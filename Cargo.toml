@@ -1,6 +1,6 @@
 [package]
 name = "newq"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A simple, cross-platform cue-based video playback system built on FFmpeg"
 license = "MIT OR Apache-2.0"
