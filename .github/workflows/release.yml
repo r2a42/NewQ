@@ -1,23 +1,24 @@
 name: Release
 
 # Push a tag like `v0.1.0` to build binaries for Windows, Linux and macOS and
-# publish them as a GitHub Release. Can also be re-run by hand for an existing tag.
+# publish them as a GitHub Release. Run it by hand with a tag to rebuild that
+# release, or with no tag for a dry run that only uploads workflow artifacts.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build, e.g. v0.1.0"
-        required: true
+        description: "Existing tag to (re)build and publish, e.g. v0.1.0. Leave empty for a dry run."
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 env:
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
-  # FFmpeg bundled with the Windows and Linux builds (LGPL build: decoding only
-  # needs FFmpeg's own LGPL decoders).
+  TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+  # FFmpeg bundled with the Windows and Linux builds (LGPL: NewQ only decodes).
   FFMPEG_BRANCH: n9.0
   FFMPEG_VERSION: "9.0"
 
@@ -38,7 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Version label
+        shell: bash
+        run: echo "LABEL=${TAG:-dev-${GITHUB_SHA::7}}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
@@ -47,6 +51,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+
+      # macOS has no ready-made portable FFmpeg, so build an LGPL universal one
+      # from source (cached; only rebuilt when the build script changes).
+      - name: Cache FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-macos
+          key: ffmpeg-macos-${{ hashFiles('scripts/build_ffmpeg_macos.sh') }}
+      - name: Build FFmpeg (macOS)
+        if: runner.os == 'macOS' && steps.ffcache.outputs.cache-hit != 'true'
+        run: |
+          brew install nasm
+          bash scripts/build_ffmpeg_macos.sh ffmpeg-macos
 
       - name: Build
         shell: bash
@@ -63,7 +82,9 @@ jobs:
 
       - name: Package
         shell: bash
-        run: bash scripts/package_release.sh "${{ matrix.platform }}" "$TAG"
+        run: |
+          export FFMPEG_MACOS_DIR="$PWD/ffmpeg-macos"
+          bash scripts/package_release.sh "${{ matrix.platform }}" "$LABEL"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -73,11 +94,12 @@ jobs:
 
   publish:
     needs: build
+    if: github.ref_type == 'tag' || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -91,6 +113,7 @@ jobs:
           sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
           else
             gh release create "$TAG" dist/* --title "NewQ $TAG" --notes-file notes.md
           fi

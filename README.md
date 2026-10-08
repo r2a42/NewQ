@@ -9,8 +9,8 @@ in Rust on [FFmpeg](https://ffmpeg.org), [wgpu](https://wgpu.rs) and
 ## Download
 
 Pre-built binaries for Windows, Linux and macOS are on the
-[Releases page](https://github.com/r2a42/NewQ/releases). The Windows and Linux
-downloads include FFmpeg; on macOS install it with `brew install ffmpeg`.
+[Releases page](https://github.com/r2a42/NewQ/releases). Every download
+includes FFmpeg, so there's nothing else to install.
 
 ## Features
 
@@ -70,6 +70,9 @@ Space and Esc also work while an output window has focus.
 
 NewQ runs `ffmpeg` and `ffprobe` as subprocesses, so you don't need FFmpeg
 development libraries to build it. It looks for the executables in this order:
+
+Release downloads already include FFmpeg; this section is for building from
+source or swapping in a different FFmpeg.
 
 1. the directory in `NEWQ_FFMPEG_DIR`
 2. next to the NewQ executable, or in an `ffmpeg/` or `ffmpeg/bin/` folder beside it

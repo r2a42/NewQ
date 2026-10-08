@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Package a release build into dist/.
 # Usage: scripts/package_release.sh <windows-x64|linux-x64|macos-universal> <tag>
-# Expects `cargo build --release` output in target/release/. Windows and Linux
-# packages bundle an LGPL FFmpeg build from BtbN/FFmpeg-Builds
-# (FFMPEG_BRANCH / FFMPEG_VERSION, default n9.0 / 9.0).
+# Expects `cargo build --release` output in target/release/. Every package
+# bundles an LGPL FFmpeg: Windows and Linux use BtbN/FFmpeg-Builds
+# (FFMPEG_BRANCH / FFMPEG_VERSION, default n9.0 / 9.0); macOS uses the build
+# from scripts/build_ffmpeg_macos.sh found in $FFMPEG_MACOS_DIR.
 set -euo pipefail
 
 platform="$1"
@@ -18,6 +19,24 @@ rm -rf dist
 stage="dist/stage/${name}"
 mkdir -p "$stage"
 cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+
+# Fail the release if a bundled FFmpeg lacks what NewQ needs.
+verify_ffmpeg() {
+  local ff="$1" probe="$2"
+  "$probe" -hide_banner -version > /dev/null
+  local decoders
+  decoders="$("$ff" -hide_banner -decoders)"
+  for d in h264 hevc prores vp9 mpeg4 mpeg2video dnxhd mjpeg png aac mp3 flac pcm_s16le pcm_s24le; do
+    if ! grep -qE "^ [A-Z.]{6} ${d} " <<< "$decoders"; then
+      echo "bundled ffmpeg is missing the ${d} decoder" >&2
+      exit 1
+    fi
+  done
+  # Decode a generated clip through the same output formats NewQ uses.
+  "$ff" -hide_banner -loglevel error -f lavfi -i testsrc2=size=320x240:rate=25 -t 1     -vf format=yuv420p -f rawvideo -pix_fmt yuv420p - > /dev/null
+  "$ff" -hide_banner -loglevel error -f lavfi -i sine=frequency=440 -t 1     -ac 2 -ar 48000 -f f32le - > /dev/null
+  echo "bundled ffmpeg OK: $("$ff" -hide_banner -version | head -1)"
+}
 
 # Download an FFmpeg build and put ffmpeg/ffprobe plus licence info in $stage/ffmpeg.
 bundle_ffmpeg() {
@@ -36,6 +55,7 @@ bundle_ffmpeg() {
   mkdir -p "$stage/ffmpeg"
   cp "$bin/ffmpeg${exe_suffix}" "$bin/ffprobe${exe_suffix}" "$stage/ffmpeg/"
   cp "$(find "$tmp" -maxdepth 2 -name 'LICENSE*' | head -1)" "$stage/ffmpeg/LICENSE.txt"
+  verify_ffmpeg "$stage/ffmpeg/ffmpeg${exe_suffix}" "$stage/ffmpeg/ffprobe${exe_suffix}"
   local version
   version="$("$stage/ffmpeg/ffmpeg${exe_suffix}" -hide_banner -version | head -1)"
   cat > "$stage/ffmpeg/SOURCE.txt" <<EOF
@@ -68,9 +88,28 @@ case "$platform" in
     ;;
   macos-universal)
     app="$stage/NewQ.app"
-    mkdir -p "$app/Contents/MacOS"
+    ffdir="${FFMPEG_MACOS_DIR:?set FFMPEG_MACOS_DIR to the output of scripts/build_ffmpeg_macos.sh}"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/FFmpeg"
     cp target/release/newq "$app/Contents/MacOS/newq"
-    chmod +x "$app/Contents/MacOS/newq"
+    # NewQ looks for ffmpeg/ffprobe next to its own executable.
+    cp "$ffdir/ffmpeg" "$ffdir/ffprobe" "$app/Contents/MacOS/"
+    chmod +x "$app/Contents/MacOS/"*
+    verify_ffmpeg "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
+    cp "$ffdir/LICENSE.txt" "$app/Contents/Resources/FFmpeg/LICENSE.txt"
+    cat > "$app/Contents/Resources/FFmpeg/SOURCE.txt" <<EOF
+The ffmpeg and ffprobe executables in NewQ.app/Contents/MacOS are LGPL builds
+of FFmpeg, compiled from the unmodified release source by
+scripts/build_ffmpeg_macos.sh in the NewQ repository (no external libraries).
+
+$(cat "$ffdir/VERSION.txt")
+
+FFmpeg is licensed under the GNU Lesser General Public License v2.1 or later;
+see LICENSE.txt. NewQ runs these programs as separate processes and does not
+link to them. Corresponding source code:
+  https://ffmpeg.org/releases/ffmpeg-$(cut -d' ' -f3 "$ffdir/VERSION.txt").tar.xz
+EOF
+    mkdir -p "$stage/FFmpeg"
+    cp "$app/Contents/Resources/FFmpeg/"* "$stage/FFmpeg/"
     cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -88,6 +127,10 @@ case "$platform" in
 </dict>
 </plist>
 EOF
+    # Apple Silicon only runs signed code: ad-hoc sign the helpers and the app.
+    codesign --force --sign - "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
+    codesign --force --sign - "$app"
+    codesign --verify --deep --strict "$app"
     (cd dist/stage && ditto -c -k --keepParent "$name" "${root}/dist/${name}.zip")
     ;;
   *)
