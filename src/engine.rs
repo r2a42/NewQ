@@ -1240,13 +1240,7 @@ mod tests {
 
     /// An engine with ffmpeg and the test image, or None to skip.
     fn engine_with_image() -> Option<(Engine, std::path::PathBuf)> {
-        let ff = Ffmpeg::locate()?;
-        let img = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test_media")
-            .join("color_red.png");
-        if !img.is_file() {
-            return None;
-        }
+        let (ff, img) = crate::media::test_media("color_red.png")?;
         let mut e = engine_without_media();
         e.ff = Some(ff);
         Some((e, img))

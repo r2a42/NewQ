@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: ["**"]
   pull_request:
 
 jobs:
@@ -16,11 +17,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Linux dependencies
+
+      - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+      - name: FFmpeg version
+        shell: bash
+        run: ffmpeg -hide_banner -version | head -1
+
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      # Integration tests skip themselves when ffmpeg / test media are absent.
-      - run: cargo test
+
+      - name: Generate test media
+        shell: bash
+        run: bash scripts/make_test_media.sh
+      - name: Test (integration tests must not skip)
+        run: cargo test
+        env:
+          NEWQ_REQUIRE_MEDIA: "1"

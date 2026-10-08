@@ -6,6 +6,12 @@ fades and crossfades and straightforward output-display selection. It's built
 in Rust on [FFmpeg](https://ffmpeg.org), [wgpu](https://wgpu.rs) and
 [egui](https://github.com/emilk/egui).
 
+## Download
+
+Pre-built binaries for Windows, Linux and macOS are on the
+[Releases page](https://github.com/r2a42/NewQ/releases). The Windows and Linux
+downloads include FFmpeg; on macOS install it with `brew install ffmpeg`.
+
 ## Features
 
 - **Cue list with a GO button.** Space fires the cue at the playhead and the
@@ -106,12 +112,24 @@ cargo test
 The integration tests in `src/media/mod.rs` decode the test media with real
 FFmpeg. They skip themselves if FFmpeg or the media are missing.
 
+### Making a release
+
+Push a version tag and the `Release` workflow builds and publishes everything:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`scripts/package_release.sh` does the packaging and can be run locally after a
+release build.
+
 ### Environment variables
 
 | Variable          | Effect                                                              |
 |-------------------|---------------------------------------------------------------------|
 | `NEWQ_FFMPEG_DIR` | Folder containing `ffmpeg` and `ffprobe`                            |
 | `NEWQ_MUTE`       | Output silence (the audio clock still runs); useful for testing     |
+| `NEWQ_REQUIRE_MEDIA` | Make integration tests fail (not skip) without FFmpeg/test media |
 | `WGPU_BACKEND`    | Force a graphics API: `dx12`, `vulkan`, `metal`, `gl`               |
 | `WGPU_POWER_PREF` | `low` prefers the integrated GPU, `high` the discrete GPU           |
 | `NEWQ_TRACE_OUTPUT` | Log the layer opacities of every frame each output composites     |

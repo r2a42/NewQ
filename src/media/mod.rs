@@ -87,6 +87,23 @@ impl ProbeCache {
     }
 }
 
+/// Locate ffmpeg and a file in `test_media/` for integration tests. Returns
+/// None (test skips) if either is missing, unless `NEWQ_REQUIRE_MEDIA` is set,
+/// as it is in CI, in which case a missing dependency fails the test.
+#[cfg(test)]
+pub fn test_media(file: &str) -> Option<(Ffmpeg, PathBuf)> {
+    let found = Ffmpeg::locate().and_then(|ff| {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_media")
+            .join(file);
+        path.is_file().then_some((ff, path))
+    });
+    if found.is_none() && std::env::var_os("NEWQ_REQUIRE_MEDIA").is_some() {
+        panic!("NEWQ_REQUIRE_MEDIA is set but ffmpeg or test_media/{file} is missing");
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     //! These run real ffmpeg against `test_media/`; they skip if either is missing.
@@ -96,11 +113,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn setup(file: &str) -> Option<(Ffmpeg, PathBuf)> {
-        let ff = Ffmpeg::locate()?;
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test_media")
-            .join(file);
-        path.is_file().then_some((ff, path))
+        super::test_media(file)
     }
 
     #[test]

@@ -1,0 +1,96 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build binaries for Windows, Linux and macOS and
+# publish them as a GitHub Release. Can also be re-run by hand for an existing tag.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # FFmpeg bundled with the Windows and Linux builds (LGPL build: decoding only
+  # needs FFmpeg's own LGPL decoders).
+  FFMPEG_BRANCH: n9.0
+  FFMPEG_VERSION: "9.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          # Older Ubuntu = older glibc, so the binary runs on more distributions.
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-latest
+            platform: macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cargo build --release --locked --target aarch64-apple-darwin
+            cargo build --release --locked --target x86_64-apple-darwin
+            mkdir -p target/release
+            lipo -create -output target/release/newq \
+              target/aarch64-apple-darwin/release/newq target/x86_64-apple-darwin/release/newq
+          else
+            cargo build --release --locked
+          fi
+
+      - name: Package
+        shell: bash
+        run: bash scripts/package_release.sh "${{ matrix.platform }}" "$TAG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "NewQ $TAG" --notes-file notes.md
+          fi
