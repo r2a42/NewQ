@@ -7,23 +7,25 @@
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Gpu, LayerTexture};
 use crate::render::{ControlThread, EguiFrame, OutputLayer, OutputThread};
-use crate::show::{Fit, OutputConfig, OutputId, Show};
-use crate::ui::{self, MonitorInfo, UiState};
+use crate::show::{DisplayRef, Fit, OutputConfig, OutputId, Placement, Show};
+use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
-/// The control UI only needs to animate progress bars while cues run.
+/// The control UI only needs to animate progress bars while cues run...
 const CONTROL_FPS_WHEN_PLAYING: f64 = 20.0;
+/// ...but output previews in it must play smoothly.
+const CONTROL_FPS_WITH_EMBEDDED: f64 = 60.0;
 /// Engine update rate while something is playing. Output threads pick up the
 /// latest state at their own refresh rate.
 const TICK_WHILE_PLAYING: Duration = Duration::from_millis(4);
@@ -36,19 +38,12 @@ struct ControlWindow {
     last_paint: Instant,
 }
 
-/// What was last applied to an output window, so changes can be detected.
-#[derive(PartialEq, Clone)]
-struct Placement {
-    monitor: Option<usize>,
-    fullscreen: bool,
-}
-
+/// A fullscreen output window on its own display.
 struct OutputWindow {
     window: Arc<Window>,
     thread: Option<OutputThread>,
     size: (u32, u32),
-    placement: Placement,
-    test_pattern: Option<(Arc<LayerTexture>, usize)>,
+    monitor: usize,
     needs_redraw: bool,
 }
 
@@ -79,6 +74,8 @@ pub struct App {
     closing: Vec<(Arc<Window>, JoinHandle<()>)>,
     /// GPU textures for playing layers, with the serial of the uploaded frame.
     textures: HashMap<u64, (Arc<LayerTexture>, u64)>,
+    /// Test-pattern textures per output, with the output number they show.
+    patterns: HashMap<OutputId, (Arc<LayerTexture>, usize)>,
     monitors: Vec<MonitorHandle>,
     last_monitor_scan: Instant,
     last_tick: Instant,
@@ -113,6 +110,7 @@ impl App {
             outputs: HashMap::new(),
             closing: Vec::new(),
             textures: HashMap::new(),
+            patterns: HashMap::new(),
             monitors: Vec::new(),
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
@@ -136,39 +134,26 @@ impl App {
         self.last_monitor_scan = Instant::now();
     }
 
-    /// Resolve an output's display choice to a monitor index: by name first,
-    /// then by index (so shows survive monitors being re-ordered).
-    fn resolve_monitor(&self, cfg: &OutputConfig) -> Option<usize> {
-        let d = cfg.display.as_ref()?;
-        let same_name: Vec<usize> = (0..self.ui.monitors.len())
-            .filter(|&i| self.ui.monitors[i].name == d.name)
-            .collect();
-        match same_name.len() {
-            1 => Some(same_name[0]),
-            n if n > 1 && same_name.contains(&d.index) => Some(d.index),
-            n if n > 1 => Some(same_name[0]),
-            _ => (d.index < self.monitors.len()).then_some(d.index),
-        }
+    /// Decide which display each enabled output goes fullscreen on.
+    fn route_outputs(&self) -> HashMap<OutputId, Option<usize>> {
+        let control_monitor = self
+            .control
+            .as_ref()
+            .and_then(|c| c.window.current_monitor())
+            .and_then(|m| self.monitors.iter().position(|x| *x == m));
+        let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
+        route_outputs(&self.show.outputs, &names, control_monitor)
     }
 
-    fn create_output(&mut self, event_loop: &ActiveEventLoop, cfg: &OutputConfig) {
+    fn create_output(&mut self, event_loop: &ActiveEventLoop, cfg: &OutputConfig, monitor: usize) {
         let Some(gpu) = &self.gpu else { return };
-        let monitor = self.resolve_monitor(cfg);
-        let placement = Placement {
-            monitor,
-            fullscreen: cfg.fullscreen && monitor.is_some(),
+        let Some(m) = self.monitors.get(monitor) else {
+            return;
         };
-        let mut attrs = Window::default_attributes()
+        let attrs = Window::default_attributes()
             .with_title(format!("NewQ: {}", cfg.name))
-            .with_inner_size(LogicalSize::new(960.0, 540.0));
-        if let Some(m) = monitor.and_then(|i| self.monitors.get(i)) {
-            if placement.fullscreen {
-                attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
-            } else {
-                let p = m.position();
-                attrs = attrs.with_position(PhysicalPosition::new(p.x + 80, p.y + 80));
-            }
-        }
+            .with_inner_size(LogicalSize::new(960.0, 540.0))
+            .with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -176,7 +161,7 @@ impl App {
                 return;
             }
         };
-        window.set_cursor_visible(!placement.fullscreen);
+        window.set_cursor_visible(false);
         let surface = match gpu.instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(e) => {
@@ -195,80 +180,82 @@ impl App {
                 window,
                 thread: Some(thread),
                 size,
-                placement,
-                test_pattern: None,
+                monitor,
                 needs_redraw: true,
             },
         );
     }
 
-    /// Make the set of open output windows match the show's output configs.
+    fn close_output(&mut self, id: OutputId) {
+        if let Some(out) = self.outputs.remove(&id)
+            && let (window, Some(handle)) = out.close()
+        {
+            window.set_visible(false);
+            self.closing.push((window, handle));
+        }
+    }
+
+    /// Open, move or close output windows to match where each output should be.
     fn reconcile_outputs(&mut self, event_loop: &ActiveEventLoop) {
-        let wanted: Vec<OutputConfig> = self
-            .show
+        let routes = self.route_outputs();
+        let stale: Vec<OutputId> = self
             .outputs
             .iter()
-            .filter(|o| o.enabled)
-            .cloned()
+            .filter(|(id, w)| routes.get(id).copied().flatten() != Some(w.monitor))
+            .map(|(id, _)| *id)
             .collect();
-        let wanted_ids: HashSet<OutputId> = wanted.iter().map(|o| o.id).collect();
-        let gone: Vec<OutputId> = self
-            .outputs
-            .keys()
-            .filter(|id| !wanted_ids.contains(id))
-            .copied()
-            .collect();
-        for id in gone {
-            if let Some(out) = self.outputs.remove(&id)
-                && let (window, Some(handle)) = out.close()
-            {
-                window.set_visible(false);
-                self.closing.push((window, handle));
-            }
+        for id in stale {
+            self.close_output(id);
         }
-        for cfg in &wanted {
-            let monitor = self.resolve_monitor(cfg);
-            let placement = Placement {
-                monitor,
-                fullscreen: cfg.fullscreen && monitor.is_some(),
-            };
-            match self.outputs.get_mut(&cfg.id) {
-                None => self.create_output(event_loop, cfg),
-                Some(out) if out.placement != placement => {
-                    let m = monitor.and_then(|i| self.monitors.get(i)).cloned();
-                    if placement.fullscreen {
-                        out.window
-                            .set_fullscreen(Some(Fullscreen::Borderless(m.clone())));
-                    } else {
-                        out.window.set_fullscreen(None);
-                        if let Some(m) = m {
-                            let p = m.position();
-                            out.window
-                                .set_outer_position(PhysicalPosition::new(p.x + 80, p.y + 80));
+        self.ui.routes.clear();
+        let configs: Vec<OutputConfig> = self.show.outputs.clone();
+        for cfg in &configs {
+            let route = routes.get(&cfg.id).copied().flatten();
+            match route {
+                Some(m) => {
+                    if !self.outputs.contains_key(&cfg.id) {
+                        self.create_output(event_loop, cfg, m);
+                    }
+                    if let Some(out) = self.outputs.get(&cfg.id) {
+                        let title = format!("NewQ: {}", cfg.name);
+                        if out.window.title() != title {
+                            out.window.set_title(&title);
                         }
                     }
-                    out.window.set_cursor_visible(!placement.fullscreen);
-                    out.placement = placement;
-                    out.needs_redraw = true;
+                    let name = self
+                        .ui
+                        .monitors
+                        .get(m)
+                        .map(|x| x.name.clone())
+                        .unwrap_or_default();
+                    self.ui.routes.insert(cfg.id, OutputRoute::Display(name));
                 }
-                Some(out) => {
-                    let title = format!("NewQ: {}", cfg.name);
-                    if out.window.title() != title {
-                        out.window.set_title(&title);
-                    }
+                None if cfg.enabled => {
+                    self.ui.routes.insert(cfg.id, OutputRoute::MainWindow);
                 }
+                None => {}
             }
         }
+        // Outputs in the main window decode at the default (1080p) size.
         self.engine.output_sizes = self.outputs.iter().map(|(id, o)| (*id, o.size)).collect();
         // Release windows once their render thread has dropped the surface.
         self.closing.retain(|(_, h)| !h.is_finished());
     }
 
-    /// Upload new frames and hand each output its current layer stack.
+    /// Upload new frames and hand each output its current layer stack: to its
+    /// render thread if it has a window, and to the UI for the live preview.
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = &self.gpu else { return };
-        let ids: Vec<OutputId> = self.outputs.keys().copied().collect();
-        for id in ids {
+        self.ui.previews.clear();
+        let configs: Vec<(OutputId, String, bool, usize)> = self
+            .show
+            .outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.enabled)
+            .map(|(i, o)| (o.id, o.name.clone(), o.test_pattern, i + 1))
+            .collect();
+        for (id, name, want_pattern, number) in configs {
             let mut layers = Vec::new();
             for l in self.engine.layers(id) {
                 let entry = match &l.source {
@@ -308,28 +295,19 @@ impl App {
                 });
             }
 
-            let number = self
-                .show
-                .outputs
-                .iter()
-                .position(|o| o.id == id)
-                .map_or(1, |i| i + 1);
-            let want_pattern = self.show.output(id).is_some_and(|c| c.test_pattern);
-            let Some(out) = self.outputs.get_mut(&id) else {
-                continue;
-            };
+            let mut pattern_changed = false;
             if want_pattern {
-                if out.test_pattern.as_ref().is_none_or(|(_, n)| *n != number) {
+                if self.patterns.get(&id).is_none_or(|(_, n)| *n != number) {
                     let (w, h) = (1280, 720);
                     let tex = LayerTexture::new_rgba(gpu, w, h);
                     tex.upload_rgba(&gpu.queue, &gpu::test_pattern(w, h, number));
-                    out.test_pattern = Some((Arc::new(tex), number));
-                    out.needs_redraw = true;
+                    self.patterns.insert(id, (Arc::new(tex), number));
+                    pattern_changed = true;
                 }
-            } else if out.test_pattern.take().is_some() {
-                out.needs_redraw = true;
+            } else if self.patterns.remove(&id).is_some() {
+                pattern_changed = true;
             }
-            if let Some((tex, _)) = &out.test_pattern {
+            if let Some((tex, _)) = self.patterns.get(&id) {
                 layers.push(OutputLayer {
                     texture: tex.clone(),
                     opacity: 1.0,
@@ -337,12 +315,18 @@ impl App {
                 });
             }
 
-            if playing || out.needs_redraw {
+            if let Some(out) = self.outputs.get_mut(&id)
+                && (playing || out.needs_redraw || pattern_changed)
+            {
                 out.needs_redraw = false;
                 if let Some(t) = &out.thread {
-                    t.submit(out.size, layers);
+                    t.submit(out.size, layers.clone());
                 }
             }
+            if pattern_changed && let Some(ctl) = &self.control {
+                ctl.window.request_redraw();
+            }
+            self.ui.previews.push(PreviewOutput { id, name, layers });
         }
     }
 
@@ -529,9 +513,15 @@ impl ApplicationHandler for App {
 
         let mut next = now + Duration::from_millis(500);
         if let Some(ctl) = &mut self.control {
-            let mut due = ctl.next_repaint.is_some_and(|t| t <= now);
+            let previews = !self.ui.previews.is_empty();
+            let mut due = ctl.next_repaint.is_some_and(|t| t <= now) || (previews && removed_layer);
             if playing {
-                let frame = Duration::from_secs_f64(1.0 / CONTROL_FPS_WHEN_PLAYING);
+                let fps = if previews {
+                    CONTROL_FPS_WITH_EMBEDDED
+                } else {
+                    CONTROL_FPS_WHEN_PLAYING
+                };
+                let frame = Duration::from_secs_f64(1.0 / fps);
                 due |= now.duration_since(ctl.last_paint) >= frame;
                 next = next.min(ctl.last_paint + frame);
             }
@@ -555,5 +545,134 @@ impl ApplicationHandler for App {
             drop(t.quit());
         }
         self.outputs.clear();
+    }
+}
+
+/// Resolve a saved display to a monitor index: by name first, then by position
+/// (so a show moved to a venue with differently named projectors still works),
+/// but never by position onto the main window's own display.
+fn resolve_display(d: &DisplayRef, monitors: &[&str], control: Option<usize>) -> Option<usize> {
+    let same_name: Vec<usize> = (0..monitors.len())
+        .filter(|&i| monitors[i] == d.name)
+        .collect();
+    match same_name.len() {
+        1 => Some(same_name[0]),
+        n if n > 1 && same_name.contains(&d.index) => Some(d.index),
+        n if n > 1 => Some(same_name[0]),
+        _ => (d.index < monitors.len() && Some(d.index) != control).then_some(d.index),
+    }
+}
+
+/// Decide which display each enabled output goes fullscreen on (`None` = it is
+/// only shown in the main window): explicit displays first, then automatic
+/// outputs take displays other than the main window's, one each.
+fn route_outputs(
+    outputs: &[OutputConfig],
+    monitors: &[&str],
+    control: Option<usize>,
+) -> HashMap<OutputId, Option<usize>> {
+    let enabled: Vec<&OutputConfig> = outputs.iter().filter(|o| o.enabled).collect();
+    let mut routes = HashMap::new();
+    let mut claimed = HashSet::new();
+    for o in &enabled {
+        if let Placement::Display(d) = &o.placement {
+            let m = resolve_display(d, monitors, control);
+            claimed.extend(m);
+            routes.insert(o.id, m);
+        }
+    }
+    for o in &enabled {
+        match &o.placement {
+            Placement::Display(_) => {}
+            Placement::MainWindow => {
+                routes.insert(o.id, None);
+            }
+            Placement::Auto => {
+                let m = (0..monitors.len()).find(|i| Some(*i) != control && !claimed.contains(i));
+                claimed.extend(m);
+                routes.insert(o.id, m);
+            }
+        }
+    }
+    routes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output(id: u64, placement: Placement) -> OutputConfig {
+        let mut o = OutputConfig::new(OutputId(id), format!("Output {id}"));
+        o.placement = placement;
+        o
+    }
+
+    fn display(name: &str, index: usize) -> Placement {
+        Placement::Display(DisplayRef {
+            name: name.into(),
+            index,
+        })
+    }
+
+    #[test]
+    fn auto_uses_main_window_with_one_display() {
+        let r = route_outputs(&[output(1, Placement::Auto)], &["Laptop"], Some(0));
+        assert_eq!(r[&OutputId(1)], None);
+    }
+
+    #[test]
+    fn auto_goes_to_the_other_display() {
+        let r = route_outputs(
+            &[output(1, Placement::Auto)],
+            &["Laptop", "Projector"],
+            Some(0),
+        );
+        assert_eq!(r[&OutputId(1)], Some(1));
+        // Main window on the second display: auto takes the first.
+        let r = route_outputs(
+            &[output(1, Placement::Auto)],
+            &["Laptop", "Projector"],
+            Some(1),
+        );
+        assert_eq!(r[&OutputId(1)], Some(0));
+    }
+
+    #[test]
+    fn explicit_displays_are_claimed_before_auto() {
+        let outs = [
+            output(1, Placement::Auto),
+            output(2, display("Projector A", 1)),
+            output(3, Placement::MainWindow),
+        ];
+        let r = route_outputs(&outs, &["Laptop", "Projector A", "Projector B"], Some(0));
+        assert_eq!(r[&OutputId(2)], Some(1));
+        assert_eq!(r[&OutputId(1)], Some(2));
+        assert_eq!(r[&OutputId(3)], None);
+        // Not enough displays for both: the auto output falls back to the main window.
+        let r = route_outputs(&outs, &["Laptop", "Projector A"], Some(0));
+        assert_eq!((r[&OutputId(2)], r[&OutputId(1)]), (Some(1), None));
+    }
+
+    #[test]
+    fn unplugged_display_falls_back_to_main_window() {
+        let r = route_outputs(&[output(1, display("Projector", 1))], &["Laptop"], Some(0));
+        assert_eq!(r[&OutputId(1)], None);
+    }
+
+    #[test]
+    fn renamed_display_matches_by_position_but_never_covers_the_main_window() {
+        let outs = [output(1, display("Old projector", 1))];
+        let r = route_outputs(&outs, &["Laptop", "Venue projector"], Some(0));
+        assert_eq!(r[&OutputId(1)], Some(1));
+        let r = route_outputs(&outs, &["Venue projector", "Laptop"], Some(1));
+        assert_eq!(r[&OutputId(1)], None);
+    }
+
+    #[test]
+    fn disabled_outputs_are_not_routed() {
+        let mut o = output(1, Placement::Auto);
+        o.enabled = false;
+        let r = route_outputs(&[o], &["Laptop", "Projector"], Some(0));
+        assert!(!r.contains_key(&OutputId(1)));
     }
 }

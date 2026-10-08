@@ -293,14 +293,22 @@ enum Planes {
     Rgba(wgpu::Texture),
 }
 
-/// GPU textures for one playing layer, plus its uniform buffer.
+/// Who is drawing a layer. An output window and its preview in the main
+/// window draw the same layer at different sizes from different threads, so
+/// each gets its own uniform buffer (placement) and bind group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Output = 0,
+    Preview = 1,
+}
+
+/// GPU textures for one playing layer, plus per-[`Slot`] uniforms.
 pub struct LayerTexture {
     planes: Planes,
     pub width: u32,
     pub height: u32,
     matrix: ColorMatrix,
-    uniform: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    slots: [(wgpu::Buffer, wgpu::BindGroup); 2],
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -383,46 +391,48 @@ impl LayerTexture {
         height: u32,
         matrix: ColorMatrix,
     ) -> LayerTexture {
-        let uniform = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("layer uniform"),
-            size: std::mem::size_of::<LayerUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let c = &gpu.compositor;
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("layer"),
-            layout: &c.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(views[0]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(views[1]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(views[2]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&c.sampler),
-                },
-            ],
-        });
+        let slot = || {
+            let uniform = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("layer uniform"),
+                size: std::mem::size_of::<LayerUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("layer"),
+                layout: &c.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(views[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&c.sampler),
+                    },
+                ],
+            });
+            (uniform, bind_group)
+        };
         LayerTexture {
             planes,
             width,
             height,
             matrix,
-            uniform,
-            bind_group,
+            slots: [slot(), slot()],
         }
     }
 
@@ -441,6 +451,35 @@ impl LayerTexture {
         write_plane(queue, &p[0], &data[..ylen], 1);
         write_plane(queue, &p[1], &data[ylen..ylen + clen], 1);
         write_plane(queue, &p[2], &data[ylen + clen..ylen + 2 * clen], 1);
+    }
+
+    /// Set where (for a `target`-sized viewport) and how opaquely this layer
+    /// draws for `slot`.
+    pub fn write_uniform(
+        &self,
+        queue: &wgpu::Queue,
+        slot: Slot,
+        target: (u32, u32),
+        opacity: f32,
+        fit: Fit,
+    ) {
+        let rows = yuv_rows(self.matrix);
+        let u = LayerUniform {
+            rect: fit_rect((self.width, self.height), target, fit),
+            opacity,
+            mode: u32::from(self.is_yuv()),
+            _pad: [0.0; 2],
+            r: rows[0],
+            g: rows[1],
+            b: rows[2],
+        };
+        queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
+    }
+
+    /// Draw for `slot` with the compositor pipeline already set on `pass`.
+    pub fn draw(&self, slot: Slot, pass: &mut wgpu::RenderPass) {
+        pass.set_bind_group(0, &self.slots[slot as usize].1, &[]);
+        pass.draw(0..4, 0..1);
     }
 
     pub fn upload_rgba(&self, queue: &wgpu::Queue, data: &[u8]) {
@@ -487,18 +526,8 @@ impl Gpu {
         layers: &[DrawLayer],
     ) -> wgpu::CommandBuffer {
         for l in layers {
-            let rows = yuv_rows(l.texture.matrix);
-            let u = LayerUniform {
-                rect: fit_rect((l.texture.width, l.texture.height), size, l.fit),
-                opacity: l.opacity,
-                mode: u32::from(l.texture.is_yuv()),
-                _pad: [0.0; 2],
-                r: rows[0],
-                g: rows[1],
-                b: rows[2],
-            };
-            self.queue
-                .write_buffer(&l.texture.uniform, 0, bytemuck::bytes_of(&u));
+            l.texture
+                .write_uniform(&self.queue, Slot::Output, size, l.opacity, l.fit);
         }
         let mut encoder = self
             .device
@@ -524,11 +553,9 @@ impl Gpu {
             });
             pass.set_pipeline(pipeline);
             for l in layers {
-                if l.opacity <= 0.0 {
-                    continue;
+                if l.opacity > 0.0 {
+                    l.texture.draw(Slot::Output, &mut pass);
                 }
-                pass.set_bind_group(0, &l.texture.bind_group, &[]);
-                pass.draw(0..4, 0..1);
             }
         }
         encoder.finish()

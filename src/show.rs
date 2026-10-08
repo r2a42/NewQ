@@ -40,14 +40,7 @@ impl Default for Show {
             panic_fade: default_panic_fade(),
         };
         let id = OutputId(show.alloc_id());
-        show.outputs.push(OutputConfig {
-            id,
-            name: "Output 1".into(),
-            display: None,
-            fullscreen: false,
-            enabled: true,
-            test_pattern: false,
-        });
+        show.outputs.push(OutputConfig::new(id, "Output 1".into()));
         show
     }
 }
@@ -60,17 +53,45 @@ pub struct DisplayRef {
     pub index: usize,
 }
 
+/// Where an output appears.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub enum Placement {
+    /// Fullscreen on a display other than the one NewQ's main window is on;
+    /// inside the main window when there is no such display.
+    #[default]
+    Auto,
+    /// Always inside the main window.
+    MainWindow,
+    /// Fullscreen on this display; inside the main window while it isn't connected.
+    Display(DisplayRef),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputConfig {
     pub id: OutputId,
     pub name: String,
-    pub display: Option<DisplayRef>,
-    /// Borderless fullscreen on the display; otherwise a normal (preview) window.
-    pub fullscreen: bool,
-    /// Whether the output window is open.
+    #[serde(default)]
+    pub placement: Placement,
+    /// Whether the output is shown at all.
     pub enabled: bool,
     #[serde(default)]
     pub test_pattern: bool,
+    /// Legacy (pre-placement) display choice, migrated on load.
+    #[serde(default, skip_serializing)]
+    display: Option<DisplayRef>,
+}
+
+impl OutputConfig {
+    pub fn new(id: OutputId, name: String) -> Self {
+        OutputConfig {
+            id,
+            name,
+            placement: Placement::Auto,
+            enabled: true,
+            test_pattern: false,
+            display: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -447,14 +468,8 @@ impl Show {
     pub fn add_output(&mut self) -> OutputId {
         let id = OutputId(self.alloc_id());
         let n = self.outputs.len() + 1;
-        self.outputs.push(OutputConfig {
-            id,
-            name: format!("Output {n}"),
-            display: None,
-            fullscreen: false,
-            enabled: true,
-            test_pattern: false,
-        });
+        self.outputs
+            .push(OutputConfig::new(id, format!("Output {n}")));
         id
     }
 
@@ -539,6 +554,11 @@ impl Show {
                 && !m.file.as_os_str().is_empty()
             {
                 m.file = base.join(&m.file);
+            }
+        }
+        for out in &mut show.outputs {
+            if let Some(d) = out.display.take() {
+                out.placement = Placement::Display(d);
             }
         }
         // Guard against hand-edited files with stale counters.
@@ -639,6 +659,31 @@ mod tests {
         );
         let saved = serde_json::to_string(&show).unwrap();
         assert!(!saved.contains("crossfade"));
+    }
+
+    #[test]
+    fn legacy_output_display_migrates_to_placement() {
+        let dir = std::env::temp_dir().join("newq_test_legacy_outputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.newq");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"name":"x","next_id":5,"cues":[],"outputs":[
+              {"id":1,"name":"A","display":{"name":"DELL","index":1},"fullscreen":true,"enabled":true},
+              {"id":2,"name":"B","display":null,"fullscreen":false,"enabled":true}]}"#,
+        )
+        .unwrap();
+        let show = Show::load(&path).unwrap();
+        assert_eq!(
+            show.outputs[0].placement,
+            Placement::Display(DisplayRef {
+                name: "DELL".into(),
+                index: 1
+            })
+        );
+        assert_eq!(show.outputs[1].placement, Placement::Auto);
+        let saved = serde_json::to_string(&show).unwrap();
+        assert!(!saved.contains("fullscreen") && !saved.contains("\"display\""));
     }
 
     #[test]

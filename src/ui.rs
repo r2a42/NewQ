@@ -2,8 +2,10 @@
 
 use crate::engine::{CueStatus, Engine};
 use crate::media::ProbeState;
+use crate::render::{OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct MonitorInfo {
@@ -13,11 +15,28 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
+/// Where an enabled output is currently being shown.
+pub enum OutputRoute {
+    MainWindow,
+    /// Fullscreen on the named display.
+    Display(String),
+}
+
+/// An output's current layer stack, previewed live in the main window.
+pub struct PreviewOutput {
+    pub id: OutputId,
+    pub name: String,
+    pub layers: Vec<OutputLayer>,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub selected: Option<CueId>,
     pub show_path: Option<PathBuf>,
     pub monitors: Vec<MonitorInfo>,
+    /// Every enabled output, previewed in the main window (set each frame by the app).
+    pub previews: Vec<PreviewOutput>,
+    pub routes: HashMap<OutputId, OutputRoute>,
     pub quit_requested: bool,
     pub dirty: bool,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -105,12 +124,13 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, engine, st));
     egui::Panel::right("side")
         .resizable(true)
-        .default_size(360.0)
+        .default_size(420.0)
         .min_size(280.0)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    output_previews(ui, st);
                     active_panel(ui, show, engine, &mut actions);
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
@@ -750,6 +770,37 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
     }
 }
 
+/// A live preview of every output. For an output with no display of its own,
+/// this is where it is shown.
+fn output_previews(ui: &mut Ui, st: &UiState) {
+    for e in &st.previews {
+        let where_ = match st.routes.get(&e.id) {
+            Some(OutputRoute::Display(name)) => format!("also fullscreen on {name}"),
+            _ => "main window only".to_string(),
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&e.name).strong());
+            ui.label(RichText::new(where_).weak().small());
+        });
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w * 9.0 / 16.0), Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
+        let ppp = ui.ctx().pixels_per_point();
+        let size_px = (
+            (rect.width() * ppp).round().max(1.0) as u32,
+            (rect.height() * ppp).round().max(1.0) as u32,
+        );
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            OutputPreview {
+                layers: e.layers.clone(),
+                size_px,
+            },
+        ));
+        ui.add_space(8.0);
+    }
+}
+
 fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.heading("Outputs");
@@ -773,6 +824,8 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
             if m.primary { " primary" } else { "" }
         )
     };
+    const AUTO_HELP: &str = "Fullscreen on a display other than the one NewQ is on; inside the main window \
+         when there isn't one. Switches automatically when displays are plugged in or out.";
     let n_outputs = show.outputs.len();
     for (oi, out) in show.outputs.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -791,47 +844,47 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                     }
                 });
             });
-            let current = out.display.as_ref().map(|d| {
-                // Show the live monitor if it still exists, otherwise the saved name.
-                st.monitors
-                    .iter()
-                    .position(|m| m.name == d.name)
-                    .map(monitor_label)
-                    .unwrap_or_else(|| format!("{} (not connected)", d.name))
-            });
-            egui::ComboBox::from_id_salt(("display", out.id.0))
+            let current = match &out.placement {
+                Placement::Auto => "Automatic".to_string(),
+                Placement::MainWindow => "Main window".to_string(),
+                Placement::Display(d) => format!("Fullscreen on {}", d.name),
+            };
+            egui::ComboBox::from_id_salt(("placement", out.id.0))
                 .width(ui.available_width() - 8.0)
-                .selected_text(current.unwrap_or_else(|| "Window (no display)".into()))
+                .selected_text(current)
                 .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(out.display.is_none(), "Window (no display)")
-                        .clicked()
-                    {
-                        out.display = None;
-                        out.fullscreen = false;
-                    }
+                    ui.selectable_value(&mut out.placement, Placement::Auto, "Automatic")
+                        .on_hover_text(AUTO_HELP);
+                    ui.selectable_value(&mut out.placement, Placement::MainWindow, "Main window")
+                        .on_hover_text("Always show this output inside NewQ's main window");
                     for i in 0..st.monitors.len() {
-                        let m = &st.monitors[i];
-                        let is_sel = out
-                            .display
-                            .as_ref()
-                            .is_some_and(|d| d.name == m.name && d.index == i);
-                        if ui.selectable_label(is_sel, monitor_label(i)).clicked() {
-                            out.display = Some(DisplayRef {
-                                name: m.name.clone(),
-                                index: i,
-                            });
-                            // Non-primary displays are almost always projectors/screens.
-                            out.fullscreen = !m.primary;
-                        }
+                        let d = DisplayRef {
+                            name: st.monitors[i].name.clone(),
+                            index: i,
+                        };
+                        ui.selectable_value(
+                            &mut out.placement,
+                            Placement::Display(d),
+                            format!("Fullscreen on {}", monitor_label(i)),
+                        );
                     }
                 });
+            let status = match (st.routes.get(&out.id), &out.placement) {
+                (None, _) => "Off".to_string(),
+                (Some(OutputRoute::Display(name)), _) => format!("Fullscreen on {name}"),
+                (Some(OutputRoute::MainWindow), Placement::Display(d)) => {
+                    format!("{} isn't connected: showing in the main window", d.name)
+                }
+                (Some(OutputRoute::MainWindow), Placement::Auto) => {
+                    "No second display: showing in the main window".to_string()
+                }
+                (Some(OutputRoute::MainWindow), Placement::MainWindow) => {
+                    "Showing in the main window".to_string()
+                }
+            };
+            ui.label(RichText::new(status).weak().small());
             ui.horizontal(|ui| {
-                ui.checkbox(&mut out.enabled, "Open");
-                ui.add_enabled(
-                    out.display.is_some(),
-                    egui::Checkbox::new(&mut out.fullscreen, "Fullscreen"),
-                );
+                ui.checkbox(&mut out.enabled, "On");
                 ui.checkbox(&mut out.test_pattern, "Test pattern")
                     .on_hover_text("Show colour bars with the output number");
             });

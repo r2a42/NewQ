@@ -38,11 +38,15 @@ includes FFmpeg, so there's nothing else to install.
 - **Fade cues** are still available for dimming or ramping another cue's
   opacity and volume mid-cue.
 - **Stop All / Panic** (Esc) fades everything out; press it again to stop instantly.
-- **Outputs and display selection:** each output is a window that you assign
-  to a display, either borderless fullscreen or as a preview window. *Test
-  pattern* shows colour bars with the output's number so you can tell which
-  projector is which. The show remembers displays by name, so a show survives
-  monitors being re-ordered.
+- **Outputs and display selection:** each output is *Automatic* by default:
+  fullscreen on a second display when one is connected, otherwise shown inside
+  NewQ's main window. Plugging displays in or out switches automatically. You
+  can instead pin an output to a specific display (it falls back to the main
+  window while that display is unplugged) or keep it in the main window. Every
+  output also has a live preview in the main window, including ones that are
+  fullscreen elsewhere. *Test pattern* shows colour bars with the output's
+  number so you can tell which projector is which. Displays are remembered by
+  name, and by position if the name changes (never onto NewQ's own screen).
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the

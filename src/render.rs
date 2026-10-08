@@ -3,7 +3,7 @@
 //! own thread. The main thread only posts the latest frame into a mailbox and
 //! never waits, so timing, input and the other outputs are unaffected.
 
-use crate::gpu::{DrawLayer, Gpu, LayerTexture};
+use crate::gpu::{DrawLayer, Gpu, LayerTexture, Slot};
 use crate::show::Fit;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -82,6 +82,7 @@ fn resize(
 
 // ----- Output windows ---------------------------------------------------------
 
+#[derive(Clone)]
 pub struct OutputLayer {
     pub texture: Arc<LayerTexture>,
     pub opacity: f32,
@@ -252,6 +253,9 @@ fn control_loop(
         config.format,
         egui_wgpu::RendererOptions::default(),
     );
+    renderer.callback_resources.insert(PreviewPipeline(
+        gpu.compositor.pipeline(&gpu.device, config.format),
+    ));
     loop {
         let mut f = match mailbox.take() {
             ControlJob::Quit => break,
@@ -305,6 +309,54 @@ fn control_loop(
         }
         for id in &freed {
             renderer.free_texture(id);
+        }
+    }
+}
+
+// ----- Outputs shown inside the main window ------------------------------------
+
+/// The compositor pipeline for the control window's format, kept in the egui
+/// renderer's callback resources.
+struct PreviewPipeline(wgpu::RenderPipeline);
+
+/// Draws an output's layers into a rectangle of the egui UI, using the same
+/// compositor as a real output window.
+pub struct OutputPreview {
+    pub layers: Vec<OutputLayer>,
+    /// Size of the preview rectangle in physical pixels.
+    pub size_px: (u32, u32),
+}
+
+impl egui_wgpu::CallbackTrait for OutputPreview {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        for l in &self.layers {
+            l.texture
+                .write_uniform(queue, Slot::Preview, self.size_px, l.opacity, l.fit);
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Some(PreviewPipeline(pipeline)) = resources.get::<PreviewPipeline>() else {
+            return;
+        };
+        pass.set_pipeline(pipeline);
+        for l in &self.layers {
+            if l.opacity > 0.0 {
+                l.texture.draw(Slot::Preview, pass);
+            }
         }
     }
 }
