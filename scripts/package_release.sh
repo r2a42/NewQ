@@ -32,9 +32,11 @@ verify_ffmpeg() {
       exit 1
     fi
   done
-  # Decode a generated clip through the same output formats NewQ uses.
-  "$ff" -hide_banner -loglevel error -f lavfi -i testsrc2=size=320x240:rate=25 -t 1     -vf format=yuv420p -f rawvideo -pix_fmt yuv420p - > /dev/null
-  "$ff" -hide_banner -loglevel error -f lavfi -i sine=frequency=440 -t 1     -ac 2 -ar 48000 -f f32le - > /dev/null
+  # Run the same kinds of commands NewQ does (see src/media/*.rs).
+  local q=(-hide_banner -loglevel error -nostdin)
+  "$ff" "${q[@]}" -f lavfi -i testsrc2=size=320x240:rate=25 -t 1 -map 0:v:0 -an     -vf "scale=160:120:flags=bicubic:out_range=tv,format=yuv420p" -fps_mode cfr -r 25     -f rawvideo -pix_fmt yuv420p pipe:1 > /dev/null
+  "$ff" "${q[@]}" -f lavfi -i testsrc2=size=320x240 -frames:v 1 -vf scale=64:48:flags=bicubic     -f rawvideo -pix_fmt rgba pipe:1 > /dev/null
+  "$ff" "${q[@]}" -f lavfi -i sine=frequency=440 -t 1 -map 0:a:0 -vn -ac 2 -ar 48000     -f f32le pipe:1 > /dev/null
   echo "bundled ffmpeg OK: $("$ff" -hide_banner -version | head -1)"
 }
 

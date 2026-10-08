@@ -46,8 +46,8 @@ build_arch() {
     --disable-autodetect --enable-zlib --enable-videotoolbox \
     --enable-static --disable-shared \
     --disable-doc --disable-debug --disable-ffplay --disable-network \
-    --disable-encoders --enable-encoder=rawvideo,pcm_f32le,pcm_s16le,png,mpeg4,aac \
-    --disable-muxers --enable-muxer=rawvideo,f32le,s16le,null,image2,mp4,mov,wav \
+    --disable-encoders --enable-encoder=rawvideo,wrapped_avframe,pcm_f32le,pcm_s16le,png,mpeg4,aac \
+    --disable-muxers --enable-muxer=rawvideo,pcm_f32le,pcm_s16le,null,image2,mp4,mov,wav \
     > configure.log 2>&1; then
     tail -40 configure.log ffbuild/config.log
     exit 1
