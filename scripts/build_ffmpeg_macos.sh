@@ -15,7 +15,8 @@ MIN_MACOS="11.0"
 
 out="$(mkdir -p "$1" && cd "$1" && pwd)"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Keep the exit status: macOS's bash 3.2 otherwise reports the trap's status.
+trap 'rc=$?; rm -rf "$work"; exit $rc' EXIT
 cd "$work"
 
 curl -fsSLO "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz"
@@ -29,15 +30,16 @@ build_arch() {
   local dir="$work/build-$arch"
   mkdir -p "$dir"
   cd "$dir"
-  local cross=()
+  # A plain string, not an array: bash 3.2 with `set -u` rejects empty arrays.
+  local cross=""
   if [ "$arch" != "$(uname -m)" ]; then
-    cross=(--enable-cross-compile --target-os=darwin)
+    cross="--enable-cross-compile --target-os=darwin"
   fi
   # No external libraries and no GPL/nonfree parts: FFmpeg's own decoders,
   # demuxers and filters cover everything NewQ uses. --disable-autodetect
   # stops it picking up Homebrew libraries that wouldn't exist on users' Macs.
-  "$src/configure" \
-    --arch="$arch" "${cross[@]}" \
+  if ! "$src/configure" \
+    --arch="$arch" $cross \
     --cc="clang -arch $arch" \
     --extra-cflags="-mmacosx-version-min=${MIN_MACOS}" \
     --extra-ldflags="-arch $arch -mmacosx-version-min=${MIN_MACOS}" \
@@ -46,9 +48,15 @@ build_arch() {
     --disable-doc --disable-debug --disable-ffplay --disable-network \
     --disable-encoders --enable-encoder=rawvideo,pcm_f32le,pcm_s16le,png,mpeg4,aac \
     --disable-muxers --enable-muxer=rawvideo,f32le,s16le,null,image2,mp4,mov,wav \
-    > configure.log
+    > configure.log 2>&1; then
+    tail -40 configure.log ffbuild/config.log
+    exit 1
+  fi
   grep -E "^(threading support|ARCH)" configure.log || true
-  make -j"$jobs" > make.log
+  if ! make -j"$jobs" > make.log 2>&1; then
+    tail -60 make.log
+    exit 1
+  fi
   cd "$work"
 }
 
