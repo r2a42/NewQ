@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "Demo",
+  "outputs": [
+    { "id": 1, "name": "Main screen", "display": null, "fullscreen": false, "enabled": true, "test_pattern": false }
+  ],
+  "next_id": 20,
+  "panic_fade": 1.0,
+  "cues": [
+    { "id": 10, "number": "1", "name": "Test card fades up", "notes": "Wait for house lights", "pre_wait": 0.0,
+      "continue_mode": "DoNotContinue",
+      "kind": { "Video": { "file": "testsrc_10s.mp4", "output": 1, "layer": 0, "fit": "Contain",
+        "transition": "FadeIn", "fade_in": 2.0, "fade_out": 2.0, "curve": "SCurve", "opacity": 1.0,
+        "volume_db": -12.0, "start": 0.0, "end": null, "loop_media": true, "hold_last_frame": false } } },
+    { "id": 11, "number": "2", "name": "Red still", "notes": "", "pre_wait": 0.0,
+      "continue_mode": "DoNotContinue",
+      "kind": { "Image": { "file": "color_red.png", "output": 1, "layer": 0, "fit": "Contain",
+        "transition": "Crossfade", "fade_in": 1.5, "fade_out": 1.0, "curve": "SCurve", "opacity": 1.0,
+        "volume_db": 0.0, "start": 0.0, "end": null, "loop_media": false, "hold_last_frame": false } } },
+    { "id": 12, "number": "3", "name": "Bars + tone", "notes": "", "pre_wait": 0.0,
+      "continue_mode": "AutoContinue",
+      "kind": { "Video": { "file": "smpte_8s.mp4", "output": 1, "layer": 0, "fit": "Contain",
+        "transition": "DipToWhite", "fade_in": 2.0, "fade_out": 1.0, "curve": "SCurve", "opacity": 1.0,
+        "volume_db": -18.0, "start": 0.0, "end": null, "loop_media": false, "hold_last_frame": true } } },
+    { "id": 13, "number": "3.5", "name": "Underscore", "notes": "", "pre_wait": 1.0,
+      "continue_mode": "DoNotContinue",
+      "kind": { "Audio": { "file": "tone_5s.wav", "output": null, "layer": 0, "fit": "Contain",
+        "transition": "FadeIn", "fade_in": 1.0, "fade_out": 1.0, "curve": "SCurve", "opacity": 1.0,
+        "volume_db": -20.0, "start": 0.0, "end": null, "loop_media": false, "hold_last_frame": false } } },
+    { "id": 14, "number": "4", "name": "Back to test card", "notes": "", "pre_wait": 0.0,
+      "continue_mode": "DoNotContinue",
+      "kind": { "Video": { "file": "testsrc_10s.mp4", "output": 1, "layer": 0, "fit": "Contain",
+        "transition": "DipToBlack", "fade_in": 2.0, "fade_out": 3.0, "curve": "SCurve", "opacity": 1.0,
+        "volume_db": -12.0, "start": 0.0, "end": null, "loop_media": true, "hold_last_frame": false } } },
+    { "id": 15, "number": "5", "name": "Blackout", "notes": "Everything fades with its own fade-out", "pre_wait": 0.0,
+      "continue_mode": "DoNotContinue",
+      "kind": { "Stop": { "target": null, "fade": 0.0, "use_own_fade": true } } }
+  ]
+}
