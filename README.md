@@ -47,6 +47,11 @@ includes FFmpeg, so there's nothing else to install.
   fullscreen elsewhere. *Test pattern* shows colour bars with the output's
   number so you can tell which projector is which. Displays are remembered by
   name, and by position if the name changes (never onto NewQ's own screen).
+- **Corner pin (keystone) per output:** click *Corner pin…* and drag the four
+  corners on the output's preview (hold Shift for fine moves), or type exact
+  positions. The warp is perspective-correct, applies to everything on the
+  output, and shows on the preview too; turn on *Test pattern* to line it up
+  on the real screen. *Reset* returns to the full screen.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the

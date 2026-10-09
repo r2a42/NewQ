@@ -5,7 +5,7 @@
 //! blocks on vsync or on a window the OS is throttling.
 
 use crate::engine::{Engine, LayerSource};
-use crate::gpu::{self, Gpu, LayerTexture};
+use crate::gpu::{self, Gpu, Homography, LayerTexture};
 use crate::render::{ControlThread, EguiFrame, OutputLayer, OutputThread};
 use crate::show::{DisplayRef, Fit, OutputConfig, OutputId, Placement, Show};
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
@@ -45,6 +45,8 @@ struct OutputWindow {
     size: (u32, u32),
     monitor: usize,
     needs_redraw: bool,
+    /// Corner pin last sent to the render thread.
+    warp: Homography,
 }
 
 impl OutputWindow {
@@ -182,6 +184,7 @@ impl App {
                 size,
                 monitor,
                 needs_redraw: true,
+                warp: gpu::IDENTITY,
             },
         );
     }
@@ -247,15 +250,18 @@ impl App {
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = &self.gpu else { return };
         self.ui.previews.clear();
-        let configs: Vec<(OutputId, String, bool, usize)> = self
+        let configs: Vec<(OutputId, String, bool, usize, Homography)> = self
             .show
             .outputs
             .iter()
             .enumerate()
             .filter(|(_, o)| o.enabled)
-            .map(|(i, o)| (o.id, o.name.clone(), o.test_pattern, i + 1))
+            .map(|(i, o)| {
+                let warp = gpu::corner_pin(&o.corners.0);
+                (o.id, o.name.clone(), o.test_pattern, i + 1, warp)
+            })
             .collect();
-        for (id, name, want_pattern, number) in configs {
+        for (id, name, want_pattern, number, warp) in configs {
             let mut layers = Vec::new();
             for l in self.engine.layers(id) {
                 let entry = match &l.source {
@@ -315,18 +321,28 @@ impl App {
                 });
             }
 
-            if let Some(out) = self.outputs.get_mut(&id)
-                && (playing || out.needs_redraw || pattern_changed)
-            {
-                out.needs_redraw = false;
-                if let Some(t) = &out.thread {
-                    t.submit(out.size, layers.clone());
+            let mut aspect = 16.0 / 9.0;
+            if let Some(out) = self.outputs.get_mut(&id) {
+                aspect = out.size.0 as f32 / out.size.1.max(1) as f32;
+                let warp_changed = out.warp != warp;
+                if playing || out.needs_redraw || pattern_changed || warp_changed {
+                    out.needs_redraw = false;
+                    out.warp = warp;
+                    if let Some(t) = &out.thread {
+                        t.submit(out.size, layers.clone(), warp);
+                    }
                 }
             }
             if pattern_changed && let Some(ctl) = &self.control {
                 ctl.window.request_redraw();
             }
-            self.ui.previews.push(PreviewOutput { id, name, layers });
+            self.ui.previews.push(PreviewOutput {
+                id,
+                name,
+                layers,
+                warp,
+                aspect,
+            });
         }
     }
 

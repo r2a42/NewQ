@@ -1,6 +1,7 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 use crate::engine::{CueStatus, Engine};
+use crate::gpu::Homography;
 use crate::media::ProbeState;
 use crate::render::{OutputLayer, OutputPreview};
 use crate::show::*;
@@ -27,6 +28,10 @@ pub struct PreviewOutput {
     pub id: OutputId,
     pub name: String,
     pub layers: Vec<OutputLayer>,
+    /// The output's corner pin.
+    pub warp: Homography,
+    /// Width / height of the output's screen.
+    pub aspect: f32,
 }
 
 #[derive(Default)]
@@ -37,6 +42,8 @@ pub struct UiState {
     /// Every enabled output, previewed in the main window (set each frame by the app).
     pub previews: Vec<PreviewOutput>,
     pub routes: HashMap<OutputId, OutputRoute>,
+    /// Output whose corner pin is being edited on its preview.
+    pub geometry_edit: Option<OutputId>,
     pub quit_requested: bool,
     pub dirty: bool,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -71,6 +78,7 @@ enum Action {
     FadeOutSelected,
     StopInstance(u64, f64),
     FadeOutInstance(u64),
+    EditGeometry(Option<OutputId>),
     SetTransition(CueId, Transition),
     AddOutput,
     RemoveOutput(OutputId),
@@ -130,7 +138,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    output_previews(ui, st);
+                    output_previews(ui, show, st);
                     active_panel(ui, show, engine, &mut actions);
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
@@ -147,6 +155,11 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         });
     egui::CentralPanel::default().show(ui, |ui| cue_list(ui, show, engine, st, &mut actions));
 
+    // Actions change state after this frame was laid out; show the result now
+    // rather than on the next mouse move.
+    if !actions.is_empty() {
+        ui.ctx().request_repaint();
+    }
     for a in actions {
         apply(a, show, engine, st);
     }
@@ -772,7 +785,7 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
 
 /// A live preview of every output. For an output with no display of its own,
 /// this is where it is shown.
-fn output_previews(ui: &mut Ui, st: &UiState) {
+fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
     for e in &st.previews {
         let where_ = match st.routes.get(&e.id) {
             Some(OutputRoute::Display(name)) => format!("also fullscreen on {name}"),
@@ -782,8 +795,16 @@ fn output_previews(ui: &mut Ui, st: &UiState) {
             ui.label(RichText::new(&e.name).strong());
             ui.label(RichText::new(where_).weak().small());
         });
-        let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w * 9.0 / 16.0), Sense::hover());
+        let editing = st.geometry_edit == Some(e.id);
+        // Leave room around the screen to drag corners past its edges.
+        let margin = if editing { 14.0 } else { 0.0 };
+        let w = ui.available_width() - 2.0 * margin;
+        let h = (w / e.aspect.max(0.1)).min(w * 1.5);
+        let (outer, _) = ui.allocate_exact_size(
+            Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
+            Sense::hover(),
+        );
+        let rect = outer.shrink(margin);
         ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
         let ppp = ui.ctx().pixels_per_point();
         let size_px = (
@@ -795,9 +816,65 @@ fn output_previews(ui: &mut Ui, st: &UiState) {
             OutputPreview {
                 layers: e.layers.clone(),
                 size_px,
+                warp: e.warp,
             },
         ));
+        if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == e.id) {
+            corner_handles(ui, rect, e.id, &mut cfg.corners);
+        }
         ui.add_space(8.0);
+    }
+}
+
+/// Draggable corner-pin handles over an output preview. Hold Shift for fine moves.
+fn corner_handles(ui: &mut Ui, screen: egui::Rect, id: OutputId, corners: &mut Corners) {
+    let to_screen =
+        |c: [f32; 2]| screen.min + Vec2::new(c[0] * screen.width(), c[1] * screen.height());
+    let painter = ui.painter().clone();
+    painter.rect_stroke(
+        screen,
+        0.0,
+        Stroke::new(1.0, Color32::from_gray(90)),
+        egui::StrokeKind::Outside,
+    );
+    let quad_color = if corners.is_convex() {
+        PLAYHEAD
+    } else {
+        STOP_RED
+    };
+    for i in 0..4 {
+        painter.line_segment(
+            [to_screen(corners.0[i]), to_screen(corners.0[(i + 1) % 4])],
+            Stroke::new(1.5, quad_color),
+        );
+    }
+    let fine = ui.input(|i| i.modifiers.shift);
+    for i in 0..4 {
+        let pos = to_screen(corners.0[i]);
+        let hit = egui::Rect::from_center_size(pos, Vec2::splat(22.0));
+        let resp = ui
+            .interact(hit, ui.id().with(("corner", id.0, i)), Sense::drag())
+            .on_hover_text(format!(
+                "{}: drag to move (Shift = fine)",
+                Corners::LABELS[i]
+            ));
+        if resp.dragged() {
+            let d = resp.drag_delta() * if fine { 0.1 } else { 1.0 };
+            let c = &mut corners.0[i];
+            c[0] = (c[0] + d.x / screen.width()).clamp(-0.5, 1.5);
+            c[1] = (c[1] + d.y / screen.height()).clamp(-0.5, 1.5);
+        }
+        let active = resp.hovered() || resp.dragged();
+        painter.circle(
+            pos,
+            if active { 8.0 } else { 6.0 },
+            if active {
+                PLAYHEAD
+            } else {
+                Color32::from_black_alpha(160)
+            },
+            Stroke::new(2.0, PLAYHEAD),
+        );
     }
 }
 
@@ -888,8 +965,72 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                 ui.checkbox(&mut out.test_pattern, "Test pattern")
                     .on_hover_text("Show colour bars with the output number");
             });
+            corner_pin_editor(ui, out, st, actions);
         });
     }
+}
+
+/// Corner-pin (keystone) controls for one output.
+fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions: &mut Vec<Action>) {
+    let editing = st.geometry_edit == Some(out.id);
+    ui.horizontal(|ui| {
+        let label = if editing { "Done" } else { "Corner pin…" };
+        if ui
+            .selectable_label(editing, label)
+            .on_hover_text(
+                "Keystone the picture to fit the screen: drag the four corners on this \
+                 output's preview. Turn on Test pattern to line it up on the real screen.",
+            )
+            .clicked()
+        {
+            actions.push(Action::EditGeometry((!editing).then_some(out.id)));
+        }
+        if !out.corners.is_identity() {
+            ui.label(RichText::new("pinned").color(PLAYHEAD).small());
+            if ui
+                .small_button("Reset")
+                .on_hover_text("Back to the full screen")
+                .clicked()
+            {
+                out.corners = Corners::default();
+            }
+        }
+    });
+    if !editing {
+        return;
+    }
+    if !out.corners.is_convex() {
+        ui.label(
+            RichText::new("⚠ Corners cross or fold in; the picture will look wrong.")
+                .color(STOP_RED)
+                .small(),
+        );
+    }
+    egui::Grid::new(("corners", out.id.0))
+        .num_columns(3)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            for (i, label) in Corners::LABELS.iter().enumerate() {
+                ui.label(*label);
+                for axis in 0..2 {
+                    let mut pct = out.corners.0[i][axis] * 100.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut pct)
+                                .speed(0.1)
+                                .range(-50.0..=150.0)
+                                .fixed_decimals(1)
+                                .prefix(if axis == 0 { "X " } else { "Y " })
+                                .suffix("%"),
+                        )
+                        .changed()
+                    {
+                        out.corners.0[i][axis] = pct / 100.0;
+                    }
+                }
+                ui.end_row();
+            }
+        });
 }
 
 fn secs(ui: &mut Ui, v: &mut f64) -> egui::Response {
@@ -1530,6 +1671,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::StopInstance(i, fade) => engine.stop_instance(i, fade),
         Action::FadeOutInstance(i) => engine.fade_out_instance(show, i),
+        Action::EditGeometry(id) => st.geometry_edit = id,
         Action::FadeOutSelected => {
             if let Some(id) = st.selected {
                 engine.fade_out_cue(show, id);
@@ -1560,5 +1702,116 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::Quit => st.quit_requested = true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
+
+    /// Run one egui frame of the corner-pin handles with the given input events.
+    fn frame(ctx: &egui::Context, t: f64, events: Vec<Event>, screen: Rect, corners: &mut Corners) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            time: Some(t),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| corner_handles(ui, screen, OutputId(1), corners));
+        out.textures_delta.clear();
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Press on `from`, drag to `to` over several frames, release.
+    /// `t` is egui's clock, which must keep moving forward between drags.
+    fn drag(
+        ctx: &egui::Context,
+        t: &mut f64,
+        screen: Rect,
+        corners: &mut Corners,
+        from: Pos2,
+        to: Pos2,
+    ) {
+        let mut step = |events: Vec<Event>, corners: &mut Corners| {
+            *t += 1.0 / 60.0;
+            frame(ctx, *t, events, screen, corners);
+        };
+        step(vec![Event::PointerMoved(from)], corners);
+        step(vec![button(from, true)], corners);
+        for i in 1..=8 {
+            let p = from + (to - from) * (i as f32 / 8.0);
+            step(vec![Event::PointerMoved(p)], corners);
+        }
+        step(vec![button(to, false)], corners);
+        step(vec![], corners);
+    }
+
+    #[test]
+    fn dragging_a_corner_handle_moves_that_corner() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(100.0, 100.0), vec2(320.0, 180.0));
+        let mut corners = Corners::default();
+        let mut t = 0.0;
+        // Drag the top-left handle 20% right and 20% down.
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            &mut corners,
+            screen.min,
+            pos2(164.0, 136.0),
+        );
+        let [x, y] = corners.0[0];
+        assert!(
+            (x - 0.2).abs() < 0.01 && (y - 0.2).abs() < 0.01,
+            "{:?}",
+            corners.0
+        );
+        assert_eq!(
+            corners.0[1..],
+            Corners::default().0[1..],
+            "other corners unchanged"
+        );
+        // Drag the bottom-right handle out past the screen edge.
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            &mut corners,
+            screen.max,
+            screen.max + vec2(32.0, 18.0),
+        );
+        let [x, y] = corners.0[2];
+        assert!(
+            (x - 1.1).abs() < 0.01 && (y - 1.1).abs() < 0.01,
+            "{:?}",
+            corners.0
+        );
+    }
+
+    #[test]
+    fn dragging_empty_space_moves_nothing() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(100.0, 100.0), vec2(320.0, 180.0));
+        let mut corners = Corners::default();
+        let mut t = 0.0;
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            &mut corners,
+            screen.center(),
+            screen.center() + vec2(50.0, 50.0),
+        );
+        assert!(corners.is_identity());
     }
 }

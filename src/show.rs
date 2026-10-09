@@ -76,6 +76,9 @@ pub struct OutputConfig {
     pub enabled: bool,
     #[serde(default)]
     pub test_pattern: bool,
+    /// Keystone / corner pin applied to everything on this output.
+    #[serde(default)]
+    pub corners: Corners,
     /// Legacy (pre-placement) display choice, migrated on load.
     #[serde(default, skip_serializing)]
     display: Option<DisplayRef>,
@@ -89,8 +92,49 @@ impl OutputConfig {
             placement: Placement::Auto,
             enabled: true,
             test_pattern: false,
+            corners: Corners::default(),
             display: None,
         }
+    }
+}
+
+/// Where the corners of an output's picture land on its screen, as fractions
+/// of the screen (0,0 = top-left, 1,1 = bottom-right), in the order
+/// top-left, top-right, bottom-right, bottom-left.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Corners(pub [[f32; 2]; 4]);
+
+impl Default for Corners {
+    fn default() -> Self {
+        Corners([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    }
+}
+
+impl Corners {
+    pub const LABELS: [&'static str; 4] = ["Top left", "Top right", "Bottom right", "Bottom left"];
+
+    pub fn is_identity(&self) -> bool {
+        *self == Corners::default()
+    }
+
+    /// The four corners form a convex quadrilateral in order (no twists or
+    /// dents), which a projector keystone needs.
+    pub fn is_convex(&self) -> bool {
+        let p = self.0;
+        let mut sign = 0.0f32;
+        for i in 0..4 {
+            let (a, b, c) = (p[i], p[(i + 1) % 4], p[(i + 2) % 4]);
+            let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+            if cross.abs() < 1e-6 {
+                return false;
+            }
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -659,6 +703,24 @@ mod tests {
         );
         let saved = serde_json::to_string(&show).unwrap();
         assert!(!saved.contains("crossfade"));
+    }
+
+    #[test]
+    fn corners_default_and_convexity() {
+        let c = Corners::default();
+        assert!(c.is_identity() && c.is_convex());
+        let keystone = Corners([[0.1, 0.0], [0.9, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert!(keystone.is_convex() && !keystone.is_identity());
+        // Swapping two corners twists the quad.
+        let twisted = Corners([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]);
+        assert!(!twisted.is_convex());
+        // A dent.
+        let concave = Corners([[0.0, 0.0], [1.0, 0.0], [0.4, 0.4], [0.0, 1.0]]);
+        assert!(!concave.is_convex());
+        // Old shows without corners load with the full screen.
+        let o: OutputConfig =
+            serde_json::from_str(r#"{"id":1,"name":"A","enabled":true}"#).unwrap();
+        assert!(o.corners.is_identity());
     }
 
     #[test]

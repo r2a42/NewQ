@@ -98,6 +98,8 @@ struct LayerUniform {
     r: [f32; 4],
     g: [f32; 4],
     b: [f32; 4],
+    /// Corner-pin homography rows (see [`corner_pin`]).
+    h: Homography,
 }
 
 const SHADER: &str = r#"
@@ -109,6 +111,10 @@ struct Params {
     r: vec4<f32>,
     g: vec4<f32>,
     b: vec4<f32>,
+    // Corner pin: maps output-canvas coordinates (0..1) to screen coordinates (0..1).
+    h0: vec4<f32>,
+    h1: vec4<f32>,
+    h2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -119,6 +125,8 @@ struct Params {
 struct VOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // Position on the output canvas (0..1), for clipping to the pinned shape.
+    @location(1) canvas: vec2<f32>,
 };
 
 @vertex
@@ -126,14 +134,24 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0));
     let c = corners[i];
+    let ndc = vec2<f32>(mix(p.rect.x, p.rect.z, c.x), mix(p.rect.y, p.rect.w, c.y));
+    let cu = vec3<f32>((ndc.x + 1.0) * 0.5, (1.0 - ndc.y) * 0.5, 1.0);
+    // Projective transform; the GPU's perspective divide by w (with
+    // perspective-correct interpolation) does the rest.
+    let q = vec3<f32>(dot(p.h0.xyz, cu), dot(p.h1.xyz, cu), dot(p.h2.xyz, cu));
     var o: VOut;
-    o.pos = vec4<f32>(mix(p.rect.x, p.rect.z, c.x), mix(p.rect.y, p.rect.w, c.y), 0.0, 1.0);
+    o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
     o.uv = c;
+    o.canvas = cu.xy;
     return o;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+    // Layers that overhang the canvas (fill/crop) must not show outside the pinned shape.
+    if (any(in.canvas < vec2<f32>(0.0)) || any(in.canvas > vec2<f32>(1.0))) {
+        discard;
+    }
     var rgba: vec4<f32>;
     if (p.mode == 0u) {
         rgba = textureSample(t0, s, in.uv);
@@ -150,6 +168,46 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgba.rgb * a, a);
 }
 "#;
+
+/// A 3×3 projective transform stored as three padded rows.
+pub type Homography = [[f32; 4]; 3];
+
+pub const IDENTITY: Homography = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+];
+
+/// The homography taking the unit square (0,0)-(1,1) to `corners` (top-left,
+/// top-right, bottom-right, bottom-left), after Heckbert's square-to-quad
+/// mapping. Returns the identity for degenerate corners.
+pub fn corner_pin(corners: &[[f32; 2]; 4]) -> Homography {
+    let [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = corners.map(|c| c.map(f64::from));
+    let (dx1, dx2, dx3) = (x1 - x2, x3 - x2, x0 - x1 + x2 - x3);
+    let (dy1, dy2, dy3) = (y1 - y2, y3 - y2, y0 - y1 + y2 - y3);
+    let den = dx1 * dy2 - dx2 * dy1;
+    if den.abs() < 1e-12 {
+        return IDENTITY;
+    }
+    let g = (dx3 * dy2 - dx2 * dy3) / den;
+    let h = (dx1 * dy3 - dx3 * dy1) / den;
+    let row = |a: f64, b: f64, c: f64| [a as f32, b as f32, c as f32, 0.0];
+    [
+        row(x1 - x0 + g * x1, x3 - x0 + h * x3, x0),
+        row(y1 - y0 + g * y1, y3 - y0 + h * y3, y0),
+        row(g, h, 1.0),
+    ]
+}
+
+/// Apply a homography to a point.
+#[cfg(test)]
+pub fn project(h: &Homography, u: f32, v: f32) -> [f32; 2] {
+    let w = h[2][0] * u + h[2][1] * v + h[2][2];
+    [
+        (h[0][0] * u + h[0][1] * v + h[0][2]) / w,
+        (h[1][0] * u + h[1][1] * v + h[1][2]) / w,
+    ]
+}
 
 /// Limited-range YUV → full-range RGB coefficients.
 fn yuv_rows(matrix: ColorMatrix) -> [[f32; 4]; 3] {
@@ -462,6 +520,7 @@ impl LayerTexture {
         target: (u32, u32),
         opacity: f32,
         fit: Fit,
+        warp: &Homography,
     ) {
         let rows = yuv_rows(self.matrix);
         let u = LayerUniform {
@@ -472,6 +531,7 @@ impl LayerTexture {
             r: rows[0],
             g: rows[1],
             b: rows[2],
+            h: *warp,
         };
         queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
     }
@@ -524,10 +584,11 @@ impl Gpu {
         target: &wgpu::TextureView,
         size: (u32, u32),
         layers: &[DrawLayer],
+        warp: &Homography,
     ) -> wgpu::CommandBuffer {
         for l in layers {
             l.texture
-                .write_uniform(&self.queue, Slot::Output, size, l.opacity, l.fit);
+                .write_uniform(&self.queue, Slot::Output, size, l.opacity, l.fit, warp);
         }
         let mut encoder = self
             .device
@@ -659,6 +720,32 @@ mod tests {
             fit_rect((10, 10), (100, 50), Fit::Stretch),
             [-1.0, 1.0, 1.0, -1.0]
         );
+    }
+
+    #[test]
+    fn corner_pin_maps_the_unit_square_onto_the_corners() {
+        let close =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
+        let id = corner_pin(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert!(close(project(&id, 0.3, 0.7), [0.3, 0.7]));
+        for c in [
+            [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]],
+            [[0.2, 0.0], [0.8, 0.0], [1.0, 1.0], [0.0, 1.0]], // classic keystone
+            [[0.1, 0.1], [0.6, 0.1], [0.6, 0.4], [0.1, 0.4]], // affine (scale + move)
+        ] {
+            let h = corner_pin(&c);
+            assert!(close(project(&h, 0.0, 0.0), c[0]));
+            assert!(close(project(&h, 1.0, 0.0), c[1]));
+            assert!(close(project(&h, 1.0, 1.0), c[2]));
+            assert!(close(project(&h, 0.0, 1.0), c[3]));
+        }
+        // Perspective, not a stretch: the picture's centre lands where the
+        // quad's diagonals cross. For this keystone (narrow at the top) that is
+        // y = 2/7, well above the corners' average height of 0.5.
+        let h = corner_pin(&[[0.3, 0.0], [0.7, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert!(close(project(&h, 0.5, 0.5), [0.5, 2.0 / 7.0]));
+        // Degenerate corners fall back to the identity.
+        assert_eq!(corner_pin(&[[0.5, 0.5]; 4]), IDENTITY);
     }
 
     #[test]
