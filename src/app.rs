@@ -5,7 +5,7 @@
 //! blocks on vsync or on a window the OS is throttling.
 
 use crate::engine::{Engine, LayerSource};
-use crate::gpu::{self, Gpu, Homography, LayerTexture};
+use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
     Corners, DisplayRef, Fit, OutputConfig, OutputId, Placement, Show, VirtualDisplay,
@@ -407,10 +407,9 @@ impl App {
             let mut pattern_changed = false;
             if want_pattern {
                 let scale = (1280.0 / canvas.0.max(canvas.1) as f32).min(1.0);
-                let size = (
-                    ((canvas.0 as f32 * scale).round() as u32).max(16),
-                    ((canvas.1 as f32 * scale).round() as u32).max(16),
-                );
+                // In 32 px steps, so dragging an area doesn't redraw it every frame.
+                let step = |v: u32| ((v as f32 * scale / 32.0).round() as u32).max(1) * 32;
+                let size = (step(canvas.0), step(canvas.1));
                 if self
                     .patterns
                     .get(&id)
@@ -446,8 +445,7 @@ impl App {
                 id,
                 OutputGroup {
                     layers: layers.clone(),
-                    warp,
-                    canvas,
+                    geometry: Geometry { canvas, warp, pin },
                 },
             );
             self.ui.previews.push(PreviewOutput {
@@ -469,7 +467,7 @@ impl App {
             let sent: Vec<(OutputId, Homography)> = screen
                 .outputs
                 .iter()
-                .filter_map(|id| Some((*id, groups.get(id)?.warp)))
+                .filter_map(|id| Some((*id, groups.get(id)?.geometry.warp)))
                 .collect();
             if playing || screen.needs_redraw || sent != screen.sent {
                 screen.needs_redraw = false;

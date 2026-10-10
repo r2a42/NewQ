@@ -98,8 +98,10 @@ struct LayerUniform {
     r: [f32; 4],
     g: [f32; 4],
     b: [f32; 4],
-    /// Corner-pin homography rows (see [`corner_pin`]).
+    /// Canvas → screen homography rows (see [`corner_pin`]).
     h: Homography,
+    /// Canvas → the output's display or virtual display, for clipping to its edges.
+    pin: Homography,
 }
 
 const SHADER: &str = r#"
@@ -115,6 +117,10 @@ struct Params {
     h0: vec4<f32>,
     h1: vec4<f32>,
     h2: vec4<f32>,
+    // The output's own corner pin: canvas to its (virtual) display (0..1).
+    c0: vec4<f32>,
+    c1: vec4<f32>,
+    c2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -127,6 +133,9 @@ struct VOut {
     @location(0) uv: vec2<f32>,
     // Position on the output canvas (0..1), for clipping to the pinned shape.
     @location(1) canvas: vec2<f32>,
+    // Homogeneous position on the output's (virtual) display, for clipping to
+    // its edges. Linear in the canvas position, so it interpolates exactly.
+    @location(2) display: vec3<f32>,
 };
 
 @vertex
@@ -143,6 +152,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
     o.uv = c;
     o.canvas = cu.xy;
+    o.display = vec3<f32>(dot(p.c0.xyz, cu), dot(p.c1.xyz, cu), dot(p.c2.xyz, cu));
     return o;
 }
 
@@ -150,6 +160,12 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     // Layers that overhang the canvas (fill/crop) must not show outside the pinned shape.
     if (any(in.canvas < vec2<f32>(0.0)) || any(in.canvas > vec2<f32>(1.0))) {
+        discard;
+    }
+    // A corner pin past the edge of a virtual display is cut off there, as a
+    // real display's edge would.
+    let d = in.display.xy / in.display.z;
+    if (any(d < vec2<f32>(0.0)) || any(d > vec2<f32>(1.0))) {
         discard;
     }
     var rgba: vec4<f32>;
@@ -525,27 +541,27 @@ impl LayerTexture {
         write_plane(queue, &p[2], &data[ylen + clen..ylen + 2 * clen], 1);
     }
 
-    /// Set where (for a `target`-sized viewport) and how opaquely this layer
-    /// draws for `slot`.
+    /// Set where (on an output placed by `geometry`) and how opaquely this
+    /// layer draws for `slot`.
     pub fn write_uniform(
         &self,
         queue: &wgpu::Queue,
         slot: Slot,
-        target: (u32, u32),
+        geometry: &Geometry,
         opacity: f32,
         fit: Fit,
-        warp: &Homography,
     ) {
         let rows = yuv_rows(self.matrix);
         let u = LayerUniform {
-            rect: fit_rect((self.width, self.height), target, fit),
+            rect: fit_rect((self.width, self.height), geometry.canvas, fit),
             opacity,
             mode: u32::from(self.is_yuv()),
             _pad: [0.0; 2],
             r: rows[0],
             g: rows[1],
             b: rows[2],
-            h: *warp,
+            h: geometry.warp,
+            pin: geometry.pin,
         };
         queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
     }
@@ -572,13 +588,22 @@ pub struct DrawLayer<'a> {
     pub fit: Fit,
 }
 
+/// Where an output's picture (its canvas) lands on a screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Geometry {
+    /// Pixel size of the output's canvas, which layers are fitted to.
+    pub canvas: (u32, u32),
+    /// Maps the canvas onto the screen (virtual display area and corner pin).
+    pub warp: Homography,
+    /// The output's own corner pin, onto its display or virtual display,
+    /// whose edges clip it.
+    pub pin: Homography,
+}
+
 /// One output's layers as drawn on a screen.
 pub struct DrawGroup<'a> {
     pub layers: Vec<DrawLayer<'a>>,
-    /// Maps the output's canvas onto the screen (virtual display area and corner pin).
-    pub warp: Homography,
-    /// Pixel size of the output's canvas, which layers are fitted to.
-    pub canvas: (u32, u32),
+    pub geometry: Geometry,
 }
 
 /// NDC rectangle for a `tex`-sized image placed in a `win`-sized window.
@@ -609,14 +634,8 @@ impl Gpu {
     ) -> wgpu::CommandBuffer {
         for g in groups {
             for l in &g.layers {
-                l.texture.write_uniform(
-                    &self.queue,
-                    Slot::Output,
-                    g.canvas,
-                    l.opacity,
-                    l.fit,
-                    &g.warp,
-                );
+                l.texture
+                    .write_uniform(&self.queue, Slot::Output, &g.geometry, l.opacity, l.fit);
             }
         }
         let mut encoder = self

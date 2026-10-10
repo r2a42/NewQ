@@ -3,7 +3,7 @@
 //! own thread. The main thread only posts the latest frame into a mailbox and
 //! never waits, so timing, input and the other outputs are unaffected.
 
-use crate::gpu::{DrawGroup, DrawLayer, Gpu, Homography, LayerTexture, Slot};
+use crate::gpu::{DrawGroup, DrawLayer, Geometry, Gpu, LayerTexture, Slot};
 use crate::show::Fit;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -93,10 +93,7 @@ pub struct OutputLayer {
 #[derive(Clone)]
 pub struct OutputGroup {
     pub layers: Vec<OutputLayer>,
-    /// Maps the output's canvas onto the screen.
-    pub warp: Homography,
-    /// Pixel size of the output's canvas.
-    pub canvas: (u32, u32),
+    pub geometry: Geometry,
 }
 
 impl OutputGroup {
@@ -111,8 +108,7 @@ impl OutputGroup {
                     fit: l.fit,
                 })
                 .collect(),
-            warp: self.warp,
-            canvas: self.canvas,
+            geometry: self.geometry,
         }
     }
 }
@@ -371,7 +367,7 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
         for g in &self.groups {
             for l in &g.layers {
                 l.texture
-                    .write_uniform(queue, self.slot, g.canvas, l.opacity, l.fit, &g.warp);
+                    .write_uniform(queue, self.slot, &g.geometry, l.opacity, l.fit);
             }
         }
         Vec::new()

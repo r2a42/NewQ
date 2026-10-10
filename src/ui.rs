@@ -1,7 +1,7 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 use crate::engine::{CueStatus, Engine};
-use crate::gpu::{Homography, Slot};
+use crate::gpu::{Geometry, Homography, Slot};
 use crate::media::ProbeState;
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
@@ -836,8 +836,11 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
             OutputPreview {
                 groups: vec![OutputGroup {
                     layers: e.layers.clone(),
-                    warp: e.warp,
-                    canvas: e.canvas,
+                    geometry: Geometry {
+                        canvas: e.canvas,
+                        warp: e.warp,
+                        pin: e.warp,
+                    },
                 }],
                 slot: Slot::Preview,
             },
