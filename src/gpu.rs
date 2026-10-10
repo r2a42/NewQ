@@ -199,6 +199,17 @@ pub fn corner_pin(corners: &[[f32; 2]; 4]) -> Homography {
     ]
 }
 
+/// The homography applying `first`, then `then`.
+pub fn compose(then: &Homography, first: &Homography) -> Homography {
+    let mut out = [[0.0; 4]; 3];
+    for (r, row) in out.iter_mut().enumerate() {
+        for (c, v) in row.iter_mut().take(3).enumerate() {
+            *v = (0..3).map(|k| then[r][k] * first[k][c]).sum();
+        }
+    }
+    out
+}
+
 /// Apply a homography to a point.
 #[cfg(test)]
 pub fn project(h: &Homography, u: f32, v: f32) -> [f32; 2] {
@@ -351,13 +362,16 @@ enum Planes {
     Rgba(wgpu::Texture),
 }
 
-/// Who is drawing a layer. An output window and its preview in the main
-/// window draw the same layer at different sizes from different threads, so
-/// each gets its own uniform buffer (placement) and bind group.
+/// Who is drawing a layer. An output window and its previews in the main
+/// window draw the same layer at different sizes and warps from different
+/// threads, so each gets its own uniform buffer (placement) and bind group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     Output = 0,
+    /// The output's own preview.
     Preview = 1,
+    /// The preview of a whole physical display, with its virtual displays.
+    Screen = 2,
 }
 
 /// GPU textures for one playing layer, plus per-[`Slot`] uniforms.
@@ -366,7 +380,7 @@ pub struct LayerTexture {
     pub width: u32,
     pub height: u32,
     matrix: ColorMatrix,
-    slots: [(wgpu::Buffer, wgpu::BindGroup); 2],
+    slots: [(wgpu::Buffer, wgpu::BindGroup); 3],
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -490,7 +504,7 @@ impl LayerTexture {
             width,
             height,
             matrix,
-            slots: [slot(), slot()],
+            slots: [slot(), slot(), slot()],
         }
     }
 
@@ -558,6 +572,15 @@ pub struct DrawLayer<'a> {
     pub fit: Fit,
 }
 
+/// One output's layers as drawn on a screen.
+pub struct DrawGroup<'a> {
+    pub layers: Vec<DrawLayer<'a>>,
+    /// Maps the output's canvas onto the screen (virtual display area and corner pin).
+    pub warp: Homography,
+    /// Pixel size of the output's canvas, which layers are fitted to.
+    pub canvas: (u32, u32),
+}
+
 /// NDC rectangle for a `tex`-sized image placed in a `win`-sized window.
 pub fn fit_rect(tex: (u32, u32), win: (u32, u32), fit: Fit) -> [f32; 4] {
     let (tw, th) = (tex.0.max(1) as f32, tex.1.max(1) as f32);
@@ -582,13 +605,19 @@ impl Gpu {
         &self,
         pipeline: &wgpu::RenderPipeline,
         target: &wgpu::TextureView,
-        size: (u32, u32),
-        layers: &[DrawLayer],
-        warp: &Homography,
+        groups: &[DrawGroup],
     ) -> wgpu::CommandBuffer {
-        for l in layers {
-            l.texture
-                .write_uniform(&self.queue, Slot::Output, size, l.opacity, l.fit, warp);
+        for g in groups {
+            for l in &g.layers {
+                l.texture.write_uniform(
+                    &self.queue,
+                    Slot::Output,
+                    g.canvas,
+                    l.opacity,
+                    l.fit,
+                    &g.warp,
+                );
+            }
         }
         let mut encoder = self
             .device
@@ -613,7 +642,7 @@ impl Gpu {
                 multiview_mask: None,
             });
             pass.set_pipeline(pipeline);
-            for l in layers {
+            for l in groups.iter().flat_map(|g| &g.layers) {
                 if l.opacity > 0.0 {
                     l.texture.draw(Slot::Output, &mut pass);
                 }
@@ -641,7 +670,9 @@ pub fn test_pattern(w: u32, h: u32, number: usize) -> Vec<u8> {
         .chars()
         .filter_map(|c| c.to_digit(10))
         .collect();
-    let dh = h as f32 * 0.4;
+    // As tall as fits, also on narrow (virtual) displays.
+    let n = digits.len() as f32;
+    let dh = (h as f32 * 0.4).min(w as f32 * 0.7 / (n * 0.55 + (n - 1.0).max(0.0) * 0.165));
     let dw = dh * 0.55;
     let gap = dw * 0.3;
     let total = digits.len() as f32 * dw + (digits.len().saturating_sub(1)) as f32 * gap;
@@ -746,6 +777,38 @@ mod tests {
         assert!(close(project(&h, 0.5, 0.5), [0.5, 2.0 / 7.0]));
         // Degenerate corners fall back to the identity.
         assert_eq!(corner_pin(&[[0.5, 0.5]; 4]), IDENTITY);
+    }
+
+    #[test]
+    fn corner_pin_inside_a_virtual_display_composes() {
+        let close =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
+        // A virtual display on the right half of the screen...
+        let area = [[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]];
+        let region = corner_pin(&area);
+        // ...with an un-pinned output fills exactly that half.
+        let full = compose(&region, &IDENTITY);
+        for (i, c) in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+            .iter()
+            .enumerate()
+        {
+            assert!(close(project(&full, c[0], c[1]), area[i]));
+        }
+        // A keystone pin is applied within the virtual display.
+        let pin = [[0.2, 0.0], [0.8, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let h = compose(&region, &corner_pin(&pin));
+        assert!(close(project(&h, 0.0, 0.0), [0.6, 0.0]));
+        assert!(close(project(&h, 1.0, 0.0), [0.9, 0.0]));
+        assert!(close(project(&h, 1.0, 1.0), [1.0, 1.0]));
+        let mid = project(&corner_pin(&pin), 0.3, 0.6);
+        assert!(close(
+            project(&h, 0.3, 0.6),
+            project(&region, mid[0], mid[1])
+        ));
+        // A non-rectangular area keeps its perspective too.
+        let trapezoid = [[0.1, 0.1], [0.4, 0.2], [0.4, 0.8], [0.1, 0.9]];
+        let h = compose(&corner_pin(&trapezoid), &IDENTITY);
+        assert!(close(project(&h, 1.0, 1.0), trapezoid[2]));
     }
 
     #[test]

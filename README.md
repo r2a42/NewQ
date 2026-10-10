@@ -52,6 +52,16 @@ includes FFmpeg, so there's nothing else to install.
   positions. The warp is perspective-correct, applies to everything on the
   output, and shows on the preview too; turn on *Test pattern* to line it up
   on the real screen. *Reset* returns to the full screen.
+- **Virtual displays:** split a display into areas that each work like a
+  display of their own, e.g. one projector covering two set pieces, or one LED
+  processor input feeding several screens. Add one under *Virtual displays*
+  (or *Outputs → Add virtual display on*), then choose *On virtual display …*
+  as an output's placement. Click *Edit area…* to see the whole display live
+  with every area outlined: drag inside an area to move it, drag its corners
+  to reshape it into any four-cornered shape, or type exact pixels. An
+  output's corner pin works inside its virtual display, and everything is
+  clipped to the area. Each display gets a single fullscreen window, however
+  many outputs are on it.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the

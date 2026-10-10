@@ -3,7 +3,7 @@
 //! own thread. The main thread only posts the latest frame into a mailbox and
 //! never waits, so timing, input and the other outputs are unaffected.
 
-use crate::gpu::{DrawLayer, Gpu, Homography, LayerTexture, Slot};
+use crate::gpu::{DrawGroup, DrawLayer, Gpu, Homography, LayerTexture, Slot};
 use crate::show::Fit;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -89,11 +89,38 @@ pub struct OutputLayer {
     pub fit: Fit,
 }
 
+/// One output's layers, placed on a screen.
+#[derive(Clone)]
+pub struct OutputGroup {
+    pub layers: Vec<OutputLayer>,
+    /// Maps the output's canvas onto the screen.
+    pub warp: Homography,
+    /// Pixel size of the output's canvas.
+    pub canvas: (u32, u32),
+}
+
+impl OutputGroup {
+    fn draw(&self) -> DrawGroup<'_> {
+        DrawGroup {
+            layers: self
+                .layers
+                .iter()
+                .map(|l| DrawLayer {
+                    texture: &l.texture,
+                    opacity: l.opacity,
+                    fit: l.fit,
+                })
+                .collect(),
+            warp: self.warp,
+            canvas: self.canvas,
+        }
+    }
+}
+
 enum OutputJob {
     Frame {
         size: (u32, u32),
-        layers: Vec<OutputLayer>,
-        warp: Homography,
+        groups: Vec<OutputGroup>,
     },
     Quit,
 }
@@ -119,14 +146,13 @@ impl OutputThread {
         OutputThread { mailbox, handle }
     }
 
-    pub fn submit(&self, size: (u32, u32), layers: Vec<OutputLayer>, warp: Homography) {
-        self.mailbox.put(
-            OutputJob::Frame { size, layers, warp },
-            |old, new| match old {
+    /// Draw `groups` (bottom first) on the whole screen.
+    pub fn submit(&self, size: (u32, u32), groups: Vec<OutputGroup>) {
+        self.mailbox
+            .put(OutputJob::Frame { size, groups }, |old, new| match old {
                 OutputJob::Quit => OutputJob::Quit,
                 _ => new,
-            },
-        );
+            });
     }
 
     /// Ask the thread to stop. Returns its handle so the caller can keep the
@@ -148,34 +174,31 @@ fn output_loop(
     // NEWQ_TRACE_OUTPUT=1 logs every composited frame's layer opacities.
     let trace = std::env::var_os("NEWQ_TRACE_OUTPUT").is_some();
     loop {
-        let (size, layers, warp) = match mailbox.take() {
+        let (size, groups) = match mailbox.take() {
             OutputJob::Quit => break,
-            OutputJob::Frame { size, layers, warp } => (size, layers, warp),
+            OutputJob::Frame { size, groups } => (size, groups),
         };
         resize(&gpu, &surface, &mut config, size);
         let Some(frame) = acquire(&gpu, &surface, &config) else {
             continue;
         };
         let view = frame.texture.create_view(&Default::default());
-        let draw: Vec<DrawLayer> = layers
-            .iter()
-            .map(|l| DrawLayer {
-                texture: &l.texture,
-                opacity: l.opacity,
-                fit: l.fit,
-            })
-            .collect();
+        let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
         if trace {
-            let ops: Vec<String> = draw.iter().map(|l| format!("{:.2}", l.opacity)).collect();
-            log::info!("output composite [{}]", ops.join(", "));
+            let ops: Vec<String> = draw
+                .iter()
+                .map(|g| {
+                    let o: Vec<String> = g
+                        .layers
+                        .iter()
+                        .map(|l| format!("{:.2}", l.opacity))
+                        .collect();
+                    o.join(", ")
+                })
+                .collect();
+            log::info!("output composite [{}]", ops.join(" | "));
         }
-        let cmd = gpu.composite(
-            &pipeline,
-            &view,
-            (config.width, config.height),
-            &draw,
-            &warp,
-        );
+        let cmd = gpu.composite(&pipeline, &view, &draw);
         gpu.queue.submit([cmd]);
         window.pre_present_notify();
         gpu.queue.present(frame);
@@ -328,14 +351,12 @@ fn control_loop(
 /// renderer's callback resources.
 struct PreviewPipeline(wgpu::RenderPipeline);
 
-/// Draws an output's layers into a rectangle of the egui UI, using the same
-/// compositor as a real output window.
+/// Draws outputs into a rectangle of the egui UI, using the same compositor
+/// as a real output window: one output on its own, or a whole screen.
 pub struct OutputPreview {
-    pub layers: Vec<OutputLayer>,
-    /// Size of the preview rectangle in physical pixels.
-    pub size_px: (u32, u32),
-    /// The output's corner pin, so the preview shows what the screen shows.
-    pub warp: Homography,
+    pub groups: Vec<OutputGroup>,
+    /// Which uniforms to use; each kind of preview needs its own.
+    pub slot: Slot,
 }
 
 impl egui_wgpu::CallbackTrait for OutputPreview {
@@ -347,15 +368,11 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
         _encoder: &mut wgpu::CommandEncoder,
         _resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        for l in &self.layers {
-            l.texture.write_uniform(
-                queue,
-                Slot::Preview,
-                self.size_px,
-                l.opacity,
-                l.fit,
-                &self.warp,
-            );
+        for g in &self.groups {
+            for l in &g.layers {
+                l.texture
+                    .write_uniform(queue, self.slot, g.canvas, l.opacity, l.fit, &g.warp);
+            }
         }
         Vec::new()
     }
@@ -370,9 +387,9 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
             return;
         };
         pass.set_pipeline(pipeline);
-        for l in &self.layers {
+        for l in self.groups.iter().flat_map(|g| &g.layers) {
             if l.opacity > 0.0 {
-                l.texture.draw(Slot::Preview, pass);
+                l.texture.draw(self.slot, pass);
             }
         }
     }

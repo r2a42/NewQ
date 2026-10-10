@@ -6,10 +6,12 @@
 
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Gpu, Homography, LayerTexture};
-use crate::render::{ControlThread, EguiFrame, OutputLayer, OutputThread};
-use crate::show::{DisplayRef, Fit, OutputConfig, OutputId, Placement, Show};
+use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
+use crate::show::{
+    Corners, DisplayRef, Fit, OutputConfig, OutputId, Placement, Show, VirtualDisplay,
+};
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -38,31 +40,45 @@ struct ControlWindow {
     last_paint: Instant,
 }
 
-/// A fullscreen output window on its own display.
-struct OutputWindow {
+/// Where an output is drawn: an area of a physical display (the whole of it
+/// unless the output is on a virtual display).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Target {
+    monitor: usize,
+    area: Corners,
+}
+
+/// A fullscreen window on one physical display. It draws every output routed
+/// to that display: one filling it, or several on virtual displays.
+struct ScreenWindow {
     window: Arc<Window>,
     thread: Option<OutputThread>,
     size: (u32, u32),
-    monitor: usize,
+    monitor: MonitorHandle,
+    /// Outputs drawn on it, bottom first.
+    outputs: Vec<OutputId>,
     needs_redraw: bool,
-    /// Corner pin last sent to the render thread.
-    warp: Homography,
+    /// Outputs and warps last sent to the render thread.
+    sent: Vec<(OutputId, Homography)>,
 }
 
-impl OutputWindow {
+impl ScreenWindow {
     fn close(mut self) -> (Arc<Window>, Option<JoinHandle<()>>) {
         let handle = self.thread.take().map(OutputThread::quit);
         (self.window.clone(), handle)
     }
 }
 
-impl Drop for OutputWindow {
+impl Drop for ScreenWindow {
     fn drop(&mut self) {
         if let Some(t) = self.thread.take() {
             drop(t.quit());
         }
     }
 }
+
+/// A test-pattern texture, with the output number and size it shows.
+type Pattern = (Arc<LayerTexture>, usize, (u32, u32));
 
 pub struct App {
     show: Show,
@@ -71,13 +87,16 @@ pub struct App {
     egui_ctx: egui::Context,
     gpu: Option<Gpu>,
     control: Option<ControlWindow>,
-    outputs: HashMap<OutputId, OutputWindow>,
+    /// Fullscreen windows by monitor index.
+    screens: HashMap<usize, ScreenWindow>,
+    /// Where each output with a screen is drawn.
+    targets: HashMap<OutputId, Target>,
     /// Windows whose render thread is shutting down; kept alive until it exits.
     closing: Vec<(Arc<Window>, JoinHandle<()>)>,
     /// GPU textures for playing layers, with the serial of the uploaded frame.
     textures: HashMap<u64, (Arc<LayerTexture>, u64)>,
-    /// Test-pattern textures per output, with the output number they show.
-    patterns: HashMap<OutputId, (Arc<LayerTexture>, usize)>,
+    /// Test-pattern textures per output.
+    patterns: HashMap<OutputId, Pattern>,
     monitors: Vec<MonitorHandle>,
     last_monitor_scan: Instant,
     last_tick: Instant,
@@ -109,7 +128,8 @@ impl App {
             egui_ctx: egui::Context::default(),
             gpu: None,
             control: None,
-            outputs: HashMap::new(),
+            screens: HashMap::new(),
+            targets: HashMap::new(),
             closing: Vec::new(),
             textures: HashMap::new(),
             patterns: HashMap::new(),
@@ -136,30 +156,38 @@ impl App {
         self.last_monitor_scan = Instant::now();
     }
 
-    /// Decide which display each enabled output goes fullscreen on.
-    fn route_outputs(&self) -> HashMap<OutputId, Option<usize>> {
-        let control_monitor = self
-            .control
+    fn control_monitor(&self) -> Option<usize> {
+        self.control
             .as_ref()
             .and_then(|c| c.window.current_monitor())
-            .and_then(|m| self.monitors.iter().position(|x| *x == m));
-        let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
-        route_outputs(&self.show.outputs, &names, control_monitor)
+            .and_then(|m| self.monitors.iter().position(|x| *x == m))
     }
 
-    fn create_output(&mut self, event_loop: &ActiveEventLoop, cfg: &OutputConfig, monitor: usize) {
+    /// Decide where each enabled output is drawn.
+    fn route_outputs(&self) -> HashMap<OutputId, Option<Target>> {
+        let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
+        route_outputs(
+            &self.show.outputs,
+            &self.show.virtual_displays,
+            &names,
+            self.control_monitor(),
+        )
+    }
+
+    fn create_screen(&mut self, event_loop: &ActiveEventLoop, monitor: usize) {
         let Some(gpu) = &self.gpu else { return };
         let Some(m) = self.monitors.get(monitor) else {
             return;
         };
         let attrs = Window::default_attributes()
-            .with_title(format!("NewQ: {}", cfg.name))
+            .with_title("NewQ output")
             .with_inner_size(LogicalSize::new(960.0, 540.0))
             .with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                self.engine.log(format!("Could not open {}: {e}", cfg.name));
+                self.engine
+                    .log(format!("Could not open an output window: {e}"));
                 return;
             }
         };
@@ -176,92 +204,165 @@ impl App {
         let config = gpu.surface_config(&surface, size);
         surface.configure(&gpu.device, &config);
         let thread = OutputThread::spawn(gpu.clone(), window.clone(), surface, config);
-        self.outputs.insert(
-            cfg.id,
-            OutputWindow {
+        self.screens.insert(
+            monitor,
+            ScreenWindow {
                 window,
                 thread: Some(thread),
                 size,
-                monitor,
+                monitor: m.clone(),
+                outputs: Vec::new(),
                 needs_redraw: true,
-                warp: gpu::IDENTITY,
+                sent: Vec::new(),
             },
         );
     }
 
-    fn close_output(&mut self, id: OutputId) {
-        if let Some(out) = self.outputs.remove(&id)
-            && let (window, Some(handle)) = out.close()
+    fn close_screen(&mut self, monitor: usize) {
+        if let Some(screen) = self.screens.remove(&monitor)
+            && let (window, Some(handle)) = screen.close()
         {
             window.set_visible(false);
             self.closing.push((window, handle));
         }
     }
 
-    /// Open, move or close output windows to match where each output should be.
+    /// Open, update or close fullscreen windows to match where outputs should be.
     fn reconcile_outputs(&mut self, event_loop: &ActiveEventLoop) {
         let routes = self.route_outputs();
-        let stale: Vec<OutputId> = self
-            .outputs
-            .iter()
-            .filter(|(id, w)| routes.get(id).copied().flatten() != Some(w.monitor))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in stale {
-            self.close_output(id);
+        // Outputs per display, bottom first: those filling the display, then
+        // virtual displays in list order.
+        let mut per_screen = BTreeMap::<usize, Vec<_>>::new();
+        self.targets.clear();
+        for (oi, o) in self.show.outputs.iter().enumerate() {
+            let Some(Some(t)) = routes.get(&o.id) else {
+                continue;
+            };
+            let order = match o.placement {
+                Placement::Virtual(v) => {
+                    1 + self
+                        .show
+                        .virtual_displays
+                        .iter()
+                        .position(|x| x.id == v)
+                        .unwrap_or(0)
+                }
+                _ => 0,
+            };
+            per_screen
+                .entry(t.monitor)
+                .or_default()
+                .push(((order, oi), o.id));
+            self.targets.insert(o.id, *t);
         }
-        self.ui.routes.clear();
-        let configs: Vec<OutputConfig> = self.show.outputs.clone();
-        for cfg in &configs {
-            let route = routes.get(&cfg.id).copied().flatten();
-            match route {
-                Some(m) => {
-                    if !self.outputs.contains_key(&cfg.id) {
-                        self.create_output(event_loop, cfg, m);
-                    }
-                    if let Some(out) = self.outputs.get(&cfg.id) {
-                        let title = format!("NewQ: {}", cfg.name);
-                        if out.window.title() != title {
-                            out.window.set_title(&title);
-                        }
-                    }
-                    let name = self
-                        .ui
-                        .monitors
-                        .get(m)
-                        .map(|x| x.name.clone())
-                        .unwrap_or_default();
-                    self.ui.routes.insert(cfg.id, OutputRoute::Display(name));
+        // Close windows on displays with nothing left to show, or that changed.
+        let stale: Vec<usize> = self
+            .screens
+            .iter()
+            .filter(|(m, w)| {
+                !per_screen.contains_key(m) || self.monitors.get(**m) != Some(&w.monitor)
+            })
+            .map(|(m, _)| *m)
+            .collect();
+        for m in stale {
+            self.close_screen(m);
+        }
+        for (m, mut list) in per_screen {
+            list.sort_by_key(|(k, _)| *k);
+            let ids: Vec<OutputId> = list.into_iter().map(|(_, id)| id).collect();
+            if !self.screens.contains_key(&m) {
+                self.create_screen(event_loop, m);
+            }
+            if let Some(screen) = self.screens.get_mut(&m) {
+                let names: Vec<&str> = ids
+                    .iter()
+                    .filter_map(|id| self.show.output(*id))
+                    .map(|o| o.name.as_str())
+                    .collect();
+                let title = format!("NewQ: {}", names.join(", "));
+                if screen.window.title() != title {
+                    screen.window.set_title(&title);
                 }
-                None if cfg.enabled => {
-                    self.ui.routes.insert(cfg.id, OutputRoute::MainWindow);
+                if screen.outputs != ids {
+                    screen.outputs = ids;
+                    screen.needs_redraw = true;
                 }
-                None => {}
             }
         }
-        // Outputs in the main window decode at the default (1080p) size.
-        self.engine.output_sizes = self.outputs.iter().map(|(id, o)| (*id, o.size)).collect();
+
+        self.ui.routes.clear();
+        for cfg in self.show.outputs.iter().filter(|o| o.enabled) {
+            let route = match self.targets.get(&cfg.id) {
+                None => OutputRoute::MainWindow,
+                Some(t) => {
+                    let display = self
+                        .ui
+                        .monitors
+                        .get(t.monitor)
+                        .map(|x| x.name.clone())
+                        .unwrap_or_default();
+                    match cfg.placement {
+                        Placement::Virtual(v) => OutputRoute::Virtual {
+                            name: self
+                                .show
+                                .virtual_display(v)
+                                .map(|x| x.name.clone())
+                                .unwrap_or_default(),
+                            display,
+                        },
+                        _ => OutputRoute::Display(display),
+                    }
+                }
+            };
+            self.ui.routes.insert(cfg.id, route);
+        }
+        let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
+        let control = self.control_monitor();
+        self.ui.virtual_monitors = self
+            .show
+            .virtual_displays
+            .iter()
+            .filter_map(|v| Some((v.id, resolve_display(&v.parent, &names, control)?)))
+            .collect();
+
+        // Decode at the size each output is shown at. Outputs in the main
+        // window decode at the default (1080p) size.
+        self.engine.output_sizes = self
+            .targets
+            .iter()
+            .filter_map(|(id, t)| Some((*id, t.area.size_on(self.screens.get(&t.monitor)?.size))))
+            .collect();
         // Release windows once their render thread has dropped the surface.
         self.closing.retain(|(_, h)| !h.is_finished());
     }
 
-    /// Upload new frames and hand each output its current layer stack: to its
-    /// render thread if it has a window, and to the UI for the live preview.
+    /// Upload new frames and hand each output's current layer stack to the
+    /// window of the display it is on, and to the UI for the live previews.
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = &self.gpu else { return };
         self.ui.previews.clear();
-        let configs: Vec<(OutputId, String, bool, usize, Homography)> = self
+        let configs: Vec<(OutputId, String, bool, usize, Corners)> = self
             .show
             .outputs
             .iter()
             .enumerate()
             .filter(|(_, o)| o.enabled)
-            .map(|(i, o)| {
-                let warp = gpu::corner_pin(&o.corners.0);
-                (o.id, o.name.clone(), o.test_pattern, i + 1, warp)
-            })
+            .map(|(i, o)| (o.id, o.name.clone(), o.test_pattern, i + 1, o.corners))
             .collect();
-        for (id, name, want_pattern, number, warp) in configs {
+        let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
+        for (id, name, want_pattern, number, corners) in configs {
+            // The output's canvas: its area of a display, or 1080p in the main window.
+            let pin = gpu::corner_pin(&corners.0);
+            let target = self.targets.get(&id).copied();
+            let screen = target.and_then(|t| Some((t, self.screens.get(&t.monitor)?.size)));
+            let (warp, canvas) = match screen {
+                Some((t, size)) => (
+                    gpu::compose(&gpu::corner_pin(&t.area.0), &pin),
+                    t.area.size_on(size),
+                ),
+                None => (pin, (1920, 1080)),
+            };
+
             let mut layers = Vec::new();
             for l in self.engine.layers(id) {
                 let entry = match &l.source {
@@ -301,48 +402,83 @@ impl App {
                 });
             }
 
+            // The test pattern is drawn at the canvas's shape, so its circles
+            // and grid stay true on a virtual display of any size.
             let mut pattern_changed = false;
             if want_pattern {
-                if self.patterns.get(&id).is_none_or(|(_, n)| *n != number) {
-                    let (w, h) = (1280, 720);
-                    let tex = LayerTexture::new_rgba(gpu, w, h);
-                    tex.upload_rgba(&gpu.queue, &gpu::test_pattern(w, h, number));
-                    self.patterns.insert(id, (Arc::new(tex), number));
+                let scale = (1280.0 / canvas.0.max(canvas.1) as f32).min(1.0);
+                let size = (
+                    ((canvas.0 as f32 * scale).round() as u32).max(16),
+                    ((canvas.1 as f32 * scale).round() as u32).max(16),
+                );
+                if self
+                    .patterns
+                    .get(&id)
+                    .is_none_or(|(_, n, s)| *n != number || *s != size)
+                {
+                    let tex = LayerTexture::new_rgba(gpu, size.0, size.1);
+                    tex.upload_rgba(&gpu.queue, &gpu::test_pattern(size.0, size.1, number));
+                    self.patterns.insert(id, (Arc::new(tex), number, size));
                     pattern_changed = true;
                 }
             } else if self.patterns.remove(&id).is_some() {
                 pattern_changed = true;
             }
-            if let Some((tex, _)) = self.patterns.get(&id) {
+            if let Some((tex, _, _)) = self.patterns.get(&id) {
                 layers.push(OutputLayer {
                     texture: tex.clone(),
                     opacity: 1.0,
                     fit: Fit::Stretch,
                 });
             }
-
-            let mut aspect = 16.0 / 9.0;
-            if let Some(out) = self.outputs.get_mut(&id) {
-                aspect = out.size.0 as f32 / out.size.1.max(1) as f32;
-                let warp_changed = out.warp != warp;
-                if playing || out.needs_redraw || pattern_changed || warp_changed {
-                    out.needs_redraw = false;
-                    out.warp = warp;
-                    if let Some(t) = &out.thread {
-                        t.submit(out.size, layers.clone(), warp);
-                    }
+            if pattern_changed {
+                if let Some(t) = target
+                    && let Some(s) = self.screens.get_mut(&t.monitor)
+                {
+                    s.needs_redraw = true;
+                }
+                if let Some(ctl) = &self.control {
+                    ctl.window.request_redraw();
                 }
             }
-            if pattern_changed && let Some(ctl) = &self.control {
-                ctl.window.request_redraw();
-            }
+
+            groups.insert(
+                id,
+                OutputGroup {
+                    layers: layers.clone(),
+                    warp,
+                    canvas,
+                },
+            );
             self.ui.previews.push(PreviewOutput {
                 id,
                 name,
                 layers,
-                warp,
-                aspect,
+                warp: pin,
+                canvas,
             });
+        }
+
+        self.ui.screens.clear();
+        for (m, screen) in &mut self.screens {
+            let list: Vec<OutputGroup> = screen
+                .outputs
+                .iter()
+                .filter_map(|id| groups.get(id).cloned())
+                .collect();
+            let sent: Vec<(OutputId, Homography)> = screen
+                .outputs
+                .iter()
+                .filter_map(|id| Some((*id, groups.get(id)?.warp)))
+                .collect();
+            if playing || screen.needs_redraw || sent != screen.sent {
+                screen.needs_redraw = false;
+                screen.sent = sent;
+                if let Some(t) = &screen.thread {
+                    t.submit(screen.size, list.clone());
+                }
+            }
+            self.ui.screens.insert(*m, (screen.size, list));
         }
     }
 
@@ -473,29 +609,33 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let Some(out_id) = self
-            .outputs
+        let Some(m) = self
+            .screens
             .iter()
-            .find(|(_, o)| o.window.id() == id)
-            .map(|(k, _)| *k)
+            .find(|(_, s)| s.window.id() == id)
+            .map(|(m, _)| *m)
         else {
             return;
         };
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(cfg) = self.show.outputs.iter_mut().find(|o| o.id == out_id) {
-                    cfg.enabled = false;
+                // Closing a display's window (e.g. Alt+F4) turns off what's on it.
+                let on_it = self.screens[&m].outputs.clone();
+                for cfg in &mut self.show.outputs {
+                    if on_it.contains(&cfg.id) {
+                        cfg.enabled = false;
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
-                if let Some(out) = self.outputs.get_mut(&out_id) {
-                    out.size = (size.width.max(1), size.height.max(1));
-                    out.needs_redraw = true;
+                if let Some(s) = self.screens.get_mut(&m) {
+                    s.size = (size.width.max(1), size.height.max(1));
+                    s.needs_redraw = true;
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(out) = self.outputs.get_mut(&out_id) {
-                    out.needs_redraw = true;
+                if let Some(s) = self.screens.get_mut(&m) {
+                    s.needs_redraw = true;
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_output_key(&event),
@@ -560,7 +700,7 @@ impl ApplicationHandler for App {
         if let Some(t) = self.control.as_mut().and_then(|c| c.thread.take()) {
             drop(t.quit());
         }
-        self.outputs.clear();
+        self.screens.clear();
     }
 }
 
@@ -579,34 +719,51 @@ fn resolve_display(d: &DisplayRef, monitors: &[&str], control: Option<usize>) ->
     }
 }
 
-/// Decide which display each enabled output goes fullscreen on (`None` = it is
-/// only shown in the main window): explicit displays first, then automatic
-/// outputs take displays other than the main window's, one each.
+/// Decide where each enabled output is drawn (`None` = only in the main
+/// window): explicit displays and virtual displays first, then automatic
+/// outputs take displays other than the main window's that nothing else is on.
 fn route_outputs(
     outputs: &[OutputConfig],
+    virtuals: &[VirtualDisplay],
     monitors: &[&str],
     control: Option<usize>,
-) -> HashMap<OutputId, Option<usize>> {
+) -> HashMap<OutputId, Option<Target>> {
     let enabled: Vec<&OutputConfig> = outputs.iter().filter(|o| o.enabled).collect();
     let mut routes = HashMap::new();
     let mut claimed = HashSet::new();
     for o in &enabled {
-        if let Placement::Display(d) = &o.placement {
-            let m = resolve_display(d, monitors, control);
-            claimed.extend(m);
-            routes.insert(o.id, m);
-        }
+        let target = match &o.placement {
+            Placement::Display(d) => resolve_display(d, monitors, control).map(|monitor| Target {
+                monitor,
+                area: Corners::default(),
+            }),
+            Placement::Virtual(v) => virtuals.iter().find(|x| x.id == *v).and_then(|v| {
+                Some(Target {
+                    monitor: resolve_display(&v.parent, monitors, control)?,
+                    area: v.area,
+                })
+            }),
+            _ => continue,
+        };
+        claimed.extend(target.map(|t| t.monitor));
+        routes.insert(o.id, target);
     }
     for o in &enabled {
         match &o.placement {
-            Placement::Display(_) => {}
+            Placement::Display(_) | Placement::Virtual(_) => {}
             Placement::MainWindow => {
                 routes.insert(o.id, None);
             }
             Placement::Auto => {
                 let m = (0..monitors.len()).find(|i| Some(*i) != control && !claimed.contains(i));
                 claimed.extend(m);
-                routes.insert(o.id, m);
+                routes.insert(
+                    o.id,
+                    m.map(|monitor| Target {
+                        monitor,
+                        area: Corners::default(),
+                    }),
+                );
             }
         }
     }
@@ -616,6 +773,7 @@ fn route_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::show::VirtualId;
 
     fn output(id: u64, placement: Placement) -> OutputConfig {
         let mut o = OutputConfig::new(OutputId(id), format!("Output {id}"));
@@ -630,22 +788,34 @@ mod tests {
         })
     }
 
+    /// Routes as monitor indices.
+    fn route(
+        outputs: &[OutputConfig],
+        monitors: &[&str],
+        control: Option<usize>,
+    ) -> HashMap<OutputId, Option<usize>> {
+        route_outputs(outputs, &[], monitors, control)
+            .into_iter()
+            .map(|(id, t)| (id, t.map(|t| t.monitor)))
+            .collect()
+    }
+
     #[test]
     fn auto_uses_main_window_with_one_display() {
-        let r = route_outputs(&[output(1, Placement::Auto)], &["Laptop"], Some(0));
+        let r = route(&[output(1, Placement::Auto)], &["Laptop"], Some(0));
         assert_eq!(r[&OutputId(1)], None);
     }
 
     #[test]
     fn auto_goes_to_the_other_display() {
-        let r = route_outputs(
+        let r = route(
             &[output(1, Placement::Auto)],
             &["Laptop", "Projector"],
             Some(0),
         );
         assert_eq!(r[&OutputId(1)], Some(1));
         // Main window on the second display: auto takes the first.
-        let r = route_outputs(
+        let r = route(
             &[output(1, Placement::Auto)],
             &["Laptop", "Projector"],
             Some(1),
@@ -660,27 +830,27 @@ mod tests {
             output(2, display("Projector A", 1)),
             output(3, Placement::MainWindow),
         ];
-        let r = route_outputs(&outs, &["Laptop", "Projector A", "Projector B"], Some(0));
+        let r = route(&outs, &["Laptop", "Projector A", "Projector B"], Some(0));
         assert_eq!(r[&OutputId(2)], Some(1));
         assert_eq!(r[&OutputId(1)], Some(2));
         assert_eq!(r[&OutputId(3)], None);
         // Not enough displays for both: the auto output falls back to the main window.
-        let r = route_outputs(&outs, &["Laptop", "Projector A"], Some(0));
+        let r = route(&outs, &["Laptop", "Projector A"], Some(0));
         assert_eq!((r[&OutputId(2)], r[&OutputId(1)]), (Some(1), None));
     }
 
     #[test]
     fn unplugged_display_falls_back_to_main_window() {
-        let r = route_outputs(&[output(1, display("Projector", 1))], &["Laptop"], Some(0));
+        let r = route(&[output(1, display("Projector", 1))], &["Laptop"], Some(0));
         assert_eq!(r[&OutputId(1)], None);
     }
 
     #[test]
     fn renamed_display_matches_by_position_but_never_covers_the_main_window() {
         let outs = [output(1, display("Old projector", 1))];
-        let r = route_outputs(&outs, &["Laptop", "Venue projector"], Some(0));
+        let r = route(&outs, &["Laptop", "Venue projector"], Some(0));
         assert_eq!(r[&OutputId(1)], Some(1));
-        let r = route_outputs(&outs, &["Venue projector", "Laptop"], Some(1));
+        let r = route(&outs, &["Venue projector", "Laptop"], Some(1));
         assert_eq!(r[&OutputId(1)], None);
     }
 
@@ -688,7 +858,66 @@ mod tests {
     fn disabled_outputs_are_not_routed() {
         let mut o = output(1, Placement::Auto);
         o.enabled = false;
-        let r = route_outputs(&[o], &["Laptop", "Projector"], Some(0));
+        let r = route(&[o], &["Laptop", "Projector"], Some(0));
         assert!(!r.contains_key(&OutputId(1)));
+    }
+
+    #[test]
+    fn virtual_displays_share_a_display_and_keep_auto_off_it() {
+        let parent = DisplayRef {
+            name: "Projector".into(),
+            index: 1,
+        };
+        let left = VirtualDisplay {
+            id: VirtualId(10),
+            name: "Left".into(),
+            parent: parent.clone(),
+            area: Corners::rect(0.0, 0.0, 0.5, 1.0),
+        };
+        let right = VirtualDisplay {
+            id: VirtualId(11),
+            area: Corners::rect(0.5, 0.0, 0.5, 1.0),
+            name: "Right".into(),
+            ..left.clone()
+        };
+        let outs = [
+            output(1, Placement::Virtual(VirtualId(10))),
+            output(2, Placement::Virtual(VirtualId(11))),
+            output(3, Placement::Auto),
+            output(4, Placement::Virtual(VirtualId(99))),
+        ];
+        let virtuals = [left.clone(), right.clone()];
+        let r = route_outputs(&outs, &virtuals, &["Laptop", "Projector"], Some(0));
+        assert_eq!(
+            r[&OutputId(1)],
+            Some(Target {
+                monitor: 1,
+                area: left.area
+            })
+        );
+        assert_eq!(
+            r[&OutputId(2)],
+            Some(Target {
+                monitor: 1,
+                area: right.area
+            })
+        );
+        // The projector is taken by the virtual displays, so automatic stays in the main window.
+        assert_eq!(r[&OutputId(3)], None);
+        // A deleted virtual display falls back to the main window.
+        assert_eq!(r[&OutputId(4)], None);
+        // Projector unplugged: everything in the main window.
+        let r = route_outputs(&outs, &virtuals, &["Laptop"], Some(0));
+        assert!(r.values().all(|t| t.is_none()));
+        // A virtual display may be on the main window's own display when chosen by name.
+        let on_laptop = VirtualDisplay {
+            parent: DisplayRef {
+                name: "Laptop".into(),
+                index: 0,
+            },
+            ..left
+        };
+        let r = route_outputs(&outs[..1], &[on_laptop], &["Laptop"], Some(0));
+        assert_eq!(r[&OutputId(1)].map(|t| t.monitor), Some(0));
     }
 }

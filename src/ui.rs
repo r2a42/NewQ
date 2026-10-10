@@ -1,12 +1,14 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 use crate::engine::{CueStatus, Engine};
-use crate::gpu::Homography;
+use crate::gpu::{Homography, Slot};
 use crate::media::ProbeState;
-use crate::render::{OutputLayer, OutputPreview};
+use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub struct MonitorInfo {
@@ -21,6 +23,11 @@ pub enum OutputRoute {
     MainWindow,
     /// Fullscreen on the named display.
     Display(String),
+    /// On a virtual display, part of the named display.
+    Virtual {
+        name: String,
+        display: String,
+    },
 }
 
 /// An output's current layer stack, previewed live in the main window.
@@ -30,8 +37,8 @@ pub struct PreviewOutput {
     pub layers: Vec<OutputLayer>,
     /// The output's corner pin.
     pub warp: Homography,
-    /// Width / height of the output's screen.
-    pub aspect: f32,
+    /// Pixel size of the output's canvas (its display or virtual display).
+    pub canvas: (u32, u32),
 }
 
 #[derive(Default)]
@@ -44,6 +51,12 @@ pub struct UiState {
     pub routes: HashMap<OutputId, OutputRoute>,
     /// Output whose corner pin is being edited on its preview.
     pub geometry_edit: Option<OutputId>,
+    /// Virtual display whose area is being edited.
+    pub area_edit: Option<VirtualId>,
+    /// What each fullscreen window shows, by monitor index: its size and outputs.
+    pub screens: HashMap<usize, ((u32, u32), Vec<OutputGroup>)>,
+    /// The monitor each connected virtual display is on.
+    pub virtual_monitors: HashMap<VirtualId, usize>,
     pub quit_requested: bool,
     pub dirty: bool,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -79,6 +92,9 @@ enum Action {
     StopInstance(u64, f64),
     FadeOutInstance(u64),
     EditGeometry(Option<OutputId>),
+    EditArea(Option<VirtualId>),
+    AddVirtual(DisplayRef),
+    RemoveVirtual(VirtualId),
     SetTransition(CueId, Transition),
     AddOutput,
     RemoveOutput(OutputId),
@@ -125,7 +141,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         actions.push(Action::AddFiles(dropped));
     }
 
-    egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, show, &mut actions));
+    egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, show, st, &mut actions));
     egui::Panel::top("transport")
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(10))
         .show(ui, |ui| transport(ui, show, engine, &mut actions));
@@ -142,6 +158,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     active_panel(ui, show, engine, &mut actions);
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
+                    ui.add_space(12.0);
+                    virtual_displays_panel(ui, show, st, &mut actions);
                 });
         });
     egui::Panel::bottom("inspector")
@@ -218,7 +236,7 @@ fn keyboard(ctx: &egui::Context, actions: &mut Vec<Action>) {
     });
 }
 
-fn menu_bar(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
+fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
     egui::containers::menu::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
             if ui
@@ -298,6 +316,9 @@ fn menu_bar(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
             if ui.button("Add output").clicked() {
                 actions.push(Action::AddOutput);
             }
+            ui.menu_button("Add virtual display on", |ui| {
+                add_virtual_menu(ui, st, actions);
+            });
         });
         ui.menu_button("Help", |ui| {
             ui.label(RichText::new("Keyboard").strong());
@@ -789,6 +810,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
     for e in &st.previews {
         let where_ = match st.routes.get(&e.id) {
             Some(OutputRoute::Display(name)) => format!("also fullscreen on {name}"),
+            Some(OutputRoute::Virtual { name, display }) => format!("also on {name} ({display})"),
             _ => "main window only".to_string(),
         };
         ui.horizontal(|ui| {
@@ -798,25 +820,26 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
         let editing = st.geometry_edit == Some(e.id);
         // Leave room around the screen to drag corners past its edges.
         let margin = if editing { 14.0 } else { 0.0 };
-        let w = ui.available_width() - 2.0 * margin;
-        let h = (w / e.aspect.max(0.1)).min(w * 1.5);
+        let full_w = ui.available_width() - 2.0 * margin;
+        // Tall (virtual) displays are previewed narrower, not taller.
+        let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
+        let h = (full_w / aspect).min(full_w * if editing { 1.2 } else { 0.75 });
+        let w = h * aspect;
         let (outer, _) = ui.allocate_exact_size(
             Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
             Sense::hover(),
         );
         let rect = outer.shrink(margin);
         ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-        let ppp = ui.ctx().pixels_per_point();
-        let size_px = (
-            (rect.width() * ppp).round().max(1.0) as u32,
-            (rect.height() * ppp).round().max(1.0) as u32,
-        );
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             OutputPreview {
-                layers: e.layers.clone(),
-                size_px,
-                warp: e.warp,
+                groups: vec![OutputGroup {
+                    layers: e.layers.clone(),
+                    warp: e.warp,
+                    canvas: e.canvas,
+                }],
+                slot: Slot::Preview,
             },
         ));
         if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == e.id) {
@@ -828,6 +851,26 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
 
 /// Draggable corner-pin handles over an output preview. Hold Shift for fine moves.
 fn corner_handles(ui: &mut Ui, screen: egui::Rect, id: OutputId, corners: &mut Corners) {
+    quad_handles(ui, screen, ("corner", id.0), corners, -0.5..=1.5, false);
+}
+
+/// Draggable handles for a virtual display's area over a picture of its
+/// display: corners reshape it, dragging inside moves it.
+fn area_handles(ui: &mut Ui, screen: egui::Rect, id: VirtualId, area: &mut Corners) {
+    quad_handles(ui, screen, ("area", id.0), area, 0.0..=1.0, true);
+}
+
+/// Draggable handles on the four corners of a shape drawn over `screen`,
+/// clamped to `range` (fractions of the screen). With `movable`, dragging
+/// inside the shape moves all of it. Hold Shift for fine moves.
+fn quad_handles(
+    ui: &mut Ui,
+    screen: egui::Rect,
+    salt: impl Hash + Copy + std::fmt::Debug,
+    corners: &mut Corners,
+    range: RangeInclusive<f32>,
+    movable: bool,
+) {
     let to_screen =
         |c: [f32; 2]| screen.min + Vec2::new(c[0] * screen.width(), c[1] * screen.height());
     let painter = ui.painter().clone();
@@ -837,6 +880,29 @@ fn corner_handles(ui: &mut Ui, screen: egui::Rect, id: OutputId, corners: &mut C
         Stroke::new(1.0, Color32::from_gray(90)),
         egui::StrokeKind::Outside,
     );
+    let fine = ui.input(|i| i.modifiers.shift);
+    let scale = if fine { 0.1 } else { 1.0 };
+    let (lo, hi) = (*range.start(), *range.end());
+    // Registered before the corners, so the corner handles stay on top.
+    if movable {
+        let [x, y, w, h] = corners.bounds();
+        let body = egui::Rect::from_min_size(
+            to_screen([x, y]),
+            Vec2::new(w * screen.width(), h * screen.height()),
+        );
+        let resp = ui
+            .interact(body, ui.id().with((salt, "body")), Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::Move);
+        if resp.dragged() {
+            let d = resp.drag_delta() * scale;
+            let dx = (d.x / screen.width()).clamp(lo - x, hi - (x + w));
+            let dy = (d.y / screen.height()).clamp(lo - y, hi - (y + h));
+            for c in &mut corners.0 {
+                c[0] += dx;
+                c[1] += dy;
+            }
+        }
+    }
     let quad_color = if corners.is_convex() {
         PLAYHEAD
     } else {
@@ -848,21 +914,20 @@ fn corner_handles(ui: &mut Ui, screen: egui::Rect, id: OutputId, corners: &mut C
             Stroke::new(1.5, quad_color),
         );
     }
-    let fine = ui.input(|i| i.modifiers.shift);
     for i in 0..4 {
         let pos = to_screen(corners.0[i]);
         let hit = egui::Rect::from_center_size(pos, Vec2::splat(22.0));
         let resp = ui
-            .interact(hit, ui.id().with(("corner", id.0, i)), Sense::drag())
+            .interact(hit, ui.id().with((salt, i)), Sense::drag())
             .on_hover_text(format!(
                 "{}: drag to move (Shift = fine)",
                 Corners::LABELS[i]
             ));
         if resp.dragged() {
-            let d = resp.drag_delta() * if fine { 0.1 } else { 1.0 };
+            let d = resp.drag_delta() * scale;
             let c = &mut corners.0[i];
-            c[0] = (c[0] + d.x / screen.width()).clamp(-0.5, 1.5);
-            c[1] = (c[1] + d.y / screen.height()).clamp(-0.5, 1.5);
+            c[0] = (c[0] + d.x / screen.width()).clamp(lo, hi);
+            c[1] = (c[1] + d.y / screen.height()).clamp(lo, hi);
         }
         let active = resp.hovered() || resp.dragged();
         painter.circle(
@@ -878,6 +943,21 @@ fn corner_handles(ui: &mut Ui, screen: egui::Rect, id: OutputId, corners: &mut C
     }
 }
 
+fn monitor_label(st: &UiState, i: usize) -> String {
+    let m = &st.monitors[i];
+    format!(
+        "{}: {} ({}×{}{}){}",
+        i + 1,
+        m.name,
+        m.size.0,
+        m.size.1,
+        m.refresh_hz
+            .map(|r| format!(" @ {r:.0} Hz"))
+            .unwrap_or_default(),
+        if m.primary { " primary" } else { "" }
+    )
+}
+
 fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.heading("Outputs");
@@ -887,23 +967,10 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
             }
         });
     });
-    let monitor_label = |i: usize| {
-        let m = &st.monitors[i];
-        format!(
-            "{}: {} ({}×{}{}){}",
-            i + 1,
-            m.name,
-            m.size.0,
-            m.size.1,
-            m.refresh_hz
-                .map(|r| format!(" @ {r:.0} Hz"))
-                .unwrap_or_default(),
-            if m.primary { " primary" } else { "" }
-        )
-    };
     const AUTO_HELP: &str = "Fullscreen on a display other than the one NewQ is on; inside the main window \
          when there isn't one. Switches automatically when displays are plugged in or out.";
     let n_outputs = show.outputs.len();
+    let show_virtuals = &show.virtual_displays;
     for (oi, out) in show.outputs.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -925,6 +992,10 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                 Placement::Auto => "Automatic".to_string(),
                 Placement::MainWindow => "Main window".to_string(),
                 Placement::Display(d) => format!("Fullscreen on {}", d.name),
+                Placement::Virtual(v) => match show_virtuals.iter().find(|x| x.id == *v) {
+                    Some(x) => format!("On virtual display {}", x.name),
+                    None => "Removed virtual display".to_string(),
+                },
             };
             egui::ComboBox::from_id_salt(("placement", out.id.0))
                 .width(ui.available_width() - 8.0)
@@ -942,13 +1013,33 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                         ui.selectable_value(
                             &mut out.placement,
                             Placement::Display(d),
-                            format!("Fullscreen on {}", monitor_label(i)),
+                            format!("Fullscreen on {}", monitor_label(st, i)),
+                        );
+                    }
+                    for v in show_virtuals.iter() {
+                        ui.selectable_value(
+                            &mut out.placement,
+                            Placement::Virtual(v.id),
+                            format!("On virtual display {} (on {})", v.name, v.parent.name),
                         );
                     }
                 });
             let status = match (st.routes.get(&out.id), &out.placement) {
                 (None, _) => "Off".to_string(),
                 (Some(OutputRoute::Display(name)), _) => format!("Fullscreen on {name}"),
+                (Some(OutputRoute::Virtual { name, display }), _) => {
+                    format!("On {name}, part of {display}")
+                }
+                (Some(OutputRoute::MainWindow), Placement::Virtual(v)) => {
+                    match show_virtuals.iter().find(|x| x.id == *v) {
+                        Some(x) => format!(
+                            "{} isn't connected: showing in the main window",
+                            x.parent.name
+                        ),
+                        None => "Its virtual display was removed: showing in the main window"
+                            .to_string(),
+                    }
+                }
                 (Some(OutputRoute::MainWindow), Placement::Display(d)) => {
                     format!("{} isn't connected: showing in the main window", d.name)
                 }
@@ -968,6 +1059,257 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
             corner_pin_editor(ui, out, st, actions);
         });
     }
+}
+
+fn add_virtual_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    if st.monitors.is_empty() {
+        ui.label(RichText::new("No displays found").weak());
+    }
+    for i in 0..st.monitors.len() {
+        if ui.button(monitor_label(st, i)).clicked() {
+            actions.push(Action::AddVirtual(DisplayRef {
+                name: st.monitors[i].name.clone(),
+                index: i,
+            }));
+            ui.close();
+        }
+    }
+}
+
+fn virtual_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.heading("Virtual displays");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.menu_button("+ Add", |ui| add_virtual_menu(ui, st, actions))
+                .response
+                .on_hover_text("Add an area of a display that outputs can be placed on");
+        });
+    });
+    if show.virtual_displays.is_empty() {
+        ui.label(
+            RichText::new(
+                "Split a display into areas that each work like a display of their own: \
+                 place an output on each, with its own corner pin.",
+            )
+            .weak()
+            .small(),
+        );
+        return;
+    }
+    // Everyone's areas, to draw the neighbours of the one being edited.
+    let all: Vec<VirtualDisplay> = show.virtual_displays.clone();
+    for v in show.virtual_displays.iter_mut() {
+        let monitor = st.virtual_monitors.get(&v.id).copied();
+        let screen_size = monitor
+            .and_then(|m| st.monitors.get(m))
+            .map(|m| m.size)
+            .unwrap_or((1920, 1080));
+        let users: Vec<&str> = show
+            .outputs
+            .iter()
+            .filter(|o| o.placement == Placement::Virtual(v.id))
+            .map(|o| o.name.as_str())
+            .collect();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut v.name).desired_width(140.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button("🗑")
+                        .on_hover_text("Remove virtual display")
+                        .clicked()
+                    {
+                        actions.push(Action::RemoveVirtual(v.id));
+                    }
+                });
+            });
+            egui::ComboBox::from_id_salt(("vd_parent", v.id.0))
+                .width(ui.available_width() - 8.0)
+                .selected_text(format!("Part of {}", v.parent.name))
+                .show_ui(ui, |ui| {
+                    for i in 0..st.monitors.len() {
+                        let d = DisplayRef {
+                            name: st.monitors[i].name.clone(),
+                            index: i,
+                        };
+                        ui.selectable_value(&mut v.parent, d, monitor_label(st, i));
+                    }
+                });
+            let (w, h) = v.area.size_on(screen_size);
+            let status = match monitor {
+                Some(_) => format!("{w}×{h} px"),
+                None => format!("{} isn't connected", v.parent.name),
+            };
+            let used = if users.is_empty() {
+                "no outputs on it yet".to_string()
+            } else {
+                format!("shows {}", users.join(", "))
+            };
+            ui.label(RichText::new(format!("{status} · {used}")).weak().small());
+
+            let editing = st.area_edit == Some(v.id);
+            ui.horizontal(|ui| {
+                let label = if editing { "Done" } else { "Edit area…" };
+                if ui
+                    .selectable_label(editing, label)
+                    .on_hover_text(
+                        "Drag inside the area to move it and its corners to reshape it, on a \
+                         picture of the whole display",
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::EditArea((!editing).then_some(v.id)));
+                }
+                if v.area.as_rect().is_none()
+                    && ui
+                        .small_button("Make rectangle")
+                        .on_hover_text("Square the area up to the rectangle around it")
+                        .clicked()
+                {
+                    let [x, y, w, h] = v.area.bounds();
+                    v.area = Corners::rect(x, y, w, h);
+                }
+            });
+            if !editing {
+                return;
+            }
+            area_editor(ui, v, &all, monitor, screen_size, st);
+        });
+    }
+}
+
+/// A picture of a virtual display's whole display, showing what is on it now,
+/// with every virtual display on it outlined and handles on the one being edited,
+/// plus exact pixel fields.
+fn area_editor(
+    ui: &mut Ui,
+    v: &mut VirtualDisplay,
+    all: &[VirtualDisplay],
+    monitor: Option<usize>,
+    screen_size: (u32, u32),
+    st: &UiState,
+) {
+    let (sw, sh) = (screen_size.0 as f32, screen_size.1 as f32);
+    let margin = 10.0;
+    let w = ui.available_width() - 2.0 * margin;
+    let h = (w * sh / sw).min(w * 1.5);
+    let (outer, _) = ui.allocate_exact_size(
+        Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
+        Sense::hover(),
+    );
+    let rect = outer.shrink(margin);
+    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
+    if let Some((_, groups)) = monitor.and_then(|m| st.screens.get(&m)) {
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            OutputPreview {
+                groups: groups.clone(),
+                slot: Slot::Screen,
+            },
+        ));
+    }
+    let to_screen = |c: [f32; 2]| rect.min + Vec2::new(c[0] * rect.width(), c[1] * rect.height());
+    for other in all.iter().filter(|o| o.id != v.id && o.parent == v.parent) {
+        let p = other.area.0.map(to_screen);
+        for i in 0..4 {
+            ui.painter().line_segment(
+                [p[i], p[(i + 1) % 4]],
+                Stroke::new(1.0, Color32::from_gray(140)),
+            );
+        }
+        let centre = p.iter().fold(Vec2::ZERO, |a, q| a + q.to_vec2()) / 4.0;
+        let label = ui.painter().layout_no_wrap(
+            other.name.clone(),
+            egui::FontId::proportional(12.0),
+            Color32::from_gray(200),
+        );
+        let at = egui::Rect::from_center_size(centre.to_pos2(), label.size());
+        ui.painter()
+            .rect_filled(at.expand(3.0), 3.0, Color32::from_black_alpha(180));
+        ui.painter().galley(at.min, label, Color32::from_gray(200));
+    }
+    area_handles(ui, rect, v.id, &mut v.area);
+    if !v.area.is_convex() {
+        ui.label(
+            RichText::new("⚠ Corners cross or fold in; the picture will look wrong.")
+                .color(STOP_RED)
+                .small(),
+        );
+    }
+    if monitor.is_none() {
+        ui.label(
+            RichText::new(format!(
+                "Pixels assume {}×{} until {} is connected.",
+                screen_size.0, screen_size.1, v.parent.name
+            ))
+            .weak()
+            .small(),
+        );
+    }
+    let px = |v: f32, axis: usize| v * if axis == 0 { sw } else { sh };
+    let frac = |p: f32, axis: usize| p / if axis == 0 { sw } else { sh };
+    egui::Grid::new(("area", v.id.0))
+        .num_columns(3)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| match v.area.as_rect() {
+            Some([x, y, w, h]) => {
+                let mut r = [px(x, 0), px(y, 1), px(w, 0), px(h, 1)];
+                let mut changed = false;
+                for (row, label) in [(0, "Position"), (2, "Size")] {
+                    ui.label(label);
+                    for axis in 0..2 {
+                        let i = row + axis;
+                        let max = if row == 0 {
+                            [sw, sh][axis] - 1.0
+                        } else {
+                            [sw, sh][axis] - r[axis]
+                        };
+                        let prefix = ["X ", "Y ", "W ", "H "][i];
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut r[i])
+                                    .speed(1.0)
+                                    .range(if row == 0 { 0.0 } else { 1.0 }..=max)
+                                    .fixed_decimals(0)
+                                    .prefix(prefix)
+                                    .suffix(" px"),
+                            )
+                            .changed();
+                    }
+                    ui.end_row();
+                }
+                if changed {
+                    // Keep it on the display when the position grows.
+                    r[2] = r[2].min(sw - r[0]).max(1.0);
+                    r[3] = r[3].min(sh - r[1]).max(1.0);
+                    v.area =
+                        Corners::rect(frac(r[0], 0), frac(r[1], 1), frac(r[2], 0), frac(r[3], 1));
+                }
+            }
+            None => {
+                for (i, label) in Corners::LABELS.iter().enumerate() {
+                    ui.label(*label);
+                    for axis in 0..2 {
+                        let mut p = px(v.area.0[i][axis], axis);
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut p)
+                                    .speed(1.0)
+                                    .range(0.0..=[sw, sh][axis])
+                                    .fixed_decimals(0)
+                                    .prefix(if axis == 0 { "X " } else { "Y " })
+                                    .suffix(" px"),
+                            )
+                            .changed()
+                        {
+                            v.area.0[i][axis] = frac(p, axis);
+                        }
+                    }
+                    ui.end_row();
+                }
+            }
+        });
 }
 
 /// Corner-pin (keystone) controls for one output.
@@ -1672,6 +2014,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::StopInstance(i, fade) => engine.stop_instance(i, fade),
         Action::FadeOutInstance(i) => engine.fade_out_instance(show, i),
         Action::EditGeometry(id) => st.geometry_edit = id,
+        Action::EditArea(id) => st.area_edit = id,
+        Action::AddVirtual(parent) => {
+            st.area_edit = Some(show.add_virtual_display(parent));
+        }
+        Action::RemoveVirtual(id) => {
+            show.remove_virtual_display(id);
+            if st.area_edit == Some(id) {
+                st.area_edit = None;
+            }
+        }
         Action::FadeOutSelected => {
             if let Some(id) = st.selected {
                 engine.fade_out_cue(show, id);
@@ -1796,6 +2148,54 @@ mod tests {
             "{:?}",
             corners.0
         );
+    }
+
+    #[test]
+    fn dragging_inside_an_area_moves_it_and_keeps_it_on_the_display() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(100.0, 100.0), vec2(320.0, 180.0));
+        let mut area = Corners::rect(0.0, 0.0, 0.5, 1.0);
+        let mut t = 0.0;
+        let mut run = |area: &mut Corners, from: Pos2, to: Pos2| {
+            let mut step = |events: Vec<Event>, area: &mut Corners| {
+                t += 1.0 / 60.0;
+                let input = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| area_handles(ui, screen, VirtualId(7), area));
+                out.textures_delta.clear();
+            };
+            step(vec![Event::PointerMoved(from)], area);
+            step(vec![button(from, true)], area);
+            for i in 1..=8 {
+                step(
+                    vec![Event::PointerMoved(from + (to - from) * (i as f32 / 8.0))],
+                    area,
+                );
+            }
+            step(vec![button(to, false)], area);
+            step(vec![], area);
+        };
+        // Drag the middle of the left half 25% of the width to the right.
+        let mid = pos2(180.0, 190.0);
+        run(&mut area, mid, mid + vec2(80.0, 0.0));
+        let r = area.as_rect().expect("still a rectangle");
+        assert!((r[0] - 0.25).abs() < 0.01 && r[1] == 0.0, "{r:?}");
+        assert!(
+            (r[2] - 0.5).abs() < 1e-5 && (r[3] - 1.0).abs() < 1e-5,
+            "{r:?}"
+        );
+        // Dragging far past the right edge stops at the edge.
+        let mid = pos2(260.0, 190.0);
+        run(&mut area, mid, mid + vec2(400.0, 50.0));
+        let r = area.as_rect().expect("still a rectangle");
+        assert!((r[0] - 0.5).abs() < 1e-5 && r[1].abs() < 1e-5, "{r:?}");
+        // A corner can't leave the display either.
+        run(&mut area, pos2(420.0, 280.0), pos2(500.0, 330.0));
+        assert_eq!(area.0[2], [1.0, 1.0]);
     }
 
     #[test]

@@ -13,11 +13,17 @@ pub struct CueId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OutputId(pub u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VirtualId(pub u64);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Show {
     pub version: u32,
     pub name: String,
     pub outputs: Vec<OutputConfig>,
+    /// Areas of physical displays that outputs can be placed on like displays.
+    #[serde(default)]
+    pub virtual_displays: Vec<VirtualDisplay>,
     pub cues: Vec<Cue>,
     pub next_id: u64,
     /// Fade time used by the Panic / Stop All button.
@@ -35,6 +41,7 @@ impl Default for Show {
             version: 1,
             name: "Untitled Show".into(),
             outputs: Vec::new(),
+            virtual_displays: Vec::new(),
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
@@ -64,6 +71,22 @@ pub enum Placement {
     MainWindow,
     /// Fullscreen on this display; inside the main window while it isn't connected.
     Display(DisplayRef),
+    /// Filling this virtual display; inside the main window while its display
+    /// isn't connected.
+    Virtual(VirtualId),
+}
+
+/// Part of a physical display that outputs can be placed on as if it were a
+/// display of its own (e.g. one projector covering two set pieces, or one
+/// LED processor input feeding several screens).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VirtualDisplay {
+    pub id: VirtualId,
+    pub name: String,
+    /// The physical display it is part of.
+    pub parent: DisplayRef,
+    /// Its four corners on that display. Any convex shape; a rectangle by default.
+    pub area: Corners,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +135,42 @@ impl Default for Corners {
 
 impl Corners {
     pub const LABELS: [&'static str; 4] = ["Top left", "Top right", "Bottom right", "Bottom left"];
+
+    /// An axis-aligned rectangle: left, top, width, height.
+    pub fn rect(x: f32, y: f32, w: f32, h: f32) -> Corners {
+        Corners([[x, y], [x + w, y], [x + w, y + h], [x, y + h]])
+    }
+
+    /// Left, top, width and height if the corners form an axis-aligned rectangle.
+    pub fn as_rect(&self) -> Option<[f32; 4]> {
+        let [tl, tr, br, bl] = self.0;
+        let rect = tl[1] == tr[1]
+            && bl[1] == br[1]
+            && tl[0] == bl[0]
+            && tr[0] == br[0]
+            && tr[0] > tl[0]
+            && bl[1] > tl[1];
+        rect.then(|| [tl[0], tl[1], tr[0] - tl[0], bl[1] - tl[1]])
+    }
+
+    /// The smallest rectangle containing the corners: left, top, width, height.
+    pub fn bounds(&self) -> [f32; 4] {
+        let min = |v: [f32; 4]| v.into_iter().fold(f32::MAX, f32::min);
+        let max = |v: [f32; 4]| v.into_iter().fold(f32::MIN, f32::max);
+        let (xs, ys) = (self.0.map(|c| c[0]), self.0.map(|c| c[1]));
+        [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+    }
+
+    /// Size in pixels of the shape on a `screen`-sized display. For shapes that
+    /// aren't rectangles, opposite edge lengths are averaged.
+    pub fn size_on(&self, screen: (u32, u32)) -> (u32, u32) {
+        let (sw, sh) = (screen.0 as f32, screen.1 as f32);
+        let len = |a: [f32; 2], b: [f32; 2]| ((b[0] - a[0]) * sw).hypot((b[1] - a[1]) * sh);
+        let [tl, tr, br, bl] = self.0;
+        let w = (len(tl, tr) + len(bl, br)) / 2.0;
+        let h = (len(tl, bl) + len(tr, br)) / 2.0;
+        (w.round().max(1.0) as u32, h.round().max(1.0) as u32)
+    }
 
     pub fn is_identity(&self) -> bool {
         *self == Corners::default()
@@ -509,6 +568,44 @@ impl Show {
         format!("{}", max.floor() as i64 + 1)
     }
 
+    pub fn virtual_display(&self, id: VirtualId) -> Option<&VirtualDisplay> {
+        self.virtual_displays.iter().find(|v| v.id == id)
+    }
+
+    /// Add a virtual display on `parent`: the left half of it, then the right
+    /// half, then a centred area.
+    pub fn add_virtual_display(&mut self, parent: DisplayRef) -> VirtualId {
+        let id = VirtualId(self.alloc_id());
+        let siblings = self
+            .virtual_displays
+            .iter()
+            .filter(|v| v.parent == parent)
+            .count();
+        let area = match siblings {
+            0 => Corners::rect(0.0, 0.0, 0.5, 1.0),
+            1 => Corners::rect(0.5, 0.0, 0.5, 1.0),
+            _ => Corners::rect(0.25, 0.25, 0.5, 0.5),
+        };
+        let n = self.virtual_displays.len() + 1;
+        self.virtual_displays.push(VirtualDisplay {
+            id,
+            name: format!("Virtual {n}"),
+            parent,
+            area,
+        });
+        id
+    }
+
+    /// Remove a virtual display; outputs on it move to the main window.
+    pub fn remove_virtual_display(&mut self, id: VirtualId) {
+        self.virtual_displays.retain(|v| v.id != id);
+        for o in &mut self.outputs {
+            if o.placement == Placement::Virtual(id) {
+                o.placement = Placement::MainWindow;
+            }
+        }
+    }
+
     pub fn add_output(&mut self) -> OutputId {
         let id = OutputId(self.alloc_id());
         let n = self.outputs.len() + 1;
@@ -611,6 +708,7 @@ impl Show {
             .iter()
             .map(|c| c.id.0)
             .chain(show.outputs.iter().map(|o| o.id.0))
+            .chain(show.virtual_displays.iter().map(|v| v.id.0))
             .max()
             .unwrap_or(0);
         show.next_id = show.next_id.max(max_id + 1);
@@ -746,6 +844,53 @@ mod tests {
         assert_eq!(show.outputs[1].placement, Placement::Auto);
         let saved = serde_json::to_string(&show).unwrap();
         assert!(!saved.contains("fullscreen") && !saved.contains("\"display\""));
+    }
+
+    #[test]
+    fn virtual_displays_add_remove_and_load() {
+        let mut show = Show::default();
+        let parent = DisplayRef {
+            name: "Projector".into(),
+            index: 1,
+        };
+        let a = show.add_virtual_display(parent.clone());
+        let b = show.add_virtual_display(parent.clone());
+        assert_eq!(
+            show.virtual_display(a).unwrap().area.as_rect(),
+            Some([0.0, 0.0, 0.5, 1.0])
+        );
+        assert_eq!(
+            show.virtual_display(b).unwrap().area.as_rect(),
+            Some([0.5, 0.0, 0.5, 1.0])
+        );
+        let out = show.outputs[0].id;
+        show.outputs[0].placement = Placement::Virtual(a);
+        show.remove_virtual_display(a);
+        assert!(show.virtual_display(a).is_none());
+        assert_eq!(show.output(out).unwrap().placement, Placement::MainWindow);
+
+        // Round trip, and shows from before virtual displays still load.
+        let text = serde_json::to_string(&show).unwrap();
+        let back: Show = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.virtual_displays, show.virtual_displays);
+        let old: Show = serde_json::from_str(
+            r#"{"version":1,"name":"x","next_id":2,"cues":[],"outputs":[{"id":1,"name":"A","enabled":true}]}"#,
+        )
+        .unwrap();
+        assert!(old.virtual_displays.is_empty());
+    }
+
+    #[test]
+    fn corner_shapes_measure_and_square_up() {
+        let r = Corners::rect(0.25, 0.0, 0.5, 0.5);
+        assert_eq!(r.as_rect(), Some([0.25, 0.0, 0.5, 0.5]));
+        assert_eq!(r.size_on((1920, 1080)), (960, 540));
+        assert_eq!(Corners::default().size_on((1920, 1080)), (1920, 1080));
+        let quad = Corners([[0.1, 0.0], [0.9, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert_eq!(quad.as_rect(), None);
+        assert_eq!(quad.bounds(), [0.0, 0.0, 1.0, 1.0]);
+        // Top edge 0.8, bottom edge 1.0 of 1000 px: averaged.
+        assert_eq!(quad.size_on((1000, 1000)).0, 900);
     }
 
     #[test]
