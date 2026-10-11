@@ -14,7 +14,7 @@ pub struct CueId(pub u64);
 pub struct OutputId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct VirtualId(pub u64);
+pub struct SubDisplayId(pub u64);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Show {
@@ -22,8 +22,8 @@ pub struct Show {
     pub name: String,
     pub outputs: Vec<OutputConfig>,
     /// Areas of physical displays that outputs can be placed on like displays.
-    #[serde(default)]
-    pub virtual_displays: Vec<VirtualDisplay>,
+    #[serde(default, alias = "virtual_displays")]
+    pub sub_displays: Vec<SubDisplay>,
     pub cues: Vec<Cue>,
     pub next_id: u64,
     /// Fade time used by the Panic / Stop All button.
@@ -41,7 +41,7 @@ impl Default for Show {
             version: 1,
             name: "Untitled Show".into(),
             outputs: Vec::new(),
-            virtual_displays: Vec::new(),
+            sub_displays: Vec::new(),
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
@@ -71,17 +71,18 @@ pub enum Placement {
     MainWindow,
     /// Fullscreen on this display; inside the main window while it isn't connected.
     Display(DisplayRef),
-    /// Filling this virtual display; inside the main window while its display
+    /// Filling this sub display; inside the main window while its display
     /// isn't connected.
-    Virtual(VirtualId),
+    #[serde(alias = "Virtual")]
+    SubDisplay(SubDisplayId),
 }
 
 /// Part of a physical display that outputs can be placed on as if it were a
 /// display of its own (e.g. one projector covering two set pieces, or one
 /// LED processor input feeding several screens).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct VirtualDisplay {
-    pub id: VirtualId,
+pub struct SubDisplay {
+    pub id: SubDisplayId,
     pub name: String,
     /// The physical display it is part of.
     pub parent: DisplayRef,
@@ -568,16 +569,16 @@ impl Show {
         format!("{}", max.floor() as i64 + 1)
     }
 
-    pub fn virtual_display(&self, id: VirtualId) -> Option<&VirtualDisplay> {
-        self.virtual_displays.iter().find(|v| v.id == id)
+    pub fn sub_display(&self, id: SubDisplayId) -> Option<&SubDisplay> {
+        self.sub_displays.iter().find(|v| v.id == id)
     }
 
-    /// Add a virtual display on `parent`: the left half of it, then the right
+    /// Add a sub display on `parent`: the left half of it, then the right
     /// half, then a centred area.
-    pub fn add_virtual_display(&mut self, parent: DisplayRef) -> VirtualId {
-        let id = VirtualId(self.alloc_id());
+    pub fn add_sub_display(&mut self, parent: DisplayRef) -> SubDisplayId {
+        let id = SubDisplayId(self.alloc_id());
         let siblings = self
-            .virtual_displays
+            .sub_displays
             .iter()
             .filter(|v| v.parent == parent)
             .count();
@@ -586,21 +587,21 @@ impl Show {
             1 => Corners::rect(0.5, 0.0, 0.5, 1.0),
             _ => Corners::rect(0.25, 0.25, 0.5, 0.5),
         };
-        let n = self.virtual_displays.len() + 1;
-        self.virtual_displays.push(VirtualDisplay {
+        let n = self.sub_displays.len() + 1;
+        self.sub_displays.push(SubDisplay {
             id,
-            name: format!("Virtual {n}"),
+            name: format!("Sub display {n}"),
             parent,
             area,
         });
         id
     }
 
-    /// Remove a virtual display; outputs on it move to the main window.
-    pub fn remove_virtual_display(&mut self, id: VirtualId) {
-        self.virtual_displays.retain(|v| v.id != id);
+    /// Remove a sub display; outputs on it move to the main window.
+    pub fn remove_sub_display(&mut self, id: SubDisplayId) {
+        self.sub_displays.retain(|v| v.id != id);
         for o in &mut self.outputs {
-            if o.placement == Placement::Virtual(id) {
+            if o.placement == Placement::SubDisplay(id) {
                 o.placement = Placement::MainWindow;
             }
         }
@@ -708,7 +709,7 @@ impl Show {
             .iter()
             .map(|c| c.id.0)
             .chain(show.outputs.iter().map(|o| o.id.0))
-            .chain(show.virtual_displays.iter().map(|v| v.id.0))
+            .chain(show.sub_displays.iter().map(|v| v.id.0))
             .max()
             .unwrap_or(0);
         show.next_id = show.next_id.max(max_id + 1);
@@ -847,37 +848,50 @@ mod tests {
     }
 
     #[test]
-    fn virtual_displays_add_remove_and_load() {
+    fn sub_displays_add_remove_and_load() {
         let mut show = Show::default();
         let parent = DisplayRef {
             name: "Projector".into(),
             index: 1,
         };
-        let a = show.add_virtual_display(parent.clone());
-        let b = show.add_virtual_display(parent.clone());
+        let a = show.add_sub_display(parent.clone());
+        let b = show.add_sub_display(parent.clone());
         assert_eq!(
-            show.virtual_display(a).unwrap().area.as_rect(),
+            show.sub_display(a).unwrap().area.as_rect(),
             Some([0.0, 0.0, 0.5, 1.0])
         );
         assert_eq!(
-            show.virtual_display(b).unwrap().area.as_rect(),
+            show.sub_display(b).unwrap().area.as_rect(),
             Some([0.5, 0.0, 0.5, 1.0])
         );
         let out = show.outputs[0].id;
-        show.outputs[0].placement = Placement::Virtual(a);
-        show.remove_virtual_display(a);
-        assert!(show.virtual_display(a).is_none());
+        show.outputs[0].placement = Placement::SubDisplay(a);
+        show.remove_sub_display(a);
+        assert!(show.sub_display(a).is_none());
         assert_eq!(show.output(out).unwrap().placement, Placement::MainWindow);
 
-        // Round trip, and shows from before virtual displays still load.
+        // Round trip, and shows from before sub displays still load.
         let text = serde_json::to_string(&show).unwrap();
         let back: Show = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.virtual_displays, show.virtual_displays);
+        assert_eq!(back.sub_displays, show.sub_displays);
         let old: Show = serde_json::from_str(
             r#"{"version":1,"name":"x","next_id":2,"cues":[],"outputs":[{"id":1,"name":"A","enabled":true}]}"#,
         )
         .unwrap();
-        assert!(old.virtual_displays.is_empty());
+        assert!(old.sub_displays.is_empty());
+        // ...as do shows saved while they were called virtual displays.
+        let renamed: Show = serde_json::from_str(
+            r#"{"version":1,"name":"x","next_id":9,"cues":[],
+                "outputs":[{"id":1,"name":"A","enabled":true,"placement":{"Virtual":5}}],
+                "virtual_displays":[{"id":5,"name":"L","parent":{"name":"P","index":0},
+                    "area":[[0,0],[0.5,0],[0.5,1],[0,1]]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(renamed.sub_displays[0].id, SubDisplayId(5));
+        assert_eq!(
+            renamed.outputs[0].placement,
+            Placement::SubDisplay(SubDisplayId(5))
+        );
     }
 
     #[test]

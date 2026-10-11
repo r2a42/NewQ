@@ -49,17 +49,19 @@ includes FFmpeg, so there's nothing else to install.
   name, and by position if the name changes (never onto NewQ's own screen).
 - **Corner pin (keystone) per output:** click *Corner pin…* and drag the four
   corners on the output's preview (hold Shift for fine moves), or type exact
-  positions. The warp is perspective-correct, applies to everything on the
+  positions. Click a corner to select it, then the arrow keys move it one
+  pixel at a time (Shift + arrow: 5 pixels); this works on sub display
+  areas too, where clicking inside an area selects all of it. The warp is perspective-correct, applies to everything on the
   output, and shows on the preview too; turn on *Test pattern* to line it up
   on the real screen. *Reset* returns to the full screen.
-- **Virtual displays:** split a display into areas that each work like a
+- **Sub displays:** split a display into areas that each work like a
   display of their own, e.g. one projector covering two set pieces, or one LED
-  processor input feeding several screens. Add one under *Virtual displays*
-  (or *Outputs → Add virtual display on*), then choose *On virtual display …*
+  processor input feeding several screens. Add one under *Sub displays*
+  (or *Outputs → Add sub display on*), then choose *On sub display …*
   as an output's placement. Click *Edit area…* to see the whole display live
   with every area outlined: drag inside an area to move it, drag its corners
   to reshape it into any four-cornered shape, or type exact pixels. An
-  output's corner pin works inside its virtual display, and everything is
+  output's corner pin works inside its sub display, and everything is
   clipped to the area. Each display gets a single fullscreen window, however
   many outputs are on it.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
@@ -80,8 +82,10 @@ includes FFmpeg, so there's nothing else to install.
 | P                     | Pause / resume everything                       |
 | ↑ / ↓                 | Move selection and playhead                     |
 | Ctrl+↑ / Ctrl+↓       | Reorder the selected cue                        |
+| ← ↑ → ↓ / Shift+arrow | Move the selected corner 1 px / 5 px (while editing) |
 | Ctrl+D / Del          | Duplicate / delete cue                          |
 | Ctrl+N / Ctrl+O / Ctrl+S | New / open / save show                       |
+| Ctrl+Shift+S          | Save as                                         |
 
 Space and Esc also work while an output window has focus.
 

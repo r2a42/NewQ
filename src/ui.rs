@@ -6,8 +6,8 @@ use crate::media::ProbeState;
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
@@ -23,8 +23,8 @@ pub enum OutputRoute {
     MainWindow,
     /// Fullscreen on the named display.
     Display(String),
-    /// On a virtual display, part of the named display.
-    Virtual {
+    /// On a sub display, part of the named display.
+    SubDisplay {
         name: String,
         display: String,
     },
@@ -37,7 +37,7 @@ pub struct PreviewOutput {
     pub layers: Vec<OutputLayer>,
     /// The output's corner pin.
     pub warp: Homography,
-    /// Pixel size of the output's canvas (its display or virtual display).
+    /// Pixel size of the output's canvas (its display or sub display).
     pub canvas: (u32, u32),
 }
 
@@ -51,17 +51,59 @@ pub struct UiState {
     pub routes: HashMap<OutputId, OutputRoute>,
     /// Output whose corner pin is being edited on its preview.
     pub geometry_edit: Option<OutputId>,
-    /// Virtual display whose area is being edited.
-    pub area_edit: Option<VirtualId>,
+    /// Sub display whose area is being edited.
+    pub area_edit: Option<SubDisplayId>,
     /// What each fullscreen window shows, by monitor index: its size and outputs.
     pub screens: HashMap<usize, ((u32, u32), Vec<OutputGroup>)>,
-    /// The monitor each connected virtual display is on.
-    pub virtual_monitors: HashMap<VirtualId, usize>,
+    /// The monitor each connected sub display is on.
+    pub sub_monitors: HashMap<SubDisplayId, usize>,
+    /// The corner (or whole area) last clicked in an open editor, which the
+    /// arrow keys move. Set while drawing, hence the `Cell`.
+    handle_sel: Cell<Option<HandleSel>>,
     pub quit_requested: bool,
     pub dirty: bool,
     /// Serialized show at last save/load, for unsaved-change detection.
     saved_json: Option<String>,
     scroll_to_selected: bool,
+}
+
+impl UiState {
+    fn editing(&self, q: Quad) -> bool {
+        match q {
+            Quad::Pin(id) => self.geometry_edit == Some(id),
+            Quad::Area(id) => self.area_edit == Some(id),
+        }
+    }
+
+    /// The selected handle, if its editor is still open.
+    fn selected_handle(&self) -> Option<HandleSel> {
+        self.handle_sel.get().filter(|s| self.editing(s.quad))
+    }
+}
+
+/// A four-cornered shape with handles: an output's corner pin, or a sub
+/// display's area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Quad {
+    Pin(OutputId),
+    Area(SubDisplayId),
+}
+
+impl Quad {
+    /// How far its corners may go, as fractions of the screen.
+    fn range(self) -> RangeInclusive<f32> {
+        match self {
+            Quad::Pin(_) => -0.5..=1.5,
+            Quad::Area(_) => 0.0..=1.0,
+        }
+    }
+}
+
+/// A selected corner of a shape, or with `corner: None` all of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HandleSel {
+    quad: Quad,
+    corner: Option<usize>,
 }
 
 const GO_GREEN: Color32 = Color32::from_rgb(38, 160, 70);
@@ -92,9 +134,11 @@ enum Action {
     StopInstance(u64, f64),
     FadeOutInstance(u64),
     EditGeometry(Option<OutputId>),
-    EditArea(Option<VirtualId>),
-    AddVirtual(DisplayRef),
-    RemoveVirtual(VirtualId),
+    EditArea(Option<SubDisplayId>),
+    /// Move the selected handle by this many screen pixels.
+    Nudge(Vec2),
+    AddSubDisplay(DisplayRef),
+    RemoveSubDisplay(SubDisplayId),
     SetTransition(CueId, Transition),
     AddOutput,
     RemoveOutput(OutputId),
@@ -127,7 +171,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         st.saved_json = serde_json::to_string(show).ok();
     }
     let mut actions: Vec<Action> = Vec::new();
-    keyboard(ui.ctx(), &mut actions);
+    keyboard(ui.ctx(), st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
         i.raw
@@ -159,7 +203,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
-                    virtual_displays_panel(ui, show, st, &mut actions);
+                    sub_displays_panel(ui, show, st, &mut actions);
                 });
         });
     egui::Panel::bottom("inspector")
@@ -186,17 +230,19 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     st.dirty = json != st.saved_json;
 }
 
-fn keyboard(ctx: &egui::Context, actions: &mut Vec<Action>) {
+fn keyboard(ctx: &egui::Context, st: &UiState, actions: &mut Vec<Action>) {
     let typing = ctx.egui_wants_keyboard_input();
+    let nudging = st.selected_handle().is_some();
     ctx.input_mut(|i| {
         if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
             actions.push(Action::Panic);
         }
-        if i.consume_key(egui::Modifiers::COMMAND, Key::S) {
-            actions.push(Action::Save);
-        }
+        // Before Ctrl+S, which also matches with Shift held.
         if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::S) {
             actions.push(Action::SaveAs);
+        }
+        if i.consume_key(egui::Modifiers::COMMAND, Key::S) {
+            actions.push(Action::Save);
         }
         if i.consume_key(egui::Modifiers::COMMAND, Key::O) {
             actions.push(Action::Open);
@@ -206,6 +252,36 @@ fn keyboard(ctx: &egui::Context, actions: &mut Vec<Action>) {
         }
         if typing {
             return;
+        }
+        if nudging {
+            // The arrow keys move the selected corner: 1 px, or 5 px with Shift.
+            let mut d = Vec2::ZERO;
+            i.events.retain(|e| {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = e
+                else {
+                    return true;
+                };
+                if modifiers.command || modifiers.alt {
+                    return true;
+                }
+                let n = if modifiers.shift { 5.0 } else { 1.0 };
+                d += match key {
+                    Key::ArrowLeft => Vec2::new(-n, 0.0),
+                    Key::ArrowRight => Vec2::new(n, 0.0),
+                    Key::ArrowUp => Vec2::new(0.0, -n),
+                    Key::ArrowDown => Vec2::new(0.0, n),
+                    _ => return true,
+                };
+                false
+            });
+            if d != Vec2::ZERO {
+                actions.push(Action::Nudge(d));
+            }
         }
         if i.consume_key(egui::Modifiers::NONE, Key::Space) {
             actions.push(Action::Go);
@@ -316,8 +392,8 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             if ui.button("Add output").clicked() {
                 actions.push(Action::AddOutput);
             }
-            ui.menu_button("Add virtual display on", |ui| {
-                add_virtual_menu(ui, st, actions);
+            ui.menu_button("Add sub display on", |ui| {
+                add_sub_display_menu(ui, st, actions);
             });
         });
         ui.menu_button("Help", |ui| {
@@ -810,7 +886,9 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
     for e in &st.previews {
         let where_ = match st.routes.get(&e.id) {
             Some(OutputRoute::Display(name)) => format!("also fullscreen on {name}"),
-            Some(OutputRoute::Virtual { name, display }) => format!("also on {name} ({display})"),
+            Some(OutputRoute::SubDisplay { name, display }) => {
+                format!("also on {name} ({display})")
+            }
             _ => "main window only".to_string(),
         };
         ui.horizontal(|ui| {
@@ -821,7 +899,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
         // Leave room around the screen to drag corners past its edges.
         let margin = if editing { 14.0 } else { 0.0 };
         let full_w = ui.available_width() - 2.0 * margin;
-        // Tall (virtual) displays are previewed narrower, not taller.
+        // Tall sub displays are previewed narrower, not taller.
         let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
         let h = (full_w / aspect).min(full_w * if editing { 1.2 } else { 0.75 });
         let w = h * aspect;
@@ -846,33 +924,45 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
             },
         ));
         if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == e.id) {
-            corner_handles(ui, rect, e.id, &mut cfg.corners);
+            corner_handles(ui, rect, e.id, &mut cfg.corners, &st.handle_sel);
         }
         ui.add_space(8.0);
     }
 }
 
 /// Draggable corner-pin handles over an output preview. Hold Shift for fine moves.
-fn corner_handles(ui: &mut Ui, screen: egui::Rect, id: OutputId, corners: &mut Corners) {
-    quad_handles(ui, screen, ("corner", id.0), corners, -0.5..=1.5, false);
+fn corner_handles(
+    ui: &mut Ui,
+    screen: egui::Rect,
+    id: OutputId,
+    corners: &mut Corners,
+    sel: &Cell<Option<HandleSel>>,
+) {
+    quad_handles(ui, screen, Quad::Pin(id), corners, sel);
 }
 
-/// Draggable handles for a virtual display's area over a picture of its
+/// Draggable handles for a sub display's area over a picture of its
 /// display: corners reshape it, dragging inside moves it.
-fn area_handles(ui: &mut Ui, screen: egui::Rect, id: VirtualId, area: &mut Corners) {
-    quad_handles(ui, screen, ("area", id.0), area, 0.0..=1.0, true);
+fn area_handles(
+    ui: &mut Ui,
+    screen: egui::Rect,
+    id: SubDisplayId,
+    area: &mut Corners,
+    sel: &Cell<Option<HandleSel>>,
+) {
+    quad_handles(ui, screen, Quad::Area(id), area, sel);
 }
 
 /// Draggable handles on the four corners of a shape drawn over `screen`,
-/// clamped to `range` (fractions of the screen). With `movable`, dragging
-/// inside the shape moves all of it. Hold Shift for fine moves.
+/// kept within its range. An area can also be dragged from inside. Hold Shift
+/// for fine moves. Clicking a handle selects it for the arrow keys; clicking
+/// anywhere else deselects it.
 fn quad_handles(
     ui: &mut Ui,
     screen: egui::Rect,
-    salt: impl Hash + Copy + std::fmt::Debug,
+    quad: Quad,
     corners: &mut Corners,
-    range: RangeInclusive<f32>,
-    movable: bool,
+    sel: &Cell<Option<HandleSel>>,
 ) {
     let to_screen =
         |c: [f32; 2]| screen.min + Vec2::new(c[0] * screen.width(), c[1] * screen.height());
@@ -885,19 +975,27 @@ fn quad_handles(
     );
     let fine = ui.input(|i| i.modifiers.shift);
     let scale = if fine { 0.1 } else { 1.0 };
+    let range = quad.range();
     let (lo, hi) = (*range.start(), *range.end());
+    let mut pressed_on = None;
     // Registered before the corners, so the corner handles stay on top.
-    if movable {
+    if let Quad::Area(_) = quad {
         let [x, y, w, h] = corners.bounds();
         let body = egui::Rect::from_min_size(
             to_screen([x, y]),
             Vec2::new(w * screen.width(), h * screen.height()),
         );
         let resp = ui
-            .interact(body, ui.id().with((salt, "body")), Sense::drag())
-            .on_hover_cursor(egui::CursorIcon::Move);
+            .interact(body, ui.id().with((quad, "body")), Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::Move)
+            .on_hover_text(
+                "Drag to move the area (Shift = fine). Click, then the arrow keys move it                  1 px (Shift = 5 px).",
+            );
+        if resp.is_pointer_button_down_on() {
+            pressed_on = Some(None);
+        }
         if resp.dragged() {
-            let d = resp.drag_delta() * scale;
+            let d = drag_moved(ui, &resp) * scale;
             let dx = (d.x / screen.width()).clamp(lo - x, hi - (x + w));
             let dy = (d.y / screen.height()).clamp(lo - y, hi - (y + h));
             for c in &mut corners.0 {
@@ -906,44 +1004,120 @@ fn quad_handles(
             }
         }
     }
+    let mut hits = [None; 4];
+    for (i, hit) in hits.iter_mut().enumerate() {
+        let pos = to_screen(corners.0[i]);
+        let rect = egui::Rect::from_center_size(pos, Vec2::splat(22.0));
+        let resp = ui
+            .interact(rect, ui.id().with((quad, i)), Sense::click_and_drag())
+            .on_hover_text(format!(
+                "{}: drag to move (Shift = fine). Click, then the arrow keys move it 1 px                  (Shift = 5 px).",
+                Corners::LABELS[i]
+            ));
+        if resp.is_pointer_button_down_on() {
+            pressed_on = Some(Some(i));
+        }
+        if resp.dragged() {
+            let d = drag_moved(ui, &resp) * scale;
+            let c = &mut corners.0[i];
+            c[0] = (c[0] + d.x / screen.width()).clamp(lo, hi);
+            c[1] = (c[1] + d.y / screen.height()).clamp(lo, hi);
+        }
+        *hit = Some(resp.hovered() || resp.dragged());
+    }
+    // Select what was pressed on; a press anywhere else deselects.
+    if let Some(corner) = pressed_on {
+        sel.set(Some(HandleSel { quad, corner }));
+    } else if ui.input(|i| i.pointer.primary_pressed()) && sel.get().is_some_and(|s| s.quad == quad)
+    {
+        sel.set(None);
+    }
+    let selected = sel.get().filter(|s| s.quad == quad).map(|s| s.corner);
+
     let quad_color = if corners.is_convex() {
         PLAYHEAD
     } else {
         STOP_RED
     };
+    let width = if selected == Some(None) { 3.0 } else { 1.5 };
     for i in 0..4 {
         painter.line_segment(
             [to_screen(corners.0[i]), to_screen(corners.0[(i + 1) % 4])],
-            Stroke::new(1.5, quad_color),
+            Stroke::new(width, quad_color),
         );
     }
-    for i in 0..4 {
+    for (i, hit) in hits.iter().enumerate() {
         let pos = to_screen(corners.0[i]);
-        let hit = egui::Rect::from_center_size(pos, Vec2::splat(22.0));
-        let resp = ui
-            .interact(hit, ui.id().with((salt, i)), Sense::drag())
-            .on_hover_text(format!(
-                "{}: drag to move (Shift = fine)",
-                Corners::LABELS[i]
-            ));
-        if resp.dragged() {
-            let d = resp.drag_delta() * scale;
-            let c = &mut corners.0[i];
-            c[0] = (c[0] + d.x / screen.width()).clamp(lo, hi);
-            c[1] = (c[1] + d.y / screen.height()).clamp(lo, hi);
+        let active = hit.unwrap_or(false);
+        if selected == Some(Some(i)) {
+            painter.circle(pos, 9.0, PLAYHEAD, Stroke::new(2.0, Color32::WHITE));
+        } else {
+            painter.circle(
+                pos,
+                if active { 8.0 } else { 6.0 },
+                if active {
+                    PLAYHEAD
+                } else {
+                    Color32::from_black_alpha(160)
+                },
+                Stroke::new(2.0, PLAYHEAD),
+            );
         }
-        let active = resp.hovered() || resp.dragged();
-        painter.circle(
-            pos,
-            if active { 8.0 } else { 6.0 },
-            if active {
-                PLAYHEAD
-            } else {
-                Color32::from_black_alpha(160)
-            },
-            Stroke::new(2.0, PLAYHEAD),
-        );
     }
+}
+
+/// How far a handle was dragged this frame. That includes the movement
+/// before egui counted it as a drag, so the handle keeps up with the pointer.
+fn drag_moved(ui: &Ui, resp: &egui::Response) -> Vec2 {
+    if !resp.drag_started() {
+        return resp.drag_delta();
+    }
+    ui.input(
+        |i| match (i.pointer.press_origin(), i.pointer.interact_pos()) {
+            (Some(from), Some(to)) => to - from,
+            _ => resp.drag_delta(),
+        },
+    )
+}
+
+/// Move one corner (or with `None`, the whole shape) by `d` pixels of a
+/// `size`-pixel screen, stepping from the nearest whole pixel, within `range`.
+fn nudge(
+    corners: &mut Corners,
+    corner: Option<usize>,
+    d: Vec2,
+    size: (u32, u32),
+    range: RangeInclusive<f32>,
+) {
+    let size = [size.0.max(1) as f32, size.1.max(1) as f32];
+    let (lo, hi) = (*range.start(), *range.end());
+    let d = [d.x, d.y];
+    let step = |v: f32, axis: usize| ((v * size[axis]).round() + d[axis]) / size[axis];
+    for axis in (0..2).filter(|&a| d[a] != 0.0) {
+        match corner {
+            Some(i) => {
+                let c = &mut corners.0[i][axis];
+                *c = step(*c, axis).clamp(lo, hi);
+            }
+            None => {
+                let b = corners.bounds();
+                let (min, len) = (b[axis], b[axis + 2]);
+                let delta = (step(min, axis) - min).clamp(lo - min, hi - (min + len));
+                for c in &mut corners.0 {
+                    c[axis] += delta;
+                }
+            }
+        }
+    }
+}
+
+/// Pixel size of a sub display's display, assuming 1920×1080 while it isn't
+/// connected.
+fn sub_display_size(st: &UiState, id: SubDisplayId) -> (u32, u32) {
+    st.sub_monitors
+        .get(&id)
+        .and_then(|m| st.monitors.get(*m))
+        .map_or((1920, 1080), |m| m.size)
 }
 
 fn monitor_label(st: &UiState, i: usize) -> String {
@@ -973,7 +1147,7 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
     const AUTO_HELP: &str = "Fullscreen on a display other than the one NewQ is on; inside the main window \
          when there isn't one. Switches automatically when displays are plugged in or out.";
     let n_outputs = show.outputs.len();
-    let show_virtuals = &show.virtual_displays;
+    let show_subs = &show.sub_displays;
     for (oi, out) in show.outputs.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -995,9 +1169,9 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                 Placement::Auto => "Automatic".to_string(),
                 Placement::MainWindow => "Main window".to_string(),
                 Placement::Display(d) => format!("Fullscreen on {}", d.name),
-                Placement::Virtual(v) => match show_virtuals.iter().find(|x| x.id == *v) {
-                    Some(x) => format!("On virtual display {}", x.name),
-                    None => "Removed virtual display".to_string(),
+                Placement::SubDisplay(v) => match show_subs.iter().find(|x| x.id == *v) {
+                    Some(x) => format!("On sub display {}", x.name),
+                    None => "Removed sub display".to_string(),
                 },
             };
             egui::ComboBox::from_id_salt(("placement", out.id.0))
@@ -1019,28 +1193,29 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                             format!("Fullscreen on {}", monitor_label(st, i)),
                         );
                     }
-                    for v in show_virtuals.iter() {
+                    for v in show_subs.iter() {
                         ui.selectable_value(
                             &mut out.placement,
-                            Placement::Virtual(v.id),
-                            format!("On virtual display {} (on {})", v.name, v.parent.name),
+                            Placement::SubDisplay(v.id),
+                            format!("On sub display {} (on {})", v.name, v.parent.name),
                         );
                     }
                 });
             let status = match (st.routes.get(&out.id), &out.placement) {
                 (None, _) => "Off".to_string(),
                 (Some(OutputRoute::Display(name)), _) => format!("Fullscreen on {name}"),
-                (Some(OutputRoute::Virtual { name, display }), _) => {
+                (Some(OutputRoute::SubDisplay { name, display }), _) => {
                     format!("On {name}, part of {display}")
                 }
-                (Some(OutputRoute::MainWindow), Placement::Virtual(v)) => {
-                    match show_virtuals.iter().find(|x| x.id == *v) {
+                (Some(OutputRoute::MainWindow), Placement::SubDisplay(v)) => {
+                    match show_subs.iter().find(|x| x.id == *v) {
                         Some(x) => format!(
                             "{} isn't connected: showing in the main window",
                             x.parent.name
                         ),
-                        None => "Its virtual display was removed: showing in the main window"
-                            .to_string(),
+                        None => {
+                            "Its sub display was removed: showing in the main window".to_string()
+                        }
                     }
                 }
                 (Some(OutputRoute::MainWindow), Placement::Display(d)) => {
@@ -1064,13 +1239,13 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
     }
 }
 
-fn add_virtual_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+fn add_sub_display_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     if st.monitors.is_empty() {
         ui.label(RichText::new("No displays found").weak());
     }
     for i in 0..st.monitors.len() {
         if ui.button(monitor_label(st, i)).clicked() {
-            actions.push(Action::AddVirtual(DisplayRef {
+            actions.push(Action::AddSubDisplay(DisplayRef {
                 name: st.monitors[i].name.clone(),
                 index: i,
             }));
@@ -1079,16 +1254,16 @@ fn add_virtual_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     }
 }
 
-fn virtual_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
+fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        ui.heading("Virtual displays");
+        ui.heading("Sub displays");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.menu_button("+ Add", |ui| add_virtual_menu(ui, st, actions))
+            ui.menu_button("+ Add", |ui| add_sub_display_menu(ui, st, actions))
                 .response
                 .on_hover_text("Add an area of a display that outputs can be placed on");
         });
     });
-    if show.virtual_displays.is_empty() {
+    if show.sub_displays.is_empty() {
         ui.label(
             RichText::new(
                 "Split a display into areas that each work like a display of their own: \
@@ -1100,17 +1275,14 @@ fn virtual_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &
         return;
     }
     // Everyone's areas, to draw the neighbours of the one being edited.
-    let all: Vec<VirtualDisplay> = show.virtual_displays.clone();
-    for v in show.virtual_displays.iter_mut() {
-        let monitor = st.virtual_monitors.get(&v.id).copied();
-        let screen_size = monitor
-            .and_then(|m| st.monitors.get(m))
-            .map(|m| m.size)
-            .unwrap_or((1920, 1080));
+    let all: Vec<SubDisplay> = show.sub_displays.clone();
+    for v in show.sub_displays.iter_mut() {
+        let monitor = st.sub_monitors.get(&v.id).copied();
+        let screen_size = sub_display_size(st, v.id);
         let users: Vec<&str> = show
             .outputs
             .iter()
-            .filter(|o| o.placement == Placement::Virtual(v.id))
+            .filter(|o| o.placement == Placement::SubDisplay(v.id))
             .map(|o| o.name.as_str())
             .collect();
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -1120,10 +1292,10 @@ fn virtual_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .small_button("🗑")
-                        .on_hover_text("Remove virtual display")
+                        .on_hover_text("Remove sub display")
                         .clicked()
                     {
-                        actions.push(Action::RemoveVirtual(v.id));
+                        actions.push(Action::RemoveSubDisplay(v.id));
                     }
                 });
             });
@@ -1182,13 +1354,13 @@ fn virtual_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &
     }
 }
 
-/// A picture of a virtual display's whole display, showing what is on it now,
-/// with every virtual display on it outlined and handles on the one being edited,
+/// A picture of a sub display's whole display, showing what is on it now,
+/// with every sub display on it outlined and handles on the one being edited,
 /// plus exact pixel fields.
 fn area_editor(
     ui: &mut Ui,
-    v: &mut VirtualDisplay,
-    all: &[VirtualDisplay],
+    v: &mut SubDisplay,
+    all: &[SubDisplay],
     monitor: Option<usize>,
     screen_size: (u32, u32),
     st: &UiState,
@@ -1232,7 +1404,7 @@ fn area_editor(
             .rect_filled(at.expand(3.0), 3.0, Color32::from_black_alpha(180));
         ui.painter().galley(at.min, label, Color32::from_gray(200));
     }
-    area_handles(ui, rect, v.id, &mut v.area);
+    area_handles(ui, rect, v.id, &mut v.area, &st.handle_sel);
     if !v.area.is_convex() {
         ui.label(
             RichText::new("⚠ Corners cross or fold in; the picture will look wrong.")
@@ -2016,13 +2188,47 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::StopInstance(i, fade) => engine.stop_instance(i, fade),
         Action::FadeOutInstance(i) => engine.fade_out_instance(show, i),
-        Action::EditGeometry(id) => st.geometry_edit = id,
-        Action::EditArea(id) => st.area_edit = id,
-        Action::AddVirtual(parent) => {
-            st.area_edit = Some(show.add_virtual_display(parent));
+        Action::EditGeometry(id) => {
+            st.geometry_edit = id;
+            st.handle_sel.set(None);
         }
-        Action::RemoveVirtual(id) => {
-            show.remove_virtual_display(id);
+        Action::EditArea(id) => {
+            st.area_edit = id;
+            st.handle_sel.set(None);
+        }
+        Action::Nudge(d) => {
+            if let Some(sel) = st.selected_handle() {
+                let target = match sel.quad {
+                    Quad::Pin(id) => {
+                        let size = st
+                            .previews
+                            .iter()
+                            .find(|p| p.id == id)
+                            .map_or((1920, 1080), |p| p.canvas);
+                        show.outputs
+                            .iter_mut()
+                            .find(|o| o.id == id)
+                            .map(|o| (&mut o.corners, size))
+                    }
+                    Quad::Area(id) => {
+                        let size = sub_display_size(st, id);
+                        show.sub_displays
+                            .iter_mut()
+                            .find(|v| v.id == id)
+                            .map(|v| (&mut v.area, size))
+                    }
+                };
+                if let Some((corners, size)) = target {
+                    nudge(corners, sel.corner, d, size, sel.quad.range());
+                }
+            }
+        }
+        Action::AddSubDisplay(parent) => {
+            st.area_edit = Some(show.add_sub_display(parent));
+            st.handle_sel.set(None);
+        }
+        Action::RemoveSubDisplay(id) => {
+            show.remove_sub_display(id);
             if st.area_edit == Some(id) {
                 st.area_edit = None;
             }
@@ -2073,7 +2279,10 @@ mod tests {
             events,
             ..Default::default()
         };
-        let mut out = ctx.run_ui(input, |ui| corner_handles(ui, screen, OutputId(1), corners));
+        let sel = Cell::new(None);
+        let mut out = ctx.run_ui(input, |ui| {
+            corner_handles(ui, screen, OutputId(1), corners, &sel)
+        });
         out.textures_delta.clear();
     }
 
@@ -2168,7 +2377,10 @@ mod tests {
                     events,
                     ..Default::default()
                 };
-                let mut out = ctx.run_ui(input, |ui| area_handles(ui, screen, VirtualId(7), area));
+                let sel = Cell::new(None);
+                let mut out = ctx.run_ui(input, |ui| {
+                    area_handles(ui, screen, SubDisplayId(7), area, &sel)
+                });
                 out.textures_delta.clear();
             };
             step(vec![Event::PointerMoved(from)], area);
@@ -2216,5 +2428,147 @@ mod tests {
             screen.center() + vec2(50.0, 50.0),
         );
         assert!(corners.is_identity());
+    }
+
+    #[test]
+    fn nudging_moves_by_whole_pixels_and_stays_in_range() {
+        let size = (1000, 500);
+        // A corner: 1 px right from the nearest whole pixel, then 5 px up.
+        let mut c = Corners::default();
+        c.0[0] = [0.1003, 0.2];
+        nudge(&mut c, Some(0), vec2(1.0, 0.0), size, -0.5..=1.5);
+        assert_eq!(c.0[0], [0.101, 0.2]);
+        nudge(&mut c, Some(0), vec2(0.0, -5.0), size, -0.5..=1.5);
+        assert_eq!(c.0[0], [0.101, 0.19]);
+        assert_eq!(c.0[1..], Corners::default().0[1..]);
+        // A corner stops at the edge of its range.
+        nudge(&mut c, Some(2), vec2(5.0, 5.0), size, 0.0..=1.0);
+        assert_eq!(c.0[2], [1.0, 1.0]);
+        // A whole area moves together and stops at the display's edge.
+        let mut a = Corners::rect(0.5, 0.0, 0.5, 1.0);
+        nudge(&mut a, None, vec2(-5.0, 0.0), size, 0.0..=1.0);
+        let r = a.as_rect().expect("still a rectangle");
+        assert!(
+            (r[0] - 0.495).abs() < 1e-6 && (r[2] - 0.5).abs() < 1e-6,
+            "{r:?}"
+        );
+        nudge(&mut a, None, vec2(0.0, 1.0), size, 0.0..=1.0);
+        assert_eq!(a.bounds()[1], 0.0, "already at the bottom");
+    }
+
+    /// Run `keyboard` for one frame of key presses.
+    fn keys(st: &UiState, keys: &[(Key, egui::Modifiers)]) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let events = keys
+            .iter()
+            .map(|&(key, modifiers)| Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            })
+            .collect();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), st, &mut actions));
+        out.textures_delta.clear();
+        actions
+    }
+
+    #[test]
+    fn arrow_keys_move_a_selected_corner_instead_of_the_cue_selection() {
+        use egui::Modifiers as M;
+        let mut st = UiState {
+            geometry_edit: Some(OutputId(1)),
+            ..Default::default()
+        };
+        let presses = [
+            (Key::ArrowRight, M::NONE),
+            (Key::ArrowDown, M::SHIFT),
+            (Key::ArrowUp, M::COMMAND),
+        ];
+        // Nothing selected: Up/Down pick cues, Ctrl+Up moves the cue.
+        let a = keys(&st, &presses);
+        assert!(matches!(
+            a[..],
+            [Action::Move(-1), Action::SelectRelative(1)]
+        ));
+
+        st.handle_sel.set(Some(HandleSel {
+            quad: Quad::Pin(OutputId(1)),
+            corner: Some(0),
+        }));
+        let a = keys(&st, &presses);
+        assert!(
+            matches!(a[..], [Action::Nudge(d), Action::Move(-1)] if d == vec2(1.0, 5.0)),
+            "{} actions",
+            a.len()
+        );
+
+        // Once its editor is closed, the arrows pick cues again.
+        st.geometry_edit = None;
+        let a = keys(&st, &[(Key::ArrowDown, M::NONE)]);
+        assert!(matches!(a[..], [Action::SelectRelative(1)]));
+    }
+
+    #[test]
+    fn clicking_a_handle_selects_it_and_clicking_elsewhere_deselects() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(100.0, 100.0), vec2(320.0, 180.0));
+        let mut area = Corners::rect(0.0, 0.0, 0.5, 1.0);
+        let sel = Cell::new(None);
+        let mut t = 0.0;
+        let mut click = |at: Pos2| {
+            for events in [
+                vec![Event::PointerMoved(at)],
+                vec![button(at, true)],
+                vec![button(at, false)],
+                vec![],
+            ] {
+                t += 1.0 / 60.0;
+                let input = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    area_handles(ui, screen, SubDisplayId(7), &mut area, &sel)
+                });
+                out.textures_delta.clear();
+            }
+        };
+        let q = Quad::Area(SubDisplayId(7));
+        // The top-right corner of the left half.
+        click(pos2(260.0, 100.0));
+        assert_eq!(
+            sel.get(),
+            Some(HandleSel {
+                quad: q,
+                corner: Some(1)
+            })
+        );
+        // Inside the area: all of it.
+        click(pos2(180.0, 190.0));
+        assert_eq!(
+            sel.get(),
+            Some(HandleSel {
+                quad: q,
+                corner: None
+            })
+        );
+        // Outside it.
+        click(pos2(380.0, 190.0));
+        assert_eq!(sel.get(), None);
+        assert_eq!(
+            area.as_rect(),
+            Some([0.0, 0.0, 0.5, 1.0]),
+            "clicks move nothing"
+        );
     }
 }

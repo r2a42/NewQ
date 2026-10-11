@@ -7,9 +7,7 @@
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
-use crate::show::{
-    Corners, DisplayRef, Fit, OutputConfig, OutputId, Placement, Show, VirtualDisplay,
-};
+use crate::show::{Corners, DisplayRef, Fit, OutputConfig, OutputId, Placement, Show, SubDisplay};
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -41,7 +39,7 @@ struct ControlWindow {
 }
 
 /// Where an output is drawn: an area of a physical display (the whole of it
-/// unless the output is on a virtual display).
+/// unless the output is on a sub display).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Target {
     monitor: usize,
@@ -49,7 +47,7 @@ struct Target {
 }
 
 /// A fullscreen window on one physical display. It draws every output routed
-/// to that display: one filling it, or several on virtual displays.
+/// to that display: one filling it, or several on sub displays.
 struct ScreenWindow {
     window: Arc<Window>,
     thread: Option<OutputThread>,
@@ -168,7 +166,7 @@ impl App {
         let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
         route_outputs(
             &self.show.outputs,
-            &self.show.virtual_displays,
+            &self.show.sub_displays,
             &names,
             self.control_monitor(),
         )
@@ -231,7 +229,7 @@ impl App {
     fn reconcile_outputs(&mut self, event_loop: &ActiveEventLoop) {
         let routes = self.route_outputs();
         // Outputs per display, bottom first: those filling the display, then
-        // virtual displays in list order.
+        // sub displays in list order.
         let mut per_screen = BTreeMap::<usize, Vec<_>>::new();
         self.targets.clear();
         for (oi, o) in self.show.outputs.iter().enumerate() {
@@ -239,10 +237,10 @@ impl App {
                 continue;
             };
             let order = match o.placement {
-                Placement::Virtual(v) => {
+                Placement::SubDisplay(v) => {
                     1 + self
                         .show
-                        .virtual_displays
+                        .sub_displays
                         .iter()
                         .position(|x| x.id == v)
                         .unwrap_or(0)
@@ -302,10 +300,10 @@ impl App {
                         .map(|x| x.name.clone())
                         .unwrap_or_default();
                     match cfg.placement {
-                        Placement::Virtual(v) => OutputRoute::Virtual {
+                        Placement::SubDisplay(v) => OutputRoute::SubDisplay {
                             name: self
                                 .show
-                                .virtual_display(v)
+                                .sub_display(v)
                                 .map(|x| x.name.clone())
                                 .unwrap_or_default(),
                             display,
@@ -318,9 +316,9 @@ impl App {
         }
         let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
         let control = self.control_monitor();
-        self.ui.virtual_monitors = self
+        self.ui.sub_monitors = self
             .show
-            .virtual_displays
+            .sub_displays
             .iter()
             .filter_map(|v| Some((v.id, resolve_display(&v.parent, &names, control)?)))
             .collect();
@@ -403,7 +401,7 @@ impl App {
             }
 
             // The test pattern is drawn at the canvas's shape, so its circles
-            // and grid stay true on a virtual display of any size.
+            // and grid stay true on a sub display of any size.
             let mut pattern_changed = false;
             if want_pattern {
                 let scale = (1280.0 / canvas.0.max(canvas.1) as f32).min(1.0);
@@ -718,11 +716,11 @@ fn resolve_display(d: &DisplayRef, monitors: &[&str], control: Option<usize>) ->
 }
 
 /// Decide where each enabled output is drawn (`None` = only in the main
-/// window): explicit displays and virtual displays first, then automatic
+/// window): explicit displays and sub displays first, then automatic
 /// outputs take displays other than the main window's that nothing else is on.
 fn route_outputs(
     outputs: &[OutputConfig],
-    virtuals: &[VirtualDisplay],
+    subs: &[SubDisplay],
     monitors: &[&str],
     control: Option<usize>,
 ) -> HashMap<OutputId, Option<Target>> {
@@ -735,7 +733,7 @@ fn route_outputs(
                 monitor,
                 area: Corners::default(),
             }),
-            Placement::Virtual(v) => virtuals.iter().find(|x| x.id == *v).and_then(|v| {
+            Placement::SubDisplay(v) => subs.iter().find(|x| x.id == *v).and_then(|v| {
                 Some(Target {
                     monitor: resolve_display(&v.parent, monitors, control)?,
                     area: v.area,
@@ -748,7 +746,7 @@ fn route_outputs(
     }
     for o in &enabled {
         match &o.placement {
-            Placement::Display(_) | Placement::Virtual(_) => {}
+            Placement::Display(_) | Placement::SubDisplay(_) => {}
             Placement::MainWindow => {
                 routes.insert(o.id, None);
             }
@@ -771,7 +769,7 @@ fn route_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::show::VirtualId;
+    use crate::show::SubDisplayId;
 
     fn output(id: u64, placement: Placement) -> OutputConfig {
         let mut o = OutputConfig::new(OutputId(id), format!("Output {id}"));
@@ -861,31 +859,31 @@ mod tests {
     }
 
     #[test]
-    fn virtual_displays_share_a_display_and_keep_auto_off_it() {
+    fn sub_displays_share_a_display_and_keep_auto_off_it() {
         let parent = DisplayRef {
             name: "Projector".into(),
             index: 1,
         };
-        let left = VirtualDisplay {
-            id: VirtualId(10),
+        let left = SubDisplay {
+            id: SubDisplayId(10),
             name: "Left".into(),
             parent: parent.clone(),
             area: Corners::rect(0.0, 0.0, 0.5, 1.0),
         };
-        let right = VirtualDisplay {
-            id: VirtualId(11),
+        let right = SubDisplay {
+            id: SubDisplayId(11),
             area: Corners::rect(0.5, 0.0, 0.5, 1.0),
             name: "Right".into(),
             ..left.clone()
         };
         let outs = [
-            output(1, Placement::Virtual(VirtualId(10))),
-            output(2, Placement::Virtual(VirtualId(11))),
+            output(1, Placement::SubDisplay(SubDisplayId(10))),
+            output(2, Placement::SubDisplay(SubDisplayId(11))),
             output(3, Placement::Auto),
-            output(4, Placement::Virtual(VirtualId(99))),
+            output(4, Placement::SubDisplay(SubDisplayId(99))),
         ];
-        let virtuals = [left.clone(), right.clone()];
-        let r = route_outputs(&outs, &virtuals, &["Laptop", "Projector"], Some(0));
+        let subs = [left.clone(), right.clone()];
+        let r = route_outputs(&outs, &subs, &["Laptop", "Projector"], Some(0));
         assert_eq!(
             r[&OutputId(1)],
             Some(Target {
@@ -900,15 +898,15 @@ mod tests {
                 area: right.area
             })
         );
-        // The projector is taken by the virtual displays, so automatic stays in the main window.
+        // The projector is taken by the sub displays, so automatic stays in the main window.
         assert_eq!(r[&OutputId(3)], None);
-        // A deleted virtual display falls back to the main window.
+        // A deleted sub display falls back to the main window.
         assert_eq!(r[&OutputId(4)], None);
         // Projector unplugged: everything in the main window.
-        let r = route_outputs(&outs, &virtuals, &["Laptop"], Some(0));
+        let r = route_outputs(&outs, &subs, &["Laptop"], Some(0));
         assert!(r.values().all(|t| t.is_none()));
-        // A virtual display may be on the main window's own display when chosen by name.
-        let on_laptop = VirtualDisplay {
+        // A sub display may be on the main window's own display when chosen by name.
+        let on_laptop = SubDisplay {
             parent: DisplayRef {
                 name: "Laptop".into(),
                 index: 0,

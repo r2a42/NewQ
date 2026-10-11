@@ -100,7 +100,7 @@ struct LayerUniform {
     b: [f32; 4],
     /// Canvas → screen homography rows (see [`corner_pin`]).
     h: Homography,
-    /// Canvas → the output's display or virtual display, for clipping to its edges.
+    /// Canvas → the output's display or sub display, for clipping to its edges.
     pin: Homography,
 }
 
@@ -117,7 +117,7 @@ struct Params {
     h0: vec4<f32>,
     h1: vec4<f32>,
     h2: vec4<f32>,
-    // The output's own corner pin: canvas to its (virtual) display (0..1).
+    // The output's own corner pin: canvas to its display or sub display (0..1).
     c0: vec4<f32>,
     c1: vec4<f32>,
     c2: vec4<f32>,
@@ -133,7 +133,7 @@ struct VOut {
     @location(0) uv: vec2<f32>,
     // Position on the output canvas (0..1), for clipping to the pinned shape.
     @location(1) canvas: vec2<f32>,
-    // Homogeneous position on the output's (virtual) display, for clipping to
+    // Homogeneous position on the output's display or sub display, for clipping to
     // its edges. Linear in the canvas position, so it interpolates exactly.
     @location(2) display: vec3<f32>,
 };
@@ -162,7 +162,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     if (any(in.canvas < vec2<f32>(0.0)) || any(in.canvas > vec2<f32>(1.0))) {
         discard;
     }
-    // A corner pin past the edge of a virtual display is cut off there, as a
+    // A corner pin past the edge of a sub display is cut off there, as a
     // real display's edge would.
     let d = in.display.xy / in.display.z;
     if (any(d < vec2<f32>(0.0)) || any(d > vec2<f32>(1.0))) {
@@ -386,7 +386,7 @@ pub enum Slot {
     Output = 0,
     /// The output's own preview.
     Preview = 1,
-    /// The preview of a whole physical display, with its virtual displays.
+    /// The preview of a whole physical display, with its sub displays.
     Screen = 2,
 }
 
@@ -593,9 +593,9 @@ pub struct DrawLayer<'a> {
 pub struct Geometry {
     /// Pixel size of the output's canvas, which layers are fitted to.
     pub canvas: (u32, u32),
-    /// Maps the canvas onto the screen (virtual display area and corner pin).
+    /// Maps the canvas onto the screen (sub display area and corner pin).
     pub warp: Homography,
-    /// The output's own corner pin, onto its display or virtual display,
+    /// The output's own corner pin, onto its display or sub display,
     /// whose edges clip it.
     pub pin: Homography,
 }
@@ -689,7 +689,7 @@ pub fn test_pattern(w: u32, h: u32, number: usize) -> Vec<u8> {
         .chars()
         .filter_map(|c| c.to_digit(10))
         .collect();
-    // As tall as fits, also on narrow (virtual) displays.
+    // As tall as fits, also on narrow sub displays.
     let n = digits.len() as f32;
     let dh = (h as f32 * 0.4).min(w as f32 * 0.7 / (n * 0.55 + (n - 1.0).max(0.0) * 0.165));
     let dw = dh * 0.55;
@@ -799,10 +799,10 @@ mod tests {
     }
 
     #[test]
-    fn corner_pin_inside_a_virtual_display_composes() {
+    fn corner_pin_inside_a_sub_display_composes() {
         let close =
             |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
-        // A virtual display on the right half of the screen...
+        // A sub display on the right half of the screen...
         let area = [[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]];
         let region = corner_pin(&area);
         // ...with an un-pinned output fills exactly that half.
@@ -813,7 +813,7 @@ mod tests {
         {
             assert!(close(project(&full, c[0], c[1]), area[i]));
         }
-        // A keystone pin is applied within the virtual display.
+        // A keystone pin is applied within the sub display.
         let pin = [[0.2, 0.0], [0.8, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let h = compose(&region, &corner_pin(&pin));
         assert!(close(project(&h, 0.0, 0.0), [0.6, 0.0]));
