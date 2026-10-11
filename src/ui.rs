@@ -1527,26 +1527,34 @@ fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions:
                 .small(),
         );
     }
+    // In pixels of the output's own display or sub display.
+    let size = st
+        .previews
+        .iter()
+        .find(|p| p.id == out.id)
+        .map_or((1920, 1080), |p| p.canvas);
+    let size = [size.0.max(1) as f32, size.1.max(1) as f32];
     egui::Grid::new(("corners", out.id.0))
         .num_columns(3)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for (i, label) in Corners::LABELS.iter().enumerate() {
                 ui.label(*label);
+                #[allow(clippy::needless_range_loop)]
                 for axis in 0..2 {
-                    let mut pct = out.corners.0[i][axis] * 100.0;
+                    let mut px = (out.corners.0[i][axis] * size[axis]).round();
                     if ui
                         .add(
-                            egui::DragValue::new(&mut pct)
-                                .speed(0.1)
-                                .range(-50.0..=150.0)
-                                .fixed_decimals(1)
+                            egui::DragValue::new(&mut px)
+                                .speed(1.0)
+                                .range(-0.5 * size[axis]..=1.5 * size[axis])
+                                .fixed_decimals(0)
                                 .prefix(if axis == 0 { "X " } else { "Y " })
-                                .suffix("%"),
+                                .suffix(" px"),
                         )
                         .changed()
                     {
-                        out.corners.0[i][axis] = pct / 100.0;
+                        out.corners.0[i][axis] = px / size[axis];
                     }
                 }
                 ui.end_row();

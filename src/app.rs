@@ -98,6 +98,8 @@ pub struct App {
     monitors: Vec<MonitorHandle>,
     last_monitor_scan: Instant,
     last_tick: Instant,
+    /// Whether something was playing at the previous tick.
+    was_active: bool,
 }
 
 impl App {
@@ -134,6 +136,7 @@ impl App {
             monitors: Vec::new(),
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
+            was_active: false,
         }
     }
 
@@ -641,9 +644,16 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_tick).as_secs_f64();
+        let mut dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
-        if dt > 0.1 && self.engine.is_active() {
+        // While nothing is playing the loop sleeps for up to 500 ms, so the
+        // gap before the first tick of a new cue is idle time, not a stall,
+        // and must not count towards the cue's pre-wait or fade.
+        if !self.was_active {
+            dt = 0.0;
+        }
+        self.was_active = self.engine.is_active();
+        if dt > 0.1 && self.was_active {
             log::warn!("event loop stalled for {:.0} ms", dt * 1000.0);
         }
 
