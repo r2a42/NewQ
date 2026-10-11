@@ -994,7 +994,7 @@ fn quad_handles(
         if resp.is_pointer_button_down_on() {
             pressed_on = Some(None);
         }
-        if resp.dragged() {
+        if resp.dragged() || resp.drag_stopped() {
             let d = drag_moved(ui, &resp) * scale;
             let dx = (d.x / screen.width()).clamp(lo - x, hi - (x + w));
             let dy = (d.y / screen.height()).clamp(lo - y, hi - (y + h));
@@ -1017,7 +1017,7 @@ fn quad_handles(
         if resp.is_pointer_button_down_on() {
             pressed_on = Some(Some(i));
         }
-        if resp.dragged() {
+        if resp.dragged() || resp.drag_stopped() {
             let d = drag_moved(ui, &resp) * scale;
             let c = &mut corners.0[i];
             c[0] = (c[0] + d.x / screen.width()).clamp(lo, hi);
@@ -1067,8 +1067,12 @@ fn quad_handles(
 }
 
 /// How far a handle was dragged this frame. That includes the movement
-/// before egui counted it as a drag, so the handle keeps up with the pointer.
+/// before egui counted it as a drag, and on the frame it is let go, so the
+/// handle ends up where the pointer did.
 fn drag_moved(ui: &Ui, resp: &egui::Response) -> Vec2 {
+    if resp.drag_stopped() {
+        return ui.input(|i| i.pointer.delta());
+    }
     if !resp.drag_started() {
         return resp.drag_delta();
     }
@@ -2295,8 +2299,9 @@ mod tests {
         }
     }
 
-    /// Press on `from`, drag to `to` over several frames, release.
-    /// `t` is egui's clock, which must keep moving forward between drags.
+    /// Press on `from`, drag to `to` over several frames, release in the same
+    /// frame as the last move. `t` is egui's clock, which must keep moving
+    /// forward between drags.
     fn drag(
         ctx: &egui::Context,
         t: &mut f64,
@@ -2311,11 +2316,11 @@ mod tests {
         };
         step(vec![Event::PointerMoved(from)], corners);
         step(vec![button(from, true)], corners);
-        for i in 1..=8 {
+        for i in 1..8 {
             let p = from + (to - from) * (i as f32 / 8.0);
             step(vec![Event::PointerMoved(p)], corners);
         }
-        step(vec![button(to, false)], corners);
+        step(vec![Event::PointerMoved(to), button(to, false)], corners);
         step(vec![], corners);
     }
 
@@ -2336,7 +2341,7 @@ mod tests {
         );
         let [x, y] = corners.0[0];
         assert!(
-            (x - 0.2).abs() < 0.01 && (y - 0.2).abs() < 0.01,
+            (x - 0.2).abs() < 0.002 && (y - 0.2).abs() < 0.002,
             "{:?}",
             corners.0
         );
@@ -2356,7 +2361,7 @@ mod tests {
         );
         let [x, y] = corners.0[2];
         assert!(
-            (x - 1.1).abs() < 0.01 && (y - 1.1).abs() < 0.01,
+            (x - 1.1).abs() < 0.002 && (y - 1.1).abs() < 0.002,
             "{:?}",
             corners.0
         );
@@ -2385,20 +2390,20 @@ mod tests {
             };
             step(vec![Event::PointerMoved(from)], area);
             step(vec![button(from, true)], area);
-            for i in 1..=8 {
+            for i in 1..8 {
                 step(
                     vec![Event::PointerMoved(from + (to - from) * (i as f32 / 8.0))],
                     area,
                 );
             }
-            step(vec![button(to, false)], area);
+            step(vec![Event::PointerMoved(to), button(to, false)], area);
             step(vec![], area);
         };
         // Drag the middle of the left half 25% of the width to the right.
         let mid = pos2(180.0, 190.0);
         run(&mut area, mid, mid + vec2(80.0, 0.0));
         let r = area.as_rect().expect("still a rectangle");
-        assert!((r[0] - 0.25).abs() < 0.01 && r[1] == 0.0, "{r:?}");
+        assert!((r[0] - 0.25).abs() < 0.002 && r[1] == 0.0, "{r:?}");
         assert!(
             (r[2] - 0.5).abs() < 1e-5 && (r[3] - 1.0).abs() < 1e-5,
             "{r:?}"
