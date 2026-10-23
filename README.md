@@ -108,6 +108,15 @@ includes FFmpeg, so there's nothing else to install.
     cue whose number is the note number; a program change selects the cue
     with that number; and MIDI Show Control GO (with or without a cue
     number), STOP, RESUME, LOAD and ALL OFF drive the transport.
+- **Audio outputs and channel routing:** under *Audio outputs* in the side
+  panel, add named outputs and put each on any audio device (or the system
+  default). Each cue then picks an output and the first device channel its
+  stereo pair plays on, so one show can feed a PA, a monitor desk and a
+  multichannel interface at once. The first output is the default for cues
+  that don't choose; with no outputs, everything plays on the system default
+  as before. NewQ opens each device with the most channels it offers; a
+  device that is missing is reported in the panel, and retried while nothing
+  is playing.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
@@ -236,7 +245,6 @@ space like a hardware video mixer.
 
 ## Known limitations / roadmap
 
-- Audio goes to the system default device, as stereo.
 - Video alpha channels (ProRes 4444, VP9 alpha) aren't supported yet; images
   with alpha are.
 - No timecode triggering or cue carts yet.

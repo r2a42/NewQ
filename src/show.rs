@@ -17,6 +17,9 @@ pub struct OutputId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubDisplayId(pub u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AudioOutputId(pub u64);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Show {
     pub version: u32,
@@ -25,6 +28,11 @@ pub struct Show {
     /// Areas of physical displays that outputs can be placed on like displays.
     #[serde(default, alias = "virtual_displays")]
     pub sub_displays: Vec<SubDisplay>,
+    /// Named destinations for sound, each on an audio device. With none, all
+    /// sound goes to the system's default device. The first is the default
+    /// for cues that don't choose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_outputs: Vec<AudioOutputConfig>,
     pub cues: Vec<Cue>,
     pub next_id: u64,
     /// Fade time used by the Panic / Stop All button.
@@ -33,6 +41,16 @@ pub struct Show {
     /// OSC and MIDI control. Off unless the show asks for it.
     #[serde(default, skip_serializing_if = "RemoteSettings::is_default")]
     pub remote: RemoteSettings,
+}
+
+/// A named audio output, on one of the machine's audio devices.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioOutputConfig {
+    pub id: AudioOutputId,
+    pub name: String,
+    /// The device's name; None = the system's default device.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 /// Which remote-control listeners run while this show is open.
@@ -79,6 +97,7 @@ impl Default for Show {
             name: "Untitled Show".into(),
             outputs: Vec::new(),
             sub_displays: Vec::new(),
+            audio_outputs: Vec::new(),
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
@@ -548,6 +567,13 @@ pub struct MediaCue {
     pub curve: Curve,
     #[serde(default = "one")]
     pub opacity: f32,
+    /// Where the sound goes (None = the show's first audio output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_output: Option<AudioOutputId>,
+    /// The first device channel the sound goes to, counting from 0: the left
+    /// channel plays there and the right on the next.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_channel: u16,
     /// Position, scale, rotation and crop on the output (visual cues).
     #[serde(default, skip_serializing_if = "LayerTransform::is_identity")]
     pub transform: LayerTransform,
@@ -577,6 +603,10 @@ fn one() -> f32 {
     1.0
 }
 
+fn is_zero(v: &u16) -> bool {
+    *v == 0
+}
+
 impl MediaCue {
     pub fn new(file: PathBuf, output: Option<OutputId>) -> Self {
         MediaCue {
@@ -589,6 +619,8 @@ impl MediaCue {
             fade_out: 0.0,
             curve: Curve::SCurve,
             opacity: 1.0,
+            audio_output: None,
+            audio_channel: 0,
             transform: LayerTransform::default(),
             volume_db: 0.0,
             start: 0.0,
@@ -855,6 +887,29 @@ impl Show {
         }
     }
 
+    pub fn add_audio_output(&mut self) -> AudioOutputId {
+        let id = AudioOutputId(self.alloc_id());
+        let n = self.audio_outputs.len() + 1;
+        self.audio_outputs.push(AudioOutputConfig {
+            id,
+            name: format!("Audio {n}"),
+            device: None,
+        });
+        id
+    }
+
+    /// Remove an audio output; cues that used it go back to the default.
+    pub fn remove_audio_output(&mut self, id: AudioOutputId) {
+        self.audio_outputs.retain(|o| o.id != id);
+        for c in &mut self.cues {
+            if let Some(m) = c.kind.media_mut()
+                && m.audio_output == Some(id)
+            {
+                m.audio_output = None;
+            }
+        }
+    }
+
     pub fn add_output(&mut self) -> OutputId {
         let id = OutputId(self.alloc_id());
         let n = self.outputs.len() + 1;
@@ -962,6 +1017,7 @@ impl Show {
             .map(|c| c.id.0)
             .chain(show.outputs.iter().map(|o| o.id.0))
             .chain(show.sub_displays.iter().map(|v| v.id.0))
+            .chain(show.audio_outputs.iter().map(|o| o.id.0))
             .max()
             .unwrap_or(0);
         show.next_id = show.next_id.max(max_id + 1);
@@ -1756,5 +1812,55 @@ mod tests {
         v["remote"] = serde_json::json!({"osc": true});
         let part: Show = serde_json::from_value(v).unwrap();
         assert!(part.remote.osc && !part.remote.midi && part.remote.osc_port == 53000);
+    }
+
+    #[test]
+    fn audio_outputs_default_empty_and_stay_out_of_old_files() {
+        let mut show = Show::default();
+        let cue = show.make_cue(CueType::Audio, Some("a.wav".into()), 0);
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(!json.contains("audio_outputs"), "{json}");
+        let cue_json = serde_json::to_string(&cue).unwrap();
+        assert!(!cue_json.contains("audio_output") && !cue_json.contains("audio_channel"));
+        let back: Cue = serde_json::from_str(&cue_json).unwrap();
+        let m = back.kind.media().unwrap();
+        assert_eq!((m.audio_output, m.audio_channel), (None, 0));
+    }
+
+    #[test]
+    fn audio_outputs_round_trip_and_removal_resets_cues() {
+        let dir = std::env::temp_dir().join("newq_test_audio_outputs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut show = Show::default();
+        let pa = show.add_audio_output();
+        let monitor = show.add_audio_output();
+        show.audio_outputs[1].device = Some("USB Interface".into());
+        let mut cue = show.make_cue(CueType::Audio, Some("a.wav".into()), 0);
+        {
+            let m = cue.kind.media_mut().unwrap();
+            m.audio_output = Some(monitor);
+            m.audio_channel = 2;
+        }
+        show.cues.push(cue);
+        let path = dir.join("audio.newq");
+        show.save(&path).unwrap();
+        let mut loaded = Show::load(&path).unwrap();
+        assert_eq!(loaded.audio_outputs, show.audio_outputs);
+        assert_eq!(loaded.audio_outputs[0].name, "Audio 1");
+        assert_eq!(
+            loaded.audio_outputs[1].device.as_deref(),
+            Some("USB Interface")
+        );
+        let m = loaded.cues[0].kind.media().unwrap();
+        assert_eq!((m.audio_output, m.audio_channel), (Some(monitor), 2));
+        // Ids stay unique across everything the show numbers.
+        let fresh = loaded.alloc_id();
+        assert!(fresh > pa.0 && fresh > monitor.0);
+        // Removing an output sends its cues back to the default.
+        loaded.remove_audio_output(monitor);
+        assert_eq!(loaded.audio_outputs.len(), 1);
+        assert_eq!(loaded.cues[0].kind.media().unwrap().audio_output, None);
+        assert!(loaded.audio_outputs.iter().any(|o| o.id == pa));
+        assert!(!loaded.audio_outputs.iter().any(|o| o.id == monitor));
     }
 }

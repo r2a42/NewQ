@@ -6,6 +6,7 @@
 
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
+use crate::media::audio;
 use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
@@ -166,6 +167,11 @@ impl App {
             })
             .collect();
         self.ui.midi_ports = remote::midi_inputs();
+        // Listing and opening audio devices can take a while; not during a show.
+        if !self.engine.is_active() {
+            self.ui.audio_devices = audio::output_devices();
+            self.engine.audio.retry_failed();
+        }
         self.last_monitor_scan = Instant::now();
     }
 
@@ -702,6 +708,7 @@ impl ApplicationHandler for App {
             self.scan_monitors(event_loop);
         }
         self.reconcile_outputs(event_loop);
+        self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
         self.engine.tick(&self.show, dt);
 

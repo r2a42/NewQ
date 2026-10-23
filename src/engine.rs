@@ -588,7 +588,14 @@ impl Engine {
                     .map_err(|e| format!("{e:#}"))?;
                 let voice = if info.has_audio && self.audio.available() {
                     self.audio
-                        .spawn_voice(ff, &m.file, m.start, playback, initial_gain)
+                        .spawn_voice(
+                            ff,
+                            &m.file,
+                            m.start,
+                            playback,
+                            initial_gain,
+                            (m.audio_output, m.audio_channel),
+                        )
                         .ok()
                 } else {
                     None
@@ -606,7 +613,14 @@ impl Engine {
                 }
                 let voice = self
                     .audio
-                    .spawn_voice(ff, &m.file, m.start, playback, initial_gain)
+                    .spawn_voice(
+                        ff,
+                        &m.file,
+                        m.start,
+                        playback,
+                        initial_gain,
+                        (m.audio_output, m.audio_channel),
+                    )
                     .map_err(|e| format!("{e:#}"))?;
                 PreparedKind::Audio(voice)
             }

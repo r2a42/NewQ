@@ -64,6 +64,8 @@ pub struct UiState {
     pub quit_requested: bool,
     /// MIDI inputs that are connected now (set by the app every few seconds).
     pub midi_ports: Vec<String>,
+    /// Audio output devices that are connected now (set by the app when idle).
+    pub audio_devices: Vec<String>,
     /// What the OSC and MIDI listeners are doing (set by the app).
     pub remote_status: RemoteStatus,
     pub dirty: bool,
@@ -160,6 +162,8 @@ enum Action {
     MoveOutOfGroup(CueId),
     AddOutput,
     RemoveOutput(OutputId),
+    AddAudioOutput,
+    RemoveAudioOutput(AudioOutputId),
     Quit,
 }
 
@@ -220,6 +224,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     active_panel(ui, show, engine, &mut actions);
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
+                    ui.add_space(12.0);
+                    audio_panel(ui, show, engine, st, &mut actions);
                     ui.add_space(12.0);
                     sub_displays_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
@@ -551,12 +557,9 @@ fn status_bar(ui: &mut Ui, engine: &Engine, st: &UiState) {
                      on your PATH, or set NEWQ_FFMPEG_DIR.",
                 ),
         };
-        match &engine.audio.error {
-            None => ui.label(format!(
-                "🔊 {} @ {} Hz",
-                engine.audio.device_name, engine.audio.sample_rate
-            )),
-            Some(e) => ui.label(RichText::new(format!("🔇 {e}")).color(STOP_RED)),
+        match engine.audio.summary() {
+            Ok(text) => ui.label(format!("🔊 {text}")),
+            Err(e) => ui.label(RichText::new(format!("🔇 {e}")).color(STOP_RED)),
         };
         ui.separator();
         let path = st
@@ -1294,6 +1297,81 @@ fn monitor_label(st: &UiState, i: usize) -> String {
     )
 }
 
+/// Where the show's sound goes: named outputs on audio devices.
+fn audio_panel(
+    ui: &mut Ui,
+    show: &mut Show,
+    engine: &Engine,
+    st: &UiState,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal(|ui| {
+        ui.heading("Audio outputs");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("+ Add").clicked() {
+                actions.push(Action::AddAudioOutput);
+            }
+        });
+    });
+    if show.audio_outputs.is_empty() {
+        ui.label(
+            RichText::new(
+                "All sound plays on the system's default device. Add an output to choose a \
+                 device, or to send cues to different devices.",
+            )
+            .weak()
+            .small(),
+        );
+        return;
+    }
+    for o in &mut show.audio_outputs {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(140.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("Remove").clicked() {
+                        actions.push(Action::RemoveAudioOutput(o.id));
+                    }
+                });
+            });
+            let shown = o.device.clone().unwrap_or_else(|| "System default".into());
+            egui::ComboBox::from_id_salt(("audio_device", o.id.0))
+                .width(ui.available_width() - 8.0)
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut o.device, None, "System default");
+                    for d in &st.audio_devices {
+                        ui.selectable_value(&mut o.device, Some(d.clone()), d);
+                    }
+                });
+            match engine.audio.device_status(Some(o.id)) {
+                Some(d) if d.error.is_none() => {
+                    ui.label(
+                        RichText::new(format!("{} channels · {} Hz", d.channels, d.sample_rate))
+                            .color(GO_GREEN)
+                            .small(),
+                    );
+                }
+                Some(d) => {
+                    ui.label(
+                        RichText::new(format!("⚠ {}", d.error.unwrap_or_default()))
+                            .color(STOP_RED)
+                            .small(),
+                    );
+                }
+                None => {
+                    ui.label(RichText::new("Starting…").weak().small());
+                }
+            }
+        });
+    }
+    ui.label(
+        RichText::new("The first output is the default for cues that don't choose one.")
+            .weak()
+            .small(),
+    );
+}
+
 /// Settings for controlling NewQ from OSC and MIDI.
 fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState) {
     ui.heading("Remote control");
@@ -1878,6 +1956,11 @@ fn inspector(
         .iter()
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    let audio_outputs: Vec<(AudioOutputId, String)> = show
+        .audio_outputs
+        .iter()
+        .map(|o| (o.id, o.name.clone()))
+        .collect();
     let cue = &mut show.cues[idx];
 
     ui.horizontal(|ui| {
@@ -1950,7 +2033,7 @@ fn inspector(
         let cue_id = cue.id;
         match &mut cue.kind {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => {
-                media_inspector(ui, cue_type, m, &outputs, engine)
+                media_inspector(ui, cue_type, m, &outputs, &audio_outputs, engine)
             }
             CueKind::Fade(f) => {
                 let candidates: Vec<_> = media_cues
@@ -2026,7 +2109,7 @@ fn inspector(
             CueKind::Text(t) => {
                 text_inspector(ui, t);
                 ui.separator();
-                media_inspector(ui, cue_type, &mut t.media, &outputs, engine);
+                media_inspector(ui, cue_type, &mut t.media, &outputs, &audio_outputs, engine);
             }
             CueKind::Group(g) => {
                 egui::Grid::new("group")
@@ -2088,6 +2171,7 @@ fn media_inspector(
     ty: CueType,
     m: &mut MediaCue,
     outputs: &[(OutputId, String)],
+    audio_outputs: &[(AudioOutputId, String)],
     engine: &mut Engine,
 ) {
     let visual = ty != CueType::Audio;
@@ -2184,6 +2268,45 @@ fn media_inspector(
             if !still {
                 ui.label("Volume");
                 db_slider(ui, &mut m.volume_db);
+                ui.end_row();
+                ui.label("Audio output");
+                let chosen = m
+                    .audio_output
+                    .and_then(|id| audio_outputs.iter().find(|o| o.0 == id))
+                    .map_or_else(|| "Default".to_string(), |o| o.1.clone());
+                egui::ComboBox::from_id_salt("audio_output")
+                    .selected_text(chosen)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut m.audio_output, None, "Default");
+                        for (id, name) in audio_outputs {
+                            ui.selectable_value(&mut m.audio_output, Some(*id), name);
+                        }
+                    });
+                ui.end_row();
+                ui.label("Channels");
+                ui.horizontal(|ui| {
+                    let mut first = m.audio_channel + 1;
+                    ui.add(egui::DragValue::new(&mut first).range(1..=64))
+                        .on_hover_text(
+                            "The first device channel; left plays here and right on the next",
+                        );
+                    m.audio_channel = first.saturating_sub(1);
+                    let device = engine.audio.device_status(m.audio_output);
+                    let hint = match device {
+                        Some(d) if d.error.is_none() => {
+                            let end = usize::from(m.audio_channel) + 2;
+                            if end > usize::from(d.channels) {
+                                RichText::new(format!("⚠ device has {} channels", d.channels))
+                                    .color(PREWAIT)
+                            } else {
+                                RichText::new(format!("to {} (of {})", end, d.channels)).weak()
+                            }
+                        }
+                        Some(_) => RichText::new("⚠ device unavailable").color(STOP_RED),
+                        None => RichText::new("").weak(),
+                    };
+                    ui.label(hint);
+                });
                 ui.end_row();
             }
             if visual {
@@ -2849,6 +2972,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddOutput => {
             show.add_output();
         }
+        Action::AddAudioOutput => {
+            show.add_audio_output();
+        }
+        Action::RemoveAudioOutput(id) => show.remove_audio_output(id),
         Action::RemoveOutput(id) => {
             show.outputs.retain(|o| o.id != id);
             let fallback = show.outputs.first().map(|o| o.id);
