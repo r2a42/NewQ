@@ -112,6 +112,10 @@ const PLAYING: Color32 = Color32::from_rgb(40, 110, 60);
 const PREWAIT: Color32 = Color32::from_rgb(150, 110, 30);
 const PLAYHEAD: Color32 = Color32::from_rgb(230, 190, 60);
 const ROW_H: f32 = 26.0;
+/// How far a group's children are indented in the cue list.
+const CHILD_INDENT: f32 = 14.0;
+/// Width of the fold arrow in front of a group's name.
+const FOLD_W: f32 = 18.0;
 
 enum Action {
     Go,
@@ -140,6 +144,15 @@ enum Action {
     AddSubDisplay(DisplayRef),
     RemoveSubDisplay(SubDisplayId),
     SetTransition(CueId, Transition),
+    /// Collapse or expand a group in the cue list.
+    ToggleGroup(CueId),
+    /// Wrap a cue in a new group.
+    GroupCue(CueId),
+    /// Dissolve a group; its children stay.
+    Ungroup(CueId),
+    /// Move a cue into the end of a group (cue, group).
+    MoveIntoGroup(CueId, CueId),
+    MoveOutOfGroup(CueId),
     AddOutput,
     RemoveOutput(OutputId),
     Quit,
@@ -354,12 +367,33 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 }
             }
             ui.separator();
-            for ty in [CueType::Fade, CueType::Stop, CueType::Wait] {
+            for ty in [CueType::Fade, CueType::Stop, CueType::Wait, CueType::Group] {
                 if ui
                     .button(format!("{} Add {} cue", ty.icon(), ty.label()))
                     .clicked()
                 {
                     actions.push(Action::AddCue(ty));
+                }
+            }
+            if let Some(id) = st.selected
+                && let Some(c) = show.cue(id)
+            {
+                match (&c.kind, c.parent) {
+                    (CueKind::Group(_), _) => {
+                        if ui.button("Ungroup").clicked() {
+                            actions.push(Action::Ungroup(id));
+                        }
+                    }
+                    (_, None) => {
+                        if ui.button("Wrap in group").clicked() {
+                            actions.push(Action::GroupCue(id));
+                        }
+                    }
+                    (_, Some(_)) => {
+                        if ui.button("Move out of group").clicked() {
+                            actions.push(Action::MoveOutOfGroup(id));
+                        }
+                    }
                 }
             }
             ui.separator();
@@ -558,6 +592,14 @@ fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Group(g) => {
+            let n = show.children(c.id).len();
+            format!(
+                "{n} cue{} · {}",
+                if n == 1 { "" } else { "s" },
+                g.mode.label().to_lowercase()
+            )
+        }
     }
 }
 
@@ -620,15 +662,45 @@ fn cue_list(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            for c in &show.cues {
+            let groups: Vec<(CueId, String)> = show
+                .cues
+                .iter()
+                .filter(|c| matches!(c.kind, CueKind::Group(_)))
+                .map(|c| (c.id, cue_label(c)))
+                .collect();
+            for (idx, c) in show.cues.iter().enumerate() {
+                if !show.is_visible(idx) {
+                    continue;
+                }
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(total, ROW_H), Sense::click());
+                // The fold arrow of a group sits at the start of its name.
+                let indent = if c.parent.is_some() {
+                    CHILD_INDENT
+                } else {
+                    0.0
+                };
+                let fold = match &c.kind {
+                    CueKind::Group(g) => {
+                        let x = col_x(3, rect.left()) + 2.0;
+                        let arrow = egui::Rect::from_min_size(
+                            egui::pos2(x, rect.top()),
+                            Vec2::new(FOLD_W, ROW_H),
+                        );
+                        let r = ui.interact(arrow, resp.id.with("fold"), Sense::click());
+                        if r.clicked() {
+                            actions.push(Action::ToggleGroup(c.id));
+                        }
+                        Some(g.collapsed)
+                    }
+                    _ => None,
+                };
                 if resp.clicked() {
                     actions.push(Action::Select(c.id));
                 }
                 if resp.double_clicked() {
                     actions.push(Action::FireSelected);
                 }
-                resp.context_menu(|ui| cue_context_menu(ui, c, actions));
+                resp.context_menu(|ui| cue_context_menu(ui, c, &groups, actions));
                 if st.scroll_to_selected && st.selected == Some(c.id) {
                     ui.scroll_to_rect(rect, None);
                     st.scroll_to_selected = false;
@@ -681,7 +753,7 @@ fn cue_list(
                     CueStatus::Idle if at_playhead => "➡",
                     CueStatus::Idle => "",
                 };
-                let cell = |i: usize, text: String, color: Color32| {
+                let cell_dx = |i: usize, dx: f32, text: String, color: Color32| {
                     let x0 = col_x(i, rect.left());
                     let w = if cols[i].1 == 0.0 { flex } else { cols[i].1 };
                     let clip = egui::Rect::from_min_max(
@@ -689,20 +761,39 @@ fn cue_list(
                         egui::pos2(x0 + w - 4.0, rect.bottom()),
                     );
                     painter.with_clip_rect(clip).text(
-                        egui::pos2(x0 + 4.0, y),
+                        egui::pos2(x0 + 4.0 + dx, y),
                         egui::Align2::LEFT_CENTER,
                         text,
                         font.clone(),
                         color,
                     );
                 };
+                let cell = |i: usize, text: String, color: Color32| cell_dx(i, 0.0, text, color);
                 cell(0, marker.into(), PLAYHEAD);
                 if marker.is_empty() && engine.is_prepared(c.id) {
                     painter.circle_filled(egui::pos2(rect.left() + 12.0, y), 3.5, GO_GREEN);
                 }
-                cell(1, c.number.clone(), text_color);
-                cell(2, c.kind.cue_type().icon().into(), text_color);
-                cell(3, c.name.clone(), text_color);
+                cell_dx(1, indent, c.number.clone(), text_color);
+                cell_dx(2, indent, c.kind.cue_type().icon().into(), text_color);
+                if let Some(collapsed) = fold {
+                    // Drawn, not typed: the default font has no triangle glyphs.
+                    let mid = egui::pos2(col_x(3, rect.left()) + 2.0 + FOLD_W / 2.0, y);
+                    let tri = if collapsed {
+                        [(-3.0, -5.0), (-3.0, 5.0), (4.0, 0.0)]
+                    } else {
+                        [(-5.0, -3.0), (5.0, -3.0), (0.0, 4.0)]
+                    };
+                    painter.add(egui::Shape::convex_polygon(
+                        tri.iter()
+                            .map(|(dx, dy)| mid + Vec2::new(*dx, *dy))
+                            .collect(),
+                        text_color,
+                        Stroke::NONE,
+                    ));
+                    cell_dx(3, FOLD_W, c.name.clone(), text_color);
+                } else {
+                    cell(3, c.name.clone(), text_color);
+                }
                 let weak = v.weak_text_color();
                 let missing = c
                     .kind
@@ -732,7 +823,7 @@ fn cue_list(
                         Some(d) => format!("-{}", fmt_time(d - elapsed)),
                         None => fmt_time(elapsed),
                     },
-                    _ => match engine.cue_duration(c) {
+                    _ => match engine.cue_duration(show, c) {
                         Some(Some(d)) if d > 0.0 => fmt_time(d),
                         Some(None) => "∞".into(),
                         _ => String::new(),
@@ -742,6 +833,7 @@ fn cue_list(
                 cell(
                     8,
                     match c.continue_mode {
+                        _ if c.parent.is_some() => "",
                         ContinueMode::DoNotContinue => "",
                         ContinueMode::AutoContinue => "⏩ auto",
                         ContinueMode::AutoFollow => "⏭ follow",
@@ -776,7 +868,7 @@ fn fades_text(c: &Cue) -> String {
     }
 }
 
-fn cue_context_menu(ui: &mut Ui, c: &Cue, actions: &mut Vec<Action>) {
+fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &mut Vec<Action>) {
     actions.push(Action::Select(c.id));
     if ui.button("▶ Fire").clicked() {
         actions.push(Action::FireSelected);
@@ -797,6 +889,37 @@ fn cue_context_menu(ui: &mut Ui, c: &Cue, actions: &mut Vec<Action>) {
             if ui.radio(m.transition == t, t.label()).clicked() {
                 actions.push(Action::SetTransition(c.id, t));
                 ui.close();
+            }
+        }
+    }
+    ui.separator();
+    match (&c.kind, c.parent) {
+        (CueKind::Group(_), _) => {
+            if ui.button("Ungroup").clicked() {
+                actions.push(Action::Ungroup(c.id));
+                ui.close();
+            }
+        }
+        (_, Some(_)) => {
+            if ui.button("Move out of group").clicked() {
+                actions.push(Action::MoveOutOfGroup(c.id));
+                ui.close();
+            }
+        }
+        (_, None) => {
+            if ui.button("Wrap in group").clicked() {
+                actions.push(Action::GroupCue(c.id));
+                ui.close();
+            }
+            if !groups.is_empty() {
+                ui.menu_button("Move into group", |ui| {
+                    for (gid, label) in groups {
+                        if ui.button(label).clicked() {
+                            actions.push(Action::MoveIntoGroup(c.id, *gid));
+                            ui.close();
+                        }
+                    }
+                });
             }
         }
     }
@@ -1623,7 +1746,7 @@ fn inspector(
     let media_cues: Vec<(CueId, String)> = show
         .cues
         .iter()
-        .filter(|c| c.kind.media().is_some())
+        .filter(|c| c.kind.media().is_some() || matches!(c.kind, CueKind::Group(_)))
         .map(|c| (c.id, cue_label(c)))
         .collect();
     let outputs: Vec<(OutputId, String)> = show
@@ -1677,13 +1800,17 @@ fn inspector(
                 secs(ui, &mut cue.pre_wait);
                 ui.end_row();
                 ui.label("Continue");
-                egui::ComboBox::from_id_salt("continue")
-                    .selected_text(cue.continue_mode.label())
-                    .show_ui(ui, |ui| {
-                        for m in ContinueMode::ALL {
-                            ui.selectable_value(&mut cue.continue_mode, m, m.label());
-                        }
-                    });
+                if cue.parent.is_some() {
+                    ui.label(RichText::new("Decided by the group").weak());
+                } else {
+                    egui::ComboBox::from_id_salt("continue")
+                        .selected_text(cue.continue_mode.label())
+                        .show_ui(ui, |ui| {
+                            for m in ContinueMode::ALL {
+                                ui.selectable_value(&mut cue.continue_mode, m, m.label());
+                            }
+                        });
+                }
                 ui.end_row();
                 ui.label("Notes");
                 ui.add(
@@ -1771,6 +1898,31 @@ fn inspector(
                         ui.add_enabled_ui(!s.use_own_fade, |ui| secs(ui, &mut s.fade));
                         ui.end_row();
                     });
+            }
+            CueKind::Group(g) => {
+                egui::Grid::new("group")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Mode");
+                        egui::ComboBox::from_id_salt("group_mode")
+                            .selected_text(g.mode.label())
+                            .show_ui(ui, |ui| {
+                                for m in GroupMode::ALL {
+                                    ui.selectable_value(&mut g.mode, m, m.label())
+                                        .on_hover_text(m.description());
+                                }
+                            });
+                        ui.end_row();
+                    });
+                ui.label(RichText::new(g.mode.description()).weak());
+                ui.label(
+                    RichText::new(
+                        "Adding a cue while the group is selected puts it inside. Children's \
+                         pre-waits are measured within the group.",
+                    )
+                    .weak(),
+                );
             }
             CueKind::Wait(w) => {
                 egui::Grid::new("wait")
@@ -2069,18 +2221,45 @@ fn load_into(
     st.saved_json = serde_json::to_string(show).ok();
 }
 
-fn insert_cue(show: &mut Show, st: &mut UiState, engine: &mut Engine, cue: Cue) {
-    let at = st
-        .selected
-        .and_then(|id| show.cue_index(id))
-        .map_or(show.cues.len(), |i| i + 1);
-    let id = cue.id;
-    show.cues.insert(at, cue);
+/// Make a new cue and put it where the selection says (see `Show::insert_slot`).
+fn add_cue(
+    show: &mut Show,
+    st: &mut UiState,
+    engine: &mut Engine,
+    ty: CueType,
+    file: Option<PathBuf>,
+) {
+    let slot = show.insert_slot(st.selected, ty == CueType::Group);
+    let cue = show.make_cue(ty, file, slot.at);
+    select_new(show, st, engine, slot.parent, cue.id);
+    show.insert_cue(slot, cue);
+}
+
+/// Select a cue that was just added, opening its group so it can be seen.
+fn select_new(
+    show: &mut Show,
+    st: &mut UiState,
+    engine: &mut Engine,
+    parent: Option<CueId>,
+    id: CueId,
+) {
+    if let Some(CueKind::Group(g)) = parent
+        .and_then(|p| show.cue_index(p))
+        .map(|i| &mut show.cues[i].kind)
+    {
+        g.collapsed = false;
+    }
     st.selected = Some(id);
     st.scroll_to_selected = true;
     if engine.playhead.is_none() {
-        engine.playhead = Some(id);
+        engine.playhead = Some(parent.unwrap_or(id));
     }
+}
+
+/// Selecting a cue puts the playhead on it, or on its group for a child.
+fn select(show: &Show, st: &mut UiState, engine: &mut Engine, id: Option<CueId>) {
+    st.selected = id;
+    engine.playhead = id.map(|id| show.top_id(id));
 }
 
 fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
@@ -2096,19 +2275,17 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             let p = !engine.paused;
             engine.set_paused(p);
         }
-        Action::Select(id) => {
-            st.selected = Some(id);
-            engine.playhead = Some(id);
-        }
+        Action::Select(id) => select(show, st, engine, Some(id)),
         Action::SelectRelative(d) => {
             if show.cues.is_empty() {
                 return;
             }
-            let i = sel_idx.map_or(0, |i| {
-                (i as i32 + d).clamp(0, show.cues.len() as i32 - 1) as usize
-            });
-            st.selected = Some(show.cues[i].id);
-            engine.playhead = st.selected;
+            let i = match sel_idx {
+                Some(i) => show.step_visible(i, d).unwrap_or(i),
+                None => 0,
+            };
+            let id = show.cues[i].id;
+            select(show, st, engine, Some(id));
             st.scroll_to_selected = true;
         }
         Action::AddCue(ty) => {
@@ -2121,9 +2298,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 }
                 _ => None,
             };
-            let at = sel_idx.map_or(show.cues.len(), |i| i + 1);
-            let cue = show.make_cue(ty, file, at);
-            insert_cue(show, st, engine, cue);
+            add_cue(show, st, engine, ty, file);
         }
         Action::AddFiles(files) => {
             for f in files {
@@ -2137,48 +2312,42 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     return;
                 }
                 match guess_cue_type(&f) {
-                    Some(ty) => {
-                        let at = st
-                            .selected
-                            .and_then(|id| show.cue_index(id))
-                            .map_or(show.cues.len(), |i| i + 1);
-                        let cue = show.make_cue(ty, Some(f), at);
-                        insert_cue(show, st, engine, cue);
-                    }
+                    Some(ty) => add_cue(show, st, engine, ty, Some(f)),
                     None => engine.log(format!("Unsupported file type: {}", f.display())),
                 }
             }
         }
         Action::Delete => {
             if let Some(i) = sel_idx {
-                let id = show.cues[i].id;
-                engine.stop_cue(id, 0.0);
-                show.cues.remove(i);
+                // A group goes with its children.
+                let removed = show.delete(i);
+                for id in &removed {
+                    engine.stop_cue(*id, 0.0);
+                }
                 let next = show
                     .cues
                     .get(i.min(show.cues.len().saturating_sub(1)))
                     .map(|c| c.id);
-                if engine.playhead == Some(id) {
-                    engine.playhead = next;
+                if engine.playhead.is_some_and(|p| removed.contains(&p)) {
+                    engine.playhead = next.map(|id| show.top_id(id));
                 }
                 st.selected = next;
             }
         }
         Action::Duplicate => {
             if let Some(i) = sel_idx {
-                let mut c = show.cues[i].clone();
-                c.id = CueId(show.alloc_id());
-                c.number = show.next_cue_number();
-                insert_cue(show, st, engine, c);
+                let parent = show.cues[i].parent;
+                let copy = show.duplicate(i);
+                select_new(show, st, engine, parent, copy);
             }
         }
         Action::Move(d) => {
-            if let Some(i) = sel_idx {
-                let j = i as i32 + d;
-                if j >= 0 && (j as usize) < show.cues.len() {
-                    show.cues.swap(i, j as usize);
-                    st.scroll_to_selected = true;
-                }
+            if let Some(i) = sel_idx
+                && show.move_cue(i, d).is_some()
+            {
+                // A child that left its group moves the playhead's idea of its home.
+                select(show, st, engine, st.selected);
+                st.scroll_to_selected = true;
             }
         }
         Action::New => {
@@ -2272,6 +2441,66 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 if t.uses_time() && m.fade_in <= 0.0 {
                     m.fade_in = 1.0;
                 }
+            }
+        }
+        Action::ToggleGroup(id) => {
+            if let Some(i) = show.cue_index(id)
+                && let CueKind::Group(g) = &mut show.cues[i].kind
+            {
+                g.collapsed = !g.collapsed;
+                // Don't leave the selection on a cue that just disappeared.
+                if g.collapsed
+                    && st
+                        .selected
+                        .and_then(|s| show.cue(s))
+                        .is_some_and(|c| c.parent == Some(id))
+                {
+                    select(show, st, engine, Some(id));
+                }
+            }
+        }
+        Action::GroupCue(id) => {
+            if let Some(i) = show.cue_index(id)
+                && let Some(g) = show.group_cue(i)
+            {
+                if engine.playhead == Some(id) {
+                    engine.playhead = Some(g);
+                }
+                st.selected = Some(g);
+                st.scroll_to_selected = true;
+            }
+        }
+        Action::Ungroup(id) => {
+            if let Some(i) = show.cue_index(id) {
+                let first_child = show.children(id).first().map(|c| c.id);
+                show.ungroup(i);
+                let next = first_child.or_else(|| show.cues.get(i).map(|c| c.id));
+                if st.selected == Some(id) {
+                    select(show, st, engine, next);
+                } else if engine.playhead == Some(id) {
+                    engine.playhead = next;
+                }
+            }
+        }
+        Action::MoveIntoGroup(id, group) => {
+            if let Some(i) = show.cue_index(id)
+                && show.move_into(i, group)
+            {
+                if let Some(g) = show.cue_index(group)
+                    && let CueKind::Group(g) = &mut show.cues[g].kind
+                {
+                    g.collapsed = false;
+                }
+                select(show, st, engine, Some(id));
+                st.scroll_to_selected = true;
+            }
+        }
+        Action::MoveOutOfGroup(id) => {
+            if let Some(i) = show.cue_index(id)
+                && show.move_out(i)
+            {
+                select(show, st, engine, Some(id));
+                st.scroll_to_selected = true;
             }
         }
         Action::AddOutput => {
@@ -2597,5 +2826,135 @@ mod tests {
             Some([0.0, 0.0, 0.5, 1.0]),
             "clicks move nothing"
         );
+    }
+
+    /// A show of `a`, a group `G` holding `b` and `c`, and `d`.
+    fn grouped_show() -> Show {
+        let mut show = Show::default();
+        for n in ["a", "b", "c", "d"] {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.name = n.into();
+            show.cues.push(c);
+        }
+        let g = show.group_cue(1).unwrap();
+        show.move_into(3, g);
+        show
+    }
+
+    /// Click `at` on a fresh cue list and return what it asked for.
+    fn click_list(show: &Show, at: Pos2) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let mut engine = Engine::for_tests();
+        let mut st = UiState::default();
+        let mut actions = Vec::new();
+        let mut t = 0.0;
+        for events in [
+            vec![],
+            vec![Event::PointerMoved(at)],
+            vec![button(at, true)],
+            vec![button(at, false)],
+            vec![],
+        ] {
+            t += 1.0 / 60.0;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 400.0))),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            actions.clear();
+            let mut out = ctx.run_ui(input, |ui| {
+                cue_list(ui, show, &mut engine, &mut st, &mut actions)
+            });
+            out.textures_delta.clear();
+            if !actions.is_empty() {
+                return actions;
+            }
+        }
+        actions
+    }
+
+    #[test]
+    fn the_fold_arrow_toggles_a_group_and_the_rest_of_the_row_selects_it() {
+        let show = grouped_show();
+        let group = show.cues[1].id;
+        // Scan the name column for the arrow, and a plain part of the row for selecting.
+        let mut toggles = Vec::new();
+        let mut selects = Vec::new();
+        for y in (0..170).step_by(4) {
+            for x in (100..150).step_by(2) {
+                let at = pos2(x as f32, y as f32);
+                let actions = click_list(&show, at);
+                let toggled = actions
+                    .iter()
+                    .any(|a| matches!(a, Action::ToggleGroup(id) if *id == group));
+                if toggled {
+                    assert!(
+                        !actions.iter().any(|a| matches!(a, Action::Select(_))),
+                        "the arrow also selected the row at {at:?}"
+                    );
+                    toggles.push(at);
+                }
+            }
+            selects.push((
+                pos2(300.0, y as f32),
+                click_list(&show, pos2(300.0, y as f32)),
+            ));
+        }
+        assert!(!toggles.is_empty(), "no click toggled the group");
+        let (x0, x1) = toggles.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p.x), hi.max(p.x))
+        });
+        let (y0, y1) = toggles.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p.y), hi.max(p.y))
+        });
+        assert!(
+            x1 - x0 < FOLD_W + 3.0 && y1 - y0 < ROW_H,
+            "{x0}..{x1} {y0}..{y1}"
+        );
+        // Clicking the group's name, in the same row, selects the group instead.
+        let name = pos2(x1 + FOLD_W + 20.0, (y0 + y1) / 2.0);
+        let actions = click_list(&show, name);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Select(id) if *id == group)),
+            "no select at {name:?}"
+        );
+        // All four visible kinds of row can be selected: a, the group, b, c and d.
+        let mut ids: Vec<CueId> = selects
+            .iter()
+            .flat_map(|(_, a)| a.iter())
+            .filter_map(|a| match a {
+                Action::Select(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 5, "every row should be clickable: {ids:?}");
+    }
+
+    #[test]
+    fn collapsed_children_are_not_listed() {
+        let mut show = grouped_show();
+        let kids: Vec<CueId> = show
+            .children(show.cues[1].id)
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        if let CueKind::Group(g) = &mut show.cues[1].kind {
+            g.collapsed = true;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for y in (0..160).step_by(4) {
+            for a in click_list(&show, pos2(200.0, y as f32)) {
+                if let Action::Select(id) = a {
+                    seen.insert(id);
+                }
+            }
+        }
+        assert!(kids.iter().all(|k| !seen.contains(k)), "{seen:?}");
+        assert_eq!(seen.len(), 3, "a, the group and d remain");
     }
 }

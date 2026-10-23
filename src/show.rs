@@ -353,6 +353,10 @@ pub struct Cue {
     pub pre_wait: f64,
     #[serde(default)]
     pub continue_mode: ContinueMode,
+    /// The group this cue belongs to. A group's children follow it
+    /// directly in `Show::cues`, and groups don't nest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<CueId>,
     pub kind: CueKind,
 }
 
@@ -364,6 +368,7 @@ pub enum CueKind {
     Fade(FadeCue),
     Stop(StopCue),
     Wait(WaitCue),
+    Group(GroupCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,6 +379,7 @@ pub enum CueType {
     Fade,
     Stop,
     Wait,
+    Group,
 }
 
 impl CueType {
@@ -385,6 +391,7 @@ impl CueType {
             CueType::Fade => "Fade",
             CueType::Stop => "Stop",
             CueType::Wait => "Wait",
+            CueType::Group => "Group",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -395,6 +402,7 @@ impl CueType {
             CueType::Fade => "📉",
             CueType::Stop => "⏹",
             CueType::Wait => "⏱",
+            CueType::Group => "📁",
         }
     }
 }
@@ -408,6 +416,7 @@ impl CueKind {
             CueKind::Fade(_) => CueType::Fade,
             CueKind::Stop(_) => CueType::Stop,
             CueKind::Wait(_) => CueType::Wait,
+            CueKind::Group(_) => CueType::Group,
         }
     }
     pub fn media(&self) -> Option<&MediaCue> {
@@ -562,6 +571,48 @@ pub struct WaitCue {
     pub duration: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupMode {
+    /// Every child is fired when the group is; a child's pre-wait is its
+    /// offset from the start of the group.
+    #[default]
+    Timeline,
+    /// The children play one after another: each is fired when the one
+    /// before it has finished.
+    Playlist,
+}
+
+impl GroupMode {
+    pub const ALL: [GroupMode; 2] = [GroupMode::Timeline, GroupMode::Playlist];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupMode::Timeline => "Start all together",
+            GroupMode::Playlist => "Play in order",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            GroupMode::Timeline => {
+                "Every child starts with the group; a child's pre-wait is its offset from the start."
+            }
+            GroupMode::Playlist => {
+                "Each child starts when the one before it finishes (after its own pre-wait)."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct GroupCue {
+    #[serde(default)]
+    pub mode: GroupMode,
+    /// Hide the children in the cue list.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
 impl Show {
     pub fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
@@ -691,6 +742,7 @@ impl Show {
                 }),
             ),
             CueType::Wait => ("Wait".into(), CueKind::Wait(WaitCue { duration: 5.0 })),
+            CueType::Group => ("Group".into(), CueKind::Group(GroupCue::default())),
         };
         Cue {
             id,
@@ -699,6 +751,7 @@ impl Show {
             notes: String::new(),
             pre_wait: 0.0,
             continue_mode: ContinueMode::DoNotContinue,
+            parent: None,
             kind,
         }
     }
@@ -725,6 +778,7 @@ impl Show {
                 out.placement = Placement::Display(d);
             }
         }
+        show.normalize_groups();
         // Guard against hand-edited files with stale counters.
         let max_id = show
             .cues
@@ -753,6 +807,302 @@ impl Show {
         let text = serde_json::to_string_pretty(&copy)?;
         std::fs::write(path, text)?;
         Ok(())
+    }
+}
+
+// ----- Groups ---------------------------------------------------------------
+//
+// Cues are one flat list. A group is followed directly by its children (cues
+// whose `parent` is the group), and groups don't nest; together they form a
+// "block" that moves, duplicates and deletes as a unit.
+
+/// Where a new cue goes, and which group it joins.
+pub struct Slot {
+    pub at: usize,
+    pub parent: Option<CueId>,
+}
+
+impl Show {
+    pub fn is_group(&self, idx: usize) -> bool {
+        matches!(self.cues[idx].kind, CueKind::Group(_))
+    }
+
+    /// Index of the top-level cue that `idx` belongs to: its group, or itself.
+    pub fn top_index(&self, idx: usize) -> usize {
+        self.cues[idx]
+            .parent
+            .and_then(|p| self.cue_index(p))
+            .unwrap_or(idx)
+    }
+
+    /// The top-level cue `id` belongs to: its group, or itself.
+    pub fn top_id(&self, id: CueId) -> CueId {
+        self.cue_index(id)
+            .map_or(id, |i| self.cues[self.top_index(i)].id)
+    }
+
+    /// One past the last cue of the block starting at top-level cue `idx`.
+    pub fn block_end(&self, idx: usize) -> usize {
+        let id = self.cues[idx].id;
+        let mut end = idx + 1;
+        if self.is_group(idx) {
+            while end < self.cues.len() && self.cues[end].parent == Some(id) {
+                end += 1;
+            }
+        }
+        end
+    }
+
+    /// The top-level cue after the block containing `idx`.
+    pub fn next_top(&self, idx: usize) -> Option<usize> {
+        let end = self.block_end(self.top_index(idx));
+        (end < self.cues.len()).then_some(end)
+    }
+
+    /// A group's children, in order.
+    pub fn children(&self, group: CueId) -> &[Cue] {
+        match self.cue_index(group) {
+            Some(i) if self.is_group(i) => &self.cues[i + 1..self.block_end(i)],
+            _ => &[],
+        }
+    }
+
+    /// `id` and, for a group, its children.
+    pub fn with_children(&self, id: CueId) -> Vec<CueId> {
+        std::iter::once(id)
+            .chain(self.children(id).iter().map(|c| c.id))
+            .collect()
+    }
+
+    /// Shown in the cue list (not inside a collapsed group).
+    pub fn is_visible(&self, idx: usize) -> bool {
+        self.cues[idx]
+            .parent
+            .and_then(|p| self.cue(p))
+            .is_none_or(|g| !matches!(&g.kind, CueKind::Group(g) if g.collapsed))
+    }
+
+    /// The visible cue `d` rows (+1/-1) from `idx`, if any.
+    pub fn step_visible(&self, idx: usize, d: i32) -> Option<usize> {
+        let mut i = idx as i32;
+        loop {
+            i += d.signum();
+            if i < 0 || i as usize >= self.cues.len() {
+                return None;
+            }
+            if self.is_visible(i as usize) {
+                return Some(i as usize);
+            }
+        }
+    }
+
+    /// Repair the group structure of a loaded show: children must follow
+    /// their group directly, and only groups have children.
+    pub fn normalize_groups(&mut self) {
+        for i in 0..self.cues.len() {
+            let Some(p) = self.cues[i].parent else {
+                continue;
+            };
+            let follows_parent = i > 0
+                && (self.cues[i - 1].id == p || self.cues[i - 1].parent == Some(p))
+                && self
+                    .cue(p)
+                    .is_some_and(|g| matches!(g.kind, CueKind::Group(_)));
+            if !follows_parent || matches!(self.cues[i].kind, CueKind::Group(_)) {
+                self.cues[i].parent = None;
+            }
+        }
+    }
+
+    /// Where a new cue goes when `selected` is selected: after a child, as a
+    /// sibling; into a selected group, at the end of it; otherwise after the cue.
+    pub fn insert_slot(&self, selected: Option<CueId>, new_is_group: bool) -> Slot {
+        let Some(i) = selected.and_then(|id| self.cue_index(id)) else {
+            return Slot {
+                at: self.cues.len(),
+                parent: None,
+            };
+        };
+        if let Some(p) = self.cues[i].parent {
+            return Slot {
+                at: if new_is_group {
+                    self.block_end(self.top_index(i))
+                } else {
+                    i + 1
+                },
+                parent: if new_is_group { None } else { Some(p) },
+            };
+        }
+        if self.is_group(i) && !new_is_group {
+            return Slot {
+                at: self.block_end(i),
+                parent: Some(self.cues[i].id),
+            };
+        }
+        Slot {
+            at: self.block_end(i),
+            parent: None,
+        }
+    }
+
+    /// Insert a cue made by `make_cue` into `slot`.
+    pub fn insert_cue(&mut self, slot: Slot, mut cue: Cue) {
+        cue.parent = slot.parent;
+        self.cues.insert(slot.at.min(self.cues.len()), cue);
+    }
+
+    /// Copy the cue at `idx` (a group is copied with its children) just after
+    /// the original. Returns the copy's id.
+    pub fn duplicate(&mut self, idx: usize) -> CueId {
+        let (range, at) = if self.is_group(idx) {
+            (idx..self.block_end(idx), self.block_end(idx))
+        } else {
+            (idx..idx + 1, idx + 1)
+        };
+        let mut copies: Vec<Cue> = self.cues[range].to_vec();
+        let old_group = copies[0].id;
+        let mut new_group = None;
+        let first_number: i64 = self.next_cue_number().parse().unwrap_or(1);
+        for (n, c) in copies.iter_mut().enumerate() {
+            c.id = CueId(self.alloc_id());
+            c.number = (first_number + n as i64).to_string();
+            if n == 0 && matches!(c.kind, CueKind::Group(_)) {
+                new_group = Some(c.id);
+            } else if c.parent == Some(old_group)
+                && let Some(g) = new_group
+            {
+                c.parent = Some(g);
+            }
+        }
+        let first = copies[0].id;
+        for (n, c) in copies.into_iter().enumerate() {
+            self.cues.insert(at + n, c);
+        }
+        first
+    }
+
+    /// Remove the cue at `idx`; a group goes with its children. Returns the
+    /// ids removed.
+    pub fn delete(&mut self, idx: usize) -> Vec<CueId> {
+        let end = if self.is_group(idx) {
+            self.block_end(idx)
+        } else {
+            idx + 1
+        };
+        self.cues.drain(idx..end).map(|c| c.id).collect()
+    }
+
+    /// Wrap the (top-level, non-group) cue at `idx` in a new group that takes
+    /// over its pre-wait and continue mode, so timing is unchanged.
+    pub fn group_cue(&mut self, idx: usize) -> Option<CueId> {
+        if self.is_group(idx) || self.cues[idx].parent.is_some() {
+            return None;
+        }
+        let mut group = self.make_cue(CueType::Group, None, idx);
+        group.name = format!("Group of {}", self.cues[idx].name);
+        group.pre_wait = std::mem::take(&mut self.cues[idx].pre_wait);
+        group.continue_mode = std::mem::take(&mut self.cues[idx].continue_mode);
+        let gid = group.id;
+        self.cues[idx].parent = Some(gid);
+        self.cues.insert(idx, group);
+        Some(gid)
+    }
+
+    /// Dissolve the group at `idx`; its children become top-level cues.
+    pub fn ungroup(&mut self, idx: usize) {
+        if !self.is_group(idx) {
+            return;
+        }
+        let end = self.block_end(idx);
+        for c in &mut self.cues[idx + 1..end] {
+            c.parent = None;
+        }
+        self.cues.remove(idx);
+    }
+
+    /// Move the top-level, non-group cue at `idx` into the end of `group`.
+    pub fn move_into(&mut self, idx: usize, group: CueId) -> bool {
+        let Some(g) = self.cue_index(group) else {
+            return false;
+        };
+        if !self.is_group(g) || self.is_group(idx) || self.cues[idx].parent.is_some() {
+            return false;
+        }
+        let mut cue = self.cues.remove(idx);
+        cue.parent = Some(group);
+        let g = self.cue_index(group).unwrap_or(g);
+        let at = self.block_end(g);
+        self.cues.insert(at, cue);
+        true
+    }
+
+    /// Move the child at `idx` out to just after its group.
+    pub fn move_out(&mut self, idx: usize) -> bool {
+        let Some(p) = self.cues[idx].parent else {
+            return false;
+        };
+        let mut cue = self.cues.remove(idx);
+        cue.parent = None;
+        let at = self.cue_index(p).map_or(idx, |g| self.block_end(g));
+        self.cues.insert(at, cue);
+        true
+    }
+
+    /// Move the cue at `idx` one place up (-1) or down (+1) the list. A group
+    /// moves with its children; a top-level cue steps over a whole group; a
+    /// child swaps with its siblings and leaves the group from either end.
+    /// Returns the cue's new index.
+    pub fn move_cue(&mut self, idx: usize, d: i32) -> Option<usize> {
+        let up = d < 0;
+        if let Some(p) = self.cues[idx].parent {
+            let first = idx > 0 && self.cues[idx - 1].id == p;
+            let last = self.cues.get(idx + 1).is_none_or(|c| c.parent != Some(p));
+            return match (up, first, last) {
+                (true, true, _) => {
+                    let g = self.cue_index(p)?;
+                    let mut cue = self.cues.remove(idx);
+                    cue.parent = None;
+                    self.cues.insert(g, cue);
+                    Some(g)
+                }
+                (false, _, true) => {
+                    self.cues[idx].parent = None;
+                    Some(idx)
+                }
+                (true, false, _) => {
+                    self.cues.swap(idx, idx - 1);
+                    Some(idx - 1)
+                }
+                (false, _, false) => {
+                    self.cues.swap(idx, idx + 1);
+                    Some(idx + 1)
+                }
+            };
+        }
+        let end = self.block_end(idx);
+        if up {
+            if idx == 0 {
+                return None;
+            }
+            let prev = self.top_index(idx - 1);
+            let block: Vec<Cue> = self.cues.drain(idx..end).collect();
+            for (n, c) in block.into_iter().enumerate() {
+                self.cues.insert(prev + n, c);
+            }
+            Some(prev)
+        } else {
+            if end >= self.cues.len() {
+                return None;
+            }
+            let next_end = self.block_end(end);
+            let len = end - idx;
+            let block: Vec<Cue> = self.cues.drain(idx..end).collect();
+            let at = next_end - len;
+            for (n, c) in block.into_iter().enumerate() {
+                self.cues.insert(at + n, c);
+            }
+            Some(at)
+        }
     }
 }
 
@@ -960,5 +1310,232 @@ mod tests {
             CueKind::Fade(f) => assert_eq!(f.target, Some(vid)),
             _ => unreachable!(),
         }
+    }
+
+    /// A show of wait cues named by `names`.
+    fn named(names: &str) -> Show {
+        let mut show = Show::default();
+        for n in names.chars() {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.name = n.to_string();
+            show.cues.push(c);
+        }
+        show
+    }
+
+    /// The list as text: names, with children in brackets after their group.
+    fn layout(show: &Show) -> String {
+        show.cues
+            .iter()
+            .map(|c| {
+                let n = c.name.as_str();
+                match (&c.kind, c.parent) {
+                    (CueKind::Group(_), _) => format!("G{n}:"),
+                    (_, Some(_)) => format!("[{n}]"),
+                    _ => n.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// `abcd` with b and c grouped into one group.
+    fn grouped() -> Show {
+        let mut show = named("abcd");
+        let g = show.group_cue(1).unwrap();
+        let gi = show.cue_index(g).unwrap();
+        show.cues[gi].name = "1".into();
+        assert!(show.move_into(3, g));
+        show
+    }
+
+    #[test]
+    fn grouping_wraps_a_cue_and_keeps_its_timing() {
+        let mut show = named("abc");
+        show.cues[1].pre_wait = 2.0;
+        show.cues[1].continue_mode = ContinueMode::AutoFollow;
+        let g = show.group_cue(1).unwrap();
+        let gi = show.cue_index(g).unwrap();
+        assert_eq!(layout(&show), "a GGroup of b: [b] c");
+        assert_eq!(show.cues[gi].pre_wait, 2.0);
+        assert_eq!(show.cues[gi].continue_mode, ContinueMode::AutoFollow);
+        assert_eq!(show.cues[gi + 1].pre_wait, 0.0);
+        assert_eq!(show.cues[gi + 1].continue_mode, ContinueMode::DoNotContinue);
+        // Groups don't nest, and a child can't be wrapped again.
+        assert!(show.group_cue(gi).is_none());
+        assert!(show.group_cue(gi + 1).is_none());
+    }
+
+    #[test]
+    fn blocks_and_navigation() {
+        let show = grouped();
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+        assert_eq!(show.block_end(1), 4);
+        assert_eq!(show.block_end(0), 1);
+        assert_eq!(show.top_index(3), 1);
+        assert_eq!(show.top_index(4), 4);
+        assert_eq!(show.top_id(show.cues[3].id), show.cues[1].id);
+        assert_eq!(show.next_top(2), Some(4));
+        assert_eq!(show.next_top(4), None);
+        assert_eq!(show.children(show.cues[1].id).len(), 2);
+        assert_eq!(show.with_children(show.cues[1].id).len(), 3);
+        assert!(show.children(show.cues[0].id).is_empty());
+    }
+
+    #[test]
+    fn collapsed_children_are_skipped_when_stepping() {
+        let mut show = grouped();
+        assert_eq!(show.step_visible(1, 1), Some(2));
+        if let CueKind::Group(g) = &mut show.cues[1].kind {
+            g.collapsed = true;
+        }
+        assert!(!show.is_visible(2));
+        assert_eq!(show.step_visible(1, 1), Some(4));
+        assert_eq!(show.step_visible(4, -1), Some(1));
+        assert_eq!(show.step_visible(4, 1), None);
+    }
+
+    #[test]
+    fn new_cues_join_the_selected_group() {
+        let show = grouped();
+        let ids: Vec<CueId> = show.cues.iter().map(|c| c.id).collect();
+        let (a, g, b, c, d) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+        let slot = |sel, group| {
+            let s = show.insert_slot(sel, group);
+            (s.at, s.parent)
+        };
+        assert_eq!(slot(None, false), (5, None));
+        assert_eq!(slot(Some(a), false), (1, None));
+        assert_eq!(slot(Some(d), false), (5, None));
+        // Selecting a group adds to the end of it; a new group goes after it.
+        assert_eq!(slot(Some(g), false), (4, Some(g)));
+        assert_eq!(slot(Some(g), true), (4, None));
+        // After a child: next to it, in its group; a new group goes after the group.
+        assert_eq!(slot(Some(b), false), (3, Some(g)));
+        assert_eq!(slot(Some(c), true), (4, None));
+    }
+
+    #[test]
+    fn moving_top_level_cues_and_groups() {
+        let mut show = grouped();
+        // A top-level cue steps over a whole group.
+        assert_eq!(show.move_cue(4, -1), Some(1));
+        assert_eq!(layout(&show), "a d G1: [b] [c]");
+        assert_eq!(show.move_cue(1, 1), Some(4));
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+        // A group moves with its children.
+        assert_eq!(show.move_cue(1, -1), Some(0));
+        assert_eq!(layout(&show), "G1: [b] [c] a d");
+        assert_eq!(show.move_cue(0, 1), Some(1));
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+        // The ends of the list stop.
+        assert_eq!(show.move_cue(0, -1), None);
+        assert_eq!(show.move_cue(4, 1), None);
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+    }
+
+    #[test]
+    fn moving_children_within_and_out_of_a_group() {
+        let mut show = grouped();
+        assert_eq!(show.move_cue(2, 1), Some(3));
+        assert_eq!(layout(&show), "a G1: [c] [b] d");
+        assert_eq!(show.move_cue(3, -1), Some(2));
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+        // Up from the first child leaves above the group; down from the last, below it.
+        assert_eq!(show.move_cue(2, -1), Some(1));
+        assert_eq!(layout(&show), "a b G1: [c] d");
+        let mut show = grouped();
+        assert_eq!(show.move_cue(3, 1), Some(3));
+        assert_eq!(layout(&show), "a G1: [b] c d");
+    }
+
+    #[test]
+    fn moving_cues_into_and_out_of_groups() {
+        let mut show = grouped();
+        let g = show.cues[1].id;
+        assert!(show.move_out(2));
+        assert_eq!(layout(&show), "a G1: [c] b d");
+        assert!(!show.move_out(3), "already top-level");
+        assert!(show.move_into(0, g));
+        assert_eq!(layout(&show), "G1: [c] [a] b d");
+        assert!(!show.move_into(0, g), "a group can't go into a group");
+        let c = show.cues[1].id;
+        assert!(!show.move_into(1, c), "target must be a group");
+        assert!(!show.move_into(1, g), "already a child");
+    }
+
+    #[test]
+    fn ungrouping_frees_the_children() {
+        let mut show = grouped();
+        show.ungroup(1);
+        assert_eq!(layout(&show), "a b c d");
+        assert!(show.cues.iter().all(|c| c.parent.is_none()));
+    }
+
+    #[test]
+    fn duplicating_and_deleting_blocks() {
+        let mut show = grouped();
+        let first = show.duplicate(1);
+        assert_eq!(layout(&show), "a G1: [b] [c] G1: [b] [c] d");
+        let copy = show.cue_index(first).unwrap();
+        assert_eq!(show.children(first).len(), 2);
+        assert!(show.children(first).iter().all(|c| c.parent == Some(first)));
+        let mut ids: Vec<_> = show.cues.iter().map(|c| c.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), show.cues.len(), "ids must stay unique");
+        let mut nums: Vec<_> = show.cues.iter().map(|c| c.number.clone()).collect();
+        nums.sort();
+        nums.dedup();
+        assert_eq!(nums.len(), show.cues.len(), "cue numbers must stay unique");
+        assert_eq!(show.delete(copy).len(), 3);
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+
+        // A child copies next to itself, in the same group.
+        show.duplicate(2);
+        assert_eq!(layout(&show), "a G1: [b] [b] [c] d");
+        assert_eq!(show.delete(2).len(), 1);
+        assert_eq!(layout(&show), "a G1: [b] [c] d");
+    }
+
+    #[test]
+    fn load_repairs_broken_groups() {
+        let mut show = grouped();
+        let g = show.cues[1].id;
+        show.cues[0].parent = Some(g); // before its group
+        show.cues[4].parent = Some(show.cues[0].id); // parent isn't a group
+        show.cues[3].parent = Some(CueId(9999)); // parent doesn't exist
+        show.normalize_groups();
+        assert_eq!(layout(&show), "a G1: [b] c d");
+        // A group inside a group is flattened.
+        let mut show = grouped();
+        let g = show.cues[1].id;
+        let mut inner = show.make_cue(CueType::Group, None, 3);
+        inner.parent = Some(g);
+        show.cues.insert(3, inner);
+        show.normalize_groups();
+        assert!(show.cues[3].parent.is_none());
+    }
+
+    #[test]
+    fn groups_roundtrip_through_the_show_file() {
+        let dir = std::env::temp_dir().join("newq_test_groups");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut show = grouped();
+        if let CueKind::Group(g) = &mut show.cues[1].kind {
+            g.mode = GroupMode::Playlist;
+            g.collapsed = true;
+        }
+        let path = dir.join("groups.newq");
+        show.save(&path).unwrap();
+        let loaded = Show::load(&path).unwrap();
+        assert_eq!(layout(&loaded), "a G1: [b] [c] d");
+        match &loaded.cues[1].kind {
+            CueKind::Group(g) => assert_eq!((g.mode, g.collapsed), (GroupMode::Playlist, true)),
+            _ => unreachable!(),
+        }
+        // Top-level cues don't carry a parent field, so old shows are unchanged.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"parent\"").count(), 2);
     }
 }
