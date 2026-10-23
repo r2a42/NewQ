@@ -2195,7 +2195,7 @@ fn geometry_inspector(ui: &mut Ui, t: &mut LayerTransform) {
             ui.label("Crop");
             ui.horizontal(|ui| {
                 for (side, name) in ["left", "top", "right", "bottom"].iter().enumerate() {
-                    ui.label(RichText::new(&name[..1].to_uppercase()).weak());
+                    ui.label(RichText::new(name[..1].to_uppercase()).weak());
                     percent(ui, &mut t.crop[side], 0.2)
                         .on_hover_text(format!("Cut from the {name}"));
                     t.crop[side] = t.crop[side].clamp(0.0, 0.95);
