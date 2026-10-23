@@ -101,6 +101,15 @@ pub struct MatteState {
     fired_at: f64,
 }
 
+/// A running group. Its children are separate active cues; the group is
+/// the thing that stays active until they have all finished.
+pub struct GroupState {
+    mode: GroupMode,
+    children: Vec<CueId>,
+    /// Playlist: index of the next child to fire.
+    next: usize,
+}
+
 pub enum ActiveKind {
     Video(Box<VideoState>),
     Image(ImageState),
@@ -108,6 +117,7 @@ pub enum ActiveKind {
     Matte(MatteState),
     Fade,
     Wait,
+    Group(GroupState),
 }
 
 /// What a cue does to the rest of its output once its first frame is ready.
@@ -247,6 +257,24 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// An engine with no ffmpeg and no audio device, for tests.
+    #[cfg(test)]
+    pub fn for_tests() -> Engine {
+        Engine {
+            ff: None,
+            audio: AudioOut::disabled(),
+            active: Vec::new(),
+            pending: Vec::new(),
+            playhead: None,
+            paused: false,
+            messages: VecDeque::new(),
+            output_sizes: HashMap::new(),
+            probe: ProbeCache::default(),
+            prepared: Vec::new(),
+            next_instance: 1,
+        }
+    }
+
     pub fn new() -> Engine {
         let ff = Ffmpeg::locate();
         match &ff {
@@ -286,7 +314,7 @@ impl Engine {
     }
 
     /// Duration of a cue's action, if it can be known. `Some(None)` = infinite.
-    pub fn cue_duration(&mut self, cue: &Cue) -> Option<Option<f64>> {
+    pub fn cue_duration(&mut self, show: &Show, cue: &Cue) -> Option<Option<f64>> {
         match &cue.kind {
             CueKind::Video(m) | CueKind::Audio(m) => {
                 let total = match self.probe_state(&m.file) {
@@ -303,6 +331,21 @@ impl Engine {
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Stop(_) => Some(Some(0.0)),
+            CueKind::Group(g) => {
+                // Timeline: until the last child ends. Playlist: all of them in turn.
+                let mut total = 0.0_f64;
+                for child in show.children(cue.id) {
+                    let Some(d) = self.cue_duration(show, child)? else {
+                        return Some(None);
+                    };
+                    let t = child.pre_wait + d;
+                    total = match g.mode {
+                        GroupMode::Timeline => total.max(t),
+                        GroupMode::Playlist => total + t,
+                    };
+                }
+                Some(Some(total))
+            }
         }
     }
 
@@ -330,17 +373,22 @@ impl Engine {
 
     /// Fire the cue at the playhead and move the playhead past its continue chain.
     pub fn go(&mut self, show: &Show) {
-        let Some(idx) = self.playhead.and_then(|id| show.cue_index(id)) else {
+        let Some(idx) = self
+            .playhead
+            .and_then(|id| show.cue_index(id))
+            .map(|i| show.top_index(i))
+        else {
             self.log("GO: no cue at the playhead");
             return;
         };
+        // Children never take the playhead: it moves over whole groups.
         let mut end = idx;
-        while end + 1 < show.cues.len()
-            && show.cues[end].continue_mode != ContinueMode::DoNotContinue
+        while show.cues[end].continue_mode != ContinueMode::DoNotContinue
+            && let Some(next) = show.next_top(end)
         {
-            end += 1;
+            end = next;
         }
-        self.playhead = show.cues.get(end + 1).map(|c| c.id);
+        self.playhead = show.next_top(end).map(|i| show.cues[i].id);
         log::info!("GO {} ({})", show.cues[idx].number, show.cues[idx].name);
         self.fire(show, show.cues[idx].id);
     }
@@ -362,13 +410,17 @@ impl Engine {
         }
     }
 
+    /// Fire the cue after `after` in the list. A group's children don't chain:
+    /// their group decides when each one starts.
     fn fire_next(&mut self, show: &Show, after: CueId) {
-        if let Some(next) = show
-            .cue_index(after)
-            .and_then(|i| show.cues.get(i + 1))
-            .map(|c| c.id)
-        {
-            self.fire(show, next);
+        let Some(i) = show.cue_index(after) else {
+            return;
+        };
+        if show.cues[i].parent.is_some() {
+            return;
+        }
+        if let Some(next) = show.next_top(i) {
+            self.fire(show, show.cues[next].id);
         }
     }
 
@@ -420,7 +472,23 @@ impl Engine {
         }
     }
 
+    /// The children of a running group instance.
+    fn group_children(&self, instance: u64) -> Option<Vec<CueId>> {
+        self.active.iter().find_map(|a| match &a.kind {
+            ActiveKind::Group(g) if a.instance == instance => Some(g.children.clone()),
+            _ => None,
+        })
+    }
+
     pub fn stop_instance(&mut self, instance: u64, fade: f64) {
+        // Stopping a group stops its children; the group itself just ends.
+        if let Some(kids) = self.group_children(instance) {
+            self.active.retain(|a| a.instance != instance);
+            for k in kids {
+                self.stop_cue(k, fade);
+            }
+            return;
+        }
         if fade <= 0.0 {
             self.active.retain(|a| a.instance != instance);
         } else if let Some(a) = self.active.iter_mut().find(|a| a.instance == instance) {
@@ -430,6 +498,13 @@ impl Engine {
 
     /// Fade a playing instance out using its cue's own fade-out time.
     pub fn fade_out_instance(&mut self, show: &Show, instance: u64) {
+        if let Some(kids) = self.group_children(instance) {
+            self.active.retain(|a| a.instance != instance);
+            for k in kids {
+                self.fade_out_cue(show, k);
+            }
+            return;
+        }
         let fade = self
             .active
             .iter()
@@ -723,8 +798,10 @@ impl Engine {
                 active.kind = ActiveKind::Fade;
                 active.duration = Some(f.duration);
                 let mut hit = false;
+                // A group as target means its children.
+                let targets = f.target.map(|t| show.with_children(t)).unwrap_or_default();
                 for t in &mut self.active {
-                    if Some(t.cue_id) != f.target || t.stopping {
+                    if !targets.contains(&t.cue_id) || t.stopping {
                         continue;
                     }
                     hit = true;
@@ -773,6 +850,26 @@ impl Engine {
             CueKind::Wait(w) => {
                 active.kind = ActiveKind::Wait;
                 active.duration = Some(w.duration);
+            }
+            CueKind::Group(g) => {
+                let children: Vec<CueId> = show.children(id).iter().map(|c| c.id).collect();
+                if children.is_empty() {
+                    ok = false; // nothing to wait for
+                } else {
+                    active.duration = self.cue_duration(show, &cue).flatten();
+                    let first = match g.mode {
+                        GroupMode::Timeline => children.len(),
+                        GroupMode::Playlist => 1,
+                    };
+                    for &child in &children[..first] {
+                        self.fire(show, child);
+                    }
+                    active.kind = ActiveKind::Group(GroupState {
+                        mode: g.mode,
+                        children,
+                        next: first,
+                    });
+                }
             }
         }
         if ok {
@@ -855,6 +952,11 @@ impl Engine {
         }
 
         let paused = self.paused;
+        let done_groups = if paused {
+            Vec::new()
+        } else {
+            self.advance_groups(show)
+        };
         let mut follow = Vec::new();
         let mut messages = Vec::new();
         let mut entries = Vec::new();
@@ -967,6 +1069,12 @@ impl Engine {
                         completed = true;
                     }
                 }
+                ActiveKind::Group(_) => {
+                    if !paused {
+                        a.elapsed += dt;
+                    }
+                    completed = done_groups.contains(&a.instance);
+                }
             }
 
             if a.started && !paused {
@@ -1038,6 +1146,44 @@ impl Engine {
         self.update_preload(show);
     }
 
+    /// A cue that is waiting out a pre-wait or still playing. A video that is
+    /// holding its last frame has finished.
+    fn is_running(&self, id: CueId) -> bool {
+        self.pending.iter().any(|p| p.cue_id == id)
+            || self.active.iter().any(|a| a.cue_id == id && !a.held)
+    }
+
+    /// Fire the next child of every playlist whose current child has finished.
+    /// Returns the groups (instances) whose children have all finished.
+    fn advance_groups(&mut self, show: &Show) -> Vec<u64> {
+        let mut done = Vec::new();
+        let mut to_fire = Vec::new();
+        for a in &self.active {
+            let ActiveKind::Group(g) = &a.kind else {
+                continue;
+            };
+            if a.stopping || g.children.iter().any(|c| self.is_running(*c)) {
+                continue;
+            }
+            match g.children.get(g.next) {
+                Some(&child) if g.mode == GroupMode::Playlist => to_fire.push((a.instance, child)),
+                _ => done.push(a.instance),
+            }
+        }
+        for (instance, child) in to_fire {
+            if let Some(ActiveKind::Group(g)) = self
+                .active
+                .iter_mut()
+                .find(|a| a.instance == instance)
+                .map(|a| &mut a.kind)
+            {
+                g.next += 1;
+            }
+            self.fire(show, child);
+        }
+        done
+    }
+
     /// Keep the next cue(s) at the playhead decoded and ready, so GO is instant.
     fn update_preload(&mut self, show: &Show) {
         // Cues that have already been fired but not started yet: in a
@@ -1052,26 +1198,54 @@ impl Engine {
             // The cue an auto-follow will fire when this one ends.
             if !a.followed
                 && let Some(i) = show.cue_index(a.cue_id)
+                && show.cues[i].parent.is_none()
                 && show.cues[i].continue_mode == ContinueMode::AutoFollow
-                && let Some(next) = show.cues.get(i + 1)
-                && next.kind.media().is_some()
+                && let Some(next) = show.next_top(i)
+                && show.cues[next].kind.media().is_some()
             {
-                wanted.push(next.id);
+                wanted.push(show.cues[next].id);
+            }
+            // The child a playlist will play next.
+            if let ActiveKind::Group(g) = &a.kind
+                && g.mode == GroupMode::Playlist
+                && let Some(&next) = g.children.get(g.next)
+                && show.cue(next).is_some_and(|c| c.kind.media().is_some())
+            {
+                wanted.push(next);
             }
         }
-        if let Some(mut idx) = self.playhead.and_then(|p| show.cue_index(p)) {
+        if let Some(mut idx) = self
+            .playhead
+            .and_then(|p| show.cue_index(p))
+            .map(|i| show.top_index(i))
+        {
             loop {
                 let cue = &show.cues[idx];
                 if cue.kind.media().is_some() {
                     wanted.push(cue.id);
                 }
-                if cue.continue_mode == ContinueMode::DoNotContinue
-                    || idx + 1 >= show.cues.len()
-                    || wanted.len() >= MAX_PRELOAD
-                {
-                    break;
+                // A group at the playhead: the children that start with it.
+                if let CueKind::Group(g) = &cue.kind {
+                    let mode = g.mode;
+                    for (n, child) in show.children(cue.id).iter().enumerate() {
+                        if mode == GroupMode::Playlist && n > 0 {
+                            break;
+                        }
+                        if child.kind.media().is_some() && wanted.len() < MAX_PRELOAD {
+                            wanted.push(child.id);
+                        }
+                    }
                 }
-                idx += 1;
+                let next = show.next_top(idx);
+                match next {
+                    Some(n)
+                        if cue.continue_mode != ContinueMode::DoNotContinue
+                            && wanted.len() < MAX_PRELOAD =>
+                    {
+                        idx = n
+                    }
+                    _ => break,
+                }
             }
         }
         let sigs: Vec<(CueId, Option<PrepSig>)> = wanted
@@ -1153,19 +1327,7 @@ mod tests {
     use super::*;
 
     fn engine_without_media() -> Engine {
-        Engine {
-            ff: None,
-            audio: AudioOut::disabled(),
-            active: Vec::new(),
-            pending: Vec::new(),
-            playhead: None,
-            paused: false,
-            messages: VecDeque::new(),
-            output_sizes: HashMap::new(),
-            probe: ProbeCache::default(),
-            prepared: Vec::new(),
-            next_instance: 1,
-        }
+        Engine::for_tests()
     }
 
     fn wait_cue(show: &mut Show, secs: f64, mode: ContinueMode) -> CueId {
@@ -1236,6 +1398,189 @@ mod tests {
         assert!(matches!(e.status(a), CueStatus::Playing { elapsed, .. } if elapsed == 0.0));
         e.panic(&show); // unpauses; wait cues stop immediately
         assert!(!e.is_active());
+    }
+
+    // ----- Groups ---------------------------------------------------------------
+
+    /// A group of wait cues lasting `secs` each. Returns the group and its children.
+    fn group(show: &mut Show, mode: GroupMode, secs: &[f64]) -> (CueId, Vec<CueId>) {
+        let mut g = show.make_cue(CueType::Group, None, show.cues.len());
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = mode;
+        }
+        let gid = g.id;
+        show.cues.push(g);
+        let kids = secs
+            .iter()
+            .map(|s| {
+                let id = wait_cue(show, *s, ContinueMode::DoNotContinue);
+                let i = show.cue_index(id).unwrap();
+                show.cues[i].parent = Some(gid);
+                id
+            })
+            .collect();
+        (gid, kids)
+    }
+
+    impl Engine {
+        fn go_again(&mut self, show: &Show, id: CueId) {
+            self.playhead = Some(id);
+            self.go(show);
+        }
+    }
+
+    fn playing(e: &Engine, id: CueId) -> bool {
+        matches!(e.status(id), CueStatus::Playing { .. })
+    }
+
+    fn idle(e: &Engine, id: CueId) -> bool {
+        matches!(e.status(id), CueStatus::Idle)
+    }
+
+    #[test]
+    fn timeline_group_starts_every_child_and_ends_with_the_last() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[1.0, 3.0]);
+        show.cues[0].continue_mode = ContinueMode::AutoFollow;
+        let after = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(playing(&e, g) && playing(&e, kids[0]) && playing(&e, kids[1]));
+        // The group is auto-follow, so GO chains on to the cue after it, not into its children.
+        assert_eq!(e.playhead, None);
+        assert!(idle(&e, after));
+
+        e.tick(&show, 1.1);
+        assert!(idle(&e, kids[0]) && playing(&e, kids[1]) && playing(&e, g));
+        e.tick(&show, 2.0);
+        assert!(idle(&e, kids[1]));
+        assert!(playing(&e, g), "the group notices on the next tick");
+        e.tick(&show, 0.01);
+        assert!(idle(&e, g));
+        assert!(
+            playing(&e, after),
+            "auto-follow fires once the whole group is done"
+        );
+    }
+
+    #[test]
+    fn timeline_children_pre_wait_is_their_offset() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[1.0, 3.0]);
+        show.cues[2].pre_wait = 2.0;
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(playing(&e, kids[0]));
+        assert!(matches!(e.status(kids[1]), CueStatus::PreWait { .. }));
+        e.tick(&show, 1.1);
+        assert!(
+            idle(&e, kids[0]) && playing(&e, g),
+            "still waiting for the second child"
+        );
+        e.tick(&show, 1.0);
+        assert!(playing(&e, kids[1]));
+        e.tick(&show, 3.1);
+        e.tick(&show, 0.01);
+        assert!(!e.is_active());
+    }
+
+    #[test]
+    fn playlist_group_plays_children_in_order() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Playlist, &[1.0, 1.0, 1.0]);
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(playing(&e, kids[0]) && idle(&e, kids[1]) && idle(&e, kids[2]));
+        for n in 1..3 {
+            e.tick(&show, 1.1); // child n-1 ends
+            e.tick(&show, 0.01); // the group starts the next
+            assert!(idle(&e, kids[n - 1]));
+            assert!(playing(&e, kids[n]), "child {n} should be playing");
+        }
+        e.tick(&show, 1.1);
+        e.tick(&show, 0.01);
+        assert!(!e.is_active(), "the group ends with its last child");
+    }
+
+    #[test]
+    fn group_durations_add_up_by_mode() {
+        let mut show = Show::default();
+        let (t, _) = group(&mut show, GroupMode::Timeline, &[1.0, 3.0]);
+        let (p, _) = group(&mut show, GroupMode::Playlist, &[1.0, 3.0]);
+        let first_child = show.cue_index(p).unwrap() + 1;
+        show.cues[first_child].pre_wait = 0.5;
+        let (empty, _) = group(&mut show, GroupMode::Timeline, &[]);
+        let mut e = engine_without_media();
+        let dur = |e: &mut Engine, id: CueId| e.cue_duration(&show, show.cue(id).unwrap());
+        assert_eq!(dur(&mut e, t), Some(Some(3.0)));
+        assert_eq!(dur(&mut e, p), Some(Some(4.5)));
+        assert_eq!(dur(&mut e, empty), Some(Some(0.0)));
+    }
+
+    #[test]
+    fn stopping_a_group_stops_its_children() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[5.0, 5.0]);
+        show.cues[2].pre_wait = 2.0;
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        e.stop_cue(g, 0.0);
+        assert!(idle(&e, g) && idle(&e, kids[0]) && idle(&e, kids[1]));
+        assert!(!e.is_active(), "the pending child is gone too");
+
+        // The same from the Active panel's Stop button.
+        e.go_again(&show, g);
+        let instance = e.active.iter().find(|a| a.cue_id == g).unwrap().instance;
+        e.stop_instance(instance, 0.0);
+        assert!(!e.is_active());
+    }
+
+    #[test]
+    fn playhead_on_a_child_fires_the_whole_group() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[1.0, 1.0]);
+        let after = wait_cue(&mut show, 1.0, ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(kids[1]);
+        e.go(&show);
+        assert!(playing(&e, g) && playing(&e, kids[0]) && playing(&e, kids[1]));
+        assert_eq!(e.playhead, Some(after));
+    }
+
+    #[test]
+    fn an_empty_group_still_continues() {
+        let mut show = Show::default();
+        let (g, _) = group(&mut show, GroupMode::Playlist, &[]);
+        show.cues[0].continue_mode = ContinueMode::AutoFollow;
+        let after = wait_cue(&mut show, 1.0, ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(playing(&e, after));
+    }
+
+    #[test]
+    fn children_do_not_chain_on_their_own() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[1.0, 1.0]);
+        // Stale continue modes on children (e.g. a cue dragged in) are ignored.
+        show.cues[1].continue_mode = ContinueMode::AutoFollow;
+        show.cues[2].continue_mode = ContinueMode::AutoContinue;
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        e.tick(&show, 0.01);
+        assert!(playing(&e, kids[0]) && playing(&e, kids[1]));
+        assert_eq!(e.active.len(), 3, "group and two children, nothing extra");
+        e.tick(&show, 1.1);
+        assert!(
+            idle(&e, kids[0]) && idle(&e, kids[1]),
+            "no child fired another"
+        );
     }
 
     // ----- Transitions, driven with real ffmpeg on a still image -------------

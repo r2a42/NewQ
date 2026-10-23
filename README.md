@@ -18,7 +18,7 @@ includes FFmpeg, so there's nothing else to install.
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
   finishes).
-- **Cue types:** Video, Image, Audio, Fade, Stop and Wait.
+- **Cue types:** Video, Image, Audio, Fade, Stop, Wait and Group.
 - **Built-in transitions on every video/image cue:** no extra cues needed to
   change what's on screen. Each cue chooses how it enters its output:
   - **Crossfade** (the default for new cues): fades in while everything else on
@@ -70,6 +70,17 @@ includes FFmpeg, so there's nothing else to install.
   decoding before the current one ends, so the join has no gap and sound and
   picture stay in step. With no out point, the loop runs from the in point to
   the end of the file.
+- **Group cues:** a group holds other cues and is fired with one GO. *Start all
+  together* fires every child at once (a child's pre-wait is its offset from the
+  start, so a group is a small timeline); *Play in order* fires each child when
+  the one before it finishes. The group is running until all of its children
+  have finished, so auto-follow after a group waits for the last child, and
+  stopping or fading a group (or a Fade/Stop cue aimed at it) stops or fades its
+  children. The playhead moves over a whole group at a time, and groups can be
+  collapsed in the cue list. Adding a cue while a group is selected puts it
+  inside; *Wrap in group*, *Move into group* and *Move out of group* (cue
+  menu or right-click) move cues in and out, and Ctrl+↑/↓ moves a cue within or
+  out of its group. Groups don't nest.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
@@ -201,7 +212,7 @@ space like a hardware video mixer.
 - Audio goes to the system default device, as stereo.
 - Video alpha channels (ProRes 4444, VP9 alpha) aren't supported yet; images
   with alpha are.
-- No timecode/MIDI/OSC triggering, groups, or cue carts yet.
+- No timecode/MIDI/OSC triggering or cue carts yet.
 - Very large files (4K60) push a lot of raw video through a pipe; NewQ
   decodes at the output window's resolution to keep this down.
 - Fullscreen output on a second display has been tested only on a single-monitor
