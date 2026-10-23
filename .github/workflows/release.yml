@@ -3,6 +3,12 @@ name: Release
 # Push a tag like `v0.1.0` to build binaries for Windows, Linux and macOS and
 # publish them as a GitHub Release. Run it by hand with a tag to rebuild that
 # release, or with no tag for a dry run that only uploads workflow artifacts.
+#
+# A tagged release is built as a draft: `prepare` makes it, each build adds its
+# download to it, and `publish` adds the checksums and releases it, so a failed
+# build never leaves a half-finished public release. Downloads go on the release
+# itself rather than through Actions artifact storage, which has a small quota
+# and can fill up.
 on:
   push:
     tags: ["v*"]
@@ -23,7 +29,29 @@ env:
   FFMPEG_VERSION: "9.0"
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Create the draft release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
+          # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
+          pre=""
+          case "$TAG" in *-*) pre="--prerelease" ;; esac
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "A release for $TAG already exists; adding to it."
+          else
+            gh release create "$TAG" --draft --title "NewQ $TAG" --notes-file notes.md $pre
+          fi
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -86,11 +114,22 @@ jobs:
           export FFMPEG_MACOS_DIR="$PWD/ffmpeg-macos"
           bash scripts/package_release.sh "${{ matrix.platform }}" "$LABEL"
 
+      # A tagged release goes straight onto the draft release made by `prepare`.
+      - name: Add to the release
+        if: env.TAG != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+      # A dry run has no release, so keep the packages briefly as an artifact.
       - uses: actions/upload-artifact@v4
+        if: env.TAG == ''
         with:
           name: ${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   publish:
     needs: build
@@ -100,23 +139,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir dist
+          gh release download "$TAG" --dir dist --clobber
+          rm -f dist/SHA256SUMS.txt
           ls -l dist
           (cd dist && sha256sum * > SHA256SUMS.txt)
+          gh release upload "$TAG" dist/SHA256SUMS.txt --clobber
           sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
           # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" --notes-file notes.md $pre
-          else
-            gh release create "$TAG" dist/* --title "NewQ $TAG" --notes-file notes.md $pre
-          fi
+          gh release edit "$TAG" --draft=false --notes-file notes.md $pre
