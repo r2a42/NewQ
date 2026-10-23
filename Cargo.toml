@@ -9,6 +9,7 @@ keywords = ["theatre", "video", "playback", "cue", "show-control"]
 categories = ["multimedia::video"]
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 cpal = "0.18.2"

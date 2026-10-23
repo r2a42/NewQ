@@ -215,6 +215,7 @@ enum PreparedKind {
     },
     Image(Receiver<Result<RgbaImage, String>>),
     Audio(Voice),
+    Text(RgbaImage),
 }
 
 struct Prepared {
@@ -331,6 +332,7 @@ impl Engine {
                 }
             }
             CueKind::Image(m) => Some(m.end.filter(|d| *d > 0.0)),
+            CueKind::Text(t) => Some(t.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Stop(_) => Some(Some(0.0)),
@@ -554,7 +556,7 @@ impl Engine {
     }
 
     fn signature(&self, cue: &Cue) -> Option<PrepSig> {
-        let m = cue.kind.media()?;
+        let m = cue.kind.file_media()?;
         Some(PrepSig {
             media: m.clone(),
             size: self.output_size(m.output),
@@ -620,6 +622,20 @@ impl Engine {
             kind,
             duration,
         })
+    }
+
+    /// Draw a text cue at its output's size. Quick enough to do when it starts.
+    fn prepare_text(&self, cue: &Cue, t: &TextCue) -> Prepared {
+        let size = self.output_size(t.media.output);
+        Prepared {
+            cue_id: cue.id,
+            sig: PrepSig {
+                media: t.media.clone(),
+                size,
+            },
+            kind: PreparedKind::Text(crate::text::render(t, size)),
+            duration: t.media.end.filter(|d| *d > 0.0),
+        }
     }
 
     fn take_prepared(&mut self, cue: &Cue) -> Option<Prepared> {
@@ -693,8 +709,13 @@ impl Engine {
         let Some(cue) = show.cue(id).cloned() else {
             return;
         };
+        let dips = match &cue.kind {
+            CueKind::Video(m) | CueKind::Image(m) => Some(m),
+            CueKind::Text(t) => Some(&t.media),
+            _ => None,
+        };
         if reveal.is_none()
-            && let CueKind::Video(m) | CueKind::Image(m) = &cue.kind
+            && let Some(m) = dips
             && let Some(color) = m.transition.dip_color()
         {
             self.begin_dip(show, &cue, m, color);
@@ -720,12 +741,14 @@ impl Engine {
         };
         let mut ok = true;
         match &cue.kind {
-            CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => {
+            CueKind::Video(_) | CueKind::Image(_) | CueKind::Audio(_) | CueKind::Text(_) => {
+                let m = cue.kind.media().expect("these cues have playback settings");
                 let prepared = match self.take_prepared(&cue) {
                     Some(p) => Ok(p),
-                    None => match &self.ff {
-                        None => Err("ffmpeg not found".to_string()),
-                        Some(ff) => {
+                    None => match (&cue.kind, &self.ff) {
+                        (CueKind::Text(t), _) => Ok(self.prepare_text(&cue, t)),
+                        (_, None) => Err("ffmpeg not found".to_string()),
+                        (_, Some(ff)) => {
                             let ff = ff.clone();
                             self.probe
                                 .get_blocking(&ff, &m.file)
@@ -762,6 +785,15 @@ impl Engine {
                                 transform: m.transform,
                             }),
                             PreparedKind::Audio(voice) => ActiveKind::Audio(voice),
+                            // Text is drawn at the output's size, so it is never fitted.
+                            PreparedKind::Text(image) => ActiveKind::Image(ImageState {
+                                image: Some(image),
+                                loader: None,
+                                output: m.output,
+                                layer: m.layer,
+                                fit: Fit::Stretch,
+                                transform: m.transform,
+                            }),
                         };
                         let transition = if active.is_visual() {
                             m.transition
@@ -1213,7 +1245,7 @@ impl Engine {
                 && show.cues[i].parent.is_none()
                 && show.cues[i].continue_mode == ContinueMode::AutoFollow
                 && let Some(next) = show.next_top(i)
-                && show.cues[next].kind.media().is_some()
+                && show.cues[next].kind.file_media().is_some()
             {
                 wanted.push(show.cues[next].id);
             }
@@ -1221,7 +1253,9 @@ impl Engine {
             if let ActiveKind::Group(g) = &a.kind
                 && g.mode == GroupMode::Playlist
                 && let Some(&next) = g.children.get(g.next)
-                && show.cue(next).is_some_and(|c| c.kind.media().is_some())
+                && show
+                    .cue(next)
+                    .is_some_and(|c| c.kind.file_media().is_some())
             {
                 wanted.push(next);
             }
@@ -1233,7 +1267,7 @@ impl Engine {
         {
             loop {
                 let cue = &show.cues[idx];
-                if cue.kind.media().is_some() {
+                if cue.kind.file_media().is_some() {
                     wanted.push(cue.id);
                 }
                 // A group at the playhead: the children that start with it.
@@ -1243,7 +1277,7 @@ impl Engine {
                         if mode == GroupMode::Playlist && n > 0 {
                             break;
                         }
-                        if child.kind.media().is_some() && wanted.len() < MAX_PRELOAD {
+                        if child.kind.file_media().is_some() && wanted.len() < MAX_PRELOAD {
                             wanted.push(child.id);
                         }
                     }
@@ -1276,7 +1310,9 @@ impl Engine {
                 continue;
             }
             let Some(cue) = show.cue(id) else { continue };
-            let Some(m) = cue.kind.media() else { continue };
+            let Some(m) = cue.kind.file_media() else {
+                continue;
+            };
             let info = match self.probe.get(self.ff.as_ref(), &m.file) {
                 ProbeState::Ready(info) => info.clone(),
                 _ => continue,
@@ -1597,6 +1633,134 @@ mod tests {
             idle(&e, kids[0]) && idle(&e, kids[1]),
             "no child fired another"
         );
+    }
+
+    // ----- Text cues ---------------------------------------------------------------
+
+    fn text_cue(show: &mut Show, text: &str, transition: Transition) -> CueId {
+        let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+        if let CueKind::Text(t) = &mut c.kind {
+            t.text = text.into();
+            t.media.transition = transition;
+            t.media.fade_in = 0.0;
+            t.media.fade_out = 0.0;
+        }
+        let id = c.id;
+        show.cues.push(c);
+        id
+    }
+
+    fn first_output(show: &Show) -> OutputId {
+        show.outputs[0].id
+    }
+
+    #[test]
+    fn a_text_cue_plays_as_a_full_output_layer_without_ffmpeg() {
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "Hello", Transition::FadeIn);
+        let out = first_output(&show);
+        let mut e = engine_without_media();
+        e.playhead = Some(t);
+        e.go(&show);
+        e.tick(&show, 0.1);
+        let layers = e.layers(out);
+        assert_eq!(layers.len(), 1, "text should be on the output");
+        let LayerSource::Image(img) = &layers[0].source else {
+            panic!("text should present as an image");
+        };
+        assert_eq!((img.width, img.height), DEFAULT_OUTPUT_SIZE);
+        assert!(img.data.chunks(4).any(|p| p[3] > 200), "nothing was drawn");
+        assert_eq!(layers[0].fit, Fit::Stretch);
+    }
+
+    #[test]
+    fn text_holds_for_its_time_then_ends() {
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "Hi", Transition::FadeIn);
+        if let CueKind::Text(c) = &mut show.cues[0].kind {
+            c.media.end = Some(2.0);
+        }
+        let mut e = engine_without_media();
+        assert_eq!(
+            e.cue_duration(&show, &show.cues[0].clone()),
+            Some(Some(2.0))
+        );
+        e.playhead = Some(t);
+        e.go(&show);
+        e.tick(&show, 1.0);
+        assert!(playing(&e, t));
+        e.tick(&show, 1.5);
+        assert!(idle(&e, t));
+        // With no hold time it stays until stopped.
+        if let CueKind::Text(c) = &mut show.cues[0].kind {
+            c.media.end = None;
+        }
+        assert_eq!(e.cue_duration(&show, &show.cues[0].clone()), Some(None));
+        e.go_again(&show, t);
+        e.tick(&show, 30.0);
+        assert!(playing(&e, t));
+    }
+
+    #[test]
+    fn text_layers_or_replaces_by_its_transition() {
+        let out_layers = |show: &Show, e: &Engine| e.layers(first_output(show)).len();
+        // A fade in leaves what is there showing; a cut replaces it.
+        let mut show = Show::default();
+        let a = text_cue(&mut show, "one", Transition::FadeIn);
+        let b = text_cue(&mut show, "two", Transition::FadeIn);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        e.go(&show);
+        e.tick(&show, 0.1);
+        assert!(playing(&e, a) && playing(&e, b));
+        assert_eq!(out_layers(&show, &e), 2);
+
+        let mut show = Show::default();
+        let a = text_cue(&mut show, "one", Transition::FadeIn);
+        let b = text_cue(&mut show, "two", Transition::Cut);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        e.tick(&show, 0.1);
+        e.go(&show);
+        e.tick(&show, 0.1);
+        assert!(idle(&e, a) && playing(&e, b));
+        assert_eq!(out_layers(&show, &e), 1);
+    }
+
+    #[test]
+    fn text_fades_with_its_own_fade_in() {
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "Hi", Transition::FadeIn);
+        if let CueKind::Text(c) = &mut show.cues[0].kind {
+            c.media.fade_in = 2.0;
+        }
+        let out = first_output(&show);
+        let mut e = engine_without_media();
+        e.playhead = Some(t);
+        e.go(&show);
+        e.tick(&show, 0.1);
+        let early = e.layers(out)[0].opacity;
+        e.tick(&show, 1.0);
+        let mid = e.layers(out)[0].opacity;
+        e.tick(&show, 2.0);
+        let late = e.layers(out)[0].opacity;
+        assert!(
+            early < mid && mid < late && late > 0.99,
+            "{early} {mid} {late}"
+        );
+    }
+
+    #[test]
+    fn text_is_not_preloaded_as_a_file() {
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "Hi", Transition::FadeIn);
+        let mut e = engine_without_media();
+        e.playhead = Some(t);
+        e.tick(&show, 0.1);
+        assert!(!e.is_prepared(t));
+        assert!(e.messages.is_empty());
     }
 
     // ----- Transitions, driven with real ffmpeg on a still image -------------
