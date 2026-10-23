@@ -1954,6 +1954,17 @@ fn media_inspector(
                 ui.label("");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut m.loop_media, "Loop");
+                    if m.loop_media {
+                        let mut forever = m.loop_count == 0;
+                        ui.checkbox(&mut forever, "Forever");
+                        if forever {
+                            m.loop_count = 0;
+                        } else {
+                            m.loop_count = m.loop_count.max(2);
+                            ui.add(egui::DragValue::new(&mut m.loop_count).range(1..=9999).suffix(" plays"))
+                                .on_hover_text("How many times in all the slice plays");
+                        }
+                    }
                     if ty == CueType::Video {
                         ui.checkbox(&mut m.hold_last_frame, "Hold last frame");
                     }
@@ -1961,10 +1972,13 @@ fn media_inspector(
                 ui.end_row();
             }
         });
-    if m.loop_media && m.end.is_some() && ty != CueType::Image {
-        ui.label(
-            RichText::new("Note: looping plays the whole file; the out point is ignored.").weak(),
-        );
+    if m.loop_media && ty != CueType::Image {
+        let what = if m.end.is_some() {
+            "Loops from the in point to the out point."
+        } else {
+            "Loops from the in point to the end of the file."
+        };
+        ui.label(RichText::new(what).weak());
     }
 }
 
