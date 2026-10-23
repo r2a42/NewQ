@@ -6,8 +6,10 @@ name: Cut release
 # without tagging. The tag must match the version in Cargo.toml, and CI must
 # have passed on the tip of the default branch.
 #
-# This exists so a release can be started by a comment, for people and tools
-# that can comment but can't push tags or run workflows by hand.
+# This exists so a release can be started with a comment from a browser or
+# phone, without pushing tags or running workflows by hand. It is meant to be
+# posted by a person: the comment tool Claude uses rewrites slash commands, so
+# Claude can't start it.
 on:
   issue_comment:
     types: [created]
