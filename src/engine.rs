@@ -3,6 +3,7 @@
 
 use crate::media::audio::{AudioOut, Voice};
 use crate::media::ffmpeg::{Ffmpeg, MediaInfo};
+use crate::media::playback::Playback;
 use crate::media::video::{self, RgbaImage, VideoPlayer};
 use crate::media::{ProbeCache, ProbeState};
 use crate::show::*;
@@ -288,15 +289,15 @@ impl Engine {
     pub fn cue_duration(&mut self, cue: &Cue) -> Option<Option<f64>> {
         match &cue.kind {
             CueKind::Video(m) | CueKind::Audio(m) => {
-                if m.loop_media {
-                    return Some(None);
-                }
                 let total = match self.probe_state(&m.file) {
                     ProbeState::Ready(info) => info.duration,
                     _ => None,
                 };
-                let end = m.end.or(total)?;
-                Some(Some((end - m.start).max(0.0)))
+                match m.playback(total) {
+                    // Without an out point or a known length there's nothing to count.
+                    Playback::Once { duration: None } => Some(Some((total? - m.start).max(0.0))),
+                    pb => Some(pb.total(None)),
+                }
             }
             CueKind::Image(m) => Some(m.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
@@ -487,11 +488,12 @@ impl Engine {
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let sig = self.signature(cue).ok_or("not a media cue")?;
         let m = &sig.media;
-        let clip = m.end.map(|e| (e - m.start).max(0.0));
-        let duration = if m.loop_media {
-            None
-        } else {
-            m.end.or(info.duration).map(|e| (e - m.start).max(0.0))
+        let playback = m.playback(info.duration);
+        let duration = match playback {
+            Playback::Once { duration } => {
+                duration.or(info.duration.map(|d| (d - m.start).max(0.0)))
+            }
+            pb => pb.total(None),
         };
         let initial_gain = if m.fade_in > 0.0 {
             0.0
@@ -502,11 +504,11 @@ impl Engine {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
                 let size = video::decode_size((vi.width, vi.height), sig.size, m.fit == Fit::Cover);
-                let player = VideoPlayer::spawn(ff, &m.file, vi, m.start, clip, m.loop_media, size)
+                let player = VideoPlayer::spawn(ff, &m.file, vi, m.start, playback, size)
                     .map_err(|e| format!("{e:#}"))?;
                 let voice = if info.has_audio && self.audio.available() {
                     self.audio
-                        .spawn_voice(ff, &m.file, m.start, clip, m.loop_media, initial_gain)
+                        .spawn_voice(ff, &m.file, m.start, playback, initial_gain)
                         .ok()
                 } else {
                     None
@@ -524,7 +526,7 @@ impl Engine {
                 }
                 let voice = self
                     .audio
-                    .spawn_voice(ff, &m.file, m.start, clip, m.loop_media, initial_gain)
+                    .spawn_voice(ff, &m.file, m.start, playback, initial_gain)
                     .map_err(|e| format!("{e:#}"))?;
                 PreparedKind::Audio(voice)
             }

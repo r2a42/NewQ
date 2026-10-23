@@ -1,5 +1,6 @@
 //! Show file data model: cues, outputs, and (de)serialization.
 
+use crate::media::playback::Playback;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -456,8 +457,12 @@ pub struct MediaCue {
     /// Out point, seconds. For images: how long to hold (None = until stopped).
     #[serde(default)]
     pub end: Option<f64>,
+    /// Repeat the slice between the in and out points (the whole file if there is no out point).
     #[serde(default)]
     pub loop_media: bool,
+    /// How many times a looping cue plays in all; 0 = until stopped.
+    #[serde(default)]
+    pub loop_count: u32,
     /// Video: hold the last frame when the media ends instead of stopping.
     #[serde(default)]
     pub hold_last_frame: bool,
@@ -486,6 +491,7 @@ impl MediaCue {
             start: 0.0,
             end: None,
             loop_media: false,
+            loop_count: 0,
             hold_last_frame: false,
             crossfade: false,
         }
@@ -499,6 +505,22 @@ impl MediaCue {
             fade_out: 1.0,
             ..MediaCue::new(file, output)
         }
+    }
+
+    /// How many passes a looping cue makes; None = forever.
+    pub fn loop_passes(&self) -> Option<u32> {
+        (self.loop_count > 0).then_some(self.loop_count)
+    }
+
+    /// How this cue's decoders should run, given the file's duration if known.
+    pub fn playback(&self, total: Option<f64>) -> Playback {
+        Playback::plan(
+            self.start,
+            self.end,
+            total,
+            self.loop_media,
+            self.loop_passes(),
+        )
     }
 
     /// The fade time to use when this cue is faded out by hand.

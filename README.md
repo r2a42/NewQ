@@ -64,6 +64,12 @@ includes FFmpeg, so there's nothing else to install.
   output's corner pin works inside its sub display, and everything is
   clipped to the area. Each display gets a single fullscreen window, however
   many outputs are on it.
+- **Loops and slices:** set an in and out point on a video or audio cue and
+  tick *Loop* to repeat just that slice, either forever or a set number of
+  plays. Each pass is cut to an exact length and the next one is already
+  decoding before the current one ends, so the join has no gap and sound and
+  picture stay in step. With no out point, the loop runs from the in point to
+  the end of the file.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
@@ -192,7 +198,6 @@ space like a hardware video mixer.
 
 ## Known limitations / roadmap
 
-- Looping plays the whole file; out points are ignored while looping.
 - Audio goes to the system default device, as stereo.
 - Video alpha channels (ProRes 4444, VP9 alpha) aren't supported yet; images
   with alpha are.

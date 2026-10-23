@@ -2,15 +2,14 @@
 //! subprocess decoding to interleaved stereo f32 at the device sample rate.
 
 use super::ffmpeg::Ffmpeg;
-use super::video::spawn_stderr_drain;
-use anyhow::{Context, Result, anyhow};
+use super::playback::{Children, PassFeed, Playback};
+use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::Mutex;
 use std::io::Read;
 use std::path::Path;
-use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -89,43 +88,45 @@ impl AudioOut {
         ff: &Ffmpeg,
         path: &Path,
         start: f64,
-        duration: Option<f64>,
-        looping: bool,
+        playback: Playback,
         gain: f32,
     ) -> Result<Voice> {
         if !self.available() {
             return Err(anyhow!("no audio output device"));
         }
         let sr = self.sample_rate;
-        let mut cmd = ff.command();
-        if looping {
-            cmd.args(["-stream_loop", "-1"]);
-        }
-        if start > 0.0 {
-            cmd.args(["-ss", &format!("{start:.3}")]);
-        }
-        cmd.arg("-i").arg(path);
-        if let Some(d) = duration.filter(|_| !looping) {
-            cmd.args(["-t", &format!("{d:.3}")]);
-        }
-        cmd.args([
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-sn",
-            "-dn",
-            "-ac",
-            "2",
-            "-ar",
-            &sr.to_string(),
-            "-f",
-            "f32le",
-            "pipe:1",
-        ]);
-        let mut child = cmd.spawn().context("starting ffmpeg for audio")?;
-        let mut stdout = child.stdout.take().context("ffmpeg stdout")?;
+        let make = {
+            let (ff, path) = (ff.clone(), path.to_path_buf());
+            move || {
+                let mut cmd = ff.command();
+                cmd.args(playback.input_args(start));
+                cmd.arg("-i").arg(&path);
+                cmd.args(playback.limit_args());
+                cmd.args([
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-sn",
+                    "-dn",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    &sr.to_string(),
+                    "-f",
+                    "f32le",
+                    "pipe:1",
+                ]);
+                cmd
+            }
+        };
+        let children = Children::new();
         let error = Arc::new(Mutex::new(None));
-        spawn_stderr_drain(child.stderr.take(), error.clone());
+        let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
+        // Looping passes are cut or padded to an exact length, so repeats
+        // don't drift and stay locked to the video's frame count.
+        let per_pass = playback
+            .pass_len()
+            .map(|l| (l * sr as f64).round().max(1.0) as u64);
 
         let shared = Arc::new(VoiceShared::default());
         shared.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
@@ -136,28 +137,66 @@ impl AudioOut {
         std::thread::Builder::new()
             .name("audio-reader".into())
             .spawn(move || {
+                // Queue one stereo frame; false if the voice was stopped meanwhile.
+                let mut push = |frame: [f32; 2]| -> bool {
+                    for v in frame {
+                        while producer.push(v).is_err() {
+                            if shared2.stopped.load(Ordering::Relaxed) {
+                                return false;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    shared2.received_frames.fetch_add(1, Ordering::Relaxed);
+                    true
+                };
                 let mut bytes = vec![0u8; 16 * 1024];
                 let mut carry: Vec<u8> = Vec::with_capacity(8);
                 'outer: loop {
-                    let n = match stdout.read(&mut bytes) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => n,
-                    };
-                    carry.extend_from_slice(&bytes[..n]);
-                    let whole = carry.len() / 8 * 8; // whole stereo frames
-                    for frame in carry[..whole].as_chunks::<8>().0 {
-                        for s in frame.as_chunks::<4>().0 {
-                            let v = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
-                            while producer.push(v).is_err() {
-                                if shared2.stopped.load(Ordering::Relaxed) {
-                                    break 'outer;
-                                }
-                                std::thread::sleep(Duration::from_millis(5));
+                    let mut n: u64 = 0; // stereo frames queued this pass
+                    carry.clear();
+                    'pass: loop {
+                        let read = match feed.stdout().read(&mut bytes) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => read,
+                        };
+                        carry.extend_from_slice(&bytes[..read]);
+                        let whole = carry.len() / 8 * 8; // whole stereo frames
+                        for frame in carry[..whole].as_chunks::<8>().0 {
+                            if per_pass.is_some_and(|p| n >= p) {
+                                break 'pass;
                             }
+                            if per_pass.is_some_and(|p| n * 2 >= p) {
+                                feed.prefetch();
+                            }
+                            let f32_at = |i: usize| {
+                                f32::from_le_bytes([
+                                    frame[i],
+                                    frame[i + 1],
+                                    frame[i + 2],
+                                    frame[i + 3],
+                                ])
+                            };
+                            if !push([f32_at(0), f32_at(4)]) {
+                                break 'outer;
+                            }
+                            n += 1;
                         }
-                        shared2.received_frames.fetch_add(1, Ordering::Relaxed);
+                        carry.drain(..whole);
                     }
-                    carry.drain(..whole);
+                    let decoded = n;
+                    if let Some(p) = per_pass {
+                        while n < p {
+                            if !push([0.0; 2]) {
+                                break 'outer;
+                            }
+                            n += 1;
+                        }
+                    }
+                    // A pass that decodes nothing is an error, not a reason to retry forever.
+                    if decoded == 0 || !feed.advance() {
+                        break;
+                    }
                 }
                 shared2.eof.store(true, Ordering::Release);
             })?;
@@ -169,7 +208,7 @@ impl AudioOut {
         });
         Ok(Voice {
             shared,
-            child,
+            children,
             sample_rate: sr,
             error,
         })
@@ -179,7 +218,7 @@ impl AudioOut {
 /// Handle to a playing voice. Dropping it stops playback and kills ffmpeg.
 pub struct Voice {
     shared: Arc<VoiceShared>,
-    child: Child,
+    children: Children,
     sample_rate: u32,
     error: Arc<Mutex<Option<String>>>,
 }
@@ -215,8 +254,7 @@ impl Voice {
 impl Drop for Voice {
     fn drop(&mut self) {
         self.shared.stopped.store(true, Ordering::Relaxed);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.children.close();
     }
 }
 

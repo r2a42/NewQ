@@ -1,12 +1,12 @@
 //! Video decoding via an ffmpeg subprocess that writes raw YUV 4:2:0 frames to a pipe.
 
 use super::ffmpeg::{ColorMatrix, Ffmpeg, VideoInfo};
-use anyhow::{Context, Result};
+use super::playback::{Children, PassFeed, Playback};
+use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use parking_lot::Mutex;
 use std::io::Read;
 use std::path::Path;
-use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,7 +26,7 @@ pub struct VideoPlayer {
     pub matrix: ColorMatrix,
     rx: Receiver<VideoFrame>,
     recycle: Sender<Vec<u8>>,
-    child: Child,
+    children: Children,
     eof: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
     current: Option<VideoFrame>,
@@ -47,78 +47,92 @@ pub fn decode_size(src: (u32, u32), max: (u32, u32), cover: bool) -> (u32, u32) 
 }
 
 impl VideoPlayer {
+    /// Start decoding `path` from `start`; `playback` says whether to play
+    /// once or loop a slice.
     pub fn spawn(
         ff: &Ffmpeg,
         path: &Path,
         info: &VideoInfo,
         start: f64,
-        duration: Option<f64>,
-        looping: bool,
+        playback: Playback,
         size: (u32, u32),
     ) -> Result<VideoPlayer> {
         let (w, h) = size;
-        let mut cmd = ff.command();
-        if looping {
-            cmd.args(["-stream_loop", "-1"]);
-        }
-        if start > 0.0 {
-            cmd.args(["-ss", &format!("{start:.3}")]);
-        }
-        cmd.arg("-i").arg(path);
-        if let Some(d) = duration.filter(|_| !looping) {
-            cmd.args(["-t", &format!("{d:.3}")]);
-        }
         let fps = info.fps;
-        cmd.args([
-            "-map",
-            "0:v:0",
-            "-an",
-            "-sn",
-            "-dn",
-            "-vf",
-            &format!("scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
-            "-fps_mode",
-            "cfr",
-            "-r",
-            &format!("{fps:.6}"),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
-            "pipe:1",
-        ]);
-        let mut child = cmd.spawn().context("starting ffmpeg for video")?;
-        let mut stdout = child.stdout.take().context("ffmpeg stdout")?;
-        let stderr = child.stderr.take();
+        let make = {
+            let (ff, path) = (ff.clone(), path.to_path_buf());
+            move || {
+                let mut cmd = ff.command();
+                cmd.args(playback.input_args(start));
+                cmd.arg("-i").arg(&path);
+                cmd.args(playback.limit_args());
+                cmd.args([
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-sn",
+                    "-dn",
+                    "-vf",
+                    &format!("scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
+                    "-fps_mode",
+                    "cfr",
+                    "-r",
+                    &format!("{fps:.6}"),
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "pipe:1",
+                ]);
+                cmd
+            }
+        };
+        let children = Children::new();
+        let error = Arc::new(Mutex::new(None));
+        let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
+        // Looping passes are cut to an exact frame count so the timeline
+        // stays locked to the audio's, whatever the decoder delivers.
+        let per_pass = playback
+            .pass_len()
+            .map(|l| (l * fps).round().max(1.0) as u64);
 
         let frame_len = (w * h + 2 * (w / 2) * (h / 2)) as usize;
         let (tx, rx) = bounded::<VideoFrame>(QUEUE_FRAMES);
         let (recycle, recycle_rx) = unbounded::<Vec<u8>>();
         let eof = Arc::new(AtomicBool::new(false));
-        let error = Arc::new(Mutex::new(None));
 
-        spawn_stderr_drain(stderr, error.clone());
         let eof2 = eof.clone();
         std::thread::Builder::new()
             .name("video-reader".into())
             .spawn(move || {
-                let mut index: u64 = 0;
+                let mut base: u64 = 0; // index of the current pass's first frame
                 loop {
-                    let mut buf = recycle_rx
-                        .try_recv()
-                        .unwrap_or_else(|_| vec![0u8; frame_len]);
-                    buf.resize(frame_len, 0);
-                    if stdout.read_exact(&mut buf).is_err() {
+                    let mut n: u64 = 0;
+                    while per_pass.is_none_or(|p| n < p) {
+                        if per_pass.is_some_and(|p| n * 2 >= p) {
+                            feed.prefetch();
+                        }
+                        let mut buf = recycle_rx
+                            .try_recv()
+                            .unwrap_or_else(|_| vec![0u8; frame_len]);
+                        buf.resize(frame_len, 0);
+                        if feed.stdout().read_exact(&mut buf).is_err() {
+                            break;
+                        }
+                        let frame = VideoFrame {
+                            pts: (base + n) as f64 / fps,
+                            data: buf,
+                        };
+                        if tx.send(frame).is_err() {
+                            return; // player dropped
+                        }
+                        n += 1;
+                    }
+                    // A pass that decodes nothing is an error, not a reason to retry forever.
+                    if n == 0 || !feed.advance() {
                         break;
                     }
-                    let frame = VideoFrame {
-                        pts: index as f64 / fps,
-                        data: buf,
-                    };
-                    if tx.send(frame).is_err() {
-                        return; // player dropped
-                    }
-                    index += 1;
+                    base += per_pass.unwrap_or(n);
                 }
                 eof2.store(true, Ordering::Release);
             })?;
@@ -129,7 +143,7 @@ impl VideoPlayer {
             matrix: info.matrix,
             rx,
             recycle,
-            child,
+            children,
             eof,
             error,
             current: None,
@@ -186,8 +200,7 @@ impl VideoPlayer {
 
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.children.close();
     }
 }
 

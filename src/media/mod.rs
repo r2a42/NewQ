@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod ffmpeg;
+pub mod playback;
 pub mod video;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -108,6 +109,7 @@ pub fn test_media(file: &str) -> Option<(Ffmpeg, PathBuf)> {
 mod tests {
     //! These run real ffmpeg against `test_media/`; they skip if either is missing.
     use super::ffmpeg::Ffmpeg;
+    use super::playback::Playback;
     use super::video::{self, VideoPlayer};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -128,7 +130,17 @@ mod tests {
         assert!(info.has_audio);
 
         let size = video::decode_size((vi.width, vi.height), (640, 360), false);
-        let mut p = VideoPlayer::spawn(&ff, &path, vi, 2.0, Some(1.0), false, size).unwrap();
+        let mut p = VideoPlayer::spawn(
+            &ff,
+            &path,
+            vi,
+            2.0,
+            Playback::Once {
+                duration: Some(1.0),
+            },
+            size,
+        )
+        .unwrap();
         let t0 = Instant::now();
         while !p.ready() {
             assert!(t0.elapsed() < Duration::from_secs(10), "no first frame");
@@ -154,6 +166,66 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!((28..=32).contains(&frames), "got {frames} frames");
+    }
+
+    /// Run the player until it finishes or `limit` frames have been shown.
+    /// Returns how many frames were shown and the last frame's pts.
+    fn drain(p: &mut VideoPlayer, limit: Option<u64>) -> (u64, f64) {
+        let t0 = Instant::now();
+        loop {
+            assert!(
+                t0.elapsed() < Duration::from_secs(20),
+                "stalled at {} frames",
+                p.serial
+            );
+            p.update(1e9);
+            if limit.is_some_and(|l| p.serial >= l) || p.finished() {
+                return (p.serial, p.current().map_or(0.0, |f| f.pts));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn loops_a_slice_a_set_number_of_times() {
+        let Some((ff, path)) = setup("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&path).unwrap();
+        let vi = info.video.as_ref().unwrap();
+        let size = video::decode_size((vi.width, vi.height), (320, 180), false);
+        // 1 s slice at 30 fps, three plays: exactly 90 frames on one timeline.
+        let pb = Playback::Slice {
+            len: 1.0,
+            passes: Some(3),
+        };
+        let mut p = VideoPlayer::spawn(&ff, &path, vi, 2.0, pb, size).unwrap();
+        let (frames, last) = drain(&mut p, None);
+        assert!((85..=90).contains(&frames), "got {frames} frames");
+        // The last frame sits a frame short of 3 s: every pass kept its length.
+        assert!((2.9..3.0).contains(&last), "last pts {last}");
+    }
+
+    #[test]
+    fn loops_a_slice_forever_and_stops_cleanly() {
+        let Some((ff, path)) = setup("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&path).unwrap();
+        let vi = info.video.as_ref().unwrap();
+        let size = video::decode_size((vi.width, vi.height), (320, 180), false);
+        let pb = Playback::Slice {
+            len: 0.5,
+            passes: None,
+        };
+        let mut p = VideoPlayer::spawn(&ff, &path, vi, 1.0, pb, size).unwrap();
+        // Five passes' worth of frames and still going.
+        let (frames, _) = drain(&mut p, Some(75));
+        assert!(frames >= 75);
+        assert!(!p.finished());
+        let t0 = Instant::now();
+        drop(p);
+        assert!(t0.elapsed() < Duration::from_secs(2), "drop was slow");
     }
 
     #[test]
