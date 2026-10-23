@@ -339,7 +339,7 @@ impl Engine {
             CueKind::Group(g) => {
                 // Timeline: until the last child ends. Playlist: all of them in turn.
                 let mut total = 0.0_f64;
-                for child in show.children(cue.id) {
+                for child in show.armed_children(cue.id) {
                     let Some(d) = self.cue_duration(show, child)? else {
                         return Some(None);
                     };
@@ -378,7 +378,7 @@ impl Engine {
 
     /// Fire the cue at the playhead and move the playhead past its continue chain.
     pub fn go(&mut self, show: &Show) {
-        let Some(idx) = self
+        let Some(here) = self
             .playhead
             .and_then(|id| show.cue_index(id))
             .map(|i| show.top_index(i))
@@ -386,14 +386,19 @@ impl Engine {
             self.log("GO: no cue at the playhead");
             return;
         };
+        // Disarmed cues are passed over, as if they weren't in the list.
+        let Some(idx) = show.armed_top_from(here) else {
+            self.log("GO: every cue from the playhead on is disarmed");
+            return;
+        };
         // Children never take the playhead: it moves over whole groups.
         let mut end = idx;
         while show.cues[end].continue_mode != ContinueMode::DoNotContinue
-            && let Some(next) = show.next_top(end)
+            && let Some(next) = show.next_armed_top(end)
         {
             end = next;
         }
-        self.playhead = show.next_top(end).map(|i| show.cues[i].id);
+        self.playhead = show.next_armed_top(end).map(|i| show.cues[i].id);
         log::info!("GO {} ({})", show.cues[idx].number, show.cues[idx].name);
         self.fire(show, show.cues[idx].id);
     }
@@ -401,6 +406,10 @@ impl Engine {
     /// Fire a cue (honouring its pre-wait) without touching the playhead.
     pub fn fire(&mut self, show: &Show, id: CueId) {
         let Some(cue) = show.cue(id) else { return };
+        if show.cue_index(id).is_some_and(|i| !show.is_armed(i)) {
+            self.log(format!("Cue {} ({}) is disarmed", cue.number, cue.name));
+            return;
+        }
         if self.paused {
             self.set_paused(false);
         }
@@ -424,7 +433,7 @@ impl Engine {
         if show.cues[i].parent.is_some() {
             return;
         }
-        if let Some(next) = show.next_top(i) {
+        if let Some(next) = show.next_armed_top(i) {
             self.fire(show, show.cues[next].id);
         }
     }
@@ -903,7 +912,7 @@ impl Engine {
                 active.duration = Some(w.duration);
             }
             CueKind::Group(g) => {
-                let children: Vec<CueId> = show.children(id).iter().map(|c| c.id).collect();
+                let children: Vec<CueId> = show.armed_children(id).iter().map(|c| c.id).collect();
                 if children.is_empty() {
                     ok = false; // nothing to wait for
                 } else {
@@ -1258,7 +1267,7 @@ impl Engine {
                 && let Some(i) = show.cue_index(a.cue_id)
                 && show.cues[i].parent.is_none()
                 && show.cues[i].continue_mode == ContinueMode::AutoFollow
-                && let Some(next) = show.next_top(i)
+                && let Some(next) = show.next_armed_top(i)
                 && show.cues[next].kind.file_media().is_some()
             {
                 wanted.push(show.cues[next].id);
@@ -1277,7 +1286,7 @@ impl Engine {
         if let Some(mut idx) = self
             .playhead
             .and_then(|p| show.cue_index(p))
-            .map(|i| show.top_index(i))
+            .and_then(|i| show.armed_top_from(i))
         {
             loop {
                 let cue = &show.cues[idx];
@@ -1287,7 +1296,7 @@ impl Engine {
                 // A group at the playhead: the children that start with it.
                 if let CueKind::Group(g) = &cue.kind {
                     let mode = g.mode;
-                    for (n, child) in show.children(cue.id).iter().enumerate() {
+                    for (n, child) in show.armed_children(cue.id).into_iter().enumerate() {
                         if mode == GroupMode::Playlist && n > 0 {
                             break;
                         }
@@ -1296,7 +1305,7 @@ impl Engine {
                         }
                     }
                 }
-                let next = show.next_top(idx);
+                let next = show.next_armed_top(idx);
                 match next {
                     Some(n)
                         if cue.continue_mode != ContinueMode::DoNotContinue
@@ -1647,6 +1656,160 @@ mod tests {
             idle(&e, kids[0]) && idle(&e, kids[1]),
             "no child fired another"
         );
+    }
+
+    // ----- Arming ---------------------------------------------------------------
+
+    fn disarm(show: &mut Show, id: CueId) {
+        let i = show.cue_index(id).unwrap();
+        show.cues[i].armed = false;
+    }
+
+    #[test]
+    fn go_passes_over_a_disarmed_cue() {
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let b = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let c = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, b);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        assert!(playing(&e, a) && idle(&e, b));
+        assert_eq!(
+            e.playhead,
+            Some(c),
+            "the playhead lands on the next armed cue"
+        );
+        e.go(&show);
+        assert!(playing(&e, c) && idle(&e, b));
+        assert_eq!(e.playhead, None);
+    }
+
+    #[test]
+    fn go_on_a_disarmed_cue_fires_the_next_armed_one() {
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let b = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, a);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        assert!(idle(&e, a) && playing(&e, b));
+    }
+
+    #[test]
+    fn go_with_nothing_armed_explains_and_stays_put() {
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let b = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, a);
+        disarm(&mut show, b);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        assert!(!e.is_active());
+        assert_eq!(e.playhead, Some(a));
+        assert!(e.messages.back().unwrap().1.contains("disarmed"));
+    }
+
+    #[test]
+    fn continues_pass_over_disarmed_cues() {
+        // Auto-continue: GO fires a and c together; b is not fired.
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 5.0, ContinueMode::AutoContinue);
+        let b = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let c = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, b);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        assert!(playing(&e, a) && idle(&e, b) && playing(&e, c));
+        assert_eq!(e.playhead, None);
+
+        // Auto-follow: c starts when a ends, skipping b.
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 1.0, ContinueMode::AutoFollow);
+        let b = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let c = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, b);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        e.tick(&show, 1.1);
+        assert!(idle(&e, a) && idle(&e, b) && playing(&e, c));
+    }
+
+    #[test]
+    fn a_disarmed_cue_will_not_fire_even_when_asked() {
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, a);
+        let mut e = engine_without_media();
+        e.fire(&show, a);
+        assert!(!e.is_active());
+        let msg = &e.messages.back().unwrap().1;
+        assert!(msg.contains("disarmed"), "{msg}");
+        // Arming it again lets it go.
+        show.cues[0].armed = true;
+        e.fire(&show, a);
+        assert!(playing(&e, a));
+    }
+
+    #[test]
+    fn groups_skip_disarmed_children_and_disarmed_groups_do_nothing() {
+        // Timeline: only the armed children start.
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[1.0, 5.0, 3.0]);
+        disarm(&mut show, kids[1]);
+        let mut e = engine_without_media();
+        assert_eq!(
+            e.cue_duration(&show, show.cue(g).unwrap()),
+            Some(Some(3.0)),
+            "a disarmed child doesn't lengthen the group"
+        );
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(playing(&e, kids[0]) && idle(&e, kids[1]) && playing(&e, kids[2]));
+
+        // Playlist: the disarmed child is stepped over.
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Playlist, &[1.0, 5.0, 3.0]);
+        disarm(&mut show, kids[1]);
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        e.tick(&show, 1.1);
+        e.tick(&show, 0.01);
+        assert!(idle(&e, kids[0]) && idle(&e, kids[1]) && playing(&e, kids[2]));
+
+        // A disarmed group skips its children too, and GO moves past it.
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[5.0, 5.0]);
+        let after = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, g);
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(!playing(&e, g) && idle(&e, kids[0]) && idle(&e, kids[1]));
+        assert!(playing(&e, after));
+        // Firing one of its children directly is refused as well.
+        e.fire(&show, kids[0]);
+        assert!(idle(&e, kids[0]));
+    }
+
+    #[test]
+    fn a_group_with_every_child_disarmed_still_continues() {
+        let mut show = Show::default();
+        let (g, kids) = group(&mut show, GroupMode::Playlist, &[5.0]);
+        show.cues[0].continue_mode = ContinueMode::AutoFollow;
+        let after = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        disarm(&mut show, kids[0]);
+        let mut e = engine_without_media();
+        e.playhead = Some(g);
+        e.go(&show);
+        assert!(idle(&e, kids[0]));
+        assert!(playing(&e, after));
     }
 
     // ----- Text cues ---------------------------------------------------------------

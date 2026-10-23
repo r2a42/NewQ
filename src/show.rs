@@ -409,6 +409,10 @@ pub struct Cue {
     pub pre_wait: f64,
     #[serde(default)]
     pub continue_mode: ContinueMode,
+    /// A disarmed cue is skipped as if it weren't in the list: GO passes
+    /// over it, continues don't fire it, and a group doesn't start it.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub armed: bool,
     /// The group this cue belongs to. A group's children follow it
     /// directly in `Show::cues`, and groups don't nest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -605,6 +609,14 @@ fn one() -> f32 {
 
 fn is_zero(v: &u16) -> bool {
     *v == 0
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 impl MediaCue {
@@ -982,6 +994,7 @@ impl Show {
             notes: String::new(),
             pre_wait: 0.0,
             continue_mode: ContinueMode::DoNotContinue,
+            armed: true,
             parent: None,
             kind,
         }
@@ -1089,6 +1102,37 @@ impl Show {
     pub fn next_top(&self, idx: usize) -> Option<usize> {
         let end = self.block_end(self.top_index(idx));
         (end < self.cues.len()).then_some(end)
+    }
+
+    /// Whether the cue at `idx` will run: it and its group are armed.
+    pub fn is_armed(&self, idx: usize) -> bool {
+        self.cues[idx].armed
+            && self.cues[idx]
+                .parent
+                .and_then(|p| self.cue(p))
+                .is_none_or(|g| g.armed)
+    }
+
+    /// The first top-level cue at or after `idx` (or after the block holding
+    /// it) that is armed.
+    pub fn armed_top_from(&self, idx: usize) -> Option<usize> {
+        let mut i = self.top_index(idx);
+        loop {
+            if self.cues[i].armed {
+                return Some(i);
+            }
+            i = self.next_top(i)?;
+        }
+    }
+
+    /// The next armed top-level cue after the block containing `idx`.
+    pub fn next_armed_top(&self, idx: usize) -> Option<usize> {
+        self.next_top(idx).and_then(|n| self.armed_top_from(n))
+    }
+
+    /// A group's children that will run, in order.
+    pub fn armed_children(&self, group: CueId) -> Vec<&Cue> {
+        self.children(group).iter().filter(|c| c.armed).collect()
     }
 
     /// A group's children, in order.
@@ -1234,6 +1278,7 @@ impl Show {
         group.name = format!("Group of {}", self.cues[idx].name);
         group.pre_wait = std::mem::take(&mut self.cues[idx].pre_wait);
         group.continue_mode = std::mem::take(&mut self.cues[idx].continue_mode);
+        group.armed = std::mem::replace(&mut self.cues[idx].armed, true);
         let gid = group.id;
         self.cues[idx].parent = Some(gid);
         self.cues.insert(idx, group);
@@ -1862,5 +1907,67 @@ mod tests {
         assert_eq!(loaded.cues[0].kind.media().unwrap().audio_output, None);
         assert!(loaded.audio_outputs.iter().any(|o| o.id == pa));
         assert!(!loaded.audio_outputs.iter().any(|o| o.id == monitor));
+    }
+
+    #[test]
+    fn armed_defaults_on_and_only_a_disarmed_cue_is_written() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Wait, None, 0);
+        assert!(cue.armed);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(!json.contains("armed"), "{json}");
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert!(back.armed, "old files have no field and load armed");
+        cue.armed = false;
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(json.contains("\"armed\":false"), "{json}");
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert!(!back.armed);
+    }
+
+    #[test]
+    fn armed_helpers_skip_disarmed_cues_and_groups() {
+        // a G1:[b c] d e, with c, G1 and e disarmed in turn.
+        let mut show = grouped();
+        let e = {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.name = "e".into();
+            show.cues.push(c);
+            show.cues.len() - 1
+        };
+        assert!((0..show.cues.len()).all(|i| show.is_armed(i)));
+        assert_eq!(show.next_armed_top(0), Some(1));
+        // A disarmed child: the group still runs, with one child fewer.
+        show.cues[3].armed = false;
+        assert!(show.is_armed(1) && show.is_armed(2) && !show.is_armed(3));
+        let g = show.cues[1].id;
+        assert_eq!(show.armed_children(g).len(), 1);
+        // A disarmed group disarms its children and is passed over.
+        show.cues[1].armed = false;
+        assert!(!show.is_armed(1) && !show.is_armed(2));
+        assert_eq!(show.next_armed_top(0), Some(4));
+        assert_eq!(show.armed_top_from(1), Some(4));
+        assert_eq!(
+            show.armed_top_from(2),
+            Some(4),
+            "a child counts as its group"
+        );
+        // From the end: nothing armed after.
+        show.cues[e].armed = false;
+        assert_eq!(show.armed_top_from(1), Some(4));
+        show.cues[4].armed = false;
+        assert_eq!(show.armed_top_from(1), None);
+        assert_eq!(show.next_armed_top(0), None);
+    }
+
+    #[test]
+    fn wrapping_a_disarmed_cue_keeps_it_out_of_the_show() {
+        let mut show = named("abc");
+        show.cues[1].armed = false;
+        let g = show.group_cue(1).unwrap();
+        let gi = show.cue_index(g).unwrap();
+        assert!(!show.cues[gi].armed, "the group takes over the arm state");
+        assert!(show.cues[gi + 1].armed);
+        assert!(!show.is_armed(gi + 1), "so the child still doesn't run");
     }
 }

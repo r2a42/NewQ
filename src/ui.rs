@@ -151,6 +151,10 @@ enum Action {
     AddSubDisplay(DisplayRef),
     RemoveSubDisplay(SubDisplayId),
     SetTransition(CueId, Transition),
+    /// Arm or disarm a cue.
+    SetArmed(CueId, bool),
+    /// Flip the selected cue between armed and disarmed.
+    ToggleArmed,
     /// Collapse or expand a group in the cue list.
     ToggleGroup(CueId),
     /// Wrap a cue in a new group.
@@ -315,6 +319,9 @@ fn keyboard(ctx: &egui::Context, st: &UiState, actions: &mut Vec<Action>) {
         if i.consume_key(egui::Modifiers::NONE, Key::P) {
             actions.push(Action::TogglePause);
         }
+        if i.consume_key(egui::Modifiers::NONE, Key::A) {
+            actions.push(Action::ToggleArmed);
+        }
         if i.consume_key(egui::Modifiers::COMMAND, Key::D) {
             actions.push(Action::Duplicate);
         }
@@ -397,6 +404,15 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             if let Some(id) = st.selected
                 && let Some(c) = show.cue(id)
             {
+                if ui
+                    .add(
+                        egui::Button::new(if c.armed { "Disarm" } else { "Arm" })
+                            .shortcut_text("A"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::SetArmed(id, !c.armed));
+                }
                 match (&c.kind, c.parent) {
                     (CueKind::Group(_), _) => {
                         if ui.button("Ungroup").clicked() {
@@ -455,6 +471,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 ("Space", "GO"),
                 ("Esc", "Fade out all (press twice: stop now)"),
                 ("P", "Pause / resume"),
+                ("A", "Arm / disarm the selected cue"),
                 ("↑ / ↓", "Move selection and playhead"),
                 ("Ctrl+↑ / Ctrl+↓", "Reorder cue"),
                 ("Ctrl+D", "Duplicate cue"),
@@ -492,7 +509,11 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
         }
         ui.add_space(8.0);
         ui.vertical(|ui| {
-            let next = engine.playhead.and_then(|id| show.cue(id));
+            // The cue GO will fire: disarmed cues at the playhead are passed over.
+            let at_playhead = engine.playhead.and_then(|id| show.cue_index(id));
+            let next = at_playhead
+                .and_then(|i| show.armed_top_from(i))
+                .map(|i| &show.cues[i]);
             ui.label(RichText::new("STANDING BY").small().weak());
             match next {
                 Some(c) => {
@@ -505,6 +526,9 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
                     if !c.notes.trim().is_empty() {
                         ui.label(RichText::new(c.notes.trim()).italics());
                     }
+                }
+                None if at_playhead.is_some() => {
+                    ui.label(RichText::new("Nothing armed").size(24.0).weak());
                 }
                 None => {
                     ui.label(RichText::new("End of cue list").size(24.0).weak());
@@ -775,7 +799,13 @@ fn cue_list(
                         egui::StrokeKind::Inside,
                     );
                 }
-                let text_color = v.strong_text_color();
+                // A disarmed cue, or one in a disarmed group, is greyed out.
+                let live = show.is_armed(idx);
+                let text_color = if live {
+                    v.strong_text_color()
+                } else {
+                    v.weak_text_color()
+                };
                 let font = egui::FontId::proportional(14.0);
                 let y = rect.center().y;
                 let marker = match status {
@@ -803,6 +833,12 @@ fn cue_list(
                 cell(0, marker.into(), PLAYHEAD);
                 if marker.is_empty() && engine.is_prepared(c.id) {
                     painter.circle_filled(egui::pos2(rect.left() + 12.0, y), 3.5, GO_GREEN);
+                } else if marker.is_empty() && !live {
+                    painter.circle_stroke(
+                        egui::pos2(rect.left() + 12.0, y),
+                        3.5,
+                        Stroke::new(1.0, v.weak_text_color()),
+                    );
                 }
                 cell_dx(1, indent, c.number.clone(), text_color);
                 cell_dx(2, indent, c.kind.cue_type().icon().into(), text_color);
@@ -928,6 +964,10 @@ fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &
         }
     }
     ui.separator();
+    if ui.button(if c.armed { "Disarm" } else { "Arm" }).clicked() {
+        actions.push(Action::SetArmed(c.id, !c.armed));
+        ui.close();
+    }
     match (&c.kind, c.parent) {
         (CueKind::Group(_), _) => {
             if ui.button("Ungroup").clicked() {
@@ -2006,6 +2046,12 @@ fn inspector(
                 ui.label("Pre-wait");
                 secs(ui, &mut cue.pre_wait);
                 ui.end_row();
+                ui.label("Armed");
+                ui.checkbox(&mut cue.armed, "").on_hover_text(
+                    "A disarmed cue is skipped as if it weren't in the list: GO passes over \
+                     it, continues don't fire it, and its group doesn't start it.",
+                );
+                ui.end_row();
                 ui.label("Continue");
                 if cue.parent.is_some() {
                     ui.label(RichText::new("Decided by the group").weak());
@@ -2665,7 +2711,9 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
         | Command::Select(ref n)
         | Command::Fire(ref n)
         | Command::Stop(ref n)
-        | Command::FadeOut(ref n) => {
+        | Command::FadeOut(ref n)
+        | Command::Arm(ref n)
+        | Command::Disarm(ref n) => {
             let Some(id) = find(show, n) else {
                 engine.log(format!("Remote: there is no cue numbered {n}"));
                 return;
@@ -2681,6 +2729,10 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
                 }
                 Command::Fire(_) => engine.fire(show, id),
                 Command::Stop(_) => engine.stop_cue(id, 0.0),
+                Command::Arm(_) | Command::Disarm(_) => {
+                    let armed = matches!(cmd, Command::Arm(_));
+                    apply(Action::SetArmed(id, armed), show, engine, st);
+                }
                 _ => engine.fade_out_cue(show, id),
             }
         }
@@ -2907,6 +2959,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 if t.uses_time() && m.fade_in <= 0.0 {
                     m.fade_in = 1.0;
                 }
+            }
+        }
+        Action::SetArmed(id, armed) => {
+            if let Some(i) = show.cue_index(id) {
+                show.cues[i].armed = armed;
+            }
+        }
+        Action::ToggleArmed => {
+            if let Some(i) = sel_idx {
+                show.cues[i].armed = !show.cues[i].armed;
             }
         }
         Action::ToggleGroup(id) => {
@@ -3515,5 +3577,39 @@ mod tests {
         run_remote(Command::Select("nope".into()), &mut show, &mut e, &mut st);
         assert_eq!(e.active.len(), before);
         assert!(e.messages.back().unwrap().1.contains("nope"));
+    }
+
+    #[test]
+    fn the_a_key_arms_and_disarms_but_not_while_typing() {
+        use egui::Modifiers as M;
+        let st = UiState::default();
+        let a = keys(&st, &[(Key::A, M::NONE)]);
+        assert!(matches!(a[..], [Action::ToggleArmed]));
+        // Ctrl+A is not the shortcut.
+        assert!(keys(&st, &[(Key::A, M::COMMAND)]).is_empty());
+    }
+
+    #[test]
+    fn arming_from_the_ui_and_over_osc() {
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        let idx = |show: &Show| show.cue_index(d).unwrap();
+        // The A key's action flips the selected cue.
+        st.selected = Some(d);
+        apply(Action::ToggleArmed, &mut show, &mut e, &mut st);
+        assert!(!show.cues[idx(&show)].armed);
+        apply(Action::ToggleArmed, &mut show, &mut e, &mut st);
+        assert!(show.cues[idx(&show)].armed);
+        // OSC/MIDI-style commands, by cue number.
+        run_remote(Command::Disarm("4".into()), &mut show, &mut e, &mut st);
+        assert!(!show.cues[idx(&show)].armed);
+        run_remote(Command::Fire("4".into()), &mut show, &mut e, &mut st);
+        assert!(!is_playing(&e, d), "a disarmed cue won't fire");
+        run_remote(Command::Arm("4".into()), &mut show, &mut e, &mut st);
+        run_remote(Command::Fire("4".into()), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d));
+        // SetArmed, as from the context menu and inspector.
+        apply(Action::SetArmed(d, false), &mut show, &mut e, &mut st);
+        assert!(!show.cues[idx(&show)].armed);
     }
 }
