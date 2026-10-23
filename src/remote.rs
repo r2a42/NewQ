@@ -33,6 +33,9 @@ pub enum Command {
     Fire(String),
     Stop(String),
     FadeOut(String),
+    /// Arm or disarm a cue.
+    Arm(String),
+    Disarm(String),
 }
 
 // ----- OSC ------------------------------------------------------------------
@@ -102,6 +105,8 @@ pub fn osc_address(address: &str) -> Option<Command> {
                 "select" | "load" => Some(Command::Select(n)),
                 "stop" => Some(Command::Stop(n)),
                 "fade" => Some(Command::FadeOut(n)),
+                "arm" => Some(Command::Arm(n)),
+                "disarm" => Some(Command::Disarm(n)),
                 _ => None,
             }
         }
@@ -401,6 +406,8 @@ mod tests {
             ("/cue/3.5/load", Command::Select("3.5".into())),
             ("/cue/7/stop", Command::Stop("7".into())),
             ("/cue/7/fade", Command::FadeOut("7".into())),
+            ("/cue/7/arm", Command::Arm("7".into())),
+            ("/cue/7/disarm", Command::Disarm("7".into())),
             ("/GO", Command::Go),
             ("/cue/Q1a/START", Command::Fire("Q1a".into())),
         ];

@@ -102,7 +102,8 @@ includes FFmpeg, so there's nothing else to install.
   - *OSC over UDP* (port 53000 by default): `/go`, `/panic`, `/stop`,
     `/pause`, `/resume`, `/playhead/next`, `/playhead/previous`, and
     `/cue/<number>/start` (fire it, playhead unchanged), `go` (select it and
-    GO), `select` (or `load`), `stop`, `fade` (fade out with its own time).
+    GO), `select` (or `load`), `stop`, `fade` (fade out with its own time),
+    `arm` and `disarm`.
     Arguments are ignored and bundles work.
   - *MIDI input*: pick a port and, if you like, a channel. A note-on fires the
     cue whose number is the note number; a program change selects the cue
@@ -117,6 +118,13 @@ includes FFmpeg, so there's nothing else to install.
   as before. NewQ opens each device with the most channels it offers; a
   device that is missing is reported in the panel, and retried while nothing
   is playing.
+- **Arm and disarm cues:** untick *Armed* in a cue's inspector (or press A, or
+  use the right-click menu) to skip it without deleting it, which is handy in
+  rehearsal. A disarmed cue is passed over as if it weren't in the list: GO
+  fires the next armed cue, auto-continue and auto-follow skip it, a group
+  doesn't start it, and firing it by hand (or over OSC) does nothing. A
+  disarmed group takes its children with it. Disarmed rows are greyed out,
+  and the *Standing by* display shows the cue GO will really fire.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
@@ -133,6 +141,7 @@ includes FFmpeg, so there's nothing else to install.
 | Space                 | GO                                              |
 | Esc                   | Fade out everything (press twice: stop now)     |
 | P                     | Pause / resume everything                       |
+| A                     | Arm / disarm the selected cue                   |
 | ↑ / ↓                 | Move selection and playhead                     |
 | Ctrl+↑ / Ctrl+↓       | Reorder the selected cue                        |
 | ← ↑ → ↓ / Shift+arrow | Move the selected corner 1 px / 5 px (while editing) |
