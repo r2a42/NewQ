@@ -899,7 +899,7 @@ mod tests {
         near(xf(&p, 0.0, 1.0), (1.0 / a, 0.0));
         // Lengths in pixels are preserved: the pixel distance from the centre is unchanged.
         let (x, y) = xf(&p, 0.6, 0.3);
-        let before = ((0.6 * a) as f32).hypot(0.3);
+        let before = (0.6 * a).hypot(0.3);
         let after = (x * a).hypot(y);
         assert!((before - after).abs() < 1e-4);
     }
