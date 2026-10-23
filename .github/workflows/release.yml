@@ -111,9 +111,12 @@ jobs:
           ls -l dist
           (cd dist && sha256sum * > SHA256SUMS.txt)
           sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
+          # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
+          pre=""
+          case "$TAG" in *-*) pre="--prerelease" ;; esac
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" --notes-file notes.md
+            gh release edit "$TAG" --notes-file notes.md $pre
           else
-            gh release create "$TAG" dist/* --title "NewQ $TAG" --notes-file notes.md
+            gh release create "$TAG" dist/* --title "NewQ $TAG" --notes-file notes.md $pre
           fi
