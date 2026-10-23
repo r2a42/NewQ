@@ -77,6 +77,7 @@ pub struct VideoState {
     pub output: Option<OutputId>,
     pub layer: i32,
     pub fit: Fit,
+    pub transform: LayerTransform,
     spawned_at: Instant,
 }
 
@@ -86,6 +87,7 @@ pub struct ImageState {
     pub output: Option<OutputId>,
     pub layer: i32,
     pub fit: Fit,
+    pub transform: LayerTransform,
 }
 
 /// A full-screen colour layer used for dip-to-black/white transitions. It
@@ -232,6 +234,7 @@ pub struct LayerRef<'a> {
     pub instance: u64,
     pub opacity: f32,
     pub fit: Fit,
+    pub transform: LayerTransform,
     pub source: LayerSource<'a>,
 }
 
@@ -746,6 +749,7 @@ impl Engine {
                                     output: m.output,
                                     layer: m.layer,
                                     fit: m.fit,
+                                    transform: m.transform,
                                     spawned_at: Instant::now(),
                                 }))
                             }
@@ -755,6 +759,7 @@ impl Engine {
                                 output: m.output,
                                 layer: m.layer,
                                 fit: m.fit,
+                                transform: m.transform,
                             }),
                             PreparedKind::Audio(voice) => ActiveKind::Audio(voice),
                         };
@@ -1090,6 +1095,13 @@ impl Engine {
 
             if let Some(m) = media {
                 // Live level edits apply until a fade cue takes over.
+                // So does position, scale, rotation and crop, so a cue can be
+                // lined up while it plays.
+                match &mut a.kind {
+                    ActiveKind::Video(v) => v.transform = m.transform,
+                    ActiveKind::Image(i) => i.transform = m.transform,
+                    _ => {}
+                }
                 if !a.faded && !a.stopping && !a.auto_faded {
                     if !a.opacity.ramping() {
                         a.opacity.value = m.opacity;
@@ -1283,18 +1295,21 @@ impl Engine {
             if !a.started {
                 continue;
             }
-            let (layer, fit, source) = match &a.kind {
+            let (layer, fit, transform, source) = match &a.kind {
                 ActiveKind::Video(v) if v.output == Some(output) => {
-                    (v.layer, v.fit, LayerSource::Video(&v.player))
+                    (v.layer, v.fit, v.transform, LayerSource::Video(&v.player))
                 }
                 ActiveKind::Image(i) if i.output == Some(output) => match &i.image {
-                    Some(img) => (i.layer, i.fit, LayerSource::Image(img)),
+                    Some(img) => (i.layer, i.fit, i.transform, LayerSource::Image(img)),
                     None => continue,
                 },
                 // Mattes cover everything on the output.
-                ActiveKind::Matte(m) if m.output == Some(output) => {
-                    (i32::MAX, Fit::Stretch, LayerSource::Solid(m.color))
-                }
+                ActiveKind::Matte(m) if m.output == Some(output) => (
+                    i32::MAX,
+                    Fit::Stretch,
+                    LayerTransform::default(),
+                    LayerSource::Solid(m.color),
+                ),
                 _ => continue,
             };
             layers.push((
@@ -1303,6 +1318,7 @@ impl Engine {
                     instance: a.instance,
                     opacity: a.opacity.value.clamp(0.0, 1.0),
                     fit,
+                    transform,
                     source,
                 },
             ));

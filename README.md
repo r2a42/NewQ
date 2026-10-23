@@ -81,6 +81,12 @@ includes FFmpeg, so there's nothing else to install.
   inside; *Wrap in group*, *Move into group* and *Move out of group* (cue
   menu or right-click) move cues in and out, and Ctrl+↑/↓ moves a cue within or
   out of its group. Groups don't nest.
+- **Per-cue geometry:** under *Geometry* in a visual cue's inspector, move,
+  scale (or mirror, with a negative scale), rotate and crop the picture on its
+  output. Position is a share of the output's size, rotation is clockwise about
+  the middle of the picture, and edits apply live while the cue plays. Parts
+  that leave the output are clipped. Two videos can share one screen this way,
+  without sub displays.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the

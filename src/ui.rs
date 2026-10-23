@@ -2124,6 +2124,17 @@ fn media_inspector(
                 ui.end_row();
             }
         });
+    if visual {
+        let title = if m.transform.is_identity() {
+            "Geometry"
+        } else {
+            "Geometry •"
+        };
+        egui::CollapsingHeader::new(title)
+            .id_salt("geometry")
+            .default_open(!m.transform.is_identity())
+            .show(ui, |ui| geometry_inspector(ui, &mut m.transform));
+    }
     if m.loop_media && ty != CueType::Image {
         let what = if m.end.is_some() {
             "Loops from the in point to the out point."
@@ -2131,6 +2142,70 @@ fn media_inspector(
             "Loops from the in point to the end of the file."
         };
         ui.label(RichText::new(what).weak());
+    }
+}
+
+/// A percentage field for a fraction (0.25 shows as 25%).
+fn percent(ui: &mut Ui, v: &mut f32, speed: f64) -> egui::Response {
+    let mut p = *v * 100.0;
+    let r = ui.add(egui::DragValue::new(&mut p).speed(speed).suffix("%"));
+    if r.changed() {
+        *v = p / 100.0;
+    }
+    r
+}
+
+/// Position, scale, rotation and crop of a visual cue on its output.
+fn geometry_inspector(ui: &mut Ui, t: &mut LayerTransform) {
+    let uniform_id = ui.id().with("uniform_scale");
+    let mut uniform = ui.data_mut(|d| *d.get_temp_mut_or(uniform_id, true));
+    egui::Grid::new("geometry_grid")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Position");
+            ui.horizontal(|ui| {
+                percent(ui, &mut t.x, 0.2)
+                    .on_hover_text("Across, as a share of the output's width");
+                percent(ui, &mut t.y, 0.2).on_hover_text("Down, as a share of the output's height");
+            });
+            ui.end_row();
+            ui.label("Scale");
+            ui.horizontal(|ui| {
+                if percent(ui, &mut t.scale_x, 0.5)
+                    .on_hover_text("Negative values mirror the picture")
+                    .changed()
+                    && uniform
+                {
+                    t.scale_y = t.scale_x;
+                }
+                ui.add_enabled_ui(!uniform, |ui| percent(ui, &mut t.scale_y, 0.5));
+                ui.checkbox(&mut uniform, "Together");
+            });
+            ui.end_row();
+            ui.label("Rotation");
+            ui.add(
+                egui::DragValue::new(&mut t.rotation)
+                    .speed(0.5)
+                    .suffix("°")
+                    .range(-360.0..=360.0),
+            )
+            .on_hover_text("Clockwise, about the middle of the picture");
+            ui.end_row();
+            ui.label("Crop");
+            ui.horizontal(|ui| {
+                for (side, name) in ["left", "top", "right", "bottom"].iter().enumerate() {
+                    ui.label(RichText::new(&name[..1].to_uppercase()).weak());
+                    percent(ui, &mut t.crop[side], 0.2)
+                        .on_hover_text(format!("Cut from the {name}"));
+                    t.crop[side] = t.crop[side].clamp(0.0, 0.95);
+                }
+            });
+            ui.end_row();
+        });
+    ui.data_mut(|d| d.insert_temp(uniform_id, uniform));
+    if !t.is_identity() && ui.small_button("Reset geometry").clicked() {
+        *t = LayerTransform::default();
     }
 }
 

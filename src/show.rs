@@ -433,6 +433,43 @@ impl CueKind {
     }
 }
 
+/// Where a visual cue sits on its output, beyond its fit mode: moved, scaled,
+/// rotated and cropped. The default leaves the cue exactly as fitted.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayerTransform {
+    /// Offset of the cue's centre, as a fraction of the output's width/height
+    /// (right and down are positive).
+    pub x: f32,
+    pub y: f32,
+    /// 1.0 = as fitted; negative values mirror.
+    pub scale_x: f32,
+    pub scale_y: f32,
+    /// Degrees, clockwise.
+    pub rotation: f32,
+    /// Fractions of the picture cut from the left, top, right and bottom.
+    pub crop: [f32; 4],
+}
+
+impl Default for LayerTransform {
+    fn default() -> Self {
+        LayerTransform {
+            x: 0.0,
+            y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation: 0.0,
+            crop: [0.0; 4],
+        }
+    }
+}
+
+impl LayerTransform {
+    pub fn is_identity(&self) -> bool {
+        *self == LayerTransform::default()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MediaCue {
     pub file: PathBuf,
@@ -458,6 +495,9 @@ pub struct MediaCue {
     pub curve: Curve,
     #[serde(default = "one")]
     pub opacity: f32,
+    /// Position, scale, rotation and crop on the output (visual cues).
+    #[serde(default, skip_serializing_if = "LayerTransform::is_identity")]
+    pub transform: LayerTransform,
     #[serde(default)]
     pub volume_db: f32,
     /// In point, seconds.
@@ -496,6 +536,7 @@ impl MediaCue {
             fade_out: 0.0,
             curve: Curve::SCurve,
             opacity: 1.0,
+            transform: LayerTransform::default(),
             volume_db: 0.0,
             start: 0.0,
             end: None,
@@ -1537,5 +1578,25 @@ mod tests {
         // Top-level cues don't carry a parent field, so old shows are unchanged.
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.matches("\"parent\"").count(), 2);
+    }
+
+    #[test]
+    fn transforms_default_to_nothing_and_stay_out_of_old_files() {
+        let mut show = Show::default();
+        let cue = show.make_cue(CueType::Video, Some("a.mp4".into()), 0);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(
+            !json.contains("transform"),
+            "identity should not be written: {json}"
+        );
+        // A file from before transforms loads with the identity.
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert!(back.kind.media().unwrap().transform.is_identity());
+        // A partial transform fills in the rest.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["kind"]["Video"]["transform"] = serde_json::json!({"rotation": 15.0});
+        let t = serde_json::from_value::<Cue>(v).unwrap();
+        let t = t.kind.media().unwrap().transform;
+        assert_eq!((t.rotation, t.scale_x, t.scale_y), (15.0, 1.0, 1.0));
     }
 }

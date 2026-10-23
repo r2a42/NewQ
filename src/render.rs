@@ -4,7 +4,7 @@
 //! never waits, so timing, input and the other outputs are unaffected.
 
 use crate::gpu::{DrawGroup, DrawLayer, Geometry, Gpu, LayerTexture, Slot};
-use crate::show::Fit;
+use crate::show::{Fit, LayerTransform};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -87,6 +87,7 @@ pub struct OutputLayer {
     pub texture: Arc<LayerTexture>,
     pub opacity: f32,
     pub fit: Fit,
+    pub transform: LayerTransform,
 }
 
 /// One output's layers, placed on a screen.
@@ -106,6 +107,7 @@ impl OutputGroup {
                     texture: &l.texture,
                     opacity: l.opacity,
                     fit: l.fit,
+                    transform: l.transform,
                 })
                 .collect(),
             geometry: self.geometry,
@@ -366,8 +368,14 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
     ) -> Vec<wgpu::CommandBuffer> {
         for g in &self.groups {
             for l in &g.layers {
-                l.texture
-                    .write_uniform(queue, self.slot, &g.geometry, l.opacity, l.fit);
+                l.texture.write_uniform(
+                    queue,
+                    self.slot,
+                    &g.geometry,
+                    l.opacity,
+                    l.fit,
+                    &l.transform,
+                );
             }
         }
         Vec::new()

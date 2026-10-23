@@ -2,7 +2,7 @@
 //! opacity onto output windows.
 
 use crate::media::ffmpeg::ColorMatrix;
-use crate::show::Fit;
+use crate::show::{Fit, LayerTransform};
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use winit::window::Window;
@@ -102,6 +102,11 @@ struct LayerUniform {
     h: Homography,
     /// Canvas → the output's display or sub display, for clipping to its edges.
     pin: Homography,
+    /// The cue's own placement: rows (m00, m01, tx) and (m10, m11, ty) applied
+    /// to the layer's NDC corners (see [`layer_placement`]).
+    xf: [[f32; 4]; 2],
+    /// The part of the texture drawn: u0, v0, u1, v1.
+    uvr: [f32; 4],
 }
 
 const SHADER: &str = r#"
@@ -121,6 +126,11 @@ struct Params {
     c0: vec4<f32>,
     c1: vec4<f32>,
     c2: vec4<f32>,
+    // The cue's own transform on the NDC rect: rows (m00, m01, tx), (m10, m11, ty).
+    x0: vec4<f32>,
+    x1: vec4<f32>,
+    // Texture sub-rectangle drawn (crop): u0, v0, u1, v1.
+    uvr: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -143,14 +153,17 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0));
     let c = corners[i];
-    let ndc = vec2<f32>(mix(p.rect.x, p.rect.z, c.x), mix(p.rect.y, p.rect.w, c.y));
+    let n0 = vec2<f32>(mix(p.rect.x, p.rect.z, c.x), mix(p.rect.y, p.rect.w, c.y));
+    let ndc = vec2<f32>(
+        p.x0.x * n0.x + p.x0.y * n0.y + p.x0.z,
+        p.x1.x * n0.x + p.x1.y * n0.y + p.x1.z);
     let cu = vec3<f32>((ndc.x + 1.0) * 0.5, (1.0 - ndc.y) * 0.5, 1.0);
     // Projective transform; the GPU's perspective divide by w (with
     // perspective-correct interpolation) does the rest.
     let q = vec3<f32>(dot(p.h0.xyz, cu), dot(p.h1.xyz, cu), dot(p.h2.xyz, cu));
     var o: VOut;
     o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
-    o.uv = c;
+    o.uv = mix(p.uvr.xy, p.uvr.zw, c);
     o.canvas = cu.xy;
     o.display = vec3<f32>(dot(p.c0.xyz, cu), dot(p.c1.xyz, cu), dot(p.c2.xyz, cu));
     return o;
@@ -184,6 +197,43 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgba.rgb * a, a);
 }
 "#;
+
+/// Where a layer draws once its fit, crop and transform are applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerPlacement {
+    /// NDC rectangle (x0, y0 top-left, x1, y1 bottom-right) after cropping.
+    pub rect: [f32; 4],
+    /// Rows (m00, m01, tx) and (m10, m11, ty) mapping the rect's NDC corners
+    /// to their final NDC positions.
+    pub xf: [[f32; 4]; 2],
+    /// The part of the texture drawn: u0, v0, u1, v1.
+    pub uvr: [f32; 4],
+}
+
+/// Combine a layer's fitted NDC rect with its cue's transform. Scale and
+/// rotation act about the centre of the uncropped picture; rotation is done
+/// in pixel proportions so it doesn't shear on a non-square canvas.
+pub fn layer_placement(fitted: [f32; 4], canvas: (u32, u32), t: &LayerTransform) -> LayerPlacement {
+    // Crops are limited so something always remains.
+    let cl = t.crop[0].clamp(0.0, 0.99);
+    let ct = t.crop[1].clamp(0.0, 0.99);
+    let cr = t.crop[2].clamp(0.0, 0.99 - cl);
+    let cb = t.crop[3].clamp(0.0, 0.99 - ct);
+    let [x0, y0, x1, y1] = fitted;
+    let (w, h) = (x1 - x0, y1 - y0);
+    let rect = [x0 + w * cl, y0 + h * ct, x1 - w * cr, y1 - h * cb];
+    let aspect = canvas.0.max(1) as f32 / canvas.1.max(1) as f32;
+    let (s, c) = t.rotation.to_radians().sin_cos();
+    let xf = [
+        [c * t.scale_x, s * t.scale_y / aspect, 2.0 * t.x, 0.0],
+        [-s * t.scale_x * aspect, c * t.scale_y, -2.0 * t.y, 0.0],
+    ];
+    LayerPlacement {
+        rect,
+        xf,
+        uvr: [cl, ct, 1.0 - cr, 1.0 - cb],
+    }
+}
 
 /// A 3×3 projective transform stored as three padded rows.
 pub type Homography = [[f32; 4]; 3];
@@ -550,10 +600,16 @@ impl LayerTexture {
         geometry: &Geometry,
         opacity: f32,
         fit: Fit,
+        transform: &LayerTransform,
     ) {
         let rows = yuv_rows(self.matrix);
+        let place = layer_placement(
+            fit_rect((self.width, self.height), geometry.canvas, fit),
+            geometry.canvas,
+            transform,
+        );
         let u = LayerUniform {
-            rect: fit_rect((self.width, self.height), geometry.canvas, fit),
+            rect: place.rect,
             opacity,
             mode: u32::from(self.is_yuv()),
             _pad: [0.0; 2],
@@ -562,6 +618,8 @@ impl LayerTexture {
             b: rows[2],
             h: geometry.warp,
             pin: geometry.pin,
+            xf: place.xf,
+            uvr: place.uvr,
         };
         queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
     }
@@ -586,6 +644,7 @@ pub struct DrawLayer<'a> {
     pub texture: &'a LayerTexture,
     pub opacity: f32,
     pub fit: Fit,
+    pub transform: LayerTransform,
 }
 
 /// Where an output's picture (its canvas) lands on a screen.
@@ -634,8 +693,14 @@ impl Gpu {
     ) -> wgpu::CommandBuffer {
         for g in groups {
             for l in &g.layers {
-                l.texture
-                    .write_uniform(&self.queue, Slot::Output, &g.geometry, l.opacity, l.fit);
+                l.texture.write_uniform(
+                    &self.queue,
+                    Slot::Output,
+                    &g.geometry,
+                    l.opacity,
+                    l.fit,
+                    &l.transform,
+                );
             }
         }
         let mut encoder = self
@@ -770,6 +835,93 @@ mod tests {
             fit_rect((10, 10), (100, 50), Fit::Stretch),
             [-1.0, 1.0, 1.0, -1.0]
         );
+    }
+
+    /// Apply a placement's transform to an NDC point.
+    fn xf(p: &LayerPlacement, x: f32, y: f32) -> (f32, f32) {
+        (
+            p.xf[0][0] * x + p.xf[0][1] * y + p.xf[0][2],
+            p.xf[1][0] * x + p.xf[1][1] * y + p.xf[1][2],
+        )
+    }
+
+    fn near(a: (f32, f32), b: (f32, f32)) {
+        assert!(
+            (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    #[test]
+    fn default_transform_changes_nothing() {
+        let fitted = fit_rect((1920, 1080), (1920, 1080), Fit::Contain);
+        let p = layer_placement(fitted, (1920, 1080), &LayerTransform::default());
+        assert_eq!(p.rect, fitted);
+        assert_eq!(p.uvr, [0.0, 0.0, 1.0, 1.0]);
+        near(xf(&p, 0.3, -0.7), (0.3, -0.7));
+    }
+
+    #[test]
+    fn scale_and_offset_move_the_picture() {
+        let t = LayerTransform {
+            x: 0.25,
+            y: -0.1,
+            scale_x: 0.5,
+            scale_y: 0.5,
+            ..Default::default()
+        };
+        let p = layer_placement([-1.0, 1.0, 1.0, -1.0], (1920, 1080), &t);
+        // The top-left corner of a full-canvas picture: halved, then shifted
+        // a quarter of the width right and a tenth of the height up.
+        near(xf(&p, -1.0, 1.0), (-0.5 + 0.5, 0.5 + 0.2));
+        // A negative scale mirrors.
+        let m = LayerTransform {
+            scale_x: -1.0,
+            ..Default::default()
+        };
+        let p = layer_placement([-1.0, 1.0, 1.0, -1.0], (1920, 1080), &m);
+        near(xf(&p, -1.0, 1.0), (1.0, 1.0));
+    }
+
+    #[test]
+    fn rotation_is_clockwise_and_keeps_pixel_proportions() {
+        let t = LayerTransform {
+            rotation: 90.0,
+            ..Default::default()
+        };
+        let canvas = (1920, 1080);
+        let p = layer_placement([-1.0, 1.0, 1.0, -1.0], canvas, &t);
+        let a = 1920.0 / 1080.0;
+        // The middle of the right edge swings down to the bottom, a full
+        // half-width (in pixels) below the centre.
+        near(xf(&p, 1.0, 0.0), (0.0, -a));
+        // The top-middle swings to the right, half a height from the centre in pixels.
+        near(xf(&p, 0.0, 1.0), (1.0 / a, 0.0));
+        // Lengths in pixels are preserved: the pixel distance from the centre is unchanged.
+        let (x, y) = xf(&p, 0.6, 0.3);
+        let before = ((0.6 * a) as f32).hypot(0.3);
+        let after = (x * a).hypot(y);
+        assert!((before - after).abs() < 1e-4);
+    }
+
+    #[test]
+    fn crop_trims_the_rect_and_the_texture_together() {
+        let t = LayerTransform {
+            crop: [0.1, 0.2, 0.3, 0.0],
+            ..Default::default()
+        };
+        let p = layer_placement([-1.0, 1.0, 1.0, -1.0], (1920, 1080), &t);
+        assert_eq!(p.uvr, [0.1, 0.2, 0.7, 1.0]);
+        let [x0, y0, x1, y1] = p.rect;
+        assert!((x0 - -0.8).abs() < 1e-5 && (x1 - 0.4).abs() < 1e-5);
+        assert!((y0 - 0.6).abs() < 1e-5 && (y1 - -1.0).abs() < 1e-5);
+        // Cropping everything still leaves a sliver rather than nothing.
+        let all = LayerTransform {
+            crop: [1.0, 1.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        let p = layer_placement([-1.0, 1.0, 1.0, -1.0], (1920, 1080), &all);
+        assert!(p.uvr[2] > p.uvr[0] && p.uvr[3] > p.uvr[1]);
     }
 
     #[test]
