@@ -95,6 +95,19 @@ includes FFmpeg, so there's nothing else to install.
   the middle of the picture, and edits apply live while the cue plays. Parts
   that leave the output are clipped. Two videos can share one screen this way,
   without sub displays.
+- **Remote control (OSC and MIDI):** turn these on under *Remote control* in
+  the side panel; the settings are saved in the show. Both are off until you
+  enable them, because anyone who can reach the OSC port on your network can
+  drive the show. Cues are named by their cue number.
+  - *OSC over UDP* (port 53000 by default): `/go`, `/panic`, `/stop`,
+    `/pause`, `/resume`, `/playhead/next`, `/playhead/previous`, and
+    `/cue/<number>/start` (fire it, playhead unchanged), `go` (select it and
+    GO), `select` (or `load`), `stop`, `fade` (fade out with its own time).
+    Arguments are ignored and bundles work.
+  - *MIDI input*: pick a port and, if you like, a channel. A note-on fires the
+    cue whose number is the note number; a program change selects the cue
+    with that number; and MIDI Show Control GO (with or without a cue
+    number), STOP, RESUME, LOAD and ALL OFF drive the transport.
 - **Layers and fit modes:** fit (letterbox), fill (crop) and stretch; higher
   layers draw on top; per-cue opacity and volume can be adjusted live.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
@@ -226,7 +239,7 @@ space like a hardware video mixer.
 - Audio goes to the system default device, as stereo.
 - Video alpha channels (ProRes 4444, VP9 alpha) aren't supported yet; images
   with alpha are.
-- No timecode/MIDI/OSC triggering or cue carts yet.
+- No timecode triggering or cue carts yet.
 - Very large files (4K60) push a lot of raw video through a pipe; NewQ
   decodes at the output window's resolution to keep this down.
 - Fullscreen output on a second display has been tested only on a single-monitor

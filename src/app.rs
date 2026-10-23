@@ -6,9 +6,11 @@
 
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
+use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
-    Corners, DisplayRef, Fit, LayerTransform, OutputConfig, OutputId, Placement, Show, SubDisplay,
+    Corners, DisplayRef, Fit, LayerTransform, OutputConfig, OutputId, Placement, RemoteSettings,
+    Show, SubDisplay,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -84,6 +86,10 @@ pub struct App {
     show: Show,
     engine: Engine,
     ui: UiState,
+    remote: Remote,
+    /// The remote settings last seen, and when they last changed, so a port
+    /// being dragged in the UI isn't rebound on every pixel.
+    remote_seen: (RemoteSettings, Instant),
     egui_ctx: egui::Context,
     gpu: Option<Gpu>,
     control: Option<ControlWindow>,
@@ -105,7 +111,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(initial_show: Option<PathBuf>) -> App {
+    /// `wake` is called from remote-control threads to rouse the event loop.
+    pub fn new(initial_show: Option<PathBuf>, wake: impl Fn() + Send + Sync + 'static) -> App {
         let mut engine = Engine::new();
         let mut ui = UiState::default();
         let show = match initial_show {
@@ -124,6 +131,8 @@ impl App {
         engine.playhead = show.cues.first().map(|c| c.id);
         ui.selected = engine.playhead;
         App {
+            remote: Remote::new(wake),
+            remote_seen: (RemoteSettings::default(), Instant::now()),
             show,
             engine,
             ui,
@@ -156,7 +165,32 @@ impl App {
                 primary: primary.as_ref() == Some(m),
             })
             .collect();
+        self.ui.midi_ports = remote::midi_inputs();
         self.last_monitor_scan = Instant::now();
+    }
+
+    /// Keep the OSC and MIDI listeners matching the show's settings, and act
+    /// on what they have received.
+    fn run_remote(&mut self, now: Instant) {
+        if self.remote_seen.0 != self.show.remote {
+            self.remote_seen = (self.show.remote.clone(), now);
+        }
+        let settled = now.duration_since(self.remote_seen.1) > Duration::from_millis(400);
+        if settled {
+            self.remote.sync(&self.show.remote);
+        }
+        self.ui.remote_status = self.remote.status.clone();
+        let commands = self.remote.drain();
+        if commands.is_empty() {
+            return;
+        }
+        for c in commands {
+            log::info!("remote: {c:?}");
+            ui::run_remote(c, &mut self.show, &mut self.engine, &mut self.ui);
+        }
+        if let Some(ctl) = &mut self.control {
+            ctl.next_repaint = Some(now);
+        }
     }
 
     fn control_monitor(&self) -> Option<usize> {
@@ -540,6 +574,9 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.control.is_some() {
             return;
@@ -665,6 +702,7 @@ impl ApplicationHandler for App {
             self.scan_monitors(event_loop);
         }
         self.reconcile_outputs(event_loop);
+        self.run_remote(now);
         self.engine.tick(&self.show, dt);
 
         // Drop GPU textures of cues that are no longer playing.

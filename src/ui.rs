@@ -3,6 +3,7 @@
 use crate::engine::{CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::media::ProbeState;
+use crate::remote::{Command, RemoteStatus};
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
@@ -61,6 +62,10 @@ pub struct UiState {
     /// arrow keys move. Set while drawing, hence the `Cell`.
     handle_sel: Cell<Option<HandleSel>>,
     pub quit_requested: bool,
+    /// MIDI inputs that are connected now (set by the app every few seconds).
+    pub midi_ports: Vec<String>,
+    /// What the OSC and MIDI listeners are doing (set by the app).
+    pub remote_status: RemoteStatus,
     pub dirty: bool,
     /// Serialized show at last save/load, for unsaved-change detection.
     saved_json: Option<String>,
@@ -217,6 +222,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     outputs_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
                     sub_displays_panel(ui, show, st, &mut actions);
+                    ui.add_space(12.0);
+                    remote_panel(ui, show, st);
                 });
         });
     egui::Panel::bottom("inspector")
@@ -1285,6 +1292,98 @@ fn monitor_label(st: &UiState, i: usize) -> String {
             .unwrap_or_default(),
         if m.primary { " primary" } else { "" }
     )
+}
+
+/// Settings for controlling NewQ from OSC and MIDI.
+fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState) {
+    ui.heading("Remote control");
+    ui.label(
+        RichText::new("Run NewQ from a lighting desk, Companion, a phone or a MIDI controller.")
+            .weak()
+            .small(),
+    );
+    let status = &st.remote_status;
+    let r = &mut show.remote;
+    ui.checkbox(&mut r.osc, "OSC over UDP");
+    if r.osc {
+        ui.horizontal(|ui| {
+            ui.label("Port");
+            ui.add(
+                egui::DragValue::new(&mut r.osc_port)
+                    .range(1..=65535)
+                    .speed(1.0),
+            );
+        });
+        match (&status.osc_port, &status.osc_error) {
+            (_, Some(e)) => {
+                ui.label(RichText::new(format!("⚠ {e}")).color(STOP_RED));
+            }
+            (Some(p), None) => {
+                ui.label(RichText::new(format!("Listening on UDP port {p}")).color(GO_GREEN));
+            }
+            _ => {
+                ui.label(RichText::new("Starting…").weak());
+            }
+        }
+        ui.label(
+            RichText::new(
+                "/go  /panic  /stop  /pause  /resume\n/playhead/next  /playhead/previous\n\
+                 /cue/<number>/start  go  select  stop  fade",
+            )
+            .weak()
+            .small(),
+        );
+        ui.label(
+            RichText::new("Anyone who can reach this port on your network can control the show.")
+                .small()
+                .color(PREWAIT),
+        );
+    }
+    ui.add_space(4.0);
+    ui.checkbox(&mut r.midi, "MIDI input");
+    if r.midi {
+        ui.horizontal(|ui| {
+            ui.label("Input");
+            egui::ComboBox::from_id_salt("midi_port")
+                .selected_text(r.midi_port.clone().unwrap_or_else(|| "Choose…".into()))
+                .show_ui(ui, |ui| {
+                    for p in &st.midi_ports {
+                        ui.selectable_value(&mut r.midi_port, Some(p.clone()), p);
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Channel");
+            let text = r
+                .midi_channel
+                .map_or("Any".to_string(), |c| (c + 1).to_string());
+            egui::ComboBox::from_id_salt("midi_channel")
+                .selected_text(text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut r.midi_channel, None, "Any");
+                    for c in 0..16u8 {
+                        ui.selectable_value(&mut r.midi_channel, Some(c), (c + 1).to_string());
+                    }
+                });
+        });
+        match (&status.midi_port, &status.midi_error) {
+            (_, Some(e)) => {
+                ui.label(RichText::new(format!("⚠ {e}")).color(STOP_RED));
+            }
+            (Some(p), None) => {
+                ui.label(RichText::new(format!("Listening to {p}")).color(GO_GREEN));
+            }
+            _ => {}
+        }
+        ui.label(
+            RichText::new(
+                "Note on N: fire cue N · Program change N: select cue N\n\
+                 MIDI Show Control: GO, STOP, RESUME, LOAD, ALL OFF (cue numbers work)",
+            )
+            .weak()
+            .small(),
+        );
+    }
 }
 
 fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
@@ -2407,6 +2506,64 @@ fn load_into(
     st.saved_json = serde_json::to_string(show).ok();
 }
 
+/// Do what a remote message asks for, as if the operator had done it.
+pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    let find = |show: &Show, n: &str| {
+        show.cues
+            .iter()
+            .find(|c| c.number == n.trim())
+            .map(|c| c.id)
+    };
+    match cmd {
+        Command::Go => apply(Action::Go, show, engine, st),
+        Command::Panic => apply(Action::Panic, show, engine, st),
+        Command::StopAll => engine.stop_all(0.0),
+        Command::Pause => engine.set_paused(true),
+        Command::Resume => engine.set_paused(false),
+        Command::PlayheadNext | Command::PlayheadPrevious => {
+            let here = engine
+                .playhead
+                .and_then(|id| show.cue_index(id))
+                .map(|i| show.top_index(i));
+            let next = match (here, cmd == Command::PlayheadNext) {
+                (Some(i), true) => show.next_top(i),
+                (Some(i), false) if i > 0 => Some(show.top_index(i - 1)),
+                (Some(_), false) => None,
+                (None, false) if !show.cues.is_empty() => Some(show.top_index(show.cues.len() - 1)),
+                (None, _) => None,
+            };
+            if let Some(i) = next {
+                let id = show.cues[i].id;
+                select(show, st, engine, Some(id));
+                st.scroll_to_selected = true;
+            }
+        }
+        Command::GoCue(ref n)
+        | Command::Select(ref n)
+        | Command::Fire(ref n)
+        | Command::Stop(ref n)
+        | Command::FadeOut(ref n) => {
+            let Some(id) = find(show, n) else {
+                engine.log(format!("Remote: there is no cue numbered {n}"));
+                return;
+            };
+            match cmd {
+                Command::GoCue(_) => {
+                    select(show, st, engine, Some(id));
+                    apply(Action::Go, show, engine, st);
+                }
+                Command::Select(_) => {
+                    select(show, st, engine, Some(id));
+                    st.scroll_to_selected = true;
+                }
+                Command::Fire(_) => engine.fire(show, id),
+                Command::Stop(_) => engine.stop_cue(id, 0.0),
+                _ => engine.fade_out_cue(show, id),
+            }
+        }
+    }
+}
+
 /// Make a new cue and put it where the selection says (see `Show::insert_slot`).
 fn add_cue(
     show: &mut Show,
@@ -3143,5 +3300,93 @@ mod tests {
         }
         assert!(kids.iter().all(|k| !seen.contains(k)), "{seen:?}");
         assert_eq!(seen.len(), 3, "a, the group and d remain");
+    }
+
+    fn running() -> (Show, Engine, UiState) {
+        let show = grouped_show();
+        let mut engine = Engine::for_tests();
+        let mut st = UiState::default();
+        engine.playhead = Some(show.cues[0].id);
+        st.selected = engine.playhead;
+        (show, engine, st)
+    }
+
+    fn number(show: &Show, n: &str) -> CueId {
+        show.cues.iter().find(|c| c.number == n).unwrap().id
+    }
+
+    fn is_playing(e: &Engine, id: CueId) -> bool {
+        matches!(e.status(id), CueStatus::Playing { .. })
+    }
+
+    #[test]
+    fn remote_fire_and_stop_work_by_cue_number() {
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        run_remote(Command::Fire("4".into()), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d));
+        assert_eq!(
+            e.playhead,
+            Some(show.cues[0].id),
+            "firing leaves the playhead"
+        );
+        run_remote(Command::Stop("4".into()), &mut show, &mut e, &mut st);
+        assert!(!is_playing(&e, d));
+        run_remote(Command::Fire(" 4 ".into()), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d), "stray spaces in the number are fine");
+        run_remote(Command::StopAll, &mut show, &mut e, &mut st);
+        assert!(!e.is_active());
+    }
+
+    #[test]
+    fn remote_go_and_go_cue() {
+        let (mut show, mut e, mut st) = running();
+        let (a, d) = (number(&show, "1"), number(&show, "4"));
+        run_remote(Command::Go, &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, a));
+        assert_eq!(st.selected, e.playhead, "the list follows the playhead");
+        // GO on a cue by number selects it, fires it, and moves on.
+        run_remote(Command::GoCue("4".into()), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d));
+        assert_eq!(e.playhead, None, "cue 4 is last");
+        // Cue 2 is inside a group: GO fires the whole group.
+        let (mut show, mut e, mut st) = running();
+        let group = show.cues[1].id;
+        run_remote(Command::GoCue("2".into()), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, group));
+    }
+
+    #[test]
+    fn remote_playhead_moves_over_whole_groups() {
+        let (mut show, mut e, mut st) = running();
+        let (group, d) = (show.cues[1].id, number(&show, "4"));
+        run_remote(Command::PlayheadNext, &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(group));
+        run_remote(Command::PlayheadNext, &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(d), "children are skipped");
+        run_remote(Command::PlayheadNext, &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(d), "the end of the list stops it");
+        run_remote(Command::PlayheadPrevious, &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(group));
+        assert_eq!(st.selected, Some(group));
+        run_remote(Command::Select("1".into()), &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(number(&show, "1")));
+        run_remote(Command::PlayheadPrevious, &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(number(&show, "1")), "the start stops it");
+    }
+
+    #[test]
+    fn remote_pause_resume_and_unknown_cues() {
+        let (mut show, mut e, mut st) = running();
+        run_remote(Command::Fire("1".into()), &mut show, &mut e, &mut st);
+        run_remote(Command::Pause, &mut show, &mut e, &mut st);
+        assert!(e.paused);
+        run_remote(Command::Resume, &mut show, &mut e, &mut st);
+        assert!(!e.paused);
+        let before = e.active.len();
+        run_remote(Command::Fire("99".into()), &mut show, &mut e, &mut st);
+        run_remote(Command::Select("nope".into()), &mut show, &mut e, &mut st);
+        assert_eq!(e.active.len(), before);
+        assert!(e.messages.back().unwrap().1.contains("nope"));
     }
 }

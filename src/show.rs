@@ -30,6 +30,42 @@ pub struct Show {
     /// Fade time used by the Panic / Stop All button.
     #[serde(default = "default_panic_fade")]
     pub panic_fade: f64,
+    /// OSC and MIDI control. Off unless the show asks for it.
+    #[serde(default, skip_serializing_if = "RemoteSettings::is_default")]
+    pub remote: RemoteSettings,
+}
+
+/// Which remote-control listeners run while this show is open.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteSettings {
+    /// Listen for OSC over UDP.
+    pub osc: bool,
+    pub osc_port: u16,
+    /// Listen to a MIDI input.
+    pub midi: bool,
+    /// Name of the MIDI input to use.
+    pub midi_port: Option<String>,
+    /// Only accept channel messages on this channel (0 to 15); None = any.
+    pub midi_channel: Option<u8>,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        RemoteSettings {
+            osc: false,
+            osc_port: 53000,
+            midi: false,
+            midi_port: None,
+            midi_channel: None,
+        }
+    }
+}
+
+impl RemoteSettings {
+    pub fn is_default(&self) -> bool {
+        *self == RemoteSettings::default()
+    }
 }
 
 fn default_panic_fade() -> f64 {
@@ -46,6 +82,7 @@ impl Default for Show {
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
+            remote: RemoteSettings::default(),
         };
         let id = OutputId(show.alloc_id());
         show.outputs.push(OutputConfig::new(id, "Output 1".into()));
@@ -1696,5 +1733,28 @@ mod tests {
         let t = serde_json::from_value::<Cue>(v).unwrap();
         let t = t.kind.media().unwrap().transform;
         assert_eq!((t.rotation, t.scale_x, t.scale_y), (15.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn remote_settings_default_off_and_stay_out_of_old_files() {
+        let show = Show::default();
+        assert!(!show.remote.osc && !show.remote.midi);
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(!json.contains("remote"), "{json}");
+        // An old file has no such field and loads with everything off.
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert!(back.remote.is_default());
+        // Settings survive a round trip, and a partial object fills in the rest.
+        let mut on = Show::default();
+        on.remote.osc = true;
+        on.remote.midi_channel = Some(3);
+        let back: Show = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(
+            back.remote.osc && back.remote.midi_channel == Some(3) && back.remote.osc_port == 53000
+        );
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["remote"] = serde_json::json!({"osc": true});
+        let part: Show = serde_json::from_value(v).unwrap();
+        assert!(part.remote.osc && !part.remote.midi && part.remote.osc_port == 53000);
     }
 }

@@ -5,6 +5,7 @@ mod app;
 mod engine;
 mod gpu;
 mod media;
+mod remote;
 mod render;
 mod show;
 mod text;
@@ -19,8 +20,12 @@ fn main() -> anyhow::Result<()> {
     .format_timestamp_millis()
     .init();
     let show_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
-    let event_loop = EventLoop::new()?;
-    let mut app = app::App::new(show_path);
+    // The user event is how remote-control threads wake the loop.
+    let event_loop = EventLoop::<()>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let mut app = app::App::new(show_path, move || {
+        let _ = proxy.send_event(());
+    });
     event_loop.run_app(&mut app)?;
     Ok(())
 }
