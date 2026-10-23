@@ -202,11 +202,20 @@ FFmpeg. They skip themselves if FFmpeg or the media are missing.
 
 ### Making a release
 
-Push a version tag and the `Release` workflow builds and publishes everything:
+Bump `version` in `Cargo.toml`, merge to `main`, and wait for CI to pass there.
+Then either push a version tag and the `Release` workflow builds and publishes
+everything:
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.1 && git push origin v0.2.1
 ```
+
+or, without pushing anything, comment `/release v0.2.1` on any issue or pull
+request as the repository owner. The `Cut release` workflow checks that the tag
+matches `Cargo.toml`, is new, and that CI passed on the tip of `main`, then tags
+it and starts the `Release` workflow. Add `dry-run` (`/release v0.2.1 dry-run`)
+to run the checks without tagging. A tag with a suffix, like `v0.2.1-rc1`, is
+published as a pre-release.
 
 `scripts/package_release.sh` does the packaging and can be run locally after a
 release build.

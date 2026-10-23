@@ -1,0 +1,97 @@
+name: Cut release
+
+# Comment `/release v0.2.1` on any issue or pull request, as the repository
+# owner, to tag the tip of the default branch and publish that release (the
+# tag then goes through the Release workflow). Add `dry-run` to run every check
+# without tagging. The tag must match the version in Cargo.toml, and CI must
+# have passed on the tip of the default branch.
+#
+# This exists so a release can be started by a comment, for people and tools
+# that can comment but can't push tags or run workflows by hand.
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  cut:
+    if: >-
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, '/release ')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.issue.number }}
+      BODY: ${{ github.event.comment.body }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Read the request
+        run: |
+          first="$(printf '%s\n' "$BODY" | head -n1 | tr -d '\r')"
+          read -r _ tag opt extra <<< "$first"
+          if [ -n "${extra:-}" ] || { [ -n "${opt:-}" ] && [ "$opt" != "dry-run" ]; }; then
+            echo "Expected '/release vX.Y.Z' or '/release vX.Y.Z dry-run'." >&2
+            exit 1
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "DRY_RUN=$([ "${opt:-}" = "dry-run" ] && echo true || echo false)" >> "$GITHUB_ENV"
+
+      - name: Check the tag and version
+        run: scripts/check_release_tag.sh "$TAG"
+
+      - name: Check the tag is new and CI has passed
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            echo "$TAG already exists" >&2
+            exit 1
+          fi
+          passed="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$sha&status=success&per_page=1" --jq '.total_count')"
+          if [ "$passed" -lt 1 ]; then
+            echo "CI has not passed on $BRANCH at $sha yet" >&2
+            exit 1
+          fi
+
+      - name: Tag and start the release
+        if: env.DRY_RUN != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$SHA" -m "NewQ $TAG"
+          git push origin "refs/tags/$TAG"
+          # A tag pushed with the workflow token doesn't start other workflows,
+          # so start the Release workflow for it directly.
+          gh workflow run release.yml --ref "$BRANCH" -f tag="$TAG"
+
+      - name: Say what happened
+        if: success()
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            msg="Dry run: $TAG is ready to release from \`${SHA:0:7}\` on $BRANCH. Nothing was tagged. ($RUN_URL)"
+          else
+            msg="Tagged $TAG at \`${SHA:0:7}\` and started the Release workflow, which builds and publishes it. ($RUN_URL)"
+          fi
+          gh issue comment "$ISSUE" --repo "$REPO" --body "$msg"
+
+      - name: Say why it failed
+        if: failure()
+        run: |
+          gh issue comment "$ISSUE" --repo "$REPO" --body "The release did not go ahead; see the log: $RUN_URL"
