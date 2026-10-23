@@ -7,7 +7,9 @@
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
-use crate::show::{Corners, DisplayRef, Fit, OutputConfig, OutputId, Placement, Show, SubDisplay};
+use crate::show::{
+    Corners, DisplayRef, Fit, LayerTransform, OutputConfig, OutputId, Placement, Show, SubDisplay,
+};
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -400,6 +402,7 @@ impl App {
                     texture: entry.0.clone(),
                     opacity: l.opacity,
                     fit: l.fit,
+                    transform: l.transform,
                 });
             }
 
@@ -429,6 +432,7 @@ impl App {
                     texture: tex.clone(),
                     opacity: 1.0,
                     fit: Fit::Stretch,
+                    transform: LayerTransform::default(),
                 });
             }
             if pattern_changed {
