@@ -369,6 +369,7 @@ pub enum CueKind {
     Stop(StopCue),
     Wait(WaitCue),
     Group(GroupCue),
+    Text(TextCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,6 +381,7 @@ pub enum CueType {
     Stop,
     Wait,
     Group,
+    Text,
 }
 
 impl CueType {
@@ -392,6 +394,7 @@ impl CueType {
             CueType::Stop => "Stop",
             CueType::Wait => "Wait",
             CueType::Group => "Group",
+            CueType::Text => "Text",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -403,6 +406,7 @@ impl CueType {
             CueType::Stop => "⏹",
             CueType::Wait => "⏱",
             CueType::Group => "📁",
+            CueType::Text => "📝",
         }
     }
 }
@@ -417,15 +421,27 @@ impl CueKind {
             CueKind::Stop(_) => CueType::Stop,
             CueKind::Wait(_) => CueType::Wait,
             CueKind::Group(_) => CueType::Group,
+            CueKind::Text(_) => CueType::Text,
         }
     }
+    /// The playback settings of a cue that plays something: transitions,
+    /// fades, output, layer and so on. A text cue has them too.
     pub fn media(&self) -> Option<&MediaCue> {
         match self {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
+            CueKind::Text(t) => Some(&t.media),
             _ => None,
         }
     }
     pub fn media_mut(&mut self) -> Option<&mut MediaCue> {
+        match self {
+            CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
+            CueKind::Text(t) => Some(&mut t.media),
+            _ => None,
+        }
+    }
+    /// Like `media`, but only for cues that read a media file.
+    pub fn file_media(&self) -> Option<&MediaCue> {
         match self {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
             _ => None,
@@ -613,6 +629,87 @@ pub struct WaitCue {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    pub const ALL: [TextAlign; 3] = [TextAlign::Left, TextAlign::Center, TextAlign::Right];
+    pub fn label(self) -> &'static str {
+        match self {
+            TextAlign::Left => "Left",
+            TextAlign::Center => "Centre",
+            TextAlign::Right => "Right",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextVAlign {
+    Top,
+    Middle,
+    #[default]
+    Bottom,
+}
+
+impl TextVAlign {
+    pub const ALL: [TextVAlign; 3] = [TextVAlign::Top, TextVAlign::Middle, TextVAlign::Bottom];
+    pub fn label(self) -> &'static str {
+        match self {
+            TextVAlign::Top => "Top",
+            TextVAlign::Middle => "Middle",
+            TextVAlign::Bottom => "Bottom",
+        }
+    }
+}
+
+/// Text drawn over an output, such as a title or surtitle. It plays like an
+/// image cue (its `media` holds the output, layer, transition, fades and
+/// hold time), with the picture made from the text instead of a file.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TextCue {
+    pub text: String,
+    /// Font size as a fraction of the output's height.
+    pub size: f32,
+    /// Straight (not premultiplied) RGBA.
+    pub color: [u8; 4],
+    pub align: TextAlign,
+    /// Where the block of text sits on the output (before any geometry).
+    pub valign: TextVAlign,
+    /// Width available to the text before it wraps, as a fraction of the output's width.
+    pub width: f32,
+    /// A dark shadow behind the letters, so they read over video.
+    pub shadow: bool,
+    /// Thicken the letters (the bundled font is a light weight).
+    #[serde(default)]
+    pub bold: bool,
+    pub media: MediaCue,
+}
+
+impl TextCue {
+    pub fn new(output: Option<OutputId>) -> TextCue {
+        let mut media = MediaCue::new(PathBuf::new(), output);
+        media.fit = Fit::Stretch;
+        media.fade_in = 0.5;
+        media.fade_out = 0.5;
+        TextCue {
+            text: "Text".into(),
+            size: 0.07,
+            color: [255, 255, 255, 255],
+            align: TextAlign::Center,
+            valign: TextVAlign::Bottom,
+            width: 0.9,
+            shadow: true,
+            bold: false,
+            media,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupMode {
     /// Every child is fired when the group is; a child's pre-wait is its
     /// offset from the start of the group.
@@ -784,6 +881,7 @@ impl Show {
             ),
             CueType::Wait => ("Wait".into(), CueKind::Wait(WaitCue { duration: 5.0 })),
             CueType::Group => ("Group".into(), CueKind::Group(GroupCue::default())),
+            CueType::Text => ("Text".into(), CueKind::Text(TextCue::new(default_output))),
         };
         Cue {
             id,

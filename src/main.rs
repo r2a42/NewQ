@@ -7,6 +7,7 @@ mod gpu;
 mod media;
 mod render;
 mod show;
+mod text;
 mod ui;
 
 use winit::event_loop::EventLoop;

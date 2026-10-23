@@ -367,7 +367,13 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 }
             }
             ui.separator();
-            for ty in [CueType::Fade, CueType::Stop, CueType::Wait, CueType::Group] {
+            for ty in [
+                CueType::Text,
+                CueType::Fade,
+                CueType::Stop,
+                CueType::Wait,
+                CueType::Group,
+            ] {
                 if ui
                     .button(format!("{} Add {} cue", ty.icon(), ty.label()))
                     .clicked()
@@ -592,6 +598,21 @@ fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Text(t) => {
+            let first = t.text.lines().next().unwrap_or("").trim();
+            let more = if t.text.lines().nth(1).is_some() {
+                " …"
+            } else {
+                ""
+            };
+            let out = t
+                .media
+                .output
+                .and_then(|o| show.output(o))
+                .map(|o| o.name.as_str())
+                .unwrap_or("no output");
+            format!("“{first}{more}”  »  {out}")
+        }
         CueKind::Group(g) => {
             let n = show.children(c.id).len();
             format!(
@@ -882,7 +903,11 @@ fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &
         actions.push(Action::StopSelected);
         ui.close();
     }
-    if let CueKind::Video(m) | CueKind::Image(m) = &c.kind {
+    if let Some(m) = c
+        .kind
+        .media()
+        .filter(|_| c.kind.cue_type() != CueType::Audio)
+    {
         ui.separator();
         ui.label(RichText::new("Transition").weak());
         for t in Transition::ALL {
@@ -1899,6 +1924,11 @@ fn inspector(
                         ui.end_row();
                     });
             }
+            CueKind::Text(t) => {
+                text_inspector(ui, t);
+                ui.separator();
+                media_inspector(ui, cue_type, &mut t.media, &outputs, engine);
+            }
             CueKind::Group(g) => {
                 egui::Grid::new("group")
                     .num_columns(2)
@@ -1962,11 +1992,15 @@ fn media_inspector(
     engine: &mut Engine,
 ) {
     let visual = ty != CueType::Audio;
+    // Text and images are held for a time rather than played from a file.
+    let still = matches!(ty, CueType::Image | CueType::Text);
+    let is_text = ty == CueType::Text;
     egui::Grid::new("media")
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label("File");
+            if !is_text {
+                ui.label("File");
             ui.horizontal(|ui| {
                 let name = m
                     .file
@@ -2012,6 +2046,7 @@ fn media_inspector(
             };
             ui.label(info);
             ui.end_row();
+            }
 
             if visual {
                 ui.label("Output");
@@ -2032,20 +2067,22 @@ fn media_inspector(
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut m.layer).range(-100..=100))
                         .on_hover_text("Higher layers draw on top");
-                    egui::ComboBox::from_id_salt("fit")
-                        .selected_text(m.fit.label())
-                        .show_ui(ui, |ui| {
-                            for f in Fit::ALL {
-                                ui.selectable_value(&mut m.fit, f, f.label());
-                            }
-                        });
+                    if !is_text {
+                        egui::ComboBox::from_id_salt("fit")
+                            .selected_text(m.fit.label())
+                            .show_ui(ui, |ui| {
+                                for f in Fit::ALL {
+                                    ui.selectable_value(&mut m.fit, f, f.label());
+                                }
+                            });
+                    }
                 });
                 ui.end_row();
                 ui.label("Opacity");
                 ui.add(egui::Slider::new(&mut m.opacity, 0.0..=1.0));
                 ui.end_row();
             }
-            if ty != CueType::Image {
+            if !still {
                 ui.label("Volume");
                 db_slider(ui, &mut m.volume_db);
                 ui.end_row();
@@ -2086,7 +2123,7 @@ fn media_inspector(
                  faded out by hand or by a Stop cue using own fades.",
             );
             ui.end_row();
-            if ty == CueType::Image {
+            if still {
                 ui.label("Hold for");
                 let mut d = m.end.unwrap_or(0.0);
                 secs(ui, &mut d).on_hover_text("0 = until stopped");
@@ -2135,7 +2172,7 @@ fn media_inspector(
             .default_open(!m.transform.is_identity())
             .show(ui, |ui| geometry_inspector(ui, &mut m.transform));
     }
-    if m.loop_media && ty != CueType::Image {
+    if m.loop_media && !still {
         let what = if m.end.is_some() {
             "Loops from the in point to the out point."
         } else {
@@ -2143,6 +2180,80 @@ fn media_inspector(
         };
         ui.label(RichText::new(what).weak());
     }
+}
+
+/// What a text cue says and how it looks; where, when and how it plays is the
+/// shared media section.
+fn text_inspector(ui: &mut Ui, t: &mut TextCue) {
+    ui.add(
+        egui::TextEdit::multiline(&mut t.text)
+            .desired_rows(3)
+            .desired_width(f32::INFINITY)
+            .hint_text("Text to show"),
+    );
+    egui::Grid::new("text_style")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Size");
+            let mut pct = t.size * 100.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut pct)
+                        .speed(0.1)
+                        .range(0.5..=100.0)
+                        .suffix("% of height"),
+                )
+                .changed()
+            {
+                t.size = pct / 100.0;
+            }
+            ui.end_row();
+            ui.label("Colour");
+            ui.horizontal(|ui| {
+                let [r, g, b, a] = t.color;
+                let mut c = Color32::from_rgba_unmultiplied(r, g, b, a);
+                if ui.color_edit_button_srgba(&mut c).changed() {
+                    t.color = c.to_srgba_unmultiplied();
+                }
+                ui.checkbox(&mut t.shadow, "Shadow")
+                    .on_hover_text("A dark shadow behind the letters, so they read over video");
+                ui.checkbox(&mut t.bold, "Bold");
+            });
+            ui.end_row();
+            ui.label("Align");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("text_align")
+                    .selected_text(t.align.label())
+                    .show_ui(ui, |ui| {
+                        for a in TextAlign::ALL {
+                            ui.selectable_value(&mut t.align, a, a.label());
+                        }
+                    });
+                egui::ComboBox::from_id_salt("text_valign")
+                    .selected_text(t.valign.label())
+                    .show_ui(ui, |ui| {
+                        for a in TextVAlign::ALL {
+                            ui.selectable_value(&mut t.valign, a, a.label());
+                        }
+                    });
+            });
+            ui.end_row();
+            ui.label("Wrap at");
+            let mut w = t.width * 100.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut w)
+                        .speed(0.5)
+                        .range(5.0..=100.0)
+                        .suffix("% of width"),
+                )
+                .changed()
+            {
+                t.width = w / 100.0;
+            }
+            ui.end_row();
+        });
 }
 
 /// A percentage field for a fraction (0.25 shows as 25%).
@@ -2585,7 +2696,8 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             show.outputs.retain(|o| o.id != id);
             let fallback = show.outputs.first().map(|o| o.id);
             for c in &mut show.cues {
-                if let CueKind::Video(m) | CueKind::Image(m) = &mut c.kind
+                if c.kind.cue_type() != CueType::Audio
+                    && let Some(m) = c.kind.media_mut()
                     && m.output == Some(id)
                 {
                     m.output = fallback;

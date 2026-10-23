@@ -18,7 +18,7 @@ includes FFmpeg, so there's nothing else to install.
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
   finishes).
-- **Cue types:** Video, Image, Audio, Fade, Stop, Wait and Group.
+- **Cue types:** Video, Image, Audio, Text, Fade, Stop, Wait and Group.
 - **Built-in transitions on every video/image cue:** no extra cues needed to
   change what's on screen. Each cue chooses how it enters its output:
   - **Crossfade** (the default for new cues): fades in while everything else on
@@ -81,6 +81,14 @@ includes FFmpeg, so there's nothing else to install.
   inside; *Wrap in group*, *Move into group* and *Move out of group* (cue
   menu or right-click) move cues in and out, and Ctrl+↑/↓ moves a cue within or
   out of its group. Groups don't nest.
+- **Text cues:** titles, surtitles and lower-thirds. Type the text (several
+  lines are fine), then set its size (a share of the output's height), colour,
+  alignment, where it sits (top, middle or bottom) and where it wraps. It's
+  drawn at the output's own resolution and then plays like an image cue, so it
+  gets the same transitions, fades, layers, hold time and geometry, and a Fade
+  or Stop cue can target it. There's one built-in font (a light weight, so
+  *Shadow* and *Bold* help over video), and editing a text cue takes effect
+  the next time it's fired.
 - **Per-cue geometry:** under *Geometry* in a visual cue's inspector, move,
   scale (or mirror, with a negative scale), rotate and crop the picture on its
   output. Position is a share of the output's size, rotation is clockwise about

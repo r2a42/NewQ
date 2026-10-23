@@ -1591,6 +1591,7 @@ dependencies = [
 name = "newq"
 version = "0.1.2"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "bytemuck",
  "cpal",
