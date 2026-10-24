@@ -31,6 +31,8 @@ pub enum Command {
     Select(String),
     /// Fire a cue without moving the playhead.
     Fire(String),
+    /// A MIDI note: fires the cue given that note, or else the cue with that number.
+    Note(u8),
     Stop(String),
     FadeOut(String),
     /// Arm or disarm a cue.
@@ -129,8 +131,8 @@ fn msc_cue(data: &[u8]) -> Option<String> {
 }
 
 /// Commands for one MIDI message. `channel` limits channel messages to one
-/// channel (0 to 15); None accepts any. A note-on fires the cue with that
-/// number, a program change puts the playhead on it, and MIDI Show Control
+/// channel (0 to 15); None accepts any. A note-on fires the cue given that
+/// note (or else the cue with that number), a program change puts the playhead on it, and MIDI Show Control
 /// (GO, STOP, RESUME, LOAD and ALL_OFF) drives the transport.
 pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
     let Some(&status) = msg.first() else {
@@ -165,7 +167,7 @@ pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
         return Vec::new();
     }
     match (status & 0xF0, msg.get(1), msg.get(2)) {
-        (0x90, Some(&note), Some(&vel)) if vel > 0 => vec![Command::Fire(note.to_string())],
+        (0x90, Some(&note), Some(&vel)) if vel > 0 => vec![Command::Note(note)],
         (0xC0, Some(&program), _) => vec![Command::Select(program.to_string())],
         _ => Vec::new(),
     }
@@ -500,10 +502,7 @@ mod tests {
 
     #[test]
     fn midi_notes_fire_cues_and_programs_select_them() {
-        assert_eq!(
-            parse_midi(&[0x90, 60, 100], None),
-            vec![Command::Fire("60".into())]
-        );
+        assert_eq!(parse_midi(&[0x90, 60, 100], None), vec![Command::Note(60)]);
         // A note-on with no velocity is a note-off.
         assert!(parse_midi(&[0x90, 60, 0], None).is_empty());
         assert!(parse_midi(&[0x80, 60, 64], None).is_empty());
@@ -518,8 +517,8 @@ mod tests {
     fn midi_channel_filter() {
         // Channel 3 (index 2).
         let on = [0x92, 10, 90];
-        assert_eq!(parse_midi(&on, Some(2)), vec![Command::Fire("10".into())]);
-        assert_eq!(parse_midi(&on, None), vec![Command::Fire("10".into())]);
+        assert_eq!(parse_midi(&on, Some(2)), vec![Command::Note(10)]);
+        assert_eq!(parse_midi(&on, None), vec![Command::Note(10)]);
         assert!(parse_midi(&on, Some(0)).is_empty());
         assert!(parse_midi(&[0xC2, 1], Some(3)).is_empty());
     }

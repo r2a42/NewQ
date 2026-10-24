@@ -102,6 +102,17 @@ includes FFmpeg, so there's nothing else to install.
   Windows, AVFoundation on macOS, where the first use asks for camera
   permission). Cameras can't be tested in NewQ's automated tests, only the
   built-in test pattern; please report any device that doesn't work.
+- **Hotkeys, MIDI notes and the cart:** give a cue its own key in its
+  inspector (click *Hotkey*, then press a letter, digit or F-key; P and A are
+  taken by the transport). Pressing the key fires just that cue, like the
+  *Fire* button, and leaves the playhead where it is. A key fires one cue:
+  giving it to another cue moves it. A *MIDI note* does the same from a
+  note-on (with MIDI control on); a note with no cue bound to it still fires
+  the cue whose number is the note, as before. Tick *On cart* for the cues you
+  want as buttons, then *Cue ▸ Show cart* for a grid of them: click to fire,
+  right-click to stop or fade out. Buttons show the hotkey, fill as the cue
+  plays, and have a green dot when preloaded. Hotkeys don't fire while you're
+  typing in a text box. Copies of a cue don't inherit its hotkey or note.
 - **Per-cue geometry:** under *Geometry* in a visual cue's inspector, move,
   scale (or mirror, with a negative scale), rotate and crop the picture on its
   output. Position is a share of the output's size, rotation is clockwise about
@@ -155,6 +166,7 @@ includes FFmpeg, so there's nothing else to install.
 | Esc                   | Fade out everything (press twice: stop now)     |
 | P                     | Pause / resume everything                       |
 | A                     | Arm / disarm the selected cue                   |
+| any cue's hotkey      | Fire that cue (letters, digits and F1–F12)      |
 | ↑ / ↓                 | Move selection and playhead                     |
 | Ctrl+↑ / Ctrl+↓       | Reorder the selected cue                        |
 | ← ↑ → ↓ / Shift+arrow | Move the selected corner 1 px / 5 px (while editing) |
@@ -279,7 +291,7 @@ space like a hardware video mixer.
 
 - Video alpha channels (ProRes 4444, VP9 alpha) aren't supported yet; images
   with alpha are.
-- No timecode triggering or cue carts yet.
+- No timecode triggering yet.
 - Very large files (4K60) push a lot of raw video through a pipe; NewQ
   decodes at the output window's resolution to keep this down.
 - Fullscreen output on a second display has been tested only on a single-monitor

@@ -417,6 +417,16 @@ pub struct Cue {
     /// directly in `Show::cues`, and groups don't nest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<CueId>,
+    /// A key that fires this cue (an egui key name such as "F1" or "Q"); see
+    /// `Show::set_hotkey`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+    /// A MIDI note that fires this cue; see `Show::set_midi_note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_note: Option<u8>,
+    /// Show this cue as a button on the cart.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cart: bool,
     pub kind: CueKind,
 }
 
@@ -627,6 +637,10 @@ fn is_zero(v: &u16) -> bool {
 
 fn yes() -> bool {
     true
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 fn is_true(v: &bool) -> bool {
@@ -1047,7 +1061,55 @@ impl Show {
             continue_mode: ContinueMode::DoNotContinue,
             armed: true,
             parent: None,
+            hotkey: None,
+            midi_note: None,
+            cart: false,
             kind,
+        }
+    }
+
+    /// The cue a key fires.
+    pub fn cue_for_hotkey(&self, key: &str) -> Option<CueId> {
+        self.cues
+            .iter()
+            .find(|c| c.hotkey.as_deref() == Some(key))
+            .map(|c| c.id)
+    }
+
+    /// The cue a MIDI note fires.
+    pub fn cue_for_note(&self, note: u8) -> Option<CueId> {
+        self.cues
+            .iter()
+            .find(|c| c.midi_note == Some(note))
+            .map(|c| c.id)
+    }
+
+    /// Give a cue a hotkey (or take it away). A key fires one cue, so any
+    /// other cue that had it loses it.
+    pub fn set_hotkey(&mut self, id: CueId, key: Option<String>) {
+        if key.is_some() {
+            for c in &mut self.cues {
+                if c.hotkey == key {
+                    c.hotkey = None;
+                }
+            }
+        }
+        if let Some(c) = self.cues.iter_mut().find(|c| c.id == id) {
+            c.hotkey = key;
+        }
+    }
+
+    /// Give a cue a MIDI note (or take it away), taking it from any other cue.
+    pub fn set_midi_note(&mut self, id: CueId, note: Option<u8>) {
+        if note.is_some() {
+            for c in &mut self.cues {
+                if c.midi_note == note {
+                    c.midi_note = None;
+                }
+            }
+        }
+        if let Some(c) = self.cues.iter_mut().find(|c| c.id == id) {
+            c.midi_note = note;
         }
     }
 
@@ -1293,6 +1355,9 @@ impl Show {
         for (n, c) in copies.iter_mut().enumerate() {
             c.id = CueId(self.alloc_id());
             c.number = (first_number + n as i64).to_string();
+            // A key or note fires one cue: the copy doesn't take it over.
+            c.hotkey = None;
+            c.midi_note = None;
             if n == 0 && matches!(c.kind, CueKind::Group(_)) {
                 new_group = Some(c.id);
             } else if c.parent == Some(old_group)
@@ -1908,6 +1973,60 @@ mod tests {
         v["remote"] = serde_json::json!({"osc": true});
         let part: Show = serde_json::from_value(v).unwrap();
         assert!(part.remote.osc && !part.remote.midi && part.remote.osc_port == 53000);
+    }
+
+    #[test]
+    fn triggers_default_off_and_stay_out_of_old_files() {
+        let mut show = Show::default();
+        let a = show.make_cue(CueType::Wait, None, 0);
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(
+            !json.contains("hotkey") && !json.contains("midi_note") && !json.contains("cart"),
+            "{json}"
+        );
+        // An old file (no such fields) loads with none set.
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert!(back.hotkey.is_none() && back.midi_note.is_none() && !back.cart);
+        // Set ones round-trip.
+        let mut b = a.clone();
+        b.hotkey = Some("F4".into());
+        b.midi_note = Some(36);
+        b.cart = true;
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(back.hotkey.as_deref(), Some("F4"));
+        assert_eq!((back.midi_note, back.cart), (Some(36), true));
+    }
+
+    #[test]
+    fn a_key_or_note_fires_one_cue() {
+        let mut show = Show::default();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let c = show.make_cue(CueType::Wait, None, i);
+            ids.push(c.id);
+            show.cues.push(c);
+        }
+        show.set_hotkey(ids[0], Some("Q".into()));
+        show.set_midi_note(ids[0], Some(60));
+        assert_eq!(show.cue_for_hotkey("Q"), Some(ids[0]));
+        assert_eq!(show.cue_for_note(60), Some(ids[0]));
+        // Giving the same key or note to another cue takes it over.
+        show.set_hotkey(ids[1], Some("Q".into()));
+        show.set_midi_note(ids[1], Some(60));
+        assert_eq!(show.cue_for_hotkey("Q"), Some(ids[1]));
+        assert_eq!(show.cue_for_note(60), Some(ids[1]));
+        assert!(show.cues[0].hotkey.is_none() && show.cues[0].midi_note.is_none());
+        // Clearing leaves the others alone.
+        show.set_hotkey(ids[1], None);
+        assert_eq!(show.cue_for_hotkey("Q"), None);
+        assert_eq!(show.cue_for_note(60), Some(ids[1]));
+        // A copy of a cue doesn't inherit its triggers (it would fight for them).
+        show.set_hotkey(ids[2], Some("W".into()));
+        show.cues[2].cart = true;
+        let copy = show.duplicate(2);
+        let c = show.cue(copy).unwrap();
+        assert!(c.hotkey.is_none() && c.midi_note.is_none() && c.cart);
+        assert_eq!(show.cue_for_hotkey("W"), Some(ids[2]));
     }
 
     #[test]
