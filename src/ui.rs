@@ -69,6 +69,10 @@ pub struct UiState {
     /// What the OSC and MIDI listeners are doing (set by the app).
     pub remote_status: RemoteStatus,
     pub dirty: bool,
+    /// Whether the cart (buttons for the cues put on it) is showing.
+    pub show_cart: bool,
+    /// The cue waiting for the next key press to become its hotkey.
+    pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
     saved_json: Option<String>,
     scroll_to_selected: bool,
@@ -140,6 +144,15 @@ enum Action {
     Save,
     SaveAs,
     FireSelected,
+    /// Fire a cue (from its hotkey or the cart) without moving the playhead.
+    FireCue(CueId),
+    StopCue(CueId),
+    FadeOutCue(CueId),
+    ToggleCart,
+    /// Wait for a key press to use as this cue's hotkey (None: stop waiting).
+    CaptureHotkey(Option<CueId>),
+    SetHotkey(CueId, Option<String>),
+    SetMidiNote(CueId, Option<u8>),
     StopSelected,
     FadeOutSelected,
     StopInstance(u64, f64),
@@ -197,7 +210,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         st.saved_json = serde_json::to_string(show).ok();
     }
     let mut actions: Vec<Action> = Vec::new();
-    keyboard(ui.ctx(), st, &mut actions);
+    keyboard(ui.ctx(), show, st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
         i.raw
@@ -236,6 +249,17 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     remote_panel(ui, show, st);
                 });
         });
+    if st.show_cart {
+        egui::Panel::bottom("cart")
+            .resizable(true)
+            .default_size(150.0)
+            .min_size(80.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| cart(ui, show, engine, &mut actions));
+            });
+    }
     egui::Panel::bottom("inspector")
         .resizable(true)
         .default_size(300.0)
@@ -260,7 +284,45 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     st.dirty = json != st.saved_json;
 }
 
-fn keyboard(ctx: &egui::Context, st: &UiState, actions: &mut Vec<Action>) {
+/// Keys a cue can take as its hotkey: letters (except the transport's P and
+/// A), digits and function keys. Everything else already means something.
+pub fn hotkey_allowed(key: Key) -> bool {
+    let name = key.name();
+    let letter = name.len() == 1 && name.chars().all(|c| c.is_ascii_uppercase());
+    let digit = name.len() == 1 && name.chars().all(|c| c.is_ascii_digit());
+    let function = key
+        .name()
+        .strip_prefix('F')
+        .is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)));
+    (letter && !matches!(key, Key::P | Key::A)) || digit || function
+}
+
+fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
+    if let Some(id) = st.capture_hotkey {
+        // Waiting for the key to bind: nothing else reacts meanwhile.
+        ctx.input_mut(|i| {
+            let pressed = i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if !modifiers.command && !modifiers.alt => Some(*key),
+                _ => None,
+            });
+            match pressed {
+                Some(Key::Escape) => actions.push(Action::CaptureHotkey(None)),
+                Some(key) if hotkey_allowed(key) => {
+                    actions.push(Action::SetHotkey(id, Some(key.name().to_string())));
+                }
+                _ => {}
+            }
+            if pressed.is_some() {
+                i.events.clear();
+            }
+        });
+        return;
+    }
     let typing = ctx.egui_wants_keyboard_input();
     let nudging = st.selected_handle().is_some();
     ctx.input_mut(|i| {
@@ -311,6 +373,30 @@ fn keyboard(ctx: &egui::Context, st: &UiState, actions: &mut Vec<Action>) {
             });
             if d != Vec2::ZERO {
                 actions.push(Action::Nudge(d));
+            }
+        }
+        // Hotkeys fire their cue wherever the playhead is.
+        if show.cues.iter().any(|c| c.hotkey.is_some()) {
+            for key in i
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if !modifiers.command && !modifiers.alt => Some(*key),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+            {
+                if let Some(id) = show.cue_for_hotkey(key.name()) {
+                    i.consume_key(egui::Modifiers::NONE, key);
+                    i.consume_key(egui::Modifiers::SHIFT, key);
+                    actions.push(Action::FireCue(id));
+                }
             }
         }
         if i.consume_key(egui::Modifiers::NONE, Key::Space) {
@@ -401,6 +487,17 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 {
                     actions.push(Action::AddCue(ty));
                 }
+            }
+            ui.separator();
+            if ui
+                .button(if st.show_cart {
+                    "Hide cart"
+                } else {
+                    "Show cart"
+                })
+                .clicked()
+            {
+                actions.push(Action::ToggleCart);
             }
             if let Some(id) = st.selected
                 && let Some(c) = show.cue(id)
@@ -872,9 +969,9 @@ fn cue_list(
                         text_color,
                         Stroke::NONE,
                     ));
-                    cell_dx(3, FOLD_W, c.name.clone(), text_color);
+                    cell_dx(3, FOLD_W, name_with_key(c), text_color);
                 } else {
-                    cell(3, c.name.clone(), text_color);
+                    cell(3, name_with_key(c), text_color);
                 }
                 let weak = v.weak_text_color();
                 let missing = c
@@ -925,6 +1022,113 @@ fn cue_list(
                 );
             }
         });
+}
+
+/// A cue's name, with its hotkey after it if it has one.
+fn name_with_key(c: &Cue) -> String {
+    match &c.hotkey {
+        Some(k) => format!("{}   [{k}]", c.name),
+        None => c.name.clone(),
+    }
+}
+
+/// The cart: one big button per cue put on it. A click fires the cue, a
+/// right click stops it.
+fn cart(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
+    let on_cart: Vec<&Cue> = show.cues.iter().filter(|c| c.cart).collect();
+    if on_cart.is_empty() {
+        ui.label(
+            RichText::new(
+                "Nothing on the cart yet. Tick “On cart” in a cue's inspector to add a button for it.",
+            )
+            .weak(),
+        );
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(8.0);
+        for c in on_cart {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(132.0, 66.0), Sense::click());
+            let idx = show.cue_index(c.id).unwrap_or(0);
+            let live = show.is_armed(idx);
+            let status = engine.status(c.id);
+            let v = ui.visuals();
+            let painter = ui.painter_at(rect);
+            let bg = if resp.hovered() {
+                v.widgets.hovered.weak_bg_fill
+            } else {
+                v.widgets.inactive.weak_bg_fill
+            };
+            painter.rect_filled(rect, 6.0, bg);
+            match status {
+                CueStatus::Playing { elapsed, duration } => {
+                    let frac = duration
+                        .map(|d| (elapsed / d.max(1e-6)).clamp(0.0, 1.0))
+                        .unwrap_or(1.0);
+                    let mut r = rect;
+                    r.set_width(rect.width() * frac as f32);
+                    painter.rect_filled(r, 6.0, PLAYING);
+                }
+                CueStatus::PreWait { remaining, total } => {
+                    let mut r = rect;
+                    r.set_width(rect.width() * (1.0 - remaining / total.max(1e-6)) as f32);
+                    painter.rect_filled(r, 6.0, PREWAIT);
+                }
+                CueStatus::Idle => {}
+            }
+            if engine.is_prepared(c.id) {
+                painter.circle_filled(rect.right_top() + Vec2::new(-10.0, 10.0), 3.5, GO_GREEN);
+            }
+            let text = if live {
+                v.strong_text_color()
+            } else {
+                v.weak_text_color()
+            };
+            painter.rect_stroke(
+                rect,
+                6.0,
+                Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            let key = c.hotkey.clone().unwrap_or_default();
+            painter.text(
+                rect.left_top() + Vec2::new(8.0, 6.0),
+                egui::Align2::LEFT_TOP,
+                key,
+                egui::FontId::proportional(13.0),
+                PLAYHEAD,
+            );
+            painter.with_clip_rect(rect.shrink(4.0)).text(
+                rect.center() + Vec2::new(0.0, 6.0),
+                egui::Align2::CENTER_CENTER,
+                &c.name,
+                egui::FontId::proportional(15.0),
+                text,
+            );
+            let hint = format!(
+                "{} {}\nClick to fire · right-click for more",
+                c.number, c.name
+            );
+            let resp = resp.on_hover_text(hint);
+            if resp.clicked() {
+                actions.push(Action::FireCue(c.id));
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Stop").clicked() {
+                    actions.push(Action::StopCue(c.id));
+                    ui.close();
+                }
+                if ui.button("Fade out").clicked() {
+                    actions.push(Action::FadeOutCue(c.id));
+                    ui.close();
+                }
+                if ui.button("Edit").clicked() {
+                    actions.push(Action::Select(c.id));
+                    ui.close();
+                }
+            });
+        }
+    });
 }
 
 fn secs_short(t: f64) -> String {
@@ -2067,6 +2271,54 @@ fn inspector(
                      it, continues don't fire it, and its group doesn't start it.",
                 );
                 ui.end_row();
+                ui.label("Hotkey");
+                ui.horizontal(|ui| {
+                    if st.capture_hotkey == Some(cue.id) {
+                        ui.label(RichText::new("Press a key…").color(PLAYHEAD));
+                        if ui.button("Cancel").clicked() {
+                            actions.push(Action::CaptureHotkey(None));
+                        }
+                    } else {
+                        let text = cue.hotkey.clone().unwrap_or_else(|| "none".into());
+                        if ui
+                            .button(text)
+                            .on_hover_text(
+                                "Click, then press a letter, digit or F-key. Pressing it \
+                                 later fires this cue without moving the playhead.",
+                            )
+                            .clicked()
+                        {
+                            actions.push(Action::CaptureHotkey(Some(cue.id)));
+                        }
+                        if cue.hotkey.is_some() && ui.small_button("Clear").clicked() {
+                            actions.push(Action::SetHotkey(cue.id, None));
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label("MIDI note");
+                ui.horizontal(|ui| {
+                    let mut on = cue.midi_note.is_some();
+                    let mut note = cue.midi_note.unwrap_or(60);
+                    let on_changed = ui
+                        .checkbox(&mut on, "")
+                        .on_hover_text(
+                            "A MIDI note-on with this number fires this cue (needs MIDI \
+                             control on). Otherwise the note number is looked up as a cue number.",
+                        )
+                        .changed();
+                    let note_changed = ui
+                        .add_enabled(on, egui::DragValue::new(&mut note).range(0..=127))
+                        .changed();
+                    if on_changed || note_changed {
+                        actions.push(Action::SetMidiNote(cue.id, on.then_some(note)));
+                    }
+                });
+                ui.end_row();
+                ui.label("On cart");
+                ui.checkbox(&mut cue.cart, "")
+                    .on_hover_text("Show this cue as a button on the cart (Cue ▸ Show cart).");
+                ui.end_row();
                 ui.label("Continue");
                 if cue.parent.is_some() {
                     ui.label(RichText::new("Decided by the group").weak());
@@ -2801,6 +3053,16 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
                 st.scroll_to_selected = true;
             }
         }
+        Command::Note(note) => {
+            // A note bound to a cue fires it; otherwise it names a cue number.
+            let id = show
+                .cue_for_note(note)
+                .or_else(|| find(show, &note.to_string()));
+            match id {
+                Some(id) => engine.fire(show, id),
+                None => engine.log(format!("Remote: no cue for MIDI note {note}")),
+            }
+        }
         Command::GoCue(ref n)
         | Command::Select(ref n)
         | Command::Fire(ref n)
@@ -2988,6 +3250,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 engine.fire(show, id);
             }
         }
+        Action::FireCue(id) => engine.fire(show, id),
+        Action::StopCue(id) => engine.stop_cue(id, 0.0),
+        Action::FadeOutCue(id) => engine.fade_out_cue(show, id),
+        Action::ToggleCart => st.show_cart = !st.show_cart,
+        Action::CaptureHotkey(id) => st.capture_hotkey = id,
+        Action::SetHotkey(id, key) => {
+            show.set_hotkey(id, key);
+            st.capture_hotkey = None;
+        }
+        Action::SetMidiNote(id, note) => show.set_midi_note(id, note),
         Action::StopSelected => {
             if let Some(id) = st.selected {
                 engine.stop_cue(id, 0.0);
@@ -3341,6 +3613,10 @@ mod tests {
 
     /// Run `keyboard` for one frame of key presses.
     fn keys(st: &UiState, keys: &[(Key, egui::Modifiers)]) -> Vec<Action> {
+        keys_with(&Show::default(), st, keys)
+    }
+
+    fn keys_with(show: &Show, st: &UiState, keys: &[(Key, egui::Modifiers)]) -> Vec<Action> {
         let ctx = egui::Context::default();
         let events = keys
             .iter()
@@ -3358,7 +3634,7 @@ mod tests {
             ..Default::default()
         };
         let mut actions = Vec::new();
-        let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), st, &mut actions));
+        let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), show, st, &mut actions));
         out.textures_delta.clear();
         actions
     }
@@ -3705,5 +3981,132 @@ mod tests {
         // SetArmed, as from the context menu and inspector.
         apply(Action::SetArmed(d, false), &mut show, &mut e, &mut st);
         assert!(!show.cues[idx(&show)].armed);
+    }
+
+    // ----- Hotkeys, MIDI notes and the cart -------------------------------------
+
+    #[test]
+    fn only_free_keys_can_be_hotkeys() {
+        for k in [Key::Q, Key::Z, Key::Num0, Key::Num7, Key::F1, Key::F12] {
+            assert!(hotkey_allowed(k), "{k:?}");
+        }
+        for k in [
+            Key::Space,
+            Key::Escape,
+            Key::P,
+            Key::A,
+            Key::ArrowUp,
+            Key::Delete,
+            Key::Enter,
+            Key::Tab,
+            Key::F13,
+        ] {
+            assert!(!hotkey_allowed(k), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn a_hotkey_fires_its_cue_and_other_keys_still_work() {
+        use egui::Modifiers as M;
+        let (mut show, _, st) = running();
+        let d = number(&show, "4");
+        show.set_hotkey(d, Some("Q".into()));
+        let a = keys_with(&show, &st, &[(Key::Q, M::NONE)]);
+        assert!(
+            matches!(a[..], [Action::FireCue(id)] if id == d),
+            "{}",
+            a.len()
+        );
+        // Shift doesn't matter; Ctrl does.
+        let a = keys_with(&show, &st, &[(Key::Q, M::SHIFT)]);
+        assert!(matches!(a[..], [Action::FireCue(id)] if id == d));
+        assert!(keys_with(&show, &st, &[(Key::Q, M::COMMAND)]).is_empty());
+        // Unbound keys do nothing, and the transport keys are untouched.
+        assert!(keys_with(&show, &st, &[(Key::W, M::NONE)]).is_empty());
+        let a = keys_with(&show, &st, &[(Key::Space, M::NONE)]);
+        assert!(matches!(a[..], [Action::Go]));
+    }
+
+    #[test]
+    fn hotkeys_fire_without_moving_the_playhead() {
+        use egui::Modifiers as M;
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        show.set_hotkey(d, Some("F2".into()));
+        for a in keys_with(&show, &st, &[(Key::F2, M::NONE)]) {
+            apply(a, &mut show, &mut e, &mut st);
+        }
+        assert!(is_playing(&e, d));
+        assert_eq!(e.playhead, Some(show.cues[0].id));
+    }
+
+    #[test]
+    fn capturing_a_hotkey_takes_the_next_allowed_key() {
+        use egui::Modifiers as M;
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        let other = number(&show, "1");
+        show.set_hotkey(other, Some("Q".into()));
+        apply(Action::CaptureHotkey(Some(d)), &mut show, &mut e, &mut st);
+        assert_eq!(st.capture_hotkey, Some(d));
+        // While waiting, Space and Esc don't GO or panic; a key that
+        // can't be a hotkey is ignored and the wait goes on.
+        assert!(keys_with(&show, &st, &[(Key::Space, M::NONE)]).is_empty());
+        assert!(keys_with(&show, &st, &[(Key::ArrowUp, M::NONE)]).is_empty());
+        // A usable key becomes the hotkey, and takes it from the cue that had it.
+        let a = keys_with(&show, &st, &[(Key::Q, M::NONE)]);
+        assert_eq!(a.len(), 1);
+        for a in a {
+            apply(a, &mut show, &mut e, &mut st);
+        }
+        assert_eq!(st.capture_hotkey, None);
+        assert_eq!(show.cue(d).unwrap().hotkey.as_deref(), Some("Q"));
+        assert_eq!(show.cue(other).unwrap().hotkey, None);
+        // Esc cancels the wait without panicking.
+        st.capture_hotkey = Some(d);
+        let a = keys_with(&show, &st, &[(Key::Escape, M::NONE)]);
+        assert!(matches!(a[..], [Action::CaptureHotkey(None)]));
+    }
+
+    #[test]
+    fn cart_buttons_fire_and_stop_cues() {
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        apply(Action::ToggleCart, &mut show, &mut e, &mut st);
+        assert!(st.show_cart);
+        apply(Action::FireCue(d), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d));
+        apply(Action::StopCue(d), &mut show, &mut e, &mut st);
+        assert!(!is_playing(&e, d));
+        // A disarmed cue is not fired by its button either.
+        let i = show.cue_index(d).unwrap();
+        show.cues[i].armed = false;
+        apply(Action::FireCue(d), &mut show, &mut e, &mut st);
+        assert!(!is_playing(&e, d));
+    }
+
+    #[test]
+    fn midi_notes_fire_the_bound_cue_or_the_cue_with_that_number() {
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        // Unbound: the note number is a cue number, as before.
+        run_remote(Command::Note(4), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d));
+        run_remote(Command::StopAll, &mut show, &mut e, &mut st);
+        // Bound: note 60 fires cue 4 whatever its number.
+        apply(Action::SetMidiNote(d, Some(60)), &mut show, &mut e, &mut st);
+        run_remote(Command::Note(60), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, d));
+        // Binding wins over a cue whose number is the note.
+        run_remote(Command::StopAll, &mut show, &mut e, &mut st);
+        let a = number(&show, "1");
+        apply(Action::SetMidiNote(a, Some(4)), &mut show, &mut e, &mut st);
+        run_remote(Command::Note(4), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, a) && !is_playing(&e, d));
+        // Neither: logged, nothing plays.
+        run_remote(Command::StopAll, &mut show, &mut e, &mut st);
+        run_remote(Command::Note(99), &mut show, &mut e, &mut st);
+        assert!(!e.is_active());
+        assert!(e.messages.back().unwrap().1.contains("MIDI note 99"));
     }
 }

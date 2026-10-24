@@ -57,8 +57,10 @@ WGPU_BACKEND=vulkan NEWQ_MUTE=1 xvfb-run -a -s "-screen 0 1500x900x24" \
          sleep 2; import -window root shot.png"
 ```
 
-There is no window manager, so keystrokes go nowhere until a click gives the
-window focus; clicking the GO button (85, 70) is the reliable way to fire a cue.
+There is no window manager, so keystrokes go nowhere until the window has focus.
+Clicking the GO button (85, 70) fires a cue; for keys, focus the window and send
+them to it: `W=$(xdotool search --name NewQ | head -1); xdotool windowfocus $W;
+xdotool key --window $W space`.
 Don't record audio with an ALSA `file` plugin: the null device isn't paced and
 writes gigabytes in seconds.
 
