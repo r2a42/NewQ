@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NewQ remote</title>
+<style>
+  :root { color-scheme: dark; --bg:#161616; --card:#222; --line:#333; --text:#eee; --dim:#999;
+          --go:#26a046; --stop:#be322d; --play:#286e3c; --wait:#966e1e; --head:#e6be3c; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px system-ui, sans-serif; padding-bottom:40px; }
+  header { position:sticky; top:0; background:var(--bg); padding:12px 14px 8px; border-bottom:1px solid var(--line); z-index:2; }
+  #standing { font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  #next { font-size:22px; font-weight:600; color:var(--head); margin:2px 0 10px; min-height:28px; }
+  .row { display:flex; gap:8px; }
+  button { font:inherit; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 10px; }
+  button:active { filter:brightness(1.4); }
+  #go { flex:3; background:var(--go); border:0; font-size:34px; font-weight:700; padding:18px 0; color:#fff; }
+  #stop { flex:2; background:var(--stop); border:0; font-weight:700; color:#fff; }
+  .small { flex:1; }
+  #status { font-size:12px; color:var(--dim); padding:6px 14px; }
+  #status.bad { color:#ff8a80; }
+  ul { list-style:none; margin:0; padding:0 10px; }
+  li { display:flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
+       border-radius:10px; margin:6px 0; padding:8px 10px; position:relative; overflow:hidden; }
+  li.child { margin-left:22px; }
+  li.head { border-color:var(--head); }
+  li.off { opacity:.45; }
+  li .bar { position:absolute; left:0; top:0; bottom:0; width:0; background:var(--play); opacity:.55; z-index:0; }
+  li.prewait .bar { background:var(--wait); }
+  li > * { position:relative; z-index:1; }
+  .num { width:44px; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .kind { color:var(--dim); font-size:12px; }
+  li button { padding:8px 12px; }
+  #pin { display:none; padding:14px; }
+</style>
+</head>
+<body>
+<header>
+  <div id="standing">Standing by</div>
+  <div id="next">&nbsp;</div>
+  <div class="row">
+    <button id="go">GO</button>
+    <button id="stop">STOP ALL</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="small" id="prev">&#9664; Prev</button>
+    <button class="small" id="pause">Pause</button>
+    <button class="small" id="nextbtn">Next &#9654;</button>
+  </div>
+</header>
+<div id="status">Connecting…</div>
+<ul id="cues"></ul>
+<script>
+const $ = id => document.getElementById(id);
+let pin = localStorage.getItem('newq-pin') || '';
+let paused = false;
+
+async function call(path, post) {
+  const headers = { 'X-Pin': pin };
+  if (post) headers['X-NewQ'] = '1';
+  const r = await fetch(path, { method: post ? 'POST' : 'GET', headers, cache: 'no-store' });
+  if (r.status === 401) {
+    const p = prompt('PIN for this remote');
+    if (p !== null) { pin = p; localStorage.setItem('newq-pin', p); }
+    throw new Error('pin');
+  }
+  if (!r.ok) throw new Error(r.status);
+  return r;
+}
+const send = path => call(path, true).then(refresh).catch(() => {});
+
+function render(s) {
+  paused = s.paused;
+  $('pause').textContent = paused ? 'Resume' : 'Pause';
+  $('standing').textContent = (s.show || 'Show') + ' — standing by' + (s.timecode ? '   ⏱ ' + s.timecode : '');
+  $('next').textContent = s.next ? s.next.number + '  ' + s.next.name : 'End of cue list';
+  const ul = $('cues');
+  ul.textContent = '';
+  for (const c of s.cues) {
+    const li = document.createElement('li');
+    li.className = [c.child ? 'child' : '', c.playhead ? 'head' : '', c.armed ? '' : 'off', c.status].join(' ');
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.width = Math.round((c.progress || 0) * 100) + '%';
+    const num = document.createElement('span'); num.className = 'num'; num.textContent = c.number;
+    const name = document.createElement('span'); name.className = 'name'; name.textContent = c.name;
+    const kind = document.createElement('span'); kind.className = 'kind'; kind.textContent = c.type;
+    const fire = document.createElement('button'); fire.textContent = c.status === 'idle' ? 'Fire' : 'Stop';
+    fire.onclick = () => send('/api/cue/' + encodeURIComponent(c.number) + (c.status === 'idle' ? '/fire' : '/stop'));
+    li.append(bar, num, name, kind, fire);
+    ul.append(li);
+  }
+}
+
+async function refresh() {
+  try {
+    const r = await call('/api/state', false);
+    render(await r.json());
+    $('status').textContent = 'Connected'; $('status').className = '';
+  } catch (e) {
+    $('status').textContent = e.message === 'pin' ? 'Enter the PIN' : 'No connection to NewQ'; $('status').className = 'bad';
+  }
+}
+$('go').onclick = () => send('/api/go');
+$('stop').onclick = () => send('/api/panic');
+$('prev').onclick = () => send('/api/previous');
+$('nextbtn').onclick = () => send('/api/next');
+$('pause').onclick = () => send(paused ? '/api/resume' : '/api/pause');
+refresh();
+setInterval(refresh, 600);
+</script>
+</body>
+</html>

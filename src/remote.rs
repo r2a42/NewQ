@@ -7,6 +7,7 @@
 
 use crate::show::RemoteSettings;
 use crate::timecode::{self, QuarterFrames, Rate, Timecode};
+use crate::web::WebServer;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -270,6 +271,9 @@ pub struct RemoteStatus {
     /// The MIDI input that is connected.
     pub midi_port: Option<String>,
     pub midi_error: Option<String>,
+    /// The TCP port the web remote is serving on.
+    pub web_port: Option<u16>,
+    pub web_error: Option<String>,
 }
 
 /// Runs the listeners the show's settings ask for.
@@ -279,6 +283,9 @@ pub struct Remote {
     wake: Arc<dyn Fn() + Send + Sync>,
     osc: Option<OscListener>,
     midi: Option<midir::MidiInputConnection<()>>,
+    web: Option<WebServer>,
+    /// The show's state as the web remote's page reads it.
+    web_state: Arc<parking_lot::Mutex<String>>,
     /// The settings the listeners were last started with.
     started: Option<RemoteSettings>,
     pub status: RemoteStatus,
@@ -294,6 +301,8 @@ impl Remote {
             wake: Arc::new(wake),
             osc: None,
             midi: None,
+            web: None,
+            web_state: Arc::new(parking_lot::Mutex::new("{}".into())),
             started: None,
             status: RemoteStatus::default(),
         }
@@ -332,6 +341,30 @@ impl Remote {
                         self.midi = Some(c);
                     }
                     Err(e) => self.status.midi_error = Some(e),
+                }
+            }
+        }
+        if first
+            || old.web != wanted.web
+            || old.web_port != wanted.web_port
+            || old.web_pin != wanted.web_pin
+        {
+            self.web = None;
+            self.status.web_port = None;
+            self.status.web_error = None;
+            if wanted.web {
+                match WebServer::start(
+                    wanted.web_port,
+                    wanted.web_pin.clone(),
+                    self.web_state.clone(),
+                    self.tx.clone(),
+                    self.wake.clone(),
+                ) {
+                    Ok(s) => {
+                        self.status.web_port = Some(s.port);
+                        self.web = Some(s);
+                    }
+                    Err(e) => self.status.web_error = Some(e),
                 }
             }
         }
@@ -382,6 +415,16 @@ impl Remote {
                 (),
             )
             .map_err(|e| e.to_string())
+    }
+
+    /// Whether the web remote is up, and so wants its state kept fresh.
+    pub fn web_running(&self) -> bool {
+        self.web.is_some()
+    }
+
+    /// Give the web remote's page the show's current state.
+    pub fn set_web_state(&self, json: String) {
+        *self.web_state.lock() = json;
     }
 
     /// Commands that have arrived since the last call.

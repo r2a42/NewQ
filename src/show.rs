@@ -69,6 +69,11 @@ pub struct RemoteSettings {
     pub midi_channel: Option<u8>,
     /// Follow MIDI Time Code on that input, firing cues at their timecodes.
     pub mtc: bool,
+    /// Serve the web remote (a page for a phone or tablet) on `web_port`.
+    pub web: bool,
+    pub web_port: u16,
+    /// Asked for by the web remote; empty = none. Kept in the show file.
+    pub web_pin: String,
 }
 
 impl Default for RemoteSettings {
@@ -80,6 +85,9 @@ impl Default for RemoteSettings {
             midi_port: None,
             midi_channel: None,
             mtc: false,
+            web: false,
+            web_port: 8080,
+            web_pin: String::new(),
         }
     }
 }
@@ -2303,6 +2311,28 @@ mod tests {
         assert_eq!(part.args, "");
         // They have no media, so nothing is preloaded or probed for them.
         assert!(osc.kind.media().is_none() && !osc.kind.preloads());
+    }
+
+    #[test]
+    fn web_remote_settings_default_off_and_stay_out_of_old_files() {
+        let d = RemoteSettings::default();
+        assert!(!d.web && d.web_port == 8080 && d.web_pin.is_empty());
+        assert!(d.is_default());
+        let part: RemoteSettings = serde_json::from_str("{\"osc\":true}").unwrap();
+        assert!(part.osc && !part.web && part.web_port == 8080);
+        let on = RemoteSettings {
+            web: true,
+            web_port: 9000,
+            web_pin: "4821".into(),
+            ..RemoteSettings::default()
+        };
+        assert!(!on.is_default());
+        let back: RemoteSettings =
+            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.web && back.web_port == 9000 && back.web_pin == "4821");
+        // A show that doesn't use it says nothing about it.
+        let json = serde_json::to_string(&Show::default()).unwrap();
+        assert!(!json.contains("web"), "{json}");
     }
 
     #[test]

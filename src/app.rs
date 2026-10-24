@@ -110,6 +110,8 @@ pub struct App {
     last_tick: Instant,
     /// When the unsaved show was last copied to its recovery file.
     last_autosave: Instant,
+    /// When the web remote's page was last given the show's state.
+    last_web_state: Instant,
     /// A recovery file from a session that didn't end properly, to offer once.
     pending_recovery: Option<PathBuf>,
     /// Whether something was playing at the previous tick.
@@ -156,6 +158,7 @@ impl App {
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
             last_autosave: Instant::now(),
+            last_web_state: Instant::now(),
             pending_recovery,
             was_active: false,
         }
@@ -196,6 +199,13 @@ impl App {
             self.remote.sync(&self.show.remote);
         }
         self.ui.remote_status = self.remote.status.clone();
+        if self.remote.web_running()
+            && now.duration_since(self.last_web_state) >= Duration::from_millis(250)
+        {
+            self.last_web_state = now;
+            self.remote
+                .set_web_state(crate::web::snapshot_json(&self.show, &self.engine));
+        }
         let commands = self.remote.drain();
         if commands.is_empty() {
             return;
