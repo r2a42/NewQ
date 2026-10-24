@@ -3,10 +3,14 @@ name: CI
 # One run per change: pull requests are tested as they are updated, and `main`
 # is tested after a merge (the Cut release workflow needs CI to have passed on
 # its tip). A branch with no pull request isn't tested until it has one.
+# Changes that only touch documentation aren't tested; scripts/check_main_ci.sh
+# lets a release go ahead past such commits.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE-*"]
   pull_request:
+    paths-ignore: ["**.md", "LICENSE-*"]
 
 # A newer push to a pull request replaces its run in progress. Runs on `main`
 # are never cancelled.
