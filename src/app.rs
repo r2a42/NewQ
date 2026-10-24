@@ -112,6 +112,13 @@ pub struct App {
     control_logged: Option<Option<usize>>,
     /// When the app started, for how long to wait for the main window's display.
     started: Instant,
+    /// The display the main window lives on, remembered while the displays
+    /// are steady, so one being plugged in can't take the window away.
+    control_home: Option<MonitorHandle>,
+    /// When the set of displays last changed (not counting the first look).
+    monitors_changed: Option<Instant>,
+    /// When the main window was last put back on its display.
+    last_homing: Instant,
     last_monitor_scan: Instant,
     last_tick: Instant,
     /// When the unsaved show was last copied to its recovery file.
@@ -171,6 +178,9 @@ impl App {
             primary: None,
             control_logged: None,
             started: Instant::now(),
+            control_home: None,
+            monitors_changed: None,
+            last_homing: Instant::now(),
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
             last_autosave: Instant::now(),
@@ -184,6 +194,9 @@ impl App {
     fn scan_monitors(&mut self, event_loop: &ActiveEventLoop) {
         let found: Vec<MonitorHandle> = event_loop.available_monitors().collect();
         if found != self.monitors {
+            if !self.monitors.is_empty() {
+                self.monitors_changed = Some(Instant::now());
+            }
             for (i, m) in found.iter().enumerate() {
                 log::info!(
                     "display {i}: {:?} {}x{} at {:?}, scale {}",
@@ -252,11 +265,57 @@ impl App {
         }
     }
 
+    /// The displays have just changed, and the main window may be moved about
+    /// by the system for a moment.
+    fn displays_settling(&self) -> bool {
+        self.monitors_changed
+            .is_some_and(|t| t.elapsed() < HOME_GRACE)
+    }
+
+    /// The display the main window is on; while the displays are changing,
+    /// the one it lives on, wherever the system has put it for now.
     fn control_monitor(&self) -> Option<usize> {
-        self.control
-            .as_ref()
-            .and_then(|c| c.window.current_monitor())
-            .and_then(|m| self.monitors.iter().position(|x| *x == m))
+        let home = self
+            .control_home
+            .clone()
+            .filter(|_| self.displays_settling());
+        home.or_else(|| {
+            self.control
+                .as_ref()
+                .and_then(|c| c.window.current_monitor())
+        })
+        .and_then(|m| self.monitors.iter().position(|x| *x == m))
+    }
+
+    /// Keep the main window on the display it lives on when displays come
+    /// and go. While steady, remember where it is; for a few seconds after a
+    /// change, put it back if the system has moved it.
+    fn keep_main_window_home(&mut self) {
+        let Some(ctl) = &self.control else { return };
+        let here = ctl.window.current_monitor();
+        if !self.displays_settling() {
+            if here.is_some() {
+                self.control_home = here;
+            }
+            return;
+        }
+        let Some(home) = self.control_home.clone() else {
+            return;
+        };
+        let at_home = here.as_ref() == Some(&home);
+        if should_return_home(true, self.monitors.contains(&home), at_home)
+            && self.last_homing.elapsed() > Duration::from_millis(500)
+        {
+            log::info!(
+                "main window was moved off its display ({:?}); putting it back",
+                here.as_ref().and_then(|m| m.name())
+            );
+            self.last_homing = Instant::now();
+            ctl.window.set_minimized(false);
+            ctl.window.set_outer_position(home.position());
+            ctl.window.set_maximized(true);
+            ctl.window.focus_window();
+        }
     }
 
     /// Decide where each enabled output is drawn.
@@ -286,10 +345,17 @@ impl App {
         let Some(m) = self.monitors.get(monitor) else {
             return;
         };
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title("NewQ output")
-            .with_inner_size(LogicalSize::new(960.0, 540.0))
-            .with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
+            .with_inner_size(LogicalSize::new(960.0, 540.0));
+        if cfg!(target_os = "macos") {
+            // Native fullscreen gets a Space of its own on that display, which
+            // can take the main window out of sight. Cover the display
+            // instead (below); the window just has to start on it.
+            attrs = attrs.with_position(m.position());
+        } else {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -298,6 +364,11 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        if !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true) {
+            log::warn!("simple fullscreen refused on display {monitor}; using native fullscreen");
+            window.set_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
+        }
         window.set_cursor_visible(false);
         let surface = match gpu.instance.create_surface(window.clone()) {
             Ok(s) => s,
@@ -347,6 +418,9 @@ impl App {
         if let Some(screen) = self.screens.remove(&monitor)
             && let (window, Some(handle)) = screen.close()
         {
+            // Give the menu bar and Dock back before the window goes.
+            #[cfg(target_os = "macos")]
+            winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, false);
             window.set_visible(false);
             self.closing.push((window, handle));
         }
@@ -812,6 +886,7 @@ impl ApplicationHandler for App {
         if now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
             self.scan_monitors(event_loop);
         }
+        self.keep_main_window_home();
         self.reconcile_outputs(event_loop);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
@@ -868,6 +943,17 @@ impl ApplicationHandler for App {
 /// Resolve a saved display to a monitor index: by name first, then by position
 /// (so a show moved to a venue with differently named projectors still works),
 /// but never by position onto the main window's own display.
+/// After the displays change, how long the main window is held on its own
+/// display while the system settles.
+const HOME_GRACE: Duration = Duration::from_secs(5);
+
+/// Whether the main window should be put back on its display: only just
+/// after the displays changed, only if that display is still there, and only
+/// if it isn't on it.
+fn should_return_home(settling: bool, home_connected: bool, at_home: bool) -> bool {
+    settling && home_connected && !at_home
+}
+
 /// How long to wait for the main window to be placed on a display before
 /// assuming it is on the primary one.
 const CONTROL_WAIT: Duration = Duration::from_secs(2);
@@ -1007,6 +1093,17 @@ mod tests {
             .into_iter()
             .map(|(id, t)| (id, t.map(|t| t.monitor)))
             .collect()
+    }
+
+    #[test]
+    fn the_main_window_goes_home_only_after_a_change_and_only_if_home_is_there() {
+        assert!(should_return_home(true, true, false));
+        assert!(!should_return_home(false, true, false), "steady: leave it");
+        assert!(
+            !should_return_home(true, false, false),
+            "home was unplugged"
+        );
+        assert!(!should_return_home(true, true, true), "already there");
     }
 
     #[test]
