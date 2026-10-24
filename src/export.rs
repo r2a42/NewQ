@@ -8,7 +8,7 @@ use crate::engine::Engine;
 use crate::show::{Cue, CueKind, Show};
 use crate::ui;
 
-pub const COLUMNS: [&str; 13] = [
+pub const COLUMNS: [&str; 14] = [
     "Number",
     "Name",
     "Type",
@@ -21,6 +21,7 @@ pub const COLUMNS: [&str; 13] = [
     "Hotkey",
     "MIDI note",
     "Timecode",
+    "Clock",
     "Notes",
 ];
 
@@ -28,7 +29,7 @@ pub const COLUMNS: [&str; 13] = [
 /// and whether it is armed (for the page's styling).
 #[derive(Debug, PartialEq)]
 pub struct Row {
-    pub cells: [String; 13],
+    pub cells: [String; 14],
     pub child: bool,
     pub armed: bool,
     pub group: bool,
@@ -67,6 +68,7 @@ pub fn rows(show: &Show, engine: &mut Engine) -> Vec<Row> {
                     c.hotkey.clone().unwrap_or_default(),
                     c.midi_note.map(|n| n.to_string()).unwrap_or_default(),
                     c.timecode.map(|t| t.to_string()).unwrap_or_default(),
+                    c.clock.map(|t| t.to_string()).unwrap_or_default(),
                     c.notes.trim().to_string(),
                 ],
                 child: c.parent.is_some(),
@@ -184,7 +186,7 @@ pub fn to_html(show_name: &str, rows: &[Row], unix_secs: i64) -> String {
         for (i, cell) in r.cells.iter().enumerate() {
             let td = match i {
                 0 => "<td class=\"n\">",
-                12 => "<td class=\"notes\">",
+                13 => "<td class=\"notes\">",
                 _ => "<td>",
             };
             out.push_str(&format!(
@@ -223,6 +225,7 @@ pub fn write(path: &std::path::Path, show: &Show, engine: &mut Engine) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::TimeOfDay;
     use crate::show::{ContinueMode, CueType, GroupMode};
 
     fn demo() -> (Show, Engine) {
@@ -252,6 +255,7 @@ mod tests {
         cue.pre_wait = 1.5;
         cue.continue_mode = ContinueMode::AutoFollow;
         cue.timecode = Some(crate::timecode::Timecode::new(1, 0, 5, 12));
+        cue.clock = TimeOfDay::new(18, 30, 0);
         (show, Engine::for_tests())
     }
 
@@ -272,8 +276,9 @@ mod tests {
             (c[9].as_str(), c[10].as_str(), c[11].as_str()),
             ("F2", "36", "01:00:05:12")
         );
+        assert_eq!(c[12], "18:30:00");
         assert_eq!(
-            c[12], "Wait for the\nhouse lights, then go",
+            c[13], "Wait for the\nhouse lights, then go",
             "notes trimmed"
         );
         assert!(!r[0].child && r[0].armed && !r[0].group);
@@ -293,7 +298,7 @@ mod tests {
         let mut lines = body.split("\r\n");
         assert_eq!(
             lines.next().unwrap(),
-            "Number,Name,Type,Target,Fades,Pre-wait,Duration,Continue,Armed,Hotkey,MIDI note,Timecode,Notes"
+            "Number,Name,Type,Target,Fades,Pre-wait,Duration,Continue,Armed,Hotkey,MIDI note,Timecode,Clock,Notes"
         );
         // The first cue's notes have a line break, so that field is quoted over two lines.
         assert!(

@@ -1,6 +1,7 @@
 //! Playback engine: fires cues, runs pre-waits, continues, fades and stops,
 //! and owns the decoders for everything that is playing.
 
+use crate::clock::{ClockFollower, TimeOfDay};
 use crate::media::audio::{AudioOut, Voice};
 use crate::media::camera;
 use crate::media::ffmpeg::{ColorMatrix, Ffmpeg, MediaInfo};
@@ -275,6 +276,8 @@ pub struct Engine {
     scanned: bool,
     /// Follows incoming MIDI Time Code and says which cues it reaches.
     pub timecode: Follower,
+    /// Follows the time of day for cues with a clock time.
+    clock: ClockFollower,
     /// Where send cues' messages go.
     outbox: Outbox,
 }
@@ -300,6 +303,7 @@ impl Engine {
             camera_scan: None,
             scanned: false,
             timecode: Follower::default(),
+            clock: ClockFollower::default(),
             outbox: Outbox::recording(),
         }
     }
@@ -327,6 +331,7 @@ impl Engine {
             camera_scan: None,
             scanned: false,
             timecode: Follower::default(),
+            clock: ClockFollower::default(),
             outbox: Outbox::new(),
         }
     }
@@ -358,6 +363,18 @@ impl Engine {
             .spawn(move || {
                 let _ = tx.send(camera::list_devices(&ff));
             });
+    }
+
+    /// The clock now reads `now`: fire the cues whose time of day has just passed.
+    pub fn on_clock(&mut self, show: &Show, now: TimeOfDay) {
+        let triggers: Vec<(CueId, TimeOfDay)> = show
+            .cues
+            .iter()
+            .filter_map(|c| c.clock.map(|t| (c.id, t)))
+            .collect();
+        for id in self.clock.advance(&triggers, now) {
+            self.fire(show, id);
+        }
     }
 
     /// MIDI Time Code reached `tc`: fire the cues set for the time it has just passed.
@@ -2623,5 +2640,63 @@ mod tests {
         let c = e.layers(out)[0].color;
         assert_eq!(c.brightness, 0.3);
         assert!(c.key.is_some());
+    }
+
+    // ----- Clock triggers --------------------------------------------------------
+
+    fn clock_cue(show: &mut Show, at: TimeOfDay) -> CueId {
+        let id = wait_cue(show, 30.0, ContinueMode::DoNotContinue);
+        show.cue_mut(id).unwrap().clock = Some(at);
+        id
+    }
+
+    fn tod(h: u32, m: u32, s: u32) -> TimeOfDay {
+        TimeOfDay::new(h, m, s).unwrap()
+    }
+
+    #[test]
+    fn a_clock_cue_fires_when_the_time_of_day_reaches_it() {
+        let mut show = Show::default();
+        let house = clock_cue(&mut show, tod(18, 30, 0));
+        let untimed = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(untimed);
+        e.on_clock(&show, tod(18, 29, 58));
+        e.on_clock(&show, tod(18, 29, 59));
+        assert!(idle(&e, house), "not yet");
+        e.on_clock(&show, tod(18, 30, 0));
+        assert!(playing(&e, house));
+        assert!(idle(&e, untimed), "cues with no time are left alone");
+        assert_eq!(e.playhead, Some(untimed), "the playhead doesn't move");
+        // Looking again in the same second, or later, doesn't fire it again.
+        e.stop_all(0.0);
+        e.on_clock(&show, tod(18, 30, 0));
+        e.on_clock(&show, tod(18, 30, 1));
+        assert!(idle(&e, house));
+    }
+
+    #[test]
+    fn clock_cues_skip_disarmed_cues_start_groups_and_ignore_jumps() {
+        let mut show = Show::default();
+        let off = clock_cue(&mut show, tod(9, 0, 1));
+        disarm(&mut show, off);
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[5.0, 5.0]);
+        show.cue_mut(g).unwrap().clock = Some(tod(9, 0, 2));
+        let late = clock_cue(&mut show, tod(9, 30, 0));
+        let mut e = engine_without_media();
+        e.on_clock(&show, tod(9, 0, 0));
+        e.on_clock(&show, tod(9, 0, 1));
+        e.on_clock(&show, tod(9, 0, 2));
+        assert!(idle(&e, off), "a disarmed cue isn't fired");
+        assert!(playing(&e, g) && playing(&e, kids[0]) && playing(&e, kids[1]));
+        // The machine sleeps for twenty minutes: the 9:30 cue is not started late.
+        e.on_clock(&show, tod(9, 22, 0));
+        assert!(idle(&e, late));
+        e.on_clock(&show, tod(9, 29, 59));
+        e.on_clock(&show, tod(9, 30, 0));
+        assert!(
+            playing(&e, late),
+            "and it still fires on time when it plays through"
+        );
     }
 }

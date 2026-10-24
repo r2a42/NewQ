@@ -193,6 +193,15 @@ includes FFmpeg, so there's nothing else to install.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
   cue list means a cue is preloaded).
 - **Audio/video sync:** video with sound is slaved to the audio clock.
+- **Clock triggers:** give a cue (or a group) a *Clock* time in its inspector
+  and it fires when the time of day reaches it, to the second, using this
+  computer's local time: house-open music at 18:30, a pre-show loop, a reminder
+  Wait. The status bar shows the next one and how long is left. A clock cue
+  fires only for time that passes while NewQ is running: opening a show at 18:31
+  doesn't start the 18:30 cue, a laptop that slept through it doesn't start it on
+  waking, and setting the computer's clock doesn't fire the cues it skips. It
+  fires again each day the show is left running. Disarmed cues are skipped, and
+  the playhead doesn't move.
 - **MIDI Time Code triggers:** give a cue (or a group) a timecode in its
   inspector, turn on *Follow MIDI Time Code* under Remote control (it listens
   to the MIDI input you chose), and the cue fires when the incoming time
