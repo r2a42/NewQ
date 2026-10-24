@@ -286,6 +286,13 @@ space like a hardware video mixer.
   Windows machine so far; macOS and Linux builds are covered by CI but haven't
   been run by hand.
 
+## Trademarks
+
+QLab is a trademark of Figure 53, LLC. NewQ is an independent project, written
+from scratch and not affiliated with or endorsed by Figure 53; it mentions QLab
+only to say what kind of program it is. NewQ contains no QLab code, files or
+text.
+
 ## License
 
 NewQ is licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT),
