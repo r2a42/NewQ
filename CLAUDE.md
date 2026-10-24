@@ -66,7 +66,9 @@ writes gigabytes in seconds.
 
 - CI runs fmt, clippy, tests and the real-media tests on Ubuntu, Windows and
   macOS, once per change: on pull requests (a newer push cancels the older run)
-  and on `main` after a merge. A branch has no CI until it has a pull request. Occasionally the macOS runner never starts and the job is cancelled
+  and on `main` after a merge. A branch has no CI until it has a pull request. Changes
+  that only touch `*.md` or `LICENSE-*` skip CI; `scripts/check_main_ci.sh` (used by
+  `Cut release`) accepts such commits on top of a commit CI passed on. Occasionally the macOS runner never starts and the job is cancelled
   after 15 minutes with no steps run; that's not a failure of the change. Re-run it.
 - **Releasing:** bump `version` in `Cargo.toml` (and `Cargo.lock`) in a PR, merge,
   and wait for CI to pass on `main`. Then, as the repository owner, comment

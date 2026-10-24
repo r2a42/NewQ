@@ -91,11 +91,7 @@ jobs:
             echo "$TAG already exists" >&2
             exit 1
           fi
-          passed="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$sha&status=success&per_page=1" --jq '.total_count')"
-          if [ "$passed" -lt 1 ]; then
-            echo "CI has not passed on $BRANCH at $sha yet" >&2
-            exit 1
-          fi
+          scripts/check_main_ci.sh "$sha"
 
       - name: Tag and start the release
         if: env.DRY_RUN != 'true'
