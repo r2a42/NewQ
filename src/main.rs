@@ -4,6 +4,7 @@
 mod app;
 mod color;
 mod engine;
+mod export;
 mod gpu;
 mod history;
 mod media;

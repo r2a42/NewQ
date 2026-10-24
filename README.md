@@ -228,6 +228,13 @@ includes FFmpeg, so there's nothing else to install.
   the background and kept, so even long files only wait the first time. A file
   with no sound (or an image) shows no waveform. The In / Out boxes still take
   typed times, and both stay in step.
+- **Cue sheet export:** *File ▸ Export cue sheet…* writes the cue list as a
+  web page to print (landscape, with the header repeated on each page, groups
+  shaded, children indented and disarmed cues struck through) or, if you name
+  the file `.csv`, as a spreadsheet file (UTF-8 with a byte order mark, so
+  Excel reads accents and symbols correctly). Each cue has its number, name,
+  type, target, fades, pre-wait, duration, continue mode, whether it is
+  armed, hotkey, MIDI note, timecode and notes.
 - **Media manager:** *File ▸ Media…* lists every file the show uses and
   which can't be found, and it opens by itself when a show is opened with
   files missing. *Search a folder for missing files…* looks in a folder (and

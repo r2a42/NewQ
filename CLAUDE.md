@@ -17,6 +17,7 @@ The README describes the features; this file is about working on the code.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.
   `src/output.rs`: send cues' OSC and MIDI messages and the sender thread.
+  `src/export.rs`: the cue sheet as CSV or a printable page.
   `src/web.rs` and `web_page.html`: the web remote (HTTP on plain `std`
   sockets, handlers tested as functions and over loopback).
   `src/relink.rs`: finding moved media and copying it into one folder.
