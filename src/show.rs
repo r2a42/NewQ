@@ -1,5 +1,6 @@
 //! Show file data model: cues, outputs, and (de)serialization.
 
+use crate::clock::TimeOfDay;
 use crate::media::playback::Playback;
 use crate::timecode::Timecode;
 use serde::{Deserialize, Serialize};
@@ -442,6 +443,9 @@ pub struct Cue {
     /// Fire this cue when incoming MIDI Time Code reaches this position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timecode: Option<Timecode>,
+    /// Fire this cue when the time of day reaches this time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<TimeOfDay>,
     pub kind: CueKind,
 }
 
@@ -1286,6 +1290,7 @@ impl Show {
             midi_note: None,
             cart: false,
             timecode: None,
+            clock: None,
             kind,
         }
     }
@@ -2540,5 +2545,25 @@ mod tests {
         assert_eq!((part.saturation, part.contrast, part.key), (0.0, 1.0, None));
         let key: ChromaKey = serde_json::from_str(r#"{"color":[0,0,255]}"#).unwrap();
         assert_eq!((key.color, key.tolerance), ([0, 0, 255], 0.2));
+    }
+
+    #[test]
+    fn clock_triggers_default_off_and_stay_out_of_old_files() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Wait, None, 0);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(!json.contains("clock"), "{json}");
+        assert!(serde_json::from_str::<Cue>(&json).unwrap().clock.is_none());
+        cue.clock = TimeOfDay::new(18, 30, 0);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(json.contains("\"clock\":\"18:30:00\""), "{json}");
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.clock, TimeOfDay::new(18, 30, 0));
+        // Written by hand with no seconds, it still reads.
+        let hand = json.replace("18:30:00", "7:05");
+        assert_eq!(
+            serde_json::from_str::<Cue>(&hand).unwrap().clock,
+            TimeOfDay::new(7, 5, 0)
+        );
     }
 }

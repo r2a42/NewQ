@@ -1,5 +1,6 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
+use crate::clock::{self, TimeOfDay};
 use crate::engine::{CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
@@ -285,7 +286,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     egui::Panel::top("transport")
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(10))
         .show(ui, |ui| transport(ui, show, engine, &mut actions));
-    egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, engine, st));
+    egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, show, engine, st));
     egui::Panel::right("side")
         .resizable(true)
         .default_size(420.0)
@@ -808,7 +809,7 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
     });
 }
 
-fn status_bar(ui: &mut Ui, engine: &Engine, st: &UiState) {
+fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
     ui.horizontal(|ui| {
         match &engine.ff {
             Some(_) => ui.label(RichText::new("✔ ffmpeg").color(GO_GREEN)),
@@ -823,6 +824,21 @@ fn status_bar(ui: &mut Ui, engine: &Engine, st: &UiState) {
             Ok(text) => ui.label(format!("🔊 {text}")),
             Err(e) => ui.label(RichText::new(format!("🔇 {e}")).color(STOP_RED)),
         };
+        // The next cue set for a time of day, if there is one.
+        let timed: Vec<_> = show
+            .cues
+            .iter()
+            .filter(|c| c.armed)
+            .filter_map(|c| c.clock.map(|t| (c.id, t)))
+            .collect();
+        if let Some((id, at, secs)) = clock::upcoming(&timed, clock::now())
+            && let Some(c) = show.cue(id)
+        {
+            ui.label(
+                RichText::new(format!("⏰ {at}  {}  in {}", c.name, fmt_wait(secs))).color(PREWAIT),
+            )
+            .on_hover_text("The next cue set to fire at a time of day");
+        }
         if engine.timecode.running()
             && let Some((tc, rate)) = engine.timecode.position()
         {
@@ -1170,6 +1186,15 @@ fn cue_list(
         });
 }
 
+/// A wait for the status bar: "42 s", "12 min", "3 h 05 min".
+fn fmt_wait(secs: u32) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3599 => format!("{} min {:02} s", secs / 60, secs % 60),
+        _ => format!("{} h {:02} min", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 /// A cue's name, with its hotkey after it if it has one.
 fn name_with_key(c: &Cue) -> String {
     let mut name = c.name.clone();
@@ -1178,6 +1203,9 @@ fn name_with_key(c: &Cue) -> String {
     }
     if let Some(t) = c.timecode {
         name.push_str(&format!("   @{t}"));
+    }
+    if let Some(t) = c.clock {
+        name.push_str(&format!("   at {t}"));
     }
     name
 }
@@ -2852,6 +2880,32 @@ fn inspector(
                         part(ui, &mut t.frames, 29, false);
                     });
                     cue.timecode = on.then_some(t);
+                });
+                ui.end_row();
+                ui.label("Clock");
+                ui.horizontal(|ui| {
+                    let mut on = cue.clock.is_some();
+                    let (mut h, mut m, mut s) = cue.clock.map_or((18, 0, 0), TimeOfDay::hms);
+                    ui.checkbox(&mut on, "").on_hover_text(
+                        "Fire this cue when the time of day reaches this time, to the second. \
+                         It only fires for time that passes while NewQ is running.",
+                    );
+                    ui.add_enabled_ui(on, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (v, max, sep) in
+                            [(&mut h, 23, true), (&mut m, 59, true), (&mut s, 59, false)]
+                        {
+                            ui.add(
+                                egui::DragValue::new(v)
+                                    .range(0..=max)
+                                    .custom_formatter(|n, _| format!("{:02}", n as u32)),
+                            );
+                            if sep {
+                                ui.label(":");
+                            }
+                        }
+                    });
+                    cue.clock = on.then(|| TimeOfDay::new(h, m, s).unwrap_or_default());
                 });
                 ui.end_row();
                 ui.label("Continue");
@@ -5596,5 +5650,22 @@ mod tests {
         assert!(e.messages.back().unwrap().1.starts_with("Could not export"));
         assert!(!st.dirty, "exporting isn't an edit");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clock_cue_shows_its_time_in_the_list_and_waits_are_readable() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Wait, None, 0);
+        c.clock = TimeOfDay::new(18, 30, 0);
+        c.hotkey = Some("Q".into());
+        assert!(
+            name_with_key(&c).ends_with("[Q]   at 18:30:00"),
+            "{}",
+            name_with_key(&c)
+        );
+        assert_eq!(fmt_wait(42), "42 s");
+        assert_eq!(fmt_wait(754), "12 min 34 s");
+        assert_eq!(fmt_wait(3 * 3600 + 5 * 60 + 9), "3 h 05 min");
+        assert_eq!(fmt_wait(86_400), "24 h 00 min");
     }
 }

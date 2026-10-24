@@ -751,6 +751,7 @@ impl ApplicationHandler for App {
         self.reconcile_outputs(event_loop);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
+        self.engine.on_clock(&self.show, crate::clock::now());
         self.engine.tick(&self.show, dt);
 
         // Drop GPU textures of cues that are no longer playing.
