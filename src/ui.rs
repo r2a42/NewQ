@@ -47,6 +47,23 @@ pub struct PreviewOutput {
     pub canvas: (u32, u32),
 }
 
+/// The scrub bar under the preview: where the bar was dragged to, kept on
+/// screen until the cue has caught up with it.
+#[derive(Clone, Copy)]
+struct Scrub {
+    instance: u64,
+    pos: f64,
+    dragging: bool,
+    /// When a seek was last asked for, and when the bar was let go.
+    sent: f64,
+    released: f64,
+}
+
+/// How often a seek is asked for while the bar is dragged (seconds).
+const SCRUB_EVERY: f64 = 0.2;
+/// How long the bar stays where it was let go, waiting for the picture to arrive.
+const SCRUB_HOLD: f64 = 1.0;
+
 /// Copying a show's media into a folder, on its own thread.
 struct CollectJob {
     done: std::sync::mpsc::Receiver<relink::Collected>,
@@ -63,6 +80,11 @@ pub struct UiState {
     /// Every enabled output, previewed in the main window (set each frame by the app).
     pub previews: Vec<PreviewOutput>,
     pub routes: HashMap<OutputId, OutputRoute>,
+    /// The output shown in the main window's preview (the first when unset
+    /// or gone).
+    pub preview_output: Option<OutputId>,
+    /// A scrub bar being dragged, or just released.
+    scrub: Option<Scrub>,
     /// Output whose corner pin is being edited on its preview.
     pub geometry_edit: Option<OutputId>,
     /// Sub display whose area is being edited.
@@ -207,6 +229,8 @@ enum Action {
     FadeOutSelected,
     StopInstance(u64, f64),
     FadeOutInstance(u64),
+    /// Jump a playing cue (by instance) to this many seconds from its start.
+    Seek(u64, f64),
     EditGeometry(Option<OutputId>),
     EditArea(Option<SubDisplayId>),
     /// Move the selected handle by this many screen pixels.
@@ -295,7 +319,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    output_previews(ui, show, st);
+                    output_previews(ui, show, engine, st, &mut actions);
                     active_panel(ui, show, engine, &mut actions);
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
@@ -1777,53 +1801,169 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
     }
 }
 
-/// A live preview of every output. For an output with no display of its own,
-/// this is where it is shown.
-fn output_previews(ui: &mut Ui, show: &mut Show, st: &UiState) {
-    for e in &st.previews {
-        let where_ = match st.routes.get(&e.id) {
-            Some(OutputRoute::Display(name)) => format!("also fullscreen on {name}"),
-            Some(OutputRoute::SubDisplay { name, display }) => {
-                format!("also on {name} ({display})")
-            }
-            _ => "main window only".to_string(),
-        };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&e.name).strong());
-            ui.label(RichText::new(where_).weak().small());
-        });
-        let editing = st.geometry_edit == Some(e.id);
-        // Leave room around the screen to drag corners past its edges.
-        let margin = if editing { 14.0 } else { 0.0 };
-        let full_w = ui.available_width() - 2.0 * margin;
-        // Tall sub displays are previewed narrower, not taller.
-        let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
-        let h = (full_w / aspect).min(full_w * if editing { 1.2 } else { 0.75 });
-        let w = h * aspect;
-        let (outer, _) = ui.allocate_exact_size(
-            Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
-            Sense::hover(),
-        );
-        let rect = outer.shrink(margin);
-        ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
-            OutputPreview {
-                groups: vec![OutputGroup {
-                    layers: e.layers.clone(),
-                    geometry: Geometry {
-                        canvas: e.canvas,
-                        warp: e.warp,
-                        pin: e.warp,
-                    },
-                }],
-                slot: Slot::Preview,
-            },
-        ));
-        if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == e.id) {
-            corner_handles(ui, rect, e.id, &mut cfg.corners, &st.handle_sel);
+/// Which of `previews` the main window shows: the output whose corners are
+/// being edited, else the one chosen, else the first.
+fn preview_index(
+    previews: &[PreviewOutput],
+    chosen: Option<OutputId>,
+    editing: Option<OutputId>,
+) -> Option<usize> {
+    let find = |id: Option<OutputId>| id.and_then(|id| previews.iter().position(|p| p.id == id));
+    find(editing)
+        .or(find(chosen))
+        .or(if previews.is_empty() { None } else { Some(0) })
+}
+
+/// A live preview of one output, with a scrub bar under it for the cue
+/// playing there. With several outputs, a menu picks which is shown. For an
+/// output with no display of its own, this is where it is shown.
+fn output_previews(
+    ui: &mut Ui,
+    show: &mut Show,
+    engine: &Engine,
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
+    let Some(i) = preview_index(&st.previews, st.preview_output, st.geometry_edit) else {
+        return;
+    };
+    let id = st.previews[i].id;
+    let editing = st.geometry_edit == Some(id);
+    let where_ = match st.routes.get(&id) {
+        Some(OutputRoute::Display(name)) => format!("also fullscreen on {name}"),
+        Some(OutputRoute::SubDisplay { name, display }) => {
+            format!("also on {name} ({display})")
         }
-        ui.add_space(8.0);
+        _ => "main window only".to_string(),
+    };
+    let mut chosen = id;
+    ui.horizontal(|ui| {
+        if st.previews.len() > 1 {
+            ui.add_enabled_ui(!editing, |ui| {
+                egui::ComboBox::from_id_salt("preview_output")
+                    .selected_text(RichText::new(&st.previews[i].name).strong())
+                    .show_ui(ui, |ui| {
+                        for p in &st.previews {
+                            ui.selectable_value(&mut chosen, p.id, &p.name);
+                        }
+                    })
+                    .response
+                    .on_hover_text("Which output to preview here")
+                    .on_disabled_hover_text("Showing the output whose corners are being edited");
+            });
+        } else {
+            ui.label(RichText::new(&st.previews[i].name).strong());
+        }
+        ui.label(RichText::new(where_).weak().small());
+    });
+    if chosen != id {
+        st.preview_output = Some(chosen);
+    }
+
+    let e = &st.previews[i];
+    // Leave room around the screen to drag corners past its edges.
+    let margin = if editing { 14.0 } else { 0.0 };
+    let full_w = ui.available_width() - 2.0 * margin;
+    // Tall sub displays are previewed narrower, not taller.
+    let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
+    let h = (full_w / aspect).min(full_w * if editing { 1.2 } else { 0.75 });
+    let w = h * aspect;
+    let (outer, _) = ui.allocate_exact_size(
+        Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
+        Sense::hover(),
+    );
+    let rect = outer.shrink(margin);
+    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
+    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+        rect,
+        OutputPreview {
+            groups: vec![OutputGroup {
+                layers: e.layers.clone(),
+                geometry: Geometry {
+                    canvas: e.canvas,
+                    warp: e.warp,
+                    pin: e.warp,
+                },
+            }],
+            slot: Slot::Preview,
+        },
+    ));
+    if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == id) {
+        corner_handles(ui, rect, id, &mut cfg.corners, &st.handle_sel);
+    }
+    scrub_bar(ui, show, engine, st, id, actions);
+    ui.add_space(8.0);
+}
+
+/// A bar under the preview that moves the cue playing on `output`: drag it
+/// to jump around in the video, sound or timed still.
+fn scrub_bar(
+    ui: &mut Ui,
+    show: &Show,
+    engine: &Engine,
+    st: &mut UiState,
+    output: OutputId,
+    actions: &mut Vec<Action>,
+) {
+    let Some(a) = engine.scrub_target(show, output) else {
+        st.scrub = None;
+        ui.label(
+            RichText::new("Nothing on this output to scrub")
+                .weak()
+                .small(),
+        );
+        return;
+    };
+    let length = a.scrub_length(show).unwrap_or(0.0);
+    let now = ui.input(|i| i.time);
+    // Stay where the bar was dragged until the cue has caught up with it.
+    let held = st.scrub.filter(|s| {
+        s.instance == a.instance && (s.dragging || a.seeking() || now - s.released < SCRUB_HOLD)
+    });
+    let mut pos = held.map_or(a.elapsed, |s| s.pos).clamp(0.0, length);
+    let name = show.cue(a.cue_id).map(cue_label).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(name).small());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // Clear of the panel's scroll bar.
+            ui.add_space(8.0);
+            ui.label(RichText::new(format!("{} / {}", fmt_time(pos), fmt_time(length))).small());
+        });
+    });
+    ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(40.0);
+    let bar = ui
+        .add(egui::Slider::new(&mut pos, 0.0..=length).show_value(false))
+        .on_hover_text("Drag to jump to another point in the cue");
+    let mut scrub = held.unwrap_or(Scrub {
+        instance: a.instance,
+        pos,
+        dragging: false,
+        sent: f64::NEG_INFINITY,
+        released: now,
+    });
+    if bar.changed() {
+        scrub.pos = pos;
+        scrub.dragging = bar.dragged();
+        scrub.released = now;
+        // While dragging, ask now and then so the picture follows; the
+        // final position is always asked for when the bar is let go.
+        if now - scrub.sent >= SCRUB_EVERY || !bar.dragged() {
+            actions.push(Action::Seek(a.instance, pos));
+            scrub.sent = now;
+        }
+    }
+    if bar.drag_stopped() {
+        scrub.dragging = false;
+        scrub.released = now;
+        // (Letting go without having moved it asks for nothing.)
+        if scrub.sent.is_finite() && scrub.sent < now {
+            actions.push(Action::Seek(a.instance, scrub.pos));
+            scrub.sent = now;
+        }
+    }
+    st.scrub = (bar.changed() || bar.dragged() || held.is_some()).then_some(scrub);
+    if st.scrub.is_some() {
+        ui.ctx().request_repaint();
     }
 }
 
@@ -4320,6 +4460,11 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::StopInstance(i, fade) => engine.stop_instance(i, fade),
         Action::FadeOutInstance(i) => engine.fade_out_instance(show, i),
+        Action::Seek(i, to) => {
+            if let Err(e) = engine.seek(show, i, to) {
+                engine.log(format!("Can't scrub: {e}"));
+            }
+        }
         Action::EditGeometry(id) => {
             st.geometry_edit = id;
             st.handle_sel.set(None);
@@ -5667,5 +5812,131 @@ mod tests {
         assert_eq!(fmt_wait(754), "12 min 34 s");
         assert_eq!(fmt_wait(3 * 3600 + 5 * 60 + 9), "3 h 05 min");
         assert_eq!(fmt_wait(86_400), "24 h 00 min");
+    }
+
+    fn preview(n: u64) -> PreviewOutput {
+        PreviewOutput {
+            id: OutputId(n),
+            name: format!("Output {n}"),
+            layers: Vec::new(),
+            warp: crate::gpu::IDENTITY,
+            canvas: (1920, 1080),
+        }
+    }
+
+    #[test]
+    fn the_preview_follows_the_menu_but_not_while_editing_corners() {
+        let previews = [preview(1), preview(2), preview(3)];
+        let pick = |chosen: Option<u64>, editing: Option<u64>| {
+            preview_index(&previews, chosen.map(OutputId), editing.map(OutputId))
+        };
+        assert_eq!(pick(None, None), Some(0), "the first by default");
+        assert_eq!(pick(Some(3), None), Some(2));
+        assert_eq!(pick(Some(9), None), Some(0), "an output that is gone");
+        assert_eq!(pick(Some(3), Some(2)), Some(1), "editing wins");
+        assert_eq!(
+            pick(Some(2), Some(9)),
+            Some(1),
+            "editing something not shown"
+        );
+        assert_eq!(preview_index(&[], None, None), None);
+    }
+
+    /// Run frames of the scrub bar under `events`; the bar's rectangle and
+    /// every action it asked for.
+    fn scrub_frames(
+        show: &Show,
+        engine: &Engine,
+        st: &mut UiState,
+        mut frames: Vec<Vec<Event>>,
+    ) -> (Rect, Vec<Action>) {
+        let ctx = egui::Context::default();
+        let out = show.outputs[0].id;
+        let mut all = Vec::new();
+        let mut area = Rect::NOTHING;
+        frames.insert(0, vec![]);
+        for (n, events) in frames.into_iter().enumerate() {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+                time: Some(1.0 + n as f64 * 0.01),
+                events,
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut o = ctx.run_ui(input, |ui| {
+                scrub_bar(ui, show, engine, st, out, &mut actions);
+                area = ui.min_rect();
+            });
+            o.textures_delta.clear();
+            all.extend(actions);
+        }
+        (area, all)
+    }
+
+    /// A show with a ten second still playing, or None to skip.
+    fn playing_still() -> Option<(Show, Engine)> {
+        let (ff, img) = crate::media::test_media("color_red.png")?;
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Image, Some(img), 0);
+        c.kind.media_mut().unwrap().end = Some(10.0);
+        let id = c.id;
+        show.cues.push(c);
+        let mut engine = Engine::for_tests();
+        engine.ff = Some(ff);
+        engine.playhead = Some(id);
+        engine.go(&show);
+        let t0 = std::time::Instant::now();
+        while !engine.active.iter().all(|a| a.started) {
+            assert!(t0.elapsed().as_secs() < 10, "the still never loaded");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            engine.tick(&show, 0.005);
+        }
+        Some((show, engine))
+    }
+
+    #[test]
+    fn dragging_the_scrub_bar_asks_to_seek() {
+        let Some((show, engine)) = playing_still() else {
+            return;
+        };
+        let instance = engine.active[0].instance;
+        let mut st = UiState::default();
+        let (area, none) = scrub_frames(&show, &engine, &mut st, vec![vec![], vec![]]);
+        assert!(none.is_empty(), "looking asks for nothing");
+        let y = area.bottom() - 9.0;
+        let at = |f: f32| pos2(area.left() + 4.0 + f * (area.width() - 16.0), y);
+        // Press near the start, drag to the middle, let go there.
+        let (_, seeks) = scrub_frames(
+            &show,
+            &engine,
+            &mut st,
+            vec![
+                vec![Event::PointerMoved(at(0.1))],
+                vec![button(at(0.1), true)],
+                vec![Event::PointerMoved(at(0.5))],
+                vec![Event::PointerMoved(at(0.5)), button(at(0.5), false)],
+                vec![],
+            ],
+        );
+        let asked: Vec<(u64, f64)> = seeks
+            .iter()
+            .filter_map(|a| match a {
+                Action::Seek(i, t) => Some((*i, *t)),
+                _ => None,
+            })
+            .collect();
+        assert!(!asked.is_empty(), "dragging moves the cue");
+        assert!(asked.iter().all(|(i, _)| *i == instance));
+        let last = asked.last().unwrap().1;
+        assert!((4.0..6.0).contains(&last), "the last ask was {last}");
+    }
+
+    #[test]
+    fn nothing_playing_means_nothing_to_scrub() {
+        let show = Show::default();
+        let engine = Engine::for_tests();
+        let mut st = UiState::default();
+        let (_, seeks) = scrub_frames(&show, &engine, &mut st, vec![vec![]]);
+        assert!(seeks.is_empty() && st.scrub.is_none());
     }
 }
