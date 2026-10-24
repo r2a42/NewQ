@@ -430,6 +430,7 @@ pub enum CueKind {
     Wait(WaitCue),
     Group(GroupCue),
     Text(TextCue),
+    Camera(CameraCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -442,6 +443,7 @@ pub enum CueType {
     Wait,
     Group,
     Text,
+    Camera,
 }
 
 impl CueType {
@@ -455,6 +457,7 @@ impl CueType {
             CueType::Wait => "Wait",
             CueType::Group => "Group",
             CueType::Text => "Text",
+            CueType::Camera => "Camera",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -467,6 +470,7 @@ impl CueType {
             CueType::Wait => "⏱",
             CueType::Group => "📁",
             CueType::Text => "📝",
+            CueType::Camera => "📷",
         }
     }
 }
@@ -482,6 +486,7 @@ impl CueKind {
             CueKind::Wait(_) => CueType::Wait,
             CueKind::Group(_) => CueType::Group,
             CueKind::Text(_) => CueType::Text,
+            CueKind::Camera(_) => CueType::Camera,
         }
     }
     /// The playback settings of a cue that plays something: transitions,
@@ -490,6 +495,7 @@ impl CueKind {
         match self {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
             CueKind::Text(t) => Some(&t.media),
+            CueKind::Camera(c) => Some(&c.media),
             _ => None,
         }
     }
@@ -497,8 +503,16 @@ impl CueKind {
         match self {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
             CueKind::Text(t) => Some(&mut t.media),
+            CueKind::Camera(c) => Some(&mut c.media),
             _ => None,
         }
+    }
+    /// True for the cues whose decoders can be started ahead of GO.
+    pub fn preloads(&self) -> bool {
+        matches!(
+            self,
+            CueKind::Video(_) | CueKind::Image(_) | CueKind::Audio(_) | CueKind::Camera(_)
+        )
     }
     /// Like `media`, but only for cues that read a media file.
     pub fn file_media(&self) -> Option<&MediaCue> {
@@ -790,6 +804,39 @@ impl TextCue {
     }
 }
 
+/// The device name that stands for NewQ's built-in moving test picture, so a
+/// camera cue can be tried without a camera.
+pub const TEST_PATTERN_DEVICE: &str = "NewQ test pattern";
+
+/// A live picture from a camera or capture card, shown as a layer. It has the
+/// same output, layer, geometry and transition settings as a video cue.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CameraCue {
+    /// The device as the operating system names it (see `media::camera`);
+    /// `TEST_PATTERN_DEVICE` for the test picture, empty if none is chosen.
+    pub device: String,
+    /// The mode asked of the device. It must be one the device supports.
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// Where, when and how it shows. `end` is how long it runs (None = until stopped).
+    pub media: MediaCue,
+}
+
+impl CameraCue {
+    pub fn new(output: Option<OutputId>) -> CameraCue {
+        let mut media = MediaCue::new_visual(PathBuf::new(), output);
+        media.fit = Fit::Contain;
+        CameraCue {
+            device: String::new(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            media,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupMode {
     /// Every child is fired when the group is; a child's pre-wait is its
@@ -986,6 +1033,10 @@ impl Show {
             CueType::Wait => ("Wait".into(), CueKind::Wait(WaitCue { duration: 5.0 })),
             CueType::Group => ("Group".into(), CueKind::Group(GroupCue::default())),
             CueType::Text => ("Text".into(), CueKind::Text(TextCue::new(default_output))),
+            CueType::Camera => (
+                "Camera".into(),
+                CueKind::Camera(CameraCue::new(default_output)),
+            ),
         };
         Cue {
             id,
@@ -1857,6 +1908,38 @@ mod tests {
         v["remote"] = serde_json::json!({"osc": true});
         let part: Show = serde_json::from_value(v).unwrap();
         assert!(part.remote.osc && !part.remote.midi && part.remote.osc_port == 53000);
+    }
+
+    #[test]
+    fn camera_cues_round_trip_and_old_files_are_unaffected() {
+        let mut show = Show::default();
+        // A show with no camera cue is written exactly as before.
+        let wait = show.make_cue(CueType::Wait, None, 0);
+        show.cues.push(wait);
+        let before = serde_json::to_string(&show).unwrap();
+        assert!(!before.contains("Camera"), "{before}");
+
+        let mut cue = show.make_cue(CueType::Camera, None, 1);
+        assert_eq!(cue.kind.cue_type(), CueType::Camera);
+        if let CueKind::Camera(c) = &mut cue.kind {
+            c.device = "/dev/video2".into();
+            c.fps = 25;
+            c.media.end = Some(10.0);
+        }
+        show.cues.push(cue);
+        let json = serde_json::to_string(&show).unwrap();
+        let back: Show = serde_json::from_str(&json).unwrap();
+        let CueKind::Camera(c) = &back.cues[1].kind else {
+            panic!("not a camera cue");
+        };
+        assert_eq!(
+            (c.device.as_str(), c.width, c.height, c.fps),
+            ("/dev/video2", 1280, 720, 25)
+        );
+        assert_eq!(c.media.end, Some(10.0));
+        // It has the media settings other visual cues have, but reads no file.
+        assert!(back.cues[1].kind.media().is_some() && back.cues[1].kind.file_media().is_none());
+        assert!(back.cues[1].kind.preloads());
     }
 
     #[test]

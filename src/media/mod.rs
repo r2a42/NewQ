@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod camera;
 pub mod ffmpeg;
 pub mod playback;
 pub mod video;

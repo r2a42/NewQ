@@ -89,6 +89,19 @@ includes FFmpeg, so there's nothing else to install.
   or Stop cue can target it. There's one built-in font (a light weight, so
   *Shadow* and *Bold* help over video), and editing a text cue takes effect
   the next time it's fired.
+- **Camera cues:** show a live camera or capture card (HDMI/SDI/USB) as a
+  layer. Pick the device and the mode to ask of it (size and frame rate, which
+  the device must support), then set the output, layer, transition, fades and
+  geometry as for a video cue. A camera cue runs until stopped, or for the time
+  in *Run for*; a Fade or Stop cue can target it. The camera is opened as soon
+  as the cue is next in line, so GO is instant, and only the newest picture is
+  kept, so it stays live rather than lagging. One cue at a time can use a given
+  camera. There's no camera sound: add an audio cue for that. *NewQ test
+  pattern* in the list is a moving picture for trying the cue without a camera.
+  Cameras are reached through FFmpeg (Video4Linux2 on Linux, DirectShow on
+  Windows, AVFoundation on macOS, where the first use asks for camera
+  permission). Cameras can't be tested in NewQ's automated tests, only the
+  built-in test pattern; please report any device that doesn't work.
 - **Per-cue geometry:** under *Geometry* in a visual cue's inspector, move,
   scale (or mirror, with a negative scale), rotate and crop the picture on its
   output. Position is a share of the output's size, rotation is clockwise about

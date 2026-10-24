@@ -2,7 +2,7 @@
 
 use crate::engine::{CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
-use crate::media::ProbeState;
+use crate::media::{ProbeState, camera};
 use crate::remote::{Command, RemoteStatus};
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
@@ -388,6 +388,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             }
             ui.separator();
             for ty in [
+                CueType::Camera,
                 CueType::Text,
                 CueType::Fade,
                 CueType::Stop,
@@ -646,6 +647,20 @@ fn cue_target_text(show: &Show, c: &Cue) -> String {
                 .map(|o| o.name.as_str())
                 .unwrap_or("no output");
             format!("“{first}{more}”  »  {out}")
+        }
+        CueKind::Camera(cam) => {
+            let device = if cam.device.is_empty() {
+                "(no camera)".to_string()
+            } else {
+                device_label(&cam.device)
+            };
+            let out = cam
+                .media
+                .output
+                .and_then(|o| show.output(o))
+                .map(|o| o.name.as_str())
+                .unwrap_or("no output");
+            format!("{device}  »  {out}")
         }
         CueKind::Group(g) => {
             let n = show.children(c.id).len();
@@ -2157,6 +2172,11 @@ fn inspector(
                 ui.separator();
                 media_inspector(ui, cue_type, &mut t.media, &outputs, &audio_outputs, engine);
             }
+            CueKind::Camera(c) => {
+                camera_inspector(ui, c, engine);
+                ui.separator();
+                media_inspector(ui, cue_type, &mut c.media, &outputs, &audio_outputs, engine);
+            }
             CueKind::Group(g) => {
                 egui::Grid::new("group")
                     .num_columns(2)
@@ -2222,8 +2242,9 @@ fn media_inspector(
 ) {
     let visual = ty != CueType::Audio;
     // Text and images are held for a time rather than played from a file.
-    let still = matches!(ty, CueType::Image | CueType::Text);
-    let is_text = ty == CueType::Text;
+    let still = matches!(ty, CueType::Image | CueType::Text | CueType::Camera);
+    // Text and cameras have no file to choose.
+    let is_text = matches!(ty, CueType::Text | CueType::Camera);
     egui::Grid::new("media")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -2392,7 +2413,11 @@ fn media_inspector(
             );
             ui.end_row();
             if still {
-                ui.label("Hold for");
+                ui.label(if ty == CueType::Camera {
+                    "Run for"
+                } else {
+                    "Hold for"
+                });
                 let mut d = m.end.unwrap_or(0.0);
                 secs(ui, &mut d).on_hover_text("0 = until stopped");
                 m.end = (d > 0.0).then_some(d);
@@ -2447,6 +2472,75 @@ fn media_inspector(
             "Loops from the in point to the end of the file."
         };
         ui.label(RichText::new(what).weak());
+    }
+}
+
+/// A camera's name as shown to the operator.
+fn device_label(device: &str) -> String {
+    if device.starts_with("/dev/")
+        && let Some(name) = camera::v4l2_label(device)
+    {
+        return format!("{name} ({device})");
+    }
+    device.to_string()
+}
+
+/// Which camera a camera cue opens and in what mode; where, when and how it
+/// shows is the shared media section.
+fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
+    egui::Grid::new("camera")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Camera");
+            ui.horizontal(|ui| {
+                let selected = if c.device.is_empty() {
+                    "(choose a camera)".to_string()
+                } else {
+                    device_label(&c.device)
+                };
+                egui::ComboBox::from_id_salt("camera_device")
+                    .selected_text(selected)
+                    .width(260.0)
+                    .show_ui(ui, |ui| {
+                        for d in engine.cameras() {
+                            ui.selectable_value(&mut c.device, d.clone(), device_label(d));
+                        }
+                    });
+                if ui
+                    .button("↻")
+                    .on_hover_text("Look for cameras again")
+                    .clicked()
+                {
+                    engine.refresh_cameras();
+                }
+            });
+            ui.end_row();
+            ui.label("Mode");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut c.width).range(16..=7680));
+                ui.label("×");
+                ui.add(egui::DragValue::new(&mut c.height).range(16..=4320));
+                ui.add(
+                    egui::DragValue::new(&mut c.fps)
+                        .range(1..=240)
+                        .suffix(" fps"),
+                );
+            });
+            ui.end_row();
+        });
+    ui.label(
+        RichText::new(
+            "The mode must be one the camera supports. The camera opens when the cue is next \
+             in line, so GO is instant; one cue at a time can use a given camera.",
+        )
+        .weak(),
+    );
+    if c.device == TEST_PATTERN_DEVICE {
+        ui.label(
+            RichText::new("A moving test picture, for trying a camera cue without a camera.")
+                .weak(),
+        );
     }
 }
 

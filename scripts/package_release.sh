@@ -32,6 +32,17 @@ verify_ffmpeg() {
       exit 1
     fi
   done
+  # Camera cues open the platform's capture device through ffmpeg.
+  local indev
+  case "$platform" in
+    windows-x64) indev=dshow ;;
+    linux-x64) indev=v4l2 ;;
+    macos-universal) indev=avfoundation ;;
+  esac
+  if ! "$ff" -hide_banner -devices | grep -E "^ D" | grep -qw "$indev"; then
+    echo "bundled ffmpeg cannot capture from ${indev} (camera cues need it)" >&2
+    exit 1
+  fi
   # Run the same kinds of commands NewQ does (see src/media/*.rs).
   local q=(-hide_banner -loglevel error -nostdin)
   "$ff" "${q[@]}" -f lavfi -i testsrc2=size=320x240:rate=25 -t 1 -map 0:v:0 -an     -vf "scale=160:120:flags=bicubic:out_range=tv,format=yuv420p" -fps_mode cfr -r 25     -f rawvideo -pix_fmt yuv420p pipe:1 > /dev/null
@@ -126,6 +137,7 @@ EOF
   <key>CFBundleVersion</key><string>${tag#v}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>NewQ shows live camera pictures in camera cues.</string>
 </dict>
 </plist>
 EOF
