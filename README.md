@@ -114,6 +114,22 @@ includes FFmpeg, so there's nothing else to install.
   Windows, AVFoundation on macOS, where the first use asks for camera
   permission). Cameras can't be tested in NewQ's automated tests, only the
   built-in test pattern; please report any device that doesn't work.
+- **Web remote:** tick *Web remote* under Remote control and a phone or
+  tablet on the same network can open the address shown (`http://<this
+  computer>:8080`) to run the show from a browser: a big GO, Stop All, Pause,
+  Prev and Next, and a line for every cue with its status and a Fire or Stop
+  button; the playhead and what is playing follow the show, and it shows the
+  timecode when MIDI Time Code is running. It needs no app on the phone.
+  Set a PIN to ask for one (the page prompts for it and remembers it); the PIN
+  is kept in the show file. Anyone on your network who can reach the port,
+  and has the PIN if there is one, can run the show, so use a PIN on a shared
+  network. Changes need a header that a web page on another site can't send,
+  and a link can't press GO, since only POST does anything. It is off unless
+  the show turns it on. Other programs can use the same endpoints:
+  `GET /api/state` for the state as JSON, and `POST /api/go`, `/api/panic`,
+  `/api/stop_all`, `/api/pause`, `/api/resume`, `/api/next`, `/api/previous`
+  and `/api/cue/<number>/fire|go|select|stop|fade`, with `X-NewQ: 1` (and
+  `X-Pin` if set).
 - **Hotkeys, MIDI notes and the cart:** give a cue its own key in its
   inspector (click *Hotkey*, then press a letter, digit or F-key; P and A are
   taken by the transport). Pressing the key fires just that cue, like the

@@ -16,6 +16,7 @@ mod show;
 mod text;
 mod timecode;
 mod ui;
+mod web;
 
 use winit::event_loop::EventLoop;
 

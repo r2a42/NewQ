@@ -2167,6 +2167,50 @@ fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
             };
         }
     }
+    ui.add_space(4.0);
+    ui.checkbox(&mut r.web, "Web remote (phone or tablet)")
+        .on_hover_text("Serves a page that runs the show from a browser on this network.");
+    if r.web {
+        ui.horizontal(|ui| {
+            ui.label("Port");
+            ui.add(
+                egui::DragValue::new(&mut r.web_port)
+                    .range(1..=65535)
+                    .speed(1.0),
+            );
+            ui.label("PIN");
+            ui.add(
+                egui::TextEdit::singleline(&mut r.web_pin)
+                    .password(true)
+                    .desired_width(70.0)
+                    .hint_text("none"),
+            );
+        });
+        match (&status.web_port, &status.web_error) {
+            (_, Some(e)) => {
+                ui.label(RichText::new(format!("⚠ {e}")).color(STOP_RED));
+            }
+            (Some(p), None) => {
+                let host = crate::web::lan_address()
+                    .map_or("<this computer>".to_string(), |ip| ip.to_string());
+                ui.label(
+                    RichText::new(format!("Open http://{host}:{p} on a phone")).color(GO_GREEN),
+                );
+            }
+            _ => {
+                ui.label(RichText::new("Starting…").weak());
+            }
+        }
+        ui.label(
+            RichText::new(
+                "GO, Stop All, Pause, the playhead and a button for every cue. Anyone on \
+                 your network who can reach the port (and has the PIN, if you set one) \
+                 can run the show. The PIN is saved in the show file.",
+            )
+            .small()
+            .color(PREWAIT),
+        );
+    }
 }
 
 fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
