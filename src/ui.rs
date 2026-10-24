@@ -89,6 +89,8 @@ pub struct UiState {
     media_note: String,
     /// Media being copied into one folder, in the background.
     collect_job: Option<CollectJob>,
+    /// A search of this computer for the missing files.
+    search: Option<relink::Search>,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -189,6 +191,10 @@ enum Action {
     RelinkCue(CueId, PathBuf),
     /// Copy all the media into this folder.
     CollectMedia(PathBuf),
+    /// Search this computer for the missing files by name.
+    FindOnComputer,
+    /// Take suggested replacements, as (file it was, file to use).
+    RelinkMany(Vec<(PathBuf, PathBuf)>),
     /// Wait for a key press to use as this cue's hotkey (None: stop waiting).
     CaptureHotkey(Option<CueId>),
     SetHotkey(CueId, Option<String>),
@@ -1323,6 +1329,18 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                 .filter(|(_, m)| !m.file.as_os_str().is_empty())
                 .collect();
             let missing = relink::missing(show);
+            // What the search of the computer has found so far, best match first.
+            let found = st.search.as_ref().map(|s| s.state());
+            let wanted: Vec<PathBuf> = {
+                let mut v: Vec<PathBuf> = missing.iter().map(|m| m.1.clone()).collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            let suggested = found
+                .as_ref()
+                .map(|f| relink::suggestions(&f.hits, &wanted))
+                .unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 if missing.is_empty() {
                     ui.label(
@@ -1357,6 +1375,21 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                 {
                     actions.push(Action::RelinkFolder(dir));
                 }
+                let searching = found.as_ref().is_some_and(|f| !f.done);
+                if ui
+                    .add_enabled(
+                        !missing.is_empty() && !searching,
+                        egui::Button::new("Find on this computer"),
+                    )
+                    .on_hover_text(
+                        "Searches this computer's folders and disks for files with the same \
+                         names and suggests them. The show's own folder and the usual media \
+                         folders go first, so likely matches turn up quickly.",
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::FindOnComputer);
+                }
                 if ui
                     .add_enabled(
                         !files.is_empty() && st.collect_job.is_none(),
@@ -1377,6 +1410,50 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                     }
                 }
             });
+            if let Some(f) = &found {
+                ui.horizontal(|ui| {
+                    if !f.done {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Searching… {} folders looked through, {} suggested so far",
+                            f.folders,
+                            suggested.len()
+                        ));
+                        if ui.small_button("Stop").clicked()
+                            && let Some(s) = &st.search
+                        {
+                            s.stop();
+                        }
+                    } else {
+                        let how = if f.timed_out {
+                            "Stopped after the time limit"
+                        } else {
+                            "Searched everywhere"
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{how} ({} folders): {} of {} missing files have a suggestion.",
+                                f.folders,
+                                suggested.len(),
+                                wanted.len()
+                            ))
+                            .weak(),
+                        );
+                    }
+                    if !suggested.is_empty()
+                        && ui
+                            .button(format!("Use all suggestions ({})", suggested.len()))
+                            .clicked()
+                    {
+                        actions.push(Action::RelinkMany(
+                            suggested
+                                .iter()
+                                .filter_map(|(old, c)| Some((old.clone(), c.first()?.clone())))
+                                .collect(),
+                        ));
+                    }
+                });
+            }
             if let Some(job) = &st.collect_job {
                 let done = job.progress.load(std::sync::atomic::Ordering::Relaxed);
                 ui.add(
@@ -1424,18 +1501,67 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                                     )
                                     .truncate(),
                                 );
+                                if gone
+                                    && let Some(best) =
+                                        suggested.get(&m.file).and_then(|o| o.first())
+                                {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("Suggested: {}", best.display()))
+                                                .small()
+                                                .color(GO_GREEN),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
                             });
-                            if gone
-                                && ui.button("Locate…").clicked()
-                                && let Some(f) = media_dialog(cue.kind.cue_type()).pick_file()
-                            {
-                                actions.push(Action::RelinkCue(cue.id, f));
-                            }
+                            ui.horizontal(|ui| {
+                                if gone && let Some(options) = suggested.get(&m.file) {
+                                    if let Some(best) = options.first()
+                                        && ui
+                                            .button("Use suggestion")
+                                            .on_hover_text(best.display().to_string())
+                                            .clicked()
+                                    {
+                                        actions.push(Action::RelinkCue(cue.id, best.clone()));
+                                    }
+                                    if options.len() > 1 {
+                                        egui::ComboBox::from_id_salt(("others", cue.id))
+                                            .selected_text(format!("{} more", options.len() - 1))
+                                            .show_ui(ui, |ui| {
+                                                for o in options.iter().skip(1).take(12) {
+                                                    if ui
+                                                        .selectable_label(
+                                                            false,
+                                                            o.display().to_string(),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        actions.push(Action::RelinkCue(
+                                                            cue.id,
+                                                            o.clone(),
+                                                        ));
+                                                    }
+                                                }
+                                            });
+                                    }
+                                }
+                                if gone
+                                    && ui.button("Locate…").clicked()
+                                    && let Some(f) = media_dialog(cue.kind.cue_type()).pick_file()
+                                {
+                                    actions.push(Action::RelinkCue(cue.id, f));
+                                }
+                            });
                             ui.end_row();
                         }
                     });
             });
         });
+    if !open {
+        // Closing the window ends the search.
+        st.search = None;
+    }
     st.show_media = open;
 }
 
@@ -3768,6 +3894,25 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 root.display()
             );
         }
+        Action::FindOnComputer => {
+            let names: std::collections::HashSet<std::ffi::OsString> = relink::missing(show)
+                .iter()
+                .filter_map(|(_, p)| p.file_name().map(|n| n.to_os_string()))
+                .collect();
+            if !names.is_empty() {
+                let show_dir = st.show_path.as_deref().and_then(|p| p.parent());
+                let roots = relink::default_roots(show_dir);
+                st.media_note = String::new();
+                st.search = Some(relink::Search::start(roots, names, relink::SEARCH_BUDGET));
+            }
+        }
+        Action::RelinkMany(pairs) => {
+            let n = relink::apply(show, &pairs.into_iter().collect());
+            st.media_note = format!(
+                "Linked {n} cue{} to the suggested files.",
+                if n == 1 { "" } else { "s" }
+            );
+        }
         Action::RelinkCue(id, new) => {
             let old = show
                 .cue(id)
@@ -4999,6 +5144,72 @@ mod tests {
         assert!(st.history.can_undo());
         apply(Action::Undo, &mut show, &mut e, &mut st);
         assert_eq!(file_of(&show, a), d.join("new/a.mp4"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn finding_on_the_computer_suggests_files_and_they_can_all_be_taken() {
+        let d = media_dir("find");
+        // The show is in d/shows; its media turned up in d/shows/media. (The
+        // helper's own copies elsewhere would be fair suggestions too.)
+        std::fs::remove_dir_all(d.join("new")).unwrap();
+        std::fs::create_dir_all(d.join("shows/media")).unwrap();
+        std::fs::write(d.join("shows/media/a.mp4"), "a").unwrap();
+        std::fs::write(d.join("shows/media/b.mp4"), "b").unwrap();
+        let mut show = Show::default();
+        let a = video_cue(&mut show, PathBuf::from("/old/a.mp4"));
+        let b = video_cue(&mut show, PathBuf::from("/old/b.mp4"));
+        let lost = video_cue(&mut show, PathBuf::from("/old/lost.mp4"));
+        let mut e = Engine::for_tests();
+        let mut st = UiState {
+            show_path: Some(d.join("shows/hamlet.newq")),
+            ..UiState::default()
+        };
+        frame_end(&show, &mut st, 0.0, false);
+        apply(Action::FindOnComputer, &mut show, &mut e, &mut st);
+        let search = st.search.as_ref().expect("a search started");
+        // Suggestions arrive while it is still looking; wait for these two.
+        let wanted = relink::missing(&show)
+            .into_iter()
+            .map(|m| m.1)
+            .collect::<Vec<_>>();
+        let t0 = std::time::Instant::now();
+        let suggested = loop {
+            let s = relink::suggestions(&search.state().hits, &wanted);
+            if s.len() == 2 {
+                break s;
+            }
+            assert!(t0.elapsed().as_secs() < 20, "no suggestions: {s:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            suggested[&PathBuf::from("/old/a.mp4")][0],
+            d.join("shows/media/a.mp4")
+        );
+        // Take them all, as the button does.
+        let pairs: Vec<(PathBuf, PathBuf)> = suggested
+            .iter()
+            .filter_map(|(old, c)| Some((old.clone(), c.first()?.clone())))
+            .collect();
+        apply(Action::RelinkMany(pairs), &mut show, &mut e, &mut st);
+        assert_eq!(file_of(&show, a), d.join("shows/media/a.mp4"));
+        assert_eq!(file_of(&show, b), d.join("shows/media/b.mp4"));
+        assert_eq!(file_of(&show, lost), PathBuf::from("/old/lost.mp4"));
+        assert!(
+            st.media_note.starts_with("Linked 2 cues"),
+            "{}",
+            st.media_note
+        );
+        // One step to undo.
+        frame_end(&show, &mut st, 1.0, true);
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(relink::missing(&show).len(), 3);
+        // Nothing missing means nothing to search for.
+        let mut fine = Show::default();
+        video_cue(&mut fine, d.join("shows/media/a.mp4"));
+        st.search = None;
+        apply(Action::FindOnComputer, &mut fine, &mut e, &mut st);
+        assert!(st.search.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
