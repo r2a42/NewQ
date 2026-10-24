@@ -66,6 +66,8 @@ pub struct UiState {
     pub quit_requested: bool,
     /// MIDI inputs that are connected now (set by the app every few seconds).
     pub midi_ports: Vec<String>,
+    /// MIDI outputs that are connected now (set with the inputs).
+    pub midi_out_ports: Vec<String>,
     /// Audio output devices that are connected now (set by the app when idle).
     pub audio_devices: Vec<String>,
     /// What the OSC and MIDI listeners are doing (set by the app).
@@ -554,6 +556,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             ui.separator();
             for ty in [
                 CueType::Camera,
+                CueType::Send,
                 CueType::Text,
                 CueType::Fade,
                 CueType::Stop,
@@ -814,6 +817,7 @@ fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Send(s) => crate::output::describe(s),
         CueKind::Text(t) => {
             let first = t.text.lines().next().unwrap_or("").trim();
             let more = if t.text.lines().nth(1).is_some() {
@@ -2551,6 +2555,7 @@ fn inspector(
                 ui.separator();
                 media_inspector(ui, cue_type, &mut t.media, &outputs, &audio_outputs, engine);
             }
+            CueKind::Send(s) => send_inspector(ui, s, &st.midi_out_ports),
             CueKind::Camera(c) => {
                 camera_inspector(ui, c, engine);
                 ui.separator();
@@ -2852,6 +2857,129 @@ fn media_inspector(
         };
         ui.label(RichText::new(what).weak());
     }
+}
+
+/// What a send cue sends, and where.
+fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
+    let is_osc = matches!(s.target, SendTarget::Osc(_));
+    ui.horizontal(|ui| {
+        if ui.selectable_label(is_osc, "OSC").clicked() && !is_osc {
+            s.target = SendTarget::Osc(OscOut::default());
+        }
+        if ui.selectable_label(!is_osc, "MIDI").clicked() && is_osc {
+            s.target = SendTarget::Midi(MidiOut::default());
+        }
+    });
+    match &mut s.target {
+        SendTarget::Osc(o) => {
+            egui::Grid::new("send_osc")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("To");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut o.host).desired_width(150.0));
+                        ui.label(":");
+                        ui.add(
+                            egui::DragValue::new(&mut o.port)
+                                .range(1..=65535)
+                                .speed(1.0),
+                        );
+                    });
+                    ui.end_row();
+                    ui.label("Address");
+                    ui.add(egui::TextEdit::singleline(&mut o.address).desired_width(220.0));
+                    ui.end_row();
+                    ui.label("Arguments");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut o.args)
+                            .desired_width(220.0)
+                            .hint_text("1 0.5 \"some text\""),
+                    );
+                    ui.end_row();
+                });
+            ui.label(
+                RichText::new(
+                    "Sent as one UDP packet when the cue fires. An IP address is safest: \
+                     a name has to be looked up. Whole numbers go as integers, other \
+                     numbers as floats, the rest as text.",
+                )
+                .weak(),
+            );
+            if !o.address.trim().starts_with('/') {
+                ui.label(RichText::new("⚠ An OSC address starts with /").color(PREWAIT));
+            }
+        }
+        SendTarget::Midi(m) => {
+            egui::Grid::new("send_midi")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Output");
+                    egui::ComboBox::from_id_salt("midi_out")
+                        .selected_text(m.port.clone().unwrap_or_else(|| "Choose…".into()))
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for p in midi_outputs {
+                                ui.selectable_value(&mut m.port, Some(p.clone()), p);
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Message");
+                    egui::ComboBox::from_id_salt("midi_kind")
+                        .selected_text(m.kind.label())
+                        .show_ui(ui, |ui| {
+                            for k in MidiKind::ALL {
+                                ui.selectable_value(&mut m.kind, k, k.label());
+                            }
+                        });
+                    ui.end_row();
+                    let show_control = matches!(m.kind, MidiKind::ShowControl(_));
+                    if show_control {
+                        if let MidiKind::ShowControl(c) = m.kind
+                            && c.takes_cue()
+                        {
+                            ui.label("Cue number");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut m.cue)
+                                    .desired_width(100.0)
+                                    .hint_text("next cue"),
+                            );
+                            ui.end_row();
+                        }
+                    } else {
+                        ui.label("Channel");
+                        let mut ch = m.channel + 1;
+                        ui.add(egui::DragValue::new(&mut ch).range(1..=16));
+                        m.channel = ch - 1;
+                        ui.end_row();
+                        let (first, second) = match m.kind {
+                            MidiKind::ControlChange => ("Controller", Some("Value")),
+                            MidiKind::ProgramChange => ("Program", None),
+                            _ => ("Note", Some("Velocity")),
+                        };
+                        ui.label(first);
+                        ui.add(egui::DragValue::new(&mut m.data1).range(0..=127));
+                        ui.end_row();
+                        if let Some(second) = second {
+                            ui.label(second);
+                            ui.add(egui::DragValue::new(&mut m.data2).range(0..=127));
+                            ui.end_row();
+                        }
+                    }
+                });
+            if matches!(m.kind, MidiKind::ShowControl(_)) {
+                ui.label(
+                    RichText::new(
+                        "MIDI Show Control, to all devices: lighting and sound desks that \
+                         understand it will GO, STOP, RESUME or LOAD their cue.",
+                    )
+                    .weak(),
+                );
+            }
+        }
+    }
+    ui.label(RichText::new("Use ▶ Fire to try it.").weak());
 }
 
 /// A camera's name as shown to the operator.
@@ -4433,5 +4561,13 @@ mod tests {
         );
         assert!(is_playing(&e, d));
         assert_eq!(e.playhead, Some(show.cues[0].id));
+    }
+
+    #[test]
+    fn a_send_cue_is_listed_by_what_it_sends() {
+        let mut show = Show::default();
+        let c = show.make_cue(CueType::Send, None, 0);
+        assert_eq!(cue_target_text(&show, &c), "OSC 127.0.0.1:53000 /go");
+        assert_eq!(c.kind.cue_type().label(), "Send");
     }
 }

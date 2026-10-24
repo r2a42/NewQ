@@ -6,6 +6,7 @@ mod engine;
 mod gpu;
 mod history;
 mod media;
+mod output;
 mod recovery;
 mod remote;
 mod render;
