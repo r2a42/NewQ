@@ -198,6 +198,12 @@ includes FFmpeg, so there's nothing else to install.
   files missing. *Search a folder for missing files…* looks in a folder (and
   everything inside it) for files with the same names, preferring the one in
   matching folders when a name appears twice, and relinks them all in one go.
+  *Find on this computer* searches this machine's folders and disks for the
+  missing files' names in the background (the show's own folder and the usual
+  media folders first, then your home folder and any other mounted disks,
+  skipping hidden, system and application-data folders, for up to 90 seconds)
+  and suggests a file for each one as soon as it turns up, best match first,
+  with *Use suggestion* on the row and *Use all suggestions* at the top.
   *Locate…* on a row links one file by hand, and every cue using that file
   follows. *Copy all media into a folder…* gathers every file into one folder
   (name clashes get a number, existing files are never overwritten, the
