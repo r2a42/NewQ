@@ -271,7 +271,7 @@ includes FFmpeg, so there's nothing else to install.
 
 ## If NewQ crashes or won't start
 
-A Windows download has no console, so NewQ keeps a log instead. It is in
+The Windows and Mac downloads have no console, so NewQ keeps a log instead. It is in
 `%LOCALAPPDATA%\NewQ\newq.log` on Windows (`~/Library/Logs/NewQ` on a Mac,
 `~/.local/state/newq` on Linux, where the log goes to the terminal unless
 `NEWQ_LOG_FILE=1` is set); the log of the run before is kept as
@@ -424,8 +424,9 @@ space like a hardware video mixer.
   decodes at the output window's resolution to keep this down.
 - Fullscreen output on a second display has had little testing on Windows
   (starting with more than one display has crashed for at least one user: see
-  the crash log section above); macOS and Linux builds are covered by CI but haven't
-  been run by hand.
+  the crash log section above), and on a Mac the main window has gone missing
+  with two displays; macOS and Linux builds are covered by CI but haven't been
+  run by hand.
 
 ## Trademarks
 

@@ -106,6 +106,12 @@ pub struct App {
     /// Test-pattern textures per output.
     patterns: HashMap<OutputId, Pattern>,
     monitors: Vec<MonitorHandle>,
+    /// The index in `monitors` of the primary display.
+    primary: Option<usize>,
+    /// Which display the main window was last logged as being on.
+    control_logged: Option<Option<usize>>,
+    /// When the app started, for how long to wait for the main window's display.
+    started: Instant,
     last_monitor_scan: Instant,
     last_tick: Instant,
     /// When the unsaved show was last copied to its recovery file.
@@ -162,6 +168,9 @@ impl App {
             textures: HashMap::new(),
             patterns: HashMap::new(),
             monitors: Vec::new(),
+            primary: None,
+            control_logged: None,
+            started: Instant::now(),
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
             last_autosave: Instant::now(),
@@ -188,6 +197,9 @@ impl App {
         }
         self.monitors = found;
         let primary = event_loop.primary_monitor();
+        self.primary = primary
+            .as_ref()
+            .and_then(|p| self.monitors.iter().position(|m| m == p));
         self.ui.monitors = self
             .monitors
             .iter()
@@ -248,17 +260,25 @@ impl App {
     }
 
     /// Decide where each enabled output is drawn.
-    fn route_outputs(&self) -> HashMap<OutputId, Option<Target>> {
+    fn route_outputs(&mut self) -> HashMap<OutputId, Option<Target>> {
         if self.main_window_only {
             return self.show.outputs.iter().map(|o| (o.id, None)).collect();
         }
         let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
-        route_outputs(
-            &self.show.outputs,
-            &self.show.sub_displays,
-            &names,
-            self.control_monitor(),
-        )
+        let found = self.control_monitor();
+        if self.control_logged != Some(found) {
+            log::info!(
+                "main window is on display {}",
+                found.map_or("?".to_string(), |m| m.to_string())
+            );
+            self.control_logged = Some(found);
+        }
+        let Some(control) = control_for_routing(found, self.primary, self.started.elapsed()) else {
+            // Not placed yet: no output windows until it is, so none lands on
+            // top of it.
+            return self.show.outputs.iter().map(|o| (o.id, None)).collect();
+        };
+        route_outputs(&self.show.outputs, &self.show.sub_displays, &names, control)
     }
 
     fn create_screen(&mut self, event_loop: &ActiveEventLoop, monitor: usize) {
@@ -304,6 +324,11 @@ impl App {
         };
         surface.configure(&gpu.device, &config);
         let thread = OutputThread::spawn(gpu.clone(), window.clone(), surface, config);
+        // A new fullscreen window takes the focus (and on a Mac, its own
+        // Space); bring the controls back in front.
+        if let Some(ctl) = &self.control {
+            ctl.window.focus_window();
+        }
         self.screens.insert(
             monitor,
             ScreenWindow {
@@ -843,6 +868,26 @@ impl ApplicationHandler for App {
 /// Resolve a saved display to a monitor index: by name first, then by position
 /// (so a show moved to a venue with differently named projectors still works),
 /// but never by position onto the main window's own display.
+/// How long to wait for the main window to be placed on a display before
+/// assuming it is on the primary one.
+const CONTROL_WAIT: Duration = Duration::from_secs(2);
+
+/// Which display routing should treat the main window as being on. The
+/// window's own answer when it has one; while it has none, `None` (hold off
+/// opening outputs, which could land on top of it); after `CONTROL_WAIT`,
+/// the primary display.
+fn control_for_routing(
+    found: Option<usize>,
+    primary: Option<usize>,
+    waited: Duration,
+) -> Option<Option<usize>> {
+    match found {
+        Some(m) => Some(Some(m)),
+        None if waited < CONTROL_WAIT => None,
+        None => Some(primary),
+    }
+}
+
 fn resolve_display(d: &DisplayRef, monitors: &[&str], control: Option<usize>) -> Option<usize> {
     let same_name: Vec<usize> = (0..monitors.len())
         .filter(|&i| monitors[i] == d.name)
@@ -962,6 +1007,18 @@ mod tests {
             .into_iter()
             .map(|(id, t)| (id, t.map(|t| t.monitor)))
             .collect()
+    }
+
+    #[test]
+    fn outputs_wait_for_the_main_windows_display() {
+        let s = Duration::from_secs;
+        // Known: use it, whenever.
+        assert_eq!(control_for_routing(Some(1), Some(0), s(0)), Some(Some(1)));
+        // Unknown at first: hold off.
+        assert_eq!(control_for_routing(None, Some(0), s(1)), None);
+        // Still unknown after the wait: the primary display, if there is one.
+        assert_eq!(control_for_routing(None, Some(0), s(3)), Some(Some(0)));
+        assert_eq!(control_for_routing(None, None, s(3)), Some(None));
     }
 
     #[test]
