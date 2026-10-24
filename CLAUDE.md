@@ -22,7 +22,8 @@ The README describes the features; this file is about working on the code.
   `gpu.rs` does the same per pixel (a test renders it on a real GPU if there
   is one; `NEWQ_REQUIRE_GPU=1` makes having none a failure).
   `src/recovery.rs`: autosave copies. `src/media/camera.rs`: camera cues'
-  device lists and ffmpeg input.
+  device lists and ffmpeg input. `src/media/waveform.rs`: peaks for the
+  inspector's waveform.
   The `NewQ test pattern` device stands in for a camera in tests.
 
 ## Build and test

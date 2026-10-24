@@ -204,6 +204,14 @@ includes FFmpeg, so there's nothing else to install.
   If you decline the offer the copy is kept as `.recovery.old` rather than
   deleted. Saving writes to a temporary file and renames it, so a crash during
   a save can't leave half a show.
+- **Waveform and visual trimming:** audio and video cues draw the file's
+  sound under *In / Out* in the inspector, with the played part highlighted.
+  Drag the yellow ends to set the in and out points by eye; a click moves
+  the nearer end. The in point can't pass the out point, and dragging the out
+  end to the end of the file clears the out point. The sound is read once in
+  the background and kept, so even long files only wait the first time. A file
+  with no sound (or an image) shows no waveform. The In / Out boxes still take
+  typed times, and both stay in step.
 - **Media manager:** *File ▸ Media…* lists every file the show uses and
   which can't be found, and it opens by itself when a show is opened with
   files missing. *Search a folder for missing files…* looks in a folder (and

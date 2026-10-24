@@ -6,6 +6,7 @@ use crate::media::camera;
 use crate::media::ffmpeg::{ColorMatrix, Ffmpeg, MediaInfo};
 use crate::media::playback::Playback;
 use crate::media::video::{self, RgbaImage, VideoPlayer};
+use crate::media::waveform::WaveformCache;
 use crate::media::{ProbeCache, ProbeState};
 use crate::output::{Outbox, Outgoing};
 use crate::show::*;
@@ -264,6 +265,8 @@ pub struct Engine {
     /// Current size of each open output window, used to pick decode resolution.
     pub output_sizes: HashMap<OutputId, (u32, u32)>,
     pub probe: ProbeCache,
+    /// The sound of each file, drawn in the inspector for setting in and out points.
+    pub waveforms: WaveformCache,
     prepared: Vec<Prepared>,
     next_instance: u64,
     /// Cameras found on this machine (the test picture first), and a scan under way.
@@ -290,6 +293,7 @@ impl Engine {
             messages: VecDeque::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
+            waveforms: WaveformCache::default(),
             prepared: Vec::new(),
             next_instance: 1,
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
@@ -316,6 +320,7 @@ impl Engine {
             messages: VecDeque::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
+            waveforms: WaveformCache::default(),
             prepared: Vec::new(),
             next_instance: 1,
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
@@ -1118,6 +1123,7 @@ impl Engine {
 
     pub fn tick(&mut self, show: &Show, dt: f64) {
         self.probe.poll();
+        self.waveforms.poll();
         self.timecode.tick(dt);
         for problem in self.outbox.errors() {
             self.log(problem);
