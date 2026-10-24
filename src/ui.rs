@@ -2,7 +2,9 @@
 
 use crate::engine::{CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
+use crate::history::History;
 use crate::media::{ProbeState, camera};
+use crate::recovery;
 use crate::remote::{Command, RemoteStatus};
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
@@ -75,10 +77,18 @@ pub struct UiState {
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
     saved_json: Option<String>,
+    /// What can be undone and redone.
+    pub history: History,
     scroll_to_selected: bool,
 }
 
 impl UiState {
+    /// Treat `show` as the one on disk, for the unsaved-changes mark (used
+    /// when a recovered copy is opened over the saved show).
+    pub fn set_saved(&mut self, show: &Show) {
+        self.saved_json = serde_json::to_string(show).ok();
+    }
+
     fn editing(&self, q: Quad) -> bool {
         match q {
             Quad::Pin(id) => self.geometry_edit == Some(id),
@@ -181,6 +191,8 @@ enum Action {
     RemoveOutput(OutputId),
     AddAudioOutput,
     RemoveAudioOutput(AudioOutputId),
+    Undo,
+    Redo,
     Quit,
 }
 
@@ -208,6 +220,11 @@ fn cue_label(c: &Cue) -> String {
 pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     if st.saved_json.is_none() {
         st.saved_json = serde_json::to_string(show).ok();
+    }
+    if !st.history.started()
+        && let Ok(json) = serde_json::to_string(show)
+    {
+        st.history.reset(json);
     }
     let mut actions: Vec<Action> = Vec::new();
     keyboard(ui.ctx(), show, st, &mut actions);
@@ -273,8 +290,11 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
 
     // Actions change state after this frame was laid out; show the result now
     // rather than on the next mouse move.
-    if !actions.is_empty() {
+    let acted = !actions.is_empty();
+    if acted {
         ui.ctx().request_repaint();
+        // What an action changes is a step of its own, not part of the edit before.
+        st.history.end_burst();
     }
     for a in actions {
         apply(a, show, engine, st);
@@ -282,6 +302,35 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
 
     let json = serde_json::to_string(show).ok();
     st.dirty = json != st.saved_json;
+    if let Some(json) = &json {
+        track_history(st, json, ui.ctx().input(|i| i.time), acted);
+    }
+}
+
+/// Tell the undo history what the show looks like after this frame.
+fn track_history(st: &mut UiState, json: &str, now: f64, acted: bool) {
+    st.history.observe(json, now);
+    if acted {
+        st.history.end_burst();
+    }
+}
+
+/// Switch to a show from the undo history, keeping the selection and the
+/// playhead on cues that still exist.
+fn restore(json: &str, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    match serde_json::from_str::<Show>(json) {
+        Ok(back) => {
+            *show = back;
+            if engine.playhead.is_some_and(|id| show.cue(id).is_none()) {
+                engine.playhead = show.cues.first().map(|c| c.id);
+            }
+            if st.selected.is_some_and(|id| show.cue(id).is_none()) {
+                st.selected = engine.playhead;
+            }
+            st.capture_hotkey = None;
+        }
+        Err(e) => engine.log(format!("Could not restore that step: {e}")),
+    }
 }
 
 /// Keys a cue can take as its hotkey: letters (except the transport's P and
@@ -343,7 +392,17 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
             actions.push(Action::New);
         }
         if typing {
+            // A text box has its own undo.
             return;
+        }
+        // Before Ctrl+Z, which also matches with Shift held.
+        if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z)
+            || i.consume_key(egui::Modifiers::COMMAND, Key::Y)
+        {
+            actions.push(Action::Redo);
+        }
+        if i.consume_key(egui::Modifiers::COMMAND, Key::Z) {
+            actions.push(Action::Undo);
         }
         if nudging {
             // The arrow keys move the selected corner: 1 px, or 5 px with Shift.
@@ -461,6 +520,26 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             ui.separator();
             if ui.button("Quit").clicked() {
                 actions.push(Action::Quit);
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            if ui
+                .add_enabled(
+                    st.history.can_undo(),
+                    egui::Button::new("Undo").shortcut_text("Ctrl+Z"),
+                )
+                .clicked()
+            {
+                actions.push(Action::Undo);
+            }
+            if ui
+                .add_enabled(
+                    st.history.can_redo(),
+                    egui::Button::new("Redo").shortcut_text("Ctrl+Y"),
+                )
+                .clicked()
+            {
+                actions.push(Action::Redo);
             }
         });
         ui.menu_button("Cue", |ui| {
@@ -2965,6 +3044,7 @@ fn show_dialog() -> rfd::FileDialog {
 /// Ask what to do with unsaved changes. Returns true if it is OK to continue.
 pub fn confirm_discard(show: &Show, st: &mut UiState) -> bool {
     if !st.dirty {
+        recovery::clear(st.show_path.as_deref());
         return true;
     }
     let answer = rfd::MessageDialog::new()
@@ -2972,11 +3052,16 @@ pub fn confirm_discard(show: &Show, st: &mut UiState) -> bool {
         .set_description("Save changes to this show first?")
         .set_buttons(rfd::MessageButtons::YesNoCancel)
         .show();
-    match answer {
+    let proceed = match answer {
         rfd::MessageDialogResult::Yes => save(show, st, false),
         rfd::MessageDialogResult::No => true,
         _ => false,
+    };
+    if proceed {
+        // Deliberately leaving this show behind (saved or not): nothing to recover.
+        recovery::clear(st.show_path.as_deref());
     }
+    proceed
 }
 
 fn save(show: &Show, st: &mut UiState, save_as: bool) -> bool {
@@ -2992,6 +3077,9 @@ fn save(show: &Show, st: &mut UiState, save_as: bool) -> bool {
     };
     match show.save(&path) {
         Ok(()) => {
+            // What was kept as a recovery copy, for the old name and the new, is now saved.
+            recovery::clear(st.show_path.as_deref());
+            recovery::clear(Some(&path));
             st.show_path = Some(path);
             st.saved_json = serde_json::to_string(show).ok();
             true
@@ -3019,6 +3107,10 @@ fn load_into(
     st.selected = engine.playhead;
     st.show_path = path;
     st.saved_json = serde_json::to_string(show).ok();
+    // A different show has a history of its own.
+    if let Some(json) = &st.saved_json {
+        st.history.reset(json.clone());
+    }
 }
 
 /// Do what a remote message asks for, as if the operator had done it.
@@ -3248,6 +3340,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::FireSelected => {
             if let Some(id) = st.selected {
                 engine.fire(show, id);
+            }
+        }
+        Action::Undo => {
+            if let Some(json) = st.history.undo() {
+                restore(&json, show, engine, st);
+            }
+        }
+        Action::Redo => {
+            if let Some(json) = st.history.redo() {
+                restore(&json, show, engine, st);
             }
         }
         Action::FireCue(id) => engine.fire(show, id),
@@ -4108,5 +4210,145 @@ mod tests {
         run_remote(Command::Note(99), &mut show, &mut e, &mut st);
         assert!(!e.is_active());
         assert!(e.messages.back().unwrap().1.contains("MIDI note 99"));
+    }
+
+    // ----- Undo and redo -----------------------------------------------------------
+
+    /// Run what draw() does about history at the end of a frame.
+    fn frame_end(show: &Show, st: &mut UiState, now: f64, acted: bool) {
+        let json = serde_json::to_string(show).unwrap();
+        if !st.history.started() {
+            st.history.reset(json.clone());
+        }
+        track_history(st, &json, now, acted);
+    }
+
+    fn name_of(show: &Show, n: &str) -> String {
+        show.cue(number(show, n)).unwrap().name.clone()
+    }
+
+    #[test]
+    fn undo_and_redo_step_through_edits() {
+        let (mut show, mut e, mut st) = running();
+        frame_end(&show, &mut st, 0.0, false);
+        let d = number(&show, "4");
+        let original = name_of(&show, "4");
+        // Typing a new name for a while is one step.
+        let i = show.cue_index(d).unwrap();
+        for (n, t) in [("S", 1.0), ("St", 1.1), ("Strike", 1.2)] {
+            show.cues[i].name = n.into();
+            frame_end(&show, &mut st, t, false);
+        }
+        frame_end(&show, &mut st, 3.0, false);
+        show.cues[i].notes = "check the fly".into();
+        frame_end(&show, &mut st, 4.0, false);
+        frame_end(&show, &mut st, 6.0, false);
+
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(show.cue(d).unwrap().notes, "");
+        assert_eq!(name_of(&show, "4"), "Strike");
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(name_of(&show, "4"), original);
+        assert!(!st.history.can_undo());
+        apply(Action::Redo, &mut show, &mut e, &mut st);
+        assert_eq!(name_of(&show, "4"), "Strike");
+        apply(Action::Redo, &mut show, &mut e, &mut st);
+        assert_eq!(show.cue(d).unwrap().notes, "check the fly");
+        assert!(!st.history.can_redo());
+        // Being undone and redone doesn't count as new edits.
+        frame_end(&show, &mut st, 9.0, false);
+        frame_end(&show, &mut st, 12.0, false);
+        assert!(st.history.can_undo() && !st.history.can_redo());
+    }
+
+    #[test]
+    fn structure_changes_undo_as_their_own_steps() {
+        let (mut show, mut e, mut st) = running();
+        frame_end(&show, &mut st, 0.0, false);
+        let before = show.cues.len();
+        // Two actions in quick succession are two steps, not one burst.
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        frame_end(&show, &mut st, 1.0, true);
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        frame_end(&show, &mut st, 1.05, true);
+        assert_eq!(show.cues.len(), before + 2);
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(show.cues.len(), before + 1);
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(show.cues.len(), before);
+        apply(Action::Redo, &mut show, &mut e, &mut st);
+        assert_eq!(show.cues.len(), before + 1);
+    }
+
+    #[test]
+    fn undo_leaves_playback_alone_and_keeps_the_selection_valid() {
+        let (mut show, mut e, mut st) = running();
+        frame_end(&show, &mut st, 0.0, false);
+        let d = number(&show, "4");
+        e.fire(&show, d);
+        assert!(is_playing(&e, d));
+        // Add a cue and select it, then undo the add.
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        frame_end(&show, &mut st, 1.0, true);
+        let added = st.selected.unwrap();
+        assert!(show.cue(added).is_some());
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert!(show.cue(added).is_none());
+        assert!(
+            st.selected.is_none_or(|id| show.cue(id).is_some()),
+            "the selection must not point at a cue that's gone"
+        );
+        assert!(e.playhead.is_none_or(|id| show.cue(id).is_some()));
+        assert!(is_playing(&e, d), "what was playing keeps playing");
+    }
+
+    #[test]
+    fn opening_or_creating_a_show_starts_a_fresh_history() {
+        let (mut show, mut e, mut st) = running();
+        frame_end(&show, &mut st, 0.0, false);
+        show.cues[0].name = "Edited".into();
+        frame_end(&show, &mut st, 1.0, false);
+        frame_end(&show, &mut st, 3.0, false);
+        assert!(st.history.can_undo());
+        load_into(Show::default(), None, &mut show, &mut e, &mut st);
+        assert!(!st.history.can_undo() && !st.history.can_redo());
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert!(show.cues.is_empty(), "undo can't reach into the old show");
+    }
+
+    #[test]
+    fn undo_redo_keys() {
+        use egui::Modifiers as M;
+        let st = UiState::default();
+        assert!(matches!(
+            keys(&st, &[(Key::Z, M::COMMAND)])[..],
+            [Action::Undo]
+        ));
+        assert!(matches!(
+            keys(&st, &[(Key::Y, M::COMMAND)])[..],
+            [Action::Redo]
+        ));
+        assert!(matches!(
+            keys(&st, &[(Key::Z, M::COMMAND | M::SHIFT)])[..],
+            [Action::Redo]
+        ));
+        assert!(keys(&st, &[(Key::Z, M::NONE)]).is_empty());
+    }
+
+    #[test]
+    fn a_restored_show_still_shows_unsaved_changes() {
+        let (mut show, mut e, mut st) = running();
+        st.set_saved(&show);
+        frame_end(&show, &mut st, 0.0, false);
+        show.cues[0].name = "Edited".into();
+        frame_end(&show, &mut st, 1.0, false);
+        frame_end(&show, &mut st, 3.0, false);
+        // Undoing all the way back is the saved show again.
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(
+            serde_json::to_string(&show).ok(),
+            st.saved_json,
+            "undo to the saved state matches what is on disk"
+        );
     }
 }

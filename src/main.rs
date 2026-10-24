@@ -4,7 +4,9 @@
 mod app;
 mod engine;
 mod gpu;
+mod history;
 mod media;
+mod recovery;
 mod remote;
 mod render;
 mod show;

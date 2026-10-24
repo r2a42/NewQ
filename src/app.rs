@@ -7,6 +7,7 @@
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::media::audio;
+use crate::recovery;
 use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
@@ -107,6 +108,10 @@ pub struct App {
     monitors: Vec<MonitorHandle>,
     last_monitor_scan: Instant,
     last_tick: Instant,
+    /// When the unsaved show was last copied to its recovery file.
+    last_autosave: Instant,
+    /// A recovery file from a session that didn't end properly, to offer once.
+    pending_recovery: Option<PathBuf>,
     /// Whether something was playing at the previous tick.
     was_active: bool,
 }
@@ -131,6 +136,7 @@ impl App {
         };
         engine.playhead = show.cues.first().map(|c| c.id);
         ui.selected = engine.playhead;
+        let pending_recovery = recovery::pending(ui.show_path.as_deref());
         App {
             remote: Remote::new(wake),
             remote_seen: (RemoteSettings::default(), Instant::now()),
@@ -148,6 +154,8 @@ impl App {
             monitors: Vec::new(),
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
+            last_autosave: Instant::now(),
+            pending_recovery,
             was_active: false,
         }
     }
@@ -529,6 +537,10 @@ impl App {
         let Some(ctl) = &mut self.control else { return };
         ctl.last_paint = Instant::now();
 
+        if let Some(rec) = self.pending_recovery.take() {
+            offer_recovery(&rec, &mut self.show, &mut self.engine, &mut self.ui);
+        }
+
         let raw = ctl.state.take_egui_input(&ctl.window);
         let (show, engine, ui_state) = (&mut self.show, &mut self.engine, &mut self.ui);
         let mut full = self
@@ -540,6 +552,21 @@ impl App {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map(|v| Instant::now() + v.repaint_delay.min(Duration::from_secs(3600)));
+
+        // Keep a copy of unsaved changes, so a crash doesn't lose them.
+        if self.last_autosave.elapsed() >= recovery::INTERVAL {
+            self.last_autosave = Instant::now();
+            let path = self.ui.show_path.as_deref();
+            if !self.ui.dirty {
+                recovery::clear(path);
+            } else if let Err(e) = recovery::write(&self.show, path) {
+                log::warn!("could not write the recovery file: {e:#}");
+            }
+        }
+        if self.ui.dirty {
+            let due = self.last_autosave + recovery::INTERVAL;
+            ctl.next_repaint = Some(ctl.next_repaint.map_or(due, |t| t.min(due)));
+        }
 
         let jobs = self.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
         let size = ctl.window.inner_size();
@@ -823,6 +850,34 @@ fn route_outputs(
         }
     }
     routes
+}
+
+/// Ask whether to take back the changes a crashed session left in `rec`.
+fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, ui: &mut UiState) {
+    let restore = rfd::MessageDialog::new()
+        .set_title("Recover unsaved changes?")
+        .set_description(
+            "NewQ didn't close properly last time and kept a copy of the changes that \
+             hadn't been saved. Restore them?",
+        )
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        == rfd::MessageDialogResult::Yes;
+    if restore {
+        match Show::load(rec) {
+            Ok(recovered) => {
+                // The show on disk stays the saved one, so the title shows the edits.
+                ui.set_saved(show);
+                *show = recovered;
+                engine.playhead = show.cues.first().map(|c| c.id);
+                ui.selected = engine.playhead;
+                return;
+            }
+            Err(e) => engine.log(format!("Could not read the recovery file: {e:#}")),
+        }
+    }
+    // Declined, or the question couldn't be asked: keep the copy, out of the way.
+    recovery::set_aside(rec);
 }
 
 #[cfg(test)]
