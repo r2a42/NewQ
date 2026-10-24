@@ -14,7 +14,9 @@ The README describes the features; this file is about working on the code.
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
 - `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
-  `src/media/camera.rs`: camera cues' device lists and ffmpeg input.
+  `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
+  `src/recovery.rs`: autosave copies. `src/media/camera.rs`: camera cues'
+  device lists and ffmpeg input.
   The `NewQ test pattern` device stands in for a camera in tests.
 
 ## Build and test

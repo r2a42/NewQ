@@ -6,3 +6,6 @@
 /test_media/*.png
 /test_media/*.wav
 /dist
+# Autosave copies written beside shows
+*.newq.recovery*
+*.newq.tmp

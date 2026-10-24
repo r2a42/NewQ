@@ -1163,7 +1163,16 @@ impl Show {
             }
         }
         let text = serde_json::to_string_pretty(&copy)?;
-        std::fs::write(path, text)?;
+        // Write beside the file and rename over it, so a crash mid-write
+        // can't leave a half-written show.
+        let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(".tmp");
+        let tmp = path.with_file_name(tmp_name);
+        std::fs::write(&tmp, text)?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 }

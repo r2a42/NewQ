@@ -154,6 +154,20 @@ includes FFmpeg, so there's nothing else to install.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
   cue list means a cue is preloaded).
 - **Audio/video sync:** video with sound is slaved to the audio clock.
+- **Undo and redo:** Ctrl+Z and Ctrl+Y (or the Edit menu) step back and
+  forward through edits to the show: cues, their order and groups, outputs,
+  audio and remote settings. Dragging a slider or typing a name is one step
+  however long it takes, and each button or menu action is a step of its own.
+  Up to 200 steps (or 64 MB) are kept. Undo never stops what is playing, and
+  opening or creating a show starts a new history. While you are typing in a
+  text box, Ctrl+Z undoes the typing there instead.
+- **Autosave and recovery:** every 30 seconds, unsaved changes are copied to
+  `<show>.newq.recovery` beside the show (a show that has no name yet uses the
+  temporary folder). If NewQ doesn't close properly, the next start offers to
+  restore them. Saving, or choosing not to save when closing, deletes the copy.
+  If you decline the offer the copy is kept as `.recovery.old` rather than
+  deleted. Saving writes to a temporary file and renames it, so a crash during
+  a save can't leave half a show.
 - **Show files** are plain JSON (`.newq`) with media paths stored relative to
   the show file, so a show folder can move between machines.
 - Drag and drop media files onto the window to create cues.
@@ -171,6 +185,7 @@ includes FFmpeg, so there's nothing else to install.
 | Ctrl+↑ / Ctrl+↓       | Reorder the selected cue                        |
 | ← ↑ → ↓ / Shift+arrow | Move the selected corner 1 px / 5 px (while editing) |
 | Ctrl+D / Del          | Duplicate / delete cue                          |
+| Ctrl+Z / Ctrl+Y       | Undo / redo (Ctrl+Shift+Z also redoes)          |
 | Ctrl+N / Ctrl+O / Ctrl+S | New / open / save show                       |
 | Ctrl+Shift+S          | Save as                                         |
 
