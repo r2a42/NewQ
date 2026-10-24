@@ -72,12 +72,17 @@ writes gigabytes in seconds.
   `/release vX.Y.Z dry-run` and then `/release vX.Y.Z` on any issue or PR. The
   `Cut release` workflow checks the tag against `Cargo.toml`, tags `main` and
   starts the `Release` workflow, which builds and publishes the downloads.
+  (It can also be run from the Actions tab, or by the owner's token.)
   A suffix (`v0.3.0-rc1`) makes it a pre-release.
 - Cloud sessions can't push tags (the git proxy only accepts branches), which
   is why releases go through that comment.
-- **Claude can't post the command.** The GitHub comment tool rewrites slash
-  commands in comments Claude posts (`/release` becomes `·/·r·elease`), so the
-  workflow skips it. That looks deliberate, so don't work around it: get the
-  repository owner to post the comment. Do everything else first (merge, wait
-  for CI to pass on `main`, say the exact comment to post) so it is one step.
+- **Claude can't post the comment, but can run the workflow.** The GitHub
+  comment tool rewrites slash commands in comments Claude posts (`/release`
+  becomes `·/·r·elease`), so the workflow skips them. That looks deliberate, so
+  don't work around it. The same workflow also has a manual trigger
+  (`workflow_dispatch`, inputs `tag` and `dry_run`) that accepts only the
+  repository owner's account. A session with the owner's token (set up with
+  `/web-setup`) can start it with `actions_run_trigger` `run_workflow` on
+  `cut-release.yml`. Do the dry run first, then the real one, and check the
+  result: the `Release` workflow publishes the downloads.
 - Large tool outputs: page GitHub list calls (`per_page` of a few).

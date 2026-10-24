@@ -227,7 +227,8 @@ or, without pushing anything, comment `/release v0.2.1` on any issue or pull
 request as the repository owner. The `Cut release` workflow checks that the tag
 matches `Cargo.toml`, is new, and that CI passed on the tip of `main`, then tags
 it and starts the `Release` workflow. Add `dry-run` (`/release v0.2.1 dry-run`)
-to run the checks without tagging. A tag with a suffix, like `v0.2.1-rc1`, is
+to run the checks without tagging. The workflow can also be run from the
+Actions tab (or `gh workflow run cut-release.yml -f tag=v0.2.1`). A tag with a suffix, like `v0.2.1-rc1`, is
 published as a pre-release.
 
 `scripts/package_release.sh` does the packaging and can be run locally after a
