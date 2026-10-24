@@ -7,12 +7,27 @@ name: Cut release
 # have passed on the tip of the default branch.
 #
 # This exists so a release can be started with a comment from a browser or
-# phone, without pushing tags or running workflows by hand. It is meant to be
-# posted by a person: the comment tool Claude uses rewrites slash commands, so
-# Claude can't start it.
+# phone, without pushing tags or running workflows by hand. The comment is meant
+# to be posted by a person: the comment tool Claude uses rewrites slash
+# commands, so Claude can't start it that way.
+#
+# The same checks run from the Actions tab ("Run workflow", with the tag and
+# the dry-run box) or `gh workflow run cut-release.yml -f tag=vX.Y.Z`. Starting
+# it needs write access and is only accepted from the repository owner's own
+# account, which is also how a session working with the owner's token (for
+# example Claude, set up with /web-setup) can cut a release.
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.3.0 (must match the version in Cargo.toml)"
+        required: true
+      dry_run:
+        description: "Run every check but don't tag"
+        type: boolean
+        default: false
 
 concurrency:
   group: cut-release
@@ -23,8 +38,11 @@ permissions: {}
 jobs:
   cut:
     if: >-
-      github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, '/release ')
+      (github.event_name == 'issue_comment' &&
+        github.event.comment.author_association == 'OWNER' &&
+        startsWith(github.event.comment.body, '/release ')) ||
+      (github.event_name == 'workflow_dispatch' &&
+        github.actor == github.repository_owner)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -36,6 +54,8 @@ jobs:
       REPO: ${{ github.repository }}
       ISSUE: ${{ github.event.issue.number }}
       BODY: ${{ github.event.comment.body }}
+      INPUT_TAG: ${{ inputs.tag }}
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
       BRANCH: ${{ github.event.repository.default_branch }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -46,6 +66,11 @@ jobs:
 
       - name: Read the request
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=$INPUT_TAG" >> "$GITHUB_ENV"
+            echo "DRY_RUN=$INPUT_DRY_RUN" >> "$GITHUB_ENV"
+            exit 0
+          fi
           first="$(printf '%s\n' "$BODY" | head -n1 | tr -d '\r')"
           read -r _ tag opt extra <<< "$first"
           if [ -n "${extra:-}" ] || { [ -n "${opt:-}" ] && [ "$opt" != "dry-run" ]; }; then
@@ -91,9 +116,15 @@ jobs:
           else
             msg="Tagged $TAG at \`${SHA:0:7}\` and started the Release workflow, which builds and publishes it. ($RUN_URL)"
           fi
-          gh issue comment "$ISSUE" --repo "$REPO" --body "$msg"
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$msg"
+          else
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Say why it failed
         if: failure()
         run: |
-          gh issue comment "$ISSUE" --repo "$REPO" --body "The release did not go ahead; see the log: $RUN_URL"
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "The release did not go ahead; see the log: $RUN_URL"
+          fi
