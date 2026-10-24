@@ -45,6 +45,9 @@ impl Gpu {
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 ..Default::default()
             }))?;
+        // An error in the GPU's drivers is logged, not a reason to take the
+        // whole program down: the default is to panic the thread that hit it.
+        device.on_uncaptured_error(Arc::new(|e| log::error!("GPU error: {e}")));
         let compositor = Arc::new(Compositor::new(&device));
         Ok((
             Gpu {
@@ -59,20 +62,28 @@ impl Gpu {
     }
 
     /// A surface configuration in a non-sRGB format, so that blending (fades and
-    /// crossfades) happens in gamma space like a video mixer.
+    /// crossfades) happens in gamma space like a video mixer. None if this
+    /// adapter can't draw to the surface at all (it reports no formats), as
+    /// can happen for a window on a display driven by another graphics card.
     pub fn surface_config(
         &self,
         surface: &wgpu::Surface,
         size: (u32, u32),
-    ) -> wgpu::SurfaceConfiguration {
+    ) -> Option<wgpu::SurfaceConfiguration> {
         let caps = surface.get_capabilities(&self.adapter);
+        log::info!(
+            "surface supports formats {:?}, alpha {:?}, present {:?}",
+            caps.formats,
+            caps.alpha_modes,
+            caps.present_modes
+        );
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        wgpu::SurfaceConfiguration {
+            .or_else(|| caps.formats.first().copied())?;
+        Some(wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.0.max(1),
@@ -80,10 +91,10 @@ impl Gpu {
             // Each window presents from its own thread, so blocking on vsync is fine.
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: caps.alpha_modes.first().copied()?,
             view_formats: vec![],
             color_space: wgpu::SurfaceColorSpace::Auto,
-        }
+        })
     }
 }
 

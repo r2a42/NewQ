@@ -19,6 +19,9 @@ The README describes the features; this file is about working on the code.
   `src/output.rs`: send cues' OSC and MIDI messages and the sender thread.
   `src/export.rs`: the cue sheet as CSV or a printable page.
   `src/clock.rs`: time-of-day triggers (local time via `jiff`).
+  `src/crash.rs`: the log file and crash reports (Windows has no console).
+  Reports go to the log folder (`%LOCALAPPDATA%\NewQ` etc.); ask for
+  `newq-crash.log` and `newq.log` when a user reports a crash.
   `src/web.rs` and `web_page.html`: the web remote (HTTP on plain `std`
   sockets, handlers tested as functions and over loopback).
   `src/relink.rs`: finding moved media and copying it into one folder.

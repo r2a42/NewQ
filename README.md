@@ -266,6 +266,22 @@ includes FFmpeg, so there's nothing else to install.
   the show file, so a show folder can move between machines.
 - Drag and drop media files onto the window to create cues.
 
+## If NewQ crashes or won't start
+
+A Windows download has no console, so NewQ keeps a log instead. It is in
+`%LOCALAPPDATA%\NewQ\newq.log` on Windows (`~/Library/Logs/NewQ` on a Mac,
+`~/.local/state/newq` on Linux, where the log goes to the terminal unless
+`NEWQ_LOG_FILE=1` is set); the log of the run before is kept as
+`newq.previous.log`. It records the displays and graphics card it found. If
+NewQ crashes it writes what went wrong, where, and a backtrace to
+`newq-crash.log` in the same folder, and on Windows shows a message with that
+path. Please send that file (and `newq.log`) when you report a crash.
+
+If the displays are what stops NewQ starting, run it with `--main-window-only`
+(or set `NEWQ_MAIN_WINDOW_ONLY=1`): every output then stays in the main window
+and no output windows are opened, so you can open the app and set up the
+displays from the Outputs panel.
+
 ## Keyboard
 
 | Key                   | Action                                          |
@@ -403,8 +419,9 @@ space like a hardware video mixer.
 - Timecode triggers follow MIDI Time Code only (no LTC audio timecode yet).
 - Very large files (4K60) push a lot of raw video through a pipe; NewQ
   decodes at the output window's resolution to keep this down.
-- Fullscreen output on a second display has been tested only on a single-monitor
-  Windows machine so far; macOS and Linux builds are covered by CI but haven't
+- Fullscreen output on a second display has had little testing on Windows
+  (starting with more than one display has crashed for at least one user: see
+  the crash log section above); macOS and Linux builds are covered by CI but haven't
   been run by hand.
 
 ## Trademarks

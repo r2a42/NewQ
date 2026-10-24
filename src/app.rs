@@ -116,11 +116,18 @@ pub struct App {
     pending_recovery: Option<PathBuf>,
     /// Whether something was playing at the previous tick.
     was_active: bool,
+    /// Keep every output in the main window, opening no output windows (a
+    /// way in when the displays are what stops NewQ starting).
+    main_window_only: bool,
 }
 
 impl App {
     /// `wake` is called from remote-control threads to rouse the event loop.
-    pub fn new(initial_show: Option<PathBuf>, wake: impl Fn() + Send + Sync + 'static) -> App {
+    pub fn new(
+        initial_show: Option<PathBuf>,
+        main_window_only: bool,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> App {
         let mut engine = Engine::new();
         let mut ui = UiState::default();
         let show = match initial_show {
@@ -161,11 +168,25 @@ impl App {
             last_web_state: Instant::now(),
             pending_recovery,
             was_active: false,
+            main_window_only,
         }
     }
 
     fn scan_monitors(&mut self, event_loop: &ActiveEventLoop) {
-        self.monitors = event_loop.available_monitors().collect();
+        let found: Vec<MonitorHandle> = event_loop.available_monitors().collect();
+        if found != self.monitors {
+            for (i, m) in found.iter().enumerate() {
+                log::info!(
+                    "display {i}: {:?} {}x{} at {:?}, scale {}",
+                    m.name(),
+                    m.size().width,
+                    m.size().height,
+                    m.position(),
+                    m.scale_factor()
+                );
+            }
+        }
+        self.monitors = found;
         let primary = event_loop.primary_monitor();
         self.ui.monitors = self
             .monitors
@@ -228,6 +249,9 @@ impl App {
 
     /// Decide where each enabled output is drawn.
     fn route_outputs(&self) -> HashMap<OutputId, Option<Target>> {
+        if self.main_window_only {
+            return self.show.outputs.iter().map(|o| (o.id, None)).collect();
+        }
         let names: Vec<&str> = self.ui.monitors.iter().map(|m| m.name.as_str()).collect();
         route_outputs(
             &self.show.outputs,
@@ -264,7 +288,20 @@ impl App {
         };
         let size = window.inner_size();
         let size = (size.width, size.height);
-        let config = gpu.surface_config(&surface, size);
+        log::info!(
+            "output window on display {monitor} ({:?}): {}x{}, scale {}",
+            m.name(),
+            size.0,
+            size.1,
+            window.scale_factor()
+        );
+        let Some(config) = gpu.surface_config(&surface, size) else {
+            self.engine.log(format!(
+                "This graphics card can't draw to display {}: outputs on it are not shown",
+                monitor + 1
+            ));
+            return;
+        };
         surface.configure(&gpu.device, &config);
         let thread = OutputThread::spawn(gpu.clone(), window.clone(), surface, config);
         self.screens.insert(
@@ -650,7 +687,9 @@ impl ApplicationHandler for App {
         let instance = wgpu::Instance::new(desc.with_env());
         let (gpu, surface) = Gpu::new(instance, window.clone()).expect("initialise GPU");
         let size = window.inner_size();
-        let config = gpu.surface_config(&surface, (size.width, size.height));
+        let config = gpu
+            .surface_config(&surface, (size.width, size.height))
+            .expect("the graphics card can't draw to the main window");
         surface.configure(&gpu.device, &config);
         ui::setup_style(&self.egui_ctx);
         let state = egui_winit::State::new(
