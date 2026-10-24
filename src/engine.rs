@@ -81,6 +81,7 @@ pub struct VideoState {
     pub layer: i32,
     pub fit: Fit,
     pub transform: LayerTransform,
+    pub color: ColorAdjust,
     spawned_at: Instant,
 }
 
@@ -91,6 +92,7 @@ pub struct ImageState {
     pub layer: i32,
     pub fit: Fit,
     pub transform: LayerTransform,
+    pub color: ColorAdjust,
 }
 
 /// A full-screen colour layer used for dip-to-black/white transitions. It
@@ -241,6 +243,7 @@ pub struct LayerRef<'a> {
     pub opacity: f32,
     pub fit: Fit,
     pub transform: LayerTransform,
+    pub color: ColorAdjust,
     pub source: LayerSource<'a>,
 }
 
@@ -910,6 +913,7 @@ impl Engine {
                                     layer: m.layer,
                                     fit: m.fit,
                                     transform: m.transform,
+                                    color: m.color,
                                     spawned_at: Instant::now(),
                                 }))
                             }
@@ -920,6 +924,7 @@ impl Engine {
                                 layer: m.layer,
                                 fit: m.fit,
                                 transform: m.transform,
+                                color: m.color,
                             }),
                             PreparedKind::Audio(voice) => ActiveKind::Audio(voice),
                             // Text is drawn at the output's size, so it is never fitted.
@@ -930,6 +935,7 @@ impl Engine {
                                 layer: m.layer,
                                 fit: Fit::Stretch,
                                 transform: m.transform,
+                                color: m.color,
                             }),
                         };
                         let transition = if active.is_visual() {
@@ -1285,8 +1291,14 @@ impl Engine {
                 // So does position, scale, rotation and crop, so a cue can be
                 // lined up while it plays.
                 match &mut a.kind {
-                    ActiveKind::Video(v) => v.transform = m.transform,
-                    ActiveKind::Image(i) => i.transform = m.transform,
+                    ActiveKind::Video(v) => {
+                        v.transform = m.transform;
+                        v.color = m.color;
+                    }
+                    ActiveKind::Image(i) => {
+                        i.transform = m.transform;
+                        i.color = m.color;
+                    }
                     _ => {}
                 }
                 if !a.faded && !a.stopping && !a.auto_faded {
@@ -1506,12 +1518,22 @@ impl Engine {
             if !a.started {
                 continue;
             }
-            let (layer, fit, transform, source) = match &a.kind {
-                ActiveKind::Video(v) if v.output == Some(output) => {
-                    (v.layer, v.fit, v.transform, LayerSource::Video(&v.player))
-                }
+            let (layer, fit, transform, color, source) = match &a.kind {
+                ActiveKind::Video(v) if v.output == Some(output) => (
+                    v.layer,
+                    v.fit,
+                    v.transform,
+                    v.color,
+                    LayerSource::Video(&v.player),
+                ),
                 ActiveKind::Image(i) if i.output == Some(output) => match &i.image {
-                    Some(img) => (i.layer, i.fit, i.transform, LayerSource::Image(img)),
+                    Some(img) => (
+                        i.layer,
+                        i.fit,
+                        i.transform,
+                        i.color,
+                        LayerSource::Image(img),
+                    ),
                     None => continue,
                 },
                 // Mattes cover everything on the output.
@@ -1519,6 +1541,7 @@ impl Engine {
                     i32::MAX,
                     Fit::Stretch,
                     LayerTransform::default(),
+                    ColorAdjust::default(),
                     LayerSource::Solid(m.color),
                 ),
                 _ => continue,
@@ -1530,6 +1553,7 @@ impl Engine {
                     opacity: a.opacity.value.clamp(0.0, 1.0),
                     fit,
                     transform,
+                    color,
                     source,
                 },
             ));
@@ -2570,5 +2594,28 @@ mod tests {
         e.tick(&show, 1.1);
         assert_eq!(sent_addresses(&e), ["/after"]);
         let _ = s;
+    }
+
+    #[test]
+    fn colour_edits_reach_a_playing_layer_live() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let a = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        e.playhead = Some(a);
+        e.go(&show);
+        run_until(&mut e, &show, "on screen", |e| e.layers(out).len() == 1);
+        assert!(e.layers(out)[0].color.is_default());
+        // Edit the cue while it plays: the layer follows on the next tick.
+        let i = show.cue_index(a).unwrap();
+        let m = show.cues[i].kind.media_mut().unwrap();
+        m.color.brightness = 0.3;
+        m.color.key = Some(ChromaKey::default());
+        e.tick(&show, 0.01);
+        let c = e.layers(out)[0].color;
+        assert_eq!(c.brightness, 0.3);
+        assert!(c.key.is_some());
     }
 }

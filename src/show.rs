@@ -582,6 +582,66 @@ impl LayerTransform {
     }
 }
 
+/// A colour to make clear (a green or blue screen).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChromaKey {
+    /// The colour of the screen.
+    pub color: [u8; 3],
+    /// How far from that colour (on the chroma plane, 0 to about 0.7) is
+    /// made fully clear.
+    pub tolerance: f32,
+    /// A soft edge beyond the tolerance, where it fades back in.
+    pub softness: f32,
+    /// How much of the key colour's spill is pulled out of what is kept (0 to 1).
+    pub spill: f32,
+}
+
+impl Default for ChromaKey {
+    fn default() -> Self {
+        ChromaKey {
+            color: [0, 255, 0],
+            tolerance: 0.2,
+            softness: 0.1,
+            spill: 0.5,
+        }
+    }
+}
+
+/// Colour correction for a visual cue, and an optional chroma key. The
+/// default leaves the picture as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorAdjust {
+    /// −1 to 1, added to each colour (0 = none).
+    pub brightness: f32,
+    /// 0 to 2 about mid grey (1 = none).
+    pub contrast: f32,
+    /// 0 (grey) to 2 (vivid); 1 = none.
+    pub saturation: f32,
+    /// Degrees around the colour wheel (0 = none).
+    pub hue: f32,
+    pub key: Option<ChromaKey>,
+}
+
+impl Default for ColorAdjust {
+    fn default() -> Self {
+        ColorAdjust {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            hue: 0.0,
+            key: None,
+        }
+    }
+}
+
+impl ColorAdjust {
+    pub fn is_default(&self) -> bool {
+        *self == ColorAdjust::default()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MediaCue {
     pub file: PathBuf,
@@ -617,6 +677,9 @@ pub struct MediaCue {
     /// Position, scale, rotation and crop on the output (visual cues).
     #[serde(default, skip_serializing_if = "LayerTransform::is_identity")]
     pub transform: LayerTransform,
+    /// Colour correction and chroma key (visual cues).
+    #[serde(default, skip_serializing_if = "ColorAdjust::is_default")]
+    pub color: ColorAdjust,
     #[serde(default)]
     pub volume_db: f32,
     /// In point, seconds.
@@ -674,6 +737,7 @@ impl MediaCue {
             audio_output: None,
             audio_channel: 0,
             transform: LayerTransform::default(),
+            color: ColorAdjust::default(),
             volume_db: 0.0,
             start: 0.0,
             end: None,
@@ -2415,5 +2479,36 @@ mod tests {
         assert!(!show.cues[gi].armed, "the group takes over the arm state");
         assert!(show.cues[gi + 1].armed);
         assert!(!show.is_armed(gi + 1), "so the child still doesn't run");
+    }
+
+    #[test]
+    fn colour_settings_default_off_and_stay_out_of_old_files() {
+        let mut show = Show::default();
+        let cue = show.make_cue(CueType::Video, Some("a.mp4".into()), 0);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(!json.contains("color"), "{json}");
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert!(back.kind.media().unwrap().color.is_default());
+
+        let mut c = cue.clone();
+        let m = c.kind.media_mut().unwrap();
+        m.color.hue = 30.0;
+        m.color.key = Some(ChromaKey {
+            color: [10, 200, 30],
+            tolerance: 0.3,
+            softness: 0.2,
+            spill: 0.9,
+        });
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        let got = back.kind.media().unwrap().color;
+        assert_eq!(got.hue, 30.0);
+        assert_eq!(got.contrast, 1.0, "the rest keep their defaults");
+        assert_eq!(got.key.unwrap().color, [10, 200, 30]);
+        // A hand-written file may name only what it changes.
+        let part: ColorAdjust = serde_json::from_str(r#"{"saturation":0.0}"#).unwrap();
+        assert_eq!((part.saturation, part.contrast, part.key), (0.0, 1.0, None));
+        let key: ChromaKey = serde_json::from_str(r#"{"color":[0,0,255]}"#).unwrap();
+        assert_eq!((key.color, key.tolerance), ([0, 0, 255], 0.2));
     }
 }

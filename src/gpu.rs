@@ -1,8 +1,9 @@
 //! GPU setup and the output compositor, which draws video/image layers with
 //! opacity onto output windows.
 
+use crate::color;
 use crate::media::ffmpeg::ColorMatrix;
-use crate::show::{Fit, LayerTransform};
+use crate::show::{ColorAdjust, Fit, LayerTransform};
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use winit::window::Window;
@@ -93,7 +94,9 @@ struct LayerUniform {
     rect: [f32; 4],
     opacity: f32,
     mode: u32,
-    _pad: [f32; 2],
+    /// Whether the chroma key is on (0 or 1).
+    key_on: u32,
+    _pad: u32,
     /// YUV→RGB rows: (y, u, v, offset).
     r: [f32; 4],
     g: [f32; 4],
@@ -107,6 +110,12 @@ struct LayerUniform {
     xf: [[f32; 4]; 2],
     /// The part of the texture drawn: u0, v0, u1, v1.
     uvr: [f32; 4],
+    /// Colour adjustment rows: (r, g, b, offset) (see [`color::color_matrix`]).
+    cm: [[f32; 4]; 3],
+    /// The key: (cb, cr, tolerance, softness) and (mask r, g, b, spill)
+    /// (see [`color::key_uniforms`]).
+    kc: [f32; 4],
+    ks: [f32; 4],
 }
 
 const SHADER: &str = r#"
@@ -114,7 +123,8 @@ struct Params {
     rect: vec4<f32>,
     opacity: f32,
     mode: u32,
-    pad: vec2<f32>,
+    key_on: u32,
+    pad: u32,
     r: vec4<f32>,
     g: vec4<f32>,
     b: vec4<f32>,
@@ -131,6 +141,13 @@ struct Params {
     x1: vec4<f32>,
     // Texture sub-rectangle drawn (crop): u0, v0, u1, v1.
     uvr: vec4<f32>,
+    // Colour adjustment: rows (r, g, b, offset).
+    cm0: vec4<f32>,
+    cm1: vec4<f32>,
+    cm2: vec4<f32>,
+    // Chroma key: (cb, cr, tolerance, softness), and (mask rgb, spill).
+    kc: vec4<f32>,
+    ks: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -193,8 +210,28 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         rgba = vec4<f32>(clamp(vec3<f32>(dot(p.r, yuv), dot(p.g, yuv), dot(p.b, yuv)),
                                vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
-    let a = rgba.a * p.opacity;
-    return vec4<f32>(rgba.rgb * a, a);
+    // Key out the screen colour (and pull its spill from what stays), then
+    // correct the colour. This is what color::apply does, number for number.
+    var rgb = rgba.rgb;
+    var key_a = 1.0;
+    if (p.key_on != 0u) {
+        let cbcr = vec2<f32>(
+            dot(rgb, vec3<f32>(-0.168736, -0.331264, 0.5)),
+            dot(rgb, vec3<f32>(0.5, -0.418688, -0.081312)));
+        key_a = smoothstep(p.kc.z, p.kc.z + p.kc.w, distance(cbcr, p.kc.xy));
+        let m = p.ks.xyz;
+        let other = max(max(rgb.r * (1.0 - m.r), rgb.g * (1.0 - m.g)), rgb.b * (1.0 - m.b));
+        let dom = dot(rgb, m);
+        rgb = rgb + m * (min(dom, other) - dom) * p.ks.w;
+    }
+    rgb = clamp(
+        vec3<f32>(
+            dot(p.cm0.xyz, rgb) + p.cm0.w,
+            dot(p.cm1.xyz, rgb) + p.cm1.w,
+            dot(p.cm2.xyz, rgb) + p.cm2.w),
+        vec3<f32>(0.0), vec3<f32>(1.0));
+    let a = rgba.a * key_a * p.opacity;
+    return vec4<f32>(rgb * a, a);
 }
 "#;
 
@@ -599,12 +636,20 @@ impl LayerTexture {
         slot: Slot,
         geometry: &Geometry,
         opacity: f32,
-        fit: Fit,
-        transform: &LayerTransform,
+        look: &Look,
     ) {
+        let Look {
+            fit,
+            transform,
+            color,
+        } = look;
         let rows = yuv_rows(self.matrix);
+        let (kc, ks) = color
+            .key
+            .as_ref()
+            .map_or(([0.0; 4], [0.0; 4]), color::key_uniforms);
         let place = layer_placement(
-            fit_rect((self.width, self.height), geometry.canvas, fit),
+            fit_rect((self.width, self.height), geometry.canvas, *fit),
             geometry.canvas,
             transform,
         );
@@ -612,7 +657,8 @@ impl LayerTexture {
             rect: place.rect,
             opacity,
             mode: u32::from(self.is_yuv()),
-            _pad: [0.0; 2],
+            key_on: u32::from(color.key.is_some()),
+            _pad: 0,
             r: rows[0],
             g: rows[1],
             b: rows[2],
@@ -620,6 +666,9 @@ impl LayerTexture {
             pin: geometry.pin,
             xf: place.xf,
             uvr: place.uvr,
+            cm: color::color_matrix(color),
+            kc,
+            ks,
         };
         queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
     }
@@ -640,11 +689,20 @@ impl LayerTexture {
     }
 }
 
+/// How a layer is fitted, moved and coloured on its output.
+#[derive(Clone, Copy)]
+pub struct Look {
+    pub fit: Fit,
+    pub transform: LayerTransform,
+    pub color: ColorAdjust,
+}
+
 pub struct DrawLayer<'a> {
     pub texture: &'a LayerTexture,
     pub opacity: f32,
     pub fit: Fit,
     pub transform: LayerTransform,
+    pub color: ColorAdjust,
 }
 
 /// Where an output's picture (its canvas) lands on a screen.
@@ -698,8 +756,11 @@ impl Gpu {
                     Slot::Output,
                     &g.geometry,
                     l.opacity,
-                    l.fit,
-                    &l.transform,
+                    &Look {
+                        fit: l.fit,
+                        transform: l.transform,
+                        color: l.color,
+                    },
                 );
             }
         }
@@ -996,5 +1057,188 @@ mod tests {
                 assert!((c - 1.0).abs() < 1e-4);
             }
         }
+    }
+
+    // ----- The shader, run for real --------------------------------------------------
+
+    /// A GPU with no window, if this machine has one (or a software one).
+    /// `NEWQ_REQUIRE_GPU` makes having none a failure instead of a skip.
+    fn test_gpu() -> Option<Gpu> {
+        let try_make = || -> Option<Gpu> {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle().with_env(),
+            );
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    apply_limit_buckets: false,
+                }))
+                .ok()?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("test"),
+                    required_limits:
+                        wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                    ..Default::default()
+                }))
+                .ok()?;
+            let compositor = Arc::new(Compositor::new(&device));
+            Some(Gpu {
+                instance,
+                adapter,
+                device,
+                queue,
+                compositor,
+            })
+        };
+        let gpu = try_make();
+        if gpu.is_none() && std::env::var_os("NEWQ_REQUIRE_GPU").is_some() {
+            panic!("NEWQ_REQUIRE_GPU is set but there is no GPU adapter");
+        }
+        gpu
+    }
+
+    /// Draw a 2×2 layer of one colour over black through the real compositor
+    /// and read back a pixel.
+    fn render_solid(gpu: &Gpu, px: [u8; 4], opacity: f32, color: &ColorAdjust) -> [u8; 4] {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let tex = LayerTexture::new_rgba(gpu, 2, 2);
+        tex.upload_rgba(&gpu.queue, &px.repeat(4));
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size: wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let pipeline = gpu.compositor.pipeline(&gpu.device, format);
+        let pin = corner_pin(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let groups = [DrawGroup {
+            layers: vec![DrawLayer {
+                texture: &tex,
+                opacity,
+                fit: Fit::Stretch,
+                transform: LayerTransform::default(),
+                color: *color,
+            }],
+            geometry: Geometry {
+                canvas: (2, 2),
+                warp: pin,
+                pin,
+            },
+        }];
+        let draw = gpu.composite(&pipeline, &view, &groups);
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: 256 * 2,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(2),
+                },
+            },
+            wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([draw, encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let data = slice.get_mapped_range().expect("mapped");
+        [data[0], data[1], data[2], data[3]]
+    }
+
+    /// What the reference maths says the pixel should come out as over black.
+    fn expected(px: [u8; 4], opacity: f32, color: &ColorAdjust) -> [u8; 3] {
+        let rgb = [px[0], px[1], px[2]].map(|v| f32::from(v) / 255.0);
+        let (out, alpha) = color::apply(rgb, color);
+        out.map(|v| (v * alpha * opacity * 255.0).round() as u8)
+    }
+
+    #[test]
+    fn the_shader_adjusts_and_keys_as_the_reference_maths_says() {
+        use crate::show::ChromaKey;
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the shader test");
+            return;
+        };
+        let adjust = |f: &dyn Fn(&mut ColorAdjust)| {
+            let mut c = ColorAdjust::default();
+            f(&mut c);
+            c
+        };
+        let green = Some(ChromaKey {
+            color: [0, 255, 0],
+            tolerance: 0.2,
+            softness: 0.1,
+            spill: 0.8,
+        });
+        let cases: Vec<([u8; 4], f32, ColorAdjust)> = vec![
+            ([200, 100, 50, 255], 1.0, ColorAdjust::default()),
+            ([200, 100, 50, 255], 0.5, ColorAdjust::default()),
+            ([200, 100, 50, 255], 1.0, adjust(&|c| c.brightness = 0.2)),
+            ([200, 100, 50, 255], 1.0, adjust(&|c| c.contrast = 1.5)),
+            ([200, 100, 50, 255], 1.0, adjust(&|c| c.saturation = 0.0)),
+            ([200, 100, 50, 255], 1.0, adjust(&|c| c.hue = 120.0)),
+            (
+                [90, 160, 200, 255],
+                1.0,
+                adjust(&|c| {
+                    c.brightness = -0.1;
+                    c.contrast = 1.3;
+                    c.saturation = 1.6;
+                    c.hue = -40.0;
+                }),
+            ),
+            ([0, 255, 0, 255], 1.0, adjust(&|c| c.key = green)),
+            ([230, 160, 130, 255], 1.0, adjust(&|c| c.key = green)),
+            ([180, 220, 120, 255], 1.0, adjust(&|c| c.key = green)),
+            (
+                [60, 190, 70, 255],
+                0.8,
+                adjust(&|c| {
+                    c.key = green;
+                    c.saturation = 1.4;
+                }),
+            ),
+        ];
+        for (px, opacity, color) in &cases {
+            let got = render_solid(&gpu, *px, *opacity, color);
+            let want = expected(*px, *opacity, color);
+            for i in 0..3 {
+                assert!(
+                    (i16::from(got[i]) - i16::from(want[i])).abs() <= 3,
+                    "{px:?} opacity {opacity} {color:?}: got {got:?}, want {want:?}"
+                );
+            }
+        }
+        // And the key really does clear the screen colour: black remains.
+        let keyed = render_solid(&gpu, [0, 255, 0, 255], 1.0, &adjust(&|c| c.key = green));
+        assert!(keyed[0] < 3 && keyed[1] < 3 && keyed[2] < 3, "{keyed:?}");
     }
 }

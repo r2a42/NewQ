@@ -125,6 +125,17 @@ includes FFmpeg, so there's nothing else to install.
   right-click to stop or fade out. Buttons show the hotkey, fill as the cue
   plays, and have a green dot when preloaded. Hotkeys don't fire while you're
   typing in a text box. Copies of a cue don't inherit its hotkey or note.
+- **Colour and chroma key:** under *Colour and key* in a visual cue's
+  inspector, adjust brightness, contrast, saturation and hue, and optionally
+  make a colour clear (a green or blue screen) so whatever is under the cue
+  shows through. The key measures distance on the chroma plane, so lighter and
+  darker shades of the screen colour go too; *Tolerance* is how far from the
+  screen colour is fully clear, *Softness* a fading edge beyond it, and *Spill*
+  pulls the screen colour's tint out of what is kept (hair and edges). The
+  order is key first, then the colour adjustments, then opacity. Edits apply
+  live while the cue plays, and work on video, images, text and cameras.
+  Adjustments are made in the same gamma space as the fades, like a hardware
+  mixer, not in linear light.
 - **Per-cue geometry:** under *Geometry* in a visual cue's inspector, move,
   scale (or mirror, with a negative scale), rotate and crop the picture on its
   output. Position is a share of the output's size, rotation is clockwise about

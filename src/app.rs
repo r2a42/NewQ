@@ -11,8 +11,8 @@ use crate::recovery;
 use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
-    Corners, DisplayRef, Fit, LayerTransform, OutputConfig, OutputId, Placement, RemoteSettings,
-    Show, SubDisplay,
+    ColorAdjust, Corners, DisplayRef, Fit, LayerTransform, OutputConfig, OutputId, Placement,
+    RemoteSettings, Show, SubDisplay,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -453,6 +453,7 @@ impl App {
                     opacity: l.opacity,
                     fit: l.fit,
                     transform: l.transform,
+                    color: l.color,
                 });
             }
 
@@ -483,6 +484,7 @@ impl App {
                     opacity: 1.0,
                     fit: Fit::Stretch,
                     transform: LayerTransform::default(),
+                    color: ColorAdjust::default(),
                 });
             }
             if pattern_changed {

@@ -3190,6 +3190,15 @@ fn media_inspector(
             .id_salt("geometry")
             .default_open(!m.transform.is_identity())
             .show(ui, |ui| geometry_inspector(ui, &mut m.transform));
+        let title = if m.color.is_default() {
+            "Colour and key"
+        } else {
+            "Colour and key •"
+        };
+        egui::CollapsingHeader::new(title)
+            .id_salt("colour")
+            .default_open(!m.color.is_default())
+            .show(ui, |ui| color_inspector(ui, &mut m.color));
     }
     if m.loop_media && !still {
         let what = if m.end.is_some() {
@@ -3468,6 +3477,70 @@ fn text_inspector(ui: &mut Ui, t: &mut TextCue) {
 }
 
 /// A percentage field for a fraction (0.25 shows as 25%).
+/// Colour correction and the chroma key of a visual cue; edits apply live.
+fn color_inspector(ui: &mut Ui, c: &mut ColorAdjust) {
+    egui::Grid::new("colour_adjust")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Brightness");
+            ui.add(egui::Slider::new(&mut c.brightness, -1.0..=1.0));
+            ui.end_row();
+            ui.label("Contrast");
+            ui.add(egui::Slider::new(&mut c.contrast, 0.0..=2.0));
+            ui.end_row();
+            ui.label("Saturation");
+            ui.add(egui::Slider::new(&mut c.saturation, 0.0..=2.0));
+            ui.end_row();
+            ui.label("Hue");
+            ui.add(egui::Slider::new(&mut c.hue, -180.0..=180.0).suffix("°"));
+            ui.end_row();
+            ui.label("Chroma key");
+            let mut on = c.key.is_some();
+            ui.checkbox(&mut on, "Make a colour clear").on_hover_text(
+                "For a green or blue screen: the chosen colour becomes transparent, \
+                     so what is under this cue shows through.",
+            );
+            if on && c.key.is_none() {
+                c.key = Some(ChromaKey::default());
+            } else if !on {
+                c.key = None;
+            }
+            ui.end_row();
+            if let Some(k) = &mut c.key {
+                ui.label("Screen colour");
+                ui.horizontal(|ui| {
+                    ui.color_edit_button_srgb(&mut k.color);
+                    if ui.small_button("Green").clicked() {
+                        k.color = [0, 255, 0];
+                    }
+                    if ui.small_button("Blue").clicked() {
+                        k.color = [0, 0, 255];
+                    }
+                });
+                ui.end_row();
+                ui.label("Tolerance");
+                ui.add(egui::Slider::new(&mut k.tolerance, 0.0..=0.6))
+                    .on_hover_text("How far from the screen colour is made fully clear.");
+                ui.end_row();
+                ui.label("Softness");
+                ui.add(egui::Slider::new(&mut k.softness, 0.0..=0.4))
+                    .on_hover_text("A soft edge, where the picture fades back in.");
+                ui.end_row();
+                ui.label("Spill");
+                ui.add(egui::Slider::new(&mut k.spill, 0.0..=1.0))
+                    .on_hover_text("Removes the screen colour's tint from what is kept.");
+                ui.end_row();
+            }
+        });
+    if ui
+        .add_enabled(!c.is_default(), egui::Button::new("Reset"))
+        .clicked()
+    {
+        *c = ColorAdjust::default();
+    }
+}
+
 fn percent(ui: &mut Ui, v: &mut f32, speed: f64) -> egui::Response {
     let mut p = *v * 100.0;
     let r = ui.add(egui::DragValue::new(&mut p).speed(speed).suffix("%"));
