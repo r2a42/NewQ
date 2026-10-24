@@ -38,12 +38,13 @@ build_arch() {
   # No external libraries and no GPL/nonfree parts: FFmpeg's own decoders,
   # demuxers and filters cover everything NewQ uses. --disable-autodetect
   # stops it picking up Homebrew libraries that wouldn't exist on users' Macs.
+  # AVFoundation is a system framework and is what camera cues capture from.
   if ! "$src/configure" \
     --arch="$arch" $cross \
     --cc="clang -arch $arch" \
     --extra-cflags="-mmacosx-version-min=${MIN_MACOS}" \
     --extra-ldflags="-arch $arch -mmacosx-version-min=${MIN_MACOS}" \
-    --disable-autodetect --enable-zlib --enable-videotoolbox \
+    --disable-autodetect --enable-zlib --enable-videotoolbox --enable-avfoundation \
     --enable-static --disable-shared \
     --disable-doc --disable-debug --disable-ffplay --disable-network \
     --disable-encoders --enable-encoder=rawvideo,wrapped_avframe,pcm_f32le,pcm_s16le,png,mpeg4,aac \

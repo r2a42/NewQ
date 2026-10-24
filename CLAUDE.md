@@ -14,6 +14,8 @@ The README describes the features; this file is about working on the code.
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
 - `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
+  `src/media/camera.rs`: camera cues' device lists and ffmpeg input.
+  The `NewQ test pattern` device stands in for a camera in tests.
 
 ## Build and test
 
@@ -30,7 +32,7 @@ NEWQ_REQUIRE_MEDIA=1 cargo test                 # ~130 tests, ~5 s once built
   In cloud sessions the SessionStart hook (`.claude/hooks/session-start.sh`)
   installs these, fetches the crates and makes the test media.
 - Use `git grep`, not `grep -r`: `test_media/` and `target/` are big.
-- Hardware can't be tested here (audio devices, MIDI ports, real displays). The
+- Hardware can't be tested here (audio devices, MIDI ports, cameras, real displays). The
   logic is tested without it: `Engine::for_tests()`, the fake `Device::for_test`
   in `audio.rs`, and the pure parsers in `remote.rs`. Say so when something was
   only tested that way.

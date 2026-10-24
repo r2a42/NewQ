@@ -3,7 +3,7 @@
 use super::ffmpeg::{ColorMatrix, Ffmpeg, VideoInfo};
 use super::playback::{Children, PassFeed, Playback};
 use anyhow::Result;
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use parking_lot::Mutex;
 use std::io::Read;
 use std::path::Path;
@@ -33,6 +33,8 @@ pub struct VideoPlayer {
     pending: Option<VideoFrame>,
     /// Increments every time `current` changes, so renderers know when to re-upload.
     pub serial: u64,
+    /// A camera: show the newest frame, whatever its time stamp says.
+    live: bool,
 }
 
 /// Compute an even-sized decode resolution no larger than the source, fitted
@@ -87,19 +89,88 @@ impl VideoPlayer {
                 cmd
             }
         };
-        let children = Children::new();
-        let error = Arc::new(Mutex::new(None));
-        let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
         // Looping passes are cut to an exact frame count so the timeline
         // stays locked to the audio's, whatever the decoder delivers.
         let per_pass = playback
             .pass_len()
             .map(|l| (l * fps).round().max(1.0) as u64);
+        Self::start(
+            make,
+            playback.passes(),
+            per_pass,
+            fps,
+            info.matrix,
+            size,
+            false,
+        )
+    }
+
+    /// Open a camera with the given ffmpeg input options (see
+    /// `camera::input_args`), delivering frames of `size`. Nothing waits for
+    /// a slow viewer: the oldest frame is dropped to make room for a new one.
+    pub fn spawn_live(
+        ff: &Ffmpeg,
+        input: Vec<String>,
+        matrix: ColorMatrix,
+        fps: u32,
+        size: (u32, u32),
+    ) -> Result<VideoPlayer> {
+        anyhow::ensure!(!input.is_empty(), "no camera chosen");
+        let (w, h) = size;
+        let make = {
+            let ff = ff.clone();
+            move || {
+                let mut cmd = ff.command();
+                cmd.args(["-fflags", "nobuffer", "-flags", "low_delay"]);
+                cmd.args(&input);
+                cmd.args([
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-sn",
+                    "-dn",
+                    "-vf",
+                    &format!("scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "pipe:1",
+                ]);
+                cmd
+            }
+        };
+        Self::start(
+            make,
+            Some(1),
+            None,
+            f64::from(fps.max(1)),
+            matrix,
+            size,
+            true,
+        )
+    }
+
+    fn start(
+        make: impl Fn() -> std::process::Command + Send + 'static,
+        passes: Option<u32>,
+        per_pass: Option<u64>,
+        fps: f64,
+        matrix: ColorMatrix,
+        size: (u32, u32),
+        live: bool,
+    ) -> Result<VideoPlayer> {
+        let (w, h) = size;
+        let children = Children::new();
+        let error = Arc::new(Mutex::new(None));
+        let mut feed = PassFeed::start(&children, passes, &error, make)?;
 
         let frame_len = (w * h + 2 * (w / 2) * (h / 2)) as usize;
         let (tx, rx) = bounded::<VideoFrame>(QUEUE_FRAMES);
         let (recycle, recycle_rx) = unbounded::<Vec<u8>>();
         let eof = Arc::new(AtomicBool::new(false));
+        let rx_reader = rx.clone();
+        let recycle_back = recycle.clone();
 
         let eof2 = eof.clone();
         std::thread::Builder::new()
@@ -123,7 +194,22 @@ impl VideoPlayer {
                             pts: (base + n) as f64 / fps,
                             data: buf,
                         };
-                        if tx.send(frame).is_err() {
+                        if live {
+                            // Newest wins: make room by dropping the oldest frame.
+                            let mut frame = frame;
+                            loop {
+                                match tx.try_send(frame) {
+                                    Ok(()) => break,
+                                    Err(TrySendError::Full(f)) => {
+                                        frame = f;
+                                        if let Ok(old) = rx_reader.try_recv() {
+                                            let _ = recycle_back.send(old.data);
+                                        }
+                                    }
+                                    Err(TrySendError::Disconnected(_)) => return,
+                                }
+                            }
+                        } else if tx.send(frame).is_err() {
                             return; // player dropped
                         }
                         n += 1;
@@ -140,7 +226,7 @@ impl VideoPlayer {
         Ok(VideoPlayer {
             width: w,
             height: h,
-            matrix: info.matrix,
+            matrix,
             rx,
             recycle,
             children,
@@ -149,6 +235,7 @@ impl VideoPlayer {
             current: None,
             pending: None,
             serial: 0,
+            live,
         })
     }
 
@@ -169,7 +256,7 @@ impl VideoPlayer {
         loop {
             self.fill_pending();
             let due = match &self.pending {
-                Some(f) => f.pts <= t || self.current.is_none(),
+                Some(f) => self.live || f.pts <= t || self.current.is_none(),
                 None => false,
             };
             if !due {
@@ -181,6 +268,11 @@ impl VideoPlayer {
             }
             self.serial += 1;
         }
+    }
+
+    /// A camera, which has no end of its own.
+    pub fn is_live(&self) -> bool {
+        self.live
     }
 
     pub fn current(&self) -> Option<&VideoFrame> {

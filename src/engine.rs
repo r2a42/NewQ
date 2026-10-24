@@ -2,7 +2,8 @@
 //! and owns the decoders for everything that is playing.
 
 use crate::media::audio::{AudioOut, Voice};
-use crate::media::ffmpeg::{Ffmpeg, MediaInfo};
+use crate::media::camera;
+use crate::media::ffmpeg::{ColorMatrix, Ffmpeg, MediaInfo};
 use crate::media::playback::Playback;
 use crate::media::video::{self, RgbaImage, VideoPlayer};
 use crate::media::{ProbeCache, ProbeState};
@@ -206,6 +207,8 @@ pub struct PendingCue {
 struct PrepSig {
     media: MediaCue,
     size: (u32, u32),
+    /// A camera's device and mode, which a file cue doesn't have.
+    camera: Option<(String, u32, u32, u32)>,
 }
 
 enum PreparedKind {
@@ -258,6 +261,10 @@ pub struct Engine {
     pub probe: ProbeCache,
     prepared: Vec<Prepared>,
     next_instance: u64,
+    /// Cameras found on this machine (the test picture first), and a scan under way.
+    cameras: Vec<String>,
+    camera_scan: Option<Receiver<Vec<String>>>,
+    scanned: bool,
 }
 
 impl Engine {
@@ -276,6 +283,9 @@ impl Engine {
             probe: ProbeCache::default(),
             prepared: Vec::new(),
             next_instance: 1,
+            cameras: vec![TEST_PATTERN_DEVICE.to_string()],
+            camera_scan: None,
+            scanned: false,
         }
     }
 
@@ -297,7 +307,39 @@ impl Engine {
             probe: ProbeCache::default(),
             prepared: Vec::new(),
             next_instance: 1,
+            cameras: vec![TEST_PATTERN_DEVICE.to_string()],
+            camera_scan: None,
+            scanned: false,
         }
+    }
+
+    /// The cameras this machine has. The first call starts a scan on a
+    /// background thread (ffmpeg takes a moment to list devices), so the
+    /// list fills in a little after the picker is first opened.
+    pub fn cameras(&mut self) -> &[String] {
+        if let Some(rx) = &self.camera_scan
+            && let Ok(list) = rx.try_recv()
+        {
+            self.cameras = list;
+            self.camera_scan = None;
+        }
+        if !self.scanned {
+            self.refresh_cameras();
+        }
+        &self.cameras
+    }
+
+    /// Look for cameras again, e.g. after plugging one in.
+    pub fn refresh_cameras(&mut self) {
+        self.scanned = true;
+        let Some(ff) = self.ff.clone() else { return };
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.camera_scan = Some(rx);
+        let _ = std::thread::Builder::new()
+            .name("camera-scan".into())
+            .spawn(move || {
+                let _ = tx.send(camera::list_devices(&ff));
+            });
     }
 
     pub fn log(&mut self, msg: impl Into<String>) {
@@ -333,6 +375,7 @@ impl Engine {
             }
             CueKind::Image(m) => Some(m.end.filter(|d| *d > 0.0)),
             CueKind::Text(t) => Some(t.media.end.filter(|d| *d > 0.0)),
+            CueKind::Camera(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Stop(_) => Some(Some(0.0)),
@@ -565,10 +608,52 @@ impl Engine {
     }
 
     fn signature(&self, cue: &Cue) -> Option<PrepSig> {
+        if let CueKind::Camera(c) = &cue.kind {
+            return Some(PrepSig {
+                media: c.media.clone(),
+                size: self.output_size(c.media.output),
+                camera: Some((c.device.clone(), c.width, c.height, c.fps)),
+            });
+        }
         let m = cue.kind.file_media()?;
         Some(PrepSig {
             media: m.clone(),
             size: self.output_size(m.output),
+            camera: None,
+        })
+    }
+
+    /// Open a camera. It starts delivering frames at once and keeps only the
+    /// newest, so it can be opened ahead of GO.
+    fn prepare_camera(&self, cue: &Cue, c: &CameraCue) -> Result<Prepared, String> {
+        let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
+        let sig = self.signature(cue).ok_or("not a camera cue")?;
+        if c.device.is_empty() {
+            return Err("no camera chosen".into());
+        }
+        let size = video::decode_size((c.width, c.height), sig.size, c.media.fit == Fit::Cover);
+        let input = camera::input_args(
+            camera::Platform::current(),
+            &c.device,
+            c.width,
+            c.height,
+            c.fps,
+        );
+        let matrix = if c.height >= 720 {
+            ColorMatrix::Bt709
+        } else {
+            ColorMatrix::Bt601
+        };
+        let player = VideoPlayer::spawn_live(ff, input, matrix, c.fps, size)
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(Prepared {
+            cue_id: cue.id,
+            sig,
+            kind: PreparedKind::Video {
+                player,
+                voice: None,
+            },
+            duration: c.media.end.filter(|d| *d > 0.0),
         })
     }
 
@@ -655,6 +740,7 @@ impl Engine {
             sig: PrepSig {
                 media: t.media.clone(),
                 size,
+                camera: None,
             },
             kind: PreparedKind::Text(crate::text::render(t, size)),
             duration: t.media.end.filter(|d| *d > 0.0),
@@ -735,6 +821,7 @@ impl Engine {
         let dips = match &cue.kind {
             CueKind::Video(m) | CueKind::Image(m) => Some(m),
             CueKind::Text(t) => Some(&t.media),
+            CueKind::Camera(c) => Some(&c.media),
             _ => None,
         };
         if reveal.is_none()
@@ -764,13 +851,18 @@ impl Engine {
         };
         let mut ok = true;
         match &cue.kind {
-            CueKind::Video(_) | CueKind::Image(_) | CueKind::Audio(_) | CueKind::Text(_) => {
+            CueKind::Video(_)
+            | CueKind::Image(_)
+            | CueKind::Audio(_)
+            | CueKind::Text(_)
+            | CueKind::Camera(_) => {
                 let m = cue.kind.media().expect("these cues have playback settings");
                 let prepared = match self.take_prepared(&cue) {
                     Some(p) => Ok(p),
                     None => match (&cue.kind, &self.ff) {
                         (CueKind::Text(t), _) => Ok(self.prepare_text(&cue, t)),
                         (_, None) => Err("ffmpeg not found".to_string()),
+                        (CueKind::Camera(c), Some(_)) => self.prepare_camera(&cue, c),
                         (_, Some(ff)) => {
                             let ff = ff.clone();
                             self.probe
@@ -1056,7 +1148,17 @@ impl Engine {
                         }
                         v.player.update(a.elapsed);
                         let audio_done = v.voice.as_ref().is_none_or(|vo| vo.finished());
-                        if v.player.finished() && audio_done && !a.held {
+                        // A camera never ends by itself; "run for" ends it.
+                        if v.player.is_live() && a.duration.is_some_and(|d| a.elapsed >= d) {
+                            completed = true;
+                        } else if v.player.finished() && audio_done && !a.held {
+                            if v.player.is_live() {
+                                let err = v.player.error().unwrap_or_else(|| "it stopped".into());
+                                messages.push(format!(
+                                    "Cue {}: camera lost: {err}",
+                                    cue.map(|c| c.number.as_str()).unwrap_or("?")
+                                ));
+                            }
                             if media.is_some_and(|m| m.hold_last_frame) && !a.stopping {
                                 a.held = true;
                                 completed_follow(a, cue, &mut follow);
@@ -1268,7 +1370,7 @@ impl Engine {
                 && show.cues[i].parent.is_none()
                 && show.cues[i].continue_mode == ContinueMode::AutoFollow
                 && let Some(next) = show.next_armed_top(i)
-                && show.cues[next].kind.file_media().is_some()
+                && show.cues[next].kind.preloads()
             {
                 wanted.push(show.cues[next].id);
             }
@@ -1276,9 +1378,7 @@ impl Engine {
             if let ActiveKind::Group(g) = &a.kind
                 && g.mode == GroupMode::Playlist
                 && let Some(&next) = g.children.get(g.next)
-                && show
-                    .cue(next)
-                    .is_some_and(|c| c.kind.file_media().is_some())
+                && show.cue(next).is_some_and(|c| c.kind.preloads())
             {
                 wanted.push(next);
             }
@@ -1290,7 +1390,7 @@ impl Engine {
         {
             loop {
                 let cue = &show.cues[idx];
-                if cue.kind.file_media().is_some() {
+                if cue.kind.preloads() {
                     wanted.push(cue.id);
                 }
                 // A group at the playhead: the children that start with it.
@@ -1300,7 +1400,7 @@ impl Engine {
                         if mode == GroupMode::Playlist && n > 0 {
                             break;
                         }
-                        if child.kind.file_media().is_some() && wanted.len() < MAX_PRELOAD {
+                        if child.kind.preloads() && wanted.len() < MAX_PRELOAD {
                             wanted.push(child.id);
                         }
                     }
@@ -1333,6 +1433,17 @@ impl Engine {
                 continue;
             }
             let Some(cue) = show.cue(id) else { continue };
+            if let CueKind::Camera(c) = &cue.kind {
+                // Two cues can't have one camera open at once on every system.
+                if self.camera_in_use(show, &c.device) {
+                    continue;
+                }
+                match self.prepare_camera(cue, c) {
+                    Ok(p) => self.prepared.push(p),
+                    Err(e) => log::debug!("preload of cue {} failed: {e}", cue.number),
+                }
+                continue;
+            }
             let Some(m) = cue.kind.file_media() else {
                 continue;
             };
@@ -1345,6 +1456,17 @@ impl Engine {
                 Err(e) => log::debug!("preload of cue {} failed: {e}", cue.number),
             }
         }
+    }
+
+    /// A playing camera cue has this device open.
+    fn camera_in_use(&self, show: &Show, device: &str) -> bool {
+        device != TEST_PATTERN_DEVICE
+            && self.active.iter().any(|a| {
+                matches!(
+                    show.cue(a.cue_id).map(|c| &c.kind),
+                    Some(CueKind::Camera(c)) if c.device == device
+                )
+            })
     }
 
     /// Visual layers on an output, bottom to top.
@@ -2122,5 +2244,138 @@ mod tests {
         e.go(&show);
         run_for(&mut e, &show, 0.3);
         assert!(e.is_prepared(b), "pre-wait cue must stay preloaded");
+    }
+
+    // ----- Camera cues, using the built-in test picture as the "camera" ------------
+
+    fn camera_cue(show: &mut Show, device: &str) -> CueId {
+        let mut c = show.make_cue(CueType::Camera, None, show.cues.len());
+        if let CueKind::Camera(cam) = &mut c.kind {
+            cam.device = device.into();
+            cam.width = 320;
+            cam.height = 180;
+            cam.media.transition = Transition::Cut;
+            cam.media.fade_in = 0.0;
+            cam.media.fade_out = 0.0;
+        }
+        let id = c.id;
+        show.cues.push(c);
+        id
+    }
+
+    fn shown_frames(e: &Engine, id: CueId) -> u64 {
+        e.active
+            .iter()
+            .find(|a| a.cue_id == id)
+            .and_then(|a| match &a.kind {
+                ActiveKind::Video(v) => Some(v.player.serial),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_camera_cue_shows_a_live_picture_and_stops_when_asked() {
+        let Some((mut e, _)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let cam = camera_cue(&mut show, TEST_PATTERN_DEVICE);
+        e.playhead = Some(cam);
+        e.go(&show);
+        run_until(&mut e, &show, "camera on screen", |e| {
+            stack(e, out).len() == 1
+        });
+        assert_eq!(stack(&e, out), vec![(Some(cam), None, 1.0)]);
+        // Live: no length, and new pictures keep arriving.
+        assert_eq!(e.active[0].duration, None);
+        let first = shown_frames(&e, cam);
+        run_for(&mut e, &show, 0.6);
+        assert!(shown_frames(&e, cam) >= first + 8, "picture is not moving");
+        assert!(stack(&e, out).len() == 1);
+        e.stop_all(0.0);
+        e.tick(&show, 0.01);
+        assert!(stack(&e, out).is_empty());
+    }
+
+    #[test]
+    fn a_camera_cue_can_run_for_a_set_time() {
+        let Some((mut e, _)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let cam = camera_cue(&mut show, TEST_PATTERN_DEVICE);
+        if let CueKind::Camera(c) = &mut show.cues[0].kind {
+            c.media.end = Some(0.5);
+        }
+        e.playhead = Some(cam);
+        e.go(&show);
+        run_until(&mut e, &show, "camera running", |e| {
+            shown_frames(e, cam) > 0
+        });
+        run_until(&mut e, &show, "camera cue to end", |e| e.active.is_empty());
+    }
+
+    #[test]
+    fn a_camera_is_opened_ahead_of_go() {
+        let Some((mut e, _)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let cam = camera_cue(&mut show, TEST_PATTERN_DEVICE);
+        e.playhead = Some(cam);
+        e.tick(&show, 0.1);
+        assert!(e.is_prepared(cam), "the camera should be open before GO");
+        e.go(&show);
+        // GO takes the open camera rather than opening a second one.
+        assert!(!e.is_prepared(cam));
+        run_until(&mut e, &show, "camera on screen", |e| {
+            shown_frames(e, cam) > 0
+        });
+        // Changing the mode closes the preloaded camera and opens it again.
+        let mut show2 = Show::default();
+        let next = camera_cue(&mut show2, TEST_PATTERN_DEVICE);
+        let mut e2 = engine_without_media();
+        e2.ff = e.ff.clone();
+        e2.playhead = Some(next);
+        e2.tick(&show2, 0.1);
+        assert!(e2.is_prepared(next));
+        if let CueKind::Camera(c) = &mut show2.cues[0].kind {
+            c.fps = 15;
+        }
+        e2.tick(&show2, 0.1);
+        assert!(e2.is_prepared(next));
+        assert_eq!(e2.prepared.len(), 1);
+        assert_eq!(e2.prepared[0].sig.camera.as_ref().map(|c| c.3), Some(15));
+    }
+
+    #[test]
+    fn a_camera_cue_without_a_camera_says_so() {
+        let Some((mut e, _)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let cam = camera_cue(&mut show, "");
+        e.playhead = Some(cam);
+        e.go(&show);
+        assert!(e.active.is_empty());
+        let (_, msg) = e.messages.back().expect("a message");
+        assert!(msg.contains("no camera chosen"), "{msg}");
+    }
+
+    #[test]
+    fn a_camera_that_cannot_be_opened_ends_the_cue_with_the_reason() {
+        let Some((mut e, _)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        // Not a device on any system: ffmpeg fails to open it.
+        let cam = camera_cue(&mut show, "/dev/no-such-camera");
+        e.playhead = Some(cam);
+        e.go(&show);
+        run_until(&mut e, &show, "the failure", |e| e.active.is_empty());
+        let (_, msg) = e.messages.back().expect("a message");
+        assert!(msg.contains("video failed"), "{msg}");
     }
 }
