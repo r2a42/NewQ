@@ -67,7 +67,7 @@ pub fn open_log(dir: &Path) -> Option<std::fs::File> {
 /// Whether the log should go to a file: always when asked (`NEWQ_LOG_FILE`),
 /// and by default where there is no console to see it on.
 pub fn log_to_file(os: Os, debug_build: bool, asked: bool) -> bool {
-    asked || (os == Os::Windows && !debug_build)
+    asked || (matches!(os, Os::Windows | Os::Mac) && !debug_build)
 }
 
 /// The text of a crash report.
@@ -197,7 +197,11 @@ mod tests {
         );
         assert!(!log_to_file(Os::Windows, true, false), "a debug build does");
         assert!(!log_to_file(Os::Other, false, false));
-        assert!(!log_to_file(Os::Mac, false, false));
+        assert!(
+            log_to_file(Os::Mac, false, false),
+            "so does an app opened from the Finder"
+        );
+        assert!(!log_to_file(Os::Mac, true, false));
         assert!(
             log_to_file(Os::Other, true, true),
             "NEWQ_LOG_FILE asks for it anywhere"
