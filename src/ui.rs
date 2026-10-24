@@ -5,6 +5,7 @@ use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
 use crate::media::{ProbeState, camera};
 use crate::recovery;
+use crate::relink;
 use crate::remote::{Command, RemoteStatus};
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
@@ -44,6 +45,14 @@ pub struct PreviewOutput {
     pub canvas: (u32, u32),
 }
 
+/// Copying a show's media into a folder, on its own thread.
+struct CollectJob {
+    done: std::sync::mpsc::Receiver<relink::Collected>,
+    progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
+    dest: PathBuf,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub selected: Option<CueId>,
@@ -75,6 +84,11 @@ pub struct UiState {
     pub dirty: bool,
     /// Whether the cart (buttons for the cues put on it) is showing.
     pub show_cart: bool,
+    /// Whether the media window is open, and what it last did.
+    pub show_media: bool,
+    media_note: String,
+    /// Media being copied into one folder, in the background.
+    collect_job: Option<CollectJob>,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -85,6 +99,13 @@ pub struct UiState {
 }
 
 impl UiState {
+    /// Open the media window if the show has files that can't be found.
+    pub fn check_media(&mut self, show: &Show) {
+        if !relink::missing(show).is_empty() {
+            self.show_media = true;
+        }
+    }
+
     /// Treat `show` as the one on disk, for the unsaved-changes mark (used
     /// when a recovered copy is opened over the saved show).
     pub fn set_saved(&mut self, show: &Show) {
@@ -161,6 +182,13 @@ enum Action {
     StopCue(CueId),
     FadeOutCue(CueId),
     ToggleCart,
+    ToggleMedia,
+    /// Look for the missing files in this folder.
+    RelinkFolder(PathBuf),
+    /// Point the cues that used this cue's file at another file.
+    RelinkCue(CueId, PathBuf),
+    /// Copy all the media into this folder.
+    CollectMedia(PathBuf),
     /// Wait for a key press to use as this cue's hotkey (None: stop waiting).
     CaptureHotkey(Option<CueId>),
     SetHotkey(CueId, Option<String>),
@@ -229,6 +257,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         st.history.reset(json);
     }
     let mut actions: Vec<Action> = Vec::new();
+    poll_collect(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -289,6 +318,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 .show(ui, |ui| inspector(ui, show, engine, st, &mut actions));
         });
     egui::CentralPanel::default().show(ui, |ui| cue_list(ui, show, engine, st, &mut actions));
+    media_window(ui.ctx(), show, st, &mut actions);
 
     // Actions change state after this frame was laid out; show the result now
     // rather than on the next mouse move.
@@ -518,6 +548,10 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 .clicked()
             {
                 actions.push(Action::SaveAs);
+            }
+            ui.separator();
+            if ui.button("Media…").clicked() {
+                actions.push(Action::ToggleMedia);
             }
             ui.separator();
             if ui.button("Quit").clicked() {
@@ -1221,6 +1255,188 @@ fn cart(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
             });
         }
     });
+}
+
+/// Apply a finished copy of the media to the show's cues.
+fn poll_collect(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
+    let Some(job) = &st.collect_job else { return };
+    match job.done.try_recv() {
+        Ok(result) => {
+            let dest = job.dest.clone();
+            st.collect_job = None;
+            // Its own step in the undo history, apart from any edit in progress.
+            st.history.end_burst();
+            let n = relink::apply(show, &result.moved);
+            st.history.observe(
+                &serde_json::to_string(show).unwrap_or_default(),
+                ctx.input(|i| i.time),
+            );
+            st.history.end_burst();
+            let mut note = format!(
+                "Copied {} file{} into {}",
+                result.copied,
+                if result.copied == 1 { "" } else { "s" },
+                dest.display()
+            );
+            if result.already_there > 0 {
+                note.push_str(&format!(" ({} were already there)", result.already_there));
+            }
+            note.push_str(&format!(
+                "; {n} cue{} now use the copies.",
+                if n == 1 { "" } else { "s" }
+            ));
+            if let Some((file, why)) = result.failed.first() {
+                note.push_str(&format!(
+                    " {} could not be copied (first: {}: {why}).",
+                    result.failed.len(),
+                    file.display()
+                ));
+            }
+            st.media_note = note;
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            st.collect_job = None;
+            st.media_note = "Copying stopped unexpectedly.".into();
+        }
+    }
+}
+
+/// The media window: every file the show uses, which are missing, finding
+/// them again, and copying them all into one folder.
+fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    if !st.show_media {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Media")
+        .open(&mut open)
+        .default_width(620.0)
+        .default_height(360.0)
+        .show(ctx, |ui| {
+            let files: Vec<(&Cue, &MediaCue)> = show
+                .cues
+                .iter()
+                .filter_map(|c| c.kind.file_media().map(|m| (c, m)))
+                .filter(|(_, m)| !m.file.as_os_str().is_empty())
+                .collect();
+            let missing = relink::missing(show);
+            ui.horizontal_wrapped(|ui| {
+                if missing.is_empty() {
+                    ui.label(
+                        RichText::new(format!("All {} files are in place.", files.len()))
+                            .color(GO_GREEN),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} of {} files can't be found.",
+                            missing.len(),
+                            files.len()
+                        ))
+                        .color(STOP_RED),
+                    );
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !missing.is_empty(),
+                        egui::Button::new("Search a folder for missing files…"),
+                    )
+                    .on_hover_text(
+                        "Looks in the folder you choose, and everything inside it, for files \
+                         with the same names.",
+                    )
+                    .clicked()
+                    && let Some(dir) = rfd::FileDialog::new()
+                        .set_title("Where are the media files now?")
+                        .pick_folder()
+                {
+                    actions.push(Action::RelinkFolder(dir));
+                }
+                if ui
+                    .add_enabled(
+                        !files.is_empty() && st.collect_job.is_none(),
+                        egui::Button::new("Copy all media into a folder…"),
+                    )
+                    .on_hover_text(
+                        "Copies every file the show uses into one folder and points the cues \
+                         at the copies, so the show and the folder can move together.",
+                    )
+                    .clicked()
+                {
+                    let mut dialog = rfd::FileDialog::new().set_title("Copy the media into…");
+                    if let Some(dir) = st.show_path.as_deref().and_then(|p| p.parent()) {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(dir) = dialog.pick_folder() {
+                        actions.push(Action::CollectMedia(dir));
+                    }
+                }
+            });
+            if let Some(job) = &st.collect_job {
+                let done = job.progress.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(
+                    egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!(
+                        "Copying {done} of {} into {}",
+                        job.total,
+                        job.dest.display()
+                    )),
+                );
+            }
+            if !st.media_note.is_empty() {
+                ui.label(RichText::new(&st.media_note).color(PLAYHEAD));
+            }
+            ui.separator();
+            ui.set_min_width(560.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("media_files")
+                    .num_columns(3)
+                    .spacing([12.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (cue, m) in &files {
+                            let gone = !m.file.is_file();
+                            ui.label(if gone {
+                                RichText::new("⚠").color(STOP_RED)
+                            } else {
+                                RichText::new("✔").color(GO_GREEN)
+                            });
+                            ui.vertical(|ui| {
+                                ui.set_min_width(420.0);
+                                ui.add(
+                                    egui::Label::new(format!("{}  {}", cue.number, cue.name))
+                                        .truncate(),
+                                );
+                                let path_color = if gone {
+                                    STOP_RED
+                                } else {
+                                    ui.visuals().weak_text_color()
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(m.file.display().to_string())
+                                            .small()
+                                            .color(path_color),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                            if gone
+                                && ui.button("Locate…").clicked()
+                                && let Some(f) = media_dialog(cue.kind.cue_type()).pick_file()
+                            {
+                                actions.push(Action::RelinkCue(cue.id, f));
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        });
+    st.show_media = open;
 }
 
 fn secs_short(t: f64) -> String {
@@ -3283,6 +3499,7 @@ fn load_into(
     st.selected = engine.playhead;
     st.show_path = path;
     st.saved_json = serde_json::to_string(show).ok();
+    st.check_media(show);
     // A different show has a history of its own.
     if let Some(json) = &st.saved_json {
         st.history.reset(json.clone());
@@ -3534,6 +3751,65 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::StopCue(id) => engine.stop_cue(id, 0.0),
         Action::FadeOutCue(id) => engine.fade_out_cue(show, id),
         Action::ToggleCart => st.show_cart = !st.show_cart,
+        Action::ToggleMedia => st.show_media = !st.show_media,
+        Action::RelinkFolder(root) => {
+            let wanted: Vec<PathBuf> = {
+                let mut v: Vec<PathBuf> = relink::missing(show).into_iter().map(|m| m.1).collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            let found = relink::search(&root, &wanted);
+            relink::apply(show, &found);
+            st.media_note = format!(
+                "Found {} of {} missing files in {}.",
+                found.len(),
+                wanted.len(),
+                root.display()
+            );
+        }
+        Action::RelinkCue(id, new) => {
+            let old = show
+                .cue(id)
+                .and_then(|c| c.kind.file_media())
+                .map(|m| m.file.clone());
+            if let Some(old) = old {
+                let n = relink::apply(show, &HashMap::from([(old, new.clone())]));
+                st.media_note = format!(
+                    "Linked {n} cue{} to {}.",
+                    if n == 1 { "" } else { "s" },
+                    new.display()
+                );
+                engine.probe.invalidate(&new);
+            }
+        }
+        Action::CollectMedia(dest) => {
+            if st.collect_job.is_none() {
+                let mut files: Vec<PathBuf> = show
+                    .cues
+                    .iter()
+                    .filter_map(|c| c.kind.file_media())
+                    .map(|m| m.file.clone())
+                    .filter(|f| !f.as_os_str().is_empty())
+                    .collect();
+                files.sort();
+                files.dedup();
+                let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let (tx, done) = std::sync::mpsc::channel();
+                let (p, d, total) = (progress.clone(), dest.clone(), files.len());
+                let _ = std::thread::Builder::new()
+                    .name("collect-media".into())
+                    .spawn(move || {
+                        let _ = tx.send(relink::collect(&d, &files, &p));
+                    });
+                st.collect_job = Some(CollectJob {
+                    done,
+                    progress,
+                    total,
+                    dest,
+                });
+            }
+        }
         Action::CaptureHotkey(id) => st.capture_hotkey = id,
         Action::SetHotkey(id, key) => {
             show.set_hotkey(id, key);
@@ -4569,5 +4845,160 @@ mod tests {
         let c = show.make_cue(CueType::Send, None, 0);
         assert_eq!(cue_target_text(&show, &c), "OSC 127.0.0.1:53000 /go");
         assert_eq!(c.kind.cue_type().label(), "Send");
+    }
+
+    // ----- The media window ----------------------------------------------------------
+
+    fn media_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("newq_ui_media_{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("new")).unwrap();
+        std::fs::write(d.join("new/a.mp4"), "a").unwrap();
+        std::fs::write(d.join("new/b.mp4"), "b").unwrap();
+        d
+    }
+
+    fn video_cue(show: &mut Show, file: PathBuf) -> CueId {
+        let c = show.make_cue(CueType::Video, Some(file), show.cues.len());
+        let id = c.id;
+        show.cues.push(c);
+        id
+    }
+
+    fn file_of(show: &Show, id: CueId) -> PathBuf {
+        show.cue(id)
+            .unwrap()
+            .kind
+            .file_media()
+            .unwrap()
+            .file
+            .clone()
+    }
+
+    #[test]
+    fn missing_media_opens_the_window_and_a_folder_search_relinks_it() {
+        let d = media_dir("search");
+        let mut show = Show::default();
+        let a = video_cue(&mut show, PathBuf::from("/old/place/a.mp4"));
+        let b = video_cue(&mut show, PathBuf::from("/old/place/b.mp4"));
+        let lost = video_cue(&mut show, PathBuf::from("/old/place/lost.mp4"));
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        st.check_media(&show);
+        assert!(st.show_media, "files are missing, so the window opens");
+        frame_end(&show, &mut st, 0.0, false);
+
+        apply(
+            Action::RelinkFolder(d.join("new")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(file_of(&show, a), d.join("new/a.mp4"));
+        assert_eq!(file_of(&show, b), d.join("new/b.mp4"));
+        assert_eq!(file_of(&show, lost), PathBuf::from("/old/place/lost.mp4"));
+        assert!(
+            st.media_note.starts_with("Found 2 of 3"),
+            "{}",
+            st.media_note
+        );
+        assert_eq!(relink::missing(&show).len(), 1);
+        // It is one step in the undo history.
+        frame_end(&show, &mut st, 1.0, true);
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(relink::missing(&show).len(), 3);
+
+        // Nothing missing: opening a show doesn't pop the window.
+        let mut ok = Show::default();
+        video_cue(&mut ok, d.join("new/a.mp4"));
+        let mut st2 = UiState::default();
+        st2.check_media(&ok);
+        assert!(!st2.show_media);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn locating_one_file_relinks_every_cue_that_shared_it() {
+        let d = media_dir("locate");
+        let mut show = Show::default();
+        let old = PathBuf::from("/old/shared.mp4");
+        let one = video_cue(&mut show, old.clone());
+        let two = video_cue(&mut show, old);
+        let other = video_cue(&mut show, PathBuf::from("/old/other.mp4"));
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        apply(
+            Action::RelinkCue(one, d.join("new/a.mp4")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(file_of(&show, one), d.join("new/a.mp4"));
+        assert_eq!(file_of(&show, two), d.join("new/a.mp4"));
+        assert_eq!(file_of(&show, other), PathBuf::from("/old/other.mp4"));
+        assert!(
+            st.media_note.starts_with("Linked 2 cues"),
+            "{}",
+            st.media_note
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collecting_media_copies_in_the_background_and_then_updates_the_cues() {
+        let d = media_dir("collect");
+        let mut show = Show::default();
+        let a = video_cue(&mut show, d.join("new/a.mp4"));
+        let b = video_cue(&mut show, d.join("new/b.mp4"));
+        let gone = video_cue(&mut show, d.join("new/gone.mp4"));
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        frame_end(&show, &mut st, 0.0, false);
+        let dest = d.join("show/media");
+        apply(
+            Action::CollectMedia(dest.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(st.collect_job.is_some());
+        // A second request while one runs is ignored.
+        apply(
+            Action::CollectMedia(d.join("other")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        let ctx = egui::Context::default();
+        let t0 = std::time::Instant::now();
+        while st.collect_job.is_some() {
+            assert!(t0.elapsed().as_secs() < 10, "the copy never finished");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            poll_collect(&ctx, &mut show, &mut st);
+        }
+        assert_eq!(file_of(&show, a), dest.join("a.mp4"));
+        assert_eq!(file_of(&show, b), dest.join("b.mp4"));
+        assert_eq!(
+            file_of(&show, gone),
+            d.join("new/gone.mp4"),
+            "a missing file stays as it was"
+        );
+        assert_eq!(std::fs::read_to_string(dest.join("b.mp4")).unwrap(), "b");
+        assert!(
+            st.media_note.starts_with("Copied 2 files"),
+            "{}",
+            st.media_note
+        );
+        assert!(
+            st.media_note.contains("1 could not be copied"),
+            "{}",
+            st.media_note
+        );
+        assert!(!d.join("other").exists(), "the second request was ignored");
+        // The change can be undone (the copies stay on disk).
+        assert!(st.history.can_undo());
+        apply(Action::Undo, &mut show, &mut e, &mut st);
+        assert_eq!(file_of(&show, a), d.join("new/a.mp4"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -17,6 +17,7 @@ The README describes the features; this file is about working on the code.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.
   `src/output.rs`: send cues' OSC and MIDI messages and the sender thread.
+  `src/relink.rs`: finding moved media and copying it into one folder.
   `src/recovery.rs`: autosave copies. `src/media/camera.rs`: camera cues'
   device lists and ffmpeg input.
   The `NewQ test pattern` device stands in for a camera in tests.

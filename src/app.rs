@@ -137,6 +137,7 @@ impl App {
         engine.playhead = show.cues.first().map(|c| c.id);
         ui.selected = engine.playhead;
         let pending_recovery = recovery::pending(ui.show_path.as_deref());
+        ui.check_media(&show);
         App {
             remote: Remote::new(wake),
             remote_seen: (RemoteSettings::default(), Instant::now()),
