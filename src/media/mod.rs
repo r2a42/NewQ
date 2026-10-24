@@ -3,6 +3,7 @@ pub mod camera;
 pub mod ffmpeg;
 pub mod playback;
 pub mod video;
+pub mod waveform;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ffmpeg::{Ffmpeg, MediaInfo};

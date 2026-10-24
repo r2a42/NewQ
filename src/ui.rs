@@ -3,6 +3,7 @@
 use crate::engine::{CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
+use crate::media::waveform::WaveState;
 use crate::media::{ProbeState, camera};
 use crate::recovery;
 use crate::relink;
@@ -2989,6 +2990,7 @@ fn media_inspector(
                     && let Some(f) = media_dialog(ty).pick_file()
                 {
                     engine.probe.invalidate(&f);
+                    engine.waveforms.invalidate(&f);
                     m.file = f;
                 }
             });
@@ -3159,6 +3161,11 @@ fn media_inspector(
                     m.end = has_end.then_some(end.max(m.start));
                 });
                 ui.end_row();
+                if ty != CueType::Image {
+                    ui.label("Waveform");
+                    waveform_trim(ui, m, engine);
+                    ui.end_row();
+                }
                 ui.label("");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut m.loop_media, "Loop");
@@ -3477,6 +3484,155 @@ fn text_inspector(ui: &mut Ui, t: &mut TextCue) {
 }
 
 /// A percentage field for a fraction (0.25 shows as 25%).
+/// Which end of the played part a drag on the waveform moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrimHandle {
+    In,
+    Out,
+}
+
+/// The shortest played part the handles allow, in seconds.
+const MIN_TRIM: f64 = 0.05;
+
+/// The handle nearest to time `t`. With no out point the out handle is at the
+/// end of the file.
+fn nearest_handle(t: f64, start: f64, end: Option<f64>, duration: f64) -> TrimHandle {
+    let out = end.unwrap_or(duration);
+    if (t - start).abs() <= (t - out).abs() {
+        TrimHandle::In
+    } else {
+        TrimHandle::Out
+    }
+}
+
+/// Move a handle to time `t`, keeping the in point before the out point and
+/// both inside the file. An out point at the very end of the file is no out
+/// point at all. Returns the new in point and out point.
+fn move_handle(
+    handle: TrimHandle,
+    t: f64,
+    start: f64,
+    end: Option<f64>,
+    duration: f64,
+) -> (f64, Option<f64>) {
+    let out = end.unwrap_or(duration);
+    match handle {
+        TrimHandle::In => (t.clamp(0.0, (out - MIN_TRIM).max(0.0)), end),
+        TrimHandle::Out => {
+            let new = t.clamp((start + MIN_TRIM).min(duration), duration);
+            (start, (new < duration - 0.02).then_some(new))
+        }
+    }
+}
+
+/// The sound of a media cue, with the played part marked: drag the yellow
+/// ends to set the in and out points by eye (click moves the nearer one).
+fn waveform_trim(ui: &mut Ui, m: &mut MediaCue, engine: &mut Engine) {
+    if m.file.as_os_str().is_empty() {
+        ui.label(RichText::new("Choose a file").weak());
+        return;
+    }
+    let hint = match engine.probe_state(&m.file) {
+        ProbeState::Ready(i) => i.duration,
+        _ => None,
+    };
+    let ff = engine.ff.clone();
+    let wave = match engine.waveforms.get(ff.as_ref(), &m.file, hint) {
+        WaveState::Ready(w) => w.clone(),
+        WaveState::Pending => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Reading the sound…").weak());
+            });
+            return;
+        }
+        WaveState::Failed(why) => {
+            ui.label(RichText::new(format!("No waveform: {why}")).weak().small());
+            return;
+        }
+    };
+    let dur = wave.duration.max(0.001);
+    ui.vertical(|ui| {
+        let width = ui.available_width().clamp(260.0, 720.0);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 64.0), Sense::click_and_drag());
+        let to_t = |x: f32| (f64::from(x - rect.left()) / f64::from(rect.width())) * dur;
+        let to_x = |t: f64| rect.left() + (t / dur) as f32 * rect.width();
+        let pos = resp.interact_pointer_pos();
+        // The handle picked when a drag begins stays the one dragged.
+        let id = resp.id.with("handle");
+        if (resp.drag_started() || resp.clicked())
+            && let Some(p) = pos
+        {
+            let h = nearest_handle(to_t(p.x), m.start, m.end, dur);
+            ui.memory_mut(|mem| mem.data.insert_temp(id, h));
+        }
+        if (resp.dragged() || resp.clicked())
+            && let Some(p) = pos
+            && let Some(h) = ui.memory(|mem| mem.data.get_temp::<TrimHandle>(id))
+        {
+            (m.start, m.end) = move_handle(h, to_t(p.x), m.start, m.end, dur);
+        }
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+        let (from, to) = (
+            to_x(m.start.clamp(0.0, dur)),
+            to_x(m.end.unwrap_or(dur).clamp(0.0, dur)),
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(from, rect.top()), egui::pos2(to, rect.bottom())),
+            0.0,
+            ui.visuals().faint_bg_color,
+        );
+        let mid = rect.center().y;
+        let half = rect.height() / 2.0 - 3.0;
+        for px in 0..rect.width() as usize {
+            let x = rect.left() + px as f32;
+            let peak = wave.peak_between(to_t(x), to_t(x + 1.0)).sqrt();
+            let h = (peak * half).max(0.5);
+            let color = if x >= from && x <= to {
+                PLAYING.gamma_multiply(1.4)
+            } else {
+                ui.visuals().weak_text_color().gamma_multiply(0.5)
+            };
+            painter.line_segment(
+                [egui::pos2(x + 0.5, mid - h), egui::pos2(x + 0.5, mid + h)],
+                Stroke::new(1.0, color),
+            );
+        }
+        for x in [from, to] {
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                Stroke::new(2.0, PLAYHEAD),
+            );
+            let grip = egui::Rect::from_center_size(
+                egui::pos2(x, rect.top() + 6.0),
+                Vec2::new(10.0, 10.0),
+            );
+            painter.rect_filled(grip, 2.0, PLAYHEAD);
+        }
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        let out = m.end.unwrap_or(dur);
+        ui.label(
+            RichText::new(format!(
+                "In {} · Out {}{} · plays {}   (drag the yellow ends)",
+                fmt_time(m.start),
+                fmt_time(out),
+                if m.end.is_none() {
+                    " (end of file)"
+                } else {
+                    ""
+                },
+                fmt_time((out - m.start).max(0.0)),
+            ))
+            .weak()
+            .small(),
+        );
+    });
+}
+
 /// Colour correction and the chroma key of a visual cue; edits apply live.
 fn color_inspector(ui: &mut Ui, c: &mut ColorAdjust) {
     egui::Grid::new("colour_adjust")
@@ -5284,5 +5440,48 @@ mod tests {
         apply(Action::FindOnComputer, &mut fine, &mut e, &mut st);
         assert!(st.search.is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ----- Trimming on the waveform ---------------------------------------------------
+
+    #[test]
+    fn a_drag_picks_the_nearer_end_and_moves_only_that() {
+        // A 10 s file played from 2 s to 6 s.
+        assert_eq!(nearest_handle(1.0, 2.0, Some(6.0), 10.0), TrimHandle::In);
+        assert_eq!(nearest_handle(3.9, 2.0, Some(6.0), 10.0), TrimHandle::In);
+        assert_eq!(nearest_handle(4.1, 2.0, Some(6.0), 10.0), TrimHandle::Out);
+        assert_eq!(nearest_handle(9.0, 2.0, Some(6.0), 10.0), TrimHandle::Out);
+        // With no out point the out end is the end of the file.
+        assert_eq!(nearest_handle(9.5, 2.0, None, 10.0), TrimHandle::Out);
+        assert_eq!(nearest_handle(5.0, 2.0, None, 10.0), TrimHandle::In);
+
+        let m = |h, t, s, e| move_handle(h, t, s, e, 10.0);
+        assert_eq!(m(TrimHandle::In, 3.0, 2.0, Some(6.0)), (3.0, Some(6.0)));
+        assert_eq!(m(TrimHandle::Out, 8.0, 2.0, Some(6.0)), (2.0, Some(8.0)));
+        assert_eq!(m(TrimHandle::Out, 8.0, 2.0, None), (2.0, Some(8.0)));
+    }
+
+    #[test]
+    fn the_ends_stay_in_order_and_inside_the_file() {
+        let m = |h, t, s, e| move_handle(h, t, s, e, 10.0);
+        // The in point can't pass the out point, or go before the start.
+        let (s, e) = m(TrimHandle::In, 9.0, 2.0, Some(6.0));
+        assert!((s - (6.0 - MIN_TRIM)).abs() < 1e-9 && e == Some(6.0));
+        assert_eq!(m(TrimHandle::In, -3.0, 2.0, Some(6.0)), (0.0, Some(6.0)));
+        // Nor can the out point come back past the in point, or run off the end.
+        let (s, e) = m(TrimHandle::Out, 0.5, 2.0, Some(6.0));
+        assert_eq!(s, 2.0);
+        assert!((e.unwrap() - (2.0 + MIN_TRIM)).abs() < 1e-9);
+        // Dragged to the end of the file it is no out point at all.
+        assert_eq!(m(TrimHandle::Out, 10.0, 2.0, Some(6.0)), (2.0, None));
+        assert_eq!(m(TrimHandle::Out, 99.0, 2.0, Some(6.0)), (2.0, None));
+        assert_eq!(m(TrimHandle::Out, 9.99, 2.0, Some(6.0)), (2.0, None));
+        // With no out point, the in point is limited by the end of the file.
+        let (s, e) = m(TrimHandle::In, 12.0, 2.0, None);
+        assert!((s - (10.0 - MIN_TRIM)).abs() < 1e-9 && e.is_none());
+        // A very short file doesn't break the limits.
+        let (s, e) = move_handle(TrimHandle::Out, 0.0, 0.0, None, 0.03);
+        assert_eq!(s, 0.0);
+        assert!(e.is_none());
     }
 }
