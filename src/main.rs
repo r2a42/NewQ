@@ -8,6 +8,7 @@ mod history;
 mod media;
 mod output;
 mod recovery;
+mod relink;
 mod remote;
 mod render;
 mod show;

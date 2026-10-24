@@ -193,6 +193,18 @@ includes FFmpeg, so there's nothing else to install.
   If you decline the offer the copy is kept as `.recovery.old` rather than
   deleted. Saving writes to a temporary file and renames it, so a crash during
   a save can't leave half a show.
+- **Media manager:** *File ▸ Media…* lists every file the show uses and
+  which can't be found, and it opens by itself when a show is opened with
+  files missing. *Search a folder for missing files…* looks in a folder (and
+  everything inside it) for files with the same names, preferring the one in
+  matching folders when a name appears twice, and relinks them all in one go.
+  *Locate…* on a row links one file by hand, and every cue using that file
+  follows. *Copy all media into a folder…* gathers every file into one folder
+  (name clashes get a number, existing files are never overwritten, the
+  originals stay put) and points the cues at the copies, so a show and its
+  media can move together. Copying runs in the background with a progress bar.
+  Each relink or copy is one step in the undo history; the copied files stay on
+  disk if you undo it.
 - **Show files** are plain JSON (`.newq`) with media paths stored relative to
   the show file, so a show folder can move between machines.
 - Drag and drop media files onto the window to create cues.
