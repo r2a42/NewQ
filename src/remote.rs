@@ -6,6 +6,7 @@
 //! commands, and wake the event loop to act on them.
 
 use crate::show::RemoteSettings;
+use crate::timecode::{self, QuarterFrames, Rate, Timecode};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -38,6 +39,10 @@ pub enum Command {
     /// Arm or disarm a cue.
     Arm(String),
     Disarm(String),
+    /// MIDI Time Code reached this position (every two frames while it runs).
+    Timecode(Timecode, Rate),
+    /// The timecode source located here (a full frame message).
+    TimecodeLocate(Timecode, Rate),
 }
 
 // ----- OSC ------------------------------------------------------------------
@@ -139,6 +144,9 @@ pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
         return Vec::new();
     };
     if status == 0xF0 {
+        if let Some((tc, rate)) = timecode::parse_full_frame(msg) {
+            return vec![Command::TimecodeLocate(tc, rate)];
+        }
         // F0 7F <device> 02 <format> <command> <data...> F7
         if msg.len() < 7 || msg[1] != 0x7F || msg[3] != 0x02 {
             return Vec::new();
@@ -171,6 +179,27 @@ pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
         (0xC0, Some(&program), _) => vec![Command::Select(program.to_string())],
         _ => Vec::new(),
     }
+}
+
+/// Commands for one message from the MIDI input. Timecode is only followed
+/// when the show asks for it (`mtc`): otherwise it is a flood of messages with
+/// no use. Quarter frames (`F1 dd`) are assembled in `quarter_frames`.
+pub fn midi_commands(
+    msg: &[u8],
+    channel: Option<u8>,
+    mtc: bool,
+    quarter_frames: &mut QuarterFrames,
+) -> Vec<Command> {
+    if msg.first() == Some(&0xF1) {
+        return match msg.get(1).and_then(|&b| quarter_frames.push(b)) {
+            Some((tc, rate)) if mtc => vec![Command::Timecode(tc, rate)],
+            _ => Vec::new(),
+        };
+    }
+    parse_midi(msg, channel)
+        .into_iter()
+        .filter(|c| mtc || !matches!(c, Command::TimecodeLocate(..)))
+        .collect()
 }
 
 // ----- Listeners ------------------------------------------------------------
@@ -288,7 +317,11 @@ impl Remote {
                 }
             }
         }
-        if first || old.midi != wanted.midi || old.midi_port != wanted.midi_port {
+        if first
+            || old.midi != wanted.midi
+            || old.midi_port != wanted.midi_port
+            || old.mtc != wanted.mtc
+        {
             self.midi = None;
             self.status.midi_port = None;
             self.status.midi_error = None;
@@ -331,12 +364,14 @@ impl Remote {
             .find(|p| input.port_name(p).is_ok_and(|n| n == name))
             .ok_or_else(|| format!("MIDI input “{name}” is not connected"))?;
         let (tx, wake, channel) = (self.tx.clone(), self.wake.clone(), wanted.midi_channel);
+        let mtc = wanted.mtc;
+        let mut quarter_frames = QuarterFrames::default();
         input
             .connect(
                 &port,
                 "newq-in",
                 move |_, msg, _| {
-                    let commands = parse_midi(msg, channel);
+                    let commands = midi_commands(msg, channel, mtc, &mut quarter_frames);
                     if !commands.is_empty() {
                         for c in commands {
                             let _ = tx.send(c);
@@ -606,5 +641,39 @@ mod tests {
             ..Default::default()
         });
         assert!(remote.status.midi_error.is_some(), "no input chosen");
+    }
+
+    #[test]
+    fn timecode_is_only_followed_when_asked_for() {
+        // Eight quarter frames saying 00:00:01:00 at 25 fps, then the full-frame form.
+        let run = [0x00, 0x10, 0x21, 0x30, 0x40, 0x50, 0x60, 0x72];
+        let full = [0xF0, 0x7F, 0x7F, 0x01, 0x01, 0x20, 0, 1, 0, 0xF7];
+        for mtc in [false, true] {
+            let mut q = QuarterFrames::default();
+            let mut got = Vec::new();
+            for b in run {
+                got.extend(midi_commands(&[0xF1, b], None, mtc, &mut q));
+            }
+            got.extend(midi_commands(&full, None, mtc, &mut q));
+            if mtc {
+                assert_eq!(
+                    got,
+                    vec![
+                        Command::Timecode(Timecode::new(0, 0, 1, 2), Rate::Fps25),
+                        Command::TimecodeLocate(Timecode::new(0, 0, 1, 0), Rate::Fps25),
+                    ]
+                );
+            } else {
+                assert!(got.is_empty(), "{got:?}");
+            }
+        }
+        // Everything else still passes through either way, and F1 itself isn't
+        // a channel message.
+        let mut q = QuarterFrames::default();
+        assert_eq!(
+            midi_commands(&[0x90, 60, 100], None, false, &mut q),
+            vec![Command::Note(60)]
+        );
+        assert!(parse_midi(&[0xF1, 0x00], None).is_empty());
     }
 }

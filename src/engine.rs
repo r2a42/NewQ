@@ -8,6 +8,7 @@ use crate::media::playback::Playback;
 use crate::media::video::{self, RgbaImage, VideoPlayer};
 use crate::media::{ProbeCache, ProbeState};
 use crate::show::*;
+use crate::timecode::{Follower, Rate, Timecode};
 use crossbeam_channel::Receiver;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -265,6 +266,8 @@ pub struct Engine {
     cameras: Vec<String>,
     camera_scan: Option<Receiver<Vec<String>>>,
     scanned: bool,
+    /// Follows incoming MIDI Time Code and says which cues it reaches.
+    pub timecode: Follower,
 }
 
 impl Engine {
@@ -286,6 +289,7 @@ impl Engine {
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
             scanned: false,
+            timecode: Follower::default(),
         }
     }
 
@@ -310,6 +314,7 @@ impl Engine {
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
             scanned: false,
+            timecode: Follower::default(),
         }
     }
 
@@ -340,6 +345,18 @@ impl Engine {
             .spawn(move || {
                 let _ = tx.send(camera::list_devices(&ff));
             });
+    }
+
+    /// MIDI Time Code reached `tc`: fire the cues set for the time it has just passed.
+    pub fn on_timecode(&mut self, show: &Show, tc: Timecode, rate: Rate) {
+        let triggers: Vec<(CueId, Timecode)> = show
+            .cues
+            .iter()
+            .filter_map(|c| c.timecode.map(|t| (c.id, t)))
+            .collect();
+        for id in self.timecode.advance(&triggers, tc, rate) {
+            self.fire(show, id);
+        }
     }
 
     pub fn log(&mut self, msg: impl Into<String>) {
@@ -1086,6 +1103,7 @@ impl Engine {
 
     pub fn tick(&mut self, show: &Show, dt: f64) {
         self.probe.poll();
+        self.timecode.tick(dt);
 
         if !self.paused {
             let mut due = Vec::new();
@@ -2377,5 +2395,91 @@ mod tests {
         run_until(&mut e, &show, "the failure", |e| e.active.is_empty());
         let (_, msg) = e.messages.back().expect("a message");
         assert!(msg.contains("video failed"), "{msg}");
+    }
+
+    // ----- Timecode triggers -----------------------------------------------------
+
+    fn at(h: u8, m: u8, sec: u8, f: u8) -> Timecode {
+        Timecode::new(h, m, sec, f)
+    }
+
+    fn tc_cue(show: &mut Show, tc: Timecode) -> CueId {
+        let id = wait_cue(show, 30.0, ContinueMode::DoNotContinue);
+        show.cue_mut(id).unwrap().timecode = Some(tc);
+        id
+    }
+
+    /// Run the clock from `from` for `frames`, two frames at a time.
+    fn run_clock(e: &mut Engine, show: &Show, from: Timecode, frames: u32) {
+        let mut n = from.frame_number(25);
+        for _ in 0..frames / 2 {
+            n += 2;
+            let t = at(
+                (n / (25 * 3600)) as u8,
+                (n / (25 * 60) % 60) as u8,
+                (n / 25 % 60) as u8,
+                (n % 25) as u8,
+            );
+            e.on_timecode(show, t, Rate::Fps25);
+        }
+    }
+
+    #[test]
+    fn cues_fire_as_the_timecode_reaches_them() {
+        let mut show = Show::default();
+        let a = tc_cue(&mut show, at(1, 0, 1, 0));
+        let b = tc_cue(&mut show, at(1, 0, 3, 0));
+        let untimed = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(untimed);
+        e.timecode.locate(at(1, 0, 0, 0), Rate::Fps25);
+
+        run_clock(&mut e, &show, at(1, 0, 0, 0), 2 * 25);
+        assert!(playing(&e, a) && idle(&e, b), "a fired, b not yet");
+        run_clock(&mut e, &show, at(1, 0, 2, 0), 2 * 25);
+        assert!(playing(&e, b));
+        assert!(idle(&e, untimed), "cues with no timecode are left alone");
+        assert_eq!(e.playhead, Some(untimed), "the playhead doesn't move");
+    }
+
+    #[test]
+    fn a_timecode_cue_that_is_disarmed_is_skipped_and_a_group_fires_whole() {
+        let mut show = Show::default();
+        let off = tc_cue(&mut show, at(0, 0, 1, 0));
+        disarm(&mut show, off);
+        let (g, kids) = group(&mut show, GroupMode::Timeline, &[5.0, 5.0]);
+        show.cue_mut(g).unwrap().timecode = Some(at(0, 0, 2, 0));
+        let mut e = engine_without_media();
+        e.timecode.locate(at(0, 0, 0, 0), Rate::Fps25);
+        run_clock(&mut e, &show, at(0, 0, 0, 0), 3 * 25);
+        assert!(idle(&e, off), "a disarmed cue isn't fired");
+        assert!(playing(&e, g) && playing(&e, kids[0]) && playing(&e, kids[1]));
+    }
+
+    #[test]
+    fn jumping_the_clock_does_not_fire_the_cues_it_skips() {
+        let mut show = Show::default();
+        let early = tc_cue(&mut show, at(0, 0, 10, 0));
+        let late = tc_cue(&mut show, at(0, 1, 0, 0));
+        let mut e = engine_without_media();
+        e.timecode.locate(at(0, 0, 0, 0), Rate::Fps25);
+        run_clock(&mut e, &show, at(0, 0, 0, 0), 2 * 25);
+        // The source jumps to 00:00:59:00, past the first cue and just short of the second.
+        e.on_timecode(&show, at(0, 0, 59, 0), Rate::Fps25);
+        assert!(idle(&e, early) && idle(&e, late));
+        run_clock(&mut e, &show, at(0, 0, 59, 0), 2 * 25);
+        assert!(playing(&e, late) && idle(&e, early));
+    }
+
+    #[test]
+    fn the_follower_reports_whether_timecode_is_arriving() {
+        let show = Show::default();
+        let mut e = engine_without_media();
+        assert!(!e.timecode.running() && e.timecode.position().is_none());
+        e.on_timecode(&show, at(0, 0, 5, 0), Rate::Fps30);
+        assert!(e.timecode.running());
+        assert_eq!(e.timecode.position(), Some((at(0, 0, 5, 0), Rate::Fps30)));
+        e.tick(&show, 0.6);
+        assert!(!e.timecode.running(), "half a second of silence is a stop");
     }
 }

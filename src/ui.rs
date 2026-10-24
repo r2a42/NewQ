@@ -263,7 +263,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     ui.add_space(12.0);
                     sub_displays_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
-                    remote_panel(ui, show, st);
+                    remote_panel(ui, show, st, engine);
                 });
         });
     if st.show_cart {
@@ -762,6 +762,11 @@ fn status_bar(ui: &mut Ui, engine: &Engine, st: &UiState) {
             Ok(text) => ui.label(format!("🔊 {text}")),
             Err(e) => ui.label(RichText::new(format!("🔇 {e}")).color(STOP_RED)),
         };
+        if engine.timecode.running()
+            && let Some((tc, rate)) = engine.timecode.position()
+        {
+            ui.label(RichText::new(format!("⏱ {tc} {}", rate.label())).color(GO_GREEN));
+        }
         ui.separator();
         let path = st
             .show_path
@@ -1105,10 +1110,14 @@ fn cue_list(
 
 /// A cue's name, with its hotkey after it if it has one.
 fn name_with_key(c: &Cue) -> String {
-    match &c.hotkey {
-        Some(k) => format!("{}   [{k}]", c.name),
-        None => c.name.clone(),
+    let mut name = c.name.clone();
+    if let Some(k) = &c.hotkey {
+        name.push_str(&format!("   [{k}]"));
     }
+    if let Some(t) = c.timecode {
+        name.push_str(&format!("   @{t}"));
+    }
+    name
 }
 
 /// The cart: one big button per cue put on it. A click fires the cue, a
@@ -1711,7 +1720,7 @@ fn audio_panel(
 }
 
 /// Settings for controlling NewQ from OSC and MIDI.
-fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState) {
+fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
     ui.heading("Remote control");
     ui.label(
         RichText::new("Run NewQ from a lighting desk, Companion, a phone or a MIDI controller.")
@@ -1793,12 +1802,23 @@ fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState) {
         }
         ui.label(
             RichText::new(
-                "Note on N: fire cue N · Program change N: select cue N\n\
-                 MIDI Show Control: GO, STOP, RESUME, LOAD, ALL OFF (cue numbers work)",
+                "Note on N: fire the cue given that note, else cue N · Program change N: \
+                 select cue N\nMIDI Show Control: GO, STOP, RESUME, LOAD, ALL OFF (cue numbers work)",
             )
             .weak()
             .small(),
         );
+        ui.checkbox(&mut r.mtc, "Follow MIDI Time Code")
+            .on_hover_text("Fire cues that have a timecode as the incoming time reaches it.");
+        if r.mtc {
+            match engine.timecode.position() {
+                Some((tc, rate)) if engine.timecode.running() => {
+                    ui.label(RichText::new(format!("{tc}  ·  {}", rate.label())).color(GO_GREEN))
+                }
+                Some((tc, _)) => ui.label(RichText::new(format!("{tc}  ·  stopped")).weak()),
+                None => ui.label(RichText::new("Waiting for timecode…").weak()),
+            };
+        }
     }
 }
 
@@ -2397,6 +2417,34 @@ fn inspector(
                 ui.label("On cart");
                 ui.checkbox(&mut cue.cart, "")
                     .on_hover_text("Show this cue as a button on the cart (Cue ▸ Show cart).");
+                ui.end_row();
+                ui.label("Timecode");
+                ui.horizontal(|ui| {
+                    let mut on = cue.timecode.is_some();
+                    let mut t = cue.timecode.unwrap_or_default();
+                    ui.checkbox(&mut on, "").on_hover_text(
+                        "Fire this cue when incoming MIDI Time Code reaches this time \
+                         (turn on “Follow MIDI Time Code” under Remote control).",
+                    );
+                    ui.add_enabled_ui(on, |ui| {
+                        let part = |ui: &mut Ui, v: &mut u8, max: u8, sep: bool| {
+                            ui.add(
+                                egui::DragValue::new(v)
+                                    .range(0..=max)
+                                    .custom_formatter(|n, _| format!("{:02}", n as u8)),
+                            );
+                            if sep {
+                                ui.label(":");
+                            }
+                        };
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        part(ui, &mut t.hours, 23, true);
+                        part(ui, &mut t.minutes, 59, true);
+                        part(ui, &mut t.seconds, 59, true);
+                        part(ui, &mut t.frames, 29, false);
+                    });
+                    cue.timecode = on.then_some(t);
+                });
                 ui.end_row();
                 ui.label("Continue");
                 if cue.parent.is_some() {
@@ -3145,6 +3193,8 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
                 st.scroll_to_selected = true;
             }
         }
+        Command::Timecode(tc, rate) => engine.on_timecode(show, tc, rate),
+        Command::TimecodeLocate(tc, rate) => engine.timecode.locate(tc, rate),
         Command::Note(note) => {
             // A note bound to a cue fires it; otherwise it names a cue number.
             let id = show
@@ -4350,5 +4400,38 @@ mod tests {
             st.saved_json,
             "undo to the saved state matches what is on disk"
         );
+    }
+
+    #[test]
+    fn remote_timecode_fires_cues_without_moving_the_playhead() {
+        use crate::timecode::{Rate, Timecode};
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        show.cue_mut(d).unwrap().timecode = Some(Timecode::new(0, 0, 2, 0));
+        run_remote(
+            Command::TimecodeLocate(Timecode::new(0, 0, 1, 20), Rate::Fps25),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(!is_playing(&e, d), "locating fires nothing");
+        for f in [22, 24] {
+            let t = Timecode::new(0, 0, 1, f);
+            run_remote(
+                Command::Timecode(t, Rate::Fps25),
+                &mut show,
+                &mut e,
+                &mut st,
+            );
+        }
+        assert!(!is_playing(&e, d));
+        run_remote(
+            Command::Timecode(Timecode::new(0, 0, 2, 1), Rate::Fps25),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(is_playing(&e, d));
+        assert_eq!(e.playhead, Some(show.cues[0].id));
     }
 }

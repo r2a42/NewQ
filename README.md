@@ -154,6 +154,19 @@ includes FFmpeg, so there's nothing else to install.
 - **Instant GO:** the next cue(s) are decoded ahead of time (a green dot in the
   cue list means a cue is preloaded).
 - **Audio/video sync:** video with sound is slaved to the audio clock.
+- **MIDI Time Code triggers:** give a cue (or a group) a timecode in its
+  inspector, turn on *Follow MIDI Time Code* under Remote control (it listens
+  to the MIDI input you chose), and the cue fires when the incoming time
+  reaches it, wherever the playhead is. NewQ follows the clock from 24, 25,
+  29.97 and 30 fps sources. Cues are fired only by time that actually plays
+  past them: locating to a later time doesn't fire the cues it skipped,
+  rewinding and playing again fires them again, and stopping and starting the
+  clock in place doesn't fire anything twice. Playing from a position fires a
+  cue set for that very frame. Disarmed cues are skipped. The current time
+  shows in the status bar while it runs. A group's children measure their
+  pre-waits from when the group fires. Only MIDI Time Code is read, not LTC
+  (audio) timecode. 29.97 drop-frame times are compared by their numbers on
+  the clock, which is how MIDI Time Code counts them.
 - **Undo and redo:** Ctrl+Z and Ctrl+Y (or the Edit menu) step back and
   forward through edits to the show: cues, their order and groups, outputs,
   audio and remote settings. Dragging a slider or typing a name is one step
@@ -306,7 +319,7 @@ space like a hardware video mixer.
 
 - Video alpha channels (ProRes 4444, VP9 alpha) aren't supported yet; images
   with alpha are.
-- No timecode triggering yet.
+- Timecode triggers follow MIDI Time Code only (no LTC audio timecode yet).
 - Very large files (4K60) push a lot of raw video through a pipe; NewQ
   decodes at the output window's resolution to keep this down.
 - Fullscreen output on a second display has been tested only on a single-monitor
