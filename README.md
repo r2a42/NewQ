@@ -89,6 +89,18 @@ includes FFmpeg, so there's nothing else to install.
   or Stop cue can target it. There's one built-in font (a light weight, so
   *Shadow* and *Bold* help over video), and editing a text cue takes effect
   the next time it's fired.
+- **Send cues (OSC and MIDI out):** a cue that sends a message when it
+  fires, so one GO can also start the lights and sound. *OSC* goes to an
+  address and port over UDP, with an OSC address and arguments (`1 0.5
+  "some text"`: whole numbers go as integers, other numbers as floats, the
+  rest as text). *MIDI* goes to one of the MIDI outputs: note on or off,
+  control change, program change, or MIDI Show Control (GO, STOP, RESUME,
+  LOAD or ALL OFF, with a cue number, to all devices). A send cue takes no
+  time, so Auto-continue and Auto-follow work as for a Stop cue, and ▶ Fire
+  tries it. Sending happens on its own thread, so a slow name lookup or a
+  missing device can't stall the show; problems are shown in the status bar.
+  What NewQ sends is what its own OSC and MIDI listeners understand, so two
+  copies of NewQ can run each other. An IP address is safer than a name.
 - **Camera cues:** show a live camera or capture card (HDMI/SDI/USB) as a
   layer. Pick the device and the mode to ask of it (size and frame rate, which
   the device must support), then set the output, layer, transition, fades and

@@ -7,6 +7,7 @@ use crate::media::ffmpeg::{ColorMatrix, Ffmpeg, MediaInfo};
 use crate::media::playback::Playback;
 use crate::media::video::{self, RgbaImage, VideoPlayer};
 use crate::media::{ProbeCache, ProbeState};
+use crate::output::{Outbox, Outgoing};
 use crate::show::*;
 use crate::timecode::{Follower, Rate, Timecode};
 use crossbeam_channel::Receiver;
@@ -268,6 +269,8 @@ pub struct Engine {
     scanned: bool,
     /// Follows incoming MIDI Time Code and says which cues it reaches.
     pub timecode: Follower,
+    /// Where send cues' messages go.
+    outbox: Outbox,
 }
 
 impl Engine {
@@ -290,6 +293,7 @@ impl Engine {
             camera_scan: None,
             scanned: false,
             timecode: Follower::default(),
+            outbox: Outbox::recording(),
         }
     }
 
@@ -315,6 +319,7 @@ impl Engine {
             camera_scan: None,
             scanned: false,
             timecode: Follower::default(),
+            outbox: Outbox::new(),
         }
     }
 
@@ -395,7 +400,7 @@ impl Engine {
             CueKind::Camera(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
-            CueKind::Stop(_) => Some(Some(0.0)),
+            CueKind::Stop(_) | CueKind::Send(_) => Some(Some(0.0)),
             CueKind::Group(g) => {
                 // Timeline: until the last child ends. Playlist: all of them in turn.
                 let mut total = 0.0_f64;
@@ -1020,6 +1025,10 @@ impl Engine {
                 active.kind = ActiveKind::Wait;
                 active.duration = Some(w.duration);
             }
+            CueKind::Send(s) => {
+                ok = false; // instantaneous; nothing stays active
+                self.outbox.send(Outgoing::from_cue(s));
+            }
             CueKind::Group(g) => {
                 let children: Vec<CueId> = show.armed_children(id).iter().map(|c| c.id).collect();
                 if children.is_empty() {
@@ -1104,6 +1113,9 @@ impl Engine {
     pub fn tick(&mut self, show: &Show, dt: f64) {
         self.probe.poll();
         self.timecode.tick(dt);
+        for problem in self.outbox.errors() {
+            self.log(problem);
+        }
 
         if !self.paused {
             let mut due = Vec::new();
@@ -2481,5 +2493,82 @@ mod tests {
         assert_eq!(e.timecode.position(), Some((at(0, 0, 5, 0), Rate::Fps30)));
         e.tick(&show, 0.6);
         assert!(!e.timecode.running(), "half a second of silence is a stop");
+    }
+
+    // ----- Send cues -----------------------------------------------------------
+
+    fn send_cue(show: &mut Show, address: &str, mode: ContinueMode) -> CueId {
+        let mut c = show.make_cue(CueType::Send, None, show.cues.len());
+        if let CueKind::Send(s) = &mut c.kind {
+            s.target = SendTarget::Osc(OscOut {
+                address: address.into(),
+                ..OscOut::default()
+            });
+        }
+        c.continue_mode = mode;
+        let id = c.id;
+        show.cues.push(c);
+        id
+    }
+
+    fn sent_addresses(e: &Engine) -> Vec<String> {
+        e.outbox
+            .sent()
+            .iter()
+            .filter_map(|m| match m {
+                Outgoing::Osc { packet, .. } => {
+                    let end = packet.iter().position(|&b| b == 0)?;
+                    Some(String::from_utf8_lossy(&packet[..end]).into_owned())
+                }
+                Outgoing::Midi { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_send_cue_sends_when_fired_and_takes_no_time() {
+        let mut show = Show::default();
+        let a = send_cue(&mut show, "/one", ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        assert_eq!(sent_addresses(&e), ["/one"]);
+        assert!(e.active.is_empty(), "nothing is left running");
+        assert_eq!(e.cue_duration(&show, show.cue(a).unwrap()), Some(Some(0.0)));
+    }
+
+    #[test]
+    fn send_cues_chain_like_stop_cues_and_respect_arming() {
+        let mut show = Show::default();
+        let a = send_cue(&mut show, "/a", ContinueMode::AutoContinue);
+        send_cue(&mut show, "/b", ContinueMode::AutoFollow);
+        let c = send_cue(&mut show, "/c", ContinueMode::AutoContinue);
+        let d = send_cue(&mut show, "/d", ContinueMode::DoNotContinue);
+        disarm(&mut show, c);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.go(&show);
+        // a continues into b, which follows into the next armed cue, passing c.
+        assert_eq!(sent_addresses(&e), ["/a", "/b", "/d"]);
+        assert!(e.active.is_empty());
+        let _ = d;
+        // A disarmed send cue is not sent by hand either.
+        e.fire(&show, c);
+        assert_eq!(sent_addresses(&e).len(), 3);
+    }
+
+    #[test]
+    fn a_send_cue_can_follow_a_wait() {
+        let mut show = Show::default();
+        let w = wait_cue(&mut show, 2.0, ContinueMode::AutoFollow);
+        let s = send_cue(&mut show, "/after", ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(w);
+        e.go(&show);
+        e.tick(&show, 1.0);
+        assert!(sent_addresses(&e).is_empty());
+        e.tick(&show, 1.1);
+        assert_eq!(sent_addresses(&e), ["/after"]);
+        let _ = s;
     }
 }

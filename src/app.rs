@@ -175,6 +175,7 @@ impl App {
             })
             .collect();
         self.ui.midi_ports = remote::midi_inputs();
+        self.ui.midi_out_ports = crate::output::midi_outputs();
         // Listing and opening audio devices can take a while; not during a show.
         if !self.engine.is_active() {
             self.ui.audio_devices = audio::output_devices();

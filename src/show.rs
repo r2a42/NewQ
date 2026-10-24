@@ -448,6 +448,7 @@ pub enum CueKind {
     Group(GroupCue),
     Text(TextCue),
     Camera(CameraCue),
+    Send(SendCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,6 +462,7 @@ pub enum CueType {
     Group,
     Text,
     Camera,
+    Send,
 }
 
 impl CueType {
@@ -475,6 +477,7 @@ impl CueType {
             CueType::Group => "Group",
             CueType::Text => "Text",
             CueType::Camera => "Camera",
+            CueType::Send => "Send",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -488,6 +491,7 @@ impl CueType {
             CueType::Group => "📁",
             CueType::Text => "📝",
             CueType::Camera => "📷",
+            CueType::Send => "📡",
         }
     }
 }
@@ -504,6 +508,7 @@ impl CueKind {
             CueKind::Group(_) => CueType::Group,
             CueKind::Text(_) => CueType::Text,
             CueKind::Camera(_) => CueType::Camera,
+            CueKind::Send(_) => CueType::Send,
         }
     }
     /// The playback settings of a cue that plays something: transitions,
@@ -825,6 +830,137 @@ impl TextCue {
     }
 }
 
+/// A cue that sends a message out when it fires: OSC to another program or
+/// desk, or MIDI to a device. It takes no time; Continue works as for a Stop cue.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SendCue {
+    pub target: SendTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SendTarget {
+    Osc(OscOut),
+    Midi(MidiOut),
+}
+
+impl Default for SendTarget {
+    fn default() -> Self {
+        SendTarget::Osc(OscOut::default())
+    }
+}
+
+/// An OSC message to a UDP address.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OscOut {
+    /// An address or a name; an address avoids a name lookup.
+    pub host: String,
+    pub port: u16,
+    pub address: String,
+    /// Arguments separated by spaces: whole numbers, decimals, or text (in
+    /// double quotes if it has spaces).
+    #[serde(default)]
+    pub args: String,
+}
+
+impl Default for OscOut {
+    fn default() -> Self {
+        OscOut {
+            host: "127.0.0.1".into(),
+            port: 53000,
+            address: "/go".into(),
+            args: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MscCommand {
+    Go,
+    Stop,
+    Resume,
+    Load,
+    AllOff,
+}
+
+impl MscCommand {
+    pub fn label(self) -> &'static str {
+        match self {
+            MscCommand::Go => "GO",
+            MscCommand::Stop => "STOP",
+            MscCommand::Resume => "RESUME",
+            MscCommand::Load => "LOAD",
+            MscCommand::AllOff => "ALL OFF",
+        }
+    }
+    /// Whether the command takes a cue number.
+    pub fn takes_cue(self) -> bool {
+        !matches!(self, MscCommand::Resume | MscCommand::AllOff)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MidiKind {
+    NoteOn,
+    NoteOff,
+    ControlChange,
+    ProgramChange,
+    /// MIDI Show Control, which lighting and sound desks understand.
+    ShowControl(MscCommand),
+}
+
+impl MidiKind {
+    pub const ALL: [MidiKind; 9] = [
+        MidiKind::NoteOn,
+        MidiKind::NoteOff,
+        MidiKind::ControlChange,
+        MidiKind::ProgramChange,
+        MidiKind::ShowControl(MscCommand::Go),
+        MidiKind::ShowControl(MscCommand::Stop),
+        MidiKind::ShowControl(MscCommand::Resume),
+        MidiKind::ShowControl(MscCommand::Load),
+        MidiKind::ShowControl(MscCommand::AllOff),
+    ];
+    pub fn label(self) -> String {
+        match self {
+            MidiKind::NoteOn => "Note on".into(),
+            MidiKind::NoteOff => "Note off".into(),
+            MidiKind::ControlChange => "Control change".into(),
+            MidiKind::ProgramChange => "Program change".into(),
+            MidiKind::ShowControl(c) => format!("Show Control {}", c.label()),
+        }
+    }
+}
+
+/// A MIDI message to an output port.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MidiOut {
+    /// The output's name; None until one is chosen.
+    pub port: Option<String>,
+    pub kind: MidiKind,
+    /// Channel 0 to 15 (shown as 1 to 16).
+    pub channel: u8,
+    /// Note, controller or program number (0 to 127).
+    pub data1: u8,
+    /// Velocity or controller value (0 to 127).
+    pub data2: u8,
+    /// The cue number for Show Control; empty for the desk's next cue.
+    #[serde(default)]
+    pub cue: String,
+}
+
+impl Default for MidiOut {
+    fn default() -> Self {
+        MidiOut {
+            port: None,
+            kind: MidiKind::NoteOn,
+            channel: 0,
+            data1: 60,
+            data2: 100,
+            cue: String::new(),
+        }
+    }
+}
+
 /// The device name that stands for NewQ's built-in moving test picture, so a
 /// camera cue can be tried without a camera.
 pub const TEST_PATTERN_DEVICE: &str = "NewQ test pattern";
@@ -1063,6 +1199,7 @@ impl Show {
                 "Camera".into(),
                 CueKind::Camera(CameraCue::new(default_output)),
             ),
+            CueType::Send => ("Send".into(), CueKind::Send(SendCue::default())),
         };
         Cue {
             id,
@@ -2048,6 +2185,60 @@ mod tests {
         let back: RemoteSettings =
             serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert!(back.mtc);
+    }
+
+    #[test]
+    fn send_cues_round_trip_and_old_files_are_unaffected() {
+        let mut show = Show::default();
+        let wait = show.make_cue(CueType::Wait, None, 0);
+        show.cues.push(wait);
+        let before = serde_json::to_string(&show).unwrap();
+        assert!(!before.contains("Send"), "{before}");
+
+        let mut osc = show.make_cue(CueType::Send, None, 1);
+        assert_eq!(osc.kind.cue_type(), CueType::Send);
+        if let CueKind::Send(s) = &mut osc.kind {
+            s.target = SendTarget::Osc(OscOut {
+                host: "10.0.0.9".into(),
+                port: 8000,
+                address: "/cue/1/start".into(),
+                args: "1 hello".into(),
+            });
+        }
+        let mut midi = show.make_cue(CueType::Send, None, 2);
+        if let CueKind::Send(s) = &mut midi.kind {
+            s.target = SendTarget::Midi(MidiOut {
+                port: Some("Desk".into()),
+                kind: MidiKind::ShowControl(MscCommand::Go),
+                cue: "12".into(),
+                ..MidiOut::default()
+            });
+        }
+        show.cues.push(osc.clone());
+        show.cues.push(midi.clone());
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        let (CueKind::Send(a), CueKind::Send(b)) = (&back.cues[1].kind, &back.cues[2].kind) else {
+            panic!("not send cues");
+        };
+        assert_eq!(
+            a.target,
+            match &osc.kind {
+                CueKind::Send(s) => s.target.clone(),
+                _ => unreachable!(),
+            }
+        );
+        assert_eq!(
+            b.target,
+            match &midi.kind {
+                CueKind::Send(s) => s.target.clone(),
+                _ => unreachable!(),
+            }
+        );
+        // A hand-written OSC cue may leave out the arguments.
+        let part: OscOut = serde_json::from_str(r#"{"host":"h","port":1,"address":"/a"}"#).unwrap();
+        assert_eq!(part.args, "");
+        // They have no media, so nothing is preloaded or probed for them.
+        assert!(osc.kind.media().is_none() && !osc.kind.preloads());
     }
 
     #[test]
