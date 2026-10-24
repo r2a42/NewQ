@@ -1,9 +1,18 @@
 name: CI
 
+# One run per change: pull requests are tested as they are updated, and `main`
+# is tested after a merge (the Cut release workflow needs CI to have passed on
+# its tip). A branch with no pull request isn't tested until it has one.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# A newer push to a pull request replaces its run in progress. Runs on `main`
+# are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
