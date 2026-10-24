@@ -186,6 +186,8 @@ enum Action {
     FadeOutCue(CueId),
     ToggleCart,
     ToggleMedia,
+    /// Write the cue sheet (CSV or a web page, by the file's extension).
+    ExportCueSheet(PathBuf),
     /// Look for the missing files in this folder.
     RelinkFolder(PathBuf),
     /// Point the cues that used this cue's file at another file.
@@ -560,6 +562,21 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             if ui.button("Media…").clicked() {
                 actions.push(Action::ToggleMedia);
             }
+            if ui
+                .button("Export cue sheet…")
+                .on_hover_text(
+                    "The cue list as a web page to print, or as a CSV for a spreadsheet.",
+                )
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_title("Export the cue sheet")
+                    .set_file_name(format!("{} cue sheet.html", show.name))
+                    .add_filter("Web page", &["html"])
+                    .add_filter("Spreadsheet (CSV)", &["csv"])
+                    .save_file()
+            {
+                actions.push(Action::ExportCueSheet(path));
+            }
             ui.separator();
             if ui.button("Quit").clicked() {
                 actions.push(Action::Quit);
@@ -827,7 +844,7 @@ fn status_bar(ui: &mut Ui, engine: &Engine, st: &UiState) {
     });
 }
 
-fn cue_target_text(show: &Show, c: &Cue) -> String {
+pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
     match &c.kind {
         CueKind::Video(m) | CueKind::Image(m) => {
             let file = m
@@ -1571,7 +1588,7 @@ fn secs_short(t: f64) -> String {
 }
 
 /// The cue list's "Fade in / out" column: a cue's built-in transition and fade-out.
-fn fades_text(c: &Cue) -> String {
+pub(crate) fn fades_text(c: &Cue) -> String {
     let Some(m) = c.kind.media() else {
         return String::new();
     };
@@ -4151,6 +4168,14 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::FadeOutCue(id) => engine.fade_out_cue(show, id),
         Action::ToggleCart => st.show_cart = !st.show_cart,
         Action::ToggleMedia => st.show_media = !st.show_media,
+        Action::ExportCueSheet(path) => match crate::export::write(&path, show, engine) {
+            Ok(n) => engine.log(format!(
+                "Exported {n} cue{} to {}",
+                if n == 1 { "" } else { "s" },
+                path.display()
+            )),
+            Err(e) => engine.log(format!("Could not export the cue sheet: {e}")),
+        },
         Action::RelinkFolder(root) => {
             let wanted: Vec<PathBuf> = {
                 let mut v: Vec<PathBuf> = relink::missing(show).into_iter().map(|m| m.1).collect();
@@ -5527,5 +5552,49 @@ mod tests {
         let (s, e) = move_handle(TrimHandle::Out, 0.0, 0.0, None, 0.03);
         assert_eq!(s, 0.0);
         assert!(e.is_none());
+    }
+
+    #[test]
+    fn exporting_the_cue_sheet_writes_the_file_and_says_so() {
+        let dir = std::env::temp_dir().join("newq_ui_export");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut show, mut e, mut st) = running();
+        let page = dir.join("sheet.html");
+        apply(
+            Action::ExportCueSheet(page.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        let text = std::fs::read_to_string(&page).unwrap();
+        assert!(text.contains("<table>") && text.contains(&show.cues[0].name));
+        let (_, msg) = e.messages.back().unwrap();
+        assert!(
+            msg.starts_with(&format!("Exported {} cues", show.cues.len())),
+            "{msg}"
+        );
+        let csv = dir.join("sheet.csv");
+        apply(
+            Action::ExportCueSheet(csv.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(
+            std::fs::read_to_string(&csv)
+                .unwrap()
+                .contains("Number,Name,Type")
+        );
+        // A place that can't be written to is reported, and nothing else happens.
+        apply(
+            Action::ExportCueSheet(dir.join("nope/x.csv")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(e.messages.back().unwrap().1.starts_with("Could not export"));
+        assert!(!st.dirty, "exporting isn't an edit");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
