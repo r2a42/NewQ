@@ -1,6 +1,7 @@
 //! Show file data model: cues, outputs, and (de)serialization.
 
 use crate::media::playback::Playback;
+use crate::timecode::Timecode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,8 @@ pub struct RemoteSettings {
     pub midi_port: Option<String>,
     /// Only accept channel messages on this channel (0 to 15); None = any.
     pub midi_channel: Option<u8>,
+    /// Follow MIDI Time Code on that input, firing cues at their timecodes.
+    pub mtc: bool,
 }
 
 impl Default for RemoteSettings {
@@ -76,6 +79,7 @@ impl Default for RemoteSettings {
             midi: false,
             midi_port: None,
             midi_channel: None,
+            mtc: false,
         }
     }
 }
@@ -427,6 +431,9 @@ pub struct Cue {
     /// Show this cue as a button on the cart.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cart: bool,
+    /// Fire this cue when incoming MIDI Time Code reaches this position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode: Option<Timecode>,
     pub kind: CueKind,
 }
 
@@ -904,6 +911,11 @@ impl Show {
         self.cues.iter().find(|c| c.id == id)
     }
 
+    #[cfg(test)]
+    pub fn cue_mut(&mut self, id: CueId) -> Option<&mut Cue> {
+        self.cues.iter_mut().find(|c| c.id == id)
+    }
+
     pub fn cue_index(&self, id: CueId) -> Option<usize> {
         self.cues.iter().position(|c| c.id == id)
     }
@@ -1064,6 +1076,7 @@ impl Show {
             hotkey: None,
             midi_note: None,
             cart: false,
+            timecode: None,
             kind,
         }
     }
@@ -2004,6 +2017,37 @@ mod tests {
         let back: Cue = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
         assert_eq!(back.hotkey.as_deref(), Some("F4"));
         assert_eq!((back.midi_note, back.cart), (Some(36), true));
+    }
+
+    #[test]
+    fn timecode_triggers_default_off_and_stay_out_of_old_files() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Wait, None, 0);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(!json.contains("timecode"), "{json}");
+        assert!(
+            serde_json::from_str::<Cue>(&json)
+                .unwrap()
+                .timecode
+                .is_none()
+        );
+        cue.timecode = Some(Timecode::new(1, 0, 5, 12));
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(json.contains("\"timecode\":\"01:00:05:12\""), "{json}");
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timecode, Some(Timecode::new(1, 0, 5, 12)));
+        // Following MIDI Time Code is off, and absent from files, by default.
+        assert!(!RemoteSettings::default().mtc);
+        let part: RemoteSettings = serde_json::from_str("{\"midi\":true}").unwrap();
+        assert!(part.midi && !part.mtc);
+        let on = RemoteSettings {
+            mtc: true,
+            ..RemoteSettings::default()
+        };
+        assert!(!on.is_default());
+        let back: RemoteSettings =
+            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.mtc);
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod remote;
 mod render;
 mod show;
 mod text;
+mod timecode;
 mod ui;
 
 use winit::event_loop::EventLoop;
