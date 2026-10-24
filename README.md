@@ -42,9 +42,12 @@ includes FFmpeg, so there's nothing else to install.
   fullscreen on a second display when one is connected, otherwise shown inside
   NewQ's main window. Plugging displays in or out switches automatically. You
   can instead pin an output to a specific display (it falls back to the main
-  window while that display is unplugged) or keep it in the main window. Every
-  output also has a live preview in the main window, including ones that are
-  fullscreen elsewhere. *Test pattern* shows colour bars with the output's
+  window while that display is unplugged) or keep it in the main window. The
+  main window has a live preview of an output, including ones that are
+  fullscreen elsewhere; with more than one output, a menu above it picks which
+  one is previewed. Under the preview is a **scrub bar** for the cue playing on
+  that output: drag it to jump around in a video, a sound or a timed still (it
+  works while paused; a looping cue and a camera can't be scrubbed). *Test pattern* shows colour bars with the output's
   number so you can tell which projector is which. Displays are remembered by
   name, and by position if the name changes (never onto NewQ's own screen).
 - **Corner pin (keystone) per output:** click *Corner pin…* and drag the four

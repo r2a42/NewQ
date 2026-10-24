@@ -162,6 +162,11 @@ pub struct ActiveCue {
     pub stopping: bool,
     /// Ended and is holding its last frame.
     pub held: bool,
+    /// Where in the cue the running decoders began (after a seek), so their
+    /// clocks, which start at zero, line up with `elapsed`.
+    seek_base: f64,
+    /// Decoders started at a new position, swapped in once they have a frame.
+    seeking: Option<Seek>,
     /// A fade cue has changed its levels, so live edits to the cue no longer apply.
     faded: bool,
     auto_faded: bool,
@@ -170,7 +175,36 @@ pub struct ActiveCue {
     entry: Option<EntryAction>,
 }
 
+/// Decoders for a new position in a cue that is playing. The old ones keep
+/// going until these have a frame, so scrubbing doesn't flash black.
+struct Seek {
+    player: Option<VideoPlayer>,
+    voice: Option<Voice>,
+    base: f64,
+    spawned_at: Instant,
+}
+
 impl ActiveCue {
+    /// The length of the cue if it can be scrubbed: a file that plays once
+    /// (not a camera, not a loop), or a still with a time.
+    pub fn scrub_length(&self, show: &Show) -> Option<f64> {
+        let d = self.duration.filter(|d| *d > 0.0)?;
+        if !self.started || self.stopping || self.held {
+            return None;
+        }
+        let media = show.cue(self.cue_id)?.kind.media()?;
+        let ok = match &self.kind {
+            ActiveKind::Video(v) => !v.player.is_live() && !media.loop_media,
+            ActiveKind::Audio(_) => !media.loop_media,
+            ActiveKind::Image(_) => true,
+            _ => false,
+        };
+        ok.then_some(d)
+    }
+    /// A seek has been asked for and is not on screen yet.
+    pub fn seeking(&self) -> bool {
+        self.seeking.is_some()
+    }
     pub fn output(&self) -> Option<OutputId> {
         match &self.kind {
             ActiveKind::Video(v) => v.output,
@@ -619,6 +653,58 @@ impl Engine {
         self.stop_instance(instance, fade);
     }
 
+    /// The cue a scrub bar under `output`'s preview moves: the newest one
+    /// playing there that can be scrubbed.
+    pub fn scrub_target(&self, show: &Show, output: OutputId) -> Option<&ActiveCue> {
+        self.active
+            .iter()
+            .rev()
+            .find(|a| a.output() == Some(output) && a.scrub_length(show).is_some())
+    }
+
+    /// Jump a playing cue to `to` seconds from its start. The decoders for the
+    /// new position start now and take over when they have a frame; asking
+    /// again meanwhile replaces them.
+    pub fn seek(&mut self, show: &Show, instance: u64, to: f64) -> Result<(), String> {
+        let a = self
+            .active
+            .iter()
+            .find(|a| a.instance == instance)
+            .ok_or("that cue is no longer playing")?;
+        let length = a.scrub_length(show).ok_or("that cue can't be scrubbed")?;
+        let to = to.clamp(0.0, (length - 0.1).max(0.0));
+        let cue = show.cue(a.cue_id).ok_or("that cue was deleted")?.clone();
+        let is_image = matches!(a.kind, ActiveKind::Image(_));
+        let (player, voice) = if is_image {
+            (None, None)
+        } else {
+            let ff = self.ff.clone().ok_or("ffmpeg not found")?;
+            let file = cue.kind.file_media().ok_or("not a file cue")?.file.clone();
+            let info = self.probe.get_blocking(&ff, &file)?;
+            match self.prepare_from(&cue, &info, to)?.kind {
+                PreparedKind::Video { player, voice } => (Some(player), voice),
+                PreparedKind::Audio(voice) => (None, Some(voice)),
+                _ => return Err("that cue can't be scrubbed".into()),
+            }
+        };
+        let a = self
+            .active
+            .iter_mut()
+            .find(|a| a.instance == instance)
+            .ok_or("that cue is no longer playing")?;
+        if is_image {
+            a.elapsed = to;
+        } else {
+            a.seeking = Some(Seek {
+                player,
+                voice,
+                base: to,
+                spawned_at: Instant::now(),
+            });
+        }
+        Ok(())
+    }
+
     /// Fade every instance of a cue out using its own fade-out time.
     pub fn fade_out_cue(&mut self, show: &Show, id: CueId) {
         self.pending.retain(|p| p.cue_id != id);
@@ -706,9 +792,16 @@ impl Engine {
 
     /// Spawn the decoders for a media cue. They start paused/buffering.
     fn prepare(&self, cue: &Cue, info: &MediaInfo) -> Result<Prepared, String> {
+        self.prepare_from(cue, info, 0.0)
+    }
+
+    /// Like `prepare`, but starting `shift` seconds into the cue (a seek).
+    fn prepare_from(&self, cue: &Cue, info: &MediaInfo, shift: f64) -> Result<Prepared, String> {
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let sig = self.signature(cue).ok_or("not a media cue")?;
-        let m = &sig.media;
+        let mut shifted = sig.media.clone();
+        shifted.start += shift;
+        let m = &shifted;
         let playback = m.playback(info.duration);
         let duration = match playback {
             Playback::Once { duration } => {
@@ -848,6 +941,8 @@ impl Engine {
             started: true,
             stopping: false,
             held: false,
+            seek_base: 0.0,
+            seeking: None,
             faded: false,
             auto_faded: false,
             followed: true,
@@ -890,6 +985,8 @@ impl Engine {
             started: true,
             stopping: false,
             held: false,
+            seek_base: 0.0,
+            seeking: None,
             faded: false,
             auto_faded: false,
             followed: false,
@@ -1177,6 +1274,7 @@ impl Engine {
             let media = cue.and_then(|c| c.kind.media()).filter(|_| !a.is_matte());
             let mut completed = false;
             let was_started = a.started;
+            apply_seek(a, paused);
 
             match &mut a.kind {
                 ActiveKind::Video(v) => {
@@ -1201,11 +1299,13 @@ impl Engine {
                     }
                     if a.started {
                         match &v.voice {
-                            Some(vo) if !vo.finished() => a.elapsed = a.elapsed.max(vo.clock()),
+                            Some(vo) if !vo.finished() => {
+                                a.elapsed = a.elapsed.max(a.seek_base + vo.clock());
+                            }
                             _ if !paused => a.elapsed += dt,
                             _ => {}
                         }
-                        v.player.update(a.elapsed);
+                        v.player.update(a.elapsed - a.seek_base);
                         let audio_done = v.voice.as_ref().is_none_or(|vo| vo.finished());
                         // A camera never ends by itself; "run for" ends it.
                         if v.player.is_live() && a.duration.is_some_and(|d| a.elapsed >= d) {
@@ -1262,7 +1362,7 @@ impl Engine {
                         vo.set_paused(paused);
                     }
                     if a.started {
-                        a.elapsed = vo.clock();
+                        a.elapsed = a.seek_base + vo.clock();
                         if vo.finished() {
                             completed = true;
                         }
@@ -1584,6 +1684,49 @@ impl Engine {
         layers.sort_by_key(|(layer, l)| (*layer, l.instance));
         layers.into_iter().map(|(_, l)| l).collect()
     }
+}
+
+/// Switch a cue to its new decoders once they have something to show.
+fn apply_seek(a: &mut ActiveCue, paused: bool) {
+    let Some(s) = a.seeking.as_mut() else {
+        return;
+    };
+    let video_ready = s.player.as_mut().is_none_or(|p| p.ready());
+    let audio_ready = s.voice.as_ref().is_none_or(|v| v.ready());
+    if s.player
+        .as_mut()
+        .is_some_and(|p| !p.ready() && p.finished())
+        || (s.player.is_none() && s.voice.as_ref().is_some_and(|v| v.finished() && !v.ready()))
+    {
+        // Nothing to show there: stay where we were.
+        a.seeking = None;
+        return;
+    }
+    if !(video_ready && (audio_ready || s.spawned_at.elapsed() > AUDIO_START_TIMEOUT)) {
+        return;
+    }
+    let Some(s) = a.seeking.take() else { return };
+    match &mut a.kind {
+        ActiveKind::Video(v) => {
+            if let Some(p) = s.player {
+                v.player = p;
+            }
+            v.voice = s.voice;
+            v.spawned_at = s.spawned_at;
+            if let Some(vo) = &v.voice {
+                vo.set_paused(paused);
+            }
+        }
+        ActiveKind::Audio(vo) => {
+            if let Some(new) = s.voice {
+                new.set_paused(paused);
+                *vo = new;
+            }
+        }
+        _ => return,
+    }
+    a.seek_base = s.base;
+    a.elapsed = s.base;
 }
 
 fn completed_follow(a: &mut ActiveCue, cue: Option<&Cue>, follow: &mut Vec<CueId>) {
@@ -2698,5 +2841,129 @@ mod tests {
             playing(&e, late),
             "and it still fires on time when it plays through"
         );
+    }
+
+    // ----- Scrubbing ---------------------------------------------------------
+
+    /// A playing video cue on the default output, or None to skip.
+    fn playing_video(looping: bool) -> Option<(Engine, Show, OutputId, u64)> {
+        let (ff, clip) = crate::media::test_media("testsrc_10s.mp4")?;
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let mut c = show.make_cue(CueType::Video, Some(clip), 0);
+        c.kind.media_mut().unwrap().loop_media = looping;
+        let id = c.id;
+        show.cues.push(c);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the clip to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        let instance = e.active[0].instance;
+        Some((e, show, out, instance))
+    }
+
+    fn elapsed(e: &Engine, instance: u64) -> f64 {
+        e.active
+            .iter()
+            .find(|a| a.instance == instance)
+            .unwrap()
+            .elapsed
+    }
+
+    #[test]
+    fn seeking_jumps_a_playing_video() {
+        let Some((mut e, show, out, instance)) = playing_video(false) else {
+            return;
+        };
+        let target = e.scrub_target(&show, out).expect("a video can be scrubbed");
+        assert_eq!(target.instance, instance);
+        assert!((target.scrub_length(&show).unwrap() - 10.0).abs() < 0.5);
+        assert!(elapsed(&e, instance) < 2.0);
+
+        e.seek(&show, instance, 6.0).unwrap();
+        run_until(&mut e, &show, "the seek to land", |e| {
+            e.active.iter().all(|a| !a.seeking()) && elapsed(e, instance) >= 6.0
+        });
+        let now = elapsed(&e, instance);
+        assert!((6.0..7.5).contains(&now), "elapsed {now}");
+        // The picture is the one for the new position, not the old one.
+        let layers = e.layers(out);
+        let LayerSource::Video(player) = &layers[0].source else {
+            panic!("a video layer");
+        };
+        assert!(player.current().is_some());
+        drop(layers);
+
+        // It keeps playing from there, and a seek past the end lands at the end.
+        run_for(&mut e, &show, 0.3);
+        assert!(elapsed(&e, instance) > now);
+        e.seek(&show, instance, 100.0).unwrap();
+        run_until(&mut e, &show, "the clip to end", |e| e.active.is_empty());
+    }
+
+    #[test]
+    fn a_later_seek_replaces_an_earlier_one() {
+        let Some((mut e, show, _, instance)) = playing_video(false) else {
+            return;
+        };
+        e.seek(&show, instance, 8.0).unwrap();
+        e.seek(&show, instance, 3.0).unwrap();
+        run_until(&mut e, &show, "the seek to land", |e| {
+            e.active.iter().all(|a| !a.seeking())
+        });
+        let now = elapsed(&e, instance);
+        assert!((3.0..4.5).contains(&now), "elapsed {now}");
+    }
+
+    #[test]
+    fn seeking_works_while_paused() {
+        let Some((mut e, show, _, instance)) = playing_video(false) else {
+            return;
+        };
+        e.set_paused(true);
+        e.seek(&show, instance, 5.0).unwrap();
+        run_until(&mut e, &show, "the seek to land", |e| {
+            e.active.iter().all(|a| !a.seeking())
+        });
+        let now = elapsed(&e, instance);
+        assert!((5.0..5.5).contains(&now), "elapsed {now}");
+        run_for(&mut e, &show, 0.3);
+        assert_eq!(elapsed(&e, instance), now, "still paused");
+    }
+
+    #[test]
+    fn looping_and_finished_cues_are_not_scrubbable() {
+        let Some((mut e, show, out, instance)) = playing_video(true) else {
+            return;
+        };
+        assert!(e.scrub_target(&show, out).is_none());
+        assert!(e.seek(&show, instance, 2.0).is_err());
+        assert!(e.seek(&show, instance + 99, 2.0).is_err());
+    }
+
+    #[test]
+    fn a_timed_still_can_be_scrubbed() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let id = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        show.cue_mut(id).unwrap().kind.media_mut().unwrap().end = Some(10.0);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the image", |e| stack(e, out).len() == 1);
+        let instance = e.active[0].instance;
+        e.seek(&show, instance, 4.0).unwrap();
+        assert!((4.0..4.5).contains(&elapsed(&e, instance)));
+        // A still with no time has nothing to scrub.
+        let open = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        e.fire(&show, open);
+        run_until(&mut e, &show, "the second image", |e| e.active.len() == 2);
+        let second = e.active.iter().find(|a| a.cue_id == open).unwrap();
+        assert!(second.scrub_length(&show).is_none());
     }
 }
