@@ -103,6 +103,22 @@ impl Waveform {
     }
 }
 
+/// Read `r` to its end, keeping only the last `keep` bytes of it as text.
+fn read_tail(mut r: impl Read, keep: usize) -> String {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = r.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        tail.extend_from_slice(&buf[..n]);
+        if tail.len() > keep {
+            tail.drain(..tail.len() - keep);
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
 /// Decode `path`'s first audio stream and reduce it to peaks. `duration_hint`
 /// (from a probe) picks how fine they are.
 pub fn read(ff: &Ffmpeg, path: &Path, duration_hint: Option<f64>) -> Result<Waveform, String> {
@@ -129,7 +145,11 @@ pub fn read(ff: &Ffmpeg, path: &Path, duration_hint: Option<f64>) -> Result<Wave
     ]);
     let mut child = cmd.spawn().map_err(|e| format!("starting ffmpeg: {e}"))?;
     let mut stdout = child.stdout.take().ok_or("no ffmpeg output")?;
-    let mut errors = child.stderr.take();
+    // ffmpeg's complaints are read as they come, on their own thread: if they
+    // piled up unread (a damaged file can produce thousands of lines) it would
+    // block writing them, and this thread would block waiting for its sound.
+    let stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || stderr.map(|e| read_tail(e, 4096)).unwrap_or_default());
     let mut builder = PeakBuilder::new(per_peak);
     let mut buf = vec![0u8; 16 * 1024];
     let mut leftover: Vec<u8> = Vec::new();
@@ -147,10 +167,7 @@ pub fn read(ff: &Ffmpeg, path: &Path, duration_hint: Option<f64>) -> Result<Wave
     }
     let _ = child.wait();
     builder.finish().ok_or_else(|| {
-        let mut text = String::new();
-        if let Some(e) = &mut errors {
-            let _ = e.read_to_string(&mut text);
-        }
+        let text = errors.join().unwrap_or_default();
         text.lines()
             .rev()
             .find(|l| !l.trim().is_empty())
@@ -225,6 +242,23 @@ impl WaveformCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flood_of_error_text_is_read_through_but_only_the_end_is_kept() {
+        // Far more than a pipe holds (64 KB), one line at a time.
+        let flood: Vec<u8> = (0..50_000)
+            .flat_map(|n| format!("error {n}\n").into_bytes())
+            .collect();
+        assert!(flood.len() > 400_000);
+        let tail = read_tail(std::io::Cursor::new(flood), 4096);
+        assert!(tail.len() <= 4096);
+        assert_eq!(tail.lines().last(), Some("error 49999"));
+        // Short text is kept whole.
+        assert_eq!(
+            read_tail(std::io::Cursor::new(b"bad file\n".to_vec()), 4096),
+            "bad file\n"
+        );
+    }
 
     #[test]
     fn samples_reduce_to_their_loudest_in_each_slice() {
