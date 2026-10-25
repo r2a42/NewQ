@@ -29,7 +29,39 @@ env:
   FFMPEG_VERSION: "9.0"
 
 jobs:
+  # Check who asked and what for before anything is built or published. A tag
+  # pushed by hand starts this workflow, and so does `Cut release` (as the
+  # Actions bot) and the repository owner from the Actions tab; nobody else
+  # may start it by hand, and what is released must be a real tag of the form
+  # vX.Y.Z whose version is the one in Cargo.toml.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Who started this
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "Started by $ACTOR"
+          if [ "$ACTOR" != "$OWNER" ] && [ "$ACTOR" != "github-actions[bot]" ]; then
+            echo "Only the repository owner, or the Cut release workflow, may start a release by hand." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        if: env.TAG != ''
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Check the tag
+        if: env.TAG != ''
+        run: |
+          # Checking out a branch name would build that branch and publish it
+          # under the name: it has to be a tag.
+          git show-ref --verify --quiet "refs/tags/$TAG" || { echo "$TAG is not a tag" >&2; exit 1; }
+          scripts/check_release_tag.sh "$TAG"
+
   prepare:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

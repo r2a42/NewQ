@@ -66,9 +66,12 @@ jobs:
 
       - name: Read the request
         run: |
+          # Only a checked tag goes into the environment file: a value with a
+          # newline in it could otherwise set other variables.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            scripts/check_release_tag.sh "$INPUT_TAG"
             echo "TAG=$INPUT_TAG" >> "$GITHUB_ENV"
-            echo "DRY_RUN=$INPUT_DRY_RUN" >> "$GITHUB_ENV"
+            echo "DRY_RUN=$([ "$INPUT_DRY_RUN" = "true" ] && echo true || echo false)" >> "$GITHUB_ENV"
             exit 0
           fi
           first="$(printf '%s\n' "$BODY" | head -n1 | tr -d '\r')"
@@ -77,6 +80,7 @@ jobs:
             echo "Expected '/release vX.Y.Z' or '/release vX.Y.Z dry-run'." >&2
             exit 1
           fi
+          scripts/check_release_tag.sh "$tag"
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "DRY_RUN=$([ "${opt:-}" = "dry-run" ] && echo true || echo false)" >> "$GITHUB_ENV"
 
