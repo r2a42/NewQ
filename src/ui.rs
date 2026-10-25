@@ -15,7 +15,7 @@ use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, U
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct MonitorInfo {
     /// What shows keep to find the display again (the system's name for it).
@@ -74,6 +74,51 @@ const SCRUB_EVERY: f64 = 0.2;
 /// How long the bar stays where it was let go, waiting for the picture to arrive.
 const SCRUB_HOLD: f64 = 1.0;
 
+/// What a file dialog that is open is for, and so what its answer does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DialogFor {
+    OpenShow,
+    SaveShow,
+    /// A file for a new cue of this type.
+    AddCue(CueType),
+    /// A different file for this cue.
+    BrowseFile(CueId, CueType),
+    /// Where this cue's missing file is now.
+    LocateFile(CueId, CueType),
+    ExportCueSheet,
+    /// A folder to search for missing files.
+    RelinkFolder,
+    /// A folder to copy the show's media into.
+    CollectMedia,
+}
+
+impl DialogFor {
+    /// What the answer `path` asks for. `changed` is whether the show was
+    /// edited while the dialog was open.
+    fn answer(self, path: PathBuf, changed: bool) -> Action {
+        match self {
+            DialogFor::OpenShow => Action::OpenShowFile(path, changed),
+            DialogFor::SaveShow => Action::SaveShowTo(path),
+            DialogFor::AddCue(ty) => Action::AddCueFile(ty, path),
+            DialogFor::BrowseFile(id, _) => Action::SetCueFile(id, path),
+            DialogFor::LocateFile(id, _) => Action::RelinkCue(id, path),
+            DialogFor::ExportCueSheet => Action::ExportCueSheet(path),
+            DialogFor::RelinkFolder => Action::RelinkFolder(path),
+            DialogFor::CollectMedia => Action::CollectMedia(path),
+        }
+    }
+}
+
+/// A file or folder dialog that is open on a thread of its own, so the show
+/// keeps running behind it: a dialog on the event loop's thread would freeze
+/// every fade, wait and picture until it was closed.
+struct OpenDialog {
+    purpose: DialogFor,
+    answer: std::sync::mpsc::Receiver<Option<PathBuf>>,
+    /// The show as it was when the dialog opened.
+    shown: String,
+}
+
 /// Copying a show's media into a folder, on its own thread.
 struct CollectJob {
     done: std::sync::mpsc::Receiver<relink::Collected>,
@@ -127,6 +172,8 @@ pub struct UiState {
     search: Option<relink::Search>,
     /// A search of a folder the operator chose, for the missing files.
     folder_search: Option<relink::FolderSearch>,
+    /// The file dialog that is open, if any.
+    dialog: Option<OpenDialog>,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -243,6 +290,16 @@ enum Action {
     FadeOutInstance(u64),
     /// Jump a playing cue (by instance) to this many seconds from its start.
     Seek(u64, f64),
+    /// Open a file dialog (if none is open); its answer comes back as one of
+    /// the actions below.
+    AskFile(DialogFor),
+    /// The show chosen to open, and whether the show was edited meanwhile.
+    OpenShowFile(PathBuf, bool),
+    SaveShowTo(PathBuf),
+    /// A new cue of this type, for this file.
+    AddCueFile(CueType, PathBuf),
+    /// This cue now plays this file.
+    SetCueFile(CueId, PathBuf),
     EditGeometry(Option<OutputId>),
     EditArea(Option<SubDisplayId>),
     /// Move the selected handle by this many screen pixels.
@@ -305,6 +362,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     let mut actions: Vec<Action> = Vec::new();
     poll_collect(ui.ctx(), show, st);
     poll_folder_search(ui.ctx(), show, st);
+    poll_dialog(ui.ctx(), show, st, &mut actions);
     keyboard(ui.ctx(), show, st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -617,14 +675,8 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                     "The cue list as a web page to print, or as a CSV for a spreadsheet.",
                 )
                 .clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .set_title("Export the cue sheet")
-                    .set_file_name(format!("{} cue sheet.html", show.name))
-                    .add_filter("Web page", &["html"])
-                    .add_filter("Spreadsheet (CSV)", &["csv"])
-                    .save_file()
             {
-                actions.push(Action::ExportCueSheet(path));
+                actions.push(Action::AskFile(DialogFor::ExportCueSheet));
             }
             ui.separator();
             if ui.button("Quit").clicked() {
@@ -1358,6 +1410,90 @@ fn cart(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
 }
 
 /// Apply a finished copy of the media to the show's cues.
+/// Open a file dialog on a thread of its own, answering with `ask` (which
+/// blocks until the dialog is closed). One at a time: a request while one is
+/// open is ignored.
+fn start_dialog_with(
+    st: &mut UiState,
+    show: &Show,
+    purpose: DialogFor,
+    ask: impl FnOnce() -> Option<PathBuf> + Send + 'static,
+) {
+    if st.dialog.is_some() {
+        return;
+    }
+    let (tx, answer) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("file-dialog".into())
+        .spawn(move || {
+            let _ = tx.send(ask());
+        });
+    if spawned.is_ok() {
+        st.dialog = Some(OpenDialog {
+            purpose,
+            answer,
+            shown: serde_json::to_string(show).unwrap_or_default(),
+        });
+    }
+}
+
+/// Open the dialog `purpose` asks for.
+fn start_dialog(st: &mut UiState, show: &Show, purpose: DialogFor) {
+    let name = show.name.clone();
+    let show_dir = st
+        .show_path
+        .as_deref()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from);
+    let kind = purpose.clone();
+    start_dialog_with(st, show, purpose, move || match kind {
+        DialogFor::OpenShow => show_dialog().pick_file(),
+        DialogFor::SaveShow => show_dialog()
+            .set_file_name(format!("{name}.{SHOW_EXTENSION}"))
+            .save_file()
+            .map(|p| p.with_extension(SHOW_EXTENSION)),
+        DialogFor::AddCue(ty) | DialogFor::BrowseFile(_, ty) | DialogFor::LocateFile(_, ty) => {
+            media_dialog(ty).pick_file()
+        }
+        DialogFor::ExportCueSheet => rfd::FileDialog::new()
+            .set_title("Export the cue sheet")
+            .set_file_name(format!("{name} cue sheet.html"))
+            .add_filter("Web page", &["html"])
+            .add_filter("Spreadsheet (CSV)", &["csv"])
+            .save_file(),
+        DialogFor::RelinkFolder => rfd::FileDialog::new()
+            .set_title("Where are the media files now?")
+            .pick_folder(),
+        DialogFor::CollectMedia => {
+            let mut dialog = rfd::FileDialog::new().set_title("Copy the media into…");
+            if let Some(dir) = show_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.pick_folder()
+        }
+    });
+}
+
+/// Take the answer of the open file dialog when it has come.
+fn poll_dialog(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    let Some(dialog) = &st.dialog else { return };
+    match dialog.answer.try_recv() {
+        Ok(answer) => {
+            let Some(dialog) = st.dialog.take() else {
+                return;
+            };
+            if let Some(path) = answer {
+                let changed = serde_json::to_string(show).is_ok_and(|now| now != dialog.shown);
+                actions.push(dialog.purpose.answer(path, changed));
+            }
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => st.dialog = None,
+    }
+}
+
 /// Take the answer of a folder search when it has come, and relink with it.
 fn poll_folder_search(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
     let Some(search) = &st.folder_search else {
@@ -1495,11 +1631,8 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                          with the same names.",
                     )
                     .clicked()
-                    && let Some(dir) = rfd::FileDialog::new()
-                        .set_title("Where are the media files now?")
-                        .pick_folder()
                 {
-                    actions.push(Action::RelinkFolder(dir));
+                    actions.push(Action::AskFile(DialogFor::RelinkFolder));
                 }
                 let searching = found.as_ref().is_some_and(|f| !f.done);
                 if ui
@@ -1527,13 +1660,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                     )
                     .clicked()
                 {
-                    let mut dialog = rfd::FileDialog::new().set_title("Copy the media into…");
-                    if let Some(dir) = st.show_path.as_deref().and_then(|p| p.parent()) {
-                        dialog = dialog.set_directory(dir);
-                    }
-                    if let Some(dir) = dialog.pick_folder() {
-                        actions.push(Action::CollectMedia(dir));
-                    }
+                    actions.push(Action::AskFile(DialogFor::CollectMedia));
                 }
             });
             if let Some(f) = &found {
@@ -1681,11 +1808,11 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                                             });
                                     }
                                 }
-                                if gone
-                                    && ui.button("Locate…").clicked()
-                                    && let Some(f) = media_dialog(cue.kind.cue_type()).pick_file()
-                                {
-                                    actions.push(Action::RelinkCue(cue.id, f));
+                                if gone && ui.button("Locate…").clicked() {
+                                    actions.push(Action::AskFile(DialogFor::LocateFile(
+                                        cue.id,
+                                        cue.kind.cue_type(),
+                                    )));
                                 }
                             });
                             ui.end_row();
@@ -3158,9 +3285,18 @@ fn inspector(
         let cue_type = cue.kind.cue_type();
         let cue_id = cue.id;
         match &mut cue.kind {
-            CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => {
-                media_inspector(ui, cue_type, m, &outputs, &audio_outputs, engine)
-            }
+            CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => media_inspector(
+                ui,
+                cue_id,
+                cue_type,
+                m,
+                OutputChoices {
+                    video: &outputs,
+                    audio: &audio_outputs,
+                },
+                engine,
+                actions,
+            ),
             CueKind::Fade(f) => {
                 let candidates: Vec<_> = media_cues
                     .iter()
@@ -3235,13 +3371,35 @@ fn inspector(
             CueKind::Text(t) => {
                 text_inspector(ui, t);
                 ui.separator();
-                media_inspector(ui, cue_type, &mut t.media, &outputs, &audio_outputs, engine);
+                media_inspector(
+                    ui,
+                    cue_id,
+                    cue_type,
+                    &mut t.media,
+                    OutputChoices {
+                        video: &outputs,
+                        audio: &audio_outputs,
+                    },
+                    engine,
+                    actions,
+                );
             }
             CueKind::Send(s) => send_inspector(ui, s, &st.midi_out_ports),
             CueKind::Camera(c) => {
                 camera_inspector(ui, c, engine);
                 ui.separator();
-                media_inspector(ui, cue_type, &mut c.media, &outputs, &audio_outputs, engine);
+                media_inspector(
+                    ui,
+                    cue_id,
+                    cue_type,
+                    &mut c.media,
+                    OutputChoices {
+                        video: &outputs,
+                        audio: &audio_outputs,
+                    },
+                    engine,
+                    actions,
+                );
             }
             CueKind::Group(g) => {
                 egui::Grid::new("group")
@@ -3298,14 +3456,25 @@ fn curve_combo(ui: &mut Ui, id: &str, curve: &mut Curve) {
         });
 }
 
+/// The outputs a cue can be sent to, by id and name.
+struct OutputChoices<'a> {
+    video: &'a [(OutputId, String)],
+    audio: &'a [(AudioOutputId, String)],
+}
+
 fn media_inspector(
     ui: &mut Ui,
+    cue_id: CueId,
     ty: CueType,
     m: &mut MediaCue,
-    outputs: &[(OutputId, String)],
-    audio_outputs: &[(AudioOutputId, String)],
+    choices: OutputChoices,
     engine: &mut Engine,
+    actions: &mut Vec<Action>,
 ) {
+    let OutputChoices {
+        video: outputs,
+        audio: audio_outputs,
+    } = choices;
     let visual = ty != CueType::Audio;
     // Text and images are held for a time rather than played from a file.
     let still = matches!(ty, CueType::Image | CueType::Text | CueType::Camera);
@@ -3325,12 +3494,8 @@ fn media_inspector(
                     .unwrap_or_else(|| "(none)".into());
                 ui.label(RichText::new(name).strong())
                     .on_hover_text(m.file.display().to_string());
-                if ui.button("Browse…").clicked()
-                    && let Some(f) = media_dialog(ty).pick_file()
-                {
-                    engine.probe.invalidate(&f);
-                    engine.waveforms.invalidate(&f);
-                    m.file = f;
+                if ui.button("Browse…").clicked() {
+                    actions.push(Action::AskFile(DialogFor::BrowseFile(cue_id, ty)));
                 }
             });
             ui.end_row();
@@ -4150,6 +4315,9 @@ pub fn confirm_discard(show: &Show, st: &mut UiState) -> bool {
     proceed
 }
 
+/// Save, asking where first if the show has no file or `save_as`. This waits
+/// for the dialog, which is fine when something else waits on the answer
+/// (leaving a show); otherwise `Action::Save` asks on a thread of its own.
 fn save(show: &Show, st: &mut UiState, save_as: bool) -> bool {
     let path = match (&st.show_path, save_as) {
         (Some(p), false) => p.clone(),
@@ -4161,6 +4329,12 @@ fn save(show: &Show, st: &mut UiState, save_as: bool) -> bool {
             None => return false,
         },
     };
+    write_show(show, st, &path)
+}
+
+/// Save the show to `path`, telling the operator if that fails.
+fn write_show(show: &Show, st: &mut UiState, path: &Path) -> bool {
+    let path = path.to_path_buf();
     match show.save(&path) {
         Ok(()) => {
             // What was kept as a recovery copy, for the old name and the new, is now saved.
@@ -4343,17 +4517,23 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             select(show, st, engine, Some(id));
             st.scroll_to_selected = true;
         }
-        Action::AddCue(ty) => {
-            let file = match ty {
-                CueType::Video | CueType::Image | CueType::Audio => {
-                    match media_dialog(ty).pick_file() {
-                        Some(f) => Some(f),
-                        None => return,
-                    }
-                }
-                _ => None,
-            };
-            add_cue(show, st, engine, ty, file);
+        Action::AddCue(ty) => match ty {
+            // A cue made from a file: ask which, and add it when it is chosen.
+            CueType::Video | CueType::Image | CueType::Audio => {
+                start_dialog(st, show, DialogFor::AddCue(ty));
+            }
+            _ => add_cue(show, st, engine, ty, None),
+        },
+        Action::AddCueFile(ty, file) => add_cue(show, st, engine, ty, Some(file)),
+        Action::AskFile(purpose) => start_dialog(st, show, purpose),
+        Action::SetCueFile(id, file) => {
+            if let Some(i) = show.cue_index(id)
+                && let Some(m) = show.cues[i].kind.media_mut()
+            {
+                engine.probe.invalidate(&file);
+                engine.waveforms.invalidate(&file);
+                m.file = file;
+            }
         }
         Action::AddFiles(files) => {
             for f in files {
@@ -4411,20 +4591,28 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::Open => {
-            if confirm_discard(show, st)
-                && let Some(path) = show_dialog().pick_file()
-            {
+            if confirm_discard(show, st) {
+                start_dialog(st, show, DialogFor::OpenShow);
+            }
+        }
+        Action::OpenShowFile(path, changed) => {
+            // Edited while the dialog was open: ask again before they are lost.
+            if !changed || confirm_discard(show, st) {
                 match Show::load(&path) {
                     Ok(new) => load_into(new, Some(path), show, engine, st),
                     Err(e) => engine.log(format!("Could not open show: {e:#}")),
                 }
             }
         }
-        Action::Save => {
-            save(show, st, false);
-        }
-        Action::SaveAs => {
-            save(show, st, true);
+        Action::Save => match st.show_path.clone() {
+            Some(path) => {
+                write_show(show, st, &path);
+            }
+            None => start_dialog(st, show, DialogFor::SaveShow),
+        },
+        Action::SaveAs => start_dialog(st, show, DialogFor::SaveShow),
+        Action::SaveShowTo(path) => {
+            write_show(show, st, &path);
         }
         Action::FireSelected => {
             if let Some(id) = st.selected {
@@ -6202,5 +6390,175 @@ mod tests {
         );
         // Moving down the list is meant to repeat.
         assert_eq!(down(&keyboard_asks(held(Key::ArrowDown))), 1);
+    }
+
+    /// A dialog that stays open until `release` is sent, then answers with it.
+    fn blocked_dialog() -> (
+        std::sync::mpsc::Sender<Option<PathBuf>>,
+        impl FnOnce() -> Option<PathBuf> + Send + 'static,
+    ) {
+        let (release, wait) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        (release, move || wait.recv().ok().flatten())
+    }
+
+    fn poll_until_answered(show: &Show, st: &mut UiState) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let t0 = std::time::Instant::now();
+        loop {
+            let mut actions = Vec::new();
+            poll_dialog(&ctx, show, st, &mut actions);
+            if st.dialog.is_none() {
+                return actions;
+            }
+            assert!(t0.elapsed().as_secs() < 10, "the dialog never answered");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_file_dialog_does_not_stop_the_show_while_it_is_open() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Wait, None, 0);
+        if let CueKind::Wait(w) = &mut c.kind {
+            w.duration = 5.0;
+        }
+        let wait = c.id;
+        show.cues.push(c);
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        let (release, ask) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::AddCue(CueType::Video), ask);
+        assert!(st.dialog.is_some());
+        // The dialog is open, and the show runs on behind it.
+        e.fire(&show, wait);
+        let ctx = egui::Context::default();
+        let mut actions = Vec::new();
+        for _ in 0..5 {
+            e.tick(&show, 0.1);
+            poll_dialog(&ctx, &show, &mut st, &mut actions);
+        }
+        assert!(actions.is_empty(), "nothing is chosen yet");
+        assert!(
+            matches!(e.status(wait), crate::engine::CueStatus::Playing { elapsed, .. } if elapsed > 0.4)
+        );
+        // A second request while one is open is ignored.
+        let (_, ask2) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::OpenShow, ask2);
+        assert_eq!(
+            st.dialog.as_ref().unwrap().purpose,
+            DialogFor::AddCue(CueType::Video)
+        );
+        // Closing the dialog on a file asks for what it was for.
+        release
+            .send(Some(PathBuf::from("/media/clip.mp4")))
+            .unwrap();
+        let actions = poll_until_answered(&show, &mut st);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::AddCueFile(CueType::Video, p)] if p == Path::new("/media/clip.mp4")
+        ));
+    }
+
+    #[test]
+    fn cancelling_a_file_dialog_asks_for_nothing() {
+        let show = Show::default();
+        let mut st = UiState::default();
+        let (release, ask) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::ExportCueSheet, ask);
+        release.send(None).unwrap();
+        assert!(poll_until_answered(&show, &mut st).is_empty());
+        // And another can be opened after it.
+        let (_, ask) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::OpenShow, ask);
+        assert!(st.dialog.is_some());
+    }
+
+    #[test]
+    fn what_a_dialog_asks_for_depends_on_what_it_was_for() {
+        let p = || PathBuf::from("/x/y");
+        let id = CueId(4);
+        assert!(matches!(
+            DialogFor::OpenShow.answer(p(), true),
+            Action::OpenShowFile(_, true)
+        ));
+        assert!(matches!(
+            DialogFor::SaveShow.answer(p(), false),
+            Action::SaveShowTo(_)
+        ));
+        assert!(matches!(
+            DialogFor::AddCue(CueType::Audio).answer(p(), false),
+            Action::AddCueFile(CueType::Audio, _)
+        ));
+        assert!(matches!(
+            DialogFor::BrowseFile(id, CueType::Video).answer(p(), false),
+            Action::SetCueFile(CueId(4), _)
+        ));
+        assert!(matches!(
+            DialogFor::LocateFile(id, CueType::Video).answer(p(), false),
+            Action::RelinkCue(CueId(4), _)
+        ));
+        assert!(matches!(
+            DialogFor::ExportCueSheet.answer(p(), false),
+            Action::ExportCueSheet(_)
+        ));
+        assert!(matches!(
+            DialogFor::RelinkFolder.answer(p(), false),
+            Action::RelinkFolder(_)
+        ));
+        assert!(matches!(
+            DialogFor::CollectMedia.answer(p(), false),
+            Action::CollectMedia(_)
+        ));
+    }
+
+    #[test]
+    fn editing_the_show_while_the_open_dialog_is_up_is_noticed() {
+        let mut show = Show::default();
+        let mut st = UiState::default();
+        let (release, ask) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::OpenShow, ask);
+        // The operator edits the show while the dialog is open.
+        show.name = "Edited meanwhile".into();
+        release
+            .send(Some(PathBuf::from("/shows/other.newq")))
+            .unwrap();
+        let actions = poll_until_answered(&show, &mut st);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::OpenShowFile(_, true)]
+        ));
+        // Untouched, it isn't.
+        let (release, ask) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::OpenShow, ask);
+        release
+            .send(Some(PathBuf::from("/shows/other.newq")))
+            .unwrap();
+        let actions = poll_until_answered(&show, &mut st);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::OpenShowFile(_, false)]
+        ));
+    }
+
+    #[test]
+    fn choosing_another_file_for_a_cue_points_it_at_the_file_and_forgets_what_it_knew() {
+        let mut show = Show::default();
+        let id = video_cue(&mut show, PathBuf::from("/old/a.mp4"));
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        apply(
+            Action::SetCueFile(id, PathBuf::from("/new/b.mp4")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(file_of(&show, id), PathBuf::from("/new/b.mp4"));
+        // A cue that has gone meanwhile is simply ignored.
+        apply(
+            Action::SetCueFile(CueId(999), PathBuf::from("/new/c.mp4")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
     }
 }
