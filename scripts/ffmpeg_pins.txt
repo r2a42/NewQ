@@ -1,7 +1,13 @@
-# SHA-256 of the FFmpeg builds bundled with the Windows and Linux releases
-# (BtbN/FFmpeg-Builds, the moving "latest" release). A release fails if the
-# download doesn't match, so a changed or tampered build is never shipped
-# unseen. When BtbN publishes a new build, look at what changed, then run
-# scripts/update_ffmpeg_pins.sh and commit the result.
-876be6f25549421b28d997d9a22380c53b3bb857e9bf3cef2dbd7d06f7c50ab7  ffmpeg-n9.0-latest-win64-lgpl-9.0.zip
-5d6e7ada637dc038c0a7ec89639c090696898e94b0335fddf884700fa5e28d11  ffmpeg-n9.0-latest-linux64-lgpl-9.0.tar.xz
+# The FFmpeg builds bundled with the Windows and Linux releases.
+#
+# They are BtbN/FFmpeg-Builds builds, copied into a release of this repository
+# (see scripts/mirror_ffmpeg.sh and the "Mirror FFmpeg" workflow) so that the
+# build we ship can't change or disappear upstream. A release downloads them
+# from there and fails if a file doesn't match the SHA-256 below.
+#
+# To move to a newer FFmpeg, run: scripts/update_ffmpeg_pins.sh <BtbN tag>
+# then run the "Mirror FFmpeg" workflow, then a release dry run.
+btbn autobuild-2026-10-25-13-00
+release ffmpeg-n9.0.2-36-g6882969ce9
+47526345cc4800f4163337d5db8048a2d06c78a53bb234532f55a30dbfb49868  ffmpeg-n9.0.2-36-g6882969ce9-win64-lgpl-9.0.zip
+e3164231897b2e503686acd5829c4dab945d9ee02bdc98ef69793ecc72fc0546  ffmpeg-n9.0.2-36-g6882969ce9-linux64-lgpl-9.0.tar.xz

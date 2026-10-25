@@ -24,9 +24,8 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
-  # FFmpeg bundled with the Windows and Linux builds (LGPL: NewQ only decodes).
-  FFMPEG_BRANCH: n9.0
-  FFMPEG_VERSION: "9.0"
+  # The FFmpeg bundled with the Windows and Linux builds (LGPL: NewQ only
+  # decodes) is the one pinned in scripts/ffmpeg_pins.txt.
 
 jobs:
   # Check who asked and what for before anything is built or published. A tag
