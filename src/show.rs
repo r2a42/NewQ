@@ -1410,7 +1410,18 @@ impl Show {
         let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
         tmp_name.push(".tmp");
         let tmp = path.with_file_name(tmp_name);
-        std::fs::write(&tmp, text)?;
+        let written = (|| {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            // On the disk before it replaces the old show: a power cut just
+            // after the rename can't leave an empty file where the show was.
+            file.sync_all()
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         if let Err(e) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
@@ -2580,5 +2591,31 @@ mod tests {
             serde_json::from_str::<Cue>(&hand).unwrap().clock,
             TimeOfDay::new(7, 5, 0)
         );
+    }
+
+    #[test]
+    fn saving_replaces_the_show_whole_and_leaves_no_temporary_file() {
+        let dir = std::env::temp_dir().join("newq_save_whole");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("show.newq");
+        let mut show = Show {
+            name: "First".into(),
+            ..Show::default()
+        };
+        show.save(&path).unwrap();
+        show.name = "Second".into();
+        show.save(&path).unwrap();
+        assert_eq!(Show::load(&path).unwrap().name, "Second");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["show.newq"], "no .tmp left behind");
+        // A save that can't be written fails and touches nothing.
+        let nowhere = dir.join("no/such/folder/show.newq");
+        assert!(show.save(&nowhere).is_err());
+        assert_eq!(Show::load(&path).unwrap().name, "Second");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
