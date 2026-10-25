@@ -313,7 +313,10 @@ impl App {
             );
             self.last_homing = Instant::now();
             ctl.window.set_minimized(false);
-            ctl.window.set_outer_position(home.position());
+            ctl.window.set_outer_position(crate::monitor::window_origin(
+                home.position(),
+                home.scale_factor(),
+            ));
             ctl.window.set_maximized(true);
             ctl.window.focus_window();
         }
@@ -587,12 +590,19 @@ impl App {
                 let entry = match &l.source {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
-                        let entry = self.textures.entry(l.instance).or_insert_with(|| {
+                        let new_texture = || {
                             (
                                 Arc::new(LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix)),
                                 0,
                             )
-                        });
+                        };
+                        let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
+                        // A seek can bring a player of another size (the output
+                        // was resized since the cue started): its frames need a
+                        // texture of their own, or they would not be shown.
+                        if (entry.0.width, entry.0.height) != (p.width, p.height) {
+                            *entry = new_texture();
+                        }
                         if entry.1 != p.serial {
                             entry.0.upload_yuv(&gpu.queue, &frame.data);
                             entry.1 = p.serial;
