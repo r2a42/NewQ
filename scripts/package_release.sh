@@ -2,20 +2,26 @@
 # Package a release build into dist/.
 # Usage: scripts/package_release.sh <windows-x64|linux-x64|macos-universal> <tag>
 # Expects `cargo build --release` output in target/release/. Every package
-# bundles an LGPL FFmpeg: Windows and Linux use BtbN/FFmpeg-Builds
-# (FFMPEG_BRANCH / FFMPEG_VERSION, default n9.0 / 9.0), checked against the
-# checksums in scripts/ffmpeg_pins.txt; macOS uses the build
-# from scripts/build_ffmpeg_macos.sh found in $FFMPEG_MACOS_DIR.
+# bundles an LGPL FFmpeg: Windows and Linux use the BtbN/FFmpeg-Builds build
+# pinned in scripts/ffmpeg_pins.txt, downloaded from the copy of it kept in a
+# release of this repository (scripts/mirror_ffmpeg.sh) and checked against
+# its SHA-256; macOS uses the build from scripts/build_ffmpeg_macos.sh found
+# in $FFMPEG_MACOS_DIR. FFMPEG_BASE_URL overrides where the pinned files are
+# fetched from (for trying a build before it is mirrored).
 set -euo pipefail
 
 platform="$1"
 tag="$2"
 name="NewQ-${tag}-${platform}"
-ffbranch="${FFMPEG_BRANCH:-n9.0}"
-ffversion="${FFMPEG_VERSION:-9.0}"
 
 cd "$(dirname "$0")/.."
 root="$(pwd)"
+pins="$root/scripts/ffmpeg_pins.txt"
+ff_btbn="$(awk '$1 == "btbn" { print $2 }' "$pins")"
+ff_release="$(awk '$1 == "release" { print $2 }' "$pins")"
+ff_base="${FFMPEG_BASE_URL:-https://github.com/${GITHUB_REPOSITORY:-r2a42/NewQ}/releases/download/${ff_release}}"
+# The pinned file for a platform ("-win64-lgpl-" or "-linux64-lgpl-").
+pinned_asset() { awk -v k="$1" 'NF == 2 && $1 ~ /^[0-9a-f]{64}$/ && index($2, k) { print $2 }' "$pins"; }
 rm -rf dist
 stage="dist/stage/${name}"
 mkdir -p "$stage"
@@ -52,15 +58,18 @@ verify_ffmpeg() {
   echo "bundled ffmpeg OK: $("$ff" -hide_banner -version | head -1)"
 }
 
-# Download an FFmpeg build and put ffmpeg/ffprobe plus licence info in $stage/ffmpeg.
+# Download the pinned FFmpeg build and put ffmpeg/ffprobe plus licence info in $stage/ffmpeg.
 bundle_ffmpeg() {
   local asset="$1" exe_suffix="$2"
-  local url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${asset}"
+  local url="${ff_base}/${asset}"
   local tmp
   tmp="$(mktemp -d)"
   echo "Downloading ${url}"
-  curl -fsSL -o "${tmp}/${asset}" "$url"
-  # The moving "latest" build is only used if it is the one that was looked at.
+  if ! curl -fsSL -o "${tmp}/${asset}" "$url"; then
+    echo "Could not download ${asset}. If the pins were just changed, run the Mirror FFmpeg workflow first." >&2
+    exit 1
+  fi
+  # Only the build that was pinned (and looked at) is bundled.
   "${root}/scripts/check_ffmpeg_pin.sh" "${tmp}/${asset}" "$asset"
   case "$asset" in
     *.zip) (cd "$tmp" && unzip -q "$asset") ;;
@@ -72,19 +81,22 @@ bundle_ffmpeg() {
   cp "$bin/ffmpeg${exe_suffix}" "$bin/ffprobe${exe_suffix}" "$stage/ffmpeg/"
   cp "$(find "$tmp" -maxdepth 2 -name 'LICENSE*' | head -1)" "$stage/ffmpeg/LICENSE.txt"
   verify_ffmpeg "$stage/ffmpeg/ffmpeg${exe_suffix}" "$stage/ffmpeg/ffprobe${exe_suffix}"
-  local version
+  local version build commit
   version="$("$stage/ffmpeg/ffmpeg${exe_suffix}" -hide_banner -version | head -1)"
+  # The asset is named after the FFmpeg commit it was built from.
+  build="$(sed -E 's/^ffmpeg-(.*)-(win64|linux64)-lgpl-.*/\1/' <<< "$asset")"
+  commit="${build##*-g}"
   cat > "$stage/ffmpeg/SOURCE.txt" <<EOF
 These ffmpeg and ffprobe executables are unmodified LGPL builds of FFmpeg from
-https://github.com/BtbN/FFmpeg-Builds (asset: ${asset}).
+https://github.com/BtbN/FFmpeg-Builds (build ${ff_btbn}, asset: ${asset}).
 
 ${version}
 
 FFmpeg is licensed under the GNU Lesser General Public License v2.1 or later;
 see LICENSE.txt. NewQ runs these programs as separate processes and does not
-link to them. Corresponding source code:
-  FFmpeg:        https://github.com/FFmpeg/FFmpeg/tree/release/${ffversion}
-  Build scripts: https://github.com/BtbN/FFmpeg-Builds
+link to them. Corresponding source code, for exactly this build:
+  FFmpeg:        https://github.com/FFmpeg/FFmpeg/commit/${commit}
+  Build scripts: https://github.com/BtbN/FFmpeg-Builds/tree/${ff_btbn}
 You may replace these files with any other FFmpeg build.
 EOF
   rm -rf "$tmp"
@@ -93,13 +105,13 @@ EOF
 case "$platform" in
   windows-x64)
     cp target/release/newq.exe "$stage/"
-    bundle_ffmpeg "ffmpeg-${ffbranch}-latest-win64-lgpl-${ffversion}.zip" ".exe"
+    bundle_ffmpeg "$(pinned_asset -win64-lgpl-)" ".exe"
     (cd dist/stage && 7z a -tzip -bso0 "${root}/dist/${name}.zip" "$name")
     ;;
   linux-x64)
     cp target/release/newq "$stage/"
     chmod +x "$stage/newq"
-    bundle_ffmpeg "ffmpeg-${ffbranch}-latest-linux64-lgpl-${ffversion}.tar.xz" ""
+    bundle_ffmpeg "$(pinned_asset -linux64-lgpl-)" ""
     tar -C dist/stage -czf "dist/${name}.tar.gz" "$name"
     ;;
   macos-universal)

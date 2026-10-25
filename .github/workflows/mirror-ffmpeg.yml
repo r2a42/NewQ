@@ -1,0 +1,24 @@
+name: Mirror FFmpeg
+
+# Copies the FFmpeg build pinned in scripts/ffmpeg_pins.txt from BtbN's release
+# into a release of this repository (not a NewQ release), where the Release
+# workflow gets it. Run it after changing the pins; running it again is
+# harmless. Only the repository owner may start it.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  mirror:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mirror the pinned build
+        run: scripts/mirror_ffmpeg.sh
