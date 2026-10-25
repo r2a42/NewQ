@@ -1,0 +1,7 @@
+# SHA-256 of the FFmpeg builds bundled with the Windows and Linux releases
+# (BtbN/FFmpeg-Builds, the moving "latest" release). A release fails if the
+# download doesn't match, so a changed or tampered build is never shipped
+# unseen. When BtbN publishes a new build, look at what changed, then run
+# scripts/update_ffmpeg_pins.sh and commit the result.
+876be6f25549421b28d997d9a22380c53b3bb857e9bf3cef2dbd7d06f7c50ab7  ffmpeg-n9.0-latest-win64-lgpl-9.0.zip
+5d6e7ada637dc038c0a7ec89639c090696898e94b0335fddf884700fa5e28d11  ffmpeg-n9.0-latest-linux64-lgpl-9.0.tar.xz
