@@ -2401,6 +2401,11 @@ fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
                     .desired_width(70.0)
                     .hint_text("none"),
             );
+            // What the page can send: no spaces or accented letters.
+            let clean = crate::web::clean_pin(&r.web_pin);
+            if clean != r.web_pin {
+                r.web_pin = clean;
+            }
         });
         match (&status.web_port, &status.web_error) {
             (_, Some(e)) => {

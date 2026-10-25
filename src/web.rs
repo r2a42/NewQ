@@ -91,6 +91,14 @@ impl PinGuard {
     }
 }
 
+/// A PIN as the page can send it: printable ASCII with no spaces. A header
+/// can't carry anything else (the browser refuses to send it), and a space at
+/// the end would never match the trimmed header, so a PIN containing either
+/// could never be entered.
+pub fn clean_pin(pin: &str) -> String {
+    pin.chars().filter(|c| c.is_ascii_graphic()).collect()
+}
+
 /// Whether a request's `Host` is an address no site on the internet can have:
 /// an IP address, a name with no dots (`localhost`, a machine's own name) or
 /// a `.local` name. A page that has made its own domain point at this machine
@@ -375,6 +383,7 @@ impl WebServer {
         wake: Arc<dyn Fn() + Send + Sync>,
         limits: Limits,
     ) -> Result<WebServer, String> {
+        let pin = clean_pin(&pin);
         let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -1007,5 +1016,20 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "never made room");
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn a_pin_is_what_the_page_can_send() {
+        assert_eq!(clean_pin("4821"), "4821");
+        assert_eq!(clean_pin(" 48 21 "), "4821", "spaces can't be sent");
+        assert_eq!(clean_pin("pässwörd9"), "psswrd9", "nor can accents");
+        assert_eq!(clean_pin(""), "");
+        // A saved PIN with a trailing space still lets the page in.
+        let server = start_server("4821 ", Limits::default());
+        let r = ask(
+            server.port,
+            "GET /api/state HTTP/1.1\r\nX-Pin: 4821\r\n\r\n",
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
     }
 }
