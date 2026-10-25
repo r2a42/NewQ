@@ -775,6 +775,21 @@ impl MediaCue {
         (self.loop_count > 0).then_some(self.loop_count)
     }
 
+    /// Whether a decoder started for `other` would do for this cue too: the
+    /// same file, the same slice of it, looped the same way, fitted and
+    /// routed the same way. Levels, fades, geometry and colour don't change
+    /// what is decoded, so editing them leaves a preload alone.
+    pub fn decodes_like(&self, other: &MediaCue) -> bool {
+        self.file == other.file
+            && self.fit == other.fit
+            && self.start == other.start
+            && self.end == other.end
+            && self.loop_media == other.loop_media
+            && self.loop_count == other.loop_count
+            && self.audio_output == other.audio_output
+            && self.audio_channel == other.audio_channel
+    }
+
     /// How this cue's decoders should run, given the file's duration if known.
     pub fn playback(&self, total: Option<f64>) -> Playback {
         Playback::plan(

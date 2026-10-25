@@ -167,6 +167,9 @@ pub struct ActiveCue {
     seek_base: f64,
     /// Decoders started at a new position, swapped in once they have a frame.
     seeking: Option<Seek>,
+    /// A seek took the cue back out of its automatic fade-out: put its levels
+    /// back at the next tick.
+    relevel: bool,
     /// A fade cue has changed its levels, so live edits to the cue no longer apply.
     faded: bool,
     auto_faded: bool,
@@ -200,6 +203,12 @@ impl ActiveCue {
             _ => false,
         };
         ok.then_some(d)
+    }
+    /// Jumping in a cue starts its automatic fade-out over: it is at full
+    /// level again until it comes round to fading out once more.
+    fn restart_auto_fade(&mut self) {
+        self.relevel = self.auto_faded;
+        self.auto_faded = false;
     }
     /// A seek has been asked for and is not on screen yet.
     pub fn seeking(&self) -> bool {
@@ -243,12 +252,23 @@ pub struct PendingCue {
     pub total: f64,
 }
 
-#[derive(Clone, PartialEq)]
+/// What a preload was made for. It is reused only if the cue still asks for
+/// the same decoding (see `MediaCue::decodes_like`), so dragging a volume or
+/// opacity slider doesn't restart the decoders on every frame.
+#[derive(Clone)]
 struct PrepSig {
     media: MediaCue,
     size: (u32, u32),
     /// A camera's device and mode, which a file cue doesn't have.
     camera: Option<(String, u32, u32, u32)>,
+}
+
+impl PartialEq for PrepSig {
+    fn eq(&self, other: &PrepSig) -> bool {
+        self.size == other.size
+            && self.camera == other.camera
+            && self.media.decodes_like(&other.media)
+    }
 }
 
 enum PreparedKind {
@@ -694,6 +714,7 @@ impl Engine {
             .ok_or("that cue is no longer playing")?;
         if is_image {
             a.elapsed = to;
+            a.restart_auto_fade();
         } else {
             a.seeking = Some(Seek {
                 player,
@@ -943,6 +964,7 @@ impl Engine {
             held: false,
             seek_base: 0.0,
             seeking: None,
+            relevel: false,
             faded: false,
             auto_faded: false,
             followed: true,
@@ -987,6 +1009,7 @@ impl Engine {
             held: false,
             seek_base: 0.0,
             seeking: None,
+            relevel: false,
             faded: false,
             auto_faded: false,
             followed: false,
@@ -1118,6 +1141,12 @@ impl Engine {
                         }
                         t.stopping = true;
                     }
+                }
+                if f.stop_target {
+                    // Cues of the target still waiting to start won't start.
+                    let waiting = self.pending.len();
+                    self.pending.retain(|p| !targets.contains(&p.cue_id));
+                    hit |= self.pending.len() != waiting;
                 }
                 if !hit {
                     let target = f
@@ -1424,6 +1453,13 @@ impl Engine {
                     }
                     _ => {}
                 }
+                if a.relevel {
+                    a.relevel = false;
+                    if !a.faded && !a.stopping {
+                        a.opacity = Param::new(m.opacity);
+                        a.volume = Param::new(m.volume_db);
+                    }
+                }
                 if !a.faded && !a.stopping && !a.auto_faded {
                     if !a.opacity.ramping() {
                         a.opacity.value = m.opacity;
@@ -1727,6 +1763,7 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) {
     }
     a.seek_base = s.base;
     a.elapsed = s.base;
+    a.restart_auto_fade();
 }
 
 fn completed_follow(a: &mut ActiveCue, cue: Option<&Cue>, follow: &mut Vec<CueId>) {
@@ -2965,5 +3002,101 @@ mod tests {
         run_until(&mut e, &show, "the second image", |e| e.active.len() == 2);
         let second = e.active.iter().find(|a| a.cue_id == open).unwrap();
         assert!(second.scrub_length(&show).is_none());
+    }
+
+    // ----- Fixes from the review -------------------------------------------
+
+    #[test]
+    fn editing_levels_keeps_a_preload_but_editing_the_slice_does_not() {
+        let mut show = Show::default();
+        let c = show.make_cue(
+            CueType::Video,
+            Some(std::path::PathBuf::from("clip.mp4")),
+            0,
+        );
+        let e = engine_without_media();
+        let base = e.signature(&c).unwrap();
+        let sig_after = |edit: &dyn Fn(&mut MediaCue)| {
+            let mut c = c.clone();
+            edit(c.kind.media_mut().unwrap());
+            e.signature(&c).unwrap()
+        };
+        // None of these change what is decoded.
+        assert!(base == sig_after(&|m| m.opacity = 0.3));
+        assert!(base == sig_after(&|m| m.volume_db = -20.0));
+        assert!(base == sig_after(&|m| m.fade_in = 2.0));
+        assert!(base == sig_after(&|m| m.fade_out = 2.0));
+        assert!(base == sig_after(&|m| m.hold_last_frame = true));
+        // These do.
+        assert!(base != sig_after(&|m| m.start = 1.0));
+        assert!(base != sig_after(&|m| m.end = Some(4.0)));
+        assert!(base != sig_after(&|m| m.loop_media = true));
+        assert!(base != sig_after(&|m| m.file = std::path::PathBuf::from("other.mp4")));
+        assert!(base != sig_after(&|m| m.audio_channel = 3));
+    }
+
+    #[test]
+    fn scrubbing_back_out_of_the_automatic_fade_restores_the_levels() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let id = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        show.cue_mut(id).unwrap().kind.media_mut().unwrap().end = Some(10.0);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the image", |e| stack(e, out).len() == 1);
+        let instance = e.active[0].instance;
+        let level = |e: &Engine| {
+            e.active
+                .iter()
+                .find(|a| a.instance == instance)
+                .unwrap()
+                .opacity
+                .value
+        };
+
+        // Into the last second (the cue fades out over it), and let it fade.
+        e.seek(&show, instance, 9.4).unwrap();
+        run_for(&mut e, &show, 0.3);
+        assert!(level(&e) < 0.9, "fading out: {}", level(&e));
+
+        // Back to the start: full level again, and it stays there.
+        e.seek(&show, instance, 1.0).unwrap();
+        run_for(&mut e, &show, 0.4);
+        assert!(level(&e) > 0.99, "restored: {}", level(&e));
+    }
+
+    #[test]
+    fn fading_out_a_group_cancels_children_still_waiting() {
+        let mut show = Show::default();
+        let (gid, kids) = group(&mut show, GroupMode::Timeline, &[5.0, 5.0]);
+        show.cue_mut(kids[1]).unwrap().pre_wait = 10.0;
+        let mut f = show.make_cue(CueType::Fade, None, show.cues.len());
+        if let CueKind::Fade(c) = &mut f.kind {
+            c.target = Some(gid);
+            c.duration = 0.5;
+            c.opacity = None;
+            c.volume_db = None;
+            c.stop_target = true;
+        }
+        let fade = f.id;
+        show.cues.push(f);
+        let mut e = engine_without_media();
+        e.playhead = Some(gid);
+        e.go(&show);
+        assert!(
+            e.pending.iter().any(|p| p.cue_id == kids[1]),
+            "second child waits"
+        );
+        e.fire(&show, fade);
+        e.tick(&show, 1.0);
+        assert!(e.pending.is_empty(), "nothing left waiting to start");
+        e.tick(&show, 11.0);
+        assert!(
+            matches!(e.status(kids[1]), CueStatus::Idle),
+            "the second child never starts"
+        );
     }
 }
