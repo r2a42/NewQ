@@ -422,6 +422,17 @@ pub fn hotkey_allowed(key: Key) -> bool {
     (letter && !matches!(key, Key::P | Key::A)) || digit || function
 }
 
+/// Take a key press, acting only on a fresh one. The repeats of a key held
+/// down are taken too, but ignored, so holding Space doesn't GO again and
+/// again and a held Esc can't turn the panic fade into an instant stop.
+fn fresh_key(i: &mut egui::InputState, modifiers: egui::Modifiers, key: Key) -> bool {
+    let fresh = i.events.iter().any(|e| {
+        matches!(e, egui::Event::Key { key: k, pressed: true, repeat: false, modifiers: m, .. }
+            if *k == key && m.matches_logically(modifiers))
+    });
+    i.consume_key(modifiers, key) && fresh
+}
+
 fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
     if let Some(id) = st.capture_hotkey {
         // Waiting for the key to bind: nothing else reacts meanwhile.
@@ -451,20 +462,20 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
     let typing = ctx.egui_wants_keyboard_input();
     let nudging = st.selected_handle().is_some();
     ctx.input_mut(|i| {
-        if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
+        if fresh_key(i, egui::Modifiers::NONE, Key::Escape) {
             actions.push(Action::Panic);
         }
         // Before Ctrl+S, which also matches with Shift held.
-        if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::S) {
+        if fresh_key(i, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::S) {
             actions.push(Action::SaveAs);
         }
-        if i.consume_key(egui::Modifiers::COMMAND, Key::S) {
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::S) {
             actions.push(Action::Save);
         }
-        if i.consume_key(egui::Modifiers::COMMAND, Key::O) {
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::O) {
             actions.push(Action::Open);
         }
-        if i.consume_key(egui::Modifiers::COMMAND, Key::N) {
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::N) {
             actions.push(Action::New);
         }
         if typing {
@@ -534,16 +545,16 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
                 }
             }
         }
-        if i.consume_key(egui::Modifiers::NONE, Key::Space) {
+        if fresh_key(i, egui::Modifiers::NONE, Key::Space) {
             actions.push(Action::Go);
         }
-        if i.consume_key(egui::Modifiers::NONE, Key::P) {
+        if fresh_key(i, egui::Modifiers::NONE, Key::P) {
             actions.push(Action::TogglePause);
         }
-        if i.consume_key(egui::Modifiers::NONE, Key::A) {
+        if fresh_key(i, egui::Modifiers::NONE, Key::A) {
             actions.push(Action::ToggleArmed);
         }
-        if i.consume_key(egui::Modifiers::COMMAND, Key::D) {
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::D) {
             actions.push(Action::Duplicate);
         }
         if i.consume_key(egui::Modifiers::COMMAND, Key::ArrowUp) {
@@ -558,8 +569,8 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
         if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
             actions.push(Action::SelectRelative(1));
         }
-        if i.consume_key(egui::Modifiers::NONE, Key::Delete)
-            || i.consume_key(egui::Modifiers::COMMAND, Key::Backspace)
+        if fresh_key(i, egui::Modifiers::NONE, Key::Delete)
+            || fresh_key(i, egui::Modifiers::COMMAND, Key::Backspace)
         {
             actions.push(Action::Delete);
         }
@@ -6007,5 +6018,79 @@ mod tests {
             "Monitor #9999",
             "not connected"
         );
+    }
+
+    /// What the keyboard asks for in the last of these frames of events. (egui
+    /// decides for itself whether a key event is a repeat, from whether the
+    /// key was already down, so a repeat needs a press before it.)
+    fn keyboard_asks(frames: Vec<Vec<Event>>) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let (show, st) = (Show::default(), UiState::default());
+        let mut actions = Vec::new();
+        for (n, events) in frames.into_iter().enumerate() {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+                time: Some(1.0 + n as f64 * 0.03),
+                events,
+                ..Default::default()
+            };
+            actions.clear();
+            let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), &show, &st, &mut actions));
+            out.textures_delta.clear();
+        }
+        actions
+    }
+
+    fn press(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn release(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn holding_a_key_does_not_repeat_its_action() {
+        let go = |a: &[Action]| a.iter().filter(|a| matches!(a, Action::Go)).count();
+        let panic = |a: &[Action]| a.iter().filter(|a| matches!(a, Action::Panic)).count();
+        let down = |a: &[Action]| {
+            a.iter()
+                .filter(|a| matches!(a, Action::SelectRelative(1)))
+                .count()
+        };
+        // The first frame of a press acts; the frames of it being held don't.
+        assert_eq!(go(&keyboard_asks(vec![vec![press(Key::Space)]])), 1);
+        let held = |key| {
+            vec![
+                vec![press(key)],
+                vec![press(key)], // a repeat, since the key is still down
+                vec![press(key)],
+            ]
+        };
+        assert_eq!(go(&keyboard_asks(held(Key::Space))), 0);
+        assert_eq!(panic(&keyboard_asks(held(Key::Escape))), 0);
+        // Let go and press again: that is a new press.
+        assert_eq!(
+            go(&keyboard_asks(vec![
+                vec![press(Key::Space)],
+                vec![release(Key::Space)],
+                vec![press(Key::Space)],
+            ])),
+            1
+        );
+        // Moving down the list is meant to repeat.
+        assert_eq!(down(&keyboard_asks(held(Key::ArrowDown))), 1);
     }
 }
