@@ -219,6 +219,7 @@ impl App {
             .enumerate()
             .map(|(i, m)| MonitorInfo {
                 name: m.name().unwrap_or_else(|| format!("Display {}", i + 1)),
+                model: crate::monitor::model_name(m),
                 size: (m.size().width, m.size().height),
                 refresh_hz: m.refresh_rate_millihertz().map(|r| r as f32 / 1000.0),
                 primary: primary.as_ref() == Some(m),
@@ -352,7 +353,10 @@ impl App {
             // Native fullscreen gets a Space of its own on that display, which
             // can take the main window out of sight. Cover the display
             // instead (below); the window just has to start on it.
-            attrs = attrs.with_position(m.position());
+            attrs = attrs.with_position(crate::monitor::window_origin(
+                m.position(),
+                m.scale_factor(),
+            ));
         } else {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         }
@@ -364,6 +368,22 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        {
+            // The window must be on the display it is to cover before it
+            // is made to cover it.
+            if window.current_monitor().as_ref() != Some(m) {
+                log::warn!(
+                    "output window started on {:?}, not {:?}; moving it",
+                    window.current_monitor().and_then(|x| x.name()),
+                    m.name()
+                );
+                window.set_outer_position(crate::monitor::window_origin(
+                    m.position(),
+                    m.scale_factor(),
+                ));
+            }
+        }
         #[cfg(target_os = "macos")]
         if !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true) {
             log::warn!("simple fullscreen refused on display {monitor}; using native fullscreen");
@@ -498,7 +518,7 @@ impl App {
                         .ui
                         .monitors
                         .get(t.monitor)
-                        .map(|x| x.name.clone())
+                        .map(|x| x.title().to_string())
                         .unwrap_or_default();
                     match cfg.placement {
                         Placement::SubDisplay(v) => OutputRoute::SubDisplay {

@@ -18,10 +18,20 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub struct MonitorInfo {
+    /// What shows keep to find the display again (the system's name for it).
     pub name: String,
+    /// What the display is, if the system says ("Built-in Retina Display").
+    pub model: Option<String>,
     pub size: (u32, u32),
     pub refresh_hz: Option<f32>,
     pub primary: bool,
+}
+
+impl MonitorInfo {
+    /// What to call the display on screen: what it is, else the system's name.
+    pub fn title(&self) -> &str {
+        self.model.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// Where an enabled output is currently being shown.
@@ -2161,12 +2171,22 @@ fn sub_display_size(st: &UiState, id: SubDisplayId) -> (u32, u32) {
         .map_or((1920, 1080), |m| m.size)
 }
 
+/// What to call the display a show refers to: what it is, if it is connected.
+fn monitor_title(st: &UiState, d: &DisplayRef) -> String {
+    let same = |m: &&MonitorInfo| m.name == d.name;
+    st.monitors
+        .get(d.index)
+        .filter(same)
+        .or_else(|| st.monitors.iter().find(same))
+        .map_or_else(|| d.name.clone(), |m| m.title().to_string())
+}
+
 fn monitor_label(st: &UiState, i: usize) -> String {
     let m = &st.monitors[i];
     format!(
         "{}: {} ({}×{}{}){}",
         i + 1,
-        m.name,
+        m.title(),
         m.size.0,
         m.size.1,
         m.refresh_hz
@@ -2431,7 +2451,7 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
             let current = match &out.placement {
                 Placement::Auto => "Automatic".to_string(),
                 Placement::MainWindow => "Main window".to_string(),
-                Placement::Display(d) => format!("Fullscreen on {}", d.name),
+                Placement::Display(d) => format!("Fullscreen on {}", monitor_title(st, d)),
                 Placement::SubDisplay(v) => match show_subs.iter().find(|x| x.id == *v) {
                     Some(x) => format!("On sub display {}", x.name),
                     None => "Removed sub display".to_string(),
@@ -2460,7 +2480,11 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                         ui.selectable_value(
                             &mut out.placement,
                             Placement::SubDisplay(v.id),
-                            format!("On sub display {} (on {})", v.name, v.parent.name),
+                            format!(
+                                "On sub display {} (on {})",
+                                v.name,
+                                monitor_title(st, &v.parent)
+                            ),
                         );
                     }
                 });
@@ -2564,7 +2588,7 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
             });
             egui::ComboBox::from_id_salt(("vd_parent", v.id.0))
                 .width(ui.available_width() - 8.0)
-                .selected_text(format!("Part of {}", v.parent.name))
+                .selected_text(format!("Part of {}", monitor_title(st, &v.parent)))
                 .show_ui(ui, |ui| {
                     for i in 0..st.monitors.len() {
                         let d = DisplayRef {
@@ -2577,7 +2601,7 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
             let (w, h) = v.area.size_on(screen_size);
             let status = match monitor {
                 Some(_) => format!("{w}×{h} px"),
-                None => format!("{} isn't connected", v.parent.name),
+                None => format!("{} isn't connected", monitor_title(st, &v.parent)),
             };
             let used = if users.is_empty() {
                 "no outputs on it yet".to_string()
@@ -5938,5 +5962,50 @@ mod tests {
         let mut st = UiState::default();
         let (_, seeks) = scrub_frames(&show, &engine, &mut st, vec![vec![]]);
         assert!(seeks.is_empty() && st.scrub.is_none());
+    }
+
+    fn monitor(name: &str, model: Option<&str>) -> MonitorInfo {
+        MonitorInfo {
+            name: name.into(),
+            model: model.map(str::to_string),
+            size: (1920, 1080),
+            refresh_hz: None,
+            primary: false,
+        }
+    }
+
+    #[test]
+    fn displays_are_called_what_they_are_when_the_system_says() {
+        let st = UiState {
+            monitors: vec![
+                monitor("Monitor #1234", Some("Built-in Retina Display")),
+                monitor("Monitor #5678", Some("SAMSUNG")),
+                monitor("\\\\.\\DISPLAY3", None),
+            ],
+            ..Default::default()
+        };
+        assert!(monitor_label(&st, 0).starts_with("1: Built-in Retina Display ("));
+        assert!(monitor_label(&st, 1).starts_with("2: SAMSUNG ("));
+        assert!(
+            monitor_label(&st, 2).starts_with("3: \\\\.\\DISPLAY3 ("),
+            "no model known: the system's name"
+        );
+        // A show remembers the system's name; it is shown as what it is.
+        let by_name = |name: &str, index: usize| {
+            monitor_title(
+                &st,
+                &DisplayRef {
+                    name: name.into(),
+                    index,
+                },
+            )
+        };
+        assert_eq!(by_name("Monitor #5678", 1), "SAMSUNG");
+        assert_eq!(by_name("Monitor #5678", 0), "SAMSUNG", "found by name");
+        assert_eq!(
+            by_name("Monitor #9999", 0),
+            "Monitor #9999",
+            "not connected"
+        );
     }
 }
