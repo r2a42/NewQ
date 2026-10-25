@@ -46,11 +46,27 @@ fn shared_tail(a: &Path, b: &Path) -> usize {
         .count()
 }
 
-/// All the files under `root`, as paths, in a stable order.
-fn walk(root: &Path) -> Vec<PathBuf> {
+/// All the files under `root`, as paths, in a stable order, and whether it
+/// stopped for lack of time (`deadline`) before it had looked everywhere. It
+/// also stops, early, if `cancel` is set. A folder reached twice (a link back
+/// up the tree) is read once.
+fn walk(root: &Path, deadline: Instant, cancel: &AtomicBool) -> (Vec<PathBuf>, bool) {
     let mut files = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut timed_out = false;
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !visited.insert(key) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -65,15 +81,22 @@ fn walk(root: &Path) -> Vec<PathBuf> {
         }
     }
     files.sort();
-    files
+    (files, timed_out)
 }
 
-/// Look for the `wanted` files by name under `root`. Where a name turns up
-/// more than once, the one whose folders match the original path best wins.
-/// Returns what was found, by the path it was wanted at.
-pub fn search(root: &Path, wanted: &[PathBuf]) -> HashMap<PathBuf, PathBuf> {
+/// Look for the `wanted` files by name under `root`, for at most `budget`.
+/// Where a name turns up more than once, the one whose folders match the
+/// original path best wins. Returns what was found, by the path it was wanted
+/// at, and whether it ran out of time.
+pub fn search_within(
+    root: &Path,
+    wanted: &[PathBuf],
+    budget: Duration,
+    cancel: &AtomicBool,
+) -> (HashMap<PathBuf, PathBuf>, bool) {
+    let (files, timed_out) = walk(root, Instant::now() + budget, cancel);
     let mut by_name: HashMap<OsString, Vec<PathBuf>> = HashMap::new();
-    for f in walk(root) {
+    for f in files {
         if let Some(name) = f.file_name() {
             by_name.entry(name.to_os_string()).or_default().push(f);
         }
@@ -87,7 +110,73 @@ pub fn search(root: &Path, wanted: &[PathBuf]) -> HashMap<PathBuf, PathBuf> {
             found.insert(want.clone(), best);
         }
     }
-    found
+    (found, timed_out)
+}
+
+/// What a search of one folder came to.
+#[derive(Debug, Default)]
+pub struct FolderFound {
+    /// The files found, by the path they were wanted at.
+    pub found: HashMap<PathBuf, PathBuf>,
+    /// It ran out of time before it had looked everywhere.
+    pub timed_out: bool,
+    /// It was stopped.
+    pub stopped: bool,
+}
+
+/// `search_within` on its own thread, so a big folder (or a whole disk) can't
+/// freeze the show while it is read.
+pub struct FolderSearch {
+    done: std::sync::mpsc::Receiver<FolderFound>,
+    cancel: Arc<AtomicBool>,
+    pub root: PathBuf,
+    /// How many files it is looking for.
+    pub wanted: usize,
+}
+
+impl FolderSearch {
+    pub fn start(root: PathBuf, wanted: Vec<PathBuf>, budget: Duration) -> FolderSearch {
+        let (tx, done) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (r, c, n) = (root.clone(), cancel.clone(), wanted.len());
+        let _ = std::thread::Builder::new()
+            .name("folder-search".into())
+            .spawn(move || {
+                let (found, timed_out) = search_within(&r, &wanted, budget, &c);
+                let stopped = c.load(Ordering::Relaxed);
+                let _ = tx.send(FolderFound {
+                    found,
+                    timed_out,
+                    stopped,
+                });
+            });
+        FolderSearch {
+            done,
+            cancel,
+            root,
+            wanted: n,
+        }
+    }
+
+    /// The result, once there is one. (A search whose thread died without
+    /// one reads as having found nothing.)
+    pub fn poll(&self) -> Option<FolderFound> {
+        match self.done.try_recv() {
+            Ok(f) => Some(f),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(FolderFound::default()),
+        }
+    }
+
+    pub fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for FolderSearch {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 /// The files that could stand in for `want`, best first: the one whose folders
@@ -443,6 +532,17 @@ mod tests {
         d
     }
 
+    /// `search_within`, with all the time it wants.
+    fn search_all(root: &Path, wanted: &[PathBuf]) -> HashMap<PathBuf, PathBuf> {
+        search_within(
+            root,
+            wanted,
+            Duration::from_secs(60),
+            &AtomicBool::new(false),
+        )
+        .0
+    }
+
     fn touch(p: &Path, content: &str) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, content).unwrap();
@@ -492,12 +592,76 @@ mod tests {
             PathBuf::from("/old/tone.wav"),
             PathBuf::from("/old/nowhere.mp4"),
         ];
-        let found = search(&d.join("new"), &wanted);
+        let found = search_all(&d.join("new"), &wanted);
         assert_eq!(found.len(), 3);
         assert_eq!(found[&wanted[0]], d.join("new/media/act1/intro.mp4"));
         assert_eq!(found[&wanted[1]], d.join("new/media/act2/outro.mp4"));
         assert_eq!(found[&wanted[2]], d.join("new/media/tone.wav"));
         assert!(!found.contains_key(&wanted[3]), "not found stays not found");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_search_stops_at_its_time_limit_and_when_told() {
+        let d = dir("budget");
+        touch(&d.join("a/b/clip.mp4"), "x");
+        let want = vec![PathBuf::from("/old/clip.mp4")];
+        // No time at all: it gives up at once and says so.
+        let (found, timed_out) = search_within(&d, &want, Duration::ZERO, &AtomicBool::new(false));
+        assert!(timed_out && found.is_empty());
+        // Told to stop: it stops, and that isn't running out of time.
+        let stop = AtomicBool::new(true);
+        let (found, timed_out) = search_within(&d, &want, Duration::from_secs(60), &stop);
+        assert!(!timed_out && found.is_empty());
+        // With time and no stop it finds the file.
+        let (found, timed_out) =
+            search_within(&d, &want, Duration::from_secs(60), &AtomicBool::new(false));
+        assert!(!timed_out);
+        assert_eq!(found[&want[0]], d.join("a/b/clip.mp4"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_back_up_the_tree_is_not_followed_round_and_round() {
+        let d = dir("loop");
+        touch(&d.join("a/clip.mp4"), "x");
+        std::os::unix::fs::symlink(&d, d.join("a/back")).unwrap();
+        let (files, timed_out) = walk(
+            &d,
+            Instant::now() + Duration::from_secs(60),
+            &AtomicBool::new(false),
+        );
+        assert!(!timed_out);
+        assert_eq!(
+            files,
+            vec![d.join("a/clip.mp4")],
+            "the file once, not again through the link at every level"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_search_runs_on_its_own_thread_and_reports_back() {
+        let d = dir("threaded");
+        touch(&d.join("media/clip.mp4"), "x");
+        let want = vec![
+            PathBuf::from("/old/clip.mp4"),
+            PathBuf::from("/old/gone.mp4"),
+        ];
+        let s = FolderSearch::start(d.clone(), want.clone(), Duration::from_secs(60));
+        assert_eq!((s.root.as_path(), s.wanted), (d.as_path(), 2));
+        let t0 = Instant::now();
+        let result = loop {
+            if let Some(r) = s.poll() {
+                break r;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "it never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(result.found.len(), 1);
+        assert_eq!(result.found[&want[0]], d.join("media/clip.mp4"));
+        assert!(!result.timed_out && !result.stopped);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -509,7 +673,7 @@ mod tests {
         touch(&d.join("b/loop.mp4"), "3");
         let want1 = PathBuf::from("/was/act2/loop.mp4");
         let want2 = PathBuf::from("/was/elsewhere/loop.mp4");
-        let found = search(&d, &[want1.clone(), want2.clone()]);
+        let found = search_all(&d, &[want1.clone(), want2.clone()]);
         assert_eq!(
             found[&want1],
             d.join("a/act2/loop.mp4"),

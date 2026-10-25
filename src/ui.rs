@@ -125,6 +125,8 @@ pub struct UiState {
     collect_job: Option<CollectJob>,
     /// A search of this computer for the missing files.
     search: Option<relink::Search>,
+    /// A search of a folder the operator chose, for the missing files.
+    folder_search: Option<relink::FolderSearch>,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -302,6 +304,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     }
     let mut actions: Vec<Action> = Vec::new();
     poll_collect(ui.ctx(), show, st);
+    poll_folder_search(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -1355,6 +1358,38 @@ fn cart(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
 }
 
 /// Apply a finished copy of the media to the show's cues.
+/// Take the answer of a folder search when it has come, and relink with it.
+fn poll_folder_search(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
+    let Some(search) = &st.folder_search else {
+        return;
+    };
+    let Some(result) = search.poll() else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        return;
+    };
+    let (root, wanted) = (search.root.clone(), search.wanted);
+    st.folder_search = None;
+    // Its own step in the undo history, apart from any edit in progress.
+    st.history.end_burst();
+    relink::apply(show, &result.found);
+    st.history.observe(
+        &serde_json::to_string(show).unwrap_or_default(),
+        ctx.input(|i| i.time),
+    );
+    st.history.end_burst();
+    let mut note = format!(
+        "Found {} of {wanted} missing files in {}.",
+        result.found.len(),
+        root.display()
+    );
+    if result.stopped {
+        note.push_str(" The search was stopped.");
+    } else if result.timed_out {
+        note.push_str(" It stopped at the time limit before looking everywhere.");
+    }
+    st.media_note = note;
+}
+
 fn poll_collect(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
     let Some(job) = &st.collect_job else { return };
     match job.done.try_recv() {
@@ -1452,7 +1487,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
-                        !missing.is_empty(),
+                        !missing.is_empty() && st.folder_search.is_none(),
                         egui::Button::new("Search a folder for missing files…"),
                     )
                     .on_hover_text(
@@ -1542,6 +1577,15 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                                 .filter_map(|(old, c)| Some((old.clone(), c.first()?.clone())))
                                 .collect(),
                         ));
+                    }
+                });
+            }
+            if let Some(search) = &st.folder_search {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Searching {}…", search.root.display()));
+                    if ui.small_button("Stop").clicked() {
+                        search.stop();
                     }
                 });
             }
@@ -4411,20 +4455,23 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             Err(e) => engine.log(format!("Could not export the cue sheet: {e}")),
         },
         Action::RelinkFolder(root) => {
-            let wanted: Vec<PathBuf> = {
-                let mut v: Vec<PathBuf> = relink::missing(show).into_iter().map(|m| m.1).collect();
-                v.sort();
-                v.dedup();
-                v
-            };
-            let found = relink::search(&root, &wanted);
-            relink::apply(show, &found);
-            st.media_note = format!(
-                "Found {} of {} missing files in {}.",
-                found.len(),
-                wanted.len(),
-                root.display()
-            );
+            // On its own thread: a big folder takes a while to read, and the
+            // show must not freeze meanwhile. One search at a time.
+            if st.folder_search.is_none() {
+                let wanted: Vec<PathBuf> = {
+                    let mut v: Vec<PathBuf> =
+                        relink::missing(show).into_iter().map(|m| m.1).collect();
+                    v.sort();
+                    v.dedup();
+                    v
+                };
+                st.media_note = String::new();
+                st.folder_search = Some(relink::FolderSearch::start(
+                    root,
+                    wanted,
+                    relink::SEARCH_BUDGET,
+                ));
+            }
         }
         Action::FindOnComputer => {
             let names: std::collections::HashSet<std::ffi::OsString> = relink::missing(show)
@@ -5557,6 +5604,17 @@ mod tests {
             .clone()
     }
 
+    /// Poll a folder search until it has finished.
+    fn wait_for_folder_search(show: &mut Show, st: &mut UiState) {
+        let ctx = egui::Context::default();
+        let t0 = std::time::Instant::now();
+        while st.folder_search.is_some() {
+            assert!(t0.elapsed().as_secs() < 10, "the search never finished");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            poll_folder_search(&ctx, show, st);
+        }
+    }
+
     #[test]
     fn missing_media_opens_the_window_and_a_folder_search_relinks_it() {
         let d = media_dir("search");
@@ -5576,6 +5634,7 @@ mod tests {
             &mut e,
             &mut st,
         );
+        wait_for_folder_search(&mut show, &mut st);
         assert_eq!(file_of(&show, a), d.join("new/a.mp4"));
         assert_eq!(file_of(&show, b), d.join("new/b.mp4"));
         assert_eq!(file_of(&show, lost), PathBuf::from("/old/place/lost.mp4"));
@@ -5620,6 +5679,52 @@ mod tests {
         assert_eq!(file_of(&show, other), PathBuf::from("/old/other.mp4"));
         assert!(
             st.media_note.starts_with("Linked 2 cues"),
+            "{}",
+            st.media_note
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn searching_a_folder_runs_in_the_background_and_then_relinks_the_cues() {
+        let d = media_dir("folder_search");
+        let mut show = Show::default();
+        let a = video_cue(&mut show, d.join("old/act1/a.mp4"));
+        let gone = video_cue(&mut show, d.join("old/gone.mp4"));
+        let b = video_cue(&mut show, d.join("old/b.mp4"));
+        std::fs::create_dir_all(d.join("new/act1")).unwrap();
+        std::fs::write(d.join("new/act1/a.mp4"), "a").unwrap();
+        std::fs::write(d.join("new/b.mp4"), "b").unwrap();
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        frame_end(&show, &mut st, 0.0, false);
+        apply(
+            Action::RelinkFolder(d.join("new")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        // The request returns at once, with the search still to do.
+        assert!(st.folder_search.is_some());
+        assert_eq!(file_of(&show, a), d.join("old/act1/a.mp4"), "not yet");
+        // A second request while one runs is ignored.
+        apply(
+            Action::RelinkFolder(d.join("other")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(st.folder_search.as_ref().unwrap().root, d.join("new"));
+        wait_for_folder_search(&mut show, &mut st);
+        assert_eq!(file_of(&show, a), d.join("new/act1/a.mp4"));
+        assert_eq!(file_of(&show, b), d.join("new/b.mp4"));
+        assert_eq!(
+            file_of(&show, gone),
+            d.join("old/gone.mp4"),
+            "not found stays"
+        );
+        assert!(
+            st.media_note.starts_with("Found 2 of 3 missing files"),
             "{}",
             st.media_note
         );
