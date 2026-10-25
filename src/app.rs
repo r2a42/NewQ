@@ -121,6 +121,8 @@ pub struct App {
     last_homing: Instant,
     last_monitor_scan: Instant,
     last_tick: Instant,
+    /// When the clock triggers were last looked at.
+    last_clock_look: Instant,
     /// When the unsaved show was last copied to its recovery file.
     last_autosave: Instant,
     /// When the web remote's page was last given the show's state.
@@ -183,6 +185,7 @@ impl App {
             last_homing: Instant::now(),
             last_monitor_scan: Instant::now(),
             last_tick: Instant::now(),
+            last_clock_look: Instant::now(),
             last_autosave: Instant::now(),
             last_web_state: Instant::now(),
             pending_recovery,
@@ -920,7 +923,11 @@ impl ApplicationHandler for App {
         self.reconcile_outputs(event_loop);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
-        self.engine.on_clock(&self.show, crate::clock::now());
+        // However long it has been since the last look, by a steady clock: a
+        // dialog or a stall is time that passed, a sleep is not.
+        let gap = now.duration_since(self.last_clock_look).as_secs_f64();
+        self.last_clock_look = now;
+        self.engine.on_clock(&self.show, crate::clock::now(), gap);
         self.engine.tick(&self.show, dt);
 
         // Drop GPU textures of cues that are no longer playing.

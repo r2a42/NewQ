@@ -4,7 +4,9 @@
 //! Times are local, to the second. Like timecode, a cue fires only for time
 //! that passes while NewQ runs: a show opened at 18:31 doesn't start the 18:30
 //! cue, a laptop that slept through it doesn't start it on waking, and moving
-//! the clock doesn't fire the cues it skips. The follower is plain functions
+//! the clock doesn't fire the cues it skips. If NewQ itself was busy for a
+//! while (up to a minute) rather than asleep, the time did pass, and the cues
+//! that came due meanwhile fire when it looks again. The follower is plain functions
 //! on the times it is given; only `now` reads the clock.
 
 use crate::show::CueId;
@@ -13,8 +15,11 @@ use std::fmt;
 
 const DAY: u32 = 24 * 3600;
 /// More than this many seconds between two looks at the clock is a jump
-/// (sleep, or the clock set), not time passing.
+/// (sleep, or the clock set), not time passing...
 const JUMP_SECONDS: u32 = 5;
+/// ...unless that long really did go by, by the program's own steady clock,
+/// and not much more than this: NewQ was busy (a dialog, a stall), not asleep.
+const STALL_SECONDS: f64 = 60.0;
 
 /// A time of day, to the second.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,14 +96,30 @@ pub struct ClockFollower {
 impl ClockFollower {
     /// The clock now reads `now`. Returns the cues, from `triggers`, whose time
     /// has passed since the last look, in the order they came due.
+    #[cfg(test)]
     pub fn advance(&mut self, triggers: &[(CueId, TimeOfDay)], now: TimeOfDay) -> Vec<CueId> {
+        self.advance_after(triggers, now, 0.0)
+    }
+
+    /// `advance`, given how many seconds went by since the last look on the
+    /// program's own steady clock. A longer gap than a moment that the clock
+    /// agrees with (within a couple of seconds, and under a minute) is the
+    /// program having been busy, so the time counts as having passed; one it
+    /// doesn't agree with is a sleep or the clock being set.
+    pub fn advance_after(
+        &mut self,
+        triggers: &[(CueId, TimeOfDay)],
+        now: TimeOfDay,
+        gap: f64,
+    ) -> Vec<CueId> {
         let fired = match self.last {
             Some(prev) if prev != now => {
                 let ahead = prev.until(now);
                 // Behind by less than half a day is the clock set back, not a
                 // new day; and ahead by more than a moment is a jump.
                 let set_back = ahead > DAY / 2;
-                if set_back || ahead > JUMP_SECONDS {
+                let busy = gap <= STALL_SECONDS && (f64::from(ahead) - gap).abs() <= 2.0;
+                if set_back || (ahead > JUMP_SECONDS && !busy) {
                     Vec::new()
                 } else {
                     let mut due: Vec<(u32, CueId)> = triggers
@@ -308,5 +329,36 @@ mod tests {
         // It agrees with itself a moment later (barring midnight).
         let b = now();
         assert!(a.until(b) < 5, "{a} then {b}");
+    }
+
+    #[test]
+    fn time_the_program_was_busy_still_counts_but_a_sleep_does_not() {
+        let trig = cues(&[t(18, 30, 0)]);
+        // A dialog held the program up for 30 seconds across the cue's time:
+        // the clock and the steady clock agree on how long, so it fires.
+        let mut f = ClockFollower::default();
+        f.advance(&trig, t(18, 29, 50));
+        assert_eq!(f.advance_after(&trig, t(18, 30, 20), 30.0), [CueId(1)]);
+        // The same jump with the steady clock saying it was a moment: the
+        // laptop slept or the clock was set forward.
+        let mut f = ClockFollower::default();
+        f.advance(&trig, t(18, 29, 50));
+        assert!(f.advance_after(&trig, t(18, 30, 20), 0.02).is_empty());
+        // Slept for an hour on a system whose steady clock runs on through it.
+        let mut f = ClockFollower::default();
+        f.advance(&trig, t(17, 30, 0));
+        assert!(f.advance_after(&trig, t(18, 30, 30), 3630.0).is_empty());
+        // Busy for ten minutes is too long to be sure of: nothing fires.
+        let mut f = ClockFollower::default();
+        f.advance(&trig, t(18, 25, 0));
+        assert!(f.advance_after(&trig, t(18, 35, 0), 600.0).is_empty());
+        // A look 30 s on where the steady clock says 10: the clock was moved.
+        let mut f = ClockFollower::default();
+        f.advance(&trig, t(18, 29, 50));
+        assert!(f.advance_after(&trig, t(18, 30, 20), 10.0).is_empty());
+        // Nothing changes for the ordinary case of a look every frame.
+        let mut f = ClockFollower::default();
+        f.advance(&trig, t(18, 29, 59));
+        assert_eq!(f.advance_after(&trig, t(18, 30, 0), 0.016), [CueId(1)]);
     }
 }
