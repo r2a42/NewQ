@@ -286,6 +286,9 @@ struct Prepared {
     sig: PrepSig,
     kind: PreparedKind,
     duration: Option<f64>,
+    /// Something the operator should be told when the cue starts (its sound
+    /// couldn't be started, say), though it can play.
+    warning: Option<String>,
 }
 
 pub enum CueStatus {
@@ -808,6 +811,7 @@ impl Engine {
                 voice: None,
             },
             duration: c.media.end.filter(|d| *d > 0.0),
+            warning: None,
         })
     }
 
@@ -835,6 +839,7 @@ impl Engine {
         } else {
             db_to_gain(m.volume_db)
         };
+        let mut warning = None;
         let kind = match &cue.kind {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
@@ -842,16 +847,20 @@ impl Engine {
                 let player = VideoPlayer::spawn(ff, &m.file, vi, m.start, playback, size)
                     .map_err(|e| format!("{e:#}"))?;
                 let voice = if info.has_audio && self.audio.available() {
-                    self.audio
-                        .spawn_voice(
-                            ff,
-                            &m.file,
-                            m.start,
-                            playback,
-                            initial_gain,
-                            (m.audio_output, m.audio_channel),
-                        )
-                        .ok()
+                    match self.audio.spawn_voice(
+                        ff,
+                        &m.file,
+                        m.start,
+                        playback,
+                        initial_gain,
+                        (m.audio_output, m.audio_channel),
+                    ) {
+                        Ok(voice) => Some(voice),
+                        Err(e) => {
+                            warning = Some(format!("playing without sound: {e:#}"));
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
@@ -890,6 +899,7 @@ impl Engine {
             sig,
             kind,
             duration,
+            warning,
         })
     }
 
@@ -905,6 +915,7 @@ impl Engine {
             },
             kind: PreparedKind::Text(crate::text::render(t, size)),
             duration: t.media.end.filter(|d| *d > 0.0),
+            warning: None,
         }
     }
 
@@ -1044,6 +1055,9 @@ impl Engine {
                         ok = false;
                     }
                     Ok(p) => {
+                        if let Some(w) = &p.warning {
+                            self.log(format!("Cue {} ({}): {w}", cue.number, cue.name));
+                        }
                         active.duration = p.duration;
                         active.started = false;
                         active.kind = match p.kind {
@@ -3097,6 +3111,34 @@ mod tests {
         assert!(
             matches!(e.status(kids[1]), CueStatus::Idle),
             "the second child never starts"
+        );
+    }
+
+    #[test]
+    fn a_video_whose_sound_cannot_start_says_so() {
+        let Some((ff, clip)) = crate::media::test_media("smpte_8s.mp4") else {
+            return;
+        };
+        assert!(ff.probe(&clip).unwrap().has_audio, "the clip has sound");
+        let broken = AudioOutputId(7);
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some(clip), 0);
+        c.kind.media_mut().unwrap().audio_output = Some(broken);
+        let id = c.id;
+        show.cues.push(c);
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        // Another device is open, so sound is expected; this cue's is not.
+        e.audio = AudioOut::with_broken_output(broken);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the video", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        assert!(
+            e.messages.iter().any(|(_, m)| m.contains("without sound")),
+            "{:?}",
+            e.messages
         );
     }
 }
