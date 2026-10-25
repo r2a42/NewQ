@@ -337,6 +337,14 @@ pub struct Collected {
     pub failed: Vec<(PathBuf, String)>,
 }
 
+/// Whether two paths are the same file on disk.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Where each file goes in `dest`: its own name, or `name_2.ext`, `name_3.ext`…
 /// when another file has taken it. The same source always gets the same place.
 pub fn plan_collect(dest: &Path, files: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
@@ -364,7 +372,9 @@ pub fn plan_collect(dest: &Path, files: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
             };
             match taken.get(&candidate) {
                 // A file that is already in the folder keeps its place.
-                None => break candidate,
+                None if !candidate.exists() || same_file(&candidate, src) => break candidate,
+                // Something else is there already: leave it alone.
+                None => n += 1,
                 Some(owner) if owner == src => break candidate,
                 Some(_) => n += 1,
             }
@@ -557,6 +567,38 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn collecting_never_overwrites_other_files_in_the_folder() {
+        // Two shows share one media folder: the second must not replace the
+        // first's clip.
+        let d = dir("collect_keep");
+        let dest = d.join("shared");
+        touch(&dest.join("clip.mp4"), "first show");
+        touch(&d.join("second/clip.mp4"), "second show");
+        let src = d.join("second/clip.mp4");
+        assert_eq!(
+            plan_collect(&dest, std::slice::from_ref(&src)),
+            vec![(src.clone(), dest.join("clip_2.mp4"))]
+        );
+        let got = collect(
+            &dest,
+            std::slice::from_ref(&src),
+            &Arc::new(AtomicUsize::new(0)),
+        );
+        assert_eq!(got.copied, 1);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("clip.mp4")).unwrap(),
+            "first show",
+            "the other show's file is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("clip_2.mp4")).unwrap(),
+            "second show"
+        );
+        assert_eq!(got.moved[&src], dest.join("clip_2.mp4"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
