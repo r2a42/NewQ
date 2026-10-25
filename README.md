@@ -127,8 +127,12 @@ includes FFmpeg, so there's nothing else to install.
   is kept in the show file. Anyone on your network who can reach the port,
   and has the PIN if there is one, can run the show, so use a PIN on a shared
   network. Changes need a header that a web page on another site can't send,
-  and a link can't press GO, since only POST does anything. It is off unless
-  the show turns it on. Other programs can use the same endpoints:
+  and a link can't press GO, since only POST does anything. A web page that
+  points its own domain at this computer is turned away too: the remote only
+  answers requests sent to an IP address, a name with no dots or a `.local`
+  name, so use the address NewQ shows (or `<computer>.local`). Five wrong
+  PINs from one address shut it out for a minute, and at most 64 connections
+  are served at once. It is off unless the show turns it on. Other programs can use the same endpoints:
   `GET /api/state` for the state as JSON, and `POST /api/go`, `/api/panic`,
   `/api/stop_all`, `/api/pause`, `/api/resume`, `/api/next`, `/api/previous`
   and `/api/cue/<number>/fire|go|select|stop|fade`, with `X-NewQ: 1` (and
