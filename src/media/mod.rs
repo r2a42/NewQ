@@ -34,7 +34,20 @@ impl Default for ProbeCache {
     }
 }
 
+/// What a lookup of a file that isn't there says.
+const NOT_FOUND: &str = "file not found";
+
 impl ProbeCache {
+    /// Forget that a file was missing once it is there (a drive mounted, a
+    /// copy finished); otherwise it would stay missing until NewQ restarted.
+    fn recheck(&mut self, path: &Path) {
+        if matches!(self.entries.get(path), Some(ProbeState::Failed(e)) if e == NOT_FOUND)
+            && path.is_file()
+        {
+            self.entries.remove(path);
+        }
+    }
+
     pub fn poll(&mut self) {
         while let Ok((path, result)) = self.rx.try_recv() {
             let state = match result {
@@ -47,10 +60,11 @@ impl ProbeCache {
 
     /// Returns the cached state, starting a background probe if needed.
     pub fn get(&mut self, ff: Option<&Ffmpeg>, path: &Path) -> &ProbeState {
+        self.recheck(path);
         if !self.entries.contains_key(path) {
             let state = match ff {
                 None => ProbeState::Failed("ffmpeg not found".into()),
-                Some(_) if !path.is_file() => ProbeState::Failed("file not found".into()),
+                Some(_) if !path.is_file() => ProbeState::Failed(NOT_FOUND.into()),
                 Some(ff) => {
                     let ff = ff.clone();
                     let tx = self.tx.clone();
@@ -70,6 +84,11 @@ impl ProbeCache {
     /// Blocking probe, used when a cue is fired before its background probe finished.
     pub fn get_blocking(&mut self, ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, String> {
         self.poll();
+        self.recheck(path);
+        if !path.is_file() {
+            // Not remembered: the file may turn up.
+            return Err(NOT_FOUND.into());
+        }
         match self.entries.get(path) {
             Some(ProbeState::Ready(info)) => return Ok(info.clone()),
             Some(ProbeState::Failed(e)) => return Err(e.clone()),
@@ -118,6 +137,29 @@ mod tests {
 
     fn setup(file: &str) -> Option<(Ffmpeg, PathBuf)> {
         super::test_media(file)
+    }
+
+    #[test]
+    fn a_file_that_turns_up_later_is_no_longer_missing() {
+        let Some((ff, clip)) = setup("testsrc_10s.mp4") else {
+            return;
+        };
+        let later = std::env::temp_dir().join("newq_probe_later.mp4");
+        let _ = std::fs::remove_file(&later);
+        let mut cache = super::ProbeCache::default();
+        assert!(matches!(
+            cache.get(Some(&ff), &later),
+            super::ProbeState::Failed(_)
+        ));
+        assert!(cache.get_blocking(&ff, &later).is_err());
+        // The drive is mounted / the copy finishes.
+        std::fs::copy(&clip, &later).unwrap();
+        assert!(
+            !matches!(cache.get(Some(&ff), &later), super::ProbeState::Failed(_)),
+            "found now"
+        );
+        assert!(cache.get_blocking(&ff, &later).is_ok());
+        let _ = std::fs::remove_file(&later);
     }
 
     #[test]
