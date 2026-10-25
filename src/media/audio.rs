@@ -43,6 +43,39 @@ struct MixVoice {
 /// The most device channels a stream is opened with.
 const MAX_CHANNELS: u16 = 64;
 
+/// Whether a device has gone away under a running stream (an unplugged USB
+/// interface), shared by the device's stream and its voices. A voice on a
+/// lost device is over: its clock has stopped for good, so waiting for it
+/// would hang the cue (and everything that follows it).
+#[derive(Default)]
+pub struct Lost {
+    why: Mutex<Option<String>>,
+}
+
+impl Lost {
+    pub fn set(&self, why: String) {
+        self.why.lock().get_or_insert(why);
+    }
+
+    pub fn why(&self) -> Option<String> {
+        self.why.lock().clone()
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.why.lock().is_some()
+    }
+}
+
+/// Whether a stream error means the stream is gone for good. A busy device, a
+/// route change or a buffer underrun leaves it running.
+fn ends_stream(kind: cpal::ErrorKind) -> bool {
+    use cpal::ErrorKind::*;
+    matches!(
+        kind,
+        DeviceNotAvailable | StreamInvalidated | HostUnavailable | PermissionDenied | Other
+    )
+}
+
 /// One open audio device.
 struct Device {
     /// Kept alive while the device is in use; dropping it stops the stream.
@@ -55,6 +88,8 @@ struct Device {
     name: String,
     error: Option<String>,
     voices_tx: Sender<MixVoice>,
+    /// Set if the stream ends under us.
+    lost: Arc<Lost>,
 }
 
 impl Device {
@@ -62,7 +97,8 @@ impl Device {
     /// be opened is kept, with its error, so it can be shown and retried.
     fn open(name: Option<&str>) -> Device {
         let (voices_tx, voices_rx) = unbounded();
-        match open_stream(name, voices_rx) {
+        let lost = Arc::new(Lost::default());
+        match open_stream(name, voices_rx, lost.clone()) {
             Ok((stream, sample_rate, channels, device)) => Device {
                 _stream: Some(stream),
                 open: true,
@@ -71,6 +107,7 @@ impl Device {
                 name: device,
                 error: None,
                 voices_tx,
+                lost,
             },
             Err(e) => {
                 log::error!("audio output unavailable: {e:#}");
@@ -82,6 +119,7 @@ impl Device {
                     name: name.unwrap_or("default").to_string(),
                     error: Some(format!("{e:#}")),
                     voices_tx,
+                    lost,
                 }
             }
         }
@@ -101,6 +139,7 @@ impl Device {
             name: "test device".into(),
             error: None,
             voices_tx,
+            lost: Arc::new(Lost::default()),
         };
         (device, voices_rx)
     }
@@ -144,6 +183,16 @@ impl AudioOut {
         AudioOut::new()
     }
 
+    /// A default device that works, and the handle that says it was lost, for tests.
+    #[cfg(test)]
+    pub fn with_working_device() -> (AudioOut, Arc<Lost>) {
+        let (good, _) = Device::for_test(2);
+        let lost = good.lost.clone();
+        let mut out = AudioOut::new();
+        out.devices.insert(None, good);
+        (out, lost)
+    }
+
     /// A default device that works, and `broken` routed to one that failed to
     /// open (an unplugged interface), for tests.
     #[cfg(test)]
@@ -183,7 +232,7 @@ impl AudioOut {
     /// Try again to open devices that failed (a USB interface plugged in later).
     pub fn retry_failed(&mut self) {
         for (k, d) in &mut self.devices {
-            if d.error.is_some() {
+            if d.error.is_some() || d.lost.is_set() {
                 *d = Device::open(k.as_deref());
             }
         }
@@ -199,7 +248,7 @@ impl AudioOut {
 
     /// Whether any device is open to play on.
     pub fn available(&self) -> bool {
-        self.devices.values().any(|d| d.open)
+        self.devices.values().any(|d| d.open && !d.lost.is_set())
     }
 
     /// The state of the device behind an audio output (None = the default).
@@ -208,7 +257,7 @@ impl AudioOut {
             name: d.name.clone(),
             sample_rate: d.sample_rate,
             channels: d.channels,
-            error: d.error.clone(),
+            error: d.error.clone().or_else(|| d.lost.why()),
         })
     }
 
@@ -216,8 +265,8 @@ impl AudioOut {
     pub fn summary(&self) -> Result<String, String> {
         match self.device_for(None) {
             None => Ok("starting audio…".into()),
-            Some(d) => match &d.error {
-                Some(e) => Err(e.clone()),
+            Some(d) => match d.error.clone().or_else(|| d.lost.why()) {
+                Some(e) => Err(e),
                 None => {
                     let more = self.devices.len().saturating_sub(1);
                     let extra = if more > 0 {
@@ -368,6 +417,7 @@ impl AudioOut {
             children,
             sample_rate: sr,
             error,
+            lost: device.lost.clone(),
         })
     }
 }
@@ -378,6 +428,8 @@ pub struct Voice {
     children: Children,
     sample_rate: u32,
     error: Arc<Mutex<Option<String>>>,
+    /// Whether the device it plays on has gone.
+    lost: Arc<Lost>,
 }
 
 impl Voice {
@@ -402,6 +454,13 @@ impl Voice {
         self.shared.drained.load(Ordering::Acquire)
             || (self.shared.eof.load(Ordering::Acquire)
                 && self.shared.received_frames.load(Ordering::Relaxed) == 0)
+            // Its device is gone, so nothing will ever be played: it is over.
+            || self.lost.is_set()
+    }
+
+    /// Why the device this plays on was lost, if it was.
+    pub fn device_lost(&self) -> Option<String> {
+        self.lost.why()
     }
     pub fn error(&self) -> Option<String> {
         self.error.lock().clone()
@@ -472,6 +531,7 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 fn open_stream(
     name: Option<&str>,
     voices_rx: Receiver<MixVoice>,
+    lost: Arc<Lost>,
 ) -> Result<(cpal::Stream, u32, u16, String)> {
     let device = find_device(name)?;
     let mut device_name = device
@@ -490,10 +550,10 @@ fn open_stream(
     let config = supported.config();
     let (sr, channels) = (config.sample_rate, config.channels);
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, voices_rx, master)?,
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, voices_rx, master)?,
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, voices_rx, master)?,
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, voices_rx, master)?,
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, voices_rx, master, lost)?,
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, voices_rx, master, lost)?,
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, voices_rx, master, lost)?,
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, voices_rx, master, lost)?,
         other => return Err(anyhow!("unsupported sample format {other:?}")),
     };
     stream.play()?;
@@ -505,6 +565,7 @@ fn build<T>(
     config: cpal::StreamConfig,
     voices_rx: Receiver<MixVoice>,
     master: f32,
+    lost: Arc<Lost>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -526,7 +587,12 @@ where
                 *s = T::from_sample((m * master).clamp(-1.0, 1.0));
             }
         },
-        |e| log::error!("audio stream error: {e}"),
+        move |e| {
+            log::error!("audio stream error: {e}");
+            if ends_stream(e.kind()) {
+                lost.set(e.to_string());
+            }
+        },
         None,
     )?;
     Ok(stream)
@@ -776,6 +842,55 @@ mod tests {
             .skip(c)
             .step_by(channels)
             .fold(0.0, |a, b| a.max(b.abs()))
+    }
+
+    #[test]
+    fn only_errors_that_end_the_stream_count_as_losing_the_device() {
+        use cpal::ErrorKind::*;
+        for gone in [DeviceNotAvailable, StreamInvalidated, HostUnavailable] {
+            assert!(ends_stream(gone), "{gone:?}");
+        }
+        for fine in [DeviceBusy, DeviceChanged, Xrun, RealtimeDenied] {
+            assert!(!ends_stream(fine), "{fine:?}");
+        }
+    }
+
+    #[test]
+    fn a_voice_on_a_lost_device_is_over_and_the_device_says_why() {
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let (device, _rx) = Device::for_test(2);
+        let lost = device.lost.clone();
+        let mut audio = AudioOut::new();
+        audio.devices.insert(None, device);
+        let voice = audio
+            .spawn_voice(
+                &ff,
+                &wav,
+                0.0,
+                Playback::Once { duration: None },
+                1.0,
+                (None, 0),
+            )
+            .unwrap();
+        voice.set_paused(false);
+        assert!(!voice.finished(), "still playing");
+        assert!(audio.available());
+        assert_eq!(audio.device_status(None).unwrap().error, None);
+        // The interface is unplugged.
+        lost.set("The audio device is not available".into());
+        assert!(voice.finished(), "nothing will play on it again");
+        assert!(voice.device_lost().is_some());
+        assert!(!audio.available(), "no device to play on");
+        assert!(audio.device_status(None).unwrap().error.is_some());
+        assert!(audio.summary().is_err(), "the status bar shows it");
+        // Trying again opens the device afresh (here there is none to open).
+        audio.retry_failed();
+        assert!(
+            !audio.devices[&None].lost.is_set(),
+            "a new device, not the lost one"
+        );
     }
 
     #[test]
