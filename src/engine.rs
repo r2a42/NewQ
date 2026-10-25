@@ -455,13 +455,15 @@ impl Engine {
     }
 
     /// The clock now reads `now`: fire the cues whose time of day has just passed.
-    pub fn on_clock(&mut self, show: &Show, now: TimeOfDay) {
+    /// `gap` is the seconds since the last look, by a steady clock (see
+    /// `ClockFollower::advance_after`).
+    pub fn on_clock(&mut self, show: &Show, now: TimeOfDay, gap: f64) {
         let triggers: Vec<(CueId, TimeOfDay)> = show
             .cues
             .iter()
             .filter_map(|c| c.clock.map(|t| (c.id, t)))
             .collect();
-        for id in self.clock.advance(&triggers, now) {
+        for id in self.clock.advance_after(&triggers, now, gap) {
             self.fire(show, id);
         }
     }
@@ -2929,17 +2931,17 @@ mod tests {
         let untimed = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
         let mut e = engine_without_media();
         e.playhead = Some(untimed);
-        e.on_clock(&show, tod(18, 29, 58));
-        e.on_clock(&show, tod(18, 29, 59));
+        e.on_clock(&show, tod(18, 29, 58), 0.0);
+        e.on_clock(&show, tod(18, 29, 59), 0.0);
         assert!(idle(&e, house), "not yet");
-        e.on_clock(&show, tod(18, 30, 0));
+        e.on_clock(&show, tod(18, 30, 0), 0.0);
         assert!(playing(&e, house));
         assert!(idle(&e, untimed), "cues with no time are left alone");
         assert_eq!(e.playhead, Some(untimed), "the playhead doesn't move");
         // Looking again in the same second, or later, doesn't fire it again.
         e.stop_all(0.0);
-        e.on_clock(&show, tod(18, 30, 0));
-        e.on_clock(&show, tod(18, 30, 1));
+        e.on_clock(&show, tod(18, 30, 0), 0.0);
+        e.on_clock(&show, tod(18, 30, 1), 0.0);
         assert!(idle(&e, house));
     }
 
@@ -2952,16 +2954,16 @@ mod tests {
         show.cue_mut(g).unwrap().clock = Some(tod(9, 0, 2));
         let late = clock_cue(&mut show, tod(9, 30, 0));
         let mut e = engine_without_media();
-        e.on_clock(&show, tod(9, 0, 0));
-        e.on_clock(&show, tod(9, 0, 1));
-        e.on_clock(&show, tod(9, 0, 2));
+        e.on_clock(&show, tod(9, 0, 0), 0.0);
+        e.on_clock(&show, tod(9, 0, 1), 0.0);
+        e.on_clock(&show, tod(9, 0, 2), 0.0);
         assert!(idle(&e, off), "a disarmed cue isn't fired");
         assert!(playing(&e, g) && playing(&e, kids[0]) && playing(&e, kids[1]));
         // The machine sleeps for twenty minutes: the 9:30 cue is not started late.
-        e.on_clock(&show, tod(9, 22, 0));
+        e.on_clock(&show, tod(9, 22, 0), 0.0);
         assert!(idle(&e, late));
-        e.on_clock(&show, tod(9, 29, 59));
-        e.on_clock(&show, tod(9, 30, 0));
+        e.on_clock(&show, tod(9, 29, 59), 0.0);
+        e.on_clock(&show, tod(9, 30, 0), 0.0);
         assert!(
             playing(&e, late),
             "and it still fires on time when it plays through"
