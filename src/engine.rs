@@ -170,6 +170,8 @@ pub struct ActiveCue {
     /// A seek took the cue back out of its automatic fade-out: put its levels
     /// back at the next tick.
     relevel: bool,
+    /// The loss of its audio device has been logged.
+    lost_logged: bool,
     /// A fade cue has changed its levels, so live edits to the cue no longer apply.
     faded: bool,
     auto_faded: bool,
@@ -976,6 +978,7 @@ impl Engine {
             seek_base: 0.0,
             seeking: None,
             relevel: false,
+            lost_logged: false,
             faded: false,
             auto_faded: false,
             followed: true,
@@ -1021,6 +1024,7 @@ impl Engine {
             seek_base: 0.0,
             seeking: None,
             relevel: false,
+            lost_logged: false,
             faded: false,
             auto_faded: false,
             followed: false,
@@ -1498,8 +1502,18 @@ impl Engine {
                 }
             }
 
-            if let Some(vo) = a.voice() {
+            let device_lost = a.voice().and_then(|vo| {
                 vo.set_gain(db_to_gain(a.volume.value));
+                vo.device_lost()
+            });
+            if let Some(why) = device_lost
+                && !a.lost_logged
+            {
+                a.lost_logged = true;
+                messages.push(format!(
+                    "Cue {}: the audio device was lost ({why})",
+                    cue.map(|c| c.number.as_str()).unwrap_or("?")
+                ));
             }
 
             if a.stopping && !a.opacity.ramping() && !a.volume.ramping() {
@@ -3137,6 +3151,48 @@ mod tests {
         });
         assert!(
             e.messages.iter().any(|(_, m)| m.contains("without sound")),
+            "{:?}",
+            e.messages
+        );
+    }
+
+    #[test]
+    fn an_audio_cue_whose_device_is_lost_ends_and_the_show_goes_on() {
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let mut show = Show::default();
+        let a = show.make_cue(CueType::Audio, Some(wav), 0);
+        let a_id = a.id;
+        show.cues.push(a);
+        let (mut e, lost) = {
+            let mut e = engine_without_media();
+            let (audio, lost) = AudioOut::with_working_device();
+            e.audio = audio;
+            (e, lost)
+        };
+        e.ff = Some(ff);
+        show.cues[0].continue_mode = ContinueMode::AutoFollow;
+        let b_id = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        e.playhead = Some(a_id);
+        e.go(&show);
+        run_until(&mut e, &show, "the sound to be ready", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        // The interface is unplugged mid-cue: nothing will play again, and the
+        // cue must not hang the show waiting for it.
+        lost.set("The audio device is not available".into());
+        run_until(&mut e, &show, "the cue to end", |e| {
+            matches!(e.status(a_id), CueStatus::Idle)
+        });
+        assert!(
+            matches!(e.status(b_id), CueStatus::Playing { .. }),
+            "the cue that follows it started"
+        );
+        assert!(
+            e.messages
+                .iter()
+                .any(|(_, m)| m.contains("audio device was lost")),
             "{:?}",
             e.messages
         );
