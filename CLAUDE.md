@@ -28,6 +28,9 @@ The README describes the features; this file is about working on the code.
   `src/color.rs`: colour adjustment and chroma key maths; the shader in
   `gpu.rs` does the same per pixel (a test renders it on a real GPU if there
   is one; `NEWQ_REQUIRE_GPU=1` makes having none a failure).
+  `src/monitor.rs`: what a display is called (a Mac's name for it) and where a
+  window starting on it goes. winit's Mac `name()` is "Monitor #" and a number,
+  and its `position()` is in that display's own pixels, so convert to points.
   `src/recovery.rs`: autosave copies. `src/media/camera.rs`: camera cues'
   device lists and ffmpeg input. `src/media/waveform.rs`: peaks for the
   inspector's waveform.

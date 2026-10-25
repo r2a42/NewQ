@@ -1755,6 +1755,8 @@ dependencies = [
  "jiff",
  "log",
  "midir",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
  "parking_lot",
  "pollster 1.0.1",
  "rfd",

@@ -30,6 +30,11 @@ serde_json = "1.0.151"
 wgpu = "30.0.1"
 winit = "0.30.13"
 
+# Same versions as winit's, to ask a Mac for each display's name.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.2.2", features = ["NSScreen"] }
+objc2-foundation = { version = "0.2.2", features = ["NSString"] }
+
 [profile.dev]
 opt-level = 1
 

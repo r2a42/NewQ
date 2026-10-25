@@ -10,6 +10,7 @@ mod export;
 mod gpu;
 mod history;
 mod media;
+mod monitor;
 mod output;
 mod recovery;
 mod relink;
