@@ -21,6 +21,36 @@ use std::time::{Duration, Instant};
 const MAX_PRELOAD: usize = 4;
 /// Start a video even if its audio has not arrived after this long.
 const AUDIO_START_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What to do about a video, or a seek in one, whose decoders are starting.
+#[derive(Debug, PartialEq)]
+enum VideoStart {
+    /// Not ready yet.
+    Wait,
+    /// Go, with its sound if it has any.
+    Go,
+    /// Go without the sound: it wasn't ready in time. The sound plays from
+    /// its own start whenever it does arrive, so starting it late would leave
+    /// it behind the picture for the whole cue.
+    GoSilent,
+}
+
+fn video_start(
+    video_ready: bool,
+    has_voice: bool,
+    audio_ready: bool,
+    waited: Duration,
+) -> VideoStart {
+    if !video_ready {
+        VideoStart::Wait
+    } else if audio_ready || !has_voice {
+        VideoStart::Go
+    } else if waited > AUDIO_START_TIMEOUT {
+        VideoStart::GoSilent
+    } else {
+        VideoStart::Wait
+    }
+}
 /// Decode size when the target output window is not open.
 const DEFAULT_OUTPUT_SIZE: (u32, u32) = (1920, 1080);
 /// A dip reveals anyway if the incoming cue hasn't started after this long.
@@ -1321,17 +1351,33 @@ impl Engine {
             let media = cue.and_then(|c| c.kind.media()).filter(|_| !a.is_matte());
             let mut completed = false;
             let was_started = a.started;
-            apply_seek(a, paused);
+            if let Some(note) = apply_seek(a, paused) {
+                messages.push(format!(
+                    "Cue {}: {note}",
+                    cue.map(|c| c.number.as_str()).unwrap_or("?")
+                ));
+            }
 
             match &mut a.kind {
                 ActiveKind::Video(v) => {
                     if !a.started {
                         let video_ready = v.player.ready();
                         let audio_ready = v.voice.as_ref().is_none_or(|vo| vo.ready());
-                        if video_ready
-                            && (audio_ready || v.spawned_at.elapsed() > AUDIO_START_TIMEOUT)
-                        {
+                        let start = video_start(
+                            video_ready,
+                            v.voice.is_some(),
+                            audio_ready,
+                            v.spawned_at.elapsed(),
+                        );
+                        if start != VideoStart::Wait {
                             a.started = true;
+                            if start == VideoStart::GoSilent {
+                                v.voice = None;
+                                messages.push(format!(
+                                    "Cue {}: its sound wasn't ready in time, so it plays without it",
+                                    cue.map(|c| c.number.as_str()).unwrap_or("?")
+                                ));
+                            }
                             if let Some(vo) = &v.voice {
                                 vo.set_paused(paused);
                             }
@@ -1750,11 +1796,10 @@ impl Engine {
     }
 }
 
-/// Switch a cue to its new decoders once they have something to show.
-fn apply_seek(a: &mut ActiveCue, paused: bool) {
-    let Some(s) = a.seeking.as_mut() else {
-        return;
-    };
+/// Switch a cue to its new decoders once they have something to show. Says
+/// so if it had to leave the sound out.
+fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
+    let s = a.seeking.as_mut()?;
     let video_ready = s.player.as_mut().is_none_or(|p| p.ready());
     let audio_ready = s.voice.as_ref().is_none_or(|v| v.ready());
     if s.player
@@ -1764,12 +1809,26 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) {
     {
         // Nothing to show there: stay where we were.
         a.seeking = None;
-        return;
+        return None;
     }
-    if !(video_ready && (audio_ready || s.spawned_at.elapsed() > AUDIO_START_TIMEOUT)) {
-        return;
+    let mut note = None;
+    match video_start(
+        video_ready,
+        s.voice.is_some(),
+        audio_ready,
+        s.spawned_at.elapsed(),
+    ) {
+        VideoStart::Wait => return None,
+        VideoStart::Go => {}
+        // Only a picture has a clock of its own to go on with; a sound alone
+        // is just waited for.
+        VideoStart::GoSilent if s.player.is_some() => {
+            s.voice = None;
+            note = Some("its sound wasn't ready in time after the jump, so it plays without it");
+        }
+        VideoStart::GoSilent => {}
     }
-    let Some(s) = a.seeking.take() else { return };
+    let s = a.seeking.take()?;
     match &mut a.kind {
         ActiveKind::Video(v) => {
             if let Some(p) = s.player {
@@ -1787,11 +1846,12 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) {
                 *vo = new;
             }
         }
-        _ => return,
+        _ => return None,
     }
     a.seek_base = s.base;
     a.elapsed = s.base;
     a.restart_auto_fade();
+    note
 }
 
 fn completed_follow(a: &mut ActiveCue, cue: Option<&Cue>, follow: &mut Vec<CueId>) {
@@ -3196,5 +3256,21 @@ mod tests {
             "{:?}",
             e.messages
         );
+    }
+
+    #[test]
+    fn a_video_waits_for_its_sound_but_not_for_ever() {
+        use VideoStart::*;
+        let s = Duration::from_secs;
+        // No picture yet: wait, whatever the sound is doing.
+        assert_eq!(video_start(false, true, true, s(0)), Wait);
+        assert_eq!(video_start(false, true, false, s(60)), Wait);
+        // A picture and its sound: go. A picture with no sound at all: go.
+        assert_eq!(video_start(true, true, true, s(0)), Go);
+        assert_eq!(video_start(true, false, false, s(0)), Go);
+        // A picture and a sound still coming: wait a while...
+        assert_eq!(video_start(true, true, false, s(1)), Wait);
+        // ...then go without it, rather than start it late and let it lag.
+        assert_eq!(video_start(true, true, false, s(4)), GoSilent);
     }
 }
