@@ -9,7 +9,13 @@
 //!
 //! It is off unless the show turns it on, an optional PIN guards it, and
 //! changes need a header a web page on another site can't send, so a page in
-//! the same browser can't press GO behind your back.
+//! the same browser can't press GO behind your back. A page can also get
+//! round that by making its own address point at this machine (DNS
+//! rebinding), so requests are answered only when the address they were sent
+//! to is an IP address, a bare name or a `.local` name, which no site on the
+//! internet can be. A source that gets the PIN wrong too often is shut out
+//! for a while, and the number of connections and the time a request may take
+//! to arrive are limited.
 
 use crate::engine::{CueStatus, Engine};
 use crate::remote::Command;
@@ -21,14 +27,84 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The page a browser is given.
 pub const PAGE: &str = include_str!("web_page.html");
 /// Requests bigger than this are refused.
 const MAX_REQUEST: usize = 16 * 1024;
+/// Wrong PINs from one address before it is shut out, and for how long.
+const MAX_WRONG_PINS: u32 = 5;
+const LOCKOUT: Duration = Duration::from_secs(60);
+
+/// How much the server puts up with.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// Connections being served at once; more are dropped.
+    pub connections: usize,
+    /// How long a request has, all told, to arrive.
+    pub head_deadline: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits {
+            connections: 64,
+            head_deadline: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Counts wrong PINs by address, and says who is shut out. Time is passed in.
+#[derive(Default)]
+pub struct PinGuard {
+    wrong: HashMap<IpAddr, (u32, Instant)>,
+}
+
+impl PinGuard {
+    /// Whether `ip` is shut out at `now`.
+    pub fn blocked(&self, ip: IpAddr, now: Instant) -> bool {
+        self.wrong
+            .get(&ip)
+            .is_some_and(|(n, at)| *n >= MAX_WRONG_PINS && now.duration_since(*at) < LOCKOUT)
+    }
+
+    /// `ip` gave a wrong PIN.
+    pub fn wrong(&mut self, ip: IpAddr, now: Instant) {
+        if self.wrong.len() > 1000 {
+            self.wrong
+                .retain(|_, (_, at)| now.duration_since(*at) < LOCKOUT);
+        }
+        let e = self.wrong.entry(ip).or_insert((0, now));
+        if now.duration_since(e.1) >= LOCKOUT {
+            *e = (0, now); // an old streak is forgotten
+        }
+        e.0 += 1;
+        e.1 = now;
+    }
+
+    /// `ip` gave the right PIN.
+    pub fn right(&mut self, ip: IpAddr) {
+        self.wrong.remove(&ip);
+    }
+}
+
+/// Whether a request's `Host` is an address no site on the internet can have:
+/// an IP address, a name with no dots (`localhost`, a machine's own name) or
+/// a `.local` name. A page that has made its own domain point at this machine
+/// carries its own domain here, and is turned away.
+pub fn host_ok(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
+    !name.is_empty()
+        && (name.parse::<IpAddr>().is_ok()
+            || !name.contains('.')
+            || name.to_ascii_lowercase().ends_with(".local"))
+}
 
 pub struct Request {
     pub method: String,
@@ -172,6 +248,10 @@ impl Reply {
 /// What to answer a request with, and the command it asks for, if any.
 /// `state` is the show's current state as JSON; `pin` is empty for none.
 pub fn respond(req: &Request, pin: &str, state: &str) -> (Reply, Option<Command>) {
+    // No Host at all is an old or plain client, not a browser.
+    if req.headers.get("host").is_some_and(|h| !host_ok(h)) {
+        return (Reply::text(421, "Use this machine's own address"), None);
+    }
     let path = req.path.as_str();
     let api = path.starts_with("/api/");
     if api && !pin.is_empty() {
@@ -283,24 +363,62 @@ impl WebServer {
         tx: Sender<Command>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<WebServer, String> {
+        Self::start_with(port, pin, state, tx, wake, Limits::default())
+    }
+
+    /// `start`, with limits other than the usual ones.
+    pub fn start_with(
+        port: u16,
+        pin: String,
+        state: Arc<Mutex<String>>,
+        tx: Sender<Command>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        limits: Limits,
+    ) -> Result<WebServer, String> {
         let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let pin = Arc::new(pin);
+        let guard = Arc::new(Mutex::new(PinGuard::default()));
+        let active = Arc::new(AtomicUsize::new(0));
         let thread = std::thread::Builder::new()
             .name("web-remote".into())
             .spawn(move || {
                 while !stop2.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => {
+                        Ok((stream, peer)) => {
+                            // Too many at once: this one is turned away unanswered.
+                            if active.fetch_add(1, Ordering::SeqCst) >= limits.connections {
+                                active.fetch_sub(1, Ordering::SeqCst);
+                                continue;
+                            }
                             let (pin, state, tx, wake) =
                                 (pin.clone(), state.clone(), tx.clone(), wake.clone());
+                            let (guard, active) = (guard.clone(), active.clone());
                             // One thread each, so a slow client holds up nobody else.
-                            let _ = std::thread::Builder::new()
+                            let spawned = std::thread::Builder::new()
                                 .name("web-request".into())
-                                .spawn(move || serve(stream, &pin, &state, &tx, &*wake));
+                                .spawn({
+                                    let active = active.clone();
+                                    move || {
+                                        let ctx = Context {
+                                            pin: &pin,
+                                            state: &state,
+                                            tx: &tx,
+                                            wake: &*wake,
+                                            guard: &guard,
+                                            peer: peer.ip(),
+                                            head_deadline: limits.head_deadline,
+                                        };
+                                        serve(stream, &ctx);
+                                        active.fetch_sub(1, Ordering::SeqCst);
+                                    }
+                                });
+                            if spawned.is_err() {
+                                active.fetch_sub(1, Ordering::SeqCst);
+                            }
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(25)),
                     }
@@ -324,14 +442,20 @@ impl Drop for WebServer {
     }
 }
 
+/// What serving one connection needs.
+struct Context<'a> {
+    pin: &'a str,
+    state: &'a Mutex<String>,
+    tx: &'a Sender<Command>,
+    wake: &'a (dyn Fn() + Send + Sync),
+    guard: &'a Mutex<PinGuard>,
+    peer: IpAddr,
+    head_deadline: Duration,
+}
+
 /// Answer one connection.
-fn serve(
-    mut stream: TcpStream,
-    pin: &str,
-    state: &Mutex<String>,
-    tx: &Sender<Command>,
-    wake: &(dyn Fn() + Send + Sync),
-) {
+fn serve(mut stream: TcpStream, ctx: &Context) {
+    let started = Instant::now();
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -341,10 +465,26 @@ fn serve(
         if buf.windows(4).any(|w| w == b"\r\n\r\n") {
             match parse_request(&buf) {
                 Some(req) => {
-                    let (reply, command) = respond(&req, pin, &state.lock());
+                    let api = req.path.starts_with("/api/");
+                    let now = Instant::now();
+                    if api && ctx.guard.lock().blocked(ctx.peer, now) {
+                        break Reply::text(429, "Too many wrong PINs; wait a minute");
+                    }
+                    let (reply, command) = respond(&req, ctx.pin, &ctx.state.lock());
+                    if api && !ctx.pin.is_empty() {
+                        // Only a PIN that was given and was wrong counts: a page
+                        // asking before it has one is not guessing.
+                        let given = req.headers.get("x-pin").is_some_and(|p| !p.is_empty());
+                        let mut guard = ctx.guard.lock();
+                        match reply.status {
+                            401 if given => guard.wrong(ctx.peer, now),
+                            200 | 403 | 404 | 405 if given => guard.right(ctx.peer),
+                            _ => {}
+                        }
+                    }
                     if let Some(c) = command {
-                        let _ = tx.send(c);
-                        wake();
+                        let _ = ctx.tx.send(c);
+                        (ctx.wake)();
                     }
                     break reply;
                 }
@@ -353,6 +493,10 @@ fn serve(
         }
         if buf.len() > MAX_REQUEST {
             break Reply::text(431, "Request too large");
+        }
+        // However slowly it comes, the whole request has this long to arrive.
+        if started.elapsed() > ctx.head_deadline {
+            return;
         }
         match stream.read(&mut chunk) {
             Ok(0) | Err(_) => return,
@@ -667,5 +811,201 @@ mod tests {
             Arc::new(|| {}),
         );
         assert!(second.is_err());
+    }
+
+    #[test]
+    fn only_addresses_no_website_can_have_are_answered() {
+        for ok in [
+            "192.168.1.20:8080",
+            "10.0.0.5",
+            "[::1]:8080",
+            "[fe80::1]",
+            "localhost:8080",
+            "macbook:8080",
+            "macbook.local",
+            "MacBook.Local:8080",
+        ] {
+            assert!(host_ok(ok), "{ok}");
+        }
+        for bad in [
+            "evil.example.com",
+            "evil.example.com:8080",
+            "1.2.3.4.evil.com:8080",
+            "localhost.evil.com",
+            "show.local.evil.com",
+            "",
+            ":8080",
+        ] {
+            assert!(!host_ok(bad), "{bad:?}");
+        }
+        // A rebound page is turned away whatever it asks for; no Host is a plain client.
+        let (reply, command) = respond(
+            &req(
+                "POST",
+                "/api/go",
+                &[("host", "evil.example.com"), ("x-newq", "1")],
+            ),
+            "",
+            "{}",
+        );
+        assert_eq!(reply.status, 421);
+        assert!(command.is_none());
+        assert_eq!(
+            respond(&req("GET", "/", &[("host", "evil.example.com")]), "", "{}")
+                .0
+                .status,
+            421
+        );
+        assert_eq!(
+            respond(&req("GET", "/", &[("host", "192.168.1.5:8080")]), "", "{}")
+                .0
+                .status,
+            200
+        );
+        assert_eq!(respond(&req("GET", "/", &[]), "", "{}").0.status, 200);
+    }
+
+    #[test]
+    fn wrong_pins_shut_an_address_out_for_a_while() {
+        let (a, b): (IpAddr, IpAddr) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
+        let t0 = Instant::now();
+        let mut g = PinGuard::default();
+        for _ in 0..MAX_WRONG_PINS - 1 {
+            g.wrong(a, t0);
+        }
+        assert!(!g.blocked(a, t0), "a few slips are fine");
+        g.wrong(a, t0);
+        assert!(g.blocked(a, t0));
+        assert!(!g.blocked(b, t0), "others are not affected");
+        assert!(g.blocked(a, t0 + LOCKOUT / 2));
+        assert!(
+            !g.blocked(a, t0 + LOCKOUT + Duration::from_secs(1)),
+            "for a while"
+        );
+        // The right PIN clears the count; an old streak is forgotten.
+        let mut g = PinGuard::default();
+        for _ in 0..MAX_WRONG_PINS - 1 {
+            g.wrong(a, t0);
+        }
+        g.right(a);
+        g.wrong(a, t0);
+        assert!(!g.blocked(a, t0));
+        let later = t0 + LOCKOUT + Duration::from_secs(1);
+        for _ in 0..MAX_WRONG_PINS - 1 {
+            g.wrong(a, later);
+        }
+        assert!(
+            !g.blocked(a, later),
+            "the slips of a minute ago don't count"
+        );
+    }
+
+    fn start_server(pin: &str, limits: Limits) -> WebServer {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        WebServer::start_with(
+            0,
+            pin.into(),
+            Arc::new(Mutex::new(String::from("{}"))),
+            tx,
+            Arc::new(|| {}),
+            limits,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn guessing_the_pin_gets_an_address_shut_out_over_a_real_socket() {
+        let server = start_server("4821", Limits::default());
+        let port = server.port;
+        let guess = |pin: &str| {
+            ask(
+                port,
+                &format!("GET /api/state HTTP/1.1\r\nX-Pin: {pin}\r\n\r\n"),
+            )
+        };
+        // Asking without a PIN (a page that has none yet) is not guessing.
+        for _ in 0..10 {
+            assert!(guess("").starts_with("HTTP/1.1 401"));
+        }
+        for n in 0..MAX_WRONG_PINS {
+            assert!(guess(&format!("000{n}")).starts_with("HTTP/1.1 401"));
+        }
+        let shut = guess("4821");
+        assert!(
+            shut.starts_with("HTTP/1.1 429"),
+            "even the right one now: {shut}"
+        );
+        // The page itself is still served.
+        assert!(ask(port, "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_page_on_another_domain_is_turned_away_over_a_real_socket() {
+        let server = start_server("", Limits::default());
+        let r = ask(
+            server.port,
+            "POST /api/go HTTP/1.1\r\nHost: evil.example.com\r\nX-NewQ: 1\r\n\r\n",
+        );
+        assert!(r.starts_with("HTTP/1.1 421"), "{r}");
+    }
+
+    #[test]
+    fn a_request_dribbled_in_is_cut_off_at_the_deadline() {
+        let server = start_server(
+            "",
+            Limits {
+                head_deadline: Duration::from_millis(500),
+                ..Limits::default()
+            },
+        );
+        let mut s = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let t0 = Instant::now();
+        let mut cut_at = None;
+        // A byte every 100 ms, which would keep a per-read timeout happy for ever.
+        while t0.elapsed() < Duration::from_secs(4) {
+            if s.write_all(b"G").is_err() {
+                cut_at = Some(t0.elapsed());
+                break;
+            }
+            let mut b = [0u8; 8];
+            if matches!(s.read(&mut b), Ok(0)) {
+                cut_at = Some(t0.elapsed());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let cut_at = cut_at.expect("the connection was never cut off");
+        assert!(cut_at < Duration::from_secs(2), "cut off after {cut_at:?}");
+    }
+
+    #[test]
+    fn connections_over_the_limit_are_dropped_and_room_is_made_again() {
+        let server = start_server(
+            "",
+            Limits {
+                connections: 2,
+                ..Limits::default()
+            },
+        );
+        let port = server.port;
+        let idle: Vec<_> = (0..2)
+            .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+            .collect();
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        let r = ask(port, "GET / HTTP/1.1\r\n\r\n");
+        assert!(r.is_empty(), "turned away unanswered: {r}");
+        assert!(t0.elapsed() < Duration::from_secs(1), "and at once");
+        // Once the idle ones are gone there is room.
+        drop(idle);
+        let t0 = Instant::now();
+        loop {
+            if ask(port, "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 200") {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "never made room");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
