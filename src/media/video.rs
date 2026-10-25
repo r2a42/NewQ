@@ -20,6 +20,15 @@ pub struct VideoFrame {
 /// Frames buffered ahead of presentation. Each 1080p frame is ~3 MB.
 const QUEUE_FRAMES: usize = 4;
 
+/// Marks the reader thread as ended however it ends.
+struct ReaderDone(Arc<AtomicBool>);
+
+impl Drop for ReaderDone {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 pub struct VideoPlayer {
     pub width: u32,
     pub height: u32,
@@ -35,6 +44,9 @@ pub struct VideoPlayer {
     pub serial: u64,
     /// A camera: show the newest frame, whatever its time stamp says.
     live: bool,
+    /// Set by the reader thread as it ends (only tests look).
+    #[cfg_attr(not(test), allow(dead_code))]
+    reader_done: Arc<AtomicBool>,
 }
 
 /// Compute an even-sized decode resolution no larger than the source, fitted
@@ -169,13 +181,20 @@ impl VideoPlayer {
         let (tx, rx) = bounded::<VideoFrame>(QUEUE_FRAMES);
         let (recycle, recycle_rx) = unbounded::<Vec<u8>>();
         let eof = Arc::new(AtomicBool::new(false));
-        let rx_reader = rx.clone();
+        // Only a camera's reader takes frames back out of the queue (to drop
+        // the oldest). A file's reader must not hold a receiver: it would keep
+        // the channel open, and its blocked `send` could never fail once the
+        // player is gone, so the thread and its frames would leak.
+        let rx_reader = live.then(|| rx.clone());
         let recycle_back = recycle.clone();
 
         let eof2 = eof.clone();
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let reader_done2 = reader_done.clone();
         std::thread::Builder::new()
             .name("video-reader".into())
             .spawn(move || {
+                let _done = ReaderDone(reader_done2);
                 let mut base: u64 = 0; // index of the current pass's first frame
                 loop {
                     let mut n: u64 = 0;
@@ -202,7 +221,9 @@ impl VideoPlayer {
                                     Ok(()) => break,
                                     Err(TrySendError::Full(f)) => {
                                         frame = f;
-                                        if let Ok(old) = rx_reader.try_recv() {
+                                        if let Some(old) =
+                                            rx_reader.as_ref().and_then(|r| r.try_recv().ok())
+                                        {
                                             let _ = recycle_back.send(old.data);
                                         }
                                     }
@@ -236,6 +257,7 @@ impl VideoPlayer {
             pending: None,
             serial: 0,
             live,
+            reader_done,
         })
     }
 
@@ -287,6 +309,12 @@ impl VideoPlayer {
 
     pub fn error(&self) -> Option<String> {
         self.error.lock().clone()
+    }
+
+    /// Whether the reader thread has ended (for tests of leaks).
+    #[cfg(test)]
+    pub fn reader_done(&self) -> Arc<AtomicBool> {
+        self.reader_done.clone()
     }
 }
 
@@ -367,6 +395,50 @@ pub fn load_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wait up to `secs` for every flag to be set.
+    fn all_set(flags: &[Arc<AtomicBool>], secs: u64) -> bool {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs() < secs {
+            if flags.iter().all(|f| f.load(Ordering::Acquire)) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn dropping_a_player_ends_its_reader_thread() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        let mut flags = Vec::new();
+        for _ in 0..3 {
+            let mut p = VideoPlayer::spawn(
+                &ff,
+                &clip,
+                vi,
+                0.0,
+                Playback::Once { duration: None },
+                (320, 180),
+            )
+            .expect("spawn");
+            // Let the decoder get ahead, so the frame queue is full and the
+            // reader is blocked on it.
+            let t0 = std::time::Instant::now();
+            while !p.ready() {
+                assert!(t0.elapsed().as_secs() < 10, "no first frame");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            flags.push(p.reader_done());
+            drop(p);
+        }
+        assert!(all_set(&flags, 5), "a reader thread outlived its player");
+    }
 
     #[test]
     fn decode_size_only_downscales() {
