@@ -144,6 +144,21 @@ impl AudioOut {
         AudioOut::new()
     }
 
+    /// A default device that works, and `broken` routed to one that failed to
+    /// open (an unplugged interface), for tests.
+    #[cfg(test)]
+    pub fn with_broken_output(broken: AudioOutputId) -> AudioOut {
+        let (good, _) = Device::for_test(2);
+        let (mut bad, _) = Device::for_test(2);
+        bad.open = false;
+        bad.error = Some("the interface was unplugged".into());
+        let mut out = AudioOut::new();
+        out.devices.insert(None, good);
+        out.devices.insert(Some("usb".into()), bad);
+        out.routes.insert(broken, Some("usb".into()));
+        out
+    }
+
     /// Open the devices the show's audio outputs use (the system default if
     /// it has none), and close those no longer used. Cheap when nothing changed.
     pub fn sync(&mut self, outputs: &[AudioOutputConfig]) {
