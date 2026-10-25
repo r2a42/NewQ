@@ -99,6 +99,10 @@ writes gigabytes in seconds.
   starts the `Release` workflow, which builds and publishes the downloads.
   (It can also be run from the Actions tab, or by the owner's token.)
   A suffix (`v0.3.0-rc1`) makes it a pre-release.
+- **FFmpeg for Windows and Linux is pinned** (`scripts/ffmpeg_pins.txt`, checked by
+  `scripts/check_ffmpeg_pin.sh` while packaging). BtbN's `latest` build changes
+  now and then; when a release fails with "does not match its pinned checksum",
+  look at what changed, run `scripts/update_ffmpeg_pins.sh`, and commit the pins.
 - Cloud sessions can't push tags (the git proxy only accepts branches), which
   is why releases go through that comment.
 - **Claude can't post the comment, but can run the workflow.** The GitHub

@@ -3,7 +3,8 @@
 # Usage: scripts/package_release.sh <windows-x64|linux-x64|macos-universal> <tag>
 # Expects `cargo build --release` output in target/release/. Every package
 # bundles an LGPL FFmpeg: Windows and Linux use BtbN/FFmpeg-Builds
-# (FFMPEG_BRANCH / FFMPEG_VERSION, default n9.0 / 9.0); macOS uses the build
+# (FFMPEG_BRANCH / FFMPEG_VERSION, default n9.0 / 9.0), checked against the
+# checksums in scripts/ffmpeg_pins.txt; macOS uses the build
 # from scripts/build_ffmpeg_macos.sh found in $FFMPEG_MACOS_DIR.
 set -euo pipefail
 
@@ -59,6 +60,8 @@ bundle_ffmpeg() {
   tmp="$(mktemp -d)"
   echo "Downloading ${url}"
   curl -fsSL -o "${tmp}/${asset}" "$url"
+  # The moving "latest" build is only used if it is the one that was looked at.
+  "${root}/scripts/check_ffmpeg_pin.sh" "${tmp}/${asset}" "$asset"
   case "$asset" in
     *.zip) (cd "$tmp" && unzip -q "$asset") ;;
     *.tar.xz) (cd "$tmp" && tar xJf "$asset") ;;
