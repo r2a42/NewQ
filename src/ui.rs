@@ -6,6 +6,7 @@ use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
 use crate::media::waveform::WaveState;
 use crate::media::{ProbeState, camera};
+use crate::mesh::Mesh;
 use crate::recovery;
 use crate::relink;
 use crate::remote::{Command, RemoteStatus};
@@ -55,6 +56,8 @@ pub struct PreviewOutput {
     pub layers: Vec<OutputLayer>,
     /// The output's corner pin.
     pub warp: Homography,
+    /// Its mesh warp, in place of the corner pin.
+    pub mesh: Option<std::sync::Arc<crate::mesh::Mesh>>,
     /// Pixel size of the output's canvas (its display or sub display).
     pub canvas: (u32, u32),
 }
@@ -256,7 +259,7 @@ impl UiState {
 
     fn editing(&self, q: Quad) -> bool {
         match q {
-            Quad::Pin(id) => self.geometry_edit == Some(id),
+            Quad::Pin(id) | Quad::Mesh(id) => self.geometry_edit == Some(id),
             Quad::Area(id) => self.area_edit == Some(id),
         }
     }
@@ -273,13 +276,16 @@ impl UiState {
 enum Quad {
     Pin(OutputId),
     Area(OutputId),
+    /// An output's mesh warp, whose handles are its points (a handle's
+    /// `corner` is the point's index in the mesh).
+    Mesh(OutputId),
 }
 
 impl Quad {
     /// How far its corners may go, as fractions of the screen.
     fn range(self) -> RangeInclusive<f32> {
         match self {
-            Quad::Pin(_) => -0.5..=1.5,
+            Quad::Pin(_) | Quad::Mesh(_) => -0.5..=1.5,
             Quad::Area(_) => 0.0..=1.0,
         }
     }
@@ -2624,15 +2630,111 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
                     canvas: e.canvas,
                     warp: e.warp,
                     pin: e.warp,
+                    mesh: e.mesh.clone(),
                 },
             }],
             slot: Slot::Preview,
         },
     ));
     if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == id) {
-        corner_handles(ui, rect, id, &mut cfg.corners, &st.handle_sel);
+        match &mut cfg.mesh {
+            Some(mesh) => mesh_handles(ui, rect, id, mesh, &st.handle_sel),
+            None => corner_handles(ui, rect, id, &mut cfg.corners, &st.handle_sel),
+        }
     }
     ui.add_space(8.0);
+}
+
+/// Draggable handles on the points of a mesh warp, with its lines drawn
+/// through them as the picture will be bent. Hold Shift for fine moves.
+/// Clicking a point selects it for the arrow keys.
+fn mesh_handles(
+    ui: &mut Ui,
+    screen: egui::Rect,
+    id: OutputId,
+    mesh: &mut Mesh,
+    sel: &Cell<Option<HandleSel>>,
+) {
+    let quad = Quad::Mesh(id);
+    let to_screen =
+        |c: [f32; 2]| screen.min + Vec2::new(c[0] * screen.width(), c[1] * screen.height());
+    let painter = ui.painter().clone();
+    painter.rect_stroke(
+        screen,
+        0.0,
+        Stroke::new(1.0, Color32::from_gray(90)),
+        egui::StrokeKind::Outside,
+    );
+    let scale = if ui.input(|i| i.modifiers.shift) {
+        0.1
+    } else {
+        1.0
+    };
+    let range = quad.range();
+    let (lo, hi) = (*range.start(), *range.end());
+    let cols = mesh.cols();
+    let mut pressed_on = None;
+    let mut hits = vec![false; mesh.points.len()];
+    for (k, hit) in hits.iter_mut().enumerate() {
+        let pos = to_screen(mesh.points[k]);
+        let rect = egui::Rect::from_center_size(pos, Vec2::splat(20.0));
+        let resp = ui
+            .interact(rect, ui.id().with((quad, k)), Sense::click_and_drag())
+            .on_hover_text(format!(
+                "Column {}, row {}: drag to move (Shift = fine). Click, then the arrow keys \
+                 move it 1 px (Shift = 5 px).",
+                k % cols + 1,
+                k / cols + 1
+            ));
+        if resp.is_pointer_button_down_on() {
+            pressed_on = Some(k);
+        }
+        if resp.dragged() || resp.drag_stopped() {
+            let d = drag_moved(ui, &resp) * scale;
+            let c = &mut mesh.points[k];
+            c[0] = (c[0] + d.x / screen.width()).clamp(lo, hi);
+            c[1] = (c[1] + d.y / screen.height()).clamp(lo, hi);
+        }
+        *hit = resp.hovered() || resp.dragged();
+    }
+    if let Some(k) = pressed_on {
+        sel.set(Some(HandleSel {
+            quad,
+            corner: Some(k),
+        }));
+    } else if ui.input(|i| i.pointer.primary_pressed()) && sel.get().is_some_and(|s| s.quad == quad)
+    {
+        sel.set(None);
+    }
+    let selected = sel.get().filter(|s| s.quad == quad).and_then(|s| s.corner);
+    // The lines of the grid as the picture is bent along them.
+    let line = |at: &dyn Fn(f32) -> [f32; 2]| -> Vec<egui::Pos2> {
+        (0..=32).map(|i| to_screen(at(i as f32 / 32.0))).collect()
+    };
+    let stroke = Stroke::new(1.0, PLAYHEAD.gamma_multiply(0.8));
+    for &y in &mesh.ys {
+        painter.add(egui::Shape::line(line(&|u| mesh.eval(u, y)), stroke));
+    }
+    for &x in &mesh.xs {
+        painter.add(egui::Shape::line(line(&|v| mesh.eval(x, v)), stroke));
+    }
+    for (k, hit) in hits.iter().enumerate() {
+        let pos = to_screen(mesh.points[k]);
+        if selected == Some(k) {
+            painter.circle(pos, 8.0, PLAYHEAD, Stroke::new(2.0, Color32::WHITE));
+        } else {
+            painter.circle(
+                pos,
+                if *hit { 7.0 } else { 5.0 },
+                if *hit {
+                    PLAYHEAD
+                } else {
+                    Color32::from_black_alpha(160)
+                },
+                Stroke::new(2.0, PLAYHEAD),
+            );
+        }
+    }
 }
 
 /// Draggable corner-pin handles over an output preview. Hold Shift for fine moves.
@@ -2787,6 +2889,17 @@ fn drag_moved(ui: &Ui, resp: &egui::Response) -> Vec2 {
             _ => resp.drag_delta(),
         },
     )
+}
+
+/// Move a point by `d` pixels of a `size`-pixel screen, stepping from the
+/// nearest whole pixel, within `range`.
+fn nudge_point(point: &mut [f32; 2], d: Vec2, size: (u32, u32), range: RangeInclusive<f32>) {
+    let size = [size.0.max(1) as f32, size.1.max(1) as f32];
+    let d = [d.x, d.y];
+    for axis in (0..2).filter(|&a| d[a] != 0.0) {
+        let moved = ((point[axis] * size[axis]).round() + d[axis]) / size[axis];
+        point[axis] = moved.clamp(*range.start(), *range.end());
+    }
 }
 
 /// Move one corner (or with `None`, the whole shape) by `d` pixels of a
@@ -3485,18 +3598,59 @@ fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions:
         {
             actions.push(Action::EditGeometry((!editing).then_some(out.id)));
         }
-        if !out.corners.is_identity() {
-            ui.label(RichText::new("pinned").color(PLAYHEAD).small());
+        if out.mesh.is_some() || !out.corners.is_identity() {
+            ui.label(
+                RichText::new(if out.mesh.is_some() {
+                    "meshed"
+                } else {
+                    "pinned"
+                })
+                .color(PLAYHEAD)
+                .small(),
+            );
             if ui
                 .small_button("Reset")
                 .on_hover_text("Back to the full screen")
                 .clicked()
             {
                 out.corners = Corners::default();
+                out.mesh = None;
+                st.handle_sel.set(None);
             }
         }
     });
     if !editing {
+        return;
+    }
+    ui.horizontal(|ui| {
+        let meshed = out.mesh.is_some();
+        if ui
+            .selectable_label(!meshed, "4 corners")
+            .on_hover_text("Keystone: four corners, straight edges")
+            .clicked()
+            && meshed
+        {
+            if let Some(m) = out.mesh.take() {
+                out.corners = Corners(m.corners());
+            }
+            st.handle_sel.set(None);
+        }
+        if ui
+            .selectable_label(meshed, "Mesh")
+            .on_hover_text(
+                "A grid of points for walls and screens that aren't flat or square: curves, \
+                 corners, columns. Starts as the shape the four corners make now.",
+            )
+            .clicked()
+            && !meshed
+        {
+            let h = crate::gpu::corner_pin(&out.corners.0);
+            out.mesh = Some(Mesh::from_pin(3, 3, |u, v| crate::gpu::project(&h, u, v)));
+            st.handle_sel.set(None);
+        }
+    });
+    if out.mesh.is_some() {
+        mesh_editor(ui, out, st);
         return;
     }
     if !out.corners.is_convex() {
@@ -3539,6 +3693,162 @@ fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions:
                 ui.end_row();
             }
         });
+}
+
+/// Controls for a mesh warp: how many lines, adding a line where it is wanted,
+/// removing one, and the exact place of the selected point.
+fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
+    let id = out.id;
+    let Some(mesh) = out.mesh.as_mut() else {
+        return;
+    };
+    let size = st
+        .previews
+        .iter()
+        .find(|p| p.id == id)
+        .map_or((1920, 1080), |p| p.canvas);
+    let size = [size.0.max(1) as f32, size.1.max(1) as f32];
+    let (mut cols, mut rows) = (mesh.cols(), mesh.rows());
+    egui::Grid::new(("mesh", id.0))
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Grid");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut cols)
+                        .range(crate::mesh::MIN_LINES..=crate::mesh::MAX_LINES)
+                        .suffix(" columns"),
+                );
+                ui.label("×");
+                ui.add(
+                    egui::DragValue::new(&mut rows)
+                        .range(crate::mesh::MIN_LINES..=crate::mesh::MAX_LINES)
+                        .suffix(" rows"),
+                );
+            });
+            ui.end_row();
+            // A line of points can be put anywhere, not only evenly.
+            for (label, vertical) in [("Add column at", true), ("Add row at", false)] {
+                ui.label(label);
+                ui.horizontal(|ui| {
+                    let key = ui.id().with(("mesh_add", id, vertical));
+                    let mut at: f32 = ui.data(|d| d.get_temp(key)).unwrap_or(25.0);
+                    ui.add(
+                        egui::DragValue::new(&mut at)
+                            .speed(0.5)
+                            .range(1.0..=99.0)
+                            .fixed_decimals(0)
+                            .suffix(if vertical { "% across" } else { "% down" }),
+                    );
+                    ui.data_mut(|d| d.insert_temp(key, at));
+                    let frac = at / 100.0;
+                    let room = if vertical {
+                        mesh.can_insert_column(frac)
+                    } else {
+                        mesh.can_insert_row(frac)
+                    };
+                    if ui
+                        .add_enabled(room, egui::Button::new("Add"))
+                        .on_hover_text("The shape stays as it is; the new points can then be moved")
+                        .on_disabled_hover_text(
+                            "No room: at most 9 lines, and not close to another line",
+                        )
+                        .clicked()
+                    {
+                        let new = if vertical {
+                            mesh.insert_column(frac)
+                        } else {
+                            mesh.insert_row(frac)
+                        };
+                        if let Some(k) = new {
+                            // Select the middle of the new line.
+                            let (c, r) = (mesh.cols(), mesh.rows());
+                            let point = if vertical {
+                                (r / 2) * c + k
+                            } else {
+                                k * c + c / 2
+                            };
+                            st.handle_sel.set(Some(HandleSel {
+                                quad: Quad::Mesh(id),
+                                corner: Some(point),
+                            }));
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    if (cols, rows) != (mesh.cols(), mesh.rows()) {
+        *mesh = mesh.resampled(cols, rows);
+        st.handle_sel.set(None);
+    }
+    let cols = mesh.cols();
+    let selected = st
+        .selected_handle()
+        .filter(|s| s.quad == Quad::Mesh(id))
+        .and_then(|s| s.corner)
+        .filter(|k| *k < mesh.points.len());
+    match selected {
+        Some(k) => {
+            let (col, row) = (k % cols, k / cols);
+            ui.separator();
+            ui.label(format!("Point at column {}, row {}", col + 1, row + 1));
+            ui.horizontal(|ui| {
+                #[allow(clippy::needless_range_loop)]
+                for axis in 0..2 {
+                    let mut px = (mesh.points[k][axis] * size[axis]).round();
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut px)
+                                .speed(1.0)
+                                .range(-0.5 * size[axis]..=1.5 * size[axis])
+                                .fixed_decimals(0)
+                                .prefix(if axis == 0 { "X " } else { "Y " })
+                                .suffix(" px"),
+                        )
+                        .changed()
+                    {
+                        mesh.points[k][axis] = px / size[axis];
+                    }
+                }
+                let edge_col = col == 0 || col == cols - 1;
+                let edge_row = row == 0 || row == mesh.rows() - 1;
+                if ui
+                    .add_enabled(!edge_col, egui::Button::new("Remove column"))
+                    .on_disabled_hover_text("The outer columns stay")
+                    .clicked()
+                {
+                    mesh.remove_column(col);
+                    st.handle_sel.set(None);
+                } else if ui
+                    .add_enabled(!edge_row, egui::Button::new("Remove row"))
+                    .on_disabled_hover_text("The outer rows stay")
+                    .clicked()
+                {
+                    mesh.remove_row(row);
+                    st.handle_sel.set(None);
+                }
+            });
+        }
+        None => {
+            ui.label(
+                RichText::new(
+                    "Drag the points on the preview (Shift = fine). Click one to see its \
+                     place, remove its line or move it with the arrow keys.",
+                )
+                .weak()
+                .small(),
+            );
+        }
+    }
+    if ui
+        .add_enabled(!mesh.is_flat(), egui::Button::new("Flatten").small())
+        .on_hover_text("Put every point back where its lines cross, keeping the grid")
+        .clicked()
+    {
+        mesh.flatten();
+    }
 }
 
 fn secs(ui: &mut Ui, v: &mut f64) -> egui::Response {
@@ -5626,28 +5936,46 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::Nudge(d) => {
             if let Some(sel) = st.selected_handle() {
-                let target = match sel.quad {
-                    Quad::Pin(id) => {
-                        let size = st
-                            .previews
-                            .iter()
-                            .find(|p| p.id == id)
-                            .map_or((1920, 1080), |p| p.canvas);
-                        show.outputs
-                            .iter_mut()
-                            .find(|o| o.id == id)
-                            .map(|o| (&mut o.corners, size))
+                if let Quad::Mesh(id) = sel.quad {
+                    let size = st
+                        .previews
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map_or((1920, 1080), |p| p.canvas);
+                    if let Some(mesh) = show
+                        .outputs
+                        .iter_mut()
+                        .find(|o| o.id == id)
+                        .and_then(|o| o.mesh.as_mut())
+                        && let Some(point) = sel.corner.and_then(|k| mesh.points.get_mut(k))
+                    {
+                        nudge_point(point, d, size, sel.quad.range());
                     }
-                    Quad::Area(id) => {
-                        let size = sub_display_size(st, id);
-                        show.outputs
-                            .iter_mut()
-                            .find(|v| v.id == id)
-                            .map(|v| (&mut v.area, size))
+                } else {
+                    let target = match sel.quad {
+                        Quad::Pin(id) => {
+                            let size = st
+                                .previews
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map_or((1920, 1080), |p| p.canvas);
+                            show.outputs
+                                .iter_mut()
+                                .find(|o| o.id == id)
+                                .map(|o| (&mut o.corners, size))
+                        }
+                        Quad::Area(id) => {
+                            let size = sub_display_size(st, id);
+                            show.outputs
+                                .iter_mut()
+                                .find(|v| v.id == id)
+                                .map(|v| (&mut v.area, size))
+                        }
+                        Quad::Mesh(_) => None,
+                    };
+                    if let Some((corners, size)) = target {
+                        nudge(corners, sel.corner, d, size, sel.quad.range());
                     }
-                };
-                if let Some((corners, size)) = target {
-                    nudge(corners, sel.corner, d, size, sel.quad.range());
                 }
             }
         }
@@ -5923,6 +6251,19 @@ mod tests {
             screen.center() + vec2(50.0, 50.0),
         );
         assert!(corners.is_identity());
+    }
+
+    #[test]
+    fn a_mesh_point_nudges_by_pixels_within_its_range() {
+        let size = (1000, 500);
+        let mut p = [0.5, 0.5];
+        nudge_point(&mut p, vec2(1.0, 0.0), size, -0.5..=1.5);
+        assert_eq!(p, [0.501, 0.5]);
+        nudge_point(&mut p, vec2(0.0, -5.0), size, -0.5..=1.5);
+        assert_eq!(p, [0.501, 0.49]);
+        let mut edge = [1.499, 0.0];
+        nudge_point(&mut edge, vec2(5.0, 0.0), size, -0.5..=1.5);
+        assert_eq!(edge[0], 1.5);
     }
 
     #[test]
@@ -7020,6 +7361,7 @@ mod tests {
             name: format!("Output {n}"),
             layers: Vec::new(),
             warp: crate::gpu::IDENTITY,
+            mesh: None,
             canvas: (1920, 1080),
         }
     }

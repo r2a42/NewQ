@@ -343,6 +343,10 @@ pub struct OutputConfig {
     /// display's area is its keystone.)
     #[serde(default)]
     pub corners: Corners,
+    /// A finer warp than four corners (see `mesh`). When there is one it takes
+    /// the place of `corners` on a display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<crate::mesh::Mesh>,
     /// Milliseconds everything on it is held back (a slow projector).
     #[serde(default, skip_serializing_if = "no_delay")]
     pub delay_ms: u32,
@@ -385,6 +389,7 @@ impl OutputConfig {
             enabled: true,
             test_pattern: false,
             corners: Corners::default(),
+            mesh: None,
             delay_ms: 0,
             monitor: None,
             twins: 1,
@@ -1959,6 +1964,13 @@ impl Show {
             }
         }
         show.normalize_groups();
+        // A mesh that doesn't make sense (a hand-edited file) is dropped, not
+        // trusted with the picture.
+        for o in &mut show.outputs {
+            if o.mesh.as_ref().is_some_and(|m| !m.is_valid()) {
+                o.mesh = None;
+            }
+        }
         // Guard against hand-edited files with stale counters.
         let max_id = show
             .cues
@@ -2428,6 +2440,27 @@ mod tests {
         );
         let saved = serde_json::to_string(&show).unwrap();
         assert!(!saved.contains("crossfade"));
+    }
+
+    #[test]
+    fn a_mesh_round_trips_old_shows_have_none_and_a_bad_one_is_dropped() {
+        let mut show = Show::default();
+        let plain = serde_json::to_string(&show).unwrap();
+        assert!(!plain.contains("mesh"), "{plain}");
+        let mut m = crate::mesh::Mesh::grid(4, 3);
+        *m.point_mut(1, 1) = [0.3, 0.4];
+        show.outputs[0].mesh = Some(m.clone());
+        let json = serde_json::to_string(&show).unwrap();
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.outputs[0].mesh, Some(m));
+
+        let dir = std::env::temp_dir().join("newq_test_mesh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.newq");
+        show.outputs[0].mesh.as_mut().unwrap().points.pop();
+        show.save(&path).unwrap();
+        assert!(Show::load(&path).unwrap().outputs[0].mesh.is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

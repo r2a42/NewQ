@@ -38,6 +38,9 @@ The README describes the features; this file is about working on the code.
   what it writes. `build.rs` puts `newq.ico` in the Windows executable; the
   packaging script puts `newq.icns` in the Mac bundle and the icon and a
   `.desktop` file (`assets/linux/`) in the Linux download.
+  `src/mesh.rs`: the mesh warp (a Hermite spline through a grid of points);
+  the vertex shader in `gpu.rs` does the same sums, cutting each layer into
+  a 48x48 grid of cells, and a test renders it and compares.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
   picture as the shown time changes; the renderer re-uploads on `version`).
   `src/relink.rs`: finding moved media and copying it into one folder.

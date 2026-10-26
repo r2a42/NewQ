@@ -3,9 +3,11 @@
 
 use crate::color;
 use crate::media::ffmpeg::ColorMatrix;
+use crate::mesh::{self, Mesh};
 use crate::show::{ColorAdjust, Fit, LayerTransform};
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use winit::window::Window;
 
 /// Whether the graphics device has gone (a driver reset or crash, the card
@@ -162,7 +164,21 @@ struct LayerUniform {
     /// (see [`color::key_uniforms`]).
     kc: [f32; 4],
     ks: [f32; 4],
+    /// The mesh warp: cells drawn per side of the layer (1 without a mesh),
+    /// whether a mesh is on, and its columns and rows.
+    grid: [u32; 4],
+    /// Where the mesh's columns and rows lie across the picture.
+    mx: [[f32; 4]; 3],
+    my: [[f32; 4]; 3],
+    /// The mesh's points, two to a row of four numbers.
+    mesh: [[f32; 4]; MESH_VECS],
 }
+
+/// Room in the shader for a mesh of `MAX_LINES` by `MAX_LINES` points, two
+/// to a vector.
+const MESH_VECS: usize = mesh::MAX_LINES * mesh::MAX_LINES / 2 + 1;
+/// How finely a layer is cut up to follow a mesh, per side.
+pub const MESH_CELLS: u32 = 48;
 
 const SHADER: &str = r#"
 struct Params {
@@ -194,6 +210,12 @@ struct Params {
     // Chroma key: (cb, cr, tolerance, softness), and (mask rgb, spill).
     kc: vec4<f32>,
     ks: vec4<f32>,
+    // Mesh warp: (cells per side, mesh on, columns, rows), where its columns
+    // and rows lie, and its points two to a vector.
+    grid: vec4<u32>,
+    mx: array<vec4<f32>, 3>,
+    my: array<vec4<f32>, 3>,
+    mesh: array<vec4<f32>, 41>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -211,24 +233,112 @@ struct VOut {
     @location(2) display: vec3<f32>,
 };
 
+// The mesh, as mesh.rs works it out: a cubic Hermite spline through the
+// points, one axis and then the other.
+fn mesh_node(c: i32, r: i32) -> vec2<f32> {
+    let cols = i32(p.grid.z);
+    let rows = i32(p.grid.w);
+    let idx = u32(clamp(r, 0, rows - 1) * cols + clamp(c, 0, cols - 1));
+    let v = p.mesh[idx / 2u];
+    return select(v.xy, v.zw, (idx & 1u) == 1u);
+}
+
+fn mesh_kx(k: i32) -> f32 {
+    let c = clamp(k, 0, i32(p.grid.z) - 1);
+    return p.mx[c / 4][c % 4];
+}
+
+fn mesh_ky(k: i32) -> f32 {
+    let c = clamp(k, 0, i32(p.grid.w) - 1);
+    return p.my[c / 4][c % 4];
+}
+
+fn hermite(ka: f32, kb: f32, kc: f32, kd: f32,
+           a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, d: vec2<f32>, u: f32) -> vec2<f32> {
+    let h = kc - kb;
+    let t = (u - kb) / h;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let mb = (c - a) / (kc - ka);
+    let mc = (d - b) / (kd - kb);
+    return (2.0 * t3 - 3.0 * t2 + 1.0) * b + (t3 - 2.0 * t2 + t) * h * mb
+        + (-2.0 * t3 + 3.0 * t2) * c + (t3 - t2) * h * mc;
+}
+
+fn mesh_inside(u: f32, v: f32) -> vec2<f32> {
+    let cols = i32(p.grid.z);
+    let rows = i32(p.grid.w);
+    var i = 0;
+    var j = 0;
+    for (var k = 1; k < cols - 1; k = k + 1) {
+        if (u >= mesh_kx(k)) { i = k; }
+    }
+    for (var k = 1; k < rows - 1; k = k + 1) {
+        if (v >= mesh_ky(k)) { j = k; }
+    }
+    var q: array<vec2<f32>, 4>;
+    for (var m = 0; m < 4; m = m + 1) {
+        let r = j - 1 + m;
+        q[m] = hermite(
+            mesh_kx(i - 1), mesh_kx(i), mesh_kx(i + 1), mesh_kx(i + 2),
+            mesh_node(i - 1, r), mesh_node(i, r), mesh_node(i + 1, r), mesh_node(i + 2, r), u);
+    }
+    return hermite(
+        mesh_ky(j - 1), mesh_ky(j), mesh_ky(j + 1), mesh_ky(j + 2), q[0], q[1], q[2], q[3], v);
+}
+
+// Where picture position (u, v) lands on the display; past the picture's edge
+// it carries on in a straight line.
+fn mesh_eval(u: f32, v: f32) -> vec2<f32> {
+    let uc = clamp(u, 0.0, 1.0);
+    let vc = clamp(v, 0.0, 1.0);
+    let e = 0.01;
+    var o = mesh_inside(uc, vc);
+    if (u > 1.0) {
+        o = o + (u - uc) * (mesh_inside(1.0, vc) - mesh_inside(1.0 - e, vc)) / e;
+    } else if (u < 0.0) {
+        o = o + (u - uc) * (mesh_inside(e, vc) - mesh_inside(0.0, vc)) / e;
+    }
+    if (v > 1.0) {
+        o = o + (v - vc) * (mesh_inside(uc, 1.0) - mesh_inside(uc, 1.0 - e)) / e;
+    } else if (v < 0.0) {
+        o = o + (v - vc) * (mesh_inside(uc, e) - mesh_inside(uc, 0.0)) / e;
+    }
+    return o;
+}
+
 @vertex
-fn vs(@builtin(vertex_index) i: u32) -> VOut {
-    var corners = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0));
-    let c = corners[i];
+fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+    // The layer is a grid of n by n cells, two triangles each (one cell
+    // without a mesh warp).
+    let n = p.grid.x;
+    let cell = vi / 6u;
+    var tri = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0));
+    let c = (vec2<f32>(f32(cell % n), f32(cell / n)) + tri[vi % 6u]) / f32(n);
     let n0 = vec2<f32>(mix(p.rect.x, p.rect.z, c.x), mix(p.rect.y, p.rect.w, c.y));
     let ndc = vec2<f32>(
         p.x0.x * n0.x + p.x0.y * n0.y + p.x0.z,
         p.x1.x * n0.x + p.x1.y * n0.y + p.x1.z);
     let cu = vec3<f32>((ndc.x + 1.0) * 0.5, (1.0 - ndc.y) * 0.5, 1.0);
-    // Projective transform; the GPU's perspective divide by w (with
-    // perspective-correct interpolation) does the rest.
-    let q = vec3<f32>(dot(p.h0.xyz, cu), dot(p.h1.xyz, cu), dot(p.h2.xyz, cu));
     var o: VOut;
-    o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
+    if (p.grid.y != 0u) {
+        // The mesh puts the picture on the display; the placement of the
+        // display on the screen follows.
+        let dsp = vec3<f32>(mesh_eval(cu.x, cu.y), 1.0);
+        let q = vec3<f32>(dot(p.h0.xyz, dsp), dot(p.h1.xyz, dsp), dot(p.h2.xyz, dsp));
+        o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
+        o.display = dsp;
+    } else {
+        // Projective transform; the GPU's perspective divide by w (with
+        // perspective-correct interpolation) does the rest.
+        let q = vec3<f32>(dot(p.h0.xyz, cu), dot(p.h1.xyz, cu), dot(p.h2.xyz, cu));
+        o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
+        o.display = vec3<f32>(dot(p.c0.xyz, cu), dot(p.c1.xyz, cu), dot(p.c2.xyz, cu));
+    }
     o.uv = mix(p.uvr.xy, p.uvr.zw, c);
     o.canvas = cu.xy;
-    o.display = vec3<f32>(dot(p.c0.xyz, cu), dot(p.c1.xyz, cu), dot(p.c2.xyz, cu));
     return o;
 }
 
@@ -318,6 +428,40 @@ pub fn layer_placement(fitted: [f32; 4], canvas: (u32, u32), t: &LayerTransform)
     }
 }
 
+/// What the shader needs to draw through `mesh`: the grid settings, where its
+/// columns and rows lie, and its points.
+#[allow(clippy::type_complexity)]
+fn mesh_uniforms(
+    mesh: Option<&Mesh>,
+) -> (
+    [u32; 4],
+    [[f32; 4]; 3],
+    [[f32; 4]; 3],
+    [[f32; 4]; MESH_VECS],
+) {
+    let mut mx = [[0.0; 4]; 3];
+    let mut my = [[0.0; 4]; 3];
+    let mut points = [[0.0; 4]; MESH_VECS];
+    let Some(m) = mesh.filter(|m| m.is_valid()) else {
+        return ([1, 0, 0, 0], mx, my, points);
+    };
+    for (k, v) in m.xs.iter().enumerate() {
+        mx[k / 4][k % 4] = *v;
+    }
+    for (k, v) in m.ys.iter().enumerate() {
+        my[k / 4][k % 4] = *v;
+    }
+    for (k, p) in m.points.iter().enumerate() {
+        points[k / 2][k % 2 * 2..k % 2 * 2 + 2].copy_from_slice(p);
+    }
+    (
+        [MESH_CELLS, 1, m.cols() as u32, m.rows() as u32],
+        mx,
+        my,
+        points,
+    )
+}
+
 /// A 3×3 projective transform stored as three padded rows.
 pub type Homography = [[f32; 4]; 3];
 
@@ -360,7 +504,6 @@ pub fn compose(then: &Homography, first: &Homography) -> Homography {
 }
 
 /// Apply a homography to a point.
-#[cfg(test)]
 pub fn project(h: &Homography, u: f32, v: f32) -> [f32; 2] {
     let w = h[2][0] * u + h[2][1] * v + h[2][2];
     [
@@ -485,7 +628,7 @@ impl Compositor {
                 buffers: &[],
             },
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -530,6 +673,8 @@ pub struct LayerTexture {
     pub height: u32,
     matrix: ColorMatrix,
     slots: [(wgpu::Buffer, wgpu::BindGroup); 3],
+    /// How many cells per side each slot was last set to draw.
+    cells: [AtomicU32; 3],
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -654,6 +799,7 @@ impl LayerTexture {
             height,
             matrix,
             slots: [slot(), slot(), slot()],
+            cells: [AtomicU32::new(1), AtomicU32::new(1), AtomicU32::new(1)],
         }
     }
 
@@ -699,6 +845,8 @@ impl LayerTexture {
             geometry.canvas,
             transform,
         );
+        let (grid, mx, my, points) = mesh_uniforms(geometry.mesh.as_deref());
+        self.cells[slot as usize].store(grid[0], Ordering::Relaxed);
         let u = LayerUniform {
             rect: place.rect,
             opacity,
@@ -715,6 +863,10 @@ impl LayerTexture {
             cm: color::color_matrix(color),
             kc,
             ks,
+            grid,
+            mx,
+            my,
+            mesh: points,
         };
         queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
     }
@@ -722,7 +874,8 @@ impl LayerTexture {
     /// Draw for `slot` with the compositor pipeline already set on `pass`.
     pub fn draw(&self, slot: Slot, pass: &mut wgpu::RenderPass) {
         pass.set_bind_group(0, &self.slots[slot as usize].1, &[]);
-        pass.draw(0..4, 0..1);
+        let n = self.cells[slot as usize].load(Ordering::Relaxed);
+        pass.draw(0..6 * n * n, 0..1);
     }
 
     pub fn upload_rgba(&self, queue: &wgpu::Queue, data: &[u8]) {
@@ -752,15 +905,18 @@ pub struct DrawLayer<'a> {
 }
 
 /// Where an output's picture (its canvas) lands on a screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Geometry {
     /// Pixel size of the output's canvas, which layers are fitted to.
     pub canvas: (u32, u32),
     /// Maps the canvas onto the screen (sub display area and corner pin).
+    /// With a mesh it is only the display's placement on the screen.
     pub warp: Homography,
     /// The output's own corner pin, onto its display or sub display,
     /// whose edges clip it.
     pub pin: Homography,
+    /// The output's mesh warp, which does the work of `pin` when there is one.
+    pub mesh: Option<Arc<Mesh>>,
 }
 
 /// One output's layers as drawn on a screen.
@@ -1195,6 +1351,7 @@ mod tests {
                 canvas: (2, 2),
                 warp: pin,
                 pin,
+                mesh: None,
             },
         }];
         let draw = gpu.composite(&pipeline, &view, &groups);
@@ -1300,5 +1457,147 @@ mod tests {
         // And the key really does clear the screen colour: black remains.
         let keyed = render_solid(&gpu, [0, 255, 0, 255], 1.0, &adjust(&|c| c.key = green));
         assert!(keyed[0] < 3 && keyed[1] < 3 && keyed[2] < 3, "{keyed:?}");
+    }
+
+    /// Draw a `size`×`size` layer (size a multiple of 64) through `geometry`
+    /// over black and read the whole picture back.
+    fn render_picture(gpu: &Gpu, pixels: &[u8], size: u32, geometry: Geometry) -> Vec<u8> {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let tex = LayerTexture::new_rgba(gpu, size, size);
+        tex.upload_rgba(&gpu.queue, pixels);
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let pipeline = gpu.compositor.pipeline(&gpu.device, format);
+        let groups = [DrawGroup {
+            layers: vec![DrawLayer {
+                texture: &tex,
+                opacity: 1.0,
+                fit: Fit::Stretch,
+                transform: LayerTransform::default(),
+                color: ColorAdjust::default(),
+            }],
+            geometry,
+        }];
+        let draw = gpu.composite(&pipeline, &view, &groups);
+        let row = size * 4;
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: u64::from(row * size),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([draw, encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let data = slice.get_mapped_range().expect("mapped");
+        data.to_vec()
+    }
+
+    #[test]
+    fn the_shader_puts_the_picture_where_the_mesh_maths_says() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the mesh shader test");
+            return;
+        };
+        const SIZE: u32 = 64;
+        // A picture whose red is how far across and green how far down.
+        let mut pixels = Vec::new();
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let (u, v) = (
+                    (x as f32 + 0.5) / SIZE as f32,
+                    (y as f32 + 0.5) / SIZE as f32,
+                );
+                pixels.extend_from_slice(&[(u * 255.0) as u8, (v * 255.0) as u8, 0, 255]);
+            }
+        }
+        let identity = corner_pin(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        // A mesh with lines in odd places, and bent.
+        let mut mesh = Mesh::grid(4, 3);
+        mesh.insert_column(0.2).unwrap();
+        *mesh.point_mut(2, 1) = [0.62, 0.45];
+        *mesh.point_mut(3, 1) = [0.78, 0.55];
+        *mesh.point_mut(1, 2) = [0.28, 0.92];
+        *mesh.point_mut(0, 0) = [0.04, 0.03];
+        assert!(mesh.is_valid());
+        let out = render_picture(
+            &gpu,
+            &pixels,
+            SIZE,
+            Geometry {
+                canvas: (SIZE, SIZE),
+                warp: identity,
+                pin: identity,
+                mesh: Some(Arc::new(mesh.clone())),
+            },
+        );
+        let at = |x: u32, y: u32| {
+            let i = ((y * SIZE + x) * 4) as usize;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        let mut checked = 0;
+        for (u, v) in [
+            (0.15, 0.2),
+            (0.4, 0.3),
+            (0.5, 0.5),
+            (0.7, 0.45),
+            (0.85, 0.6),
+            (0.3, 0.8),
+            (0.6, 0.85),
+            (0.9, 0.15),
+        ] {
+            let d = mesh.eval(u, v);
+            let (x, y) = (
+                (d[0] * SIZE as f32).floor() as u32,
+                (d[1] * SIZE as f32).floor() as u32,
+            );
+            let px = at(x, y);
+            let want = [u * 255.0, v * 255.0];
+            assert!(
+                (f32::from(px[0]) - want[0]).abs() < 12.0
+                    && (f32::from(px[1]) - want[1]).abs() < 12.0
+                    && px[3] == 255,
+                "picture ({u}, {v}) should be at display {d:?} (pixel {x},{y}) as {want:?}, found {px:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 8);
+        // Outside the mesh's shape, where its corner is pulled in, it is black.
+        assert_eq!(at(0, 0)[..3], [0, 0, 0]);
     }
 }
