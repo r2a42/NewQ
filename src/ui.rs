@@ -109,6 +109,16 @@ impl DialogFor {
     }
 }
 
+/// A save being written on a thread of its own: serialising the show and
+/// flushing it to the disk can take tens of milliseconds, a dropped frame on
+/// every output if it happens on the main thread.
+struct SaveJob {
+    path: PathBuf,
+    done: std::sync::mpsc::Receiver<Result<(), String>>,
+    /// The show as it was saved, which is what it is "unchanged" against.
+    snapshot: Option<String>,
+}
+
 /// A file or folder dialog that is open on a thread of its own, so the show
 /// keeps running behind it: a dialog on the event loop's thread would freeze
 /// every fade, wait and picture until it was closed.
@@ -174,6 +184,8 @@ pub struct UiState {
     folder_search: Option<relink::FolderSearch>,
     /// The file dialog that is open, if any.
     dialog: Option<OpenDialog>,
+    /// A save being written, if any.
+    saving: Option<SaveJob>,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -363,6 +375,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     poll_collect(ui.ctx(), show, st);
     poll_folder_search(ui.ctx(), show, st);
     poll_dialog(ui.ctx(), show, st, &mut actions);
+    poll_save(ui.ctx(), engine, st);
     keyboard(ui.ctx(), show, st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -4298,6 +4311,9 @@ fn show_dialog() -> rfd::FileDialog {
 
 /// Ask what to do with unsaved changes. Returns true if it is OK to continue.
 pub fn confirm_discard(show: &Show, st: &mut UiState) -> bool {
+    if let Some(why) = finish_save(show, st) {
+        tell_save_failed(&why, true);
+    }
     if !st.dirty {
         recovery::clear(st.show_path.as_deref());
         return true;
@@ -4336,25 +4352,114 @@ fn save(show: &Show, st: &mut UiState, save_as: bool) -> bool {
     write_show(show, st, &path)
 }
 
-/// Save the show to `path`, telling the operator if that fails.
+/// Save the show to `path` and wait for it, telling the operator if that
+/// fails. For when something waits on the answer (leaving the show).
 fn write_show(show: &Show, st: &mut UiState, path: &Path) -> bool {
-    let path = path.to_path_buf();
-    match show.save(&path) {
+    match show.save(path) {
         Ok(()) => {
-            // What was kept as a recovery copy, for the old name and the new, is now saved.
-            recovery::clear(st.show_path.as_deref());
-            recovery::clear(Some(&path));
-            st.show_path = Some(path);
-            st.saved_json = serde_json::to_string(show).ok();
+            saved(st, path.to_path_buf(), serde_json::to_string(show).ok());
             true
         }
         Err(e) => {
-            rfd::MessageDialog::new()
-                .set_title("Save failed")
-                .set_description(format!("{e:#}"))
-                .show();
+            tell_save_failed(&format!("{e:#}"), true);
             false
         }
+    }
+}
+
+/// The show is on the disk at `path`, as `snapshot`.
+fn saved(st: &mut UiState, path: PathBuf, snapshot: Option<String>) {
+    // What was kept as a recovery copy, for the old name and the new, is now saved.
+    recovery::clear(st.show_path.as_deref());
+    recovery::clear(Some(&path));
+    st.show_path = Some(path);
+    st.saved_json = snapshot;
+}
+
+/// Say that a save failed. Waiting for the operator to read it would stop the
+/// show, so unless something is waiting on the answer anyway, it is shown on
+/// a thread of its own.
+fn tell_save_failed(why: &str, wait: bool) {
+    // (No dialogs in tests.)
+    if cfg!(test) {
+        return;
+    }
+    let why = why.to_string();
+    let show = move || {
+        rfd::MessageDialog::new()
+            .set_title("Save failed")
+            .set_description(why)
+            .show();
+    };
+    if wait {
+        show();
+    } else {
+        let _ = std::thread::Builder::new()
+            .name("save-failed".into())
+            .spawn(show);
+    }
+}
+
+/// Start writing the show to `path` on a thread of its own. One save at a time.
+fn start_save(show: &Show, st: &mut UiState, path: PathBuf) {
+    if st.saving.is_some() {
+        return;
+    }
+    let copy = show.clone();
+    let snapshot = serde_json::to_string(show).ok();
+    let (tx, done) = std::sync::mpsc::channel();
+    let to = path.clone();
+    let spawned = std::thread::Builder::new()
+        .name("save".into())
+        .spawn(move || {
+            let _ = tx.send(copy.save(&to).map_err(|e| format!("{e:#}")));
+        });
+    if spawned.is_ok() {
+        st.saving = Some(SaveJob {
+            path,
+            done,
+            snapshot,
+        });
+    }
+}
+
+/// Take the result of the save being written, when it is in.
+fn poll_save(ctx: &egui::Context, engine: &mut Engine, st: &mut UiState) {
+    let Some(job) = &st.saving else { return };
+    let result = match job.done.try_recv() {
+        Ok(r) => r,
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the save stopped".into()),
+    };
+    let Some(job) = st.saving.take() else { return };
+    match result {
+        Ok(()) => saved(st, job.path, job.snapshot),
+        Err(why) => {
+            engine.log(format!("Could not save the show: {why}"));
+            tell_save_failed(&why, false);
+        }
+    }
+}
+
+/// Wait for the save being written, if there is one, so leaving the show
+/// doesn't race it. Returns why it failed, if it did.
+fn finish_save(show: &Show, st: &mut UiState) -> Option<String> {
+    let job = st.saving.take()?;
+    let result = job
+        .done
+        .recv()
+        .unwrap_or_else(|_| Err("the save stopped".into()));
+    match result {
+        Ok(()) => {
+            saved(st, job.path, job.snapshot);
+            // Unchanged since, unless edited meanwhile.
+            st.dirty = serde_json::to_string(show).ok() != st.saved_json;
+            None
+        }
+        Err(why) => Some(why),
     }
 }
 
@@ -4609,15 +4714,11 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::Save => match st.show_path.clone() {
-            Some(path) => {
-                write_show(show, st, &path);
-            }
+            Some(path) => start_save(show, st, path),
             None => start_dialog(st, show, DialogFor::SaveShow),
         },
         Action::SaveAs => start_dialog(st, show, DialogFor::SaveShow),
-        Action::SaveShowTo(path) => {
-            write_show(show, st, &path);
-        }
+        Action::SaveShowTo(path) => start_save(show, st, path),
         Action::FireSelected => {
             if let Some(id) = st.selected {
                 engine.fire(show, id);
@@ -6564,5 +6665,107 @@ mod tests {
             &mut e,
             &mut st,
         );
+    }
+
+    /// Poll the save in progress until it has finished.
+    fn wait_for_save(engine: &mut Engine, st: &mut UiState) {
+        let ctx = egui::Context::default();
+        let t0 = std::time::Instant::now();
+        while st.saving.is_some() {
+            assert!(t0.elapsed().as_secs() < 10, "the save never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            poll_save(&ctx, engine, st);
+        }
+    }
+
+    fn save_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("newq_ui_save_{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn saving_is_written_in_the_background_and_then_the_show_is_clean() {
+        let d = save_dir("ok");
+        let path = d.join("a.newq");
+        let mut show = Show {
+            name: "Saved".into(),
+            ..Show::default()
+        };
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        frame_end(&show, &mut st, 0.0, false);
+        // An old recovery copy is there, as after unsaved edits.
+        std::fs::write(recovery::path_for(Some(&path)), "{}").unwrap();
+        apply(Action::SaveShowTo(path.clone()), &mut show, &mut e, &mut st);
+        assert!(
+            st.saving.is_some(),
+            "the request returns with the write still to do"
+        );
+        // A second request while one runs is ignored.
+        apply(
+            Action::SaveShowTo(d.join("other.newq")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        wait_for_save(&mut e, &mut st);
+        assert!(st.saving.is_none());
+        assert_eq!(Show::load(&path).unwrap().name, "Saved");
+        assert!(!d.join("other.newq").exists());
+        assert_eq!(st.show_path.as_deref(), Some(path.as_path()));
+        assert!(
+            !recovery::path_for(Some(&path)).exists(),
+            "the recovery copy is cleared"
+        );
+        assert_eq!(st.saved_json, serde_json::to_string(&show).ok());
+        // Save with a path already known saves there, without asking.
+        show.name = "Saved again".into();
+        apply(Action::Save, &mut show, &mut e, &mut st);
+        wait_for_save(&mut e, &mut st);
+        assert_eq!(Show::load(&path).unwrap().name, "Saved again");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_save_is_logged_and_leaves_the_show_unsaved() {
+        let d = save_dir("fail");
+        let mut show = Show::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        let before = st.saved_json.clone();
+        apply(
+            Action::SaveShowTo(d.join("no/such/folder/a.newq")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        wait_for_save(&mut e, &mut st);
+        assert!(st.show_path.is_none(), "still untitled");
+        assert_eq!(st.saved_json, before, "and still unsaved");
+        assert!(
+            e.messages.iter().any(|(_, m)| m.contains("Could not save")),
+            "{:?}",
+            e.messages
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn leaving_a_show_waits_for_a_save_that_is_still_being_written() {
+        let d = save_dir("leave");
+        let path = d.join("a.newq");
+        let mut show = Show::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        frame_end(&show, &mut st, 0.0, false);
+        show.name = "Edited".into();
+        st.dirty = true;
+        apply(Action::SaveShowTo(path.clone()), &mut show, &mut e, &mut st);
+        // Quitting right away: it waits for the write, finds nothing unsaved,
+        // and doesn't ask.
+        assert!(confirm_discard(&show, &mut st));
+        assert!(st.saving.is_none());
+        assert_eq!(Show::load(&path).unwrap().name, "Edited");
+        assert!(!st.dirty);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
