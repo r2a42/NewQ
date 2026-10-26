@@ -219,6 +219,22 @@ pub fn test_media(file: &str) -> Option<(Ffmpeg, PathBuf)> {
     found
 }
 
+/// Read `r` to its end, keeping only the last `keep` bytes of it as text.
+pub(crate) fn read_tail(mut r: impl std::io::Read, keep: usize) -> String {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = r.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        tail.extend_from_slice(&buf[..n]);
+        if tail.len() > keep {
+            tail.drain(..tail.len() - keep);
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     //! These run real ffmpeg against `test_media/`; they skip if either is missing.
