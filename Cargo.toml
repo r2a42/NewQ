@@ -35,6 +35,10 @@ winit = "0.30.13"
 objc2-app-kit = { version = "0.2.2", features = ["NSScreen"] }
 objc2-foundation = { version = "0.2.2", features = ["NSString"] }
 
+# The icon in the Windows executable (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 # To read each monitor's EDID (make, model, serial) by the name Windows gives it.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -111,6 +111,9 @@ case "$platform" in
   linux-x64)
     cp target/release/newq "$stage/"
     chmod +x "$stage/newq"
+    # The icon, and a launcher to copy to ~/.local/share/applications (edit Exec and Icon to the full paths).
+    cp assets/logo/png/newq-icon-256.png "$stage/newq.png"
+    cp assets/linux/newq.desktop "$stage/newq.desktop"
     bundle_ffmpeg "$(pinned_asset -linux64-lgpl-)" ""
     tar -C dist/stage -czf "dist/${name}.tar.gz" "$name"
     ;;
@@ -120,6 +123,7 @@ case "$platform" in
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/FFmpeg"
     cp target/release/newq "$app/Contents/MacOS/newq"
     # NewQ looks for ffmpeg/ffprobe next to its own executable.
+    cp assets/logo/newq.icns "$app/Contents/Resources/newq.icns"
     cp "$ffdir/ffmpeg" "$ffdir/ffprobe" "$app/Contents/MacOS/"
     chmod +x "$app/Contents/MacOS/"*
     verify_ffmpeg "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
@@ -147,6 +151,7 @@ EOF
   <key>CFBundleDisplayName</key><string>NewQ</string>
   <key>CFBundleIdentifier</key><string>io.github.r2a42.newq</string>
   <key>CFBundleExecutable</key><string>newq</string>
+  <key>CFBundleIconFile</key><string>newq</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${tag#v}</string>
   <key>CFBundleVersion</key><string>${tag#v}</string>

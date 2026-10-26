@@ -1078,6 +1078,7 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("NewQ")
+                        .with_window_icon(crate::branding::window_icon())
                         .with_inner_size(LogicalSize::new(1280.0, 760.0))
                         .with_min_inner_size(LogicalSize::new(800.0, 500.0))
                         .with_maximized(true),

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="973" height="297" viewBox="0 0 324.36 99.00" role="img" aria-label="NewQ">
+<title>NewQ</title>
+<g transform="translate(-9.0 -9.0)">
+<defs>
+<linearGradient id="l-beam" gradientUnits="userSpaceOnUse" x1="112" y1="112" x2="54" y2="54"><stop offset="0" stop-color="#EF9A14" stop-opacity="0.95"/><stop offset="1" stop-color="#EF9A14" stop-opacity="0.25"/></linearGradient>
+<radialGradient id="l-pool" gradientUnits="userSpaceOnUse" cx="54" cy="54" r="30" fx="47" fy="46"><stop offset="0" stop-color="#FFC85E"/><stop offset="0.36" stop-color="#EF9A14"/><stop offset="0.68" stop-color="#E07F06"/><stop offset="0.86" stop-color="#E07F06" stop-opacity="0.5"/><stop offset="1" stop-color="#E07F06" stop-opacity="0"/></radialGradient>
+</defs>
+<g transform="translate(-4 -4)">
+<polygon points="112,112 68,54 45,69" fill="url(#l-beam)"/>
+<circle cx="54" cy="54" r="36" fill="none" stroke="#14110F" stroke-width="10"/>
+<circle cx="54" cy="54" r="30" fill="url(#l-pool)"/>
+<path d="M46.5 40.5 L46.5 70.5 L69.5 55.5 Z" fill="#000" fill-opacity="0.28"/>
+<path d="M45 39 L45 69 L68 54 Z" fill="#14110F"/>
+</g>
+</g>
+<g transform="translate(115.00 69.00)">
+<path d="M5.28 0V-56H25.36L36.48 -7.2H37.92V-56H48.32V0H28.24L17.12 -48.8H15.68V0Z" fill="#14110F"/>
+<path d="M74.88 1.12Q68.96 1.12 64.44 -1.4Q59.92 -3.92 57.4 -8.52Q54.88 -13.12 54.88 -19.36V-20.32Q54.88 -26.56 57.36 -31.16Q59.84 -35.76 64.32 -38.28Q68.8 -40.8 74.72 -40.8Q80.56 -40.8 84.88 -38.2Q89.2 -35.6 91.6 -31Q94 -26.4 94 -20.32V-16.88H65.12Q65.28 -12.8 68.16 -10.24Q71.04 -7.68 75.2 -7.68Q79.44 -7.68 81.44 -9.52Q83.44 -11.36 84.48 -13.6L92.72 -9.28Q91.6 -7.2 89.48 -4.76Q87.36 -2.32 83.84 -0.6Q80.32 1.12 74.88 1.12ZM65.2 -24.4H83.76Q83.44 -27.84 81 -29.92Q78.56 -32 74.64 -32Q70.56 -32 68.16 -29.92Q65.76 -27.84 65.2 -24.4Z" fill="#14110F"/>
+<path d="M103.76 0 98.16 -39.68H108.16L111.68 -6.8H113.12L118.24 -39.68H134.4L139.52 -6.8H140.96L144.48 -39.68H154.48L148.88 0H132.16L127.04 -32.88H125.6L120.48 0Z" fill="#14110F"/>
+<path d="M182.32 1.12Q171.76 1.12 165.52 -4.68Q159.28 -10.48 159.28 -21.28V-34.72Q159.28 -45.52 165.52 -51.32Q171.76 -57.12 182.32 -57.12Q192.88 -57.12 199.12 -51.32Q205.36 -45.52 205.36 -34.72V-21.28Q205.36 -10.48 199.12 -4.68Q192.88 1.12 182.32 1.12ZM182.32 -8.32Q188.24 -8.32 191.52 -11.76Q194.8 -15.2 194.8 -20.96V-35.04Q194.8 -40.8 191.52 -44.24Q188.24 -47.68 182.32 -47.68Q176.48 -47.68 173.16 -44.24Q169.84 -40.8 169.84 -35.04V-20.96Q169.84 -15.2 173.16 -11.76Q176.48 -8.32 182.32 -8.32ZM186 14.4Q182.08 14.4 179.64 11.96Q177.2 9.52 177.2 5.44V0H187.44V3.84Q187.44 6.24 189.68 6.24H194.4V14.4Z" fill="#D9770A"/>
+</g>
+</svg>

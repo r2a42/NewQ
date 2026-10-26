@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 120 120" role="img" aria-label="NewQ">
+<title>NewQ</title>
+<rect x="11.724" y="11.724" width="96.55199999999999" height="96.55199999999999" rx="21.7242" fill="#14110F"/>
+<g transform="translate(60 60) scale(0.64368) translate(-58.5 -58.5)">
+<defs>
+<linearGradient id="i-beam" gradientUnits="userSpaceOnUse" x1="112" y1="112" x2="54" y2="54"><stop offset="0" stop-color="#F5A524" stop-opacity="0.95"/><stop offset="1" stop-color="#F5A524" stop-opacity="0.25"/></linearGradient>
+<radialGradient id="i-pool" gradientUnits="userSpaceOnUse" cx="54" cy="54" r="27" fx="47" fy="46"><stop offset="0" stop-color="#FFD98A"/><stop offset="0.42" stop-color="#F5A524"/><stop offset="0.64" stop-color="#D08209"/><stop offset="1" stop-color="#D08209" stop-opacity="0"/></radialGradient>
+</defs>
+<g transform="translate(-4 -4)">
+<polygon points="112,112 68,54 45,69" fill="url(#i-beam)"/>
+<circle cx="54" cy="54" r="36" fill="none" stroke="#FAF6EE" stroke-width="10"/>
+<circle cx="54" cy="54" r="27" fill="url(#i-pool)"/>
+<path d="M46.5 40.5 L46.5 70.5 L69.5 55.5 Z" fill="#000" fill-opacity="0.28"/>
+<path d="M45 39 L45 69 L68 54 Z" fill="#14110F"/>
+</g>
+</g>
+</svg>

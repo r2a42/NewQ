@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NewQ
+Comment=Cue-based playback for theatre and live events
+Exec=newq
+Icon=newq
+Terminal=false
+Categories=AudioVideo;Video;

@@ -200,6 +200,9 @@ pub struct UiState {
     /// Whether the window for lining sound up with picture is open, and the
     /// clip being made for it.
     pub show_sync: bool,
+    /// Whether the About window is open, and its logo (made when first needed).
+    pub show_about: bool,
+    about_logo: Option<egui::TextureHandle>,
     sync_clip: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     media_note: String,
     sync_note: String,
@@ -323,6 +326,7 @@ enum Action {
     ToggleCart,
     ToggleMedia,
     ToggleSync,
+    ToggleAbout,
     /// Make the clip for checking the sync (about a second of work).
     MakeSyncClip,
     /// A cue for the sync clip, looping.
@@ -485,6 +489,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     egui::CentralPanel::default().show(ui, |ui| cue_list(ui, show, engine, st, &mut actions));
     media_window(ui.ctx(), show, st, &mut actions);
     sync_window(ui.ctx(), show, st, &mut actions);
+    about_window(ui.ctx(), st);
 
     // Actions change state after this frame was laid out; show the result now
     // rather than on the next mouse move.
@@ -909,6 +914,11 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             });
         });
         ui.menu_button("Help", |ui| {
+            if ui.button("About NewQ…").clicked() {
+                actions.push(Action::ToggleAbout);
+                ui.close();
+            }
+            ui.separator();
             ui.label(RichText::new("Keyboard").strong());
             for (k, d) in [
                 ("Space", "GO"),
@@ -1758,6 +1768,51 @@ fn poll_collect(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
 
 /// The media window: every file the show uses, which are missing, finding
 /// them again, and copying them all into one folder.
+/// The About window: the logo, the version, the licence and where the logs are.
+fn about_window(ctx: &egui::Context, st: &mut UiState) {
+    if !st.show_about {
+        return;
+    }
+    let logo = st
+        .about_logo
+        .get_or_insert_with(|| {
+            ctx.load_texture(
+                "newq-logo",
+                crate::branding::icon_image(),
+                egui::TextureOptions::LINEAR,
+            )
+        })
+        .clone();
+    let mut open = true;
+    egui::Window::new("About NewQ")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.image(egui::load::SizedTexture::new(logo.id(), Vec2::splat(96.0)));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("NewQ").size(28.0).strong());
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.label(
+                        RichText::new("Cue-based playback for theatre and live events")
+                            .weak()
+                            .small(),
+                    );
+                });
+            });
+            ui.separator();
+            ui.label("Free software, under the MIT or Apache-2.0 licence.");
+            ui.hyperlink_to("github.com/r2a42/NewQ", "https://github.com/r2a42/NewQ");
+            ui.label(
+                RichText::new(format!("Logs: {}", crate::crash::log_dir().display()))
+                    .weak()
+                    .small(),
+            );
+        });
+    st.show_about = open;
+}
+
 /// The window for lining sound up with picture: how long to hold each back.
 fn sync_window(ctx: &egui::Context, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     if !st.show_sync {
@@ -5178,6 +5233,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::ToggleCart => st.show_cart = !st.show_cart,
         Action::ToggleMedia => st.show_media = !st.show_media,
         Action::ToggleSync => st.show_sync = !st.show_sync,
+        Action::ToggleAbout => st.show_about = !st.show_about,
         Action::MakeSyncClip => match engine.ff.clone() {
             None => st.sync_note = "ffmpeg wasn't found, so there's no clip to make.".into(),
             Some(ff) => {
@@ -7405,6 +7461,30 @@ mod tests {
         // Drawing every row of 2,000 would be tens of thousands of shapes.
         assert!(many < 1500, "{many} shapes for 2,000 cues");
         assert!(many < few * 3, "{many} shapes for 2,000 cues, {few} for 30");
+    }
+
+    #[test]
+    fn the_about_window_opens_from_the_help_menu_and_draws_the_logo() {
+        let mut show = Show::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        assert!(!st.show_about);
+        apply(Action::ToggleAbout, &mut show, &mut e, &mut st);
+        assert!(st.show_about);
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(700.0, 500.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| about_window(ui.ctx(), &mut st));
+        assert!(
+            !out.textures_delta.set.is_empty(),
+            "the logo was sent to the GPU"
+        );
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 3 && st.show_about && st.about_logo.is_some());
+        apply(Action::ToggleAbout, &mut show, &mut e, &mut st);
+        assert!(!st.show_about);
     }
 
     #[test]

@@ -28,6 +28,13 @@ The README describes the features; this file is about working on the code.
   monitor by the user; `show.rs::slot_state` finds the monitor and never picks
   another, `app.rs::route_outputs` places outputs, and `Show::assign_displays`
   gives older shows (Auto/Display placements) their displays once.
+  `assets/logo/`: the logo (SVGs, PNGs, `newq.ico`, `newq.icns`, the raw 128 px
+  window icon `src/branding.rs` embeds, and the 1280x640 GitHub social preview).
+  Change the artwork in `scripts/make_logo_assets.py` and re-run it (it needs
+  fontTools, node with playwright and ImageMagick; see its header), then commit
+  what it writes. `build.rs` puts `newq.ico` in the Windows executable; the
+  packaging script puts `newq.icns` in the Mac bundle and the icon and a
+  `.desktop` file (`assets/linux/`) in the Linux download.
   `src/relink.rs`: finding moved media and copying it into one folder.
   `src/gpu.rs` also notices a lost graphics device (`DeviceLost`) and
   `app.rs::watch_gpu` rebuilds every window's device, surface and render thread;
