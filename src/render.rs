@@ -3,8 +3,8 @@
 //! own thread. The main thread only posts the latest frame into a mailbox and
 //! never waits, so timing, input and the other outputs are unaffected.
 
-use crate::gpu::{DrawGroup, DrawLayer, Geometry, Gpu, LayerTexture, Look, Slot};
-use crate::show::{ColorAdjust, Fit, LayerTransform};
+use crate::gpu::{BlendPass, DrawGroup, DrawLayer, Geometry, Gpu, LayerTexture, Look, Slot};
+use crate::show::{ColorAdjust, EdgeBlend, Fit, LayerTransform};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -121,6 +121,7 @@ enum OutputJob {
     Frame {
         size: (u32, u32),
         groups: Vec<OutputGroup>,
+        blend: EdgeBlend,
     },
     Quit,
 }
@@ -136,23 +137,31 @@ impl OutputThread {
         window: Arc<Window>,
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
+        slot: Slot,
     ) -> OutputThread {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let handle = std::thread::Builder::new()
             .name("output-render".into())
-            .spawn(move || output_loop(gpu, window, surface, config, mb))
+            .spawn(move || output_loop(gpu, window, surface, config, slot, mb))
             .expect("spawn output render thread");
         OutputThread { mailbox, handle }
     }
 
-    /// Draw `groups` (bottom first) on the whole screen.
-    pub fn submit(&self, size: (u32, u32), groups: Vec<OutputGroup>) {
-        self.mailbox
-            .put(OutputJob::Frame { size, groups }, |old, new| match old {
+    /// Draw `groups` (bottom first) on the whole screen, with its edges
+    /// faded as `blend` says.
+    pub fn submit(&self, size: (u32, u32), groups: Vec<OutputGroup>, blend: EdgeBlend) {
+        self.mailbox.put(
+            OutputJob::Frame {
+                size,
+                groups,
+                blend,
+            },
+            |old, new| match old {
                 OutputJob::Quit => OutputJob::Quit,
                 _ => new,
-            });
+            },
+        );
     }
 
     /// Ask the thread to stop. Returns its handle so the caller can keep the
@@ -168,15 +177,21 @@ fn output_loop(
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     mut config: wgpu::SurfaceConfiguration,
+    slot: Slot,
     mailbox: Arc<Mailbox<OutputJob>>,
 ) {
     let pipeline = gpu.compositor.pipeline(&gpu.device, config.format);
+    let fade = BlendPass::new(&gpu.device, config.format);
     // NEWQ_TRACE_OUTPUT=1 logs every composited frame's layer opacities.
     let trace = std::env::var_os("NEWQ_TRACE_OUTPUT").is_some();
     loop {
-        let (size, groups) = match mailbox.take() {
+        let (size, groups, blend) = match mailbox.take() {
             OutputJob::Quit => break,
-            OutputJob::Frame { size, groups } => (size, groups),
+            OutputJob::Frame {
+                size,
+                groups,
+                blend,
+            } => (size, groups, blend),
         };
         resize(&gpu, &surface, &mut config, size);
         let Some(frame) = acquire(&gpu, &surface, &config) else {
@@ -198,7 +213,11 @@ fn output_loop(
                 .collect();
             log::info!("output composite [{}]", ops.join(" | "));
         }
-        let cmd = gpu.composite(&pipeline, &view, &draw);
+        let faded = (!blend.is_off()).then(|| {
+            fade.set(&gpu.queue, &blend);
+            &fade
+        });
+        let cmd = gpu.composite(&pipeline, slot, &view, &draw, faded);
         gpu.queue.submit([cmd]);
         window.pre_present_notify();
         gpu.queue.present(frame);

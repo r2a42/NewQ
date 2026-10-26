@@ -4,7 +4,7 @@
 use crate::color;
 use crate::media::ffmpeg::ColorMatrix;
 use crate::mesh::{self, Mesh};
-use crate::show::{ColorAdjust, Fit, LayerTransform};
+use crate::show::{ColorAdjust, EdgeBlend, Fit, LayerTransform};
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -172,6 +172,9 @@ struct LayerUniform {
     my: [[f32; 4]; 3],
     /// The mesh's points, two to a row of four numbers.
     mesh: [[f32; 4]; MESH_VECS],
+    /// Where the mesh sees the picture, for a display showing part of a
+    /// bigger one: (left, top, 1 / width, 1 / height) of the part.
+    slice: [f32; 4],
 }
 
 /// Room in the shader for a mesh of `MAX_LINES` by `MAX_LINES` points, two
@@ -216,6 +219,8 @@ struct Params {
     mx: array<vec4<f32>, 3>,
     my: array<vec4<f32>, 3>,
     mesh: array<vec4<f32>, 41>,
+    // Where the mesh sees the picture: (left, top, 1 / width, 1 / height).
+    slice: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -326,7 +331,9 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     if (p.grid.y != 0u) {
         // The mesh puts the picture on the display; the placement of the
         // display on the screen follows.
-        let dsp = vec3<f32>(mesh_eval(cu.x, cu.y), 1.0);
+        let su = (cu.x - p.slice.x) * p.slice.z;
+        let sv = (cu.y - p.slice.y) * p.slice.w;
+        let dsp = vec3<f32>(mesh_eval(su, sv), 1.0);
         let q = vec3<f32>(dot(p.h0.xyz, dsp), dot(p.h1.xyz, dsp), dot(p.h2.xyz, dsp));
         o.pos = vec4<f32>(2.0 * q.x - q.z, q.z - 2.0 * q.y, 0.0, q.z);
         o.display = dsp;
@@ -649,6 +656,144 @@ impl Compositor {
     }
 }
 
+const BLEND_SHADER: &str = r#"
+struct Blend {
+    // Left, right, top and bottom, as fractions of the display; then gamma.
+    edges: vec4<f32>,
+    gamma: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> b: Blend;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> VOut {
+    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    var o: VOut;
+    o.pos = vec4<f32>(p[i], 0.0, 1.0);
+    o.uv = vec2<f32>((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5);
+    return o;
+}
+
+// blend.rs: a smoothstep share of the light, as a signal for the projector's gamma.
+fn edge(pos: f32, width: f32) -> f32 {
+    if (width <= 0.0) {
+        return 1.0;
+    }
+    let t = clamp(pos / width, 0.0, 1.0);
+    return pow(t * t * (3.0 - 2.0 * t), 1.0 / max(b.gamma.x, 1.0));
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    let m = edge(in.uv.x, b.edges.x) * edge(1.0 - in.uv.x, b.edges.y)
+        * edge(in.uv.y, b.edges.z) * edge(1.0 - in.uv.y, b.edges.w);
+    return vec4<f32>(m, m, m, 1.0);
+}
+"#;
+
+/// The fade at the edges of a window's picture: a pass drawn last that
+/// multiplies what is there by the fade (see `blend.rs`).
+pub struct BlendPass {
+    pipeline: wgpu::RenderPipeline,
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl BlendPass {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> BlendPass {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blend"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blend"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blend"),
+            source: wgpu::ShaderSource::Wgsl(BLEND_SHADER.into()),
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blend"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blend"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        // What is there times the fade (colour), and what was there (alpha).
+        let multiply = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::Src,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blend"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(multiply),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        BlendPass {
+            pipeline,
+            buffer,
+            bind_group,
+        }
+    }
+
+    /// Set the fade to draw.
+    pub fn set(&self, queue: &wgpu::Queue, blend: &EdgeBlend) {
+        let b = blend.clamped();
+        let data = [b.left, b.right, b.top, b.bottom, b.gamma, 0.0, 0.0, 0.0];
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&data));
+    }
+}
+
 enum Planes {
     Yuv([wgpu::Texture; 3]),
     Rgba(wgpu::Texture),
@@ -659,11 +804,28 @@ enum Planes {
 /// threads, so each gets its own uniform buffer (placement) and bind group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
-    Output = 0,
     /// The output's own preview.
-    Preview = 1,
+    Preview,
     /// The preview of a whole physical display, with its sub displays.
-    Screen = 2,
+    Screen,
+    /// A fullscreen output window (by the number of its display). Windows
+    /// that show the same picture, as projectors sharing a wide one do,
+    /// must not share a slot.
+    Window(u8),
+}
+
+/// How many windows can draw the same layer at once without sharing a slot.
+const WINDOW_SLOTS: usize = 8;
+const SLOTS: usize = 2 + WINDOW_SLOTS;
+
+impl Slot {
+    fn index(self) -> usize {
+        match self {
+            Slot::Preview => 0,
+            Slot::Screen => 1,
+            Slot::Window(n) => 2 + n as usize % WINDOW_SLOTS,
+        }
+    }
 }
 
 /// GPU textures for one playing layer, plus per-[`Slot`] uniforms.
@@ -672,9 +834,9 @@ pub struct LayerTexture {
     pub width: u32,
     pub height: u32,
     matrix: ColorMatrix,
-    slots: [(wgpu::Buffer, wgpu::BindGroup); 3],
+    slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     /// How many cells per side each slot was last set to draw.
-    cells: [AtomicU32; 3],
+    cells: Vec<AtomicU32>,
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -798,8 +960,8 @@ impl LayerTexture {
             width,
             height,
             matrix,
-            slots: [slot(), slot(), slot()],
-            cells: [AtomicU32::new(1), AtomicU32::new(1), AtomicU32::new(1)],
+            slots: (0..SLOTS).map(|_| slot()).collect(),
+            cells: (0..SLOTS).map(|_| AtomicU32::new(1)).collect(),
         }
     }
 
@@ -846,7 +1008,7 @@ impl LayerTexture {
             transform,
         );
         let (grid, mx, my, points) = mesh_uniforms(geometry.mesh.as_deref());
-        self.cells[slot as usize].store(grid[0], Ordering::Relaxed);
+        self.cells[slot.index()].store(grid[0], Ordering::Relaxed);
         let u = LayerUniform {
             rect: place.rect,
             opacity,
@@ -867,14 +1029,15 @@ impl LayerTexture {
             mx,
             my,
             mesh: points,
+            slice: geometry.slice,
         };
-        queue.write_buffer(&self.slots[slot as usize].0, 0, bytemuck::bytes_of(&u));
+        queue.write_buffer(&self.slots[slot.index()].0, 0, bytemuck::bytes_of(&u));
     }
 
     /// Draw for `slot` with the compositor pipeline already set on `pass`.
     pub fn draw(&self, slot: Slot, pass: &mut wgpu::RenderPass) {
-        pass.set_bind_group(0, &self.slots[slot as usize].1, &[]);
-        let n = self.cells[slot as usize].load(Ordering::Relaxed);
+        pass.set_bind_group(0, &self.slots[slot.index()].1, &[]);
+        let n = self.cells[slot.index()].load(Ordering::Relaxed);
         pass.draw(0..6 * n * n, 0..1);
     }
 
@@ -917,6 +1080,15 @@ pub struct Geometry {
     pub pin: Homography,
     /// The output's mesh warp, which does the work of `pin` when there is one.
     pub mesh: Option<Arc<Mesh>>,
+    /// Where the mesh sees the picture, for a display showing part of a
+    /// bigger one: (left, top, 1 / width, 1 / height) of the part. The whole
+    /// picture is `WHOLE`.
+    pub slice: [f32; 4],
+}
+
+impl Geometry {
+    /// The part of the picture a mesh sees when it sees all of it.
+    pub const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 }
 
 /// One output's layers as drawn on a screen.
@@ -944,18 +1116,22 @@ pub fn fit_rect(tex: (u32, u32), win: (u32, u32), fit: Fit) -> [f32; 4] {
 }
 
 impl Gpu {
-    /// Draw layers (bottom to top) over black into `target`.
+    /// Draw layers (bottom to top) over black into `target`, then fade the
+    /// edges if `blend` says so. `slot` is the window's own: windows showing
+    /// the same layers must pass different ones.
     pub fn composite(
         &self,
         pipeline: &wgpu::RenderPipeline,
+        slot: Slot,
         target: &wgpu::TextureView,
         groups: &[DrawGroup],
+        blend: Option<&BlendPass>,
     ) -> wgpu::CommandBuffer {
         for g in groups {
             for l in &g.layers {
                 l.texture.write_uniform(
                     &self.queue,
-                    Slot::Output,
+                    slot,
                     &g.geometry,
                     l.opacity,
                     &Look {
@@ -991,8 +1167,13 @@ impl Gpu {
             pass.set_pipeline(pipeline);
             for l in groups.iter().flat_map(|g| &g.layers) {
                 if l.opacity > 0.0 {
-                    l.texture.draw(Slot::Output, &mut pass);
+                    l.texture.draw(slot, &mut pass);
                 }
+            }
+            if let Some(b) = blend {
+                pass.set_pipeline(&b.pipeline);
+                pass.set_bind_group(0, &b.bind_group, &[]);
+                pass.draw(0..3, 0..1);
             }
         }
         encoder.finish()
@@ -1352,9 +1533,10 @@ mod tests {
                 warp: pin,
                 pin,
                 mesh: None,
+                slice: Geometry::WHOLE,
             },
         }];
-        let draw = gpu.composite(&pipeline, &view, &groups);
+        let draw = gpu.composite(&pipeline, Slot::Window(0), &view, &groups, None);
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size: 256 * 2,
@@ -1462,6 +1644,17 @@ mod tests {
     /// Draw a `size`×`size` layer (size a multiple of 64) through `geometry`
     /// over black and read the whole picture back.
     fn render_picture(gpu: &Gpu, pixels: &[u8], size: u32, geometry: Geometry) -> Vec<u8> {
+        render_faded(gpu, pixels, size, geometry, None)
+    }
+
+    /// `render_picture`, with the edges faded.
+    fn render_faded(
+        gpu: &Gpu,
+        pixels: &[u8],
+        size: u32,
+        geometry: Geometry,
+        blend: Option<EdgeBlend>,
+    ) -> Vec<u8> {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let tex = LayerTexture::new_rgba(gpu, size, size);
         tex.upload_rgba(&gpu.queue, pixels);
@@ -1491,7 +1684,12 @@ mod tests {
             }],
             geometry,
         }];
-        let draw = gpu.composite(&pipeline, &view, &groups);
+        let fade = BlendPass::new(&gpu.device, format);
+        let faded = blend.map(|b| {
+            fade.set(&gpu.queue, &b);
+            &fade
+        });
+        let draw = gpu.composite(&pipeline, Slot::Window(0), &view, &groups, faded);
         let row = size * 4;
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -1564,6 +1762,7 @@ mod tests {
                 warp: identity,
                 pin: identity,
                 mesh: Some(Arc::new(mesh.clone())),
+                slice: Geometry::WHOLE,
             },
         );
         let at = |x: u32, y: u32| {
@@ -1599,5 +1798,119 @@ mod tests {
         assert_eq!(checked, 8);
         // Outside the mesh's shape, where its corner is pulled in, it is black.
         assert_eq!(at(0, 0)[..3], [0, 0, 0]);
+    }
+
+    /// A `SIZE`-square picture whose red is how far across and green how far down.
+    fn gradient(size: u32) -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for y in 0..size {
+            for x in 0..size {
+                let (u, v) = (
+                    (x as f32 + 0.5) / size as f32,
+                    (y as f32 + 0.5) / size as f32,
+                );
+                pixels.extend_from_slice(&[(u * 255.0) as u8, (v * 255.0) as u8, 0, 255]);
+            }
+        }
+        pixels
+    }
+
+    fn identity_geometry(size: u32) -> Geometry {
+        let identity = corner_pin(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        Geometry {
+            canvas: (size, size),
+            warp: identity,
+            pin: identity,
+            mesh: None,
+            slice: Geometry::WHOLE,
+        }
+    }
+
+    #[test]
+    fn the_edges_fade_as_the_blend_maths_says() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the blend shader test");
+            return;
+        };
+        const SIZE: u32 = 64;
+        let white = vec![255u8; (SIZE * SIZE * 4) as usize];
+        let blend = EdgeBlend {
+            left: 0.25,
+            right: 0.1,
+            top: 0.2,
+            bottom: 0.0,
+            gamma: 2.2,
+        };
+        let out = render_faded(&gpu, &white, SIZE, identity_geometry(SIZE), Some(blend));
+        let at = |x: u32, y: u32| out[((y * SIZE + x) * 4) as usize];
+        for (x, y) in [
+            (0, 32),
+            (3, 32),
+            (8, 32),
+            (15, 32),
+            (32, 32),
+            (60, 32),
+            (63, 32),
+            (32, 0),
+            (32, 5),
+            (32, 63),
+            (2, 3),
+        ] {
+            let want = crate::blend::mask(
+                &blend,
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            ) * 255.0;
+            let got = f32::from(at(x, y));
+            assert!(
+                (got - want).abs() <= 3.0,
+                "pixel ({x},{y}): {got} but {want}"
+            );
+        }
+        // Alpha is left alone, and no blend leaves the picture as it was.
+        assert_eq!(out[3], 255);
+        let plain = render_faded(&gpu, &white, SIZE, identity_geometry(SIZE), None);
+        assert!(plain.iter().all(|&b| b == 255));
+    }
+
+    #[test]
+    fn a_display_shows_its_part_of_a_picture_with_or_without_a_mesh() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the slice shader test");
+            return;
+        };
+        const SIZE: u32 = 64;
+        let pixels = gradient(SIZE);
+        // The part of the picture from 0.5 across for half its width, all its height.
+        let area = [0.5f32, 0.0, 0.5, 1.0];
+        let part = [
+            [1.0 / area[2], 0.0, -area[0] / area[2], 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        for meshed in [false, true] {
+            let mut g = identity_geometry(SIZE);
+            if meshed {
+                g.mesh = Some(Arc::new(Mesh::grid(3, 3)));
+                g.slice = [area[0], area[1], 1.0 / area[2], 1.0 / area[3]];
+            } else {
+                g.pin = part;
+                g.warp = part;
+            }
+            let out = render_picture(&gpu, &pixels, SIZE, g);
+            for (x, y) in [(2u32, 10u32), (20, 30), (40, 50), (60, 5)] {
+                let i = ((y * SIZE + x) * 4) as usize;
+                // The display's pixel x is at 0.5 + 0.5 * x / SIZE of the picture.
+                let want_u = area[0] + area[2] * (x as f32 + 0.5) / SIZE as f32;
+                let want_v = (y as f32 + 0.5) / SIZE as f32;
+                let (r, g) = (f32::from(out[i]), f32::from(out[i + 1]));
+                assert!(
+                    (r - want_u * 255.0).abs() <= 8.0 && (g - want_v * 255.0).abs() <= 8.0,
+                    "mesh={meshed} pixel ({x},{y}): {r},{g} but {},{}",
+                    want_u * 255.0,
+                    want_v * 255.0
+                );
+            }
+        }
     }
 }

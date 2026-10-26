@@ -12,8 +12,8 @@ use crate::recovery;
 use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
-    ColorAdjust, Corners, DisplayState, Fit, LayerTransform, MonitorKey, OutputConfig, OutputId,
-    RemoteSettings, Show, display_state,
+    ColorAdjust, Corners, DisplayState, EdgeBlend, Fit, LayerTransform, MonitorKey, OutputConfig,
+    OutputId, PartOf, RemoteSettings, Show, display_state,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -29,9 +29,20 @@ use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
-/// An enabled output as `update_outputs` draws it: id, name, whether it shows
-/// the test pattern, its number, corner pin and mesh.
-type OutputSetup = (OutputId, String, bool, usize, Corners, Option<Arc<Mesh>>);
+/// An enabled output as `update_outputs` draws it.
+struct OutputSetup {
+    id: OutputId,
+    name: String,
+    /// Whether it shows the test pattern, and the number it shows.
+    test_pattern: bool,
+    number: usize,
+    corners: Corners,
+    mesh: Option<Arc<Mesh>>,
+    /// The part of another display's picture it shows instead of its own.
+    part: Option<PartOf>,
+    /// The size of its picture, when that isn't its monitor's.
+    picture: Option<(u32, u32)>,
+}
 
 /// The control UI only needs to animate progress bars while cues run...
 const CONTROL_FPS_WHEN_PLAYING: f64 = 20.0;
@@ -69,6 +80,8 @@ struct ScreenWindow {
     needs_redraw: bool,
     /// Outputs and warps last sent to the render thread.
     sent: Vec<(OutputId, Homography, Option<Arc<Mesh>>)>,
+    /// The fade at the edges last sent.
+    blend: EdgeBlend,
     /// The title last given to the window (asking a window for its title is a
     /// round trip to the display server on some systems).
     title: String,
@@ -94,6 +107,7 @@ impl Drop for ScreenWindow {
 fn start_output_thread(
     gpu: &Gpu,
     window: &Arc<Window>,
+    monitor: usize,
 ) -> Result<(OutputThread, (u32, u32)), String> {
     let surface = gpu
         .instance
@@ -107,7 +121,13 @@ fn start_output_thread(
     })?;
     surface.configure(&gpu.device, &config);
     Ok((
-        OutputThread::spawn(gpu.clone(), window.clone(), surface, config),
+        OutputThread::spawn(
+            gpu.clone(),
+            window.clone(),
+            surface,
+            config,
+            gpu::Slot::Window(monitor.min(u8::MAX as usize) as u8),
+        ),
         size,
     ))
 }
@@ -538,7 +558,7 @@ impl App {
             window.set_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         }
         window.set_cursor_visible(false);
-        let (thread, size) = match start_output_thread(gpu, &window) {
+        let (thread, size) = match start_output_thread(gpu, &window, monitor) {
             Ok(started) => started,
             Err(e) => {
                 self.engine
@@ -568,6 +588,7 @@ impl App {
                 outputs: Vec::new(),
                 needs_redraw: true,
                 sent: Vec::new(),
+                blend: EdgeBlend::default(),
                 title: String::new(),
             },
         );
@@ -668,7 +689,7 @@ impl App {
         );
         self.egui_ctx.set_fonts(fonts);
         for (monitor, screen) in &mut self.screens {
-            match start_output_thread(&gpu, &screen.window) {
+            match start_output_thread(&gpu, &screen.window, *monitor) {
                 Ok((thread, size)) => {
                     screen.thread = Some(thread);
                     screen.size = size;
@@ -819,6 +840,13 @@ impl App {
             .iter()
             .filter_map(|(id, t)| Some((*id, t.area.size_on(self.screens.get(&t.monitor)?.size))))
             .collect();
+        // A picture given a size of its own (one that projectors share) is
+        // decoded at that size, monitor or not.
+        for o in &self.show.outputs {
+            if let Some(size) = o.picture {
+                sizes.insert(o.id, size);
+            }
+        }
         // A display whose monitor has gone keeps the size it had, so what
         // plays meanwhile is ready for it when it is back.
         self.last_sizes.extend(sizes.iter().map(|(k, v)| (*k, *v)));
@@ -830,6 +858,18 @@ impl App {
         self.engine.output_sizes = sizes;
         // Release windows once their render thread has dropped the surface.
         self.closing.retain(|(_, h)| !h.is_finished());
+    }
+
+    /// The size of display `id`'s picture: the one it is given, or its
+    /// monitor's, or 1080p while it is only in the main window.
+    fn picture_size(&self, id: OutputId) -> (u32, u32) {
+        if let Some(size) = self.show.output(id).and_then(|o| o.picture) {
+            return size;
+        }
+        self.targets
+            .get(&id)
+            .and_then(|t| Some(t.area.size_on(self.screens.get(&t.monitor)?.size)))
+            .unwrap_or((1920, 1080))
     }
 
     /// Upload new frames and hand each output's current layer stack to the
@@ -856,29 +896,75 @@ impl App {
                     .clone()
                     .filter(|m| !o.is_sub_display() && m.is_valid())
                     .map(Arc::new);
-                (o.id, o.name.clone(), o.test_pattern, i + 1, corners, mesh)
+                OutputSetup {
+                    id: o.id,
+                    name: o.name.clone(),
+                    test_pattern: o.test_pattern,
+                    number: i + 1,
+                    corners,
+                    mesh,
+                    part: self.show.part_of(o.id),
+                    picture: o.picture,
+                }
             })
             .collect();
         let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
-        for (id, name, want_pattern, number, corners, mesh) in configs {
-            // The output's canvas: its area of a display, or 1080p in the main window.
-            let pin = if mesh.is_some() {
-                gpu::IDENTITY
-            } else {
-                gpu::corner_pin(&corners.0)
-            };
+        for setup in configs {
+            let OutputSetup {
+                id,
+                name,
+                test_pattern: want_pattern,
+                number,
+                corners,
+                mesh,
+                part,
+                picture,
+            } = setup;
             let target = self.targets.get(&id).copied();
             let screen = target.and_then(|t| Some((t, self.screens.get(&t.monitor)?.size)));
-            let (warp, canvas) = match screen {
-                Some((t, size)) => (
-                    gpu::compose(&gpu::corner_pin(&t.area.0), &pin),
-                    t.area.size_on(size),
-                ),
-                None => (pin, (1920, 1080)),
+            // The output's own canvas: its area of a display, or 1080p in the
+            // main window, unless it is given a size of its own.
+            let own_canvas = match screen {
+                Some((t, size)) => t.area.size_on(size),
+                None => (1920, 1080),
+            };
+            let own_canvas = picture.unwrap_or(own_canvas);
+            // A display that shows part of another's picture draws that
+            // display's layers, on that picture's canvas, through the part.
+            let (source, canvas) = match part {
+                Some(p) => (p.display, self.picture_size(p.display)),
+                None => (id, own_canvas),
+            };
+            let (part_hom, slice) = match part {
+                Some(p) => {
+                    let [x, y, w, h] = p.area;
+                    let (w, h) = (w.max(0.01), h.max(0.01));
+                    (
+                        [
+                            [1.0 / w, 0.0, -x / w, 0.0],
+                            [0.0, 1.0 / h, -y / h, 0.0],
+                            [0.0, 0.0, 1.0, 0.0],
+                        ],
+                        [x, y, 1.0 / w, 1.0 / h],
+                    )
+                }
+                None => (gpu::IDENTITY, Geometry::WHOLE),
+            };
+            let (pin, slice) = if mesh.is_some() {
+                (gpu::IDENTITY, slice)
+            } else {
+                (
+                    gpu::compose(&gpu::corner_pin(&corners.0), &part_hom),
+                    Geometry::WHOLE,
+                )
+            };
+            let warp = match screen {
+                Some((t, _)) => gpu::compose(&gpu::corner_pin(&t.area.0), &pin),
+                None => pin,
             };
 
             let mut layers = Vec::new();
-            for l in self.engine.layers(id) {
+            for l in self.engine.layers(source) {
                 let entry = match &l.source {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
@@ -937,14 +1023,27 @@ impl App {
                 });
             }
 
+            // The test pattern of the picture it shows part of, so projectors
+            // can be lined up across their overlap.
+            if source != id
+                && let Some((tex, _, _)) = self.patterns.get(&source)
+            {
+                layers.push(OutputLayer {
+                    texture: tex.clone(),
+                    opacity: 1.0,
+                    fit: Fit::Stretch,
+                    transform: LayerTransform::default(),
+                    color: ColorAdjust::default(),
+                });
+            }
             // The test pattern is drawn at the canvas's shape, so its circles
             // and grid stay true on a sub display of any size.
             let mut pattern_changed = false;
             if want_pattern {
-                let scale = (1280.0 / canvas.0.max(canvas.1) as f32).min(1.0);
+                let scale = (1280.0 / own_canvas.0.max(own_canvas.1) as f32).min(1.0);
                 // In 32 px steps, so dragging an area doesn't redraw it every frame.
                 let step = |v: u32| ((v as f32 * scale / 32.0).round() as u32).max(1) * 32;
-                let size = (step(canvas.0), step(canvas.1));
+                let size = (step(own_canvas.0), step(own_canvas.1));
                 if self
                     .patterns
                     .get(&id)
@@ -959,18 +1058,32 @@ impl App {
                 pattern_changed = true;
             }
             if let Some((tex, _, _)) = self.patterns.get(&id) {
+                // On a display showing part of a picture, the pattern covers
+                // that part (the layer is placed on the whole picture).
+                let transform = match part {
+                    Some(p) => {
+                        let [x, y, w, h] = p.area;
+                        LayerTransform {
+                            x: x + w / 2.0 - 0.5,
+                            y: y + h / 2.0 - 0.5,
+                            scale_x: w,
+                            scale_y: h,
+                            ..LayerTransform::default()
+                        }
+                    }
+                    None => LayerTransform::default(),
+                };
                 layers.push(OutputLayer {
                     texture: tex.clone(),
                     opacity: 1.0,
                     fit: Fit::Stretch,
-                    transform: LayerTransform::default(),
+                    transform,
                     color: ColorAdjust::default(),
                 });
             }
             if pattern_changed {
-                if let Some(t) = target
-                    && let Some(s) = self.screens.get_mut(&t.monitor)
-                {
+                // (Other displays may show part of this picture.)
+                for s in self.screens.values_mut() {
                     s.needs_redraw = true;
                 }
                 if let Some(ctl) = &self.control {
@@ -987,16 +1100,27 @@ impl App {
                         warp,
                         pin,
                         mesh: mesh.clone(),
+                        slice,
                     },
                 },
             );
+            // The preview is the shape of what the display shows: the part of
+            // the picture, not all of it.
+            let preview_canvas = match part {
+                Some(p) => (
+                    ((canvas.0 as f32 * p.area[2]).round() as u32).max(1),
+                    ((canvas.1 as f32 * p.area[3]).round() as u32).max(1),
+                ),
+                None => canvas,
+            };
             self.ui.previews.push(PreviewOutput {
                 id,
                 name,
                 layers,
                 warp: pin,
                 mesh,
-                canvas,
+                slice,
+                canvas: preview_canvas,
             });
         }
 
@@ -1015,11 +1139,21 @@ impl App {
                     Some((*id, g.warp, g.mesh.clone()))
                 })
                 .collect();
-            if playing || screen.needs_redraw || sent != screen.sent {
+            // The fade at the edges is the display's own, whatever sub displays
+            // share its monitor.
+            let blend = screen
+                .outputs
+                .iter()
+                .filter_map(|id| self.show.output(*id))
+                .find(|o| !o.is_sub_display())
+                .map(|o| o.blend.clamped())
+                .unwrap_or_default();
+            if playing || screen.needs_redraw || sent != screen.sent || blend != screen.blend {
                 screen.needs_redraw = false;
                 screen.sent = sent;
+                screen.blend = blend;
                 if let Some(t) = &screen.thread {
-                    t.submit(screen.size, list.clone());
+                    t.submit(screen.size, list.clone(), blend);
                 }
             }
             self.ui.screens.insert(*m, (screen.size, list));
