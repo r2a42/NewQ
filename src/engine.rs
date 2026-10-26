@@ -303,6 +303,8 @@ pub struct Reading {
 }
 
 /// How long to wait for a file to be probed before giving up on the cue.
+/// How long a cue whose preparation failed is left alone before another try.
+const PREP_RETRY: Duration = Duration::from_secs(5);
 const PROBE_LIMIT: Duration = Duration::from_secs(30);
 
 /// What a preload was made for. It is reused only if the cue still asks for
@@ -331,7 +333,8 @@ enum PreparedKind {
     },
     Image(Receiver<Result<RgbaImage, String>>),
     Audio(Voice),
-    Text(RgbaImage),
+    /// A title being drawn on a thread (at 4K it takes tens of milliseconds).
+    Text(Receiver<Result<RgbaImage, String>>),
 }
 
 struct Prepared {
@@ -379,6 +382,9 @@ pub struct Engine {
     /// The sound of each file, drawn in the inspector for setting in and out points.
     pub waveforms: WaveformCache,
     prepared: Vec<Prepared>,
+    /// Cues whose preparation failed, and when: not tried again with the same
+    /// settings for a few seconds, so a bad file isn't retried every tick.
+    failed_preps: HashMap<CueId, (PrepSig, Instant)>,
     next_instance: u64,
     /// Cameras found on this machine (the test picture first), and a scan under way.
     cameras: Vec<String>,
@@ -408,6 +414,7 @@ impl Engine {
             probe: ProbeCache::default(),
             waveforms: WaveformCache::default(),
             prepared: Vec::new(),
+            failed_preps: HashMap::new(),
             next_instance: 1,
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -436,6 +443,7 @@ impl Engine {
             probe: ProbeCache::default(),
             waveforms: WaveformCache::default(),
             prepared: Vec::new(),
+            failed_preps: HashMap::new(),
             next_instance: 1,
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -963,7 +971,7 @@ impl Engine {
         })
     }
 
-    /// Draw a text cue at its output's size. Quick enough to do when it starts.
+    /// Draw a text cue at its output's size, on a thread.
     fn prepare_text(&self, cue: &Cue, t: &TextCue) -> Prepared {
         let size = self.output_size(t.media.output);
         Prepared {
@@ -973,7 +981,7 @@ impl Engine {
                 size,
                 camera: None,
             },
-            kind: PreparedKind::Text(crate::text::render(t, size)),
+            kind: PreparedKind::Text(draw_text_on_thread(t.clone(), size)),
             duration: t.media.end.filter(|d| *d > 0.0),
             warning: None,
         }
@@ -1171,9 +1179,9 @@ impl Engine {
                             }),
                             PreparedKind::Audio(voice) => ActiveKind::Audio(voice),
                             // Text is drawn at the output's size, so it is never fitted.
-                            PreparedKind::Text(image) => ActiveKind::Image(ImageState {
-                                image: Some(image),
-                                loader: None,
+                            PreparedKind::Text(loader) => ActiveKind::Image(ImageState {
+                                image: None,
+                                loader: Some(loader),
                                 output: m.output,
                                 layer: m.layer,
                                 fit: Fit::Stretch,
@@ -1796,11 +1804,19 @@ impl Engine {
         if self.ff.is_none() {
             return;
         }
+        self.failed_preps
+            .retain(|id, (_, at)| wanted.contains(id) && at.elapsed() < PREP_RETRY);
         for id in wanted {
             if self.is_prepared(id) {
                 continue;
             }
             let Some(cue) = show.cue(id) else { continue };
+            let sig = self.signature(cue);
+            if let (Some(sig), Some((failed, _))) = (&sig, self.failed_preps.get(&id))
+                && sig == failed
+            {
+                continue;
+            }
             if let CueKind::Camera(c) = &cue.kind {
                 // Two cues can't have one camera open at once on every system.
                 if self.camera_in_use(show, &c.device) {
@@ -1808,7 +1824,12 @@ impl Engine {
                 }
                 match self.prepare_camera(cue, c) {
                     Ok(p) => self.prepared.push(p),
-                    Err(e) => log::debug!("preload of cue {} failed: {e}", cue.number),
+                    Err(e) => {
+                        log::debug!("preload of cue {} failed: {e}", cue.number);
+                        if let Some(sig) = sig {
+                            self.failed_preps.insert(id, (sig, Instant::now()));
+                        }
+                    }
                 }
                 continue;
             }
@@ -1821,7 +1842,12 @@ impl Engine {
             };
             match self.prepare(cue, &info) {
                 Ok(p) => self.prepared.push(p),
-                Err(e) => log::debug!("preload of cue {} failed: {e}", cue.number),
+                Err(e) => {
+                    log::debug!("preload of cue {} failed: {e}", cue.number);
+                    if let Some(sig) = sig {
+                        self.failed_preps.insert(id, (sig, Instant::now()));
+                    }
+                }
             }
         }
     }
@@ -1888,6 +1914,22 @@ impl Engine {
         layers.sort_by_key(|(layer, l)| (*layer, l.instance));
         layers.into_iter().map(|(_, l)| l).collect()
     }
+}
+
+fn draw_text_on_thread(cue: TextCue, size: (u32, u32)) -> Receiver<Result<RgbaImage, String>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let spawned = std::thread::Builder::new()
+        .name("text-render".into())
+        .spawn(move || {
+            let _ = tx.send(Ok(crate::text::render(&cue, size)));
+        });
+    if let Err(e) = spawned {
+        // No thread to draw on: the cue reports it rather than hanging.
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let _ = tx.send(Err(format!("could not start drawing the text: {e}")));
+        return rx;
+    }
+    rx
 }
 
 /// Switch a cue to its new decoders once they have something to show. Says
@@ -2395,6 +2437,13 @@ mod tests {
         show.outputs[0].id
     }
 
+    /// Titles are drawn on a thread: wait until everything playing has its picture.
+    fn drawn(e: &mut Engine, show: &Show) {
+        run_until(e, show, "the text to be drawn", |e| {
+            !e.active.is_empty() && e.active.iter().all(|a| a.started)
+        });
+    }
+
     #[test]
     fn a_text_cue_plays_as_a_full_output_layer_without_ffmpeg() {
         let mut show = Show::default();
@@ -2403,7 +2452,7 @@ mod tests {
         let mut e = engine_without_media();
         e.playhead = Some(t);
         e.go(&show);
-        e.tick(&show, 0.1);
+        drawn(&mut e, &show);
         let layers = e.layers(out);
         assert_eq!(layers.len(), 1, "text should be on the output");
         let LayerSource::Image(img) = &layers[0].source else {
@@ -2428,6 +2477,7 @@ mod tests {
         );
         e.playhead = Some(t);
         e.go(&show);
+        drawn(&mut e, &show);
         e.tick(&show, 1.0);
         assert!(playing(&e, t));
         e.tick(&show, 1.5);
@@ -2438,6 +2488,7 @@ mod tests {
         }
         assert_eq!(e.cue_duration(&show, &show.cues[0].clone()), Some(None));
         e.go_again(&show, t);
+        drawn(&mut e, &show);
         e.tick(&show, 30.0);
         assert!(playing(&e, t));
     }
@@ -2453,7 +2504,7 @@ mod tests {
         e.playhead = Some(a);
         e.go(&show);
         e.go(&show);
-        e.tick(&show, 0.1);
+        drawn(&mut e, &show);
         assert!(playing(&e, a) && playing(&e, b));
         assert_eq!(out_layers(&show, &e), 2);
 
@@ -2463,8 +2514,9 @@ mod tests {
         let mut e = engine_without_media();
         e.playhead = Some(a);
         e.go(&show);
-        e.tick(&show, 0.1);
+        drawn(&mut e, &show);
         e.go(&show);
+        drawn(&mut e, &show);
         e.tick(&show, 0.1);
         assert!(idle(&e, a) && playing(&e, b));
         assert_eq!(out_layers(&show, &e), 1);
@@ -2481,7 +2533,7 @@ mod tests {
         let mut e = engine_without_media();
         e.playhead = Some(t);
         e.go(&show);
-        e.tick(&show, 0.1);
+        drawn(&mut e, &show);
         let early = e.layers(out)[0].opacity;
         e.tick(&show, 1.0);
         let mid = e.layers(out)[0].opacity;
@@ -2491,6 +2543,36 @@ mod tests {
             early < mid && mid < late && late > 0.99,
             "{early} {mid} {late}"
         );
+    }
+
+    #[test]
+    fn a_preparation_that_failed_is_not_tried_again_every_tick() {
+        let mut show = Show::default();
+        // A camera cue with no camera chosen cannot be prepared.
+        let c = show.make_cue(CueType::Camera, None, 0);
+        let id = c.id;
+        show.cues.push(c);
+        let mut e = engine_without_media();
+        e.ff = Some(Ffmpeg {
+            ffmpeg: "no-such-ffmpeg".into(),
+            ffprobe: "no-such-ffprobe".into(),
+        });
+        e.playhead = Some(id);
+        e.tick(&show, 0.1);
+        let (_, first) = e.failed_preps[&id].clone();
+        std::thread::sleep(Duration::from_millis(20));
+        e.tick(&show, 0.1);
+        assert_eq!(e.failed_preps[&id].1, first, "it was not tried again");
+        // Change what it would try and it is tried at once.
+        if let CueKind::Camera(c) = &mut show.cues[0].kind {
+            c.fps += 1;
+        }
+        e.tick(&show, 0.1);
+        assert_ne!(e.failed_preps[&id].1, first);
+        // Once the playhead moves on it is forgotten.
+        e.playhead = None;
+        e.tick(&show, 0.1);
+        assert!(e.failed_preps.is_empty());
     }
 
     #[test]

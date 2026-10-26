@@ -64,6 +64,9 @@ struct ScreenWindow {
     needs_redraw: bool,
     /// Outputs and warps last sent to the render thread.
     sent: Vec<(OutputId, Homography)>,
+    /// The title last given to the window (asking a window for its title is a
+    /// round trip to the display server on some systems).
+    title: String,
 }
 
 impl ScreenWindow {
@@ -518,6 +521,7 @@ impl App {
                 outputs: Vec::new(),
                 needs_redraw: true,
                 sent: Vec::new(),
+                title: String::new(),
             },
         );
     }
@@ -697,8 +701,9 @@ impl App {
                     .map(|o| o.name.as_str())
                     .collect();
                 let title = format!("NewQ: {}", names.join(", "));
-                if screen.window.title() != title {
+                if screen.title != title {
                     screen.window.set_title(&title);
+                    screen.title = title;
                 }
                 if screen.outputs != ids {
                     screen.outputs = ids;

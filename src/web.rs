@@ -22,7 +22,6 @@ use crate::remote::Command;
 use crate::show::Show;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
-use serde_json::json;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
@@ -304,45 +303,69 @@ pub fn snapshot_json(show: &Show, engine: &Engine) -> String {
         .and_then(|id| show.cue_index(id))
         .and_then(|i| show.armed_top_from(i))
         .map(|i| &show.cues[i]);
-    let cues: Vec<_> = show
-        .cues
-        .iter()
-        .map(|c| {
-            let (status, progress) = match engine.status(c.id) {
-                CueStatus::Idle => ("idle", 0.0),
-                CueStatus::PreWait { remaining, total } => {
-                    ("prewait", 1.0 - remaining / total.max(1e-6))
-                }
-                CueStatus::Playing { elapsed, duration } => (
-                    "playing",
-                    duration.map_or(1.0, |d| (elapsed / d.max(1e-6)).clamp(0.0, 1.0)),
-                ),
-            };
-            json!({
-                "number": c.number,
-                "name": c.name,
-                "type": c.kind.cue_type().label(),
-                "armed": c.armed,
-                "child": c.parent.is_some(),
-                "playhead": engine.playhead == Some(c.id),
-                "status": status,
-                "progress": progress,
-            })
-        })
-        .collect();
+    use std::fmt::Write as _;
+    // Written out by hand: with thousands of cues this runs a few times a
+    // second on the main thread, and building a value per cue was several
+    // milliseconds, a dropped frame each time.
+    let mut cues = String::with_capacity(show.cues.len() * 120 + 2);
+    cues.push('[');
+    for (n, c) in show.cues.iter().enumerate() {
+        let (status, progress) = match engine.status(c.id) {
+            CueStatus::Idle => ("idle", 0.0),
+            CueStatus::PreWait { remaining, total } => {
+                ("prewait", 1.0 - remaining / total.max(1e-6))
+            }
+            CueStatus::Playing { elapsed, duration } => (
+                "playing",
+                duration.map_or(1.0, |d| (elapsed / d.max(1e-6)).clamp(0.0, 1.0)),
+            ),
+        };
+        if n > 0 {
+            cues.push(',');
+        }
+        let _ = write!(
+            cues,
+            r#"{{"number":{},"name":{},"type":{},"armed":{},"child":{},"playhead":{},"status":"{status}","progress":{}}}"#,
+            json_string(&c.number),
+            json_string(&c.name),
+            json_string(c.kind.cue_type().label()),
+            c.armed,
+            c.parent.is_some(),
+            engine.playhead == Some(c.id),
+            json_number(progress),
+        );
+    }
+    cues.push(']');
     let timecode = engine
         .timecode
         .position()
         .filter(|_| engine.timecode.running())
         .map(|(t, _)| t.to_string());
-    json!({
-        "show": show.name,
-        "paused": engine.paused,
-        "next": next.map(|c| json!({ "number": c.number, "name": c.name })),
-        "timecode": timecode,
-        "cues": cues,
-    })
-    .to_string()
+    let next = next.map_or("null".to_string(), |c| {
+        format!(
+            r#"{{"number":{},"name":{}}}"#,
+            json_string(&c.number),
+            json_string(&c.name)
+        )
+    });
+    let timecode = timecode.map_or("null".to_string(), |t| json_string(&t));
+    format!(
+        r#"{{"show":{},"paused":{},"next":{next},"timecode":{timecode},"cues":{cues}}}"#,
+        json_string(&show.name),
+        engine.paused,
+    )
+}
+
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+fn json_number(n: f64) -> String {
+    if n.is_finite() {
+        n.to_string()
+    } else {
+        "0".into()
+    }
 }
 
 /// This computer's address on the local network, if it has one: what a phone
@@ -1031,5 +1054,29 @@ mod tests {
             "GET /api/state HTTP/1.1\r\nX-Pin: 4821\r\n\r\n",
         );
         assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    }
+
+    #[test]
+    fn the_snapshot_escapes_names_and_stays_json_with_many_cues() {
+        let mut show = Show {
+            name: "The \"Scottish\" play\n\\ é 🎭".into(),
+            ..Show::default()
+        };
+        for i in 0..3 {
+            let mut c = show.make_cue(CueType::Wait, None, i);
+            c.name = format!("quote \" tab \t slash \\ <{i}> ü");
+            show.cues.push(c);
+        }
+        let engine = Engine::for_tests();
+        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        assert_eq!(v["show"], show.name.as_str());
+        for (i, c) in show.cues.iter().enumerate() {
+            assert_eq!(v["cues"][i]["name"], c.name.as_str());
+            assert_eq!(v["cues"][i]["number"], c.number.as_str());
+        }
+        // No cues is still a list.
+        show.cues.clear();
+        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        assert_eq!(v["cues"].as_array().map(Vec::len), Some(0));
     }
 }

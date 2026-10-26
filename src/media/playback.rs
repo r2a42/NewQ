@@ -142,9 +142,8 @@ impl Children {
                 .position(|(i, _)| *i == id)
                 .map(|p| st.live.remove(p).1)
         };
-        if let Some(mut c) = child {
-            let _ = c.kill();
-            let _ = c.wait();
+        if let Some(c) = child {
+            reap(c);
         }
     }
 
@@ -154,11 +153,22 @@ impl Children {
             st.closed = true;
             std::mem::take(&mut st.live)
         };
-        for (_, mut c) in live {
-            let _ = c.kill();
-            let _ = c.wait();
+        for (_, c) in live {
+            reap(c);
         }
     }
+}
+
+/// Kill an ffmpeg and see it off on a thread of its own: waiting for the
+/// process to be gone can take a while (the pipe to drain, the OS to tidy up),
+/// and this is called from the main thread by Stop All and when a cue ends.
+fn reap(mut child: Child) {
+    let _ = child.kill();
+    let _ = std::thread::Builder::new()
+        .name("ffmpeg-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 /// Supplies a reader thread with the decoder output of each pass in turn.
