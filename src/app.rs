@@ -81,6 +81,40 @@ impl Drop for ScreenWindow {
     }
 }
 
+/// Give an output window a surface and a render thread. The error says what
+/// to tell the user; "{display}" stands for the display's number.
+fn start_output_thread(
+    gpu: &Gpu,
+    window: &Arc<Window>,
+) -> Result<(OutputThread, (u32, u32)), String> {
+    let surface = gpu
+        .instance
+        .create_surface(window.clone())
+        .map_err(|e| format!("Could not create surface: {e}"))?;
+    let size = window.inner_size();
+    let size = (size.width, size.height);
+    let config = gpu.surface_config(&surface, size).ok_or_else(|| {
+        "This graphics card can't draw to display {display}: outputs on it are not shown"
+            .to_string()
+    })?;
+    surface.configure(&gpu.device, &config);
+    Ok((
+        OutputThread::spawn(gpu.clone(), window.clone(), surface, config),
+        size,
+    ))
+}
+
+/// The graphics device was lost and its windows are being given a new one.
+struct GpuRecovery {
+    instance: wgpu::Instance,
+    /// The old render threads, which must be gone (and their surfaces with
+    /// them) before the windows can have new surfaces.
+    stopping: Vec<JoinHandle<()>>,
+    since: Instant,
+    last_try: Option<Instant>,
+    warned: bool,
+}
+
 /// A test-pattern texture, with the output number and size it shows.
 type Pattern = (Arc<LayerTexture>, usize, (u32, u32));
 
@@ -101,6 +135,11 @@ pub struct App {
     remote_seen: (RemoteSettings, Instant),
     egui_ctx: egui::Context,
     gpu: Option<Gpu>,
+    recovery: Option<GpuRecovery>,
+    gpu_restarts: u32,
+    /// For testing the recovery: when to destroy the graphics device
+    /// (`NEWQ_LOSE_GPU_AFTER`, in seconds).
+    lose_gpu_at: Option<Instant>,
     control: Option<ControlWindow>,
     /// Fullscreen windows by monitor index.
     screens: HashMap<usize, ScreenWindow>,
@@ -180,6 +219,12 @@ impl App {
             ui,
             egui_ctx: egui::Context::default(),
             gpu: None,
+            recovery: None,
+            gpu_restarts: 0,
+            lose_gpu_at: std::env::var("NEWQ_LOSE_GPU_AFTER")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|s| Instant::now() + Duration::from_secs_f64(s)),
             control: None,
             screens: HashMap::new(),
             targets: HashMap::new(),
@@ -443,15 +488,14 @@ impl App {
             window.set_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         }
         window.set_cursor_visible(false);
-        let surface = match gpu.instance.create_surface(window.clone()) {
-            Ok(s) => s,
+        let (thread, size) = match start_output_thread(gpu, &window) {
+            Ok(started) => started,
             Err(e) => {
-                self.engine.log(format!("Could not create surface: {e}"));
+                self.engine
+                    .log(e.replace("{display}", &(monitor + 1).to_string()));
                 return;
             }
         };
-        let size = window.inner_size();
-        let size = (size.width, size.height);
         log::info!(
             "output window on display {monitor} ({:?}): {}x{}, scale {}",
             m.name(),
@@ -459,15 +503,6 @@ impl App {
             size.1,
             window.scale_factor()
         );
-        let Some(config) = gpu.surface_config(&surface, size) else {
-            self.engine.log(format!(
-                "This graphics card can't draw to display {}: outputs on it are not shown",
-                monitor + 1
-            ));
-            return;
-        };
-        surface.configure(&gpu.device, &config);
-        let thread = OutputThread::spawn(gpu.clone(), window.clone(), surface, config);
         // A new fullscreen window takes the focus (and on a Mac, its own
         // Space); bring the controls back in front.
         if let Some(ctl) = &self.control {
@@ -485,6 +520,116 @@ impl App {
                 sent: Vec::new(),
             },
         );
+    }
+
+    /// Notice a lost graphics device and give every window a new one: stop the
+    /// render threads, then start a device, surfaces and threads afresh.
+    fn watch_gpu(&mut self) {
+        if let (Some(at), Some(gpu)) = (self.lose_gpu_at, &self.gpu)
+            && Instant::now() >= at
+        {
+            self.lose_gpu_at = None;
+            log::warn!("destroying the graphics device, as asked");
+            gpu.device.destroy();
+        }
+        if let Some(gpu) = &self.gpu {
+            // The loss is reported when the device is polled.
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+        }
+        if self.recovery.is_none()
+            && let Some(gpu) = &self.gpu
+            && let Some(why) = gpu.lost.why()
+        {
+            self.engine.log(format!(
+                "The graphics device was lost ({why}); restarting the displays"
+            ));
+            let mut stopping = Vec::new();
+            if let Some(ctl) = &mut self.control {
+                stopping.extend(ctl.thread.take().map(ControlThread::quit));
+            }
+            for screen in self.screens.values_mut() {
+                stopping.extend(screen.thread.take().map(OutputThread::quit));
+                screen.sent.clear();
+                screen.needs_redraw = true;
+            }
+            self.recovery = Some(GpuRecovery {
+                instance: gpu.instance.clone(),
+                stopping,
+                since: Instant::now(),
+                last_try: None,
+                warned: false,
+            });
+            self.gpu = None;
+            // Everything on the old device is gone with it.
+            self.textures.clear();
+            self.patterns.clear();
+        }
+        let Some(rec) = &mut self.recovery else {
+            return;
+        };
+        if rec.stopping.iter().any(|h| !h.is_finished()) {
+            if !rec.warned && rec.since.elapsed() > Duration::from_secs(5) {
+                rec.warned = true;
+                log::warn!("a render thread is slow to stop on the lost device");
+            }
+            return;
+        }
+        if rec
+            .last_try
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        rec.last_try = Some(Instant::now());
+        let Some(ctl) = &mut self.control else {
+            return;
+        };
+        let (gpu, surface) = match Gpu::new(rec.instance.clone(), ctl.window.clone()) {
+            Ok(made) => made,
+            Err(e) => {
+                // The driver may need a moment; keep trying.
+                log::warn!("no graphics device yet: {e:#}");
+                return;
+            }
+        };
+        let size = ctl.window.inner_size();
+        let Some(config) = gpu.surface_config(&surface, (size.width, size.height)) else {
+            log::warn!("the new graphics device can't draw to the main window");
+            return;
+        };
+        surface.configure(&gpu.device, &config);
+        ctl.thread = Some(ControlThread::spawn(
+            gpu.clone(),
+            ctl.window.clone(),
+            surface,
+            config,
+        ));
+        ctl.next_repaint = Some(Instant::now());
+        // The new renderer has none of the textures egui sent the old one
+        // (its fonts); asking for the fonts again sends the lot.
+        // (Setting the very same fonts does nothing, so each restart adds an
+        // empty font family of its own to make them different.)
+        let mut fonts = egui::FontDefinitions::default();
+        self.gpu_restarts += 1;
+        fonts.families.insert(
+            egui::FontFamily::Name(format!("restart-{}", self.gpu_restarts).into()),
+            Vec::new(),
+        );
+        self.egui_ctx.set_fonts(fonts);
+        for (monitor, screen) in &mut self.screens {
+            match start_output_thread(&gpu, &screen.window) {
+                Ok((thread, size)) => {
+                    screen.thread = Some(thread);
+                    screen.size = size;
+                }
+                Err(e) => self
+                    .engine
+                    .log(e.replace("{display}", &(monitor + 1).to_string())),
+            }
+        }
+        self.gpu = Some(gpu);
+        self.recovery = None;
+        self.engine.log("The graphics device was restarted");
     }
 
     fn close_screen(&mut self, monitor: usize) {
@@ -965,6 +1110,7 @@ impl ApplicationHandler for App {
             log::warn!("event loop stalled for {:.0} ms", dt * 1000.0);
         }
 
+        self.watch_gpu();
         self.collect_devices();
         if now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
             self.scan_monitors(event_loop);
