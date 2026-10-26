@@ -35,6 +35,14 @@ winit = "0.30.13"
 objc2-app-kit = { version = "0.2.2", features = ["NSScreen"] }
 objc2-foundation = { version = "0.2.2", features = ["NSString"] }
 
+# To read each monitor's EDID (make, model, serial) by the name Windows gives it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Registry",
+] }
+
 [profile.dev]
 opt-level = 1
 

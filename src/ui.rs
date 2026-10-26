@@ -22,6 +22,8 @@ pub struct MonitorInfo {
     pub name: String,
     /// What the display is, if the system says ("Built-in Retina Display").
     pub model: Option<String>,
+    /// What stays the same for this monitor, if the system says.
+    pub hardware: Option<String>,
     pub size: (u32, u32),
     pub refresh_hz: Option<f32>,
     pub primary: bool,
@@ -2765,6 +2767,18 @@ fn sub_display_size(st: &UiState, id: OutputId) -> (u32, u32) {
         .map_or((1920, 1080), |m| m.size)
 }
 
+/// The connected monitors as shows recognise them.
+pub fn monitor_keys(monitors: &[MonitorInfo]) -> Vec<MonitorKey> {
+    monitors
+        .iter()
+        .map(|m| MonitorKey {
+            identity: m.title().to_string(),
+            raw: m.name.clone(),
+            hardware: m.hardware.clone(),
+        })
+        .collect()
+}
+
 fn monitor_label(st: &UiState, i: usize) -> String {
     let m = &st.monitors[i];
     format!(
@@ -3107,16 +3121,9 @@ fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<
                                 if c == i
                         );
                         if ui.selectable_label(chosen, monitor_label(st, i)).clicked() {
-                            let m = &st.monitors[i];
-                            d.monitor = Some(DisplayRef {
-                                name: m.title().to_string(),
-                                index: i,
-                            });
-                            d.twins = st
-                                .monitors
-                                .iter()
-                                .filter(|x| x.title() == m.title())
-                                .count() as u32;
+                            let keys = monitor_keys(&st.monitors);
+                            d.monitor = Some(keys[i].reference(i));
+                            d.twins = twins_of(&keys, i);
                         }
                     }
                 });
@@ -6937,6 +6944,7 @@ mod tests {
         MonitorInfo {
             name: name.into(),
             model: model.map(str::to_string),
+            hardware: None,
             size: (1920, 1080),
             refresh_hz: None,
             primary: false,
@@ -6972,10 +6980,12 @@ mod tests {
         show.outputs[0].monitor = Some(DisplayRef {
             name: "SAMSUNG".into(),
             index: 1,
+            hardware: None,
         });
         show.outputs[1].monitor = Some(DisplayRef {
             name: "Laptop".into(),
             index: 0,
+            hardware: None,
         });
         let mut st = UiState {
             monitors: vec![

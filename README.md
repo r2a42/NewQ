@@ -50,10 +50,15 @@ includes FFmpeg, so there's nothing else to install.
   the picture is back on it at once, mid-cue and in time; or choose another
   monitor for the display, or send the cues to another display. A display
   with no monitor assigned shows only in the main window (the default for a
-  new one). Monitors are recognised by hardware identity where the system
-  tells it (see below), not by their position in the system's list. Two
-  identical monitors can only be told apart by their order, so a display
-  assigned to one of two look-alikes is only used while both are connected. A
+  new one). A monitor is recognised by what it is, not by which port or position the
+  system lists it in: its make, model and serial number from the EDID it
+  reports (read from the registry on Windows, `/sys/class/drm` on Linux, and
+  CoreGraphics on a Mac), which also gives displays their real names. A
+  display assigned before this was known learns its monitor's id when that
+  monitor is connected (the log says so). If a system tells nothing, the name
+  it reports is used. Monitors of one model without serial numbers can only
+  be told apart by their order, so a display assigned to one of such
+  look-alikes is only used while all of them are connected. A
   display can't cover the monitor NewQ's main window is on; it stays in the
   main window and the panel says so. The main window has a live preview of
   any display or sub display; with more than one, a menu above it picks which.

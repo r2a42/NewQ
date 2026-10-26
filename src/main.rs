@@ -5,6 +5,7 @@ mod app;
 mod clock;
 mod color;
 mod crash;
+mod edid;
 mod engine;
 mod export;
 mod gpu;

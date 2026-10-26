@@ -157,6 +157,8 @@ pub struct App {
     /// Test-pattern textures per output.
     patterns: HashMap<OutputId, Pattern>,
     monitors: Vec<MonitorHandle>,
+    /// What the system says each of `monitors` is.
+    identities: Vec<crate::monitor::Identity>,
     /// The index in `monitors` of the primary display.
     primary: Option<usize>,
     /// Which display the main window was last logged as being on.
@@ -238,6 +240,7 @@ impl App {
             last_sizes: HashMap::new(),
             patterns: HashMap::new(),
             monitors: Vec::new(),
+            identities: Vec::new(),
             primary: None,
             control_logged: None,
             started: Instant::now(),
@@ -258,7 +261,8 @@ impl App {
 
     fn scan_monitors(&mut self, event_loop: &ActiveEventLoop) {
         let found: Vec<MonitorHandle> = event_loop.available_monitors().collect();
-        if found != self.monitors {
+        let changed = found != self.monitors;
+        if changed {
             if !self.monitors.is_empty() {
                 self.monitors_changed = Some(Instant::now());
             }
@@ -278,13 +282,19 @@ impl App {
         self.primary = primary
             .as_ref()
             .and_then(|p| self.monitors.iter().position(|m| m == p));
+        // Asked of the system when the set of monitors changes, not every look:
+        // an answer that came and went would make a display come and go.
+        if changed || self.identities.len() != self.monitors.len() {
+            self.identities = self.monitors.iter().map(crate::monitor::identify).collect();
+        }
         self.ui.monitors = self
             .monitors
             .iter()
             .enumerate()
             .map(|(i, m)| MonitorInfo {
                 name: m.name().unwrap_or_else(|| format!("Display {}", i + 1)),
-                model: crate::monitor::model_name(m),
+                model: self.identities[i].title.clone(),
+                hardware: self.identities[i].hardware.clone(),
                 size: (m.size().width, m.size().height),
                 refresh_hz: m.refresh_rate_millihertz().map(|r| r as f32 / 1000.0),
                 primary: primary.as_ref() == Some(m),
@@ -447,21 +457,16 @@ impl App {
 
     /// The connected monitors as shows recognise them.
     fn monitor_keys(&self) -> Vec<MonitorKey> {
-        self.ui
-            .monitors
-            .iter()
-            .map(|m| MonitorKey {
-                identity: m.title().to_string(),
-                raw: m.name.clone(),
-            })
-            .collect()
+        ui::monitor_keys(&self.ui.monitors)
     }
 
-    /// Give the outputs of an older show that were "automatic" a monitor, once,
-    /// as soon as it is known which monitor the main window is on. After that
-    /// nothing moves an output to another monitor.
-    fn assign_legacy_displays(&mut self) {
-        if self.main_window_only || !self.show.needs_automatic_assignment() {
+    /// Settle the displays of a show that was just opened, once it is known
+    /// which monitor the main window is on: give the outputs of an older show
+    /// that were "automatic" a monitor, and let displays assigned before
+    /// hardware ids were known learn theirs. After that nothing moves an
+    /// output to another monitor.
+    fn settle_displays(&mut self) {
+        if self.main_window_only {
             return;
         }
         let found = self.control_monitor();
@@ -469,7 +474,12 @@ impl App {
             return;
         };
         let keys = self.monitor_keys();
-        for note in self.show.assign_automatic_displays(&keys, control) {
+        let mut notes = Vec::new();
+        if self.show.needs_automatic_assignment() {
+            notes.extend(self.show.assign_automatic_displays(&keys, control));
+        }
+        notes.extend(self.show.learn_hardware_ids(&keys, control));
+        for note in notes {
             self.engine.log(format!("Displays: {note}"));
         }
     }
@@ -1188,7 +1198,7 @@ impl ApplicationHandler for App {
             self.scan_monitors(event_loop);
         }
         self.keep_main_window_home();
-        self.assign_legacy_displays();
+        self.settle_displays();
         self.reconcile_outputs(event_loop);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
@@ -1354,6 +1364,7 @@ mod tests {
             .map(|n| MonitorKey {
                 identity: n.to_string(),
                 raw: n.to_string(),
+                hardware: None,
             })
             .collect()
     }
@@ -1364,6 +1375,7 @@ mod tests {
         o.monitor = monitor.map(|(name, index)| DisplayRef {
             name: name.into(),
             index,
+            hardware: None,
         });
         o
     }
@@ -1461,6 +1473,7 @@ mod tests {
             let r = DisplayRef {
                 name: monitor.0.into(),
                 index: monitor.1,
+                hardware: None,
             };
             display_state(Some(&r), twins, &keys(connected), control)
         };
@@ -1493,21 +1506,93 @@ mod tests {
             MonitorKey {
                 identity: "Built-in Retina Display".into(),
                 raw: "Monitor #1".into(),
+                hardware: None,
             },
             MonitorKey {
                 identity: "SAMSUNG".into(),
                 raw: "Monitor #2".into(),
+                hardware: None,
             },
         ];
         let find = |name: &str| {
             let r = DisplayRef {
                 name: name.into(),
                 index: 1,
+                hardware: None,
             };
             display_state(Some(&r), 1, &monitors, Some(0))
         };
         assert_eq!(find("SAMSUNG"), DisplayState::Connected(1));
         assert_eq!(find("Monitor #2"), DisplayState::Connected(1));
+    }
+
+    fn hw(identity: &str, raw: &str, hardware: Option<&str>) -> MonitorKey {
+        MonitorKey {
+            identity: identity.into(),
+            raw: raw.into(),
+            hardware: hardware.map(str::to_string),
+        }
+    }
+
+    fn assigned(name: &str, index: usize, hardware: Option<&str>) -> DisplayRef {
+        DisplayRef {
+            name: name.into(),
+            index,
+            hardware: hardware.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_same_monitor_is_found_by_its_hardware_whichever_port_or_name_it_has() {
+        let r = assigned("SAMSUNG", 1, Some("SAM0F6B:00012345"));
+        // It moved to another port: the system's name and position changed.
+        let moved = [
+            hw("Dell", r"\\.\DISPLAY1", Some("DEL0001:AAA")),
+            hw("SAMSUNG", r"\\.\DISPLAY3", Some("SAM0F6B:00012345")),
+        ];
+        assert_eq!(
+            display_state(Some(&r), 1, &moved, Some(0)),
+            DisplayState::Connected(1)
+        );
+        // Another monitor with the same name but not the same hardware isn't it.
+        let other = [
+            hw("Dell", "A", Some("DEL0001:AAA")),
+            hw("SAMSUNG", "B", Some("SAM0F6B:99999999")),
+        ];
+        assert_eq!(
+            display_state(Some(&r), 1, &other, Some(0)),
+            DisplayState::Missing
+        );
+        // The same make and model with another serial number is another monitor too.
+        // When the system tells nothing at all, the name has to do.
+        let silent = [hw("Dell", "A", None), hw("SAMSUNG", "B", None)];
+        assert_eq!(
+            display_state(Some(&r), 1, &silent, Some(0)),
+            DisplayState::Connected(1)
+        );
+    }
+
+    #[test]
+    fn identical_monitors_share_a_hardware_model_and_are_told_apart_by_order() {
+        let tv = |serial: &str| hw("SAMSUNG", "x", Some(&format!("SAM0F6B{serial}")));
+        // No serial numbers: the same id twice.
+        let monitors = [hw("Laptop", "L", Some("APP0001")), tv(""), tv("")];
+        assert_eq!(crate::show::twins_of(&monitors, 1), 2);
+        assert_eq!(crate::show::twins_of(&monitors, 0), 1);
+        let r = monitors[2].reference(2);
+        assert_eq!(
+            display_state(Some(&r), 2, &monitors, Some(0)),
+            DisplayState::Connected(2)
+        );
+        // With serial numbers they are different monitors, found whatever the order.
+        let pair = [tv(":A1"), tv(":B2"), hw("Laptop", "L", Some("APP0001"))];
+        let b = pair[1].reference(1);
+        assert_eq!(crate::show::twins_of(&pair, 1), 2, "still look alike");
+        let swapped = [pair[1].clone(), pair[0].clone(), pair[2].clone()];
+        assert_eq!(
+            display_state(Some(&b), 1, &swapped, Some(2)),
+            DisplayState::Connected(0)
+        );
     }
 
     #[test]
