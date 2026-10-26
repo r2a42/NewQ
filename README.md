@@ -104,6 +104,27 @@ includes FFmpeg, so there's nothing else to install.
   display and shows in the preview. A sub display is shaped by its area, not
   a mesh. Without a projector to look at, only the maths and a software GPU
   have checked this; the real test is a surface and a test pattern.
+- **Edge blending (several projectors, one picture):** for a picture wider
+  than one projector, overlap two or more projectors and let each show a part
+  of it. *Displays → Add blended projectors* sets up a pair: a *Wide picture*
+  display (send your cues to this one) and a *Left* and *Right projector*, each
+  showing part of it, overlapping by 15%, with their overlapping edges faded.
+  Give each projector its monitor as usual. To build your own, choose *Shows →
+  Part of …* on a display and set which part (position and size in pixels of
+  the picture); the picture's own size is set on the display it is a part of
+  (*Picture size*), and can be any size, not tied to a monitor. Each display's
+  *Edge blend* has the width to fade in from the left, right, top and bottom
+  (the width of the overlap) and the projector's gamma (2.2 suits most): the
+  fades are shaped so that the light of the two projectors adds up to an even
+  picture in the overlap, which is what makes the join invisible. The wide
+  picture's *Test pattern* is drawn across the projectors so you can line up
+  their overlap (with each projector's corner pin or mesh warp, if it needs
+  one), and a display's own test pattern is drawn on that display alone. Cues
+  can't be sent to a display that shows part of another's picture, only to the
+  picture itself; colour matching between projectors and black-level
+  compensation are not done. The preview in the control window shows what a
+  projector shows, not the fade: look at the screen. The fade and the parts
+  were checked in tests against a software GPU, not against projectors.
 - **Sub displays:** split a display into areas that each work like a display
   of their own, e.g. one projector covering two set pieces, or one LED
   processor input feeding several screens. Add one under *Sub displays* (or

@@ -58,6 +58,8 @@ pub struct PreviewOutput {
     pub warp: Homography,
     /// Its mesh warp, in place of the corner pin.
     pub mesh: Option<std::sync::Arc<crate::mesh::Mesh>>,
+    /// The part of a shared picture it shows, as the mesh sees it.
+    pub slice: [f32; 4],
     /// Pixel size of the output's canvas (its display or sub display).
     pub canvas: (u32, u32),
 }
@@ -375,6 +377,10 @@ enum Action {
     Nudge(Vec2),
     AddSubDisplay(OutputId),
     AddDisplay,
+    /// Two projectors that share a wide picture, with fading edges.
+    AddBlendedPair,
+    /// Make a display show part of another's picture (or its own again).
+    ShowPartOf(OutputId, Option<OutputId>),
     SetTransition(CueId, Transition),
     /// Arm or disarm a cue.
     SetArmed(CueId, bool),
@@ -916,6 +922,16 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
         ui.menu_button("Displays", |ui| {
             if ui.button("Add display").clicked() {
                 actions.push(Action::AddDisplay);
+            }
+            if ui
+                .button("Add blended projectors")
+                .on_hover_text(
+                    "Two projectors that overlap and share one wide picture, with the \
+                     overlap faded so it doesn't show",
+                )
+                .clicked()
+            {
+                actions.push(Action::AddBlendedPair);
             }
             ui.menu_button("Add sub display on", |ui| {
                 add_sub_display_menu(ui, show, actions);
@@ -2631,6 +2647,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
                     warp: e.warp,
                     pin: e.warp,
                     mesh: e.mesh.clone(),
+                    slice: e.slice,
                 },
             }],
             slot: Slot::Preview,
@@ -3228,9 +3245,23 @@ fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<
     ui.horizontal(|ui| {
         ui.heading("Displays");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("+ Add").clicked() {
-                actions.push(Action::AddDisplay);
-            }
+            ui.menu_button("+ Add", |ui| {
+                if ui.button("Display").clicked() {
+                    actions.push(Action::AddDisplay);
+                    ui.close();
+                }
+                if ui
+                    .button("Blended projectors")
+                    .on_hover_text(
+                        "Two projectors that overlap and share one wide picture, with the \
+                         overlap faded so it doesn't show",
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::AddBlendedPair);
+                    ui.close();
+                }
+            });
         });
     });
     ui.label(
@@ -3242,6 +3273,26 @@ fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<
         .small(),
     );
     let n_displays = show.outputs.iter().filter(|o| !o.is_sub_display()).count();
+    // For the "Shows" choice: the displays that can be taken a part of (not
+    // sub displays, and not ones that show part of another), the ones that
+    // are, and how big each picture is.
+    let sources: Vec<(OutputId, String)> = show
+        .outputs
+        .iter()
+        .filter(|o| !o.is_sub_display() && show.part_of(o.id).is_none())
+        .map(|o| (o.id, o.name.clone()))
+        .collect();
+    let shared: HashSet<OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| show.is_shared(o.id))
+        .map(|o| o.id)
+        .collect();
+    let picture_sizes: HashMap<OutputId, (u32, u32)> = show
+        .outputs
+        .iter()
+        .map(|o| (o.id, o.picture.unwrap_or((1920, 1080))))
+        .collect();
     let subs: Vec<(OutputId, String)> = show
         .outputs
         .iter()
@@ -3323,9 +3374,206 @@ fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<
                 ui.checkbox(&mut d.test_pattern, "Test pattern")
                     .on_hover_text("Show colour bars with the display's number");
             });
+            let state_size = match state {
+                Some(DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i)) => {
+                    st.monitors.get(i).map(|m| m.size)
+                }
+                _ => None,
+            };
+            shared_picture_editor(
+                ui,
+                d,
+                &sources,
+                shared.contains(&d.id),
+                &picture_sizes,
+                actions,
+            );
             corner_pin_editor(ui, d, st, actions);
+            edge_blend_editor(ui, d, state_size.unwrap_or((1920, 1080)));
         });
     }
+}
+
+/// Which picture a display shows: its own, or a part of another display's,
+/// which several projectors can share between them. Also, for a picture
+/// that is shared, how big it is.
+fn shared_picture_editor(
+    ui: &mut Ui,
+    d: &mut OutputConfig,
+    sources: &[(OutputId, String)],
+    is_shared: bool,
+    picture_sizes: &HashMap<OutputId, (u32, u32)>,
+    actions: &mut Vec<Action>,
+) {
+    let current = d.part_of.map(|p| p.display);
+    // A display that others show part of can't itself show part of another.
+    if !is_shared {
+        ui.horizontal(|ui| {
+            ui.label("Shows");
+            let shown = current
+                .and_then(|id| sources.iter().find(|(s, _)| *s == id))
+                .map_or("its own picture".to_string(), |(_, n)| {
+                    format!("part of {n}")
+                });
+            egui::ComboBox::from_id_salt(("display_part", d.id.0))
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(current.is_none(), "Its own picture")
+                        .clicked()
+                    {
+                        actions.push(Action::ShowPartOf(d.id, None));
+                    }
+                    for (id, name) in sources.iter().filter(|(id, _)| *id != d.id) {
+                        if ui
+                            .selectable_label(current == Some(*id), format!("Part of {name}"))
+                            .clicked()
+                            && current != Some(*id)
+                        {
+                            actions.push(Action::ShowPartOf(d.id, Some(*id)));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Several projectors can show one wide picture between them: make one \
+                     display the whole picture and the others parts of it. Send cues to \
+                     the whole picture.",
+                );
+        });
+    }
+    if let Some(p) = &mut d.part_of {
+        let (pw, ph) = picture_sizes
+            .get(&p.display)
+            .copied()
+            .unwrap_or((1920, 1080));
+        let (pw, ph) = (pw as f32, ph as f32);
+        egui::Grid::new(("part_of", d.id.0))
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for (row, label) in [(0, "Position"), (2, "Size")] {
+                    ui.label(label);
+                    ui.horizontal(|ui| {
+                        for axis in 0..2 {
+                            let i = row + axis;
+                            let full = if axis == 0 { pw } else { ph };
+                            let mut px = (p.area[i] * full).round();
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut px)
+                                        .speed(1.0)
+                                        .range(if row == 0 { 0.0 } else { 1.0 }..=full)
+                                        .fixed_decimals(0)
+                                        .prefix(["X ", "Y ", "W ", "H "][i])
+                                        .suffix(" px"),
+                                )
+                                .changed()
+                            {
+                                p.area[i] = px / full;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        ui.label(
+            RichText::new(format!(
+                "of a {}×{} picture. Turn on the whole picture's test pattern to line the \
+                 projectors up.",
+                pw as u32, ph as u32
+            ))
+            .weak()
+            .small(),
+        );
+    }
+    if is_shared {
+        let mut size = d.picture.unwrap_or((1920, 1080));
+        ui.horizontal(|ui| {
+            ui.label("Picture size");
+            let w = ui.add(
+                egui::DragValue::new(&mut size.0)
+                    .range(1..=16_384)
+                    .speed(4.0)
+                    .suffix(" px"),
+            );
+            ui.label("×");
+            let h = ui.add(
+                egui::DragValue::new(&mut size.1)
+                    .range(1..=16_384)
+                    .speed(4.0)
+                    .suffix(" px"),
+            );
+            if w.changed() || h.changed() {
+                d.picture = Some(size);
+            }
+        })
+        .response
+        .on_hover_text("How big the shared picture is: the projectors show parts of it");
+    }
+}
+
+/// How far in from each edge a display fades to black, so projectors that
+/// overlap don't show the overlap.
+fn edge_blend_editor(ui: &mut Ui, d: &mut OutputConfig, size: (u32, u32)) {
+    let open = !d.blend.is_off();
+    egui::CollapsingHeader::new(if open { "Edge blend ●" } else { "Edge blend" })
+        .id_salt(("edge_blend", d.id.0))
+        .default_open(open)
+        .show(ui, |ui| {
+            let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+            egui::Grid::new(("blend", d.id.0))
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    for (label, edge) in [("Left", 0usize), ("Right", 1), ("Top", 2), ("Bottom", 3)]
+                    {
+                        ui.label(label);
+                        let full = if edge < 2 { w } else { h };
+                        let slot = match edge {
+                            0 => &mut d.blend.left,
+                            1 => &mut d.blend.right,
+                            2 => &mut d.blend.top,
+                            _ => &mut d.blend.bottom,
+                        };
+                        let mut px = (*slot * full).round();
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut px)
+                                    .speed(1.0)
+                                    .range(0.0..=full / 2.0)
+                                    .fixed_decimals(0)
+                                    .suffix(" px"),
+                            )
+                            .changed()
+                        {
+                            *slot = px / full;
+                        }
+                        ui.end_row();
+                    }
+                    ui.label("Gamma");
+                    ui.add(
+                        egui::DragValue::new(&mut d.blend.gamma)
+                            .speed(0.01)
+                            .range(1.0..=4.0)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "The projector's gamma, which the fade allows for so the overlap \
+                         comes out even. 2.2 suits most.",
+                    );
+                    ui.end_row();
+                });
+            ui.label(
+                RichText::new(
+                    "Fade the picture to black this far in from an edge, where another \
+                     projector overlaps it. Use the width of the overlap. The preview \
+                     doesn't show it: look at the screen.",
+                )
+                .weak()
+                .small(),
+            );
+        });
 }
 
 fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
@@ -3919,7 +4167,7 @@ fn inspector(
     let outputs: Vec<(OutputId, String)> = show
         .outputs
         .iter()
-        .filter(|o| !o.is_sub_display())
+        .filter(|o| !o.is_sub_display() && show.part_of(o.id).is_none())
         .chain(show.outputs.iter().filter(|o| o.is_sub_display()))
         .map(|o| match show.display_of(o) {
             Some(d) if d.id != o.id => (o.id, format!("{} (on {})", o.name, d.name)),
@@ -6071,6 +6319,41 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddDisplay => {
             show.add_display();
         }
+        Action::AddBlendedPair => {
+            show.add_blended_pair(1920, 1080, 0.15);
+        }
+        Action::ShowPartOf(id, source) => match source {
+            None => {
+                if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
+                    o.part_of = None;
+                }
+            }
+            Some(source) => {
+                // The picture it takes a part of needs a size of its own to
+                // be bigger than one monitor: twice as wide to start with.
+                if let Some(s) = show.outputs.iter_mut().find(|o| o.id == source)
+                    && s.picture.is_none()
+                {
+                    let (w, h) = st
+                        .display_states
+                        .get(&source)
+                        .and_then(|state| match state {
+                            DisplayState::Connected(m) | DisplayState::OnMainWindowDisplay(m) => {
+                                st.monitors.get(*m).map(|m| m.size)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or((1920, 1080));
+                    s.picture = Some((w * 2, h));
+                }
+                if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
+                    o.part_of = Some(PartOf {
+                        display: source,
+                        area: [0.0, 0.0, 0.5, 1.0],
+                    });
+                }
+            }
+        },
         Action::AddAudioOutput => {
             show.add_audio_output();
         }
@@ -6638,6 +6921,32 @@ mod tests {
         assert!(matches!(a[..], [Action::ToggleArmed]));
         // Ctrl+A is not the shortcut.
         assert!(keys(&st, &[(Key::A, M::COMMAND)]).is_empty());
+    }
+
+    #[test]
+    fn a_display_can_be_made_to_show_part_of_another_and_the_wizard_sets_up_a_pair() {
+        let (mut show, mut e, mut st) = running();
+        let a = show.outputs[0].id;
+        let b = show.add_display();
+        apply(Action::ShowPartOf(b, Some(a)), &mut show, &mut e, &mut st);
+        let part = show.part_of(b).expect("b shows part of a");
+        assert_eq!(part.display, a);
+        // The picture it takes a part of is given a size bigger than a monitor.
+        assert_eq!(show.output(a).unwrap().picture, Some((3840, 1080)));
+        assert!(show.is_shared(a));
+        // And back to its own picture.
+        apply(Action::ShowPartOf(b, None), &mut show, &mut e, &mut st);
+        assert!(show.part_of(b).is_none());
+
+        let before = show.outputs.len();
+        apply(Action::AddBlendedPair, &mut show, &mut e, &mut st);
+        assert_eq!(show.outputs.len(), before + 3);
+        let wide = show
+            .outputs
+            .iter()
+            .find(|o| o.name == "Wide picture")
+            .unwrap();
+        assert!(show.is_shared(wide.id));
     }
 
     #[test]
@@ -7362,6 +7671,7 @@ mod tests {
             layers: Vec::new(),
             warp: crate::gpu::IDENTITY,
             mesh: None,
+            slice: Geometry::WHOLE,
             canvas: (1920, 1080),
         }
     }

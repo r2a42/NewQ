@@ -41,6 +41,11 @@ The README describes the features; this file is about working on the code.
   `src/mesh.rs`: the mesh warp (a Hermite spline through a grid of points);
   the vertex shader in `gpu.rs` does the same sums, cutting each layer into
   a 48x48 grid of cells, and a test renders it and compares.
+  `src/blend.rs`: the edge blend maths (test-only reference for the blend
+  shader in `gpu.rs`). A display can show a part of another's picture
+  (`OutputConfig::part_of`): `app.rs::update_outputs` draws the other
+  display's layers through that part; windows drawing the same layers need
+  different `Slot::Window`s or their uniforms overwrite each other.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
   picture as the shown time changes; the renderer re-uploads on `version`).
   `src/relink.rs`: finding moved media and copying it into one folder.

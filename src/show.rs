@@ -347,6 +347,17 @@ pub struct OutputConfig {
     /// the place of `corners` on a display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<crate::mesh::Mesh>,
+    /// Display: it shows part of another display's picture instead of its own,
+    /// so several projectors can show one wide picture between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_of: Option<PartOf>,
+    /// The size of the picture in pixels when it isn't the size of the monitor
+    /// the display is on: a wide picture that projectors share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<(u32, u32)>,
+    /// Display: edges that fade out where projectors overlap.
+    #[serde(default, skip_serializing_if = "EdgeBlend::is_off")]
+    pub blend: EdgeBlend,
     /// Milliseconds everything on it is held back (a slow projector).
     #[serde(default, skip_serializing_if = "no_delay")]
     pub delay_ms: u32,
@@ -390,6 +401,9 @@ impl OutputConfig {
             test_pattern: false,
             corners: Corners::default(),
             mesh: None,
+            part_of: None,
+            picture: None,
+            blend: EdgeBlend::default(),
             delay_ms: 0,
             monitor: None,
             twins: 1,
@@ -403,6 +417,75 @@ impl OutputConfig {
 
     pub fn is_sub_display(&self) -> bool {
         self.within.is_some()
+    }
+}
+
+/// A display showing part of another display's picture: which display, and
+/// which part, as fractions of that picture (left, top, width, height).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PartOf {
+    pub display: OutputId,
+    pub area: [f32; 4],
+}
+
+/// How far in from each edge of a display its picture fades to black, as
+/// fractions of the display's width (left and right) and height (top and
+/// bottom), so that where two projectors overlap their light adds up to one
+/// even picture.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgeBlend {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+    /// The projector's gamma, which the fade allows for (2.2 is typical).
+    #[serde(default = "default_blend_gamma")]
+    pub gamma: f32,
+}
+
+fn default_blend_gamma() -> f32 {
+    2.2
+}
+
+impl Default for EdgeBlend {
+    fn default() -> Self {
+        EdgeBlend {
+            left: 0.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+            gamma: default_blend_gamma(),
+        }
+    }
+}
+
+impl EdgeBlend {
+    /// No edge fades.
+    pub fn is_off(&self) -> bool {
+        self.left <= 0.0 && self.right <= 0.0 && self.top <= 0.0 && self.bottom <= 0.0
+    }
+
+    /// The same with every width kept in range (0 to half the display) and
+    /// the gamma sensible. A show file may hold anything.
+    pub fn clamped(&self) -> EdgeBlend {
+        let w = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 0.5)
+            } else {
+                0.0
+            }
+        };
+        EdgeBlend {
+            left: w(self.left),
+            right: w(self.right),
+            top: w(self.top),
+            bottom: w(self.bottom),
+            gamma: if self.gamma.is_finite() {
+                self.gamma.clamp(1.0, 4.0)
+            } else {
+                default_blend_gamma()
+            },
+        }
     }
 }
 
@@ -1540,6 +1623,90 @@ impl Show {
         id
     }
 
+    /// Set up two projectors that share one wide picture: a display for the
+    /// picture (a `width` wide `height` tall one, `overlap` of a projector's
+    /// width of it shown by both), and a display for each projector showing
+    /// its half, fading out where they overlap. Returns the picture's display
+    /// and the left and right projector's. They still need monitors.
+    pub fn add_blended_pair(
+        &mut self,
+        width: u32,
+        height: u32,
+        overlap: f32,
+    ) -> (OutputId, OutputId, OutputId) {
+        let overlap_px = (width as f32 * overlap).round().max(0.0);
+        let total = (2 * width) as f32 - overlap_px;
+        let share = width as f32 / total;
+        let picture = self.add_display();
+        let left = self.add_display();
+        let right = self.add_display();
+        let set = |show: &mut Show, id: OutputId, name: &str, f: &dyn Fn(&mut OutputConfig)| {
+            if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
+                o.name = name.to_string();
+                f(o);
+            }
+        };
+        set(self, picture, "Wide picture", &|o| {
+            o.picture = Some((total as u32, height));
+        });
+        set(self, left, "Left projector", &|o| {
+            o.part_of = Some(PartOf {
+                display: picture,
+                area: [0.0, 0.0, share, 1.0],
+            });
+            o.blend.right = overlap;
+        });
+        set(self, right, "Right projector", &|o| {
+            o.part_of = Some(PartOf {
+                display: picture,
+                area: [1.0 - share, 0.0, share, 1.0],
+            });
+            o.blend.left = overlap;
+        });
+        (picture, left, right)
+    }
+
+    /// The part of another display's picture that display `id` shows, if it
+    /// shows one: only a display can be shown from, not a sub display, and not
+    /// one that itself shows part of another (nor itself).
+    pub fn part_of(&self, id: OutputId) -> Option<PartOf> {
+        let part = self.output(id)?.part_of?;
+        let source = self.output(part.display)?;
+        (part.display != id && !source.is_sub_display() && source.part_of.is_none()).then_some(part)
+    }
+
+    /// Whether any display shows part of display `id`'s picture.
+    pub fn is_shared(&self, id: OutputId) -> bool {
+        self.outputs
+            .iter()
+            .any(|o| o.part_of.is_some_and(|p| p.display == id) && self.part_of(o.id).is_some())
+    }
+
+    /// Put right what a hand-edited show file may hold: shared pictures that
+    /// don't make sense, widths and sizes out of range.
+    fn sanitize_blending(&mut self) {
+        let valid: Vec<(OutputId, bool)> = self
+            .outputs
+            .iter()
+            .map(|o| (o.id, self.part_of(o.id).is_some()))
+            .collect();
+        for o in &mut self.outputs {
+            if o.part_of.is_some() && !valid.iter().any(|(id, ok)| *id == o.id && *ok) {
+                o.part_of = None;
+            }
+            if let Some(p) = &mut o.part_of {
+                let [x, y, w, h] = p.area;
+                if ![x, y, w, h].iter().all(|v| v.is_finite()) || w <= 0.0 || h <= 0.0 {
+                    p.area = [0.0, 0.0, 1.0, 1.0];
+                }
+            }
+            o.blend = o.blend.clamped();
+            if let Some((w, h)) = &mut o.picture {
+                (*w, *h) = ((*w).clamp(1, 16_384), (*h).clamp(1, 16_384));
+            }
+        }
+    }
+
     /// Add a sub display on `display`: the left half of it, then the right
     /// half, then a centred area.
     pub fn add_sub_display(&mut self, display: OutputId) -> OutputId {
@@ -1566,6 +1733,12 @@ impl Show {
     /// that were sent to what went are sent to the first display left.
     pub fn remove_output(&mut self, id: OutputId) {
         self.outputs.retain(|o| o.id != id && o.within != Some(id));
+        // What showed part of a display that has gone shows its own picture.
+        for o in &mut self.outputs {
+            if o.part_of.is_some_and(|p| p.display == id) {
+                o.part_of = None;
+            }
+        }
         let fallback = self.outputs.first().map(|o| o.id);
         let gone =
             |out: Option<OutputId>| out.is_some_and(|o| self.outputs.iter().all(|x| x.id != o));
@@ -1971,6 +2144,7 @@ impl Show {
                 o.mesh = None;
             }
         }
+        show.sanitize_blending();
         // Guard against hand-edited files with stale counters.
         let max_id = show
             .cues
@@ -2440,6 +2614,97 @@ mod tests {
         );
         let saved = serde_json::to_string(&show).unwrap();
         assert!(!saved.contains("crossfade"));
+    }
+
+    #[test]
+    fn a_blended_pair_is_set_up_and_round_trips_and_plain_shows_are_unchanged() {
+        let mut show = Show::default();
+        let plain = serde_json::to_string(&show).unwrap();
+        assert!(
+            !plain.contains("part_of") && !plain.contains("blend") && !plain.contains("picture"),
+            "{plain}"
+        );
+        let (wide, left, right) = show.add_blended_pair(1920, 1080, 0.15);
+        let o = |id| show.output(id).unwrap().clone();
+        assert_eq!(o(wide).picture, Some((3552, 1080)));
+        assert_eq!(o(wide).name, "Wide picture");
+        let (l, r) = (o(left), o(right));
+        let (lp, rp) = (show.part_of(left).unwrap(), show.part_of(right).unwrap());
+        assert_eq!((lp.display, rp.display), (wide, wide));
+        // Each shows 1920 of the 3552 pixels, and they share 288 of them.
+        let share = 1920.0 / 3552.0;
+        assert!((lp.area[2] - share).abs() < 1e-6 && (rp.area[2] - share).abs() < 1e-6);
+        assert!((lp.area[0] + lp.area[2] - (rp.area[0] + 288.0 / 3552.0)).abs() < 1e-5);
+        assert_eq!((l.blend.right, l.blend.left), (0.15, 0.0));
+        assert_eq!((r.blend.left, r.blend.right), (0.15, 0.0));
+        assert!(show.is_shared(wide) && !show.is_shared(left));
+
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        assert_eq!(back.part_of(left), Some(lp));
+        assert_eq!(back.output(right).unwrap().blend, r.blend);
+        assert_eq!(back.output(wide).unwrap().picture, Some((3552, 1080)));
+
+        // Taking the picture's display away leaves the projectors on their own pictures.
+        show.remove_output(wide);
+        assert!(show.output(left).unwrap().part_of.is_none());
+        assert!(!show.is_shared(wide));
+    }
+
+    #[test]
+    fn nonsense_sharing_and_blends_in_a_file_are_put_right() {
+        let dir = std::env::temp_dir().join("newq_test_blend");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut show = Show::default();
+        let (wide, left, right) = show.add_blended_pair(1920, 1080, 0.1);
+        let sub = show.add_sub_display(left);
+        // A display showing part of itself, of a display that shows part of
+        // another, and of a sub display; and a zero-sized part.
+        show.outputs
+            .iter_mut()
+            .find(|o| o.id == wide)
+            .unwrap()
+            .part_of = Some(PartOf {
+            display: wide,
+            area: [0.0, 0.0, 1.0, 1.0],
+        });
+        let sub_part = PartOf {
+            display: sub,
+            area: [0.0, 0.0, 0.5, 1.0],
+        };
+        show.outputs
+            .iter_mut()
+            .find(|o| o.id == left)
+            .unwrap()
+            .part_of = Some(sub_part);
+        let right_o = show.outputs.iter_mut().find(|o| o.id == right).unwrap();
+        right_o.part_of = Some(PartOf {
+            display: wide,
+            area: [0.2, 0.0, 0.0, 1.0],
+        });
+        right_o.blend = EdgeBlend {
+            left: 9.0,
+            right: 7.0,
+            top: -1.0,
+            bottom: 0.2,
+            gamma: 99.0,
+        };
+        right_o.picture = Some((0, 100_000));
+        let path = dir.join("bad.newq");
+        show.save(&path).unwrap();
+        let back = Show::load(&path).unwrap();
+        let o = |id| back.output(id).unwrap();
+        // The wide display now shows part of itself (nonsense): its own picture.
+        assert!(o(wide).part_of.is_none());
+        assert!(o(left).part_of.is_none());
+        // Right showed part of wide, which was part of itself at the time of
+        // the check, so that's gone too; the numbers are in range regardless.
+        let b = o(right).blend;
+        assert_eq!(
+            (b.left, b.right, b.top, b.bottom, b.gamma),
+            (0.5, 0.5, 0.0, 0.2, 4.0)
+        );
+        assert_eq!(o(right).picture, Some((1, 16_384)));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
