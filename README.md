@@ -53,10 +53,13 @@ includes FFmpeg, so there's nothing else to install.
   the panel says so. An output can also be kept in the main window only (the
   default for a new output). The main window has a live preview of an output,
   including ones that are fullscreen elsewhere; with more than one output, a
-  menu above it picks which one is previewed. Under the preview is a **scrub
-  bar** for the cue playing on that output: drag it to jump around in a
-  video, a sound or a timed still (it works while paused; a looping cue and a
-  camera can't be scrubbed). *Test pattern* shows colour bars with the
+  menu above it picks which one is previewed. Each playing cue's **progress bar in the Active panel is also its
+  scrubber**: click or drag it to jump around in a video, a sound or a timed
+  still (it works while paused; a looping cue, a camera and a cue that is
+  fading out can't be scrubbed). Scroll over a bar to move that cue by the
+  wheel. Hold **Shift** while dragging or scrolling to move every cue that can
+  be scrubbed by the same amount, keeping their positions relative to each
+  other. *Test pattern* shows colour bars with the
   output's number so you can tell which projector is which. Shows saved
   before displays were numbered are given displays once, when they are
   opened: a monitor they named becomes a display assigned to it, and an

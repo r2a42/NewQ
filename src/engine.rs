@@ -740,15 +740,6 @@ impl Engine {
         self.stop_instance(instance, fade);
     }
 
-    /// The cue a scrub bar under `output`'s preview moves: the newest one
-    /// playing there that can be scrubbed.
-    pub fn scrub_target(&self, show: &Show, output: OutputId) -> Option<&ActiveCue> {
-        self.active
-            .iter()
-            .rev()
-            .find(|a| a.output() == Some(output) && a.scrub_length(show).is_some())
-    }
-
     /// Jump a playing cue to `to` seconds from its start. The decoders for the
     /// new position start now and take over when they have a frame; asking
     /// again meanwhile replaces them.
@@ -3182,9 +3173,8 @@ mod tests {
         let Some((mut e, show, out, instance)) = playing_video(false) else {
             return;
         };
-        let target = e.scrub_target(&show, out).expect("a video can be scrubbed");
-        assert_eq!(target.instance, instance);
-        assert!((target.scrub_length(&show).unwrap() - 10.0).abs() < 0.5);
+        let a = e.active.iter().find(|a| a.instance == instance).unwrap();
+        assert!((a.scrub_length(&show).expect("a video can be scrubbed") - 10.0).abs() < 0.5);
         assert!(elapsed(&e, instance) < 2.0);
 
         e.seek(&show, instance, 6.0).unwrap();
@@ -3265,10 +3255,10 @@ mod tests {
 
     #[test]
     fn looping_and_finished_cues_are_not_scrubbable() {
-        let Some((mut e, show, out, instance)) = playing_video(true) else {
+        let Some((mut e, show, _, instance)) = playing_video(true) else {
             return;
         };
-        assert!(e.scrub_target(&show, out).is_none());
+        assert!(e.active[0].scrub_length(&show).is_none());
         assert!(e.seek(&show, instance, 2.0).is_err());
         assert!(e.seek(&show, instance + 99, 2.0).is_err());
     }

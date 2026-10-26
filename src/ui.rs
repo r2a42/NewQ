@@ -1,7 +1,7 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 use crate::clock::{self, TimeOfDay};
-use crate::engine::{CueStatus, Engine};
+use crate::engine::{ActiveCue, CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
 use crate::media::waveform::WaveState;
@@ -11,7 +11,7 @@ use crate::relink;
 use crate::remote::{Command, RemoteStatus};
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
-use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, pos2};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -57,22 +57,36 @@ pub struct PreviewOutput {
     pub canvas: (u32, u32),
 }
 
-/// The scrub bar under the preview: where the bar was dragged to, kept on
+/// A playing cue's bar, moved by hand: where it was moved to, kept on
 /// screen until the cue has caught up with it.
 #[derive(Clone, Copy)]
 struct Scrub {
-    instance: u64,
     pos: f64,
-    dragging: bool,
-    /// When a seek was last asked for, and when the bar was let go.
+    /// Being dragged, or moved by the wheel a moment ago.
+    moving: bool,
+    /// Where it was asked to jump to last, and when.
+    sent_pos: f64,
     sent: f64,
+    /// When it was last moved (or let go).
     released: f64,
 }
 
-/// How often a seek is asked for while the bar is dragged (seconds).
+/// A drag with Shift held, which moves every cue that can be scrubbed by the
+/// same amount: where each one was when the drag began.
+struct GroupDrag {
+    anchor: u64,
+    from: f64,
+    starts: HashMap<u64, f64>,
+}
+
+/// How often a seek is asked for while a bar is moved (seconds).
 const SCRUB_EVERY: f64 = 0.2;
-/// How long the bar stays where it was let go, waiting for the picture to arrive.
+/// How long a bar stays where it was let go, waiting for the picture to arrive.
 const SCRUB_HOLD: f64 = 1.0;
+/// Seconds moved per point of mouse wheel or trackpad scroll over a bar.
+const SCRUB_PER_POINT: f64 = 0.05;
+/// How long after the last wheel movement the jump is made for good.
+const SCRUB_WHEEL_REST: f64 = 0.25;
 
 /// What a file dialog that is open is for, and so what its answer does.
 #[derive(Clone, Debug, PartialEq)]
@@ -148,8 +162,10 @@ pub struct UiState {
     /// The output shown in the main window's preview (the first when unset
     /// or gone).
     pub preview_output: Option<OutputId>,
-    /// A scrub bar being dragged, or just released.
-    scrub: Option<Scrub>,
+    /// The bars of playing cues that were moved by hand, by cue instance.
+    scrubs: HashMap<u64, Scrub>,
+    /// A Shift-drag that moves all the bars together.
+    group_drag: Option<GroupDrag>,
     /// Output whose corner pin is being edited on its preview.
     pub geometry_edit: Option<OutputId>,
     /// Sub display whose area is being edited.
@@ -433,8 +449,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    output_previews(ui, show, engine, st, &mut actions);
-                    active_panel(ui, show, engine, &mut actions);
+                    output_previews(ui, show, st);
+                    active_panel(ui, show, engine, st, &mut actions);
                     ui.add_space(12.0);
                     displays_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
@@ -2170,7 +2186,13 @@ fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &
     }
 }
 
-fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
+fn active_panel(
+    ui: &mut Ui,
+    show: &Show,
+    engine: &Engine,
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
     ui.heading("Active");
     if !engine.is_active() {
         ui.label(RichText::new("Nothing playing").weak());
@@ -2183,6 +2205,16 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
             ui.label(format!("{name}: pre-wait {}", fmt_time(p.remaining)));
         }
     }
+    // Every cue whose bar can be moved: where it is and how long it is.
+    let scrubbable: Vec<(u64, f64, f64)> = engine
+        .active
+        .iter()
+        .filter_map(|a| Some((a.instance, a.elapsed, a.scrub_length(show)?)))
+        .collect();
+    let now = ui.input(|i| i.time);
+    st.scrubs
+        .retain(|inst, _| engine.active.iter().any(|a| a.instance == *inst));
+    settle_wheel_scrubs(st, now, actions);
     for a in engine.active.iter().rev() {
         let mut name = show
             .cue(a.cue_id)
@@ -2214,19 +2246,15 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
                 }
             });
         });
-        let (frac, text) = match a.duration {
-            Some(d) => (
-                (a.elapsed / d.max(1e-6)).clamp(0.0, 1.0) as f32,
-                format!(
-                    "{} / {}  (-{})",
-                    fmt_time(a.elapsed),
-                    fmt_time(d),
-                    fmt_time(d - a.elapsed)
-                ),
+        let mut text = match a.duration {
+            Some(d) => format!(
+                "{} / {}  (-{})",
+                fmt_time(a.elapsed),
+                fmt_time(d),
+                fmt_time(d - a.elapsed)
             ),
-            None => (1.0, format!("{} / ∞", fmt_time(a.elapsed))),
+            None => format!("{} / ∞", fmt_time(a.elapsed)),
         };
-        let mut text = text;
         if !a.started {
             text = "loading…".into();
         } else if a.held {
@@ -2234,13 +2262,204 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
         } else if a.stopping {
             text.push_str("  fading out");
         }
-        ui.add(egui::ProgressBar::new(frac).text(text).fill(if a.stopping {
-            PREWAIT
-        } else {
-            PLAYING
-        }));
+        let fill = if a.stopping { PREWAIT } else { PLAYING };
+        match a.scrub_length(show) {
+            Some(length) => progress_scrubber(ui, a, length, text, fill, &scrubbable, st, actions),
+            None => {
+                let frac = a
+                    .duration
+                    .map_or(1.0, |d| (a.elapsed / d.max(1e-6)).clamp(0.0, 1.0));
+                ui.add(egui::ProgressBar::new(frac as f32).text(text).fill(fill));
+            }
+        }
         ui.add_space(4.0);
     }
+}
+
+/// Ask a cue to jump to `pos`, not more often than `SCRUB_EVERY` while it
+/// is being moved; the last position is always asked for when it stops.
+fn scrub_to(
+    st: &mut UiState,
+    now: f64,
+    instance: u64,
+    pos: f64,
+    moving: bool,
+    actions: &mut Vec<Action>,
+) {
+    let s = st.scrubs.entry(instance).or_insert(Scrub {
+        pos,
+        moving,
+        sent_pos: f64::NAN,
+        sent: f64::NEG_INFINITY,
+        released: now,
+    });
+    s.pos = pos;
+    s.moving = moving;
+    s.released = now;
+    if !moving || now - s.sent >= SCRUB_EVERY {
+        if s.sent_pos != pos {
+            actions.push(Action::Seek(instance, pos));
+        }
+        s.sent_pos = pos;
+        s.sent = now;
+    }
+}
+
+/// Make the jump for good for bars the wheel has stopped moving.
+fn settle_wheel_scrubs(st: &mut UiState, now: f64, actions: &mut Vec<Action>) {
+    for (instance, s) in st.scrubs.iter_mut() {
+        if s.moving && !st.group_drag.is_some() && now - s.released >= SCRUB_WHEEL_REST {
+            s.moving = false;
+            s.released = now;
+            if s.sent_pos != s.pos {
+                actions.push(Action::Seek(*instance, s.pos));
+                s.sent_pos = s.pos;
+                s.sent = now;
+            }
+        }
+    }
+}
+
+/// A playing cue's progress bar, which is also its scrubber: click or drag
+/// it to jump to that point; scroll over it to move by the wheel. With
+/// Shift held, dragging or scrolling moves every cue that can be scrubbed by
+/// the same amount instead.
+#[allow(clippy::too_many_arguments)]
+fn progress_scrubber(
+    ui: &mut Ui,
+    a: &ActiveCue,
+    length: f64,
+    text: String,
+    fill: Color32,
+    scrubbable: &[(u64, f64, f64)],
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
+    let now = ui.input(|i| i.time);
+    let (rect, bar) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+        Sense::click_and_drag(),
+    );
+    // Stay where it was moved to until the cue has caught up.
+    let held = st
+        .scrubs
+        .get(&a.instance)
+        .copied()
+        .filter(|s| s.moving || a.seeking() || now - s.released < SCRUB_HOLD);
+    if held.is_none() {
+        st.scrubs.remove(&a.instance);
+    }
+    let shown = held.map_or(a.elapsed, |s| s.pos).clamp(0.0, length);
+    let shift = ui.input(|i| i.modifiers.shift);
+    let at =
+        |x: f32| (((x - rect.left()) / rect.width().max(1.0)) as f64 * length).clamp(0.0, length);
+
+    // Moving it with the pointer.
+    if bar.drag_started() || (bar.clicked() && !bar.dragged()) {
+        // Where it was pressed, not where the pointer is when the drag is
+        // recognised, a few pixels on.
+        let from = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| bar.interact_pointer_pos())
+            .map_or(shown, |p| at(p.x));
+        st.group_drag = shift.then(|| GroupDrag {
+            anchor: a.instance,
+            from,
+            starts: scrubbable
+                .iter()
+                .map(|(i, elapsed, _)| (*i, st.scrubs.get(i).map_or(*elapsed, |s| s.pos)))
+                .collect(),
+        });
+    }
+    if (bar.dragged() || bar.clicked())
+        && let Some(p) = bar.interact_pointer_pos()
+    {
+        let pos = at(p.x);
+        let moving = bar.dragged();
+        match &st.group_drag {
+            Some(g) if g.anchor == a.instance => {
+                let delta = pos - g.from;
+                let moves: Vec<(u64, f64)> = scrubbable
+                    .iter()
+                    .filter_map(|(i, _, len)| {
+                        Some((*i, (g.starts.get(i)? + delta).clamp(0.0, *len)))
+                    })
+                    .collect();
+                for (i, to) in moves {
+                    scrub_to(st, now, i, to, moving, actions);
+                }
+            }
+            _ => scrub_to(st, now, a.instance, pos, moving, actions),
+        }
+    }
+    if bar.drag_stopped() || bar.clicked() {
+        st.group_drag = None;
+        for (instance, s) in st.scrubs.iter_mut() {
+            s.moving = false;
+            s.released = now;
+            if s.sent_pos != s.pos {
+                actions.push(Action::Seek(*instance, s.pos));
+                s.sent_pos = s.pos;
+                s.sent = now;
+            }
+        }
+    }
+
+    // Moving it with the wheel (Shift often turns the wheel sideways, so both
+    // directions count).
+    if bar.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta);
+        let amount = (scroll.x + scroll.y) as f64;
+        if amount != 0.0 {
+            // The panel's own scrolling shouldn't also move.
+            ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+            let delta = amount * SCRUB_PER_POINT;
+            let targets: Vec<(u64, f64, f64)> = if shift {
+                scrubbable.to_vec()
+            } else {
+                vec![(a.instance, a.elapsed, length)]
+            };
+            for (i, elapsed, len) in targets {
+                let from = st.scrubs.get(&i).map_or(elapsed, |s| s.pos);
+                scrub_to(st, now, i, (from + delta).clamp(0.0, len), true, actions);
+            }
+        }
+    }
+    if st.scrubs.values().any(|s| s.moving) {
+        ui.ctx().request_repaint();
+    }
+
+    // Drawn last, so it shows where it was moved to.
+    let shown = st.scrubs.get(&a.instance).map_or(shown, |s| s.pos);
+    let painter = ui.painter();
+    let radius = CornerRadius::same(3);
+    painter.rect_filled(rect, radius, ui.visuals().extreme_bg_color);
+    let frac = (shown / length.max(1e-6)).clamp(0.0, 1.0) as f32;
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height())),
+        radius,
+        fill,
+    );
+    let x = rect.left() + rect.width() * frac;
+    painter.line_segment(
+        [pos2(x, rect.top()), pos2(x, rect.bottom())],
+        Stroke::new(2.0, Color32::WHITE),
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        if held.is_some() {
+            format!("{} / {}", fmt_time(shown), fmt_time(length))
+        } else {
+            text
+        },
+        egui::TextStyle::Body.resolve(ui.style()),
+        Color32::WHITE,
+    );
+    bar.on_hover_text(
+        "Drag or click to jump to a point. Scroll to move. Hold Shift to move every cue that \
+         can be moved by the same amount.",
+    );
 }
 
 /// Which of `previews` the main window shows: the output whose corners are
@@ -2256,16 +2475,9 @@ fn preview_index(
         .or(if previews.is_empty() { None } else { Some(0) })
 }
 
-/// A live preview of one output, with a scrub bar under it for the cue
-/// playing there. With several outputs, a menu picks which is shown. For an
+/// A live preview of one output. With several outputs, a menu picks which is shown. For an
 /// output with no display of its own, this is where it is shown.
-fn output_previews(
-    ui: &mut Ui,
-    show: &mut Show,
-    engine: &Engine,
-    st: &mut UiState,
-    actions: &mut Vec<Action>,
-) {
+fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     let Some(i) = preview_index(&st.previews, st.preview_output, st.geometry_edit) else {
         return;
     };
@@ -2333,80 +2545,7 @@ fn output_previews(
     if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == id) {
         corner_handles(ui, rect, id, &mut cfg.corners, &st.handle_sel);
     }
-    scrub_bar(ui, show, engine, st, id, actions);
     ui.add_space(8.0);
-}
-
-/// A bar under the preview that moves the cue playing on `output`: drag it
-/// to jump around in the video, sound or timed still.
-fn scrub_bar(
-    ui: &mut Ui,
-    show: &Show,
-    engine: &Engine,
-    st: &mut UiState,
-    output: OutputId,
-    actions: &mut Vec<Action>,
-) {
-    let Some(a) = engine.scrub_target(show, output) else {
-        st.scrub = None;
-        ui.label(
-            RichText::new("Nothing on this output to scrub")
-                .weak()
-                .small(),
-        );
-        return;
-    };
-    let length = a.scrub_length(show).unwrap_or(0.0);
-    let now = ui.input(|i| i.time);
-    // Stay where the bar was dragged until the cue has caught up with it.
-    let held = st.scrub.filter(|s| {
-        s.instance == a.instance && (s.dragging || a.seeking() || now - s.released < SCRUB_HOLD)
-    });
-    let mut pos = held.map_or(a.elapsed, |s| s.pos).clamp(0.0, length);
-    let name = show.cue(a.cue_id).map(cue_label).unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(name).small());
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // Clear of the panel's scroll bar.
-            ui.add_space(8.0);
-            ui.label(RichText::new(format!("{} / {}", fmt_time(pos), fmt_time(length))).small());
-        });
-    });
-    ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(40.0);
-    let bar = ui
-        .add(egui::Slider::new(&mut pos, 0.0..=length).show_value(false))
-        .on_hover_text("Drag to jump to another point in the cue");
-    let mut scrub = held.unwrap_or(Scrub {
-        instance: a.instance,
-        pos,
-        dragging: false,
-        sent: f64::NEG_INFINITY,
-        released: now,
-    });
-    if bar.changed() {
-        scrub.pos = pos;
-        scrub.dragging = bar.dragged();
-        scrub.released = now;
-        // While dragging, ask now and then so the picture follows; the
-        // final position is always asked for when the bar is let go.
-        if now - scrub.sent >= SCRUB_EVERY || !bar.dragged() {
-            actions.push(Action::Seek(a.instance, pos));
-            scrub.sent = now;
-        }
-    }
-    if bar.drag_stopped() {
-        scrub.dragging = false;
-        scrub.released = now;
-        // (Letting go without having moved it asks for nothing.)
-        if scrub.sent.is_finite() && scrub.sent < now {
-            actions.push(Action::Seek(a.instance, scrub.pos));
-            scrub.sent = now;
-        }
-    }
-    st.scrub = (bar.changed() || bar.dragged() || held.is_some()).then_some(scrub);
-    if st.scrub.is_some() {
-        ui.ctx().request_repaint();
-    }
 }
 
 /// Draggable corner-pin handles over an output preview. Hold Shift for fine moves.
@@ -6683,29 +6822,34 @@ mod tests {
         assert_eq!(preview_index(&[], None, None), None);
     }
 
-    /// Run frames of the scrub bar under `events`; the bar's rectangle and
-    /// every action it asked for.
-    fn scrub_frames(
+    /// Run frames of the Active panel under `events` (with Shift held if
+    /// asked); the bottom of the panel and every action it asked for.
+    fn panel_frames(
         show: &Show,
         engine: &Engine,
         st: &mut UiState,
+        shift: bool,
         mut frames: Vec<Vec<Event>>,
     ) -> (Rect, Vec<Action>) {
         let ctx = egui::Context::default();
-        let out = show.outputs[0].id;
         let mut all = Vec::new();
         let mut area = Rect::NOTHING;
         frames.insert(0, vec![]);
         for (n, events) in frames.into_iter().enumerate() {
+            let shift_held = shift && n == 0;
             let input = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
                 time: Some(1.0 + n as f64 * 0.01),
-                events,
+                events: shift_held
+                    .then_some(Event::ModifiersChanged(egui::Modifiers::SHIFT))
+                    .into_iter()
+                    .chain(events)
+                    .collect(),
                 ..Default::default()
             };
             let mut actions = Vec::new();
             let mut o = ctx.run_ui(input, |ui| {
-                scrub_bar(ui, show, engine, st, out, &mut actions);
+                active_panel(ui, show, engine, st, &mut actions);
                 area = ui.min_rect();
             });
             o.textures_delta.clear();
@@ -6714,43 +6858,65 @@ mod tests {
         (area, all)
     }
 
-    /// A show with a ten second still playing, or None to skip.
-    fn playing_still() -> Option<(Show, Engine)> {
+    fn seeks(actions: &[Action]) -> Vec<(u64, f64)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Seek(i, t) => Some((*i, *t)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A show with `n` ten second stills playing, or None to skip.
+    fn playing_stills(n: usize) -> Option<(Show, Engine)> {
         let (ff, img) = crate::media::test_media("color_red.png")?;
         let mut show = Show::default();
-        let mut c = show.make_cue(CueType::Image, Some(img), 0);
-        c.kind.media_mut().unwrap().end = Some(10.0);
-        let id = c.id;
-        show.cues.push(c);
+        for k in 0..n {
+            let mut c = show.make_cue(CueType::Image, Some(img.clone()), k);
+            c.kind.media_mut().unwrap().end = Some(10.0);
+            c.kind.media_mut().unwrap().transition = Transition::FadeIn;
+            show.cues.push(c);
+        }
         let mut engine = Engine::for_tests();
         engine.ff = Some(ff);
-        engine.playhead = Some(id);
-        engine.go(&show);
+        engine.playhead = Some(show.cues[0].id);
+        for _ in 0..n {
+            engine.go(&show);
+        }
         let t0 = std::time::Instant::now();
-        while engine.active.is_empty() || !engine.active.iter().all(|a| a.started) {
-            assert!(t0.elapsed().as_secs() < 10, "the still never loaded");
+        while engine.active.len() < n || !engine.active.iter().all(|a| a.started) {
+            assert!(t0.elapsed().as_secs() < 10, "the stills never loaded");
             std::thread::sleep(std::time::Duration::from_millis(5));
             engine.tick(&show, 0.005);
         }
         Some((show, engine))
     }
 
+    /// The bar of the `k`th active cue (newest first, as listed), found from
+    /// the bottom of the panel: each cue takes the same height.
+    fn bar_y(area: Rect, listed_from_bottom: usize, rows: usize) -> f32 {
+        let per = (area.height() - 24.0) / rows as f32;
+        area.bottom() - 4.0 - 9.0 - per * listed_from_bottom as f32
+    }
+
     #[test]
-    fn dragging_the_scrub_bar_asks_to_seek() {
-        let Some((show, engine)) = playing_still() else {
+    fn dragging_a_progress_bar_jumps_that_cue() {
+        let Some((show, engine)) = playing_stills(1) else {
             return;
         };
         let instance = engine.active[0].instance;
         let mut st = UiState::default();
-        let (area, none) = scrub_frames(&show, &engine, &mut st, vec![vec![], vec![]]);
+        let (area, none) = panel_frames(&show, &engine, &mut st, false, vec![vec![], vec![]]);
         assert!(none.is_empty(), "looking asks for nothing");
-        let y = area.bottom() - 9.0;
-        let at = |f: f32| pos2(area.left() + 4.0 + f * (area.width() - 16.0), y);
+        let y = bar_y(area, 0, 1);
+        let at = |f: f32| pos2(area.left() + f * area.width(), y);
         // Press near the start, drag to the middle, let go there.
-        let (_, seeks) = scrub_frames(
+        let (_, acts) = panel_frames(
             &show,
             &engine,
             &mut st,
+            false,
             vec![
                 vec![Event::PointerMoved(at(0.1))],
                 vec![button(at(0.1), true)],
@@ -6759,13 +6925,7 @@ mod tests {
                 vec![],
             ],
         );
-        let asked: Vec<(u64, f64)> = seeks
-            .iter()
-            .filter_map(|a| match a {
-                Action::Seek(i, t) => Some((*i, *t)),
-                _ => None,
-            })
-            .collect();
+        let asked = seeks(&acts);
         assert!(!asked.is_empty(), "dragging moves the cue");
         assert!(asked.iter().all(|(i, _)| *i == instance));
         let last = asked.last().unwrap().1;
@@ -6773,12 +6933,90 @@ mod tests {
     }
 
     #[test]
+    fn shift_dragging_moves_every_cue_by_the_same_amount() {
+        let Some((show, mut engine)) = playing_stills(2) else {
+            return;
+        };
+        // One is two seconds further on than the other.
+        engine.active[0].elapsed = 5.0;
+        engine.active[1].elapsed = 3.0;
+        let (a, b) = (engine.active[0].instance, engine.active[1].instance);
+        let mut st = UiState::default();
+        let (area, _) = panel_frames(&show, &engine, &mut st, true, vec![vec![]]);
+        // Listed newest first, so the second is the top bar and the first the bottom one.
+        let y = bar_y(area, 0, 2);
+        let at = |f: f32| pos2(area.left() + f * area.width(), y);
+        // Grab the first cue's bar (at 5 s of 10) and drag it 2 s on.
+        let (_, acts) = panel_frames(
+            &show,
+            &engine,
+            &mut st,
+            true,
+            vec![
+                vec![Event::PointerMoved(at(0.5))],
+                vec![button(at(0.5), true)],
+                vec![Event::PointerMoved(at(0.7))],
+                vec![Event::PointerMoved(at(0.7)), button(at(0.7), false)],
+                vec![],
+            ],
+        );
+        let last = |inst: u64| {
+            seeks(&acts)
+                .into_iter()
+                .rev()
+                .find(|(i, _)| *i == inst)
+                .map(|(_, t)| t)
+        };
+        let (ta, tb) = (
+            last(a).expect("the grabbed one"),
+            last(b).expect("the other"),
+        );
+        assert!((ta - 7.0).abs() < 0.3, "grabbed one went to {ta}");
+        assert!((tb - 5.0).abs() < 0.3, "the other went to {tb}");
+        assert!(((ta - 5.0) - (tb - 3.0)).abs() < 0.05, "by the same amount");
+    }
+
+    #[test]
+    fn scrolling_over_a_bar_moves_that_cue_and_shift_scrolling_moves_all() {
+        let Some((show, mut engine)) = playing_stills(2) else {
+            return;
+        };
+        engine.active[0].elapsed = 5.0;
+        engine.active[1].elapsed = 5.0;
+        let (a, b) = (engine.active[0].instance, engine.active[1].instance);
+        let scroll = |shift: bool| {
+            let mut st = UiState::default();
+            let (area, _) = panel_frames(&show, &engine, &mut st, shift, vec![vec![]]);
+            let y = bar_y(area, 0, 2);
+            let over = pos2(area.center().x, y);
+            let mut frames = vec![vec![Event::PointerMoved(over)]];
+            for _ in 0..8 {
+                frames.push(vec![Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(0.0, 40.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: Default::default(),
+                }]);
+            }
+            frames.extend(vec![vec![]; 40]);
+            let (_, acts) = panel_frames(&show, &engine, &mut st, shift, frames);
+            seeks(&acts)
+        };
+        // The bar under the pointer is the first cue's (the listing is newest first).
+        let plain = scroll(false);
+        assert!(plain.iter().all(|(i, _)| *i == a), "{plain:?}");
+        assert!(plain.last().unwrap().1 > 5.5, "scrolled on: {plain:?}");
+        let all = scroll(true);
+        assert!(all.iter().any(|(i, _)| *i == a) && all.iter().any(|(i, _)| *i == b));
+    }
+
+    #[test]
     fn nothing_playing_means_nothing_to_scrub() {
         let show = Show::default();
         let engine = Engine::for_tests();
         let mut st = UiState::default();
-        let (_, seeks) = scrub_frames(&show, &engine, &mut st, vec![vec![]]);
-        assert!(seeks.is_empty() && st.scrub.is_none());
+        let (_, acts) = panel_frames(&show, &engine, &mut st, false, vec![vec![]]);
+        assert!(seeks(&acts).is_empty() && st.scrubs.is_empty());
     }
 
     fn monitor(name: &str, model: Option<&str>) -> MonitorInfo {
