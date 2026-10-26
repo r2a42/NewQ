@@ -172,10 +172,15 @@ impl Default for Show {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct DisplayRef {
-    /// Monitor name as reported by the OS.
+    /// What the monitor was called: its model where the system says, else the
+    /// name the system reported.
     pub name: String,
-    /// Index in the OS monitor list, used as a fallback when names collide or change.
+    /// Index in the OS monitor list, which tells look-alike monitors apart.
     pub index: usize,
+    /// What stays the same for this monitor (make, model, serial number), where
+    /// the system tells it; the display is found by this when it is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<String>,
 }
 
 /// A connected monitor as the operating system describes it.
@@ -186,12 +191,42 @@ pub struct MonitorKey {
     pub identity: String,
     /// The name the system reports (all that older shows recorded).
     pub raw: String,
+    /// Its make, model and serial number, where the system tells them.
+    pub hardware: Option<String>,
 }
 
 impl MonitorKey {
     fn matches(&self, name: &str) -> bool {
         self.identity == name || self.raw == name
     }
+
+    /// The reference a display assigned to this monitor keeps.
+    pub fn reference(&self, index: usize) -> DisplayRef {
+        DisplayRef {
+            name: self.identity.clone(),
+            index,
+            hardware: self.hardware.clone(),
+        }
+    }
+}
+
+/// How many of the connected monitors look just like monitor `i` (the same
+/// make and model, or when the system says nothing, the same name).
+pub fn twins_of(monitors: &[MonitorKey], i: usize) -> u32 {
+    let m = &monitors[i];
+    monitors
+        .iter()
+        .filter(|k| match (&m.hardware, &k.hardware) {
+            (Some(a), Some(b)) => hardware_model(a) == hardware_model(b),
+            _ => k.identity == m.identity,
+        })
+        .count()
+        .max(1) as u32
+}
+
+/// The make-and-model part of a hardware id: what look-alikes share.
+fn hardware_model(id: &str) -> &str {
+    id.split(':').next().unwrap_or(id)
 }
 
 /// What a display of the show is attached to right now.
@@ -220,8 +255,14 @@ pub fn display_state(
     let Some(r) = monitor else {
         return DisplayState::Unassigned;
     };
+    // By hardware identity when both have one; by name when the system
+    // didn't say (an older show, or a system that tells nothing).
+    let by_hardware = r.hardware.is_some() && monitors.iter().any(|m| m.hardware.is_some());
     let same: Vec<usize> = (0..monitors.len())
-        .filter(|&i| monitors[i].matches(&r.name))
+        .filter(|&i| match (&r.hardware, by_hardware) {
+            (Some(h), true) => monitors[i].hardware.as_ref() == Some(h),
+            _ => monitors[i].matches(&r.name),
+        })
         .collect();
     let found = match same.len() {
         0 => None,
@@ -1431,22 +1472,41 @@ impl Show {
             match free {
                 Some(m) => {
                     claimed.insert(m);
-                    let identity = monitors[m].identity.clone();
-                    o.twins = monitors
-                        .iter()
-                        .filter(|k| k.matches(&identity))
-                        .count()
-                        .max(1) as u32;
-                    notes.push(format!("{} is on {identity}", o.name));
-                    o.monitor = Some(DisplayRef {
-                        name: identity,
-                        index: m,
-                    });
+                    o.twins = twins_of(monitors, m);
+                    notes.push(format!("{} is on {}", o.name, monitors[m].identity));
+                    o.monitor = Some(monitors[m].reference(m));
                 }
                 None => notes.push(format!(
                     "{} stays in the main window (no other display)",
                     o.name
                 )),
+            }
+        }
+        notes
+    }
+
+    /// A display assigned to a monitor before hardware ids were known learns its
+    /// monitor's, once it is connected, so that it is found by them from now on.
+    /// Returns what it learned, for the log.
+    pub fn learn_hardware_ids(
+        &mut self,
+        monitors: &[MonitorKey],
+        control: Option<usize>,
+    ) -> Vec<String> {
+        let mut notes = Vec::new();
+        for o in self.outputs.iter_mut().filter(|o| o.within.is_none()) {
+            let state = display_state(o.monitor.as_ref(), o.twins, monitors, control);
+            let (DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i)) = state else {
+                continue;
+            };
+            if let Some(r) = &mut o.monitor
+                && r.hardware.is_none()
+                && let Some(h) = &monitors[i].hardware
+            {
+                r.hardware = Some(h.clone());
+                r.name = monitors[i].identity.clone();
+                o.twins = twins_of(monitors, i);
+                notes.push(format!("{} is monitor {}", o.name, monitors[i].identity));
             }
         }
         notes
@@ -1556,9 +1616,8 @@ impl Show {
         }
         // Displays nothing was on still exist, with their monitors.
         for sl in &slots {
-            if !slot_display.contains_key(&sl.id) {
-                let id = self.display_for(sl.name.clone(), sl.monitor.clone(), sl.twins);
-                slot_display.insert(sl.id, id);
+            if let std::collections::hash_map::Entry::Vacant(e) = slot_display.entry(sl.id) {
+                e.insert(self.display_for(sl.name.clone(), sl.monitor.clone(), sl.twins));
             }
         }
     }
@@ -2259,6 +2318,7 @@ mod tests {
         show.outputs[0].monitor = Some(DisplayRef {
             name: "Samsung".into(),
             index: 1,
+            hardware: None,
         });
         let sub = show.add_sub_display(d);
         let sub2 = show.add_sub_display(d);
@@ -2332,7 +2392,8 @@ mod tests {
             show.outputs[0].monitor,
             Some(DisplayRef {
                 name: "DELL".into(),
-                index: 1
+                index: 1,
+                hardware: None
             })
         );
         assert_eq!(show.outputs[1].monitor, None);
@@ -2418,6 +2479,45 @@ mod tests {
     }
 
     #[test]
+    fn a_display_assigned_before_hardware_ids_learns_its_monitors_once() {
+        let mut show = Show::default();
+        show.outputs[0].monitor = Some(DisplayRef {
+            name: "SAMSUNG".into(),
+            index: 1,
+            hardware: None,
+        });
+        let monitors = [
+            key("Laptop"),
+            MonitorKey {
+                identity: "SAMSUNG".into(),
+                raw: "Monitor #2".into(),
+                hardware: Some("SAM0F6B:00012345".into()),
+            },
+        ];
+        // Not there: nothing to learn from.
+        assert!(show.learn_hardware_ids(&monitors[..1], Some(0)).is_empty());
+        assert_eq!(show.outputs[0].monitor.as_ref().unwrap().hardware, None);
+        // There: it learns, and says so once.
+        let notes = show.learn_hardware_ids(&monitors, Some(0));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(
+            show.outputs[0]
+                .monitor
+                .as_ref()
+                .unwrap()
+                .hardware
+                .as_deref(),
+            Some("SAM0F6B:00012345")
+        );
+        assert!(show.learn_hardware_ids(&monitors, Some(0)).is_empty());
+        // The id is saved with the show, and left out when there is none.
+        let text = serde_json::to_string(&show).unwrap();
+        assert!(text.contains("SAM0F6B:00012345"));
+        let plain = serde_json::to_string(&Show::default()).unwrap();
+        assert!(!plain.contains("hardware"));
+    }
+
+    #[test]
     fn sub_displays_that_named_a_monitor_get_a_display_for_it() {
         let show = legacy(
             r#"{"version":1,"name":"x","next_id":100,"cues":[],
@@ -2439,6 +2539,7 @@ mod tests {
         MonitorKey {
             identity: name.into(),
             raw: name.into(),
+            hardware: None,
         }
     }
 
