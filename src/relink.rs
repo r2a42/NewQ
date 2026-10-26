@@ -28,6 +28,18 @@ pub fn missing(show: &Show) -> Vec<(CueId, PathBuf)> {
         .collect()
 }
 
+/// The same, from a set of files already known to be missing (the control
+/// window keeps one up to date on a thread), so nothing is looked at here.
+pub fn missing_among(show: &Show, gone: &HashSet<PathBuf>) -> Vec<(CueId, PathBuf)> {
+    show.cues
+        .iter()
+        .filter_map(|c| {
+            let file = &c.kind.file_media()?.file;
+            gone.contains(file).then(|| (c.id, file.clone()))
+        })
+        .collect()
+}
+
 /// How many trailing path components two paths share (the file name counts).
 fn shared_tail(a: &Path, b: &Path) -> usize {
     let parts = |p: &Path| -> Vec<OsString> {
@@ -976,5 +988,24 @@ mod tests {
         // Without a show folder it still has somewhere to look, if there is a home.
         let _ = default_roots(None);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn missing_among_picks_the_cues_whose_files_are_in_the_set() {
+        let mut show = Show::default();
+        let gone = std::env::temp_dir().join("newq_nope_a.mp4");
+        let here = std::env::temp_dir().join("newq_nope_b.mp4");
+        for f in [&gone, &here] {
+            let c = show.make_cue(
+                crate::show::CueType::Video,
+                Some(f.clone()),
+                show.cues.len(),
+            );
+            show.cues.push(c);
+        }
+        let set: HashSet<PathBuf> = [gone.clone()].into();
+        let found = missing_among(&show, &set);
+        assert_eq!(found, vec![(show.cues[0].id, gone)]);
+        assert!(missing_among(&show, &HashSet::new()).is_empty());
     }
 }

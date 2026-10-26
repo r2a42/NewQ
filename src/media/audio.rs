@@ -607,7 +607,14 @@ where
 {
     let channels = config.channels as usize;
     let mut voices: Vec<MixVoice> = Vec::with_capacity(64);
-    let mut mix: Vec<f32> = Vec::new();
+    // Room for a big buffer up front, so the callback never has to ask for more.
+    let mut mix: Vec<f32> = Vec::with_capacity(16_384 * channels);
+    // A finished voice holds a couple of seconds of buffer; freeing that is
+    // not something to do on the audio thread, so a thread of its own does it.
+    let (dead_tx, dead_rx) = crossbeam_channel::unbounded::<MixVoice>();
+    let _ = std::thread::Builder::new()
+        .name("audio-janitor".into())
+        .spawn(move || while dead_rx.recv().is_ok() {});
     let stream = device.build_output_stream::<T, _, _>(
         config,
         move |out: &mut [T], _| {
@@ -617,7 +624,14 @@ where
             let frames = out.len() / channels;
             mix.clear();
             mix.resize(frames * channels, 0.0);
-            voices.retain_mut(|v| mix_voice(v, &mut mix, frames, channels));
+            let mut i = 0;
+            while i < voices.len() {
+                if mix_voice(&mut voices[i], &mut mix, frames, channels) {
+                    i += 1;
+                } else {
+                    let _ = dead_tx.send(voices.swap_remove(i));
+                }
+            }
             for (s, m) in out.iter_mut().zip(&mix) {
                 *s = T::from_sample((m * master).clamp(-1.0, 1.0));
             }

@@ -1827,7 +1827,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                 .filter_map(|c| c.kind.file_media().map(|m| (c, m)))
                 .filter(|(_, m)| !m.file.as_os_str().is_empty())
                 .collect();
-            let missing = relink::missing(show);
+            let missing = relink::missing_among(show, &st.missing);
             // What the search of the computer has found so far, best match first.
             let found = st.search.as_ref().map(|s| s.state());
             let wanted: Vec<PathBuf> = {
