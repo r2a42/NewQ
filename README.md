@@ -38,18 +38,31 @@ includes FFmpeg, so there's nothing else to install.
 - **Fade cues** are still available for dimming or ramping another cue's
   opacity and volume mid-cue.
 - **Stop All / Panic** (Esc) fades everything out; press it again to stop instantly.
-- **Outputs and display selection:** each output is *Automatic* by default:
-  fullscreen on a second display when one is connected, otherwise shown inside
-  NewQ's main window. Plugging displays in or out switches automatically. You
-  can instead pin an output to a specific display (it falls back to the main
-  window while that display is unplugged) or keep it in the main window. The
-  main window has a live preview of an output, including ones that are
-  fullscreen elsewhere; with more than one output, a menu above it picks which
-  one is previewed. Under the preview is a **scrub bar** for the cue playing on
-  that output: drag it to jump around in a video, a sound or a timed still (it
-  works while paused; a looping cue and a camera can't be scrubbed). *Test pattern* shows colour bars with the output's
-  number so you can tell which projector is which. Displays are remembered by
-  name, and by position if the name changes (never onto NewQ's own screen).
+- **Displays and outputs:** the show has its own numbered **Displays**
+  (*Display 1*, *Display 2*, a name you choose such as *Stage TV*), and each
+  one is assigned by hand to a monitor. Outputs are placed on a display, not
+  on a monitor, so moving a show to another venue means reassigning each
+  display once. **Nothing is ever reassigned automatically.** If the monitor
+  a display is assigned to is unplugged, its outputs show on no other
+  monitor and the panel says why; when it is plugged in again the display is
+  back on it. A monitor is recognised by its make and model (or the system's
+  name for it), not by where it sits in the system's list. Two identical
+  monitors can only be told apart by their order, so a display assigned to one
+  of two look-alikes is only used while both are connected. An output can't
+  cover the monitor NewQ's main window is on; it stays in the main window and
+  the panel says so. An output can also be kept in the main window only (the
+  default for a new output). The main window has a live preview of an output,
+  including ones that are fullscreen elsewhere; with more than one output, a
+  menu above it picks which one is previewed. Under the preview is a **scrub
+  bar** for the cue playing on that output: drag it to jump around in a
+  video, a sound or a timed still (it works while paused; a looping cue and a
+  camera can't be scrubbed). *Test pattern* shows colour bars with the
+  output's number so you can tell which projector is which. Shows saved
+  before displays were numbered are given displays once, when they are
+  opened: a monitor they named becomes a display assigned to it, and an
+  output that was *Automatic* gets the first monitor the main window isn't
+  on (the log says what was done); from then
+  on it stays there.
 - **Corner pin (keystone) per output:** click *Corner pin…* and drag the four
   corners on the output's preview (hold Shift for fine moves), or type exact
   positions. Click a corner to select it, then the arrow keys move it one
@@ -60,8 +73,8 @@ includes FFmpeg, so there's nothing else to install.
 - **Sub displays:** split a display into areas that each work like a
   display of their own, e.g. one projector covering two set pieces, or one LED
   processor input feeding several screens. Add one under *Sub displays*
-  (or *Outputs → Add sub display on*), then choose *On sub display …*
-  as an output's placement. Click *Edit area…* to see the whole display live
+  (or *Outputs → Add sub display on*), choose which display it is part of,
+  then choose *On sub display …* as an output's placement. Click *Edit area…* to see the whole display live
   with every area outlined: drag inside an area to move it, drag its corners
   to reshape it into any four-cornered shape, or type exact pixels. An
   output's corner pin works inside its sub display, and everything is
@@ -301,7 +314,7 @@ path. Please send that file (and `newq.log`) when you report a crash.
 If the displays are what stops NewQ starting, run it with `--main-window-only`
 (or set `NEWQ_MAIN_WINDOW_ONLY=1`): every output then stays in the main window
 and no output windows are opened, so you can open the app and set up the
-displays from the Outputs panel.
+displays from the Displays panel.
 
 ## Keyboard
 

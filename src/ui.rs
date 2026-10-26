@@ -158,6 +158,8 @@ pub struct UiState {
     pub screens: HashMap<usize, ((u32, u32), Vec<OutputGroup>)>,
     /// The monitor each connected sub display is on.
     pub sub_monitors: HashMap<SubDisplayId, usize>,
+    /// What each of the show's displays is attached to right now.
+    pub display_states: HashMap<DisplayId, SlotState>,
     /// The corner (or whole area) last clicked in an open editor, which the
     /// arrow keys move. Set while drawing, hence the `Cell`.
     handle_sel: Cell<Option<HandleSel>>,
@@ -341,7 +343,9 @@ enum Action {
     EditArea(Option<SubDisplayId>),
     /// Move the selected handle by this many screen pixels.
     Nudge(Vec2),
-    AddSubDisplay(DisplayRef),
+    AddSubDisplay(Option<DisplayId>),
+    AddDisplay,
+    RemoveDisplay(DisplayId),
     RemoveSubDisplay(SubDisplayId),
     SetTransition(CueId, Transition),
     /// Arm or disarm a cue.
@@ -431,6 +435,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 .show(ui, |ui| {
                     output_previews(ui, show, engine, st, &mut actions);
                     active_panel(ui, show, engine, &mut actions);
+                    ui.add_space(12.0);
+                    displays_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
                     outputs_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
@@ -883,8 +889,11 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             if ui.button("Add output").clicked() {
                 actions.push(Action::AddOutput);
             }
+            if ui.button("Add display").clicked() {
+                actions.push(Action::AddDisplay);
+            }
             ui.menu_button("Add sub display on", |ui| {
-                add_sub_display_menu(ui, st, actions);
+                add_sub_display_menu(ui, show, actions);
             });
         });
         ui.menu_button("Help", |ui| {
@@ -2594,16 +2603,6 @@ fn sub_display_size(st: &UiState, id: SubDisplayId) -> (u32, u32) {
         .map_or((1920, 1080), |m| m.size)
 }
 
-/// What to call the display a show refers to: what it is, if it is connected.
-fn monitor_title(st: &UiState, d: &DisplayRef) -> String {
-    let same = |m: &&MonitorInfo| m.name == d.name;
-    st.monitors
-        .get(d.index)
-        .filter(same)
-        .or_else(|| st.monitors.iter().find(same))
-        .map_or_else(|| d.name.clone(), |m| m.title().to_string())
-}
-
 fn monitor_label(st: &UiState, i: usize) -> String {
     let m = &st.monitors[i];
     format!(
@@ -2846,6 +2845,150 @@ fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
     }
 }
 
+/// What to tell the user when the display an output is on isn't showing it.
+fn display_problem(displays: &[DisplaySlot], st: &UiState, id: DisplayId) -> String {
+    let Some(d) = displays.iter().find(|x| x.id == id) else {
+        return "Its display was removed: showing in the main window".to_string();
+    };
+    match st.display_states.get(&id) {
+        Some(SlotState::Missing) => format!(
+            "{} ({}) isn't connected: not shown on any display",
+            d.name,
+            d.monitor.as_ref().map_or("", |r| r.name.as_str())
+        ),
+        Some(SlotState::OnMainWindowDisplay(_)) => format!(
+            "{} is the monitor NewQ's main window is on: showing in the main window",
+            d.name
+        ),
+        _ => format!("{} has no monitor yet: showing in the main window", d.name),
+    }
+}
+
+/// The show's displays: names that outputs are placed on, each assigned by
+/// hand to a monitor. They stay as assigned whatever is plugged in or out.
+fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.heading("Displays");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("+ Add").clicked() {
+                actions.push(Action::AddDisplay);
+            }
+        });
+    });
+    if show.displays.is_empty() {
+        ui.label(
+            RichText::new(
+                "Add a display for each screen or projector, assign it to a monitor, and place \
+                 outputs on it. A display stays on the monitor you chose: if that monitor is \
+                 unplugged, nothing moves to another one.",
+            )
+            .weak()
+            .small(),
+        );
+        return;
+    }
+    for d in &mut show.displays {
+        let users: Vec<&str> = show
+            .outputs
+            .iter()
+            .filter(|o| match o.placement {
+                Placement::Slot(id) => id == d.id,
+                Placement::SubDisplay(v) => show
+                    .sub_displays
+                    .iter()
+                    .any(|s| s.id == v && s.display == Some(d.id)),
+                _ => false,
+            })
+            .map(|o| o.name.as_str())
+            .collect();
+        let state = st
+            .display_states
+            .get(&d.id)
+            .copied()
+            .unwrap_or(SlotState::Unassigned);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(140.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button("🗑")
+                        .on_hover_text("Remove display")
+                        .clicked()
+                    {
+                        actions.push(Action::RemoveDisplay(d.id));
+                    }
+                });
+            });
+            let shown = match (&d.monitor, state) {
+                (None, _) => "Not assigned".to_string(),
+                (Some(_), SlotState::Connected(i) | SlotState::OnMainWindowDisplay(i)) => {
+                    monitor_label(st, i)
+                }
+                (Some(r), _) => format!("{} (not connected)", r.name),
+            };
+            egui::ComboBox::from_id_salt(("display_monitor", d.id.0))
+                .width(ui.available_width() - 8.0)
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(d.monitor.is_none(), "Not assigned")
+                        .clicked()
+                    {
+                        d.monitor = None;
+                        d.twins = 1;
+                    }
+                    for i in 0..st.monitors.len() {
+                        let chosen = matches!(
+                            state,
+                            SlotState::Connected(c) | SlotState::OnMainWindowDisplay(c) if c == i
+                        );
+                        if ui.selectable_label(chosen, monitor_label(st, i)).clicked() {
+                            let m = &st.monitors[i];
+                            d.monitor = Some(DisplayRef {
+                                name: m.title().to_string(),
+                                index: i,
+                            });
+                            d.twins = st
+                                .monitors
+                                .iter()
+                                .filter(|x| x.title() == m.title())
+                                .count() as u32;
+                        }
+                    }
+                });
+            let (text, color) = match state {
+                SlotState::Unassigned => ("Choose a monitor for it".to_string(), None),
+                SlotState::Missing => (
+                    format!(
+                        "⚠ {} isn't connected: nothing is shown on this display",
+                        d.monitor.as_ref().map_or("", |r| r.name.as_str())
+                    ),
+                    Some(STOP_RED),
+                ),
+                SlotState::OnMainWindowDisplay(_) => (
+                    "⚠ NewQ's main window is on this monitor, so outputs don't cover it"
+                        .to_string(),
+                    Some(STOP_RED),
+                ),
+                SlotState::Connected(_) => (
+                    if users.is_empty() {
+                        "Connected · no outputs on it yet".to_string()
+                    } else {
+                        format!("Connected · shows {}", users.join(", "))
+                    },
+                    Some(GO_GREEN),
+                ),
+            };
+            let label = RichText::new(text).small();
+            ui.label(match color {
+                Some(c) => label.color(c),
+                None => label.weak(),
+            });
+        });
+    }
+}
+
 fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.heading("Outputs");
@@ -2855,10 +2998,9 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
             }
         });
     });
-    const AUTO_HELP: &str = "Fullscreen on a display other than the one NewQ is on; inside the main window \
-         when there isn't one. Switches automatically when displays are plugged in or out.";
     let n_outputs = show.outputs.len();
     let show_subs = &show.sub_displays;
+    let displays = &show.displays;
     for (oi, out) in show.outputs.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2877,42 +3019,44 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                 });
             });
             let current = match &out.placement {
-                Placement::Auto => "Automatic".to_string(),
-                Placement::MainWindow => "Main window".to_string(),
-                Placement::Display(d) => format!("Fullscreen on {}", monitor_title(st, d)),
+                Placement::MainWindow => "Main window only".to_string(),
+                Placement::Slot(d) => match displays.iter().find(|x| x.id == *d) {
+                    Some(x) => format!("Fullscreen on {}", x.name),
+                    None => "Removed display".to_string(),
+                },
                 Placement::SubDisplay(v) => match show_subs.iter().find(|x| x.id == *v) {
                     Some(x) => format!("On sub display {}", x.name),
                     None => "Removed sub display".to_string(),
                 },
+                // Older shows: given a display as they open.
+                Placement::Auto | Placement::Display(_) => "…".to_string(),
             };
             egui::ComboBox::from_id_salt(("placement", out.id.0))
                 .width(ui.available_width() - 8.0)
                 .selected_text(current)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut out.placement, Placement::Auto, "Automatic")
-                        .on_hover_text(AUTO_HELP);
-                    ui.selectable_value(&mut out.placement, Placement::MainWindow, "Main window")
-                        .on_hover_text("Always show this output inside NewQ's main window");
-                    for i in 0..st.monitors.len() {
-                        let d = DisplayRef {
-                            name: st.monitors[i].name.clone(),
-                            index: i,
-                        };
+                    ui.selectable_value(
+                        &mut out.placement,
+                        Placement::MainWindow,
+                        "Main window only",
+                    )
+                    .on_hover_text("Show this output inside NewQ's main window only");
+                    for d in displays.iter() {
                         ui.selectable_value(
                             &mut out.placement,
-                            Placement::Display(d),
-                            format!("Fullscreen on {}", monitor_label(st, i)),
+                            Placement::Slot(d.id),
+                            format!("Fullscreen on {}", d.name),
                         );
                     }
                     for v in show_subs.iter() {
+                        let on = v
+                            .display
+                            .and_then(|d| displays.iter().find(|x| x.id == d))
+                            .map_or("no display", |x| x.name.as_str());
                         ui.selectable_value(
                             &mut out.placement,
                             Placement::SubDisplay(v.id),
-                            format!(
-                                "On sub display {} (on {})",
-                                v.name,
-                                monitor_title(st, &v.parent)
-                            ),
+                            format!("On sub display {} (on {on})", v.name),
                         );
                     }
                 });
@@ -2922,26 +3066,23 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
                 (Some(OutputRoute::SubDisplay { name, display }), _) => {
                     format!("On {name}, part of {display}")
                 }
+                (Some(OutputRoute::MainWindow), Placement::Slot(d)) => {
+                    display_problem(displays, st, *d)
+                }
                 (Some(OutputRoute::MainWindow), Placement::SubDisplay(v)) => {
                     match show_subs.iter().find(|x| x.id == *v) {
-                        Some(x) => format!(
-                            "{} isn't connected: showing in the main window",
-                            x.parent.name
-                        ),
+                        Some(x) => match x.display {
+                            Some(d) => display_problem(displays, st, d),
+                            None => {
+                                format!("{} has no display yet: showing in the main window", x.name)
+                            }
+                        },
                         None => {
                             "Its sub display was removed: showing in the main window".to_string()
                         }
                     }
                 }
-                (Some(OutputRoute::MainWindow), Placement::Display(d)) => {
-                    format!("{} isn't connected: showing in the main window", d.name)
-                }
-                (Some(OutputRoute::MainWindow), Placement::Auto) => {
-                    "No second display: showing in the main window".to_string()
-                }
-                (Some(OutputRoute::MainWindow), Placement::MainWindow) => {
-                    "Showing in the main window".to_string()
-                }
+                (Some(OutputRoute::MainWindow), _) => "Showing in the main window".to_string(),
             };
             ui.label(RichText::new(status).weak().small());
             ui.horizontal(|ui| {
@@ -2954,16 +3095,13 @@ fn outputs_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<A
     }
 }
 
-fn add_sub_display_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
-    if st.monitors.is_empty() {
-        ui.label(RichText::new("No displays found").weak());
+fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
+    if show.displays.is_empty() {
+        ui.label(RichText::new("Add a display first").weak());
     }
-    for i in 0..st.monitors.len() {
-        if ui.button(monitor_label(st, i)).clicked() {
-            actions.push(Action::AddSubDisplay(DisplayRef {
-                name: st.monitors[i].name.clone(),
-                index: i,
-            }));
+    for d in &show.displays {
+        if ui.button(&d.name).clicked() {
+            actions.push(Action::AddSubDisplay(Some(d.id)));
             ui.close();
         }
     }
@@ -2973,7 +3111,7 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
     ui.horizontal(|ui| {
         ui.heading("Sub displays");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.menu_button("+ Add", |ui| add_sub_display_menu(ui, st, actions))
+            ui.menu_button("+ Add", |ui| add_sub_display_menu(ui, show, actions))
                 .response
                 .on_hover_text("Add an area of a display that outputs can be placed on");
         });
@@ -2991,6 +3129,7 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
     }
     // Everyone's areas, to draw the neighbours of the one being edited.
     let all: Vec<SubDisplay> = show.sub_displays.clone();
+    let displays = show.displays.clone();
     for v in show.sub_displays.iter_mut() {
         let monitor = st.sub_monitors.get(&v.id).copied();
         let screen_size = sub_display_size(st, v.id);
@@ -3014,22 +3153,22 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
                     }
                 });
             });
+            let on = v
+                .display
+                .and_then(|d| displays.iter().find(|x| x.id == d))
+                .map_or("no display", |x| x.name.as_str());
             egui::ComboBox::from_id_salt(("vd_parent", v.id.0))
                 .width(ui.available_width() - 8.0)
-                .selected_text(format!("Part of {}", monitor_title(st, &v.parent)))
+                .selected_text(format!("Part of {on}"))
                 .show_ui(ui, |ui| {
-                    for i in 0..st.monitors.len() {
-                        let d = DisplayRef {
-                            name: st.monitors[i].name.clone(),
-                            index: i,
-                        };
-                        ui.selectable_value(&mut v.parent, d, monitor_label(st, i));
+                    for d in displays.iter() {
+                        ui.selectable_value(&mut v.display, Some(d.id), &d.name);
                     }
                 });
             let (w, h) = v.area.size_on(screen_size);
             let status = match monitor {
                 Some(_) => format!("{w}×{h} px"),
-                None => format!("{} isn't connected", monitor_title(st, &v.parent)),
+                None => format!("{on} isn't available"),
             };
             let used = if users.is_empty() {
                 "no outputs on it yet".to_string()
@@ -5140,8 +5279,8 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 }
             }
         }
-        Action::AddSubDisplay(parent) => {
-            st.area_edit = Some(show.add_sub_display(parent));
+        Action::AddSubDisplay(display) => {
+            st.area_edit = Some(show.add_sub_display(display));
             st.handle_sel.set(None);
         }
         Action::RemoveSubDisplay(id) => {
@@ -5238,6 +5377,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddOutput => {
             show.add_output();
         }
+        Action::AddDisplay => {
+            show.add_display();
+        }
+        Action::RemoveDisplay(id) => show.remove_display(id),
         Action::AddAudioOutput => {
             show.add_audio_output();
         }
@@ -6664,23 +6807,56 @@ mod tests {
             monitor_label(&st, 2).starts_with("3: \\\\.\\DISPLAY3 ("),
             "no model known: the system's name"
         );
-        // A show remembers the system's name; it is shown as what it is.
-        let by_name = |name: &str, index: usize| {
-            monitor_title(
-                &st,
-                &DisplayRef {
-                    name: name.into(),
-                    index,
-                },
-            )
+    }
+
+    #[test]
+    fn the_displays_panel_draws_and_says_why_an_output_is_not_on_its_display() {
+        let mut show = Show::default();
+        let a = show.add_display();
+        let b = show.add_display();
+        let c = show.add_display();
+        show.displays[0].name = "Stage TV".into();
+        show.displays[0].monitor = Some(DisplayRef {
+            name: "SAMSUNG".into(),
+            index: 1,
+        });
+        show.displays[1].monitor = Some(DisplayRef {
+            name: "Laptop".into(),
+            index: 0,
+        });
+        show.outputs[0].placement = Placement::Slot(a);
+        let mut st = UiState {
+            monitors: vec![
+                monitor("Laptop", None),
+                monitor("Monitor #2", Some("SAMSUNG")),
+            ],
+            ..Default::default()
         };
-        assert_eq!(by_name("Monitor #5678", 1), "SAMSUNG");
-        assert_eq!(by_name("Monitor #5678", 0), "SAMSUNG", "found by name");
+        st.display_states.insert(a, SlotState::Connected(1));
+        st.display_states
+            .insert(b, SlotState::OnMainWindowDisplay(0));
+        st.display_states.insert(c, SlotState::Unassigned);
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(500.0, 700.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| displays_panel(ui, &mut show, &st, &mut actions));
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 10 && actions.is_empty());
+
+        // Why an output isn't on its display, by what the display is attached to.
+        st.display_states.insert(a, SlotState::Missing);
+        let why = |st: &UiState, id| display_problem(&show.displays, st, id);
         assert_eq!(
-            by_name("Monitor #9999", 0),
-            "Monitor #9999",
-            "not connected"
+            why(&st, a),
+            "Stage TV (SAMSUNG) isn't connected: not shown on any display"
         );
+        assert!(why(&st, b).contains("main window is on"));
+        assert!(why(&st, c).contains("no monitor yet"));
+        assert!(why(&st, DisplayId(999)).contains("removed"));
     }
 
     /// What the keyboard asks for in the last of these frames of events. (egui
