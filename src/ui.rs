@@ -175,7 +175,12 @@ pub struct UiState {
     pub show_cart: bool,
     /// Whether the media window is open, and what it last did.
     pub show_media: bool,
+    /// Whether the window for lining sound up with picture is open, and the
+    /// clip being made for it.
+    pub show_sync: bool,
+    sync_clip: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     media_note: String,
+    sync_note: String,
     /// Media being copied into one folder, in the background.
     collect_job: Option<CollectJob>,
     /// A search of this computer for the missing files.
@@ -295,6 +300,11 @@ enum Action {
     FadeOutCue(CueId),
     ToggleCart,
     ToggleMedia,
+    ToggleSync,
+    /// Make the clip for checking the sync (about a second of work).
+    MakeSyncClip,
+    /// A cue for the sync clip, looping.
+    AddSyncCue(PathBuf),
     /// Write the cue sheet (CSV or a web page, by the file's extension).
     ExportCueSheet(PathBuf),
     /// Look for the missing files in this folder.
@@ -453,6 +463,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         });
     egui::CentralPanel::default().show(ui, |ui| cue_list(ui, show, engine, st, &mut actions));
     media_window(ui.ctx(), show, st, &mut actions);
+    sync_window(ui.ctx(), show, st, &mut actions);
 
     // Actions change state after this frame was laid out; show the result now
     // rather than on the next mouse move.
@@ -733,6 +744,13 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             ui.separator();
             if ui.button("Media…").clicked() {
                 actions.push(Action::ToggleMedia);
+            }
+            if ui
+                .button("Sync…")
+                .on_hover_text("Line the sound up with the picture.")
+                .clicked()
+            {
+                actions.push(Action::ToggleSync);
             }
             if ui
                 .button("Export cue sheet…")
@@ -1690,6 +1708,109 @@ fn poll_collect(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
 
 /// The media window: every file the show uses, which are missing, finding
 /// them again, and copying them all into one folder.
+/// The window for lining sound up with picture: how long to hold each back.
+fn sync_window(ctx: &egui::Context, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    if !st.show_sync {
+        return;
+    }
+    if let Some(rx) = &st.sync_clip {
+        match rx.try_recv() {
+            Ok(Ok(path)) => {
+                st.sync_clip = None;
+                actions.push(Action::AddSyncCue(path));
+            }
+            Ok(Err(e)) => {
+                st.sync_clip = None;
+                st.sync_note = format!("Couldn't make the test clip: {e}");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.sync_clip = None,
+        }
+    }
+    let delay = |ui: &mut Ui, ms: &mut u32| {
+        ui.add(
+            egui::DragValue::new(ms)
+                .range(0..=MAX_DELAY_MS)
+                .speed(1.0)
+                .suffix(" ms"),
+        )
+        .changed()
+    };
+    let mut open = true;
+    egui::Window::new("Sync")
+        .open(&mut open)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            ui.label(
+                "Hold back whichever comes first. If the picture is ahead of the sound, \
+                 delay the picture; if the sound is ahead, delay the sound.",
+            );
+            egui::Grid::new("sync_all").num_columns(2).show(ui, |ui| {
+                ui.label("Sound delay");
+                delay(ui, &mut show.sync.audio_ms);
+                ui.end_row();
+                ui.label("Picture delay");
+                delay(ui, &mut show.sync.video_ms);
+                ui.end_row();
+            });
+            ui.label(
+                RichText::new("These apply to every output. A delay changes cues as they start.")
+                    .weak()
+                    .small(),
+            );
+            if !show.audio_outputs.is_empty() || !show.outputs.is_empty() {
+                ui.separator();
+                ui.label("On top of that, for one output:");
+                egui::Grid::new("sync_outputs")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        for o in &mut show.audio_outputs {
+                            ui.label(format!("Sound: {}", o.name));
+                            delay(ui, &mut o.delay_ms);
+                            ui.end_row();
+                        }
+                        for o in &mut show.outputs {
+                            ui.label(format!("Picture: {}", o.name));
+                            delay(ui, &mut o.delay_ms);
+                            ui.end_row();
+                        }
+                    });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let making = st.sync_clip.is_some();
+                if ui
+                    .add_enabled(!making, egui::Button::new("Add a sync test cue"))
+                    .on_hover_text(
+                        "A looping clip that flashes white and beeps together once a second. \
+                         Play it and adjust until the flash and the beep land together.",
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::MakeSyncClip);
+                }
+                if making {
+                    ui.spinner();
+                }
+                if ui.button("Reset").clicked() {
+                    show.sync = SyncSettings::default();
+                    for o in &mut show.audio_outputs {
+                        o.delay_ms = 0;
+                    }
+                    for o in &mut show.outputs {
+                        o.delay_ms = 0;
+                    }
+                }
+            });
+            if !st.sync_note.is_empty() {
+                ui.label(RichText::new(&st.sync_note).color(STOP_RED).small());
+            }
+        });
+    st.show_sync = open;
+}
+
 fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
     if !st.show_media {
         return;
@@ -4844,6 +4965,40 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::FadeOutCue(id) => engine.fade_out_cue(show, id),
         Action::ToggleCart => st.show_cart = !st.show_cart,
         Action::ToggleMedia => st.show_media = !st.show_media,
+        Action::ToggleSync => st.show_sync = !st.show_sync,
+        Action::MakeSyncClip => match engine.ff.clone() {
+            None => st.sync_note = "ffmpeg wasn't found, so there's no clip to make.".into(),
+            Some(ff) => {
+                st.sync_note.clear();
+                let path = crate::crash::log_dir().join("newq-sync-test.mp4");
+                let (tx, rx) = std::sync::mpsc::channel();
+                let started =
+                    std::thread::Builder::new()
+                        .name("sync-clip".into())
+                        .spawn(move || {
+                            let made = std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                                .map_err(|e| e.to_string())
+                                .and_then(|_| {
+                                    ff.make_sync_clip(&path).map_err(|e| format!("{e:#}"))
+                                });
+                            let _ = tx.send(made.map(|_| path));
+                        });
+                match started {
+                    Ok(_) => st.sync_clip = Some(rx),
+                    Err(e) => st.sync_note = format!("Couldn't start: {e}"),
+                }
+            }
+        },
+        Action::AddSyncCue(path) => {
+            add_cue(show, st, engine, CueType::Video, Some(path));
+            let new = st.selected.and_then(|id| show.cue_index(id));
+            if let Some(c) = new.map(|i| &mut show.cues[i]) {
+                c.name = "Sync test".into();
+                if let Some(m) = c.kind.media_mut() {
+                    m.loop_media = true;
+                }
+            }
+        }
         Action::ExportCueSheet(path) => match crate::export::write(&path, show, engine) {
             Ok(n) => engine.log(format!(
                 "Exported {n} cue{} to {}",
@@ -6904,6 +7059,40 @@ mod tests {
         // Drawing every row of 2,000 would be tens of thousands of shapes.
         assert!(many < 1500, "{many} shapes for 2,000 cues");
         assert!(many < few * 3, "{many} shapes for 2,000 cues, {few} for 30");
+    }
+
+    #[test]
+    fn the_sync_window_draws_and_the_test_cue_loops() {
+        let mut show = Show::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        st.show_sync = true;
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| {
+            sync_window(ui.ctx(), &mut show, &mut st, &mut actions)
+        });
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 5, "the window has something in it");
+        assert!(actions.is_empty() && st.show_sync);
+
+        apply(
+            Action::AddSyncCue(PathBuf::from("sync.mp4")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        let cue = &show.cues[0];
+        assert_eq!(cue.name, "Sync test");
+        assert!(cue.kind.media().unwrap().loop_media);
+
+        // Without ffmpeg there is nothing to make, and it says so.
+        apply(Action::MakeSyncClip, &mut show, &mut e, &mut st);
+        assert!(st.sync_note.contains("ffmpeg") && st.sync_clip.is_none());
     }
 
     #[test]

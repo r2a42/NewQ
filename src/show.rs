@@ -40,6 +40,9 @@ pub struct Show {
     /// Fade time used by the Panic / Stop All button.
     #[serde(default = "default_panic_fade")]
     pub panic_fade: f64,
+    /// Lining sound up with picture. Nothing is held back unless set.
+    #[serde(default, skip_serializing_if = "SyncSettings::is_default")]
+    pub sync: SyncSettings,
     /// OSC and MIDI control. Off unless the show asks for it.
     #[serde(default, skip_serializing_if = "RemoteSettings::is_default")]
     pub remote: RemoteSettings,
@@ -53,6 +56,35 @@ pub struct AudioOutputConfig {
     /// The device's name; None = the system's default device.
     #[serde(default)]
     pub device: Option<String>,
+    /// Milliseconds this output's sound is held back, to line it up with the
+    /// picture (a Bluetooth speaker, a long cable run, a slow display).
+    #[serde(default, skip_serializing_if = "no_delay")]
+    pub delay_ms: u32,
+}
+
+fn no_delay(v: &u32) -> bool {
+    *v == 0
+}
+
+/// The most a delay can be set to, in milliseconds.
+pub const MAX_DELAY_MS: u32 = 2000;
+
+/// How sound and picture are lined up. Each is a delay, so whichever is
+/// ahead is the one to hold back. These apply to everything; each audio output
+/// and each video output can add its own on top.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncSettings {
+    /// Milliseconds all sound is held back.
+    pub audio_ms: u32,
+    /// Milliseconds all pictures are held back.
+    pub video_ms: u32,
+}
+
+impl SyncSettings {
+    pub fn is_default(&self) -> bool {
+        *self == SyncSettings::default()
+    }
 }
 
 /// Which remote-control listeners run while this show is open.
@@ -114,6 +146,7 @@ impl Default for Show {
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
+            sync: SyncSettings::default(),
             remote: RemoteSettings::default(),
         };
         let id = OutputId(show.alloc_id());
@@ -173,6 +206,9 @@ pub struct OutputConfig {
     /// Keystone / corner pin applied to everything on this output.
     #[serde(default)]
     pub corners: Corners,
+    /// Milliseconds everything on this output is held back (a slow projector).
+    #[serde(default, skip_serializing_if = "no_delay")]
+    pub delay_ms: u32,
     /// Legacy (pre-placement) display choice, migrated on load.
     #[serde(default, skip_serializing)]
     display: Option<DisplayRef>,
@@ -187,6 +223,7 @@ impl OutputConfig {
             enabled: true,
             test_pattern: false,
             corners: Corners::default(),
+            delay_ms: 0,
             display: None,
         }
     }
@@ -1199,6 +1236,24 @@ impl Show {
         }
     }
 
+    /// Milliseconds sound is held back on an audio output (None = the first,
+    /// which is the default): the show's own plus the output's.
+    pub fn audio_delay_ms(&self, output: Option<AudioOutputId>) -> u32 {
+        let own = output
+            .and_then(|id| self.audio_outputs.iter().find(|o| o.id == id))
+            .or_else(|| self.audio_outputs.first())
+            .map_or(0, |o| o.delay_ms);
+        (self.sync.audio_ms + own).min(MAX_DELAY_MS)
+    }
+
+    /// Milliseconds pictures are held back on a video output.
+    pub fn video_delay_ms(&self, output: Option<OutputId>) -> u32 {
+        let own = output
+            .and_then(|id| self.outputs.iter().find(|o| o.id == id))
+            .map_or(0, |o| o.delay_ms);
+        (self.sync.video_ms + own).min(MAX_DELAY_MS)
+    }
+
     pub fn add_audio_output(&mut self) -> AudioOutputId {
         let id = AudioOutputId(self.alloc_id());
         let n = self.audio_outputs.len() + 1;
@@ -1206,6 +1261,7 @@ impl Show {
             id,
             name: format!("Audio {n}"),
             device: None,
+            delay_ms: 0,
         });
         id
     }
@@ -2471,6 +2527,46 @@ mod tests {
         // It has the media settings other visual cues have, but reads no file.
         assert!(back.cues[1].kind.media().is_some() && back.cues[1].kind.file_media().is_none());
         assert!(back.cues[1].kind.preloads());
+    }
+
+    #[test]
+    fn delays_default_to_none_stay_out_of_old_files_and_add_up() {
+        let mut show = Show::default();
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(
+            !json.contains("sync") && !json.contains("delay_ms"),
+            "{json}"
+        );
+        assert_eq!(
+            (show.audio_delay_ms(None), show.video_delay_ms(None)),
+            (0, 0)
+        );
+        // An old file has none of these and loads as no delay.
+        let old: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.sync, SyncSettings::default());
+
+        let out = show.outputs[0].id;
+        let first = show.add_audio_output();
+        let second = show.add_audio_output();
+        show.sync = SyncSettings {
+            audio_ms: 40,
+            video_ms: 100,
+        };
+        show.audio_outputs[1].delay_ms = 25;
+        show.outputs[0].delay_ms = 20;
+        // No output chosen means the first, the default.
+        assert_eq!(show.audio_delay_ms(None), 40);
+        assert_eq!(show.audio_delay_ms(Some(first)), 40);
+        assert_eq!(show.audio_delay_ms(Some(second)), 65);
+        assert_eq!(show.video_delay_ms(Some(out)), 120);
+        assert_eq!(show.video_delay_ms(None), 100);
+        show.sync.audio_ms = MAX_DELAY_MS;
+        assert_eq!(show.audio_delay_ms(Some(second)), MAX_DELAY_MS);
+
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        assert_eq!(back.sync, show.sync);
+        assert_eq!(back.audio_outputs, show.audio_outputs);
+        assert_eq!(back.outputs[0].delay_ms, 20);
     }
 
     #[test]
