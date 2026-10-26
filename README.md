@@ -123,6 +123,16 @@ includes FFmpeg, so there's nothing else to install.
   or Stop cue can target it. There's one built-in font (a light weight, so
   *Shadow* and *Bold* help over video), and editing a text cue takes effect
   the next time it's fired.
+- **Clock and speaker timer cues:** *Cue ▸ Add Clock cue* and *Add Timer cue*
+  make a text cue that shows the time instead of typed words (or pick *Shows*
+  in any text cue). A clock shows this computer's time, 24-hour or AM/PM, with
+  or without seconds. A timer counts down from a length you set (or up, with an
+  optional limit): a countdown reads its full length when it starts, turns
+  amber when the time you choose is left, turns red at zero and then counts
+  the overrun as `-0:12`. Put other words round it with `{time}` (`Left:
+  {time}`). They're redrawn as the time changes and otherwise behave like any
+  text cue: send them to a speaker's display or a sub display, fade them, stop
+  them with a Stop cue. A timer runs on show time, so Pause holds it.
 - **Send cues (OSC and MIDI out):** a cue that sends a message when it
   fires, so one GO can also start the lights and sound. *OSC* goes to an
   address and port over UDP, with an OSC address and arguments (`1 0.5

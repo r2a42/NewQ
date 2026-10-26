@@ -684,6 +684,10 @@ pub enum CueType {
     Text,
     Camera,
     Send,
+    /// Ways to make a text cue that shows the time (a cue's own type is
+    /// still `Text`).
+    Clock,
+    Timer,
 }
 
 impl CueType {
@@ -699,6 +703,8 @@ impl CueType {
             CueType::Text => "Text",
             CueType::Camera => "Camera",
             CueType::Send => "Send",
+            CueType::Clock => "Clock",
+            CueType::Timer => "Timer",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -713,6 +719,8 @@ impl CueType {
             CueType::Text => "📝",
             CueType::Camera => "📷",
             CueType::Send => "📡",
+            CueType::Clock => "🕒",
+            CueType::Timer => "⏳",
         }
     }
 }
@@ -1107,7 +1115,33 @@ pub struct TextCue {
     /// Thicken the letters (the bundled font is a light weight).
     #[serde(default)]
     pub bold: bool,
+    /// Where the words come from: typed in, or the time of day or a timer
+    /// that the text shows as it runs. See `live_text`.
+    #[serde(default, skip_serializing_if = "TextSource::is_static")]
+    pub source: TextSource,
     pub media: MediaCue,
+}
+
+/// What a text cue shows. A live source replaces `{time}` in the cue's text
+/// with the time (or is the whole text when there is no `{time}`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum TextSource {
+    #[default]
+    Static,
+    /// The time of day on this computer.
+    Clock { hour24: bool, seconds: bool },
+    /// A speaker timer: counts `total` seconds down (turning amber at `warn`
+    /// seconds left and red at zero, then counting the overrun), or up.
+    Timer { total: f64, up: bool, warn: f64 },
+}
+
+impl TextSource {
+    pub fn is_static(&self) -> bool {
+        matches!(self, TextSource::Static)
+    }
+    pub fn is_live(&self) -> bool {
+        !self.is_static()
+    }
 }
 
 impl TextCue {
@@ -1125,8 +1159,33 @@ impl TextCue {
             width: 0.9,
             shadow: true,
             bold: false,
+            source: TextSource::Static,
             media,
         }
+    }
+
+    /// A clock: the time of day, large and centred.
+    pub fn clock(output: Option<OutputId>) -> TextCue {
+        let mut t = TextCue::new(output);
+        t.text = crate::live_text::PLACEHOLDER.into();
+        t.source = TextSource::Clock {
+            hour24: true,
+            seconds: false,
+        };
+        t.size = 0.2;
+        t.valign = TextVAlign::Middle;
+        t
+    }
+
+    /// A ten minute countdown for a speaker, amber for the last minute.
+    pub fn timer(output: Option<OutputId>) -> TextCue {
+        let mut t = TextCue::clock(output);
+        t.source = TextSource::Timer {
+            total: 600.0,
+            up: false,
+            warn: 60.0,
+        };
+        t
     }
 }
 
@@ -1720,6 +1779,14 @@ impl Show {
             CueType::Wait => ("Wait".into(), CueKind::Wait(WaitCue { duration: 5.0 })),
             CueType::Group => ("Group".into(), CueKind::Group(GroupCue::default())),
             CueType::Text => ("Text".into(), CueKind::Text(TextCue::new(default_output))),
+            CueType::Clock => (
+                "Clock".into(),
+                CueKind::Text(TextCue::clock(default_output)),
+            ),
+            CueType::Timer => (
+                "Speaker timer".into(),
+                CueKind::Text(TextCue::timer(default_output)),
+            ),
             CueType::Camera => (
                 "Camera".into(),
                 CueKind::Camera(CameraCue::new(default_output)),
@@ -3043,6 +3110,46 @@ mod tests {
         let c = show.cue(copy).unwrap();
         assert!(c.hotkey.is_none() && c.midi_note.is_none() && c.cart);
         assert_eq!(show.cue_for_hotkey("W"), Some(ids[2]));
+    }
+
+    #[test]
+    fn clock_and_timer_cues_round_trip_and_plain_text_is_written_as_before() {
+        let mut show = Show::default();
+        let text = show.make_cue(CueType::Text, None, 0);
+        show.cues.push(text);
+        let plain = serde_json::to_string(&show).unwrap();
+        assert!(!plain.contains("source"), "{plain}");
+        // A file from before live text loads as typed text.
+        let back: Show = serde_json::from_str(&plain).unwrap();
+        let CueKind::Text(t) = &back.cues[0].kind else {
+            panic!("not text");
+        };
+        assert_eq!(t.source, TextSource::Static);
+
+        let clock = show.make_cue(CueType::Clock, None, 1);
+        let timer = show.make_cue(CueType::Timer, None, 2);
+        assert_eq!(clock.kind.cue_type(), CueType::Text);
+        show.cues.push(clock);
+        show.cues.push(timer);
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        let sources: Vec<TextSource> = back
+            .cues
+            .iter()
+            .map(|c| match &c.kind {
+                CueKind::Text(t) => t.source,
+                _ => panic!("not text"),
+            })
+            .collect();
+        assert_eq!(sources[0], TextSource::Static);
+        assert!(matches!(sources[1], TextSource::Clock { hour24: true, .. }));
+        assert_eq!(
+            sources[2],
+            TextSource::Timer {
+                total: 600.0,
+                up: false,
+                warn: 60.0
+            }
+        );
     }
 
     #[test]
