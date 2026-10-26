@@ -13,6 +13,7 @@ mod gpu;
 mod history;
 mod live_text;
 mod media;
+mod mesh;
 mod monitor;
 mod output;
 mod projector;

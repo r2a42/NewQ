@@ -89,6 +89,21 @@ includes FFmpeg, so there's nothing else to install.
   perspective-correct, applies to everything on the display, and shows on the
   preview too; turn on *Test pattern* to line it up on the real screen.
   *Reset* returns to the full screen.
+- **Mesh warp:** in the same editor, choose *Mesh* instead of *4 corners* for
+  walls and screens that aren't flat or square (a curved cyclorama, a column,
+  a corner, a dome segment). The picture is bent through a grid of points,
+  3 × 3 to start with and up to 9 × 9; drag any point on the preview (Shift
+  for fine moves, arrow keys after a click, or type pixels). Between the points
+  the picture follows a smooth curve that passes through every one. To put
+  points exactly where the surface bends, *Add column at* / *Add row at* puts a
+  whole new line of points at any percentage across or down (the shape stays
+  as it was, give or take a little on a strongly bent mesh), and *Remove
+  column* / *Remove row* takes one out. Changing the grid size keeps the shape.
+  *4 corners* goes back to a keystone using the mesh's corners, and *Flatten*
+  puts every point back. Like the corner pin it applies to everything on a
+  display and shows in the preview. A sub display is shaped by its area, not
+  a mesh. Without a projector to look at, only the maths and a software GPU
+  have checked this; the real test is a surface and a test pattern.
 - **Sub displays:** split a display into areas that each work like a display
   of their own, e.g. one projector covering two set pieces, or one LED
   processor input feeding several screens. Add one under *Sub displays* (or

@@ -112,7 +112,7 @@ impl OutputGroup {
                     color: l.color,
                 })
                 .collect(),
-            geometry: self.geometry,
+            geometry: self.geometry.clone(),
         }
     }
 }

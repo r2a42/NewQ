@@ -7,6 +7,7 @@
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::media::audio;
+use crate::mesh::Mesh;
 use crate::recovery;
 use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
@@ -27,6 +28,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
+
+/// An enabled output as `update_outputs` draws it: id, name, whether it shows
+/// the test pattern, its number, corner pin and mesh.
+type OutputSetup = (OutputId, String, bool, usize, Corners, Option<Arc<Mesh>>);
 
 /// The control UI only needs to animate progress bars while cues run...
 const CONTROL_FPS_WHEN_PLAYING: f64 = 20.0;
@@ -63,7 +68,7 @@ struct ScreenWindow {
     outputs: Vec<OutputId>,
     needs_redraw: bool,
     /// Outputs and warps last sent to the render thread.
-    sent: Vec<(OutputId, Homography)>,
+    sent: Vec<(OutputId, Homography, Option<Arc<Mesh>>)>,
     /// The title last given to the window (asking a window for its title is a
     /// round trip to the display server on some systems).
     title: String,
@@ -832,7 +837,7 @@ impl App {
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = &self.gpu else { return };
         self.ui.previews.clear();
-        let configs: Vec<(OutputId, String, bool, usize, Corners)> = self
+        let configs: Vec<OutputSetup> = self
             .show
             .outputs
             .iter()
@@ -845,13 +850,23 @@ impl App {
                 } else {
                     o.corners
                 };
-                (o.id, o.name.clone(), o.test_pattern, i + 1, corners)
+                // A mesh does the work of the four corners on a display.
+                let mesh = o
+                    .mesh
+                    .clone()
+                    .filter(|m| !o.is_sub_display() && m.is_valid())
+                    .map(Arc::new);
+                (o.id, o.name.clone(), o.test_pattern, i + 1, corners, mesh)
             })
             .collect();
         let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
-        for (id, name, want_pattern, number, corners) in configs {
+        for (id, name, want_pattern, number, corners, mesh) in configs {
             // The output's canvas: its area of a display, or 1080p in the main window.
-            let pin = gpu::corner_pin(&corners.0);
+            let pin = if mesh.is_some() {
+                gpu::IDENTITY
+            } else {
+                gpu::corner_pin(&corners.0)
+            };
             let target = self.targets.get(&id).copied();
             let screen = target.and_then(|t| Some((t, self.screens.get(&t.monitor)?.size)));
             let (warp, canvas) = match screen {
@@ -967,7 +982,12 @@ impl App {
                 id,
                 OutputGroup {
                     layers: layers.clone(),
-                    geometry: Geometry { canvas, warp, pin },
+                    geometry: Geometry {
+                        canvas,
+                        warp,
+                        pin,
+                        mesh: mesh.clone(),
+                    },
                 },
             );
             self.ui.previews.push(PreviewOutput {
@@ -975,6 +995,7 @@ impl App {
                 name,
                 layers,
                 warp: pin,
+                mesh,
                 canvas,
             });
         }
@@ -986,10 +1007,13 @@ impl App {
                 .iter()
                 .filter_map(|id| groups.get(id).cloned())
                 .collect();
-            let sent: Vec<(OutputId, Homography)> = screen
+            let sent: Vec<(OutputId, Homography, Option<Arc<Mesh>>)> = screen
                 .outputs
                 .iter()
-                .filter_map(|id| Some((*id, groups.get(id)?.geometry.warp)))
+                .filter_map(|id| {
+                    let g = &groups.get(id)?.geometry;
+                    Some((*id, g.warp, g.mesh.clone()))
+                })
                 .collect();
             if playing || screen.needs_redraw || sent != screen.sent {
                 screen.needs_redraw = false;
