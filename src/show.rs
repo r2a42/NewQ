@@ -1200,11 +1200,96 @@ pub struct SendCue {
 pub enum SendTarget {
     Osc(OscOut),
     Midi(MidiOut),
+    /// Power, shutter or input of a projector, over PJLink.
+    Projector(ProjectorOut),
+    /// Bytes to any device on the network, over TCP or UDP.
+    Network(NetworkOut),
 }
 
 impl Default for SendTarget {
     fn default() -> Self {
         SendTarget::Osc(OscOut::default())
+    }
+}
+
+/// A command for a projector that speaks PJLink (class 1, TCP port 4352).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectorOut {
+    pub host: String,
+    pub port: u16,
+    /// The PJLink password, if the projector has one. It is kept in the show
+    /// file as typed.
+    #[serde(default)]
+    pub password: String,
+    pub action: ProjectorAction,
+}
+
+impl Default for ProjectorOut {
+    fn default() -> Self {
+        ProjectorOut {
+            host: "192.168.0.100".into(),
+            port: 4352,
+            password: String::new(),
+            action: ProjectorAction::PowerOn,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectorAction {
+    PowerOn,
+    PowerOff,
+    /// Close the shutter: mute the picture (the lamp stays on).
+    ShutterClosed,
+    ShutterOpen,
+    /// Select an input: PJLink's two digits, the kind (1 RGB, 2 video, 3
+    /// digital, 4 storage, 5 network) then its number.
+    Input(u8),
+}
+
+impl ProjectorAction {
+    pub fn label(self) -> String {
+        match self {
+            ProjectorAction::PowerOn => "Power on".into(),
+            ProjectorAction::PowerOff => "Power off".into(),
+            ProjectorAction::ShutterClosed => "Shutter closed".into(),
+            ProjectorAction::ShutterOpen => "Shutter open".into(),
+            ProjectorAction::Input(code) => format!("Input {}", input_name(code)),
+        }
+    }
+}
+
+/// An input as PJLink numbers it: "HDMI/DVI 1" for 31.
+pub fn input_name(code: u8) -> String {
+    let kind = match code / 10 {
+        1 => "RGB",
+        2 => "Video",
+        3 => "Digital",
+        4 => "Storage",
+        5 => "Network",
+        _ => "?",
+    };
+    format!("{kind} {}", code % 10)
+}
+
+/// Bytes sent to a host and port, as typed with escapes (see `output::unescape`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NetworkOut {
+    pub host: String,
+    pub port: u16,
+    /// TCP (connect, send, close) or, when false, UDP (one packet).
+    pub tcp: bool,
+    pub payload: String,
+}
+
+impl Default for NetworkOut {
+    fn default() -> Self {
+        NetworkOut {
+            host: "192.168.0.100".into(),
+            port: 23,
+            tcp: true,
+            payload: String::new(),
+        }
     }
 }
 
@@ -3150,6 +3235,55 @@ mod tests {
                 warn: 60.0
             }
         );
+    }
+
+    #[test]
+    fn projector_and_network_cues_round_trip_and_old_send_cues_are_unaffected() {
+        let mut show = Show::default();
+        let mut osc = show.make_cue(CueType::Send, None, 0);
+        osc.name = "osc".into();
+        show.cues.push(osc);
+        let before = serde_json::to_string(&show).unwrap();
+        assert!(
+            !before.contains("Projector") && !before.contains("Network"),
+            "{before}"
+        );
+
+        for target in [
+            SendTarget::Projector(ProjectorOut {
+                host: "10.1.1.5".into(),
+                password: "secret".into(),
+                action: ProjectorAction::Input(32),
+                ..ProjectorOut::default()
+            }),
+            SendTarget::Network(NetworkOut {
+                host: "10.1.1.6".into(),
+                port: 1024,
+                tcp: false,
+                payload: "\\x02PON\\x03".into(),
+            }),
+        ] {
+            let mut cue = show.make_cue(CueType::Send, None, 1);
+            cue.kind = CueKind::Send(SendCue {
+                target: target.clone(),
+            });
+            let mut one = Show::default();
+            one.cues.push(cue);
+            let back: Show = serde_json::from_str(&serde_json::to_string(&one).unwrap()).unwrap();
+            let CueKind::Send(s) = &back.cues[0].kind else {
+                panic!("not a send cue");
+            };
+            assert_eq!(s.target, target);
+        }
+        // A projector saved with no password field loads without one.
+        let json = r#"{"host":"h","port":4352,"action":"PowerOff"}"#;
+        let p: ProjectorOut = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            (p.password.as_str(), p.action),
+            ("", ProjectorAction::PowerOff)
+        );
+        assert_eq!(input_name(31), "Digital 1");
+        assert_eq!(ProjectorAction::Input(52).label(), "Input Network 2");
     }
 
     #[test]

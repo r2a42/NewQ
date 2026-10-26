@@ -3145,7 +3145,7 @@ mod tests {
                     let end = packet.iter().position(|&b| b == 0)?;
                     Some(String::from_utf8_lossy(&packet[..end]).into_owned())
                 }
-                Outgoing::Midi { .. } => None,
+                Outgoing::Midi { .. } | Outgoing::Projector(_) | Outgoing::Tcp { .. } => None,
             })
             .collect()
     }
