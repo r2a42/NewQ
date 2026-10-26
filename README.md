@@ -244,6 +244,16 @@ includes FFmpeg, so there's nothing else to install.
   the background and kept, so even long files only wait the first time. A file
   with no sound (or an image) shows no waveform. The In / Out boxes still take
   typed times, and both stay in step.
+- **Lining sound up with picture:** *File ▸ Sync…* sets how long to hold
+  back the sound and the picture, in milliseconds, for the whole show, and
+  again for each audio output (a Bluetooth speaker, a long cable run) and each
+  video output (a projector that processes its picture). Whichever arrives
+  first is the one to delay: if the picture is ahead, delay the picture. A
+  video with its own sound keeps the two together whatever the delays are.
+  *Add a sync test cue* makes a looping clip that flashes white and beeps
+  together once a second, to adjust by eye and ear. Delays are saved with the
+  show, change cues as they start, and go up to 2,000 ms. A picture held back
+  also appears late, so a fade-in starts that much later.
 - **Cue sheet export:** *File ▸ Export cue sheet…* writes the cue list as a
   web page to print (landscape, with the header repeated on each page, groups
   shaded, children indented and disarmed cues struck through) or, if you name

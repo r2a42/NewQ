@@ -69,6 +69,35 @@ impl Ffmpeg {
         cmd
     }
 
+    /// Write a short clip for lining sound up with picture: once a second the
+    /// screen flashes white and a 1 kHz beep sounds, for a tenth of a second.
+    pub fn make_sync_clip(&self, path: &Path) -> Result<()> {
+        let mut cmd = self.command();
+        cmd.args(["-y", "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=30"]);
+        cmd.args(["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000"]);
+        cmd.args(["-t", "4"]);
+        cmd.args([
+            "-vf",
+            "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t,1),0.1)'",
+            "-af",
+            "volume='if(lt(mod(t,1),0.1),0.5,0)':eval=frame",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+        ]);
+        cmd.arg(path);
+        let out = cmd.output().context("running ffmpeg")?;
+        anyhow::ensure!(
+            out.status.success(),
+            "ffmpeg: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(())
+    }
+
     pub fn probe(&self, path: &Path) -> Result<MediaInfo> {
         let mut cmd = Command::new(&self.ffprobe);
         cmd.args([
@@ -262,6 +291,19 @@ fn parse_probe(json: &[u8]) -> Result<MediaInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sync_clip_has_picture_and_sound() {
+        let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let path = std::env::temp_dir().join("newq_test_sync_clip.mp4");
+        ff.make_sync_clip(&path).unwrap();
+        let info = ff.probe(&path).unwrap();
+        assert!(info.video.is_some() && info.has_audio);
+        assert!((info.duration.unwrap_or(0.0) - 4.0).abs() < 0.3);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn parses_video_with_audio() {

@@ -195,6 +195,12 @@ pub struct ActiveCue {
     /// Where in the cue the running decoders began (after a seek), so their
     /// clocks, which start at zero, line up with `elapsed`.
     seek_base: f64,
+    /// Seconds its sound is held back and its picture is held back (the
+    /// show's sync settings, as they were when it started).
+    audio_lead: f64,
+    video_lag: f64,
+    /// Seconds since it started, for holding the picture back.
+    age: f64,
     /// Decoders started at a new position, swapped in once they have a frame.
     seeking: Option<Seek>,
     /// A seek took the cue back out of its automatic fade-out: put its levels
@@ -1028,6 +1034,9 @@ impl Engine {
             stopping: false,
             held: false,
             seek_base: 0.0,
+            audio_lead: 0.0,
+            video_lag: 0.0,
+            age: 0.0,
             seeking: None,
             relevel: false,
             lost_logged: false,
@@ -1074,6 +1083,9 @@ impl Engine {
             stopping: false,
             held: false,
             seek_base: 0.0,
+            audio_lead: 0.0,
+            video_lag: 0.0,
+            age: 0.0,
             seeking: None,
             relevel: false,
             lost_logged: false,
@@ -1133,6 +1145,8 @@ impl Engine {
                         }
                         active.duration = p.duration;
                         active.started = false;
+                        active.audio_lead = show.audio_delay_ms(m.audio_output) as f64 / 1000.0;
+                        active.video_lag = show.video_delay_ms(m.output) as f64 / 1000.0;
                         active.kind = match p.kind {
                             PreparedKind::Video { player, voice } => {
                                 ActiveKind::Video(Box::new(VideoState {
@@ -1414,6 +1428,10 @@ impl Engine {
             let media = cue.and_then(|c| c.kind.media()).filter(|_| !a.is_matte());
             let mut completed = false;
             let was_started = a.started;
+            let (audio_lead, video_lag) = (a.audio_lead, a.video_lag);
+            if a.started {
+                a.age += dt;
+            }
             if let Some(note) = apply_seek(a, paused) {
                 messages.push(format!(
                     "Cue {}: {note}",
@@ -1442,6 +1460,7 @@ impl Engine {
                                 ));
                             }
                             if let Some(vo) = &v.voice {
+                                vo.set_lead(audio_lead);
                                 vo.set_paused(paused);
                             }
                         } else if v.player.finished() {
@@ -1461,7 +1480,17 @@ impl Engine {
                             _ if !paused => a.elapsed += dt,
                             _ => {}
                         }
-                        v.player.update(a.elapsed - a.seek_base);
+                        // The picture follows the sound's clock, lead and all,
+                        // less its own delay; with no sound, its own time.
+                        let on_the_clock = match &v.voice {
+                            Some(vo) if !vo.finished() => Some(vo.clock_with_lead()),
+                            _ => None,
+                        };
+                        let t = on_the_clock.unwrap_or_else(|| {
+                            let lead = if v.voice.is_some() { audio_lead } else { 0.0 };
+                            a.elapsed - a.seek_base + lead
+                        });
+                        v.player.update((t - video_lag).max(0.0));
                         let audio_done = v.voice.as_ref().is_none_or(|vo| vo.finished());
                         // A camera never ends by itself; "run for" ends it.
                         if v.player.is_live() && a.duration.is_some_and(|d| a.elapsed >= d) {
@@ -1515,6 +1544,7 @@ impl Engine {
                     }
                     if !a.started && vo.ready() {
                         a.started = true;
+                        vo.set_lead(audio_lead);
                         vo.set_paused(paused);
                     }
                     if a.started {
@@ -1811,7 +1841,8 @@ impl Engine {
     pub fn layers(&self, output: OutputId) -> Vec<LayerRef<'_>> {
         let mut layers: Vec<(i32, LayerRef)> = Vec::new();
         for a in &self.active {
-            if !a.started {
+            // Held back until its delay has passed.
+            if !a.started || a.age < a.video_lag {
                 continue;
             }
             let (layer, fit, transform, color, source) = match &a.kind {
@@ -1892,6 +1923,7 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
         VideoStart::GoSilent => {}
     }
     let s = a.seeking.take()?;
+    let lead = a.audio_lead;
     match &mut a.kind {
         ActiveKind::Video(v) => {
             if let Some(p) = s.player {
@@ -1900,11 +1932,13 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
             v.voice = s.voice;
             v.spawned_at = s.spawned_at;
             if let Some(vo) = &v.voice {
+                vo.set_lead(lead);
                 vo.set_paused(paused);
             }
         }
         ActiveKind::Audio(vo) => {
             if let Some(new) = s.voice {
+                new.set_lead(lead);
                 new.set_paused(paused);
                 *vo = new;
             }
@@ -3090,6 +3124,31 @@ mod tests {
         assert!(elapsed(&e, instance) > now);
         e.seek(&show, instance, 100.0).unwrap();
         run_until(&mut e, &show, "the clip to end", |e| e.active.is_empty());
+    }
+
+    #[test]
+    fn a_video_output_with_a_delay_shows_its_pictures_late() {
+        let Some((mut e, mut show, out, _)) = playing_video(false) else {
+            return;
+        };
+        // One that is already playing keeps the delay it started with.
+        assert!(!e.layers(out).is_empty());
+        e.stop_all(0.0);
+        run_until(&mut e, &show, "the clip to stop", |e| e.active.is_empty());
+
+        show.sync.video_ms = 600;
+        let id = show.cues[0].id;
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the clip to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        assert!(e.layers(out).is_empty(), "held back at first");
+        assert_eq!(e.active[0].video_lag, 0.6);
+        run_until(&mut e, &show, "the picture to show", |e| {
+            !e.layers(out).is_empty()
+        });
+        assert!(e.active[0].age >= 0.6, "{}", e.active[0].age);
     }
 
     #[test]

@@ -28,7 +28,12 @@ struct VoiceShared {
     stopped: AtomicBool,
     eof: AtomicBool,
     drained: AtomicBool,
+    /// Frames sent to the device, the silent lead included.
     played_frames: AtomicU64,
+    /// Silent frames still to send before the sound starts (see `set_lead`).
+    lead_left: AtomicU64,
+    /// How many frames the lead was in all.
+    lead_total: AtomicU64,
     received_frames: AtomicU64,
 }
 
@@ -456,9 +461,24 @@ impl Voice {
     pub fn set_paused(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Relaxed);
     }
-    /// Seconds of audio actually sent to the device. This is the master clock
-    /// for video cues that have sound.
+    /// Hold the sound back by `secs`: the voice plays that much silence first.
+    /// Call before the voice is first unpaused.
+    pub fn set_lead(&self, secs: f64) {
+        let frames = (secs.max(0.0) * self.sample_rate as f64).round() as u64;
+        self.shared.lead_total.store(frames, Ordering::Relaxed);
+        self.shared.lead_left.store(frames, Ordering::Relaxed);
+    }
+    /// Seconds of the sound itself sent to the device (not the lead). This is
+    /// the clock for the cue's own time.
     pub fn clock(&self) -> f64 {
+        let played = self.shared.played_frames.load(Ordering::Relaxed);
+        let lead = self.shared.lead_total.load(Ordering::Relaxed);
+        played.saturating_sub(lead) as f64 / self.sample_rate as f64
+    }
+    /// Seconds since the voice started, the lead included. A picture that
+    /// goes with the sound is paced by this, so it keeps its place however the
+    /// two are delayed.
+    pub fn clock_with_lead(&self) -> f64 {
         self.shared.played_frames.load(Ordering::Relaxed) as f64 / self.sample_rate as f64
     }
     /// Some audio has been decoded and is ready to play.
@@ -637,6 +657,19 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
     if sh.paused.load(Ordering::Relaxed) {
         return true;
     }
+    // The lead is silence: spend it before any of the sound is mixed in.
+    let lead = sh.lead_left.load(Ordering::Relaxed);
+    let (mix, frames) = if lead > 0 {
+        let skip = lead.min(frames as u64) as usize;
+        sh.lead_left.fetch_sub(skip as u64, Ordering::Relaxed);
+        sh.played_frames.fetch_add(skip as u64, Ordering::Relaxed);
+        (&mut mix[skip * channels..], frames - skip)
+    } else {
+        (mix, frames)
+    };
+    if frames == 0 {
+        return true;
+    }
     let available = v.consumer.slots() / 2;
     let n = available.min(frames);
     if n == 0 {
@@ -733,6 +766,33 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_is_silence_before_the_sound_and_the_clock_waits_for_it() {
+        let sr = 4;
+        let mut v = voice(&[1.0, 1.0, 0.5, 0.5], 0);
+        // 1.5 s at 4 frames a second is 6 frames of lead; the buffer is 4 frames.
+        let lead = 6u64;
+        v.shared.lead_total.store(lead, Ordering::Relaxed);
+        v.shared.lead_left.store(lead, Ordering::Relaxed);
+        let clock = |v: &MixVoice| {
+            let played = v.shared.played_frames.load(Ordering::Relaxed);
+            let total = v.shared.lead_total.load(Ordering::Relaxed);
+            (
+                played as f64 / sr as f64,
+                played.saturating_sub(total) as f64 / sr as f64,
+            )
+        };
+        let mut mix = vec![0.0; 4 * 2];
+        assert!(mix_voice(&mut v, &mut mix, 4, 2));
+        assert_eq!(mix, [0.0; 8], "all lead");
+        assert_eq!(clock(&v), (1.0, 0.0));
+        // The next buffer starts with two more frames of lead, then the sound.
+        let mut mix = vec![0.0; 4 * 2];
+        assert!(mix_voice(&mut v, &mut mix, 4, 2));
+        assert_eq!(mix, [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.5]);
+        assert_eq!(clock(&v), (2.0, 0.5));
+    }
+
+    #[test]
     fn two_voices_on_different_channels_do_not_mix_together() {
         let mut a = voice(&[1.0, 1.0], 0);
         let mut b = voice(&[0.25, 0.25], 2);
@@ -786,6 +846,7 @@ mod tests {
             id: AudioOutputId(id),
             name: format!("Out {id}"),
             device: device.map(String::from),
+            delay_ms: 0,
         }
     }
 
