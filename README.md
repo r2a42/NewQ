@@ -1,4 +1,9 @@
-# NewQ
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/newq-logo-dark.svg">
+    <img alt="NewQ" src="assets/logo/newq-logo.svg" width="380">
+  </picture>
+</p>
 
 A simple, free, cross-platform cue-based playback system for theatre and live
 events, in the spirit of QLab but much smaller. It focuses on video, with easy

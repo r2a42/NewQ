@@ -626,7 +626,13 @@ mod tests {
         assert_eq!(page.status, 200);
         assert!(cmd.is_none());
         let text = String::from_utf8(page.body).unwrap();
-        for needle in ["NewQ remote", "id=\"go\"", "/api/state", "X-NewQ"] {
+        for needle in [
+            "NewQ remote",
+            "id=\"go\"",
+            "/api/state",
+            "X-NewQ",
+            "rel=\"icon\"",
+        ] {
             assert!(text.contains(needle), "page lacks {needle}");
         }
         let (state, _) = respond(&req("GET", "/api/state", &[]), "", "{\"a\":1}");

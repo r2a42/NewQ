@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="202" height="202" viewBox="8.0 8.0 101.0 101.0" role="img" aria-label="NewQ">
+<title>NewQ</title>
+<defs>
+<linearGradient id="m-beam" gradientUnits="userSpaceOnUse" x1="112" y1="112" x2="54" y2="54"><stop offset="0" stop-color="#EF9A14" stop-opacity="0.95"/><stop offset="1" stop-color="#EF9A14" stop-opacity="0.25"/></linearGradient>
+<radialGradient id="m-pool" gradientUnits="userSpaceOnUse" cx="54" cy="54" r="30" fx="47" fy="46"><stop offset="0" stop-color="#FFC85E"/><stop offset="0.36" stop-color="#EF9A14"/><stop offset="0.68" stop-color="#E07F06"/><stop offset="0.86" stop-color="#E07F06" stop-opacity="0.5"/><stop offset="1" stop-color="#E07F06" stop-opacity="0"/></radialGradient>
+</defs>
+<g transform="translate(-4 -4)">
+<polygon points="112,112 68,54 45,69" fill="url(#m-beam)"/>
+<circle cx="54" cy="54" r="36" fill="none" stroke="#14110F" stroke-width="10"/>
+<circle cx="54" cy="54" r="30" fill="url(#m-pool)"/>
+<path d="M46.5 40.5 L46.5 70.5 L69.5 55.5 Z" fill="#000" fill-opacity="0.28"/>
+<path d="M45 39 L45 69 L68 54 Z" fill="#14110F"/>
+</g>
+</svg>
