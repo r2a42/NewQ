@@ -24,6 +24,10 @@ The README describes the features; this file is about working on the code.
   `newq-crash.log` and `newq.log` when a user reports a crash.
   `src/web.rs` and `web_page.html`: the web remote (HTTP on plain `std`
   sockets, handlers tested as functions and over loopback).
+  Displays: the show has `DisplaySlot`s (Display 1, 2…) each assigned to a
+  monitor by the user; `show.rs::slot_state` finds the monitor and never picks
+  another, `app.rs::route_outputs` places outputs, and `Show::assign_displays`
+  gives older shows (Auto/Display placements) their displays once.
   `src/relink.rs`: finding moved media and copying it into one folder.
   `src/gpu.rs` also notices a lost graphics device (`DeviceLost`) and
   `app.rs::watch_gpu` rebuilds every window's device, surface and render thread;
