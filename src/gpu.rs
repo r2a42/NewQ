@@ -1946,8 +1946,7 @@ mod tests {
                 out.display()
             ),
         };
-        let sink = crate::stream::Sink::start(&ff, size, 30, &kind).expect("ffmpeg starts");
-        let thread = CaptureThread::spawn(gpu.clone(), Slot::Capture(0), size, 30, sink);
+        let thread = CaptureThread::spawn(gpu.clone(), Slot::Capture(0), size, 30, ff, kind);
         // A red picture, drawn at the stream's size from a 2×2 layer.
         let tex = LayerTexture::new_rgba(&gpu, 2, 2);
         tex.upload_rgba(&gpu.queue, &[255, 0, 0, 255].repeat(4));
@@ -2000,21 +1999,16 @@ mod tests {
         let kind = StreamKind::Custom {
             args: "-f no_such_format nowhere".into(),
         };
-        // FFmpeg may refuse at once (the sink then can't start properly) or
-        // as soon as a frame arrives; either way the reason comes back.
-        let reason = match crate::stream::Sink::start(&ff, size, 30, &kind) {
-            Err(e) => e,
-            Ok(sink) => {
-                let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, sink);
-                let t0 = std::time::Instant::now();
-                loop {
-                    if let Some(why) = thread.failure() {
-                        break why;
-                    }
-                    assert!(t0.elapsed().as_secs() < 15, "nothing was reported");
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
+        // FFmpeg may refuse at once or as soon as a frame arrives; either way
+        // the reason comes back.
+        let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, ff, kind);
+        let t0 = std::time::Instant::now();
+        let reason = loop {
+            if let Some(why) = thread.failure() {
+                break why;
             }
+            assert!(t0.elapsed().as_secs() < 15, "nothing was reported");
+            std::thread::sleep(std::time::Duration::from_millis(20));
         };
         assert!(!reason.is_empty());
         assert!(

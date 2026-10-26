@@ -255,14 +255,24 @@ impl CaptureThread {
         slot: Slot,
         size: (u32, u32),
         fps: u32,
-        sink: crate::stream::Sink,
+        ff: crate::media::ffmpeg::Ffmpeg,
+        kind: crate::show::StreamKind,
     ) -> CaptureThread {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let (err_tx, errors) = crossbeam_channel::unbounded();
         let handle = std::thread::Builder::new()
             .name("stream-render".into())
-            .spawn(move || capture_loop(gpu, slot, size, fps, sink, mb, err_tx))
+            .spawn(move || {
+                // Started here: asking FFmpeg what it can encode and starting it
+                // can take a while.
+                match crate::stream::Sink::start(&ff, size, fps, &kind) {
+                    Ok(sink) => capture_loop(gpu, slot, size, fps, sink, mb, err_tx),
+                    Err(e) => {
+                        let _ = err_tx.send(e);
+                    }
+                }
+            })
             .expect("spawn stream render thread");
         CaptureThread {
             mailbox,
