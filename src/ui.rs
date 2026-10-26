@@ -4238,16 +4238,78 @@ fn media_inspector(
 
 /// What a send cue sends, and where.
 fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
-    let is_osc = matches!(s.target, SendTarget::Osc(_));
+    use crate::show::{NetworkOut, ProjectorOut};
     ui.horizontal(|ui| {
-        if ui.selectable_label(is_osc, "OSC").clicked() && !is_osc {
-            s.target = SendTarget::Osc(OscOut::default());
-        }
-        if ui.selectable_label(!is_osc, "MIDI").clicked() && is_osc {
-            s.target = SendTarget::Midi(MidiOut::default());
+        let tabs = [
+            (
+                "OSC",
+                matches!(s.target, SendTarget::Osc(_)),
+                SendTarget::Osc(OscOut::default()),
+            ),
+            (
+                "MIDI",
+                matches!(s.target, SendTarget::Midi(_)),
+                SendTarget::Midi(MidiOut::default()),
+            ),
+            (
+                "Projector",
+                matches!(s.target, SendTarget::Projector(_)),
+                SendTarget::Projector(ProjectorOut::default()),
+            ),
+            (
+                "TCP / UDP",
+                matches!(s.target, SendTarget::Network(_)),
+                SendTarget::Network(NetworkOut::default()),
+            ),
+        ];
+        for (label, selected, fresh) in tabs {
+            if ui.selectable_label(selected, label).clicked() && !selected {
+                s.target = fresh;
+            }
         }
     });
     match &mut s.target {
+        SendTarget::Projector(p) => projector_inspector(ui, p),
+        SendTarget::Network(n) => {
+            egui::Grid::new("send_network")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("To");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut n.host).desired_width(150.0));
+                        ui.label(":");
+                        ui.add(
+                            egui::DragValue::new(&mut n.port)
+                                .range(1..=65535)
+                                .speed(1.0),
+                        );
+                    });
+                    ui.end_row();
+                    ui.label("Over");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut n.tcp, true, "TCP");
+                        ui.selectable_value(&mut n.tcp, false, "UDP");
+                    });
+                    ui.end_row();
+                    ui.label("Send");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut n.payload)
+                            .desired_width(260.0)
+                            .hint_text("PON\\r"),
+                    );
+                    ui.end_row();
+                });
+            ui.label(
+                RichText::new(
+                    "For any device with a network control port. Type the text to send; \\r \
+                     \\n \\t \\0 and \\xNN (hex, as in \\x02) are turned into those bytes, \\\\ \
+                     into one backslash. TCP connects, sends and hangs up; the reply, if \
+                     any, isn't read. Check your device's manual for what it expects.",
+                )
+                .weak(),
+            );
+        }
         SendTarget::Osc(o) => {
             egui::Grid::new("send_osc")
                 .num_columns(2)
@@ -4357,6 +4419,80 @@ fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
         }
     }
     ui.label(RichText::new("Use ▶ Fire to try it.").weak());
+}
+
+/// A projector command: which projector, and what to tell it.
+fn projector_inspector(ui: &mut Ui, p: &mut crate::show::ProjectorOut) {
+    use crate::show::{ProjectorAction, input_name};
+    egui::Grid::new("send_projector")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Projector");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut p.host).desired_width(150.0));
+                ui.label(":");
+                ui.add(
+                    egui::DragValue::new(&mut p.port)
+                        .range(1..=65535)
+                        .speed(1.0),
+                );
+            });
+            ui.end_row();
+            ui.label("Password");
+            ui.add(
+                egui::TextEdit::singleline(&mut p.password)
+                    .password(true)
+                    .desired_width(150.0)
+                    .hint_text("none"),
+            );
+            ui.end_row();
+            ui.label("Command");
+            let is_input = matches!(p.action, ProjectorAction::Input(_));
+            egui::ComboBox::from_id_salt("projector_action")
+                .selected_text(if is_input {
+                    "Select input".to_string()
+                } else {
+                    p.action.label()
+                })
+                .show_ui(ui, |ui| {
+                    for a in [
+                        ProjectorAction::PowerOn,
+                        ProjectorAction::PowerOff,
+                        ProjectorAction::ShutterClosed,
+                        ProjectorAction::ShutterOpen,
+                    ] {
+                        ui.selectable_value(&mut p.action, a, a.label());
+                    }
+                    if ui.selectable_label(is_input, "Select input").clicked() && !is_input {
+                        p.action = ProjectorAction::Input(31);
+                    }
+                });
+            ui.end_row();
+            if let ProjectorAction::Input(code) = &mut p.action {
+                ui.label("Input");
+                egui::ComboBox::from_id_salt("projector_input")
+                    .selected_text(input_name(*code))
+                    .show_ui(ui, |ui| {
+                        for kind in 1..=5u8 {
+                            for n in 1..=3u8 {
+                                let c = kind * 10 + n;
+                                ui.selectable_value(code, c, input_name(c));
+                            }
+                        }
+                    });
+                ui.end_row();
+            }
+        });
+    ui.label(
+        RichText::new(
+            "PJLink, the standard most projectors speak over the network (TCP port 4352). \
+             Turn PJLink on in the projector's network settings. A projector refuses power \
+             commands while it warms up or cools down: the cue's problem is shown in the \
+             status bar. The password is saved in the show file as typed.",
+        )
+        .weak(),
+    );
 }
 
 /// A camera's name as shown to the operator.

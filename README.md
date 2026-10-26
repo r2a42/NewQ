@@ -145,6 +145,23 @@ includes FFmpeg, so there's nothing else to install.
   missing device can't stall the show; problems are shown in the status bar.
   What NewQ sends is what its own OSC and MIDI listeners understand, so two
   copies of NewQ can run each other. An IP address is safer than a name.
+  Two more kinds of send cue reach equipment on the network:
+  - *Projector* speaks **PJLink** (class 1, TCP port 4352, which most
+    projectors from Epson, NEC, Panasonic, Sony, Barco, Optoma and others
+    offer once it is switched on in their network settings): power on or off,
+    shutter closed or open (PJLink's "video mute"; the lamp stays on), and
+    select input. If the projector has a PJLink password, enter it; it is saved
+    in the show file as typed. NewQ checks the projector's answer, so a refusal
+    (it won't take power commands while warming up or cooling down) or a wrong
+    password shows in the status bar rather than passing silently. Each
+    projector is talked to on a thread of its own, in order, so one that has
+    been switched off can't hold up the others.
+  - *TCP / UDP* sends text or bytes you type to any host and port, for gear
+    with its own control protocol (many projectors, matrix switchers, relay
+    boxes). Escapes: `\r` `\n` `\t` `\0`, `\xNN` for a byte in hex, and `\\` for a
+    backslash, so a command framed with STX and ETX is `\x02PON\x03`. TCP
+    connects, sends and hangs up and doesn't read a reply; UDP is one packet.
+    Look up the exact bytes in the device's manual: NewQ can't know them.
 - **Camera cues:** show a live camera or capture card (HDMI/SDI/USB) as a
   layer. Pick the device and the mode to ask of it (size and frame rate, which
   the device must support), then set the output, layer, transition, fades and

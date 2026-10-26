@@ -15,6 +15,7 @@ mod live_text;
 mod media;
 mod monitor;
 mod output;
+mod projector;
 mod recovery;
 mod relink;
 mod remote;

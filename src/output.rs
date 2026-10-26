@@ -5,11 +5,15 @@
 //! a worker thread, so a slow name lookup or a stuck port can never stall the
 //! show; problems come back through `errors`.
 
-use crate::show::{MidiKind, MidiOut, MscCommand, OscOut, SendCue, SendTarget};
+use crate::show::{
+    MidiKind, MidiOut, MscCommand, NetworkOut, OscOut, ProjectorOut, SendCue, SendTarget,
+};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::collections::HashMap;
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::io::Write;
+use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OscArg {
@@ -139,6 +143,15 @@ pub enum Outgoing {
         port: Option<String>,
         bytes: Vec<u8>,
     },
+    /// A PJLink command. Sent from a thread of its own for that projector,
+    /// since a projector can take seconds to answer.
+    Projector(ProjectorOut),
+    /// Bytes over TCP, from a thread of its own for that host.
+    Tcp {
+        host: String,
+        port: u16,
+        payload: Vec<u8>,
+    },
 }
 
 impl Outgoing {
@@ -153,13 +166,96 @@ impl Outgoing {
                 port: m.port.clone(),
                 bytes: midi_bytes(m),
             },
+            SendTarget::Projector(p) => Outgoing::Projector(p.clone()),
+            SendTarget::Network(NetworkOut {
+                host,
+                port,
+                tcp,
+                payload,
+            }) => {
+                let payload = unescape(payload);
+                let host = host.trim().to_string();
+                if *tcp {
+                    Outgoing::Tcp {
+                        host,
+                        port: *port,
+                        payload,
+                    }
+                } else {
+                    // One UDP packet, like an OSC message with other contents.
+                    Outgoing::Osc {
+                        host,
+                        port: *port,
+                        packet: payload,
+                    }
+                }
+            }
         }
     }
+}
+
+/// Bytes from text typed with escapes: `\r`, `\n`, `\t`, `\\`, `\0` and `\xNN`
+/// (two hex digits). Anything else after a backslash stays as typed.
+pub fn unescape(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('r') => {
+                chars.next();
+                out.push(b'\r');
+            }
+            Some('n') => {
+                chars.next();
+                out.push(b'\n');
+            }
+            Some('t') => {
+                chars.next();
+                out.push(b'\t');
+            }
+            Some('0') => {
+                chars.next();
+                out.push(0);
+            }
+            Some('\\') => {
+                chars.next();
+                out.push(b'\\');
+            }
+            Some('x') => {
+                let mut ahead = chars.clone();
+                ahead.next();
+                let hex: String = ahead.by_ref().take(2).collect();
+                if hex.len() == 2
+                    && let Ok(b) = u8::from_str_radix(&hex, 16)
+                {
+                    out.push(b);
+                    chars = ahead;
+                } else {
+                    out.push(b'\\');
+                }
+            }
+            _ => out.push(b'\\'),
+        }
+    }
+    out
 }
 
 /// A short description of what a send cue sends, for the cue list.
 pub fn describe(cue: &SendCue) -> String {
     match &cue.target {
+        SendTarget::Projector(p) => format!("Projector {}: {}", p.host.trim(), p.action.label()),
+        SendTarget::Network(n) => format!(
+            "{} {}:{} {}",
+            if n.tcp { "TCP" } else { "UDP" },
+            n.host.trim(),
+            n.port,
+            n.payload.trim()
+        ),
         SendTarget::Osc(OscOut {
             host,
             port,
@@ -220,8 +316,33 @@ impl Outbox {
             .name("send-cues".into())
             .spawn(move || {
                 let mut sender = SocketSet::default();
+                let mut hosts: HashMap<String, Sender<Outgoing>> = HashMap::new();
                 for job in rx {
-                    if let Err(e) = sender.send(&job) {
+                    // Projectors and TCP hosts can be slow or gone, so each
+                    // has a thread of its own: one that doesn't answer holds
+                    // up nobody else, and commands to it still go in order.
+                    let host_key = match &job {
+                        Outgoing::Projector(p) => {
+                            Some(format!("pjlink {}:{}", p.host.trim(), p.port))
+                        }
+                        Outgoing::Tcp { host, port, .. } => Some(format!("tcp {host}:{port}")),
+                        _ => None,
+                    };
+                    if let Some(key) = host_key {
+                        let tx = hosts.entry(key.clone()).or_insert_with(|| {
+                            let (tx, jobs) = unbounded::<Outgoing>();
+                            let errors = err_tx.clone();
+                            let _ = std::thread::Builder::new().name(key).spawn(move || {
+                                for job in jobs {
+                                    if let Err(e) = send_network(&job) {
+                                        let _ = errors.send(e);
+                                    }
+                                }
+                            });
+                            tx
+                        });
+                        let _ = tx.send(job);
+                    } else if let Err(e) = sender.send(&job) {
                         let _ = err_tx.send(e);
                     }
                 }
@@ -266,6 +387,34 @@ impl Outbox {
     }
 }
 
+/// Send what goes over a TCP connection of its own: a projector command or
+/// bytes to a host.
+fn send_network(job: &Outgoing) -> Result<(), String> {
+    match job {
+        Outgoing::Projector(p) => crate::projector::send(p),
+        Outgoing::Tcp {
+            host,
+            port,
+            payload,
+        } => {
+            let addr = (host.as_str(), *port)
+                .to_socket_addrs()
+                .map_err(|e| format!("TCP: can't find {host}: {e}"))?
+                .next()
+                .ok_or_else(|| format!("TCP: no address for {host}"))?;
+            let timeout = Duration::from_secs(4);
+            let mut stream = TcpStream::connect_timeout(&addr, timeout)
+                .map_err(|e| format!("TCP: can't connect to {host}:{port}: {e}"))?;
+            stream.set_write_timeout(Some(timeout)).ok();
+            stream
+                .write_all(payload)
+                .and_then(|()| stream.flush())
+                .map_err(|e| format!("TCP to {host}:{port}: {e}"))
+        }
+        _ => Err("internal: not a network message".into()),
+    }
+}
+
 /// The sockets and MIDI connections the worker keeps open between sends.
 #[derive(Default)]
 struct SocketSet {
@@ -280,9 +429,9 @@ impl SocketSet {
             Outgoing::Osc { host, port, packet } => {
                 let addr = (host.as_str(), *port)
                     .to_socket_addrs()
-                    .map_err(|e| format!("OSC: can't find {host}: {e}"))?
+                    .map_err(|e| format!("UDP: can't find {host}: {e}"))?
                     .next()
-                    .ok_or_else(|| format!("OSC: no address for {host}"))?;
+                    .ok_or_else(|| format!("UDP: no address for {host}"))?;
                 let socket = if addr.is_ipv4() {
                     &mut self.udp4
                 } else {
@@ -294,15 +443,16 @@ impl SocketSet {
                     } else {
                         "[::]:0"
                     };
-                    *socket = Some(UdpSocket::bind(bind).map_err(|e| format!("OSC: {e}"))?);
+                    *socket = Some(UdpSocket::bind(bind).map_err(|e| format!("UDP: {e}"))?);
                 }
                 socket
                     .as_ref()
                     .expect("just opened")
                     .send_to(packet, addr)
-                    .map_err(|e| format!("OSC to {host}:{port}: {e}"))?;
+                    .map_err(|e| format!("UDP to {host}:{port}: {e}"))?;
                 Ok(())
             }
+            Outgoing::Projector(_) | Outgoing::Tcp { .. } => send_network(job),
             Outgoing::Midi { port, bytes } => {
                 let name = port.as_ref().ok_or("MIDI: no output chosen")?;
                 if !self.midi.contains_key(name) {
@@ -553,5 +703,104 @@ mod tests {
         });
         let mut buf = [0u8; 64];
         assert!(receiver.recv_from(&mut buf).is_ok());
+    }
+
+    #[test]
+    fn escapes_become_bytes() {
+        assert_eq!(unescape("PON\\r"), b"PON\r");
+        assert_eq!(unescape("\\x02PON\\x03"), [0x02, b'P', b'O', b'N', 0x03]);
+        assert_eq!(unescape("a\\nb\\tc\\0"), b"a\nb\tc\0");
+        assert_eq!(unescape("one\\\\two"), b"one\\two");
+        // Not an escape: left as typed. A short or bad hex pair too.
+        assert_eq!(unescape("C:\\dir"), b"C:\\dir");
+        assert_eq!(unescape("\\x4"), b"\\x4");
+        assert_eq!(unescape("\\xZZ"), b"\\xZZ");
+        assert_eq!(unescape("end\\"), b"end\\");
+        assert_eq!(unescape("héllo"), "héllo".as_bytes());
+    }
+
+    #[test]
+    fn network_cues_become_tcp_or_udp() {
+        let mut n = NetworkOut {
+            host: " 10.0.0.9 ".into(),
+            port: 1024,
+            tcp: true,
+            payload: "\\x02PON\\x03".into(),
+        };
+        let cue = |n: &NetworkOut| SendCue {
+            target: SendTarget::Network(n.clone()),
+        };
+        assert_eq!(
+            Outgoing::from_cue(&cue(&n)),
+            Outgoing::Tcp {
+                host: "10.0.0.9".into(),
+                port: 1024,
+                payload: vec![2, b'P', b'O', b'N', 3],
+            }
+        );
+        assert_eq!(describe(&cue(&n)), "TCP 10.0.0.9:1024 \\x02PON\\x03");
+        n.tcp = false;
+        assert_eq!(
+            Outgoing::from_cue(&cue(&n)),
+            Outgoing::Osc {
+                host: "10.0.0.9".into(),
+                port: 1024,
+                packet: vec![2, b'P', b'O', b'N', 3],
+            }
+        );
+        assert!(describe(&cue(&n)).starts_with("UDP "));
+    }
+
+    #[test]
+    fn projector_cues_are_described() {
+        let cue = SendCue {
+            target: SendTarget::Projector(ProjectorOut::default()),
+        };
+        assert_eq!(describe(&cue), "Projector 192.168.0.100: Power on");
+    }
+
+    #[test]
+    fn tcp_bytes_and_projector_commands_go_out_for_real() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let got = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            s.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let outbox = Outbox::new();
+        outbox.send(Outgoing::from_cue(&SendCue {
+            target: SendTarget::Network(NetworkOut {
+                host: "127.0.0.1".into(),
+                port,
+                tcp: true,
+                payload: "hello\\r\\n".into(),
+            }),
+        }));
+        assert_eq!(got.join().unwrap(), b"hello\r\n");
+
+        // A projector that is not there is reported, and does not hold up a
+        // message to anywhere else.
+        let dead = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        outbox.send(Outgoing::Projector(ProjectorOut {
+            port: dead,
+            host: "127.0.0.1".into(),
+            ..ProjectorOut::default()
+        }));
+        let mut errors = Vec::new();
+        for _ in 0..200 {
+            errors.extend(outbox.errors());
+            if !errors.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(errors[0].contains("can't connect"), "{errors:?}");
     }
 }
