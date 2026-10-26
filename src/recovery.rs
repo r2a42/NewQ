@@ -9,6 +9,8 @@
 
 use crate::show::Show;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::SystemTime;
 
 /// How often a changed show is written out.
@@ -29,7 +31,48 @@ pub fn write(show: &Show, show_path: Option<&Path>) -> anyhow::Result<()> {
     show.save(&path_for(show_path))
 }
 
+/// One recovery write at a time, and `clear` waits for one in progress.
+static WRITING: Mutex<()> = Mutex::new(());
+/// A write is running or waiting to.
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Counts the clearings, so a write asked for before one doesn't come after it
+/// and put back a copy that has just been deleted.
+static CLEARED: AtomicU64 = AtomicU64::new(0);
+
+/// Write the recovery copy of `show` on a thread of its own: serialising a big
+/// show and flushing it to the disk can take tens of milliseconds, which is a
+/// dropped frame on every output. If the last write is still going, nothing
+/// is started (the next one is only seconds away). Returns whether one was.
+pub fn write_in_background(show: Show, show_path: Option<PathBuf>) -> bool {
+    if IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    let asked = CLEARED.load(Ordering::Acquire);
+    let spawned = std::thread::Builder::new()
+        .name("autosave".into())
+        .spawn(move || {
+            {
+                let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+                // Cleared since it was asked for (the show was saved, or its
+                // changes were thrown away): the copy would be stale.
+                if CLEARED.load(Ordering::Acquire) == asked
+                    && let Err(e) = write(&show, show_path.as_deref())
+                {
+                    log::warn!("could not write the recovery file: {e:#}");
+                }
+            }
+            IN_FLIGHT.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        IN_FLIGHT.store(false, Ordering::Release);
+        return false;
+    }
+    true
+}
+
 pub fn clear(show_path: Option<&Path>) {
+    CLEARED.fetch_add(1, Ordering::AcqRel);
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let _ = std::fs::remove_file(path_for(show_path));
 }
 
@@ -130,5 +173,60 @@ mod tests {
         assert_eq!(pending(None), Some(path_for(None)));
         clear(None);
         assert_eq!(pending(None), None);
+    }
+
+    /// Wait (up to ten seconds) until no background write is running.
+    fn wait_idle() {
+        let t0 = std::time::Instant::now();
+        while IN_FLIGHT.load(Ordering::Acquire) {
+            assert!(t0.elapsed().as_secs() < 10, "the write never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    // These two share the process-wide write state, so they run one at a time.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn the_copy_is_written_on_a_thread_of_its_own() {
+        let _only = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let d = dir("background");
+        let path = d.join("a.newq");
+        let mut show = Show::default();
+        show.save(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let cue = show.make_cue(CueType::Wait, None, 0);
+        show.cues.push(cue);
+        assert!(write_in_background(show.clone(), Some(path.clone())));
+        wait_idle();
+        let rec = pending(Some(&path)).expect("the copy was written");
+        assert_eq!(Show::load(&rec).unwrap().cues.len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_write_that_was_asked_for_before_a_clearing_does_not_come_after_it() {
+        let _only = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let d = dir("cleared");
+        let path = d.join("a.newq");
+        let mut show = Show::default();
+        // Hold the write lock, as a write in progress does: the request waits
+        // behind it, and the clearing happens first.
+        let held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let cue = show.make_cue(CueType::Wait, None, 0);
+        show.cues.push(cue);
+        assert!(write_in_background(show.clone(), Some(path.clone())));
+        assert!(
+            !write_in_background(show.clone(), Some(path.clone())),
+            "one at a time"
+        );
+        CLEARED.fetch_add(1, Ordering::AcqRel); // what `clear` does before it takes the lock
+        drop(held);
+        wait_idle();
+        assert!(
+            !path_for(Some(&path)).exists(),
+            "a stale copy was put back after the show was saved"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

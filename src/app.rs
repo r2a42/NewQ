@@ -742,8 +742,10 @@ impl App {
             let path = self.ui.show_path.as_deref();
             if !self.ui.dirty {
                 recovery::clear(path);
-            } else if let Err(e) = recovery::write(&self.show, path) {
-                log::warn!("could not write the recovery file: {e:#}");
+            } else {
+                // On a thread of its own: the write and its flush are a dropped
+                // frame on every output if they happen here.
+                recovery::write_in_background(self.show.clone(), path.map(PathBuf::from));
             }
         }
         if self.ui.dirty {
