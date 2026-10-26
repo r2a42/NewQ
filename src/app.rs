@@ -84,6 +84,13 @@ impl Drop for ScreenWindow {
 /// A test-pattern texture, with the output number and size it shows.
 type Pattern = (Arc<LayerTexture>, usize, (u32, u32));
 
+/// What a device scan found; `audio` is None when it didn't look.
+struct DeviceList {
+    midi_in: Vec<String>,
+    midi_out: Vec<String>,
+    audio: Option<Vec<String>>,
+}
+
 pub struct App {
     show: Show,
     engine: Engine,
@@ -120,6 +127,9 @@ pub struct App {
     /// When the main window was last put back on its display.
     last_homing: Instant,
     last_monitor_scan: Instant,
+    /// A look at the MIDI ports and audio devices, running on a thread (asking
+    /// the system for them can stall for a while).
+    device_scan: Option<std::sync::mpsc::Receiver<DeviceList>>,
     last_tick: Instant,
     /// When the clock triggers were last looked at.
     last_clock_look: Instant,
@@ -184,6 +194,7 @@ impl App {
             monitors_changed: None,
             last_homing: Instant::now(),
             last_monitor_scan: Instant::now(),
+            device_scan: None,
             last_tick: Instant::now(),
             last_clock_look: Instant::now(),
             last_autosave: Instant::now(),
@@ -228,14 +239,50 @@ impl App {
                 primary: primary.as_ref() == Some(m),
             })
             .collect();
-        self.ui.midi_ports = remote::midi_inputs();
-        self.ui.midi_out_ports = crate::output::midi_outputs();
-        // Listing and opening audio devices can take a while; not during a show.
-        if !self.engine.is_active() {
-            self.ui.audio_devices = audio::output_devices();
-            self.engine.audio.retry_failed();
-        }
+        self.scan_devices();
         self.last_monitor_scan = Instant::now();
+    }
+
+    /// Take what the device scan found, if it has finished.
+    fn collect_devices(&mut self) {
+        if let Some(rx) = &self.device_scan {
+            match rx.try_recv() {
+                Ok(found) => {
+                    self.device_scan = None;
+                    self.ui.midi_ports = found.midi_in;
+                    self.ui.midi_out_ports = found.midi_out;
+                    if let Some(devices) = found.audio {
+                        self.engine.audio.retry_failed(&devices);
+                        self.ui.audio_devices = devices;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.device_scan = None,
+            }
+        }
+    }
+
+    /// Start a device scan unless one is still running. Listing and opening
+    /// audio devices can take a while; not during a show.
+    fn scan_devices(&mut self) {
+        self.collect_devices();
+        if self.device_scan.is_some() {
+            return;
+        }
+        let with_audio = !self.engine.is_active();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("device-scan".into())
+            .spawn(move || {
+                let _ = tx.send(DeviceList {
+                    midi_in: remote::midi_inputs(),
+                    midi_out: crate::output::midi_outputs(),
+                    audio: with_audio.then(audio::output_devices),
+                });
+            });
+        if spawned.is_ok() {
+            self.device_scan = Some(rx);
+        }
     }
 
     /// Keep the OSC and MIDI listeners matching the show's settings, and act
@@ -918,6 +965,7 @@ impl ApplicationHandler for App {
             log::warn!("event loop stalled for {:.0} ms", dt * 1000.0);
         }
 
+        self.collect_devices();
         if now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
             self.scan_monitors(event_loop);
         }

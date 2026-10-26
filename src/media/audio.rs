@@ -96,6 +96,12 @@ impl Device {
     /// Open the named device, or the system's default. A device that can't
     /// be opened is kept, with its error, so it can be shown and retried.
     fn open(name: Option<&str>) -> Device {
+        Device::open_again(name, None)
+    }
+
+    /// Open a device that failed before with `earlier`: the same failure again
+    /// isn't logged, so a missing device doesn't fill the log every few seconds.
+    fn open_again(name: Option<&str>, earlier: Option<&str>) -> Device {
         let (voices_tx, voices_rx) = unbounded();
         let lost = Arc::new(Lost::default());
         match open_stream(name, voices_rx, lost.clone()) {
@@ -110,7 +116,9 @@ impl Device {
                 lost,
             },
             Err(e) => {
-                log::error!("audio output unavailable: {e:#}");
+                if earlier != Some(format!("{e:#}").as_str()) {
+                    log::error!("audio output unavailable: {e:#}");
+                }
                 Device {
                     _stream: None,
                     open: false,
@@ -229,11 +237,18 @@ impl AudioOut {
         self.synced = Some(key);
     }
 
-    /// Try again to open devices that failed (a USB interface plugged in later).
-    pub fn retry_failed(&mut self) {
+    /// Try again to open devices that failed (a USB interface plugged in
+    /// later). `present` is the list of devices that are connected now: a device
+    /// that isn't there is left alone, so a machine with no audio output isn't
+    /// retried (and logged) every few seconds.
+    pub fn retry_failed(&mut self, present: &[String]) {
         for (k, d) in &mut self.devices {
-            if d.error.is_some() || d.lost.is_set() {
-                *d = Device::open(k.as_deref());
+            let could_open = match k {
+                Some(name) => present.contains(name),
+                None => !present.is_empty(),
+            };
+            if could_open && (d.error.is_some() || d.lost.is_set()) {
+                *d = Device::open_again(k.as_deref(), d.error.as_deref());
             }
         }
     }
@@ -788,8 +803,10 @@ mod tests {
         assert_eq!(audio.device_status(None), Some(status));
         // An output that isn't in the show falls back to the default too.
         assert!(audio.device_status(Some(AudioOutputId(99))).is_some());
-        // Retrying doesn't panic or lose the device.
-        audio.retry_failed();
+        // Retrying doesn't panic or lose the device, and a device that isn't
+        // there isn't tried at all.
+        audio.retry_failed(&[]);
+        audio.retry_failed(&["Another Interface".to_string()]);
         assert!(
             audio
                 .device_status(Some(AudioOutputId(1)))
@@ -886,7 +903,7 @@ mod tests {
         assert!(audio.device_status(None).unwrap().error.is_some());
         assert!(audio.summary().is_err(), "the status bar shows it");
         // Trying again opens the device afresh (here there is none to open).
-        audio.retry_failed();
+        audio.retry_failed(&["Some Interface".to_string()]);
         assert!(
             !audio.devices[&None].lost.is_set(),
             "a new device, not the lost one"
