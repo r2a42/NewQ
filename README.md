@@ -38,51 +38,56 @@ includes FFmpeg, so there's nothing else to install.
 - **Fade cues** are still available for dimming or ramping another cue's
   opacity and volume mid-cue.
 - **Stop All / Panic** (Esc) fades everything out; press it again to stop instantly.
-- **Displays and outputs:** the show has its own numbered **Displays**
-  (*Display 1*, *Display 2*, a name you choose such as *Stage TV*), and each
-  one is assigned by hand to a monitor. Outputs are placed on a display, not
-  on a monitor, so moving a show to another venue means reassigning each
-  display once. **Nothing is ever reassigned automatically.** If the monitor
-  a display is assigned to is unplugged, its outputs show on no other
-  monitor and the panel says why; when it is plugged in again the display is
-  back on it. A monitor is recognised by its make and model (or the system's
-  name for it), not by where it sits in the system's list. Two identical
-  monitors can only be told apart by their order, so a display assigned to one
-  of two look-alikes is only used while both are connected. An output can't
-  cover the monitor NewQ's main window is on; it stays in the main window and
-  the panel says so. An output can also be kept in the main window only (the
-  default for a new output). The main window has a live preview of an output,
-  including ones that are fullscreen elsewhere; with more than one output, a
-  menu above it picks which one is previewed. Each playing cue's **progress bar in the Active panel is also its
-  scrubber**: click or drag it to jump around in a video, a sound or a timed
-  still (it works while paused; a looping cue, a camera and a cue that is
+- **Displays and sub displays:** cues are sent to a **display** (*Display 1*,
+  a name you choose such as *Stage TV*) or to a **sub display**, an area of
+  one. Each display is assigned by hand to a monitor in the Displays panel,
+  so moving a show to another venue means reassigning each display once.
+  **Nothing is ever reassigned automatically.** If the monitor a display is
+  assigned to is unplugged, what was sent to it **keeps playing, to no
+  destination**: nothing is drawn on any other monitor, the status bar, the
+  cue list and the display's own row say so, and the main window's preview
+  still shows what it would show. When the *same* monitor is plugged in again
+  the picture is back on it at once, mid-cue and in time; or choose another
+  monitor for the display, or send the cues to another display. A display
+  with no monitor assigned shows only in the main window (the default for a
+  new one). Monitors are recognised by hardware identity where the system
+  tells it (see below), not by their position in the system's list. Two
+  identical monitors can only be told apart by their order, so a display
+  assigned to one of two look-alikes is only used while both are connected. A
+  display can't cover the monitor NewQ's main window is on; it stays in the
+  main window and the panel says so. The main window has a live preview of
+  any display or sub display; with more than one, a menu above it picks which.
+  *Test pattern* shows colour bars with the display's name so you can tell
+  which projector is which. Shows from before displays and outputs were one
+  thing are converted when they are opened, with the same cues pointing at the
+  same things: an output becomes a display on its monitor (or a sub display if
+  it was on one; a second output that shared a display becomes a sub display
+  covering all of it), and one that was *Automatic* gets the first monitor the
+  main window isn't on, once (the log says what was done).
+- **Scrubbing:** each playing cue's **progress bar in the Active panel is also
+  its scrubber**: click or drag it to jump around in a video, a sound or a
+  timed still (it works while paused; a looping cue, a camera and a cue that is
   fading out can't be scrubbed). Scroll over a bar to move that cue by the
   wheel. Hold **Shift** while dragging or scrolling to move every cue that can
   be scrubbed by the same amount, keeping their positions relative to each
-  other. *Test pattern* shows colour bars with the
-  output's number so you can tell which projector is which. Shows saved
-  before displays were numbered are given displays once, when they are
-  opened: a monitor they named becomes a display assigned to it, and an
-  output that was *Automatic* gets the first monitor the main window isn't
-  on (the log says what was done); from then
-  on it stays there.
-- **Corner pin (keystone) per output:** click *Corner pin…* and drag the four
-  corners on the output's preview (hold Shift for fine moves), or type exact
+  other.
+- **Corner pin (keystone) per display:** click *Corner pin…* and drag the four
+  corners on the display's preview (hold Shift for fine moves), or type exact
   positions. Click a corner to select it, then the arrow keys move it one
   pixel at a time (Shift + arrow: 5 pixels); this works on sub display
-  areas too, where clicking inside an area selects all of it. The warp is perspective-correct, applies to everything on the
-  output, and shows on the preview too; turn on *Test pattern* to line it up
-  on the real screen. *Reset* returns to the full screen.
-- **Sub displays:** split a display into areas that each work like a
-  display of their own, e.g. one projector covering two set pieces, or one LED
-  processor input feeding several screens. Add one under *Sub displays*
-  (or *Outputs → Add sub display on*), choose which display it is part of,
-  then choose *On sub display …* as an output's placement. Click *Edit area…* to see the whole display live
-  with every area outlined: drag inside an area to move it, drag its corners
-  to reshape it into any four-cornered shape, or type exact pixels. An
-  output's corner pin works inside its sub display, and everything is
-  clipped to the area. Each display gets a single fullscreen window, however
-  many outputs are on it.
+  areas too, where clicking inside an area selects all of it. The warp is
+  perspective-correct, applies to everything on the display, and shows on the
+  preview too; turn on *Test pattern* to line it up on the real screen.
+  *Reset* returns to the full screen.
+- **Sub displays:** split a display into areas that each work like a display
+  of their own, e.g. one projector covering two set pieces, or one LED
+  processor input feeding several screens. Add one under *Sub displays* (or
+  *Displays → Add sub display on*) and choose which display it is part of.
+  Click *Edit area…* to see the whole display live with every area outlined:
+  drag inside an area to move it, drag its corners to reshape it into any
+  four-cornered shape (the area is its keystone), or type exact pixels.
+  Everything is clipped to the area. Each monitor gets a single fullscreen
+  window, however many displays and sub displays are on it.
 - **Loops and slices:** set an in and out point on a video or audio cue and
   tick *Loop* to repeat just that slice, either forever or a set number of
   plays. Each pass is cut to an exact length and the next one is already

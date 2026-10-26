@@ -11,8 +11,8 @@ use crate::recovery;
 use crate::remote::{self, Remote};
 use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
 use crate::show::{
-    ColorAdjust, Corners, DisplayId, DisplaySlot, Fit, LayerTransform, MonitorKey, OutputConfig,
-    OutputId, Placement, RemoteSettings, Show, SlotState, SubDisplay, slot_state,
+    ColorAdjust, Corners, DisplayState, Fit, LayerTransform, MonitorKey, OutputConfig, OutputId,
+    RemoteSettings, Show, display_state,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -152,6 +152,8 @@ pub struct App {
     closing: Vec<(Arc<Window>, JoinHandle<()>)>,
     /// GPU textures for playing layers, with the serial of the uploaded frame.
     textures: HashMap<u64, (Arc<LayerTexture>, u64)>,
+    /// The size each output was last shown at, kept while its display is away.
+    last_sizes: HashMap<OutputId, (u32, u32)>,
     /// Test-pattern textures per output.
     patterns: HashMap<OutputId, Pattern>,
     monitors: Vec<MonitorHandle>,
@@ -233,6 +235,7 @@ impl App {
             targets: HashMap::new(),
             closing: Vec::new(),
             textures: HashMap::new(),
+            last_sizes: HashMap::new(),
             patterns: HashMap::new(),
             monitors: Vec::new(),
             primary: None,
@@ -439,13 +442,7 @@ impl App {
             // top of it.
             return self.show.outputs.iter().map(|o| (o.id, None)).collect();
         };
-        route_outputs(
-            &self.show.outputs,
-            &self.show.sub_displays,
-            &self.show.displays,
-            &keys,
-            control,
-        )
+        route_outputs(&self.show.outputs, &keys, control)
     }
 
     /// The connected monitors as shows recognise them.
@@ -460,11 +457,11 @@ impl App {
             .collect()
     }
 
-    /// Give an older show's placements their displays, once, as soon as it
-    /// is known which monitor the main window is on. After that nothing
-    /// moves an output to another monitor.
+    /// Give the outputs of an older show that were "automatic" a monitor, once,
+    /// as soon as it is known which monitor the main window is on. After that
+    /// nothing moves an output to another monitor.
     fn assign_legacy_displays(&mut self) {
-        if self.main_window_only || !self.show.needs_display_assignment() {
+        if self.main_window_only || !self.show.needs_automatic_assignment() {
             return;
         }
         let found = self.control_monitor();
@@ -472,7 +469,7 @@ impl App {
             return;
         };
         let keys = self.monitor_keys();
-        for note in self.show.assign_displays(&keys, control) {
+        for note in self.show.assign_automatic_displays(&keys, control) {
             self.engine.log(format!("Displays: {note}"));
         }
     }
@@ -694,17 +691,8 @@ impl App {
             let Some(Some(t)) = routes.get(&o.id) else {
                 continue;
             };
-            let order = match o.placement {
-                Placement::SubDisplay(v) => {
-                    1 + self
-                        .show
-                        .sub_displays
-                        .iter()
-                        .position(|x| x.id == v)
-                        .unwrap_or(0)
-                }
-                _ => 0,
-            };
+            // Whole displays go underneath, then sub displays in list order.
+            let order = usize::from(o.is_sub_display());
             per_screen
                 .entry(t.monitor)
                 .or_default()
@@ -758,16 +746,13 @@ impl App {
                         .get(t.monitor)
                         .map(|x| x.title().to_string())
                         .unwrap_or_default();
-                    match cfg.placement {
-                        Placement::SubDisplay(v) => OutputRoute::SubDisplay {
-                            name: self
-                                .show
-                                .sub_display(v)
-                                .map(|x| x.name.clone())
-                                .unwrap_or_default(),
+                    if cfg.is_sub_display() {
+                        OutputRoute::SubDisplay {
+                            name: cfg.name.clone(),
                             display,
-                        },
-                        _ => OutputRoute::Display(display),
+                        }
+                    } else {
+                        OutputRoute::Display(display)
                     }
                 }
             };
@@ -777,27 +762,57 @@ impl App {
         let control = self.control_monitor();
         self.ui.display_states = self
             .show
-            .displays
+            .outputs
             .iter()
-            .map(|d| (d.id, slot_state(d, &keys, control)))
+            .filter(|o| !o.is_sub_display())
+            .map(|d| {
+                (
+                    d.id,
+                    display_state(d.monitor.as_ref(), d.twins, &keys, control),
+                )
+            })
             .collect();
         self.ui.sub_monitors = self
             .show
-            .sub_displays
+            .outputs
             .iter()
-            .filter_map(|v| match self.ui.display_states.get(&v.display?)? {
-                SlotState::Connected(m) | SlotState::OnMainWindowDisplay(m) => Some((v.id, *m)),
+            .filter_map(|o| match self.ui.display_states.get(&o.within?)? {
+                DisplayState::Connected(m) | DisplayState::OnMainWindowDisplay(m) => {
+                    Some((o.id, *m))
+                }
                 _ => None,
             })
+            .collect();
+        // Cues sent to a display whose monitor isn't there keep playing, to
+        // nothing; the UI says so until it is back.
+        self.ui.dark_outputs = self
+            .show
+            .outputs
+            .iter()
+            .filter(|o| o.enabled)
+            .filter(|o| {
+                let display = o.within.unwrap_or(o.id);
+                self.ui.display_states.get(&display) == Some(&DisplayState::Missing)
+            })
+            .map(|o| o.id)
             .collect();
 
         // Decode at the size each output is shown at. Outputs in the main
         // window decode at the default (1080p) size.
-        self.engine.output_sizes = self
+        let mut sizes: HashMap<OutputId, (u32, u32)> = self
             .targets
             .iter()
             .filter_map(|(id, t)| Some((*id, t.area.size_on(self.screens.get(&t.monitor)?.size))))
             .collect();
+        // A display whose monitor has gone keeps the size it had, so what
+        // plays meanwhile is ready for it when it is back.
+        self.last_sizes.extend(sizes.iter().map(|(k, v)| (*k, *v)));
+        self.last_sizes
+            .retain(|id, _| self.ui.dark_outputs.contains(id) || sizes.contains_key(id));
+        for (id, size) in &self.last_sizes {
+            sizes.entry(*id).or_insert(*size);
+        }
+        self.engine.output_sizes = sizes;
         // Release windows once their render thread has dropped the surface.
         self.closing.retain(|(_, h)| !h.is_finished());
     }
@@ -813,7 +828,15 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, o)| o.enabled)
-            .map(|(i, o)| (o.id, o.name.clone(), o.test_pattern, i + 1, o.corners))
+            .map(|(i, o)| {
+                // A sub display's area is its keystone.
+                let corners = if o.is_sub_display() {
+                    Corners::default()
+                } else {
+                    o.corners
+                };
+                (o.id, o.name.clone(), o.test_pattern, i + 1, corners)
+            })
             .collect();
         let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
         for (id, name, want_pattern, number, corners) in configs {
@@ -1263,37 +1286,30 @@ fn control_for_routing(
 /// nothing is picked automatically.
 fn route_outputs(
     outputs: &[OutputConfig],
-    subs: &[SubDisplay],
-    slots: &[DisplaySlot],
     monitors: &[MonitorKey],
     control: Option<usize>,
 ) -> HashMap<OutputId, Option<Target>> {
-    let on = |id: DisplayId| {
-        let slot = slots.iter().find(|d| d.id == id)?;
-        match slot_state(slot, monitors, control) {
-            SlotState::Connected(monitor) => Some(monitor),
-            _ => None,
-        }
-    };
     outputs
         .iter()
         .filter(|o| o.enabled)
         .map(|o| {
-            let target = match &o.placement {
-                Placement::Slot(d) => on(*d).map(|monitor| Target {
-                    monitor,
-                    area: Corners::default(),
-                }),
-                Placement::SubDisplay(v) => subs.iter().find(|x| x.id == *v).and_then(|v| {
-                    Some(Target {
-                        monitor: on(v.display?)?,
-                        area: v.area,
-                    })
-                }),
-                // Older placements are turned into displays when the show is
-                // opened (`Show::assign_displays`); until then, not on a display.
-                Placement::MainWindow | Placement::Auto | Placement::Display(_) => None,
+            let display = match o.within {
+                None => Some(o),
+                Some(d) => outputs.iter().find(|x| x.id == d && x.within.is_none()),
             };
+            let target = display.and_then(|d| {
+                match display_state(d.monitor.as_ref(), d.twins, monitors, control) {
+                    DisplayState::Connected(monitor) => Some(Target {
+                        monitor,
+                        area: if o.is_sub_display() {
+                            o.area
+                        } else {
+                            Corners::default()
+                        },
+                    }),
+                    _ => None,
+                }
+            });
             (o.id, target)
         })
         .collect()
@@ -1330,13 +1346,7 @@ fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::show::{DisplayRef, SubDisplayId};
-
-    fn output(id: u64, placement: Placement) -> OutputConfig {
-        let mut o = OutputConfig::new(OutputId(id), format!("Output {id}"));
-        o.placement = placement;
-        o
-    }
+    use crate::show::DisplayRef;
 
     fn keys(names: &[&str]) -> Vec<MonitorKey> {
         names
@@ -1348,27 +1358,31 @@ mod tests {
             .collect()
     }
 
-    /// A display of the show assigned to monitor `name` (at `index`).
-    fn slot(id: u64, name: &str, index: usize) -> DisplaySlot {
-        DisplaySlot {
-            id: DisplayId(id),
-            name: format!("Display {id}"),
-            monitor: Some(DisplayRef {
-                name: name.into(),
-                index,
-            }),
-            twins: 1,
-        }
+    /// A display assigned to monitor `name` (at `index`), or to none.
+    fn display(id: u64, monitor: Option<(&str, usize)>) -> OutputConfig {
+        let mut o = OutputConfig::new(OutputId(id), format!("Display {id}"));
+        o.monitor = monitor.map(|(name, index)| DisplayRef {
+            name: name.into(),
+            index,
+        });
+        o
+    }
+
+    /// A sub display: the area `area` of display `of`.
+    fn sub(id: u64, of: u64, area: Corners) -> OutputConfig {
+        let mut o = OutputConfig::new(OutputId(id), format!("Sub {id}"));
+        o.within = Some(OutputId(of));
+        o.area = area;
+        o
     }
 
     /// Routes as monitor indices.
     fn route(
         outputs: &[OutputConfig],
-        slots: &[DisplaySlot],
         monitors: &[&str],
         control: Option<usize>,
     ) -> HashMap<OutputId, Option<usize>> {
-        route_outputs(outputs, &[], slots, &keys(monitors), control)
+        route_outputs(outputs, &keys(monitors), control)
             .into_iter()
             .map(|(id, t)| (id, t.map(|t| t.monitor)))
             .collect()
@@ -1398,109 +1412,78 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_placed_on_a_display_automatically() {
-        // Outputs saved as "automatic" or by monitor name wait to be given a
-        // display when the show opens; routing never picks one itself.
+    fn a_display_is_on_the_monitor_it_was_assigned_to() {
         let outs = [
-            output(1, Placement::Auto),
-            output(
-                2,
-                Placement::Display(DisplayRef {
-                    name: "Projector".into(),
-                    index: 1,
-                }),
-            ),
-            output(3, Placement::MainWindow),
+            display(1, Some(("Samsung", 2))),
+            display(2, Some(("Projector", 1))),
         ];
-        let r = route(&outs, &[], &["Laptop", "Projector", "TV"], Some(0));
-        assert!(r.values().all(|m| m.is_none()), "{r:?}");
-    }
-
-    #[test]
-    fn an_output_is_on_the_monitor_its_display_was_assigned_to() {
-        let slots = [slot(1, "Samsung", 2), slot(2, "Projector", 1)];
-        let outs = [
-            output(1, Placement::Slot(DisplayId(1))),
-            output(2, Placement::Slot(DisplayId(2))),
-        ];
-        let monitors = ["Laptop", "Projector", "Samsung"];
-        let r = route(&outs, &slots, &monitors, Some(0));
+        let r = route(&outs, &["Laptop", "Projector", "Samsung"], Some(0));
         assert_eq!((r[&OutputId(1)], r[&OutputId(2)]), (Some(2), Some(1)));
         // Plugged in in another order: still the same monitors, found by name.
-        let r = route(&outs, &slots, &["Laptop", "Samsung", "Projector"], Some(0));
+        let r = route(&outs, &["Laptop", "Samsung", "Projector"], Some(0));
         assert_eq!((r[&OutputId(1)], r[&OutputId(2)]), (Some(1), Some(2)));
     }
 
     #[test]
     fn a_display_that_goes_away_is_not_replaced_by_another_monitor() {
-        let slots = [slot(1, "Samsung", 1)];
-        let outs = [output(1, Placement::Slot(DisplayId(1)))];
+        let outs = [display(1, Some(("Samsung", 1)))];
         // The Samsung is gone and a different monitor is in its place: nothing shows on it.
-        let r = route(&outs, &slots, &["Laptop", "Dell"], Some(0));
+        let r = route(&outs, &["Laptop", "Dell"], Some(0));
         assert_eq!(r[&OutputId(1)], None);
-        let r = route(&outs, &slots, &["Laptop"], Some(0));
+        let r = route(&outs, &["Laptop"], Some(0));
         assert_eq!(r[&OutputId(1)], None);
         // And it is back where it was when the Samsung returns.
-        let r = route(&outs, &slots, &["Laptop", "Samsung"], Some(0));
+        let r = route(&outs, &["Laptop", "Samsung"], Some(0));
         assert_eq!(r[&OutputId(1)], Some(1));
     }
 
     #[test]
     fn a_display_with_no_monitor_or_on_the_main_windows_monitor_shows_nothing() {
-        let mut empty = slot(1, "x", 0);
-        empty.monitor = None;
-        let on_main = slot(2, "Laptop", 0);
-        let outs = [
-            output(1, Placement::Slot(DisplayId(1))),
-            output(2, Placement::Slot(DisplayId(2))),
-        ];
-        let r = route(
-            &outs,
-            &[empty.clone(), on_main.clone()],
-            &["Laptop", "TV"],
-            Some(0),
-        );
+        let outs = [display(1, None), display(2, Some(("Laptop", 0)))];
+        let r = route(&outs, &["Laptop", "TV"], Some(0));
         assert_eq!((r[&OutputId(1)], r[&OutputId(2)]), (None, None));
         let monitors = keys(&["Laptop", "TV"]);
+        let state = |o: &OutputConfig, control| {
+            display_state(o.monitor.as_ref(), o.twins, &monitors, control)
+        };
+        assert_eq!(state(&outs[0], Some(0)), DisplayState::Unassigned);
         assert_eq!(
-            slot_state(&empty, &monitors, Some(0)),
-            SlotState::Unassigned
+            state(&outs[1], Some(0)),
+            DisplayState::OnMainWindowDisplay(0)
         );
-        assert_eq!(
-            slot_state(&on_main, &monitors, Some(0)),
-            SlotState::OnMainWindowDisplay(0)
-        );
-        // Not covered by a sub display either.
-        assert_eq!(
-            slot_state(&on_main, &monitors, Some(1)),
-            SlotState::Connected(0)
-        );
+        // Not covered by a sub display either, and free when the main window is elsewhere.
+        assert_eq!(state(&outs[1], Some(1)), DisplayState::Connected(0));
     }
 
     #[test]
     fn identical_monitors_are_only_used_when_they_can_be_told_apart() {
+        let state = |monitor: (&str, usize), twins: u32, connected: &[&str], control| {
+            let r = DisplayRef {
+                name: monitor.0.into(),
+                index: monitor.1,
+            };
+            display_state(Some(&r), twins, &keys(connected), control)
+        };
         // Two of the same TV when the display was assigned, the second one chosen.
-        let mut s = slot(1, "Samsung", 2);
-        s.twins = 2;
-        let both = keys(&["Laptop", "Samsung", "Samsung"]);
-        assert_eq!(slot_state(&s, &both, Some(0)), SlotState::Connected(2));
+        let both = ["Laptop", "Samsung", "Samsung"];
+        assert_eq!(
+            state(("Samsung", 2), 2, &both, Some(0)),
+            DisplayState::Connected(2)
+        );
         // One unplugged: the one left might be either, so neither is used.
-        let one = keys(&["Laptop", "Samsung"]);
-        assert_eq!(slot_state(&s, &one, Some(0)), SlotState::Missing);
+        assert_eq!(
+            state(("Samsung", 2), 2, &["Laptop", "Samsung"], Some(0)),
+            DisplayState::Missing
+        );
         // A look-alike added later to a display assigned when there was one:
         // it keeps the position it had, and isn't guessed otherwise.
-        let single = slot(1, "Samsung", 1);
-        let two = keys(&["Laptop", "Samsung", "Samsung"]);
-        assert_eq!(slot_state(&single, &two, Some(0)), SlotState::Connected(1));
-        let moved = keys(&["Samsung", "Samsung", "Laptop"]);
         assert_eq!(
-            slot_state(&single, &moved, Some(2)),
-            SlotState::Connected(1)
+            state(("Samsung", 1), 1, &both, Some(0)),
+            DisplayState::Connected(1)
         );
-        let other = slot(1, "Samsung", 0);
         assert_eq!(
-            slot_state(&other, &keys(&["Laptop", "Samsung", "Samsung"]), Some(0)),
-            SlotState::Missing
+            state(("Samsung", 0), 1, &both, Some(0)),
+            DisplayState::Missing
         );
     }
 
@@ -1516,75 +1499,57 @@ mod tests {
                 raw: "Monitor #2".into(),
             },
         ];
-        let by_model = slot(1, "SAMSUNG", 1);
-        let by_raw = slot(2, "Monitor #2", 1);
-        assert_eq!(
-            slot_state(&by_model, &monitors, Some(0)),
-            SlotState::Connected(1)
-        );
-        assert_eq!(
-            slot_state(&by_raw, &monitors, Some(0)),
-            SlotState::Connected(1)
-        );
+        let find = |name: &str| {
+            let r = DisplayRef {
+                name: name.into(),
+                index: 1,
+            };
+            display_state(Some(&r), 1, &monitors, Some(0))
+        };
+        assert_eq!(find("SAMSUNG"), DisplayState::Connected(1));
+        assert_eq!(find("Monitor #2"), DisplayState::Connected(1));
     }
 
     #[test]
-    fn disabled_outputs_are_not_routed() {
-        let mut o = output(1, Placement::Slot(DisplayId(1)));
+    fn disabled_displays_are_not_routed() {
+        let mut o = display(1, Some(("TV", 1)));
         o.enabled = false;
-        let r = route(&[o], &[slot(1, "TV", 1)], &["Laptop", "TV"], Some(0));
+        let r = route(&[o], &["Laptop", "TV"], Some(0));
         assert!(!r.contains_key(&OutputId(1)));
     }
 
     #[test]
-    fn sub_displays_share_a_display() {
-        let slots = [slot(1, "Projector", 1)];
-        let left = SubDisplay {
-            id: SubDisplayId(10),
-            name: "Left".into(),
-            display: Some(DisplayId(1)),
-            parent: DisplayRef::default(),
-            area: Corners::rect(0.0, 0.0, 0.5, 1.0),
-        };
-        let right = SubDisplay {
-            id: SubDisplayId(11),
-            area: Corners::rect(0.5, 0.0, 0.5, 1.0),
-            name: "Right".into(),
-            ..left.clone()
-        };
+    fn sub_displays_are_areas_of_their_displays_monitor() {
+        let left = Corners::rect(0.0, 0.0, 0.5, 1.0);
+        let right = Corners::rect(0.5, 0.0, 0.5, 1.0);
         let outs = [
-            output(1, Placement::SubDisplay(SubDisplayId(10))),
-            output(2, Placement::SubDisplay(SubDisplayId(11))),
-            output(3, Placement::SubDisplay(SubDisplayId(99))),
+            display(1, Some(("Projector", 1))),
+            sub(10, 1, left),
+            sub(11, 1, right),
+            sub(12, 99, left),
         ];
-        let subs = [left.clone(), right.clone()];
         let monitors = keys(&["Laptop", "Projector"]);
-        let r = route_outputs(&outs, &subs, &slots, &monitors, Some(0));
+        let r = route_outputs(&outs, &monitors, Some(0));
         assert_eq!(
-            r[&OutputId(1)],
+            r[&OutputId(10)],
             Some(Target {
                 monitor: 1,
-                area: left.area
+                area: left
             })
         );
         assert_eq!(
-            r[&OutputId(2)],
+            r[&OutputId(11)],
             Some(Target {
                 monitor: 1,
-                area: right.area
+                area: right
             })
         );
-        // A deleted sub display shows nowhere.
-        assert_eq!(r[&OutputId(3)], None);
-        // Projector unplugged: the sub displays on it show nowhere else.
-        let r = route_outputs(&outs, &subs, &slots, &keys(&["Laptop", "TV"]), Some(0));
+        // The whole display is still the whole of it.
+        assert_eq!(r[&OutputId(1)].map(|t| t.area), Some(Corners::default()));
+        // A sub display of a display that isn't there shows nowhere.
+        assert_eq!(r[&OutputId(12)], None);
+        // Projector unplugged: everything on it shows nowhere else.
+        let r = route_outputs(&outs, &keys(&["Laptop", "TV"]), Some(0));
         assert!(r.values().all(|t| t.is_none()));
-        // A sub display with no display chosen shows nowhere.
-        let none = SubDisplay {
-            display: None,
-            ..left
-        };
-        let r = route_outputs(&outs[..1], &[none], &slots, &monitors, Some(0));
-        assert_eq!(r[&OutputId(1)], None);
     }
 }

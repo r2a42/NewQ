@@ -4,6 +4,7 @@ use crate::clock::TimeOfDay;
 use crate::media::playback::Playback;
 use crate::timecode::Timecode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const SHOW_EXTENSION: &str = "newq";
@@ -13,34 +14,36 @@ pub const MIN_DB: f32 = -60.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct CueId(pub u64);
 
+/// A display or a sub display of the show: what a cue is sent to. (Code calls
+/// both outputs.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OutputId(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SubDisplayId(pub u64);
-
-/// One of the show's numbered displays ("Display 1"), which the user assigns
-/// to a physical monitor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DisplayId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AudioOutputId(pub u64);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Show {
+    /// 1 = shows with outputs placed on displays (before displays and
+    /// outputs were one thing), 2 = displays and sub displays.
     pub version: u32,
     pub name: String,
-    pub outputs: Vec<OutputConfig>,
-    /// The show's displays: names that outputs are placed on, each assigned
-    /// by the user to a physical monitor. Nothing reassigns them: if the
-    /// monitor goes away its display shows nothing until it is back or is
+    /// The show's displays and sub displays, which cues are sent to. A
+    /// display is assigned by the user to a monitor and stays assigned: if
+    /// the monitor goes away it shows nothing until it is back or is
     /// assigned to another.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub displays: Vec<DisplaySlot>,
-    /// Areas of physical displays that outputs can be placed on like displays.
-    #[serde(default, alias = "virtual_displays")]
-    pub sub_displays: Vec<SubDisplay>,
+    pub outputs: Vec<OutputConfig>,
+    /// Shows from before displays and outputs were one thing kept these
+    /// lists; `migrate_legacy` folds them into `outputs`.
+    #[serde(default, rename = "displays", skip_serializing)]
+    pub(crate) legacy_displays: Vec<LegacyDisplaySlot>,
+    #[serde(
+        default,
+        rename = "sub_displays",
+        alias = "virtual_displays",
+        skip_serializing
+    )]
+    pub(crate) legacy_sub_displays: Vec<LegacySubDisplay>,
     /// Named destinations for sound, each on an audio device. With none, all
     /// sound goes to the system's default device. The first is the default
     /// for cues that don't choose.
@@ -71,10 +74,6 @@ pub struct AudioOutputConfig {
     /// picture (a Bluetooth speaker, a long cable run, a slow display).
     #[serde(default, skip_serializing_if = "no_delay")]
     pub delay_ms: u32,
-}
-
-fn is_unnamed(d: &DisplayRef) -> bool {
-    *d == DisplayRef::default()
 }
 
 fn no_delay(v: &u32) -> bool {
@@ -153,11 +152,11 @@ fn default_panic_fade() -> f64 {
 impl Default for Show {
     fn default() -> Self {
         let mut show = Show {
-            version: 1,
+            version: 2,
             name: "Untitled Show".into(),
             outputs: Vec::new(),
-            displays: Vec::new(),
-            sub_displays: Vec::new(),
+            legacy_displays: Vec::new(),
+            legacy_sub_displays: Vec::new(),
             audio_outputs: Vec::new(),
             cues: Vec::new(),
             next_id: 1,
@@ -166,7 +165,7 @@ impl Default for Show {
             remote: RemoteSettings::default(),
         };
         let id = OutputId(show.alloc_id());
-        show.outputs.push(OutputConfig::new(id, "Output 1".into()));
+        show.outputs.push(OutputConfig::new(id, "Display 1".into()));
         show
     }
 }
@@ -177,30 +176,6 @@ pub struct DisplayRef {
     pub name: String,
     /// Index in the OS monitor list, used as a fallback when names collide or change.
     pub index: usize,
-}
-
-/// A numbered display of the show and the monitor the user assigned to it.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct DisplaySlot {
-    pub id: DisplayId,
-    pub name: String,
-    /// The monitor it is assigned to; None = not assigned yet.
-    #[serde(default)]
-    pub monitor: Option<DisplayRef>,
-    /// How many connected monitors looked alike (the same make and model) when
-    /// it was assigned. With identical monitors the display can only be
-    /// told apart by their order, so it is not used unless they are all
-    /// connected: a guess could put the picture on the wrong one.
-    #[serde(default = "one_twin", skip_serializing_if = "is_one")]
-    pub twins: u32,
-}
-
-fn one_twin() -> u32 {
-    1
-}
-
-fn is_one(v: &u32) -> bool {
-    *v == 1
 }
 
 /// A connected monitor as the operating system describes it.
@@ -221,7 +196,7 @@ impl MonitorKey {
 
 /// What a display of the show is attached to right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SlotState {
+pub enum DisplayState {
     /// No monitor chosen for it.
     Unassigned,
     /// The monitor it was assigned to isn't connected.
@@ -234,105 +209,154 @@ pub enum SlotState {
 }
 
 /// Find the monitor a display of the show was assigned to. Only that monitor
-/// will do: when it isn't there, no other is picked in its place.
-pub fn slot_state(
-    slot: &DisplaySlot,
+/// will do: when it isn't there, no other is picked in its place. `twins` is
+/// how many look-alikes there were when it was assigned.
+pub fn display_state(
+    monitor: Option<&DisplayRef>,
+    twins: u32,
     monitors: &[MonitorKey],
     control: Option<usize>,
-) -> SlotState {
-    let Some(r) = &slot.monitor else {
-        return SlotState::Unassigned;
+) -> DisplayState {
+    let Some(r) = monitor else {
+        return DisplayState::Unassigned;
     };
     let same: Vec<usize> = (0..monitors.len())
         .filter(|&i| monitors[i].matches(&r.name))
         .collect();
     let found = match same.len() {
         0 => None,
-        1 if slot.twins <= 1 => Some(same[0]),
+        1 if twins <= 1 => Some(same[0]),
         // Look-alikes can only be told apart by their order, and then only
         // when they are all there.
-        n if n >= slot.twins as usize && same.contains(&r.index) => Some(r.index),
+        n if n >= twins as usize && same.contains(&r.index) => Some(r.index),
         _ => None,
     };
     match found {
-        None => SlotState::Missing,
-        Some(i) if Some(i) == control => SlotState::OnMainWindowDisplay(i),
-        Some(i) => SlotState::Connected(i),
+        None => DisplayState::Missing,
+        Some(i) if Some(i) == control => DisplayState::OnMainWindowDisplay(i),
+        Some(i) => DisplayState::Connected(i),
     }
 }
 
-/// Where an output appears.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
-pub enum Placement {
-    /// Shows saved before displays were numbered: a display other than the
-    /// main window's, picked automatically. Opening the show assigns it to a
-    /// display once (see `Show::assign_displays`); it is never picked again.
+/// What shows from before displays and outputs were one thing recorded.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct LegacyDisplaySlot {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    monitor: Option<DisplayRef>,
+    #[serde(default = "one_twin")]
+    twins: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct LegacySubDisplay {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    display: Option<u64>,
+    #[serde(default)]
+    parent: DisplayRef,
+    area: Corners,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+enum LegacyPlacement {
+    /// Picked automatically: a monitor other than the main window's.
     #[default]
     Auto,
-    /// Inside the main window only.
     MainWindow,
-    /// Shows saved before displays were numbered: fullscreen on this monitor.
-    /// Opening the show turns it into one of the show's displays.
     Display(DisplayRef),
-    /// Fullscreen on one of the show's displays. While that display's monitor
-    /// isn't connected the output isn't shown on any other.
-    Slot(DisplayId),
-    /// Filling this sub display, on the sub display's display.
+    Slot(u64),
     #[serde(alias = "Virtual")]
-    SubDisplay(SubDisplayId),
+    SubDisplay(u64),
 }
 
-/// Part of a physical display that outputs can be placed on as if it were a
-/// display of its own (e.g. one projector covering two set pieces, or one
-/// LED processor input feeding several screens).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SubDisplay {
-    pub id: SubDisplayId,
-    pub name: String,
-    /// The display it is part of; None = none chosen yet.
-    #[serde(default)]
-    pub display: Option<DisplayId>,
-    /// Shows saved before displays were numbered named a monitor here.
-    /// `assign_displays` turns it into `display`.
-    #[serde(default, skip_serializing_if = "is_unnamed")]
-    pub parent: DisplayRef,
-    /// Its four corners on that display. Any convex shape; a rectangle by default.
-    pub area: Corners,
+fn one_twin() -> u32 {
+    1
 }
 
+fn is_one(v: &u32) -> bool {
+    *v == 1
+}
+
+fn is_unnamed(d: &DisplayRef) -> bool {
+    *d == DisplayRef::default()
+}
+
+fn is_whole(c: &Corners) -> bool {
+    *c == Corners::default()
+}
+
+/// A display, assigned to a monitor, or a sub display, an area of one. Cues
+/// are sent to either.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputConfig {
     pub id: OutputId,
     pub name: String,
-    #[serde(default)]
-    pub placement: Placement,
-    /// Whether the output is shown at all.
+    /// Whether it is shown at all.
     pub enabled: bool,
     #[serde(default)]
     pub test_pattern: bool,
-    /// Keystone / corner pin applied to everything on this output.
+    /// Keystone / corner pin applied to everything on a display. (A sub
+    /// display's area is its keystone.)
     #[serde(default)]
     pub corners: Corners,
-    /// Milliseconds everything on this output is held back (a slow projector).
+    /// Milliseconds everything on it is held back (a slow projector).
     #[serde(default, skip_serializing_if = "no_delay")]
     pub delay_ms: u32,
-    /// Legacy (pre-placement) display choice, migrated on load.
+    /// Display: the monitor it is assigned to; None = not assigned, so it is
+    /// shown only in the main window's preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<DisplayRef>,
+    /// How many look-alike monitors (the same make and model) were connected
+    /// when it was assigned. With identical monitors the display can only be
+    /// told apart by their order, so it is not used unless they are all
+    /// connected: a guess could put the picture on the wrong one.
+    #[serde(default = "one_twin", skip_serializing_if = "is_one")]
+    pub twins: u32,
+    /// Sub display: the display it is an area of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within: Option<OutputId>,
+    /// Sub display: its four corners on that display. Any convex shape; the
+    /// whole display by default.
+    #[serde(default, skip_serializing_if = "is_whole")]
+    pub area: Corners,
+    /// Older shows: where an output was placed, folded into the fields
+    /// above by `Show::migrate_legacy`.
+    #[serde(default, skip_serializing)]
+    placement: Option<LegacyPlacement>,
+    /// Older shows: the monitor chosen before there were placements.
     #[serde(default, skip_serializing)]
     display: Option<DisplayRef>,
+    /// Set by `migrate_legacy` for an output that was picked a monitor
+    /// automatically, until `assign_automatic_displays` has chosen once.
+    #[serde(skip)]
+    needs_monitor: bool,
 }
 
 impl OutputConfig {
+    /// A display, not assigned to a monitor yet.
     pub fn new(id: OutputId, name: String) -> Self {
         OutputConfig {
             id,
             name,
-            placement: Placement::MainWindow,
             enabled: true,
             test_pattern: false,
             corners: Corners::default(),
             delay_ms: 0,
+            monitor: None,
+            twins: 1,
+            within: None,
+            area: Corners::default(),
+            placement: None,
             display: None,
+            needs_monitor: false,
         }
+    }
+
+    pub fn is_sub_display(&self) -> bool {
+        self.within.is_some()
     }
 }
 
@@ -1305,178 +1329,236 @@ impl Show {
         format!("{}", max.floor() as i64 + 1)
     }
 
-    pub fn sub_display(&self, id: SubDisplayId) -> Option<&SubDisplay> {
-        self.sub_displays.iter().find(|v| v.id == id)
+    /// The display an output is on: itself, or for a sub display the display
+    /// it is an area of.
+    pub fn display_of<'a>(&'a self, o: &'a OutputConfig) -> Option<&'a OutputConfig> {
+        match o.within {
+            None => Some(o),
+            Some(d) => self
+                .outputs
+                .iter()
+                .find(|x| x.id == d && x.within.is_none()),
+        }
+    }
+
+    /// Add a display, not assigned to a monitor yet.
+    pub fn add_display(&mut self) -> OutputId {
+        let id = OutputId(self.alloc_id());
+        let n = self.outputs.iter().filter(|o| !o.is_sub_display()).count() + 1;
+        self.outputs
+            .push(OutputConfig::new(id, format!("Display {n}")));
+        id
     }
 
     /// Add a sub display on `display`: the left half of it, then the right
     /// half, then a centred area.
-    pub fn add_sub_display(&mut self, display: Option<DisplayId>) -> SubDisplayId {
-        let id = SubDisplayId(self.alloc_id());
+    pub fn add_sub_display(&mut self, display: OutputId) -> OutputId {
+        let id = OutputId(self.alloc_id());
         let siblings = self
-            .sub_displays
+            .outputs
             .iter()
-            .filter(|v| v.display == display)
+            .filter(|o| o.within == Some(display))
             .count();
         let area = match siblings {
             0 => Corners::rect(0.0, 0.0, 0.5, 1.0),
             1 => Corners::rect(0.5, 0.0, 0.5, 1.0),
             _ => Corners::rect(0.25, 0.25, 0.5, 0.5),
         };
-        let n = self.sub_displays.len() + 1;
-        self.sub_displays.push(SubDisplay {
-            id,
-            name: format!("Sub display {n}"),
-            display,
-            parent: DisplayRef::default(),
-            area,
-        });
+        let n = self.outputs.iter().filter(|o| o.is_sub_display()).count() + 1;
+        let mut o = OutputConfig::new(id, format!("Sub display {n}"));
+        o.within = Some(display);
+        o.area = area;
+        self.outputs.push(o);
         id
     }
 
-    /// Whether the show still has placements from before displays were
-    /// numbered, which `assign_displays` turns into displays.
-    pub fn needs_display_assignment(&self) -> bool {
-        self.outputs
+    /// Remove a display or sub display (and a display's sub displays). Cues
+    /// that were sent to what went are sent to the first display left.
+    pub fn remove_output(&mut self, id: OutputId) {
+        self.outputs.retain(|o| o.id != id && o.within != Some(id));
+        let fallback = self.outputs.first().map(|o| o.id);
+        let gone =
+            |out: Option<OutputId>| out.is_some_and(|o| self.outputs.iter().all(|x| x.id != o));
+        let retarget: Vec<CueId> = self
+            .cues
             .iter()
-            .any(|o| matches!(o.placement, Placement::Auto | Placement::Display(_)))
-            || self
-                .sub_displays
-                .iter()
-                .any(|v| v.display.is_none() && !is_unnamed(&v.parent))
+            .filter(|c| {
+                c.kind.cue_type() != CueType::Audio
+                    && c.kind.media().is_some_and(|m| gone(m.output))
+            })
+            .map(|c| c.id)
+            .collect();
+        for c in &mut self.cues {
+            if retarget.contains(&c.id)
+                && let Some(m) = c.kind.media_mut()
+            {
+                m.output = fallback;
+            }
+        }
     }
 
-    /// Turn the placements of older shows into displays, once: a monitor a
-    /// show named becomes a display assigned to it, and an output that
-    /// picked a display automatically gets the first monitor the main window
-    /// isn't on (as it did), which is then its display for good. Returns what
-    /// it did, for the log.
-    pub fn assign_displays(
+    /// Whether some output is waiting for a monitor to be picked for it (see
+    /// `assign_automatic_displays`).
+    pub fn needs_automatic_assignment(&self) -> bool {
+        self.outputs.iter().any(|o| o.needs_monitor)
+    }
+
+    /// Give each output of an older show that was "automatic" a monitor, once:
+    /// the first one the main window isn't on, as it used to pick, which is
+    /// then its monitor for good. Returns what it did, for the log.
+    pub fn assign_automatic_displays(
         &mut self,
         monitors: &[MonitorKey],
         control: Option<usize>,
     ) -> Vec<String> {
         let mut notes = Vec::new();
-        for i in 0..self.outputs.len() {
-            if let Placement::Display(r) = self.outputs[i].placement.clone() {
-                let id = self.slot_for(&r, monitors);
-                self.outputs[i].placement = Placement::Slot(id);
-                notes.push(format!(
-                    "{} is on {}",
-                    self.outputs[i].name,
-                    self.display(id).map_or("", |d| d.name.as_str())
-                ));
-            }
-        }
-        for i in 0..self.sub_displays.len() {
-            let v = &self.sub_displays[i];
-            if v.display.is_none() && !is_unnamed(&v.parent) {
-                let r = v.parent.clone();
-                let id = self.slot_for(&r, monitors);
-                self.sub_displays[i].display = Some(id);
-                self.sub_displays[i].parent = DisplayRef::default();
-            }
-        }
         let mut claimed: std::collections::HashSet<usize> = self
-            .displays
+            .outputs
             .iter()
-            .filter_map(|d| match slot_state(d, monitors, control) {
-                SlotState::Connected(i) | SlotState::OnMainWindowDisplay(i) => Some(i),
-                _ => None,
-            })
+            .filter(|o| !o.is_sub_display())
+            .filter_map(
+                |o| match display_state(o.monitor.as_ref(), o.twins, monitors, control) {
+                    DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i) => Some(i),
+                    _ => None,
+                },
+            )
             .collect();
-        for i in 0..self.outputs.len() {
-            if self.outputs[i].placement != Placement::Auto {
+        for o in &mut self.outputs {
+            if !std::mem::take(&mut o.needs_monitor) {
                 continue;
             }
             let free = (0..monitors.len()).find(|m| Some(*m) != control && !claimed.contains(m));
-            self.outputs[i].placement = match free {
+            match free {
                 Some(m) => {
                     claimed.insert(m);
-                    let id = self.slot_for(
-                        &DisplayRef {
-                            name: monitors[m].identity.clone(),
-                            index: m,
-                        },
-                        monitors,
-                    );
-                    notes.push(format!(
-                        "{} is on {} ({})",
-                        self.outputs[i].name,
-                        self.display(id).map_or("", |d| d.name.as_str()),
-                        monitors[m].identity
-                    ));
-                    Placement::Slot(id)
+                    let identity = monitors[m].identity.clone();
+                    o.twins = monitors
+                        .iter()
+                        .filter(|k| k.matches(&identity))
+                        .count()
+                        .max(1) as u32;
+                    notes.push(format!("{} is on {identity}", o.name));
+                    o.monitor = Some(DisplayRef {
+                        name: identity,
+                        index: m,
+                    });
                 }
-                None => {
-                    notes.push(format!(
-                        "{} stays in the main window (no other display)",
-                        self.outputs[i].name
-                    ));
-                    Placement::MainWindow
-                }
-            };
+                None => notes.push(format!(
+                    "{} stays in the main window (no other display)",
+                    o.name
+                )),
+            }
         }
         notes
     }
 
-    /// The display assigned to monitor `r`, made if there isn't one.
-    fn slot_for(&mut self, r: &DisplayRef, monitors: &[MonitorKey]) -> DisplayId {
-        if let Some(d) = self.displays.iter().find(|d| d.monitor.as_ref() == Some(r)) {
-            return d.id;
-        }
-        let id = self.add_display();
-        let twins = monitors
-            .iter()
-            .filter(|m| m.matches(&r.name))
-            .count()
-            .max(1) as u32;
-        if let Some(d) = self.displays.iter_mut().find(|d| d.id == id) {
-            d.monitor = Some(r.clone());
-            d.twins = twins;
-        }
+    /// A display of the show for `monitor`, made if there isn't one.
+    fn display_for(&mut self, name: String, monitor: Option<DisplayRef>, twins: u32) -> OutputId {
+        let id = OutputId(self.alloc_id());
+        let mut o = OutputConfig::new(id, name);
+        o.monitor = monitor;
+        o.twins = twins;
+        self.outputs.push(o);
         id
     }
 
-    pub fn display(&self, id: DisplayId) -> Option<&DisplaySlot> {
-        self.displays.iter().find(|d| d.id == id)
-    }
-
-    /// Add a display, not yet assigned to a monitor.
-    pub fn add_display(&mut self) -> DisplayId {
-        let id = DisplayId(self.alloc_id());
-        let n = self.displays.len() + 1;
-        self.displays.push(DisplaySlot {
-            id,
-            name: format!("Display {n}"),
-            monitor: None,
-            twins: 1,
-        });
-        id
-    }
-
-    /// Remove a display; outputs on it move to the main window and sub
-    /// displays on it are left without one.
-    pub fn remove_display(&mut self, id: DisplayId) {
-        self.displays.retain(|d| d.id != id);
-        for o in &mut self.outputs {
-            if o.placement == Placement::Slot(id) {
-                o.placement = Placement::MainWindow;
+    /// Fold what shows from before displays and outputs were one thing
+    /// recorded into displays and sub displays. Outputs become displays (or
+    /// sub displays, if they were on one) with the same ids, so cues keep
+    /// pointing at them; a second output that shared a display becomes a
+    /// sub display covering all of it.
+    pub(crate) fn migrate_legacy(&mut self) {
+        if self.version >= 2 {
+            return;
+        }
+        self.version = 2;
+        let slots = std::mem::take(&mut self.legacy_displays);
+        let subs = std::mem::take(&mut self.legacy_sub_displays);
+        // The display that stands for each older display, and the output
+        // that took over each older sub display.
+        let mut slot_display: HashMap<u64, OutputId> = HashMap::new();
+        let mut sub_output: HashMap<u64, OutputId> = HashMap::new();
+        let mut on_subs: Vec<(usize, u64)> = Vec::new();
+        for i in 0..self.outputs.len() {
+            let o = &mut self.outputs[i];
+            let placement = match (o.placement.take(), o.display.take()) {
+                (Some(p), _) => p,
+                (None, Some(d)) => LegacyPlacement::Display(d),
+                (None, None) => LegacyPlacement::Auto,
+            };
+            let id = o.id;
+            match placement {
+                LegacyPlacement::Display(r) => o.monitor = Some(r),
+                LegacyPlacement::MainWindow => {}
+                LegacyPlacement::Auto => o.needs_monitor = true,
+                LegacyPlacement::Slot(s) => match slot_display.get(&s) {
+                    Some(&first) => o.within = Some(first),
+                    None => {
+                        if let Some(sl) = slots.iter().find(|x| x.id == s) {
+                            o.monitor = sl.monitor.clone();
+                            o.twins = sl.twins;
+                        }
+                        slot_display.insert(s, id);
+                    }
+                },
+                LegacyPlacement::SubDisplay(v) => on_subs.push((i, v)),
             }
         }
-        for v in &mut self.sub_displays {
-            if v.display == Some(id) {
-                v.display = None;
+        // The display an older sub display was part of.
+        let mut parent_of = |show: &mut Show, sub: &LegacySubDisplay| -> OutputId {
+            if let Some(s) = sub.display {
+                if let Some(&d) = slot_display.get(&s) {
+                    return d;
+                }
+                let sl = slots.iter().find(|x| x.id == s);
+                let d = show.display_for(
+                    sl.map_or("Display".to_string(), |x| x.name.clone()),
+                    sl.and_then(|x| x.monitor.clone()),
+                    sl.map_or(1, |x| x.twins),
+                );
+                slot_display.insert(s, d);
+                return d;
             }
+            if !is_unnamed(&sub.parent) {
+                let found = show
+                    .outputs
+                    .iter()
+                    .find(|o| !o.is_sub_display() && o.monitor.as_ref() == Some(&sub.parent));
+                if let Some(o) = found {
+                    return o.id;
+                }
+                return show.display_for(sub.parent.name.clone(), Some(sub.parent.clone()), 1);
+            }
+            show.display_for("Display".into(), None, 1)
+        };
+        for (i, v) in on_subs {
+            let Some(sub) = subs.iter().find(|x| x.id == v) else {
+                // Its sub display was removed: only the preview shows it.
+                continue;
+            };
+            let parent = parent_of(self, sub);
+            let id = self.outputs[i].id;
+            self.outputs[i].within = Some(parent);
+            self.outputs[i].area = sub.area;
+            sub_output.entry(v).or_insert(id);
         }
-    }
-
-    /// Remove a sub display; outputs on it move to the main window.
-    pub fn remove_sub_display(&mut self, id: SubDisplayId) {
-        self.sub_displays.retain(|v| v.id != id);
-        for o in &mut self.outputs {
-            if o.placement == Placement::SubDisplay(id) {
-                o.placement = Placement::MainWindow;
+        // Sub displays nothing was on still exist.
+        for sub in &subs {
+            if sub_output.contains_key(&sub.id) {
+                continue;
+            }
+            let parent = parent_of(self, sub);
+            let id = OutputId(self.alloc_id());
+            let mut o = OutputConfig::new(id, sub.name.clone());
+            o.within = Some(parent);
+            o.area = sub.area;
+            self.outputs.push(o);
+        }
+        // Displays nothing was on still exist, with their monitors.
+        for sl in &slots {
+            if !slot_display.contains_key(&sl.id) {
+                let id = self.display_for(sl.name.clone(), sl.monitor.clone(), sl.twins);
+                slot_display.insert(sl.id, id);
             }
         }
     }
@@ -1521,14 +1603,6 @@ impl Show {
                 m.audio_output = None;
             }
         }
-    }
-
-    pub fn add_output(&mut self) -> OutputId {
-        let id = OutputId(self.alloc_id());
-        let n = self.outputs.len() + 1;
-        self.outputs
-            .push(OutputConfig::new(id, format!("Output {n}")));
-        id
     }
 
     /// Build a new cue of the given type, inserting sensible defaults
@@ -1673,11 +1747,6 @@ impl Show {
                 m.file = base.join(&m.file);
             }
         }
-        for out in &mut show.outputs {
-            if let Some(d) = out.display.take() {
-                out.placement = Placement::Display(d);
-            }
-        }
         show.normalize_groups();
         // Guard against hand-edited files with stale counters.
         let max_id = show
@@ -1685,12 +1754,11 @@ impl Show {
             .iter()
             .map(|c| c.id.0)
             .chain(show.outputs.iter().map(|o| o.id.0))
-            .chain(show.sub_displays.iter().map(|v| v.id.0))
-            .chain(show.displays.iter().map(|d| d.id.0))
             .chain(show.audio_outputs.iter().map(|o| o.id.0))
             .max()
             .unwrap_or(0);
         show.next_id = show.next_id.max(max_id + 1);
+        show.migrate_legacy();
         Ok(show)
     }
 
@@ -2170,72 +2238,201 @@ mod tests {
     }
 
     #[test]
-    fn legacy_output_display_migrates_to_placement() {
-        let dir = std::env::temp_dir().join("newq_test_legacy_outputs");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("old.newq");
-        std::fs::write(
-            &path,
+    fn displays_and_sub_displays_round_trip_and_stay_lean() {
+        let mut show = Show::default();
+        let json = serde_json::to_string(&show).unwrap();
+        for absent in [
+            "monitor",
+            "within",
+            "area",
+            "twins",
+            "placement",
+            "sub_displays",
+        ] {
+            assert!(!json.contains(absent), "{absent} in {json}");
+        }
+        assert_eq!(
+            (show.version, show.outputs[0].name.as_str()),
+            (2, "Display 1")
+        );
+        let d = show.outputs[0].id;
+        show.outputs[0].monitor = Some(DisplayRef {
+            name: "Samsung".into(),
+            index: 1,
+        });
+        let sub = show.add_sub_display(d);
+        let sub2 = show.add_sub_display(d);
+        assert_eq!(
+            show.output(sub).unwrap().area.as_rect(),
+            Some([0.0, 0.0, 0.5, 1.0])
+        );
+        assert_eq!(
+            show.output(sub2).unwrap().area.as_rect(),
+            Some([0.5, 0.0, 0.5, 1.0])
+        );
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        assert_eq!(back.outputs.len(), 3);
+        assert_eq!(back.outputs[0].monitor, show.outputs[0].monitor);
+        assert_eq!(back.outputs[1].within, Some(d));
+        assert_eq!(back.outputs[2].area, show.outputs[2].area);
+        // A saved version 2 show is never treated as an older one.
+        let mut back = back;
+        back.migrate_legacy();
+        assert!(!back.needs_automatic_assignment());
+        let text = serde_json::to_string(&show).unwrap();
+        assert!(
+            !text.contains("twins"),
+            "one monitor is the default: {text}"
+        );
+    }
+
+    #[test]
+    fn removing_a_display_removes_its_sub_displays_and_retargets_cues() {
+        let mut show = Show::default();
+        let first = show.outputs[0].id;
+        let second = show.add_display();
+        let sub = show.add_sub_display(second);
+        let mut cue = show.make_cue(CueType::Image, Some("a.png".into()), 0);
+        cue.kind.media_mut().unwrap().output = Some(sub);
+        let image = cue.id;
+        show.cues.push(cue);
+        let mut audio = show.make_cue(CueType::Audio, Some("a.wav".into()), 1);
+        audio.kind.media_mut().unwrap().output = Some(second);
+        let sound = audio.id;
+        show.cues.push(audio);
+        show.remove_output(second);
+        assert_eq!(show.outputs.len(), 1);
+        assert!(show.output(sub).is_none());
+        // What was sent to it goes to the first display; sound has no display.
+        assert_eq!(
+            show.cue(image).unwrap().kind.media().unwrap().output,
+            Some(first)
+        );
+        assert_eq!(
+            show.cue(sound).unwrap().kind.media().unwrap().output,
+            Some(second),
+            "sound never had a display"
+        );
+    }
+
+    fn legacy(json: &str) -> Show {
+        let mut show: Show = serde_json::from_str(json).unwrap();
+        show.migrate_legacy();
+        show
+    }
+
+    #[test]
+    fn shows_from_before_placements_keep_their_monitor_or_wait_for_one() {
+        let show = legacy(
             r#"{"version":1,"name":"x","next_id":5,"cues":[],"outputs":[
               {"id":1,"name":"A","display":{"name":"DELL","index":1},"fullscreen":true,"enabled":true},
               {"id":2,"name":"B","display":null,"fullscreen":false,"enabled":true}]}"#,
-        )
-        .unwrap();
-        let show = Show::load(&path).unwrap();
+        );
         assert_eq!(
-            show.outputs[0].placement,
-            Placement::Display(DisplayRef {
+            show.outputs[0].monitor,
+            Some(DisplayRef {
                 name: "DELL".into(),
                 index: 1
             })
         );
-        assert_eq!(show.outputs[1].placement, Placement::Auto);
+        assert_eq!(show.outputs[1].monitor, None);
+        assert!(show.needs_automatic_assignment());
         let saved = serde_json::to_string(&show).unwrap();
         assert!(!saved.contains("fullscreen") && !saved.contains("\"display\""));
+
+        // The automatic one gets the first monitor the main window isn't on, once.
+        let mut show = show;
+        let keys = [key("Laptop"), key("DELL"), key("TV")];
+        let notes = show.assign_automatic_displays(&keys, Some(0));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(show.outputs[1].monitor.as_ref().unwrap().name, "TV");
+        assert!(!show.needs_automatic_assignment());
+        assert!(
+            show.assign_automatic_displays(&[key("Laptop")], Some(0))
+                .is_empty()
+        );
+        assert_eq!(show.outputs[1].monitor.as_ref().unwrap().name, "TV");
+
+        // With no monitor to spare it stays in the main window, and stays unassigned.
+        let mut show = legacy(
+            r#"{"version":1,"name":"x","next_id":5,"cues":[],"outputs":[
+              {"id":1,"name":"A","enabled":true}]}"#,
+        );
+        let notes = show.assign_automatic_displays(&[key("Laptop")], Some(0));
+        assert!(notes[0].contains("main window"), "{notes:?}");
+        assert_eq!(show.outputs[0].monitor, None);
+        assert!(!show.needs_automatic_assignment());
     }
 
     #[test]
-    fn sub_displays_add_remove_and_load() {
-        let mut show = Show::default();
-        let parent = Some(show.add_display());
-        let a = show.add_sub_display(parent);
-        let b = show.add_sub_display(parent);
-        assert_eq!(
-            show.sub_display(a).unwrap().area.as_rect(),
-            Some([0.0, 0.0, 0.5, 1.0])
+    fn shows_with_numbered_displays_fold_into_displays_and_sub_displays() {
+        // 0.6.0: outputs placed on displays and sub displays kept in lists.
+        let show = legacy(
+            r#"{"version":1,"name":"x","next_id":1000,"cues":[],
+              "displays":[
+                {"id":900,"name":"Stage TV","monitor":{"name":"SAMSUNG","index":1},"twins":2},
+                {"id":901,"name":"Lobby"},
+                {"id":902,"name":"Spare","monitor":{"name":"Dell","index":2}}],
+              "sub_displays":[
+                {"id":50,"name":"Left","display":900,"area":[[0,0],[0.5,0],[0.5,1],[0,1]]},
+                {"id":51,"name":"Right","display":901,"area":[[0.5,0],[1,0],[1,1],[0.5,1]]}],
+              "outputs":[
+                {"id":1,"name":"Main","enabled":true,"placement":{"Slot":900}},
+                {"id":2,"name":"Second","enabled":true,"placement":{"Slot":900}},
+                {"id":3,"name":"Titles","enabled":true,"placement":{"SubDisplay":50}},
+                {"id":4,"name":"Preview","enabled":true,"placement":"MainWindow"}]}"#,
         );
+        let o = |id: u64| show.output(OutputId(id)).unwrap();
+        // The first output on a display is the display, with its monitor.
+        assert_eq!(o(1).monitor.as_ref().unwrap().name, "SAMSUNG");
+        assert_eq!((o(1).twins, o(1).within), (2, None));
+        // A second one on the same display is a sub display covering all of it.
+        assert_eq!(o(2).within, Some(OutputId(1)));
+        assert_eq!(o(2).area, Corners::default());
+        // An output on a sub display took its place.
+        assert_eq!(o(3).within, Some(OutputId(1)));
+        assert_eq!(o(3).area.as_rect(), Some([0.0, 0.0, 0.5, 1.0]));
+        assert_eq!((o(4).monitor.clone(), o(4).within), (None, None));
+        // A sub display nothing was on, and the display it was on, are kept.
+        let right = show.outputs.iter().find(|x| x.name == "Right").unwrap();
+        assert_eq!(right.area.as_rect(), Some([0.5, 0.0, 0.5, 1.0]));
+        let lobby = show.output(right.within.unwrap()).unwrap();
         assert_eq!(
-            show.sub_display(b).unwrap().area.as_rect(),
-            Some([0.5, 0.0, 0.5, 1.0])
+            (lobby.name.as_str(), lobby.monitor.is_none()),
+            ("Lobby", true)
         );
-        let out = show.outputs[0].id;
-        show.outputs[0].placement = Placement::SubDisplay(a);
-        show.remove_sub_display(a);
-        assert!(show.sub_display(a).is_none());
-        assert_eq!(show.output(out).unwrap().placement, Placement::MainWindow);
-
-        // Round trip, and shows from before sub displays still load.
+        // A display nothing was on keeps its monitor.
+        let spare = show.outputs.iter().find(|x| x.name == "Spare").unwrap();
+        assert_eq!(spare.monitor.as_ref().unwrap().name, "Dell");
+        // Ids stay unique, nothing is waiting for a monitor, and it is saved as new.
+        let mut ids: Vec<u64> = show.outputs.iter().map(|x| x.id.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), show.outputs.len());
+        assert!(!show.needs_automatic_assignment() && show.version == 2);
         let text = serde_json::to_string(&show).unwrap();
-        let back: Show = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.sub_displays, show.sub_displays);
-        let old: Show = serde_json::from_str(
-            r#"{"version":1,"name":"x","next_id":2,"cues":[],"outputs":[{"id":1,"name":"A","enabled":true}]}"#,
-        )
-        .unwrap();
-        assert!(old.sub_displays.is_empty());
-        // ...as do shows saved while they were called virtual displays.
-        let renamed: Show = serde_json::from_str(
-            r#"{"version":1,"name":"x","next_id":9,"cues":[],
-                "outputs":[{"id":1,"name":"A","enabled":true,"placement":{"Virtual":5}}],
-                "virtual_displays":[{"id":5,"name":"L","parent":{"name":"P","index":0},
-                    "area":[[0,0],[0.5,0],[0.5,1],[0,1]]}]}"#,
-        )
-        .unwrap();
-        assert_eq!(renamed.sub_displays[0].id, SubDisplayId(5));
-        assert_eq!(
-            renamed.outputs[0].placement,
-            Placement::SubDisplay(SubDisplayId(5))
+        assert!(
+            !text.contains("placement") && !text.contains("\"displays\""),
+            "{text}"
         );
+    }
+
+    #[test]
+    fn sub_displays_that_named_a_monitor_get_a_display_for_it() {
+        let show = legacy(
+            r#"{"version":1,"name":"x","next_id":100,"cues":[],
+              "virtual_displays":[
+                {"id":5,"name":"L","parent":{"name":"Projector","index":1},
+                 "area":[[0,0],[0.5,0],[0.5,1],[0,1]]}],
+              "outputs":[
+                {"id":1,"name":"A","enabled":true,"placement":{"Display":{"name":"Projector","index":1}}},
+                {"id":2,"name":"B","enabled":true,"placement":{"Virtual":5}}]}"#,
+        );
+        // The output on the monitor is the display; the sub display is on it.
+        let b = show.output(OutputId(2)).unwrap();
+        assert_eq!(b.within, Some(OutputId(1)));
+        assert_eq!(b.area.as_rect(), Some([0.0, 0.0, 0.5, 1.0]));
+        assert_eq!(show.outputs.len(), 2, "no second display was made");
     }
 
     fn key(name: &str) -> MonitorKey {
@@ -2243,108 +2440,6 @@ mod tests {
             identity: name.into(),
             raw: name.into(),
         }
-    }
-
-    #[test]
-    fn displays_default_to_none_stay_out_of_old_files_and_round_trip() {
-        let mut show = Show::default();
-        let json = serde_json::to_string(&show).unwrap();
-        assert!(!json.contains("\"displays\""), "{json}");
-        // A new output is in the main window until it is placed.
-        assert_eq!(show.outputs[0].placement, Placement::MainWindow);
-        let d = show.add_display();
-        show.displays[0].monitor = Some(DisplayRef {
-            name: "Samsung".into(),
-            index: 1,
-        });
-        show.outputs[0].placement = Placement::Slot(d);
-        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
-        assert_eq!(back.displays, show.displays);
-        assert_eq!(back.outputs[0].placement, Placement::Slot(d));
-        let text = serde_json::to_string(&show).unwrap();
-        assert!(
-            !text.contains("twins"),
-            "one monitor is the default: {text}"
-        );
-        // Removing a display sends its outputs to the main window.
-        let sub = show.add_sub_display(Some(d));
-        show.remove_display(d);
-        assert!(show.displays.is_empty());
-        assert_eq!(show.outputs[0].placement, Placement::MainWindow);
-        assert_eq!(show.sub_display(sub).unwrap().display, None);
-    }
-
-    #[test]
-    fn older_placements_become_displays_once_and_stay() {
-        let mut show = Show::default();
-        show.outputs[0].placement = Placement::Display(DisplayRef {
-            name: "Projector".into(),
-            index: 1,
-        });
-        let b = show.add_output();
-        let c = show.add_output();
-        let d = show.add_output();
-        let idx = |show: &Show, id| show.outputs.iter().position(|o| o.id == id).unwrap();
-        for id in [b, c] {
-            let i = idx(&show, id);
-            show.outputs[i].placement = Placement::Auto;
-        }
-        let i = idx(&show, d);
-        show.outputs[i].placement = Placement::MainWindow;
-        // A sub display of the old kind, on a monitor named in the show.
-        let sub = show.add_sub_display(None);
-        show.sub_displays[0].parent = DisplayRef {
-            name: "Projector".into(),
-            index: 1,
-        };
-        assert!(show.needs_display_assignment());
-
-        let monitors = [key("Laptop"), key("Projector"), key("TV")];
-        let notes = show.assign_displays(&monitors, Some(0));
-        assert_eq!(notes.len(), 3, "{notes:?}");
-        assert!(!show.needs_display_assignment());
-        // The monitor the show named got a display; the sub display shares it.
-        let projector = show
-            .displays
-            .iter()
-            .find(|d| d.monitor.as_ref().is_some_and(|m| m.name == "Projector"))
-            .unwrap()
-            .id;
-        assert_eq!(show.outputs[0].placement, Placement::Slot(projector));
-        assert_eq!(show.sub_display(sub).unwrap().display, Some(projector));
-        assert_eq!(show.sub_display(sub).unwrap().parent, DisplayRef::default());
-        // The first automatic output took the free monitor, the second had none left.
-        let tv = show
-            .displays
-            .iter()
-            .find(|d| d.monitor.as_ref().is_some_and(|m| m.name == "TV"))
-            .unwrap()
-            .id;
-        assert_eq!(show.outputs[idx(&show, b)].placement, Placement::Slot(tv));
-        assert_eq!(show.outputs[idx(&show, c)].placement, Placement::MainWindow);
-        assert_eq!(show.outputs[idx(&show, d)].placement, Placement::MainWindow);
-        assert_eq!(show.displays.len(), 2);
-        // It does nothing the second time, whatever is connected.
-        let before = show.clone();
-        assert!(show.assign_displays(&[key("Laptop")], Some(0)).is_empty());
-        assert_eq!(show.displays, before.displays);
-        assert_eq!(show.outputs[idx(&show, b)].placement, Placement::Slot(tv));
-    }
-
-    #[test]
-    fn automatic_outputs_are_given_the_main_windows_other_monitor() {
-        let mut show = Show::default();
-        show.outputs[0].placement = Placement::Auto;
-        // The main window is on the second monitor: the first is free.
-        show.assign_displays(&[key("A"), key("B")], Some(1));
-        let d = show.displays[0].monitor.clone().unwrap();
-        assert_eq!((d.name.as_str(), d.index), ("A", 0));
-        // With only the main window's monitor, it stays in the main window.
-        let mut show = Show::default();
-        show.outputs[0].placement = Placement::Auto;
-        show.assign_displays(&[key("A")], Some(0));
-        assert_eq!(show.outputs[0].placement, Placement::MainWindow);
-        assert!(show.displays.is_empty());
     }
 
     #[test]
