@@ -7,8 +7,11 @@ pub mod waveform;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ffmpeg::{Ffmpeg, MediaInfo};
-use std::collections::HashMap;
+use parking_lot::{Condvar, Mutex};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub enum ProbeState {
     Pending,
@@ -16,11 +19,30 @@ pub enum ProbeState {
     Failed(String),
 }
 
-/// Caches ffprobe results; probes run on background threads.
+/// How many files are probed at once. A show opened with hundreds of files
+/// would otherwise start hundreds of ffprobe processes (and threads) together.
+const PROBE_WORKERS: usize = 3;
+
+/// Files waiting to be probed, shared with the worker threads.
+struct Jobs {
+    queue: Mutex<VecDeque<(PathBuf, Ffmpeg)>>,
+    wake: Condvar,
+    closed: AtomicBool,
+    /// Tests keep the workers from finishing, to look at what is waiting.
+    #[cfg(test)]
+    hold: AtomicBool,
+}
+
+type Probed = (PathBuf, Result<MediaInfo, String>);
+
+/// Caches ffprobe results. Probes run on a few background threads, the files
+/// nearest the playhead first.
 pub struct ProbeCache {
     entries: HashMap<PathBuf, ProbeState>,
-    tx: Sender<(PathBuf, Result<MediaInfo, String>)>,
-    rx: Receiver<(PathBuf, Result<MediaInfo, String>)>,
+    tx: Sender<Probed>,
+    rx: Receiver<Probed>,
+    jobs: Arc<Jobs>,
+    workers: usize,
 }
 
 impl Default for ProbeCache {
@@ -30,6 +52,47 @@ impl Default for ProbeCache {
             entries: HashMap::new(),
             tx,
             rx,
+            jobs: Arc::new(Jobs {
+                queue: Mutex::new(VecDeque::new()),
+                wake: Condvar::new(),
+                closed: AtomicBool::new(false),
+                #[cfg(test)]
+                hold: AtomicBool::new(false),
+            }),
+            workers: 0,
+        }
+    }
+}
+
+impl Drop for ProbeCache {
+    fn drop(&mut self) {
+        self.jobs.closed.store(true, Ordering::Release);
+        self.jobs.wake.notify_all();
+    }
+}
+
+/// One probe worker: takes the next file off the queue until the cache is gone.
+fn probe_worker(jobs: &Jobs, tx: &Sender<Probed>) {
+    loop {
+        let (path, ff) = {
+            let mut queue = jobs.queue.lock();
+            loop {
+                if jobs.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(job) = queue.pop_front() {
+                    break job;
+                }
+                jobs.wake.wait(&mut queue);
+            }
+        };
+        #[cfg(test)]
+        while jobs.hold.load(Ordering::Acquire) && !jobs.closed.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let r = ff.probe(&path).map_err(|e| format!("{e:#}"));
+        if tx.send((path, r)).is_err() {
+            return;
         }
     }
 }
@@ -60,47 +123,77 @@ impl ProbeCache {
 
     /// Returns the cached state, starting a background probe if needed.
     pub fn get(&mut self, ff: Option<&Ffmpeg>, path: &Path) -> &ProbeState {
+        self.lookup(ff, path, false)
+    }
+
+    /// Like `get`, but a probe that is wanted soon (a cue about to be fired)
+    /// goes to the front of the queue.
+    pub fn get_urgent(&mut self, ff: Option<&Ffmpeg>, path: &Path) -> &ProbeState {
+        self.lookup(ff, path, true)
+    }
+
+    /// What is known about a file, without starting anything.
+    pub fn peek(&self, path: &Path) -> Option<&ProbeState> {
+        self.entries.get(path)
+    }
+
+    fn lookup(&mut self, ff: Option<&Ffmpeg>, path: &Path, urgent: bool) -> &ProbeState {
+        self.poll();
         self.recheck(path);
         if !self.entries.contains_key(path) {
             let state = match ff {
                 None => ProbeState::Failed("ffmpeg not found".into()),
                 Some(_) if !path.is_file() => ProbeState::Failed(NOT_FOUND.into()),
                 Some(ff) => {
-                    let ff = ff.clone();
-                    let tx = self.tx.clone();
-                    let p = path.to_path_buf();
-                    std::thread::spawn(move || {
-                        let r = ff.probe(&p).map_err(|e| format!("{e:#}"));
-                        let _ = tx.send((p, r));
-                    });
+                    self.queue(ff.clone(), path.to_path_buf(), urgent);
                     ProbeState::Pending
                 }
             };
             self.entries.insert(path.to_path_buf(), state);
+        } else if urgent && matches!(self.entries.get(path), Some(ProbeState::Pending)) {
+            // Already waiting its turn: move it up.
+            let mut queue = self.jobs.queue.lock();
+            if let Some(i) = queue.iter().position(|(p, _)| p == path)
+                && let Some(job) = queue.remove(i)
+            {
+                queue.push_front(job);
+            }
         }
         &self.entries[path]
     }
 
-    /// Blocking probe, used when a cue is fired before its background probe finished.
-    pub fn get_blocking(&mut self, ff: &Ffmpeg, path: &Path) -> Result<MediaInfo, String> {
-        self.poll();
-        self.recheck(path);
-        if !path.is_file() {
-            // Not remembered: the file may turn up.
-            return Err(NOT_FOUND.into());
+    /// Put a file in the queue, and start a worker if fewer than the limit run.
+    fn queue(&mut self, ff: Ffmpeg, path: PathBuf, urgent: bool) {
+        {
+            let mut queue = self.jobs.queue.lock();
+            if urgent {
+                queue.push_front((path, ff));
+            } else {
+                queue.push_back((path, ff));
+            }
         }
-        match self.entries.get(path) {
-            Some(ProbeState::Ready(info)) => return Ok(info.clone()),
-            Some(ProbeState::Failed(e)) => return Err(e.clone()),
-            _ => {}
+        if self.workers < PROBE_WORKERS {
+            let (jobs, tx) = (self.jobs.clone(), self.tx.clone());
+            let spawned = std::thread::Builder::new()
+                .name("probe".into())
+                .spawn(move || probe_worker(&jobs, &tx));
+            if spawned.is_ok() {
+                self.workers += 1;
+            }
         }
-        let r = ff.probe(path).map_err(|e| format!("{e:#}"));
-        let state = match &r {
-            Ok(info) => ProbeState::Ready(info.clone()),
-            Err(e) => ProbeState::Failed(e.clone()),
-        };
-        self.entries.insert(path.to_path_buf(), state);
-        r
+        self.jobs.wake.notify_one();
+    }
+
+    /// Worker threads started, and files waiting for one (for tests).
+    #[cfg(test)]
+    pub fn load(&self) -> (usize, usize) {
+        (self.workers, self.jobs.queue.lock().len())
+    }
+
+    /// Keep the workers from finishing (for tests).
+    #[cfg(test)]
+    pub fn hold(&self, on: bool) {
+        self.jobs.hold.store(on, Ordering::Release);
     }
 
     /// Forget a path so it is probed again (e.g. after the user relinks a file).
@@ -139,6 +232,20 @@ mod tests {
         super::test_media(file)
     }
 
+    /// Ask until the answer for `path` is in.
+    fn wait_for(cache: &mut super::ProbeCache, ff: &Ffmpeg, path: &std::path::Path) -> bool {
+        let t0 = Instant::now();
+        loop {
+            match cache.get(Some(ff), path) {
+                super::ProbeState::Ready(_) => return true,
+                super::ProbeState::Failed(_) => return false,
+                super::ProbeState::Pending => {}
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "never answered");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn a_file_that_turns_up_later_is_no_longer_missing() {
         let Some((ff, clip)) = setup("testsrc_10s.mp4") else {
@@ -151,15 +258,55 @@ mod tests {
             cache.get(Some(&ff), &later),
             super::ProbeState::Failed(_)
         ));
-        assert!(cache.get_blocking(&ff, &later).is_err());
         // The drive is mounted / the copy finishes.
         std::fs::copy(&clip, &later).unwrap();
         assert!(
             !matches!(cache.get(Some(&ff), &later), super::ProbeState::Failed(_)),
             "found now"
         );
-        assert!(cache.get_blocking(&ff, &later).is_ok());
+        assert!(wait_for(&mut cache, &ff, &later), "and readable");
         let _ = std::fs::remove_file(&later);
+    }
+
+    #[test]
+    fn many_files_are_probed_a_few_at_a_time_and_the_urgent_one_first() {
+        let Some((ff, clip)) = setup("testsrc_10s.mp4") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("newq_probe_pool");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files: Vec<PathBuf> = (0..30)
+            .map(|i| {
+                let f = dir.join(format!("clip{i}.mp4"));
+                std::fs::hard_link(&clip, &f)
+                    .or_else(|_| std::fs::copy(&clip, &f).map(|_| ()))
+                    .unwrap();
+                f
+            })
+            .collect();
+        let mut cache = super::ProbeCache::default();
+        cache.hold(true);
+        for f in &files {
+            assert!(matches!(
+                cache.get(Some(&ff), f),
+                super::ProbeState::Pending
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let (workers, waiting) = cache.load();
+        assert_eq!(workers, 3, "three at once, not thirty");
+        assert_eq!(waiting, 27, "the rest wait their turn");
+        // The one wanted soonest jumps the queue, wherever it was.
+        cache.get_urgent(Some(&ff), &files[29]);
+        cache.hold(false);
+        assert!(wait_for(&mut cache, &ff, &files[29]));
+        // And every file is answered in the end.
+        for f in &files {
+            assert!(wait_for(&mut cache, &ff, f), "{}", f.display());
+        }
+        assert_eq!(cache.load(), (3, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
