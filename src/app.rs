@@ -81,7 +81,7 @@ struct ScreenWindow {
     outputs: Vec<OutputId>,
     needs_redraw: bool,
     /// Outputs and warps last sent to the render thread.
-    sent: Vec<(OutputId, Homography, Option<Arc<Mesh>>)>,
+    sent: Vec<SentGeometry>,
     /// The fade at the edges last sent.
     blend: EdgeBlend,
     /// The title last given to the window (asking a window for its title is a
@@ -147,6 +147,10 @@ struct GpuRecovery {
 
 /// A test-pattern texture, with the output number and size it shows.
 type Pattern = (Arc<LayerTexture>, usize, (u32, u32));
+
+/// What of an output's placement was last sent to a window: id, warp, mesh and
+/// the part of the picture the mesh sees.
+type SentGeometry = (OutputId, Homography, Option<Arc<Mesh>>, [f32; 4]);
 
 /// A display's picture being sent out as a stream.
 struct RunningStream {
@@ -953,31 +957,29 @@ impl App {
                 fail(self, "FFmpeg was not found".into());
                 continue;
             };
-            match crate::stream::Sink::start(&ff, *size, config.fps, &config.kind) {
-                Ok(sink) => {
-                    let thread = CaptureThread::spawn(
-                        gpu.clone(),
-                        gpu::Slot::Capture(slot),
-                        *size,
-                        config.fps,
-                        sink,
-                    );
-                    self.engine.log(format!(
-                        "Sending {name} out: {}×{} at {} fps",
-                        size.0, size.1, config.fps
-                    ));
-                    self.streams.insert(
-                        *id,
-                        RunningStream {
-                            thread,
-                            config: config.clone(),
-                            size: *size,
-                            slot,
-                        },
-                    );
-                }
-                Err(e) => fail(self, e),
-            }
+            // FFmpeg is started on the stream's own thread, so neither
+            // looking for what it can encode nor starting it holds up the show.
+            let thread = CaptureThread::spawn(
+                gpu.clone(),
+                gpu::Slot::Capture(slot),
+                *size,
+                config.fps,
+                ff,
+                config.kind.clone(),
+            );
+            self.engine.log(format!(
+                "Sending {name} out: {}×{} at {} fps",
+                size.0, size.1, config.fps
+            ));
+            self.streams.insert(
+                *id,
+                RunningStream {
+                    thread,
+                    config: config.clone(),
+                    size: *size,
+                    slot,
+                },
+            );
         }
         for (id, running) in &self.streams {
             let Some(g) = groups.get(id) else { continue };
@@ -1266,12 +1268,12 @@ impl App {
                 .iter()
                 .filter_map(|id| groups.get(id).cloned())
                 .collect();
-            let sent: Vec<(OutputId, Homography, Option<Arc<Mesh>>)> = screen
+            let sent: Vec<SentGeometry> = screen
                 .outputs
                 .iter()
                 .filter_map(|id| {
                     let g = &groups.get(id)?.geometry;
-                    Some((*id, g.warp, g.mesh.clone()))
+                    Some((*id, g.warp, g.mesh.clone(), g.slice))
                 })
                 .collect();
             // The fade at the edges is the display's own, whatever sub displays
@@ -1895,9 +1897,31 @@ mod tests {
         let b = pair[1].reference(1);
         assert_eq!(crate::show::twins_of(&pair, 1), 2, "still look alike");
         let swapped = [pair[1].clone(), pair[0].clone(), pair[2].clone()];
+        // (`twins` as the UI records it: two of that model, so 2.)
+        let twins = crate::show::twins_of(&pair, 1);
         assert_eq!(
-            display_state(Some(&b), 1, &swapped, Some(2)),
+            display_state(Some(&b), twins, &swapped, Some(2)),
             DisplayState::Connected(0)
+        );
+        // With the other one unplugged it is still found, and a serial that
+        // isn't there is still missing.
+        let alone = [pair[1].clone(), pair[2].clone()];
+        assert_eq!(
+            display_state(Some(&b), twins, &alone, Some(1)),
+            DisplayState::Connected(0)
+        );
+        let gone = [pair[0].clone(), pair[2].clone()];
+        assert_eq!(
+            display_state(Some(&b), twins, &gone, Some(1)),
+            DisplayState::Missing
+        );
+        // Without serials a lone look-alike could be either, so it is not used.
+        let plain = [tv(""), tv(""), hw("Laptop", "L", Some("APP0001"))];
+        let r = plain[1].reference(1);
+        let one = [plain[0].clone(), plain[2].clone()];
+        assert_eq!(
+            display_state(Some(&r), 2, &one, Some(1)),
+            DisplayState::Missing
         );
     }
 

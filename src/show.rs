@@ -267,6 +267,9 @@ pub fn display_state(
     let found = match same.len() {
         0 => None,
         1 if twins <= 1 => Some(same[0]),
+        // A hardware id with a serial number names one monitor outright, even
+        // when other monitors of its model were there (`twins` counts those).
+        1 if by_hardware && r.hardware.as_deref().is_some_and(|h| h.contains(':')) => Some(same[0]),
         // Look-alikes can only be told apart by their order, and then only
         // when they are all there.
         n if n >= twins as usize && same.contains(&r.index) => Some(r.index),
