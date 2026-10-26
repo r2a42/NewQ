@@ -10,10 +10,12 @@ use crate::media::audio;
 use crate::mesh::Mesh;
 use crate::recovery;
 use crate::remote::{self, Remote};
-use crate::render::{ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread};
+use crate::render::{
+    CaptureThread, ControlThread, EguiFrame, OutputGroup, OutputLayer, OutputThread,
+};
 use crate::show::{
     ColorAdjust, Corners, DisplayState, EdgeBlend, Fit, LayerTransform, MonitorKey, OutputConfig,
-    OutputId, PartOf, RemoteSettings, Show, display_state,
+    OutputId, PartOf, RemoteSettings, Show, StreamOut, display_state,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -146,6 +148,14 @@ struct GpuRecovery {
 /// A test-pattern texture, with the output number and size it shows.
 type Pattern = (Arc<LayerTexture>, usize, (u32, u32));
 
+/// A display's picture being sent out as a stream.
+struct RunningStream {
+    thread: CaptureThread,
+    config: StreamOut,
+    size: (u32, u32),
+    slot: u8,
+}
+
 /// What a device scan found; `audio` is None when it didn't look.
 struct DeviceList {
     midi_in: Vec<String>,
@@ -181,6 +191,11 @@ pub struct App {
     last_sizes: HashMap<OutputId, (u32, u32)>,
     /// Test-pattern textures per output.
     patterns: HashMap<OutputId, Pattern>,
+    /// The displays whose picture is being sent out.
+    streams: HashMap<OutputId, RunningStream>,
+    /// Streams that failed to start or stopped, by display, so they are not
+    /// tried again until their settings change.
+    stream_failed: HashMap<OutputId, (StreamOut, (u32, u32))>,
     monitors: Vec<MonitorHandle>,
     /// What the system says each of `monitors` is.
     identities: Vec<crate::monitor::Identity>,
@@ -264,6 +279,8 @@ impl App {
             textures: HashMap::new(),
             last_sizes: HashMap::new(),
             patterns: HashMap::new(),
+            streams: HashMap::new(),
+            stream_failed: HashMap::new(),
             monitors: Vec::new(),
             identities: Vec::new(),
             primary: None,
@@ -632,7 +649,9 @@ impl App {
                 warned: false,
             });
             self.gpu = None;
-            // Everything on the old device is gone with it.
+            // Everything on the old device is gone with it, streams included
+            // (they start again once there is a new device).
+            self.stop_streams();
             self.textures.clear();
             self.patterns.clear();
         }
@@ -858,6 +877,120 @@ impl App {
         self.engine.output_sizes = sizes;
         // Release windows once their render thread has dropped the surface.
         self.closing.retain(|(_, h)| !h.is_finished());
+    }
+
+    /// Stop every stream, without waiting for them.
+    fn stop_streams(&mut self) {
+        for (_, running) in self.streams.drain() {
+            let _ = std::thread::Builder::new()
+                .name("stream-stop".into())
+                .spawn(move || running.thread.stop());
+        }
+    }
+
+    /// Start, restart and stop the streams the show asks for, and give each
+    /// the picture it is to send: the display's own picture on its own canvas,
+    /// without the shaping a projector needs.
+    fn update_streams(&mut self, groups: &HashMap<OutputId, OutputGroup>) {
+        let Some(gpu) = self.gpu.clone() else { return };
+        let wanted: HashMap<OutputId, (StreamOut, (u32, u32))> = self
+            .show
+            .outputs
+            .iter()
+            .filter(|o| o.enabled && !o.is_sub_display() && self.show.part_of(o.id).is_none())
+            .filter_map(|o| {
+                let s = o.stream.as_ref().filter(|s| s.enabled)?.clamped();
+                let size = crate::stream::size_for(self.picture_size(o.id), s.height);
+                Some((o.id, (s, size)))
+            })
+            .collect();
+        self.stream_failed
+            .retain(|id, failed| wanted.get(id) == Some(&(failed.0.clone(), failed.1)));
+        // Stop what is no longer wanted, or is wanted differently.
+        let stale: Vec<OutputId> = self
+            .streams
+            .iter()
+            .filter(|(id, r)| {
+                wanted.get(id) != Some(&(r.config.clone(), r.size)) || !r.thread.is_running()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(r) = self.streams.remove(&id) {
+                let name = self.show.output(id).map_or("?", |o| o.name.as_str());
+                if let Some(why) = r.thread.failure() {
+                    self.engine.log(format!("Stream from {name}: {why}"));
+                    self.stream_failed.insert(id, (r.config.clone(), r.size));
+                }
+                let _ = std::thread::Builder::new()
+                    .name("stream-stop".into())
+                    .spawn(move || r.thread.stop());
+            }
+        }
+        for (id, (config, size)) in &wanted {
+            if self.streams.contains_key(id) || self.stream_failed.contains_key(id) {
+                continue;
+            }
+            let name = self
+                .show
+                .output(*id)
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            let fail = |app: &mut App, why: String| {
+                app.engine.log(format!("Stream from {name}: {why}"));
+                app.stream_failed.insert(*id, (config.clone(), *size));
+            };
+            let Some(slot) = (0..gpu::CAPTURE_SLOTS as u8)
+                .find(|n| !self.streams.values().any(|r| r.slot == *n))
+            else {
+                fail(
+                    self,
+                    format!("only {} streams at a time", gpu::CAPTURE_SLOTS),
+                );
+                continue;
+            };
+            let Some(ff) = self.engine.ff.clone() else {
+                fail(self, "FFmpeg was not found".into());
+                continue;
+            };
+            match crate::stream::Sink::start(&ff, *size, config.fps, &config.kind) {
+                Ok(sink) => {
+                    let thread = CaptureThread::spawn(
+                        gpu.clone(),
+                        gpu::Slot::Capture(slot),
+                        *size,
+                        config.fps,
+                        sink,
+                    );
+                    self.engine.log(format!(
+                        "Sending {name} out: {}×{} at {} fps",
+                        size.0, size.1, config.fps
+                    ));
+                    self.streams.insert(
+                        *id,
+                        RunningStream {
+                            thread,
+                            config: config.clone(),
+                            size: *size,
+                            slot,
+                        },
+                    );
+                }
+                Err(e) => fail(self, e),
+            }
+        }
+        for (id, running) in &self.streams {
+            let Some(g) = groups.get(id) else { continue };
+            let mut clean = g.clone();
+            clean.geometry = Geometry {
+                canvas: self.picture_size(*id),
+                warp: gpu::IDENTITY,
+                pin: gpu::IDENTITY,
+                mesh: None,
+                slice: Geometry::WHOLE,
+            };
+            running.thread.submit(vec![clean]);
+        }
     }
 
     /// The size of display `id`'s picture: the one it is given, or its
@@ -1123,6 +1256,8 @@ impl App {
                 canvas: preview_canvas,
             });
         }
+
+        self.update_streams(&groups);
 
         self.ui.screens.clear();
         for (m, screen) in &mut self.screens {

@@ -358,6 +358,9 @@ pub struct OutputConfig {
     /// Display: edges that fade out where projectors overlap.
     #[serde(default, skip_serializing_if = "EdgeBlend::is_off")]
     pub blend: EdgeBlend,
+    /// Display: its picture is also sent out as a video stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamOut>,
     /// Milliseconds everything on it is held back (a slow projector).
     #[serde(default, skip_serializing_if = "no_delay")]
     pub delay_ms: u32,
@@ -404,6 +407,7 @@ impl OutputConfig {
             part_of: None,
             picture: None,
             blend: EdgeBlend::default(),
+            stream: None,
             delay_ms: 0,
             monitor: None,
             twins: 1,
@@ -426,6 +430,65 @@ impl OutputConfig {
 pub struct PartOf {
     pub display: OutputId,
     pub area: [f32; 4],
+}
+
+/// A display's picture sent out as video, to a virtual camera or over the
+/// network, so a video call or a streaming program can use it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StreamOut {
+    pub enabled: bool,
+    pub kind: StreamKind,
+    pub fps: u32,
+    /// How tall the picture is sent; the width follows its shape.
+    pub height: u32,
+}
+
+impl Default for StreamOut {
+    fn default() -> Self {
+        StreamOut {
+            enabled: false,
+            kind: StreamKind::default(),
+            fps: 30,
+            height: 720,
+        }
+    }
+}
+
+impl StreamOut {
+    /// The same with its numbers in a range FFmpeg and the machine can take.
+    pub fn clamped(&self) -> StreamOut {
+        StreamOut {
+            fps: self.fps.clamp(1, 60),
+            height: self.height.clamp(16, 2160),
+            ..self.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum StreamKind {
+    /// A Video4Linux loopback device (Linux): what Zoom, Teams and OBS
+    /// see as a camera.
+    VirtualCamera { device: String },
+    /// MPEG-TS over UDP, which OBS can take as a media source.
+    Udp { host: String, port: u16 },
+    /// Any FFmpeg output: the arguments that follow the input.
+    Custom { args: String },
+}
+
+impl Default for StreamKind {
+    fn default() -> Self {
+        if cfg!(target_os = "linux") {
+            StreamKind::VirtualCamera {
+                device: String::new(),
+            }
+        } else {
+            StreamKind::Udp {
+                host: "127.0.0.1".into(),
+                port: 5000,
+            }
+        }
+    }
 }
 
 /// How far in from each edge of a display its picture fades to black, as
@@ -1701,6 +1764,7 @@ impl Show {
                 }
             }
             o.blend = o.blend.clamped();
+            o.stream = o.stream.as_ref().map(StreamOut::clamped);
             if let Some((w, h)) = &mut o.picture {
                 (*w, *h) = ((*w).clamp(1, 16_384), (*h).clamp(1, 16_384));
             }
@@ -2704,6 +2768,43 @@ mod tests {
             (0.5, 0.5, 0.0, 0.2, 4.0)
         );
         assert_eq!(o(right).picture, Some((1, 16_384)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stream_round_trips_plain_shows_have_none_and_numbers_are_kept_in_range() {
+        let mut show = Show::default();
+        let plain = serde_json::to_string(&show).unwrap();
+        assert!(!plain.contains("stream"), "{plain}");
+        show.outputs[0].stream = Some(StreamOut {
+            enabled: true,
+            kind: StreamKind::Udp {
+                host: "10.0.0.2".into(),
+                port: 5004,
+            },
+            fps: 25,
+            height: 540,
+        });
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        assert_eq!(back.outputs[0].stream, show.outputs[0].stream);
+
+        let dir = std::env::temp_dir().join("newq_test_stream_show");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wild.newq");
+        show.outputs[0].stream = Some(StreamOut {
+            enabled: true,
+            kind: StreamKind::Custom {
+                args: "-f null -".into(),
+            },
+            fps: 9000,
+            height: 1,
+        });
+        show.save(&path).unwrap();
+        let s = Show::load(&path).unwrap().outputs[0]
+            .stream
+            .clone()
+            .unwrap();
+        assert_eq!((s.fps, s.height), (60, 16));
         std::fs::remove_dir_all(&dir).ok();
     }
 

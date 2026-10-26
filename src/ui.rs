@@ -469,7 +469,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     output_previews(ui, show, st);
                     active_panel(ui, show, engine, st, &mut actions);
                     ui.add_space(12.0);
-                    displays_panel(ui, show, st, &mut actions);
+                    displays_panel(ui, show, engine, st, &mut actions);
                     ui.add_space(12.0);
                     sub_displays_panel(ui, show, st, &mut actions);
                     ui.add_space(12.0);
@@ -3241,7 +3241,13 @@ fn display_status(d: &OutputConfig, st: &UiState) -> (String, Option<Color32>) {
 
 /// The show's displays: each is assigned by hand to a monitor, and stays on
 /// it whatever is plugged in or out. Cues are sent to them.
-fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
+fn displays_panel(
+    ui: &mut Ui,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &UiState,
+    actions: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
         ui.heading("Displays");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3390,6 +3396,7 @@ fn displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<
             );
             corner_pin_editor(ui, d, st, actions);
             edge_blend_editor(ui, d, state_size.unwrap_or((1920, 1080)));
+            stream_editor(ui, d, engine);
         });
     }
 }
@@ -3510,6 +3517,138 @@ fn shared_picture_editor(
         })
         .response
         .on_hover_text("How big the shared picture is: the projectors show parts of it");
+    }
+}
+
+/// Sending a display's picture out as video: to a virtual camera (Linux), to
+/// OBS over the network, or anywhere FFmpeg can send it.
+fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
+    use crate::show::{StreamKind, StreamOut};
+    let on = d.stream.as_ref().is_some_and(|s| s.enabled);
+    egui::CollapsingHeader::new(if on { "Send out ●" } else { "Send out" })
+        .id_salt(("stream", d.id.0))
+        .default_open(on)
+        .show(ui, |ui| {
+            let s = d.stream.get_or_insert_with(StreamOut::default);
+            ui.checkbox(&mut s.enabled, "Send this display's picture out as video");
+            let label = |k: &StreamKind| match k {
+                StreamKind::VirtualCamera { .. } => "Virtual camera",
+                StreamKind::Udp { .. } => "Network stream (for OBS)",
+                StreamKind::Custom { .. } => "Custom FFmpeg output",
+            };
+            egui::Grid::new(("stream_grid", d.id.0))
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("To");
+                    egui::ComboBox::from_id_salt(("stream_kind", d.id.0))
+                        .selected_text(label(&s.kind))
+                        .show_ui(ui, |ui| {
+                            let options = [
+                                StreamKind::VirtualCamera {
+                                    device: String::new(),
+                                },
+                                StreamKind::Udp {
+                                    host: "127.0.0.1".into(),
+                                    port: 5000,
+                                },
+                                StreamKind::Custom {
+                                    args: String::new(),
+                                },
+                            ];
+                            for o in options {
+                                let same =
+                                    std::mem::discriminant(&s.kind) == std::mem::discriminant(&o);
+                                // A camera can only be made on Linux.
+                                if matches!(o, StreamKind::VirtualCamera { .. })
+                                    && !cfg!(target_os = "linux")
+                                {
+                                    continue;
+                                }
+                                if ui.selectable_label(same, label(&o)).clicked() && !same {
+                                    s.kind = o;
+                                }
+                            }
+                        });
+                    ui.end_row();
+                    match &mut s.kind {
+                        StreamKind::VirtualCamera { device } => {
+                            // (The list is looked for when it is first wanted.)
+                            let cameras: Vec<String> = engine.cameras().to_vec();
+                            ui.label("Camera");
+                            egui::ComboBox::from_id_salt(("stream_device", d.id.0))
+                                .selected_text(if device.is_empty() {
+                                    "(choose a loopback device)".to_string()
+                                } else {
+                                    device_label(device)
+                                })
+                                .width(220.0)
+                                .show_ui(ui, |ui| {
+                                    for c in &cameras {
+                                        ui.selectable_value(device, c.clone(), device_label(c));
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                        StreamKind::Udp { host, port } => {
+                            ui.label("Address");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(host).desired_width(120.0));
+                                ui.label(":");
+                                ui.add(egui::DragValue::new(port).range(1..=65535).speed(1.0));
+                            });
+                            ui.end_row();
+                        }
+                        StreamKind::Custom { args } => {
+                            ui.label("FFmpeg output");
+                            ui.add(
+                                egui::TextEdit::singleline(args)
+                                    .desired_width(240.0)
+                                    .hint_text("-c:v libx264 -f flv rtmp://…"),
+                            );
+                            ui.end_row();
+                        }
+                    }
+                    ui.label("Picture");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.height)
+                                .range(16..=2160)
+                                .speed(4.0)
+                                .suffix(" px tall"),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut s.fps)
+                                .range(1..=60)
+                                .suffix(" fps"),
+                        );
+                    });
+                    ui.end_row();
+                });
+            ui.label(
+                RichText::new(match s.kind {
+                    StreamKind::VirtualCamera { .. } => {
+                        "Needs a v4l2loopback device, made with: sudo modprobe v4l2loopback \
+                         video_nr=10 card_label=NewQ exclusive_caps=1. Zoom, Teams and OBS \
+                         then list it as a camera. The sender must be on before the call starts."
+                    }
+                    StreamKind::Udp { .. } => {
+                        "In OBS add a Media Source, untick Local File and give it \
+                         udp://127.0.0.1:5000 (the same address and port). OBS's Virtual Camera \
+                         then shows it in Zoom and Teams. About half a second behind."
+                    }
+                    StreamKind::Custom { .. } => {
+                        "The arguments that follow the input: the picture arrives as raw RGBA, \
+                         so give a codec and format. A problem is shown in the status bar."
+                    }
+                })
+                .weak()
+                .small(),
+            );
+        });
+    // A section that was opened and left alone isn't saved.
+    if d.stream.as_ref() == Some(&StreamOut::default()) {
+        d.stream = None;
     }
 }
 
@@ -7957,8 +8096,9 @@ mod tests {
             ..Default::default()
         };
         let mut actions = Vec::new();
+        let mut engine = Engine::for_tests();
         let mut out = ctx.run_ui(input, |ui| {
-            displays_panel(ui, &mut show, &st, &mut actions);
+            displays_panel(ui, &mut show, &mut engine, &st, &mut actions);
             sub_displays_panel(ui, &mut show, &st, &mut actions);
         });
         out.textures_delta.clear();
