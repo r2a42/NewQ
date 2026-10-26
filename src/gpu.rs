@@ -8,9 +8,45 @@ use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use winit::window::Window;
 
+/// Whether the graphics device has gone (a driver reset or crash, the card
+/// removed). Everything made on it is then useless and must be rebuilt.
+#[derive(Default)]
+pub struct DeviceLost(parking_lot::Mutex<Option<String>>);
+
+impl DeviceLost {
+    /// Start watching `device`, and keep its errors out of the log once it
+    /// has gone (every call on it fails then). An error in the GPU's drivers
+    /// is logged, not a reason to take the whole program down: the default is
+    /// to panic the thread that hit it.
+    fn watch(device: &wgpu::Device) -> Arc<DeviceLost> {
+        let lost = Arc::new(DeviceLost::default());
+        let seen = lost.clone();
+        device.on_uncaptured_error(Arc::new(move |e| {
+            if seen.why().is_none() {
+                log::error!("GPU error: {e}")
+            }
+        }));
+        let reported = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("GPU device lost ({reason:?}): {message}");
+            reported.set(format!("{reason:?}: {message}"));
+        });
+        lost
+    }
+
+    fn set(&self, why: String) {
+        self.0.lock().get_or_insert(why);
+    }
+
+    pub fn why(&self) -> Option<String> {
+        self.0.lock().clone()
+    }
+}
+
 /// Shared GPU context. Cheap to clone; render threads each hold a copy.
 #[derive(Clone)]
 pub struct Gpu {
+    pub lost: Arc<DeviceLost>,
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
@@ -45,12 +81,11 @@ impl Gpu {
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 ..Default::default()
             }))?;
-        // An error in the GPU's drivers is logged, not a reason to take the
-        // whole program down: the default is to panic the thread that hit it.
-        device.on_uncaptured_error(Arc::new(|e| log::error!("GPU error: {e}")));
+        let lost = DeviceLost::watch(&device);
         let compositor = Arc::new(Compositor::new(&device));
         Ok((
             Gpu {
+                lost,
                 instance,
                 adapter,
                 device,
@@ -1097,6 +1132,7 @@ mod tests {
                 .ok()?;
             let compositor = Arc::new(Compositor::new(&device));
             Some(Gpu {
+                lost: DeviceLost::watch(&device),
                 instance,
                 adapter,
                 device,
@@ -1109,6 +1145,19 @@ mod tests {
             panic!("NEWQ_REQUIRE_GPU is set but there is no GPU adapter");
         }
         gpu
+    }
+
+    #[test]
+    fn a_destroyed_device_is_noticed() {
+        let Some(gpu) = test_gpu() else { return };
+        assert!(gpu.lost.why().is_none());
+        gpu.device.destroy();
+        let t0 = std::time::Instant::now();
+        while gpu.lost.why().is_none() && t0.elapsed().as_secs() < 5 {
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(gpu.lost.why().is_some_and(|w| w.contains("Destroyed")));
     }
 
     /// Draw a 2×2 layer of one colour over black through the real compositor

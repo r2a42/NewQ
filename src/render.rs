@@ -288,6 +288,10 @@ fn control_loop(
     renderer.callback_resources.insert(PreviewPipeline(
         gpu.compositor.pipeline(&gpu.device, config.format),
     ));
+    // The textures this renderer has been given in full. A partial update to
+    // one it doesn't have (egui believes an earlier renderer holds it) would
+    // panic; skipping it just leaves a stale patch until egui sends it whole.
+    let mut known: std::collections::HashSet<egui::TextureId> = Default::default();
     loop {
         let mut f = match mailbox.take() {
             ControlJob::Quit => break,
@@ -295,7 +299,12 @@ fn control_loop(
         };
         for (id, deltas) in f.textures.set.drain() {
             for delta in &deltas {
+                if delta.pos.is_some() && !known.contains(&id) {
+                    log::warn!("skipping a partial update to a texture the renderer lacks");
+                    continue;
+                }
                 renderer.update_texture(&gpu.device, &gpu.queue, id, delta);
+                known.insert(id);
             }
         }
         let freed: Vec<egui::TextureId> = f.textures.free.drain().collect();
@@ -341,6 +350,7 @@ fn control_loop(
         }
         for id in &freed {
             renderer.free_texture(id);
+            known.remove(id);
         }
     }
 }

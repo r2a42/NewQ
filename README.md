@@ -282,6 +282,10 @@ includes FFmpeg, so there's nothing else to install.
 - **Show files** are plain JSON (`.newq`) with media paths stored relative to
   the show file, so a show folder can move between machines.
 - Drag and drop media files onto the window to create cues.
+- **Graphics device recovery:** if the graphics driver resets or the card is
+  taken away mid-show, NewQ notices, says so in the status bar, and starts the
+  main window and every output window again on a new device, usually in well
+  under a second. Cues keep playing; a picture may blink out for that moment.
 
 ## If NewQ crashes or won't start
 

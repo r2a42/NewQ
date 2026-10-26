@@ -25,6 +25,9 @@ The README describes the features; this file is about working on the code.
   `src/web.rs` and `web_page.html`: the web remote (HTTP on plain `std`
   sockets, handlers tested as functions and over loopback).
   `src/relink.rs`: finding moved media and copying it into one folder.
+  `src/gpu.rs` also notices a lost graphics device (`DeviceLost`) and
+  `app.rs::watch_gpu` rebuilds every window's device, surface and render thread;
+  `NEWQ_LOSE_GPU_AFTER=<seconds>` destroys the device on purpose to test it.
   `src/color.rs`: colour adjustment and chroma key maths; the shader in
   `gpu.rs` does the same per pixel (a test renders it on a real GPU if there
   is one; `NEWQ_REQUIRE_GPU=1` makes having none a failure).
