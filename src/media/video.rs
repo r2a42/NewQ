@@ -333,8 +333,9 @@ pub fn spawn_stderr_drain(
     let _ = std::thread::Builder::new()
         .name("ffmpeg-stderr".into())
         .spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
+            // Only the tail matters (it holds the error), and a chatty ffmpeg
+            // can write a lot over a long show.
+            let text = super::read_tail(&mut stderr, 8192);
             if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
                 log::warn!("ffmpeg: {line}");
                 *error.lock() = Some(line.to_string());

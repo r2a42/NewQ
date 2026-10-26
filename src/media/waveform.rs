@@ -6,6 +6,7 @@
 //! file, like the file's probe.
 
 use super::ffmpeg::Ffmpeg;
+use super::read_tail;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::collections::HashMap;
 use std::io::Read;
@@ -101,22 +102,6 @@ impl Waveform {
             .copied()
             .fold(0.0, f32::max)
     }
-}
-
-/// Read `r` to its end, keeping only the last `keep` bytes of it as text.
-fn read_tail(mut r: impl Read, keep: usize) -> String {
-    let mut tail: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 4096];
-    while let Ok(n) = r.read(&mut buf) {
-        if n == 0 {
-            break;
-        }
-        tail.extend_from_slice(&buf[..n]);
-        if tail.len() > keep {
-            tail.drain(..tail.len() - keep);
-        }
-    }
-    String::from_utf8_lossy(&tail).into_owned()
 }
 
 /// Decode `path`'s first audio stream and reduce it to peaks. `duration_hint`
