@@ -13,7 +13,7 @@ use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2};
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
@@ -194,6 +194,13 @@ pub struct UiState {
     json_at: f64,
     /// Something outside `draw` (a remote command) changed the show.
     json_stale: bool,
+    /// The media files that aren't there, checked once a second on a thread of
+    /// its own (a stat of a file on a network share that has gone can take
+    /// seconds, and the cue list must not wait for it), and when that was
+    /// asked, and the check being made.
+    missing: HashSet<PathBuf>,
+    missing_asked: Option<f64>,
+    missing_check: Option<std::sync::mpsc::Receiver<HashSet<PathBuf>>>,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -384,6 +391,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     poll_folder_search(ui.ctx(), show, st);
     poll_dialog(ui.ctx(), show, st, &mut actions);
     poll_save(ui.ctx(), engine, st);
+    refresh_missing(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -1303,10 +1311,9 @@ fn cue_list(
                     cell(3, name_with_key(c), text_color);
                 }
                 let weak = v.weak_text_color();
-                let missing = c
-                    .kind
-                    .media()
-                    .is_some_and(|m| !m.file.as_os_str().is_empty() && !m.file.is_file());
+                let missing = c.kind.media().is_some_and(|m| {
+                    !m.file.as_os_str().is_empty() && st.missing.contains(&m.file)
+                });
                 cell(
                     4,
                     if missing {
@@ -1539,6 +1546,48 @@ fn start_dialog(st: &mut UiState, show: &Show, purpose: DialogFor) {
             dialog.pick_folder()
         }
     });
+}
+
+/// How often the media files are checked to be there (seconds).
+const MISSING_EVERY: f64 = 1.0;
+
+/// Keep `st.missing` up to date: take the answer of the check being made, and
+/// start another once it is time. The check runs on a thread of its own.
+fn refresh_missing(ctx: &egui::Context, show: &Show, st: &mut UiState) {
+    let now = ctx.input(|i| i.time);
+    if let Some(check) = &st.missing_check {
+        match check.try_recv() {
+            Ok(missing) => {
+                st.missing = missing;
+                st.missing_check = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.missing_check = None,
+        }
+    }
+    if st.missing_check.is_some() || st.missing_asked.is_some_and(|t| now - t < MISSING_EVERY) {
+        return;
+    }
+    st.missing_asked = Some(now);
+    let files: HashSet<PathBuf> = show
+        .cues
+        .iter()
+        .filter_map(|c| c.kind.media())
+        .map(|m| m.file.clone())
+        .filter(|f| !f.as_os_str().is_empty())
+        .collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("missing-check".into())
+        .spawn(move || {
+            let _ = tx.send(files.into_iter().filter(|f| !f.is_file()).collect());
+        });
+    if spawned.is_ok() {
+        st.missing_check = Some(rx);
+    }
 }
 
 /// Take the answer of the open file dialog when it has come.
@@ -6938,5 +6987,30 @@ mod tests {
         assert!(frame(vec![button(pos2(10.0, 10.0), true)]), "a click");
         // Still held on the next frame: a drag in progress.
         assert!(frame(vec![]), "the button is still down");
+    }
+
+    #[test]
+    fn missing_files_are_found_on_a_thread_and_the_list_marks_them() {
+        let d = media_dir("missing_check");
+        let mut show = Show::default();
+        let here = video_cue(&mut show, d.join("new/a.mp4"));
+        let gone = video_cue(&mut show, d.join("new/gone.mp4"));
+        let ctx = egui::Context::default();
+        let mut st = UiState::default();
+        // The first look starts a check and returns at once; nothing is marked yet.
+        refresh_missing(&ctx, &show, &mut st);
+        assert!(st.missing_check.is_some());
+        let t0 = std::time::Instant::now();
+        while st.missing_check.is_some() {
+            assert!(t0.elapsed().as_secs() < 10, "the check never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            refresh_missing(&ctx, &show, &mut st);
+        }
+        let _ = here;
+        assert_eq!(st.missing, HashSet::from([file_of(&show, gone)]));
+        // It isn't repeated until its time (egui's clock stood still here).
+        refresh_missing(&ctx, &show, &mut st);
+        assert!(st.missing_check.is_none(), "not due again yet");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
