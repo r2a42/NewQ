@@ -1100,20 +1100,34 @@ fn cue_list(
     }
     ui.separator();
 
+    // Only the rows in view are laid out and drawn: a show of thousands of cues
+    // costs no more per frame than one of a few dozen.
+    let visible = show.visible_indices();
+    ui.spacing_mut().item_spacing.y = 1.0;
+    let row_pitch = ROW_H + ui.spacing().item_spacing.y;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
+        .show_rows(ui, ROW_H, visible.len(), |ui, rows| {
+            if st.scroll_to_selected {
+                st.scroll_to_selected = false;
+                // The row may not be drawn, so find where it would be.
+                if let Some(r) = visible
+                    .iter()
+                    .position(|&i| Some(show.cues[i].id) == st.selected)
+                {
+                    let top = ui.max_rect().top() - rows.start as f32 * row_pitch;
+                    let at = egui::pos2(ui.max_rect().left(), top + r as f32 * row_pitch);
+                    ui.scroll_to_rect(egui::Rect::from_min_size(at, Vec2::new(total, ROW_H)), None);
+                }
+            }
             let groups: Vec<(CueId, String)> = show
                 .cues
                 .iter()
                 .filter(|c| matches!(c.kind, CueKind::Group(_)))
                 .map(|c| (c.id, cue_label(c)))
                 .collect();
-            for (idx, c) in show.cues.iter().enumerate() {
-                if !show.is_visible(idx) {
-                    continue;
-                }
+            for &idx in &visible[rows] {
+                let c = &show.cues[idx];
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(total, ROW_H), Sense::click());
                 // The fold arrow of a group sits at the start of its name.
                 let indent = if c.parent.is_some() {
@@ -1143,10 +1157,6 @@ fn cue_list(
                     actions.push(Action::FireSelected);
                 }
                 resp.context_menu(|ui| cue_context_menu(ui, c, &groups, actions));
-                if st.scroll_to_selected && st.selected == Some(c.id) {
-                    ui.scroll_to_rect(rect, None);
-                    st.scroll_to_selected = false;
-                }
                 let status = engine.status(c.id);
                 let selected = st.selected == Some(c.id);
                 let at_playhead = engine.playhead == Some(c.id);
@@ -6767,5 +6777,80 @@ mod tests {
         assert_eq!(Show::load(&path).unwrap().name, "Edited");
         assert!(!st.dirty);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn long_show(n: usize) -> Show {
+        let mut show = Show::default();
+        for i in 0..n {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.name = format!("cue {i}");
+            show.cues.push(c);
+        }
+        show
+    }
+
+    #[test]
+    fn a_long_cue_list_draws_only_the_rows_in_view() {
+        let ctx = egui::Context::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        let frame = |show: &Show, e: &mut Engine, st: &mut UiState, ctx: &egui::Context| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 400.0))),
+                time: Some(1.0),
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut out = ctx.run_ui(input, |ui| cue_list(ui, show, e, st, &mut actions));
+            out.textures_delta.clear();
+            out.shapes.len()
+        };
+        let few = frame(&long_show(30), &mut e, &mut st, &ctx);
+        let many = frame(&long_show(2000), &mut e, &mut st, &egui::Context::default());
+        // Drawing every row of 2,000 would be tens of thousands of shapes.
+        assert!(many < 1500, "{many} shapes for 2,000 cues");
+        assert!(many < few * 3, "{many} shapes for 2,000 cues, {few} for 30");
+    }
+
+    #[test]
+    fn scrolling_to_a_cue_far_down_a_long_list_brings_it_into_view() {
+        let show = long_show(2000);
+        let last = show.cues.last().unwrap().id;
+        let ctx = egui::Context::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        st.selected = Some(last);
+        st.scroll_to_selected = true;
+        let mut t = 1.0;
+        let mut run = |events: Vec<Event>, st: &mut UiState| {
+            t += 1.0 / 60.0;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 400.0))),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut out = ctx.run_ui(input, |ui| cue_list(ui, &show, &mut e, st, &mut actions));
+            out.textures_delta.clear();
+            actions
+        };
+        for _ in 0..4 {
+            run(vec![], &mut st);
+        }
+        assert!(!st.scroll_to_selected, "the request was taken");
+        // Click down the list: the last cue is on screen somewhere.
+        let mut hit = false;
+        for y in [150.0, 190.0, 230.0, 270.0, 310.0, 350.0, 385.0] {
+            let at = pos2(300.0, y);
+            run(vec![Event::PointerMoved(at)], &mut st);
+            run(vec![button(at, true)], &mut st);
+            let actions = run(vec![button(at, false)], &mut st);
+            hit |= actions
+                .iter()
+                .any(|a| matches!(a, Action::Select(id) if *id == last));
+        }
+        assert!(
+            hit,
+            "the last of 2,000 cues was not on screen after scrolling to it"
+        );
     }
 }

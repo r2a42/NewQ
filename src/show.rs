@@ -1533,6 +1533,24 @@ impl Show {
             .is_none_or(|g| !matches!(&g.kind, CueKind::Group(g) if g.collapsed))
     }
 
+    /// The indices of the cues shown in the cue list, in order, found in one
+    /// pass (`is_visible` for each cue looks its group up by id, which for a
+    /// long list is a search per cue).
+    pub fn visible_indices(&self) -> Vec<usize> {
+        let collapsed: std::collections::HashSet<CueId> = self
+            .cues
+            .iter()
+            .filter(|c| matches!(&c.kind, CueKind::Group(g) if g.collapsed))
+            .map(|c| c.id)
+            .collect();
+        self.cues
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.parent.is_none_or(|p| !collapsed.contains(&p)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// The visible cue `d` rows (+1/-1) from `idx`, if any.
     pub fn step_visible(&self, idx: usize, d: i32) -> Option<usize> {
         let mut i = idx as i32;
@@ -2048,6 +2066,31 @@ mod tests {
         assert_eq!(show.step_visible(1, 1), Some(4));
         assert_eq!(show.step_visible(4, -1), Some(1));
         assert_eq!(show.step_visible(4, 1), None);
+    }
+
+    #[test]
+    fn the_visible_indices_are_what_is_visible_found_in_one_pass() {
+        let mut show = grouped();
+        let by_asking = |show: &Show| -> Vec<usize> {
+            (0..show.cues.len())
+                .filter(|&i| show.is_visible(i))
+                .collect()
+        };
+        assert_eq!(show.visible_indices(), by_asking(&show));
+        assert_eq!(show.visible_indices(), [0, 1, 2, 3, 4]);
+        if let CueKind::Group(g) = &mut show.cues[1].kind {
+            g.collapsed = true;
+        }
+        assert_eq!(show.visible_indices(), by_asking(&show));
+        assert_eq!(
+            show.visible_indices(),
+            [0, 1, 4],
+            "the group's children are hidden"
+        );
+        // A child whose group has gone is shown, as `is_visible` says.
+        show.cues[2].parent = Some(CueId(9999));
+        assert_eq!(show.visible_indices(), by_asking(&show));
+        assert!(Show::default().visible_indices().is_empty());
     }
 
     #[test]
