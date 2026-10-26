@@ -1942,7 +1942,7 @@ mod tests {
         let size = (64u32, 36u32);
         let kind = StreamKind::Custom {
             args: format!(
-                "-frames:v 4 -f rawvideo -pix_fmt rgba \"{}\"",
+                "-frames:v 12 -f rawvideo -pix_fmt rgba \"{}\"",
                 out.display()
             ),
         };
@@ -1967,7 +1967,7 @@ mod tests {
                 slice: Geometry::WHOLE,
             },
         }]);
-        let want = (size.0 * size.1 * 4 * 4) as u64;
+        let want = (size.0 * size.1 * 4 * 12) as u64;
         let t0 = std::time::Instant::now();
         while std::fs::metadata(&out).map_or(0, |m| m.len()) < want {
             assert!(
@@ -1979,7 +1979,7 @@ mod tests {
         }
         thread.stop();
         let bytes = std::fs::read(&out).unwrap();
-        assert_eq!(bytes.len() as u64, want, "four whole frames");
+        assert_eq!(bytes.len() as u64, want, "twelve whole frames");
         // The last frame is the red picture, all over.
         let last = &bytes[bytes.len() - (size.0 * size.1 * 4) as usize..];
         for px in last.chunks(4).step_by(97) {

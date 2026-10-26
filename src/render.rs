@@ -347,6 +347,14 @@ fn capture_loop(
     let mut next = std::time::Instant::now();
     let mut frame = vec![0u8; (row * size.1) as usize];
     loop {
+        // Pick up what was last submitted every time round, not only while
+        // waiting for the next frame: when drawing takes as long as a frame,
+        // there is no waiting, and a picture would never be taken up.
+        match mailbox.take_timeout(std::time::Duration::ZERO) {
+            Some(CaptureJob::Quit) => break,
+            Some(CaptureJob::Groups(g)) => groups = g,
+            None => {}
+        }
         let now = std::time::Instant::now();
         if now < next {
             match mailbox.take_timeout(next - now) {
