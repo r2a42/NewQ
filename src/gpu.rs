@@ -1919,8 +1919,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_stream_sends_the_picture_to_ffmpeg() {
+    /// Stream a red picture for 12 frames through real FFmpeg, drawing each
+    /// frame `slow` longer than it needs, and check the last frame is red.
+    fn stream_a_red_picture(slow: std::time::Duration) {
         use crate::media::ffmpeg::Ffmpeg;
         use crate::render::{CaptureThread, OutputGroup, OutputLayer};
         use crate::show::StreamKind;
@@ -1935,7 +1936,7 @@ mod tests {
             eprintln!("no ffmpeg; skipping the stream test");
             return;
         };
-        let dir = std::env::temp_dir().join("newq_test_stream");
+        let dir = std::env::temp_dir().join(format!("newq_test_stream_{}", slow.as_millis()));
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("out.rgba");
         let _ = std::fs::remove_file(&out);
@@ -1946,7 +1947,8 @@ mod tests {
                 out.display()
             ),
         };
-        let thread = CaptureThread::spawn(gpu.clone(), Slot::Capture(0), size, 30, ff, kind);
+        let thread =
+            CaptureThread::spawn_slow(gpu.clone(), Slot::Capture(0), size, 30, ff, kind, slow);
         // A red picture, drawn at the stream's size from a 2×2 layer.
         let tex = LayerTexture::new_rgba(&gpu, 2, 2);
         tex.upload_rgba(&gpu.queue, &[255, 0, 0, 255].repeat(4));
@@ -1986,6 +1988,18 @@ mod tests {
             assert_eq!(px, [255, 0, 0, 255], "{px:?}");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stream_sends_the_picture_to_ffmpeg() {
+        stream_a_red_picture(std::time::Duration::ZERO);
+    }
+
+    /// Drawing slower than a frame lasts leaves the loop no time to wait, and
+    /// it once never took up the picture, so the stream stayed black.
+    #[test]
+    fn a_stream_still_takes_up_its_picture_when_drawing_is_slower_than_a_frame() {
+        stream_a_red_picture(std::time::Duration::from_millis(90));
     }
 
     #[test]

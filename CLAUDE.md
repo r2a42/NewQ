@@ -119,7 +119,10 @@ writes gigabytes in seconds.
 
 - CI runs fmt, clippy, tests and the real-media tests on Ubuntu, Windows and
   macOS, once per change: on pull requests (a newer push cancels the older run)
-  and on `main` after a merge. A branch has no CI until it has a pull request. Changes
+  and on `main` after a merge. A rebase merge of a pull request that CI passed on
+  has the same tree, so its `main` run skips the builds (the `gate` job) and still
+  counts for `Cut release`; a merge after `main` moved on is tested in full.
+  Slow steps are capped (`apt` once stalled for 40 minutes). A branch has no CI until it has a pull request. Changes
   that only touch `*.md` or `LICENSE-*` skip CI; `scripts/check_main_ci.sh` (used by
   `Cut release`) accepts such commits on top of a commit CI passed on. Occasionally the macOS runner never starts and the job is cancelled
   after 15 minutes with no steps run; that's not a failure of the change. Re-run it.

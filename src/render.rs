@@ -258,6 +258,20 @@ impl CaptureThread {
         ff: crate::media::ffmpeg::Ffmpeg,
         kind: crate::show::StreamKind,
     ) -> CaptureThread {
+        Self::spawn_slow(gpu, slot, size, fps, ff, kind, std::time::Duration::ZERO)
+    }
+
+    /// `spawn`, with each frame made to take `slow` longer to draw: for
+    /// trying a slow graphics card.
+    pub fn spawn_slow(
+        gpu: Gpu,
+        slot: Slot,
+        size: (u32, u32),
+        fps: u32,
+        ff: crate::media::ffmpeg::Ffmpeg,
+        kind: crate::show::StreamKind,
+        slow: std::time::Duration,
+    ) -> CaptureThread {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let (err_tx, errors) = crossbeam_channel::unbounded();
@@ -267,7 +281,7 @@ impl CaptureThread {
                 // Started here: asking FFmpeg what it can encode and starting it
                 // can take a while.
                 match crate::stream::Sink::start(&ff, size, fps, &kind) {
-                    Ok(sink) => capture_loop(gpu, slot, size, fps, sink, mb, err_tx),
+                    Ok(sink) => capture_loop(gpu, slot, size, fps, slow, sink, mb, err_tx),
                     Err(e) => {
                         let _ = err_tx.send(e);
                     }
@@ -306,11 +320,13 @@ impl CaptureThread {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_loop(
     gpu: Gpu,
     slot: Slot,
     size: (u32, u32),
     fps: u32,
+    slow: std::time::Duration,
     mut sink: crate::stream::Sink,
     mailbox: Arc<Mailbox<CaptureJob>>,
     errors: crossbeam_channel::Sender<String>,
@@ -371,6 +387,7 @@ fn capture_loop(
         }
         let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
         let cmd = gpu.composite(&pipeline, slot, &view, &draw, None);
+        std::thread::sleep(slow);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });

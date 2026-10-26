@@ -5,6 +5,12 @@ name: CI
 # its tip). A branch with no pull request isn't tested until it has one.
 # Changes that only touch documentation aren't tested; scripts/check_main_ci.sh
 # lets a release go ahead past such commits.
+#
+# A rebase merge makes new commits with the same files as the pull request's
+# last commit, so when that is all a push to `main` is (the same tree as a
+# pull request head that CI passed on) the `gate` job says so and the builds
+# are skipped; the run still counts as passed for the release check. Anything
+# else, such as a merge after `main` moved on, is tested in full.
 on:
   push:
     branches: [main]
@@ -19,7 +25,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      tested: ${{ steps.same.outputs.tested }}
+    steps:
+      - id: same
+        name: Has this exact tree already passed CI in its pull request?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          tested=false
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tree="$(gh api "repos/$REPO/commits/$SHA" --jq .commit.tree.sha)"
+            for head in $(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[].head.sha' || true); do
+              [ "$(gh api "repos/$REPO/commits/$head" --jq .commit.tree.sha)" = "$tree" ] || continue
+              passed="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success&per_page=1" --jq .total_count)"
+              if [ "$passed" -ge 1 ]; then
+                echo "Tree $tree passed CI as $head in its pull request; not testing it again"
+                tested=true
+                break
+              fi
+            done
+          fi
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: gate
+    if: needs.gate.outputs.tested != 'true'
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -33,9 +74,11 @@ jobs:
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
+        # This step once sat for 40 minutes on a stalled package mirror.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: brew install ffmpeg
