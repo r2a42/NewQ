@@ -826,6 +826,8 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 CueType::Camera,
                 CueType::Send,
                 CueType::Text,
+                CueType::Clock,
+                CueType::Timer,
                 CueType::Fade,
                 CueType::Stop,
                 CueType::Wait,
@@ -1128,7 +1130,12 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
         CueKind::Wait(_) => String::new(),
         CueKind::Send(s) => crate::output::describe(s),
         CueKind::Text(t) => {
-            let first = t.text.lines().next().unwrap_or("").trim();
+            let first = match t.source {
+                crate::show::TextSource::Static => t.text.lines().next().unwrap_or("").trim(),
+                crate::show::TextSource::Clock { .. } => "clock",
+                crate::show::TextSource::Timer { up: false, .. } => "countdown",
+                crate::show::TextSource::Timer { up: true, .. } => "count up",
+            };
             let more = if t.text.lines().nth(1).is_some() {
                 " …"
             } else {
@@ -4424,11 +4431,16 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
 /// What a text cue says and how it looks; where, when and how it plays is the
 /// shared media section.
 fn text_inspector(ui: &mut Ui, t: &mut TextCue) {
+    source_inspector(ui, t);
     ui.add(
         egui::TextEdit::multiline(&mut t.text)
-            .desired_rows(3)
+            .desired_rows(if t.source.is_live() { 1 } else { 3 })
             .desired_width(f32::INFINITY)
-            .hint_text("Text to show"),
+            .hint_text(if t.source.is_live() {
+                "Words around the time, with {time} where it goes"
+            } else {
+                "Text to show"
+            }),
     );
     egui::Grid::new("text_style")
         .num_columns(2)
@@ -4493,6 +4505,101 @@ fn text_inspector(ui: &mut Ui, t: &mut TextCue) {
             }
             ui.end_row();
         });
+}
+
+/// What the text shows: typed words, the time of day or a speaker timer.
+fn source_inspector(ui: &mut Ui, t: &mut TextCue) {
+    use crate::show::TextSource;
+    let kind = |s: &TextSource| match s {
+        TextSource::Static => "Typed text",
+        TextSource::Clock { .. } => "Clock",
+        TextSource::Timer { .. } => "Speaker timer",
+    };
+    egui::Grid::new("text_source")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Shows");
+            egui::ComboBox::from_id_salt("text_source_kind")
+                .selected_text(kind(&t.source))
+                .show_ui(ui, |ui| {
+                    let was = t.source;
+                    let options = [
+                        TextSource::Static,
+                        TextSource::Clock {
+                            hour24: true,
+                            seconds: false,
+                        },
+                        TextSource::Timer {
+                            total: 600.0,
+                            up: false,
+                            warn: 60.0,
+                        },
+                    ];
+                    for o in options {
+                        let selected = std::mem::discriminant(&was) == std::mem::discriminant(&o);
+                        if ui.selectable_label(selected, kind(&o)).clicked() && !selected {
+                            t.source = o;
+                            if o.is_live() && !t.text.contains(crate::live_text::PLACEHOLDER) {
+                                t.text = crate::live_text::PLACEHOLDER.into();
+                            }
+                        }
+                    }
+                });
+            ui.end_row();
+            match &mut t.source {
+                TextSource::Static => {}
+                TextSource::Clock { hour24, seconds } => {
+                    ui.label("Format");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(hour24, "24-hour");
+                        ui.checkbox(seconds, "Seconds");
+                    });
+                    ui.end_row();
+                }
+                TextSource::Timer { total, up, warn } => {
+                    ui.label("Direction");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(up, false, "Count down");
+                        ui.selectable_value(up, true, "Count up");
+                    });
+                    ui.end_row();
+                    ui.label(if *up { "Limit" } else { "From" });
+                    let mut mins = *total / 60.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut mins)
+                                .speed(0.1)
+                                .range(0.0..=600.0)
+                                .suffix(" min"),
+                        )
+                        .changed()
+                    {
+                        *total = (mins * 60.0).round();
+                    }
+                    ui.end_row();
+                    if !*up {
+                        ui.label("Amber at");
+                        ui.add(
+                            egui::DragValue::new(warn)
+                                .speed(1.0)
+                                .range(0.0..=3600.0)
+                                .suffix(" s left"),
+                        );
+                        ui.end_row();
+                    }
+                }
+            }
+        });
+    if t.source.is_live() {
+        ui.label(
+            RichText::new(
+                "It runs while the cue plays and pauses with the show. A timer turns \
+                 red at zero and counts the overrun.",
+            )
+            .weak(),
+        );
+    }
 }
 
 /// A percentage field for a fraction (0.25 shows as 25%).

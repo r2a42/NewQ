@@ -119,12 +119,30 @@ pub struct VideoState {
 
 pub struct ImageState {
     pub image: Option<RgbaImage>,
+    /// Counts the pictures: the renderer uploads a new one when it changes.
+    pub version: u64,
     loader: Option<Receiver<Result<RgbaImage, String>>>,
     pub output: Option<OutputId>,
     pub layer: i32,
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    /// Set for a clock or timer: the picture is redrawn as the time changes.
+    live: Option<LiveText>,
+}
+
+/// A clock or timer text cue being kept up to date.
+struct LiveText {
+    size: (u32, u32),
+    /// What the picture on screen (or on its way) shows.
+    drawn: (String, [u8; 4]),
+    /// A newer picture being drawn.
+    pending: Option<Receiver<Result<RgbaImage, String>>>,
+}
+
+/// What distinguishes one picture of a live cue from the next.
+fn live_key(c: &TextCue) -> (String, [u8; 4]) {
+    (c.text.clone(), c.color)
 }
 
 /// A full-screen colour layer used for dip-to-black/white transitions. It
@@ -364,7 +382,8 @@ pub struct LayerRef<'a> {
 
 pub enum LayerSource<'a> {
     Video(&'a VideoPlayer),
-    Image(&'a RgbaImage),
+    /// The picture and its version (see `ImageState::version`).
+    Image(&'a RgbaImage, u64),
     Solid([u8; 4]),
 }
 
@@ -972,7 +991,11 @@ impl Engine {
                 size,
                 camera: None,
             },
-            kind: PreparedKind::Text(draw_text_on_thread(t.clone(), size)),
+            kind: PreparedKind::Text(draw_text_on_thread(
+                crate::live_text::resolve(t, 0.0, crate::live_text::now_hms())
+                    .unwrap_or_else(|| t.clone()),
+                size,
+            )),
             duration: t.media.end.filter(|d| *d > 0.0),
             warning: None,
         }
@@ -1161,23 +1184,43 @@ impl Engine {
                             }
                             PreparedKind::Image(loader) => ActiveKind::Image(ImageState {
                                 image: None,
+                                version: 0,
                                 loader: Some(loader),
                                 output: m.output,
                                 layer: m.layer,
                                 fit: m.fit,
                                 transform: m.transform,
                                 color: m.color,
+                                live: None,
                             }),
                             PreparedKind::Audio(voice) => ActiveKind::Audio(voice),
                             // Text is drawn at the output's size, so it is never fitted.
                             PreparedKind::Text(loader) => ActiveKind::Image(ImageState {
                                 image: None,
+                                version: 0,
                                 loader: Some(loader),
                                 output: m.output,
                                 layer: m.layer,
                                 fit: Fit::Stretch,
                                 transform: m.transform,
                                 color: m.color,
+                                live: match &cue.kind {
+                                    CueKind::Text(t) if t.source.is_live() => {
+                                        crate::live_text::resolve(
+                                            t,
+                                            0.0,
+                                            crate::live_text::now_hms(),
+                                        )
+                                        .map(|r| {
+                                            LiveText {
+                                                size: self.output_size(m.output),
+                                                drawn: live_key(&r),
+                                                pending: None,
+                                            }
+                                        })
+                                    }
+                                    _ => None,
+                                },
                             }),
                         };
                         let transition = if active.is_visual() {
@@ -1517,7 +1560,10 @@ impl Engine {
                     {
                         img.loader = None;
                         match result {
-                            Ok(i) => img.image = Some(i),
+                            Ok(i) => {
+                                img.image = Some(i);
+                                img.version += 1;
+                            }
                             Err(e) => {
                                 messages.push(format!("Image cue failed: {e}"));
                                 return false;
@@ -1527,6 +1573,30 @@ impl Engine {
                     a.started = img.image.is_some();
                     if a.started && !paused {
                         a.elapsed += dt;
+                    }
+                    if let (Some(live), Some(CueKind::Text(t))) =
+                        (&mut img.live, cue.map(|c| &c.kind))
+                    {
+                        if let Some(rx) = &live.pending
+                            && let Ok(result) = rx.try_recv()
+                        {
+                            live.pending = None;
+                            if let Ok(i) = result {
+                                img.image = Some(i);
+                                img.version += 1;
+                            }
+                        }
+                        if live.pending.is_none()
+                            && let Some(now) = crate::live_text::resolve(
+                                t,
+                                a.elapsed,
+                                crate::live_text::now_hms(),
+                            )
+                            && live_key(&now) != live.drawn
+                        {
+                            live.drawn = live_key(&now);
+                            live.pending = Some(draw_text_on_thread(now, live.size));
+                        }
                     }
                     if a.duration.is_some_and(|d| a.elapsed >= d) {
                         completed = true;
@@ -1876,7 +1946,7 @@ impl Engine {
                         i.fit,
                         i.transform,
                         i.color,
-                        LayerSource::Image(img),
+                        LayerSource::Image(img, i.version),
                     ),
                     None => continue,
                 },
@@ -2446,12 +2516,82 @@ mod tests {
         drawn(&mut e, &show);
         let layers = e.layers(out);
         assert_eq!(layers.len(), 1, "text should be on the output");
-        let LayerSource::Image(img) = &layers[0].source else {
+        let LayerSource::Image(img, _) = &layers[0].source else {
             panic!("text should present as an image");
         };
         assert_eq!((img.width, img.height), DEFAULT_OUTPUT_SIZE);
         assert!(img.data.chunks(4).any(|p| p[3] > 200), "nothing was drawn");
         assert_eq!(layers[0].fit, Fit::Stretch);
+    }
+
+    fn first_picture(e: &Engine, show: &Show) -> Vec<u8> {
+        let layers = e.layers(first_output(show));
+        let LayerSource::Image(img, _) = &layers[0].source else {
+            panic!("text should present as an image");
+        };
+        img.data.to_vec()
+    }
+
+    #[test]
+    fn a_timer_redraws_as_it_counts_and_a_plain_text_cue_does_not() {
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "{time}", Transition::FadeIn);
+        if let CueKind::Text(c) = &mut show.cues[0].kind {
+            c.source = TextSource::Timer {
+                total: 600.0,
+                up: false,
+                warn: 60.0,
+            };
+        }
+        let mut e = engine_without_media();
+        e.playhead = Some(t);
+        e.go(&show);
+        drawn(&mut e, &show);
+        let before = first_picture(&e, &show);
+        // A tenth of a second is still 10:00: nothing is redrawn.
+        e.tick(&show, 0.1);
+        run_for(&mut e, &show, 0.2);
+        assert_eq!(first_picture(&e, &show), before);
+        // Ninety seconds in it reads 8:30 (and the minute has changed).
+        e.tick(&show, 90.0);
+        run_until(&mut e, &show, "the new time to be drawn", |e| {
+            first_picture(e, &show) != before
+        });
+        // The picture stays up while the next one is drawn: still one layer.
+        assert_eq!(e.layers(first_output(&show)).len(), 1);
+
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "static", Transition::FadeIn);
+        let mut e = engine_without_media();
+        e.playhead = Some(t);
+        e.go(&show);
+        drawn(&mut e, &show);
+        let before = first_picture(&e, &show);
+        e.tick(&show, 90.0);
+        run_for(&mut e, &show, 0.2);
+        assert_eq!(first_picture(&e, &show), before);
+    }
+
+    #[test]
+    fn a_paused_timer_stands_still() {
+        let mut show = Show::default();
+        let t = text_cue(&mut show, "{time}", Transition::FadeIn);
+        if let CueKind::Text(c) = &mut show.cues[0].kind {
+            c.source = TextSource::Timer {
+                total: 600.0,
+                up: false,
+                warn: 60.0,
+            };
+        }
+        let mut e = engine_without_media();
+        e.playhead = Some(t);
+        e.go(&show);
+        drawn(&mut e, &show);
+        let before = first_picture(&e, &show);
+        e.paused = true;
+        e.tick(&show, 90.0);
+        run_for(&mut e, &show, 0.2);
+        assert_eq!(first_picture(&e, &show), before);
     }
 
     #[test]

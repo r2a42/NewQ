@@ -11,6 +11,7 @@ mod engine;
 mod export;
 mod gpu;
 mod history;
+mod live_text;
 mod media;
 mod monitor;
 mod output;

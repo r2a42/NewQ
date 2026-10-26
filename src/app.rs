@@ -886,12 +886,24 @@ impl App {
                         }
                         entry
                     }
-                    LayerSource::Image(img) => {
-                        self.textures.entry(l.instance).or_insert_with(|| {
+                    LayerSource::Image(img, version) => {
+                        let version = *version;
+                        let new_texture = || {
                             let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
                             tex.upload_rgba(&gpu.queue, &img.data);
-                            (Arc::new(tex), 1)
-                        })
+                            (Arc::new(tex), version)
+                        };
+                        let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
+                        // A clock or timer is drawn again as the time changes.
+                        if entry.1 != version {
+                            if (entry.0.width, entry.0.height) == (img.width, img.height) {
+                                entry.0.upload_rgba(&gpu.queue, &img.data);
+                                entry.1 = version;
+                            } else {
+                                *entry = new_texture();
+                            }
+                        }
+                        entry
                     }
                     LayerSource::Solid(color) => {
                         self.textures.entry(l.instance).or_insert_with(|| {

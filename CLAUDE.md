@@ -35,6 +35,8 @@ The README describes the features; this file is about working on the code.
   what it writes. `build.rs` puts `newq.ico` in the Windows executable; the
   packaging script puts `newq.icns` in the Mac bundle and the icon and a
   `.desktop` file (`assets/linux/`) in the Linux download.
+  `src/live_text.rs`: clock and speaker timer text (the engine redraws the
+  picture as the shown time changes; the renderer re-uploads on `version`).
   `src/relink.rs`: finding moved media and copying it into one folder.
   `src/gpu.rs` also notices a lost graphics device (`DeviceLost`) and
   `app.rs::watch_gpu` rebuilds every window's device, surface and render thread;
