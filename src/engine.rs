@@ -14,7 +14,7 @@ use crate::show::*;
 use crate::timecode::{Follower, Rate, Timecode};
 use crossbeam_channel::Receiver;
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Cues from the playhead onward (along a continue chain) that get preloaded.
@@ -282,7 +282,22 @@ pub struct PendingCue {
     pub cue_id: CueId,
     pub remaining: f64,
     pub total: f64,
+    /// Not waiting out a time but for the file to be read (ffprobe), which
+    /// takes a moment when the cue wasn't read ahead of GO.
+    pub reading: Option<Reading>,
 }
+
+/// A cue whose start waits for its file to be probed. The rest of the show
+/// carries on meanwhile; the cue starts as soon as the answer is in.
+pub struct Reading {
+    pub file: PathBuf,
+    pub since: Instant,
+    /// If it is the second half of a dip, how to finish the dip.
+    reveal: Option<(u64, f64)>,
+}
+
+/// How long to wait for a file to be probed before giving up on the cue.
+const PROBE_LIMIT: Duration = Duration::from_secs(30);
 
 /// What a preload was made for. It is reused only if the cue still asks for
 /// the same decoding (see `MediaCue::decodes_like`), so dragging a volume or
@@ -599,6 +614,7 @@ impl Engine {
                 cue_id: id,
                 remaining: cue.pre_wait,
                 total: cue.pre_wait,
+                reading: None,
             });
         } else {
             self.start(show, id);
@@ -735,9 +751,13 @@ impl Engine {
         let (player, voice) = if is_image {
             (None, None)
         } else {
-            let ff = self.ff.clone().ok_or("ffmpeg not found")?;
             let file = cue.kind.file_media().ok_or("not a file cue")?.file.clone();
-            let info = self.probe.get_blocking(&ff, &file)?;
+            // It is playing, so it has been read.
+            let info = match self.probe.get(self.ff.as_ref(), &file) {
+                ProbeState::Ready(info) => info.clone(),
+                ProbeState::Failed(e) => return Err(e.clone()),
+                ProbeState::Pending => return Err("still reading the file".into()),
+            };
             match self.prepare_from(&cue, &info, to)?.kind {
                 PreparedKind::Video { player, voice } => (Some(player), voice),
                 PreparedKind::Audio(voice) => (None, Some(voice)),
@@ -1079,9 +1099,26 @@ impl Engine {
                         (CueKind::Camera(c), Some(_)) => self.prepare_camera(&cue, c),
                         (_, Some(ff)) => {
                             let ff = ff.clone();
-                            self.probe
-                                .get_blocking(&ff, &m.file)
-                                .and_then(|info| self.prepare(&cue, &info))
+                            // Not read yet: don't make the whole show wait for
+                            // ffprobe. The cue starts when the answer is in.
+                            let known = match self.probe.get_urgent(Some(&ff), &m.file) {
+                                ProbeState::Ready(info) => Ok(info.clone()),
+                                ProbeState::Failed(e) => Err(e.clone()),
+                                ProbeState::Pending => {
+                                    self.pending.push(PendingCue {
+                                        cue_id: id,
+                                        remaining: 0.0,
+                                        total: 1.0,
+                                        reading: Some(Reading {
+                                            file: m.file.clone(),
+                                            since: Instant::now(),
+                                            reveal,
+                                        }),
+                                    });
+                                    return;
+                                }
+                            };
+                            known.and_then(|info| self.prepare(&cue, &info))
                         }
                     },
                 };
@@ -1323,18 +1360,42 @@ impl Engine {
         }
 
         if !self.paused {
-            let mut due = Vec::new();
+            let mut due: Vec<(CueId, Option<(u64, f64)>)> = Vec::new();
+            let mut gave_up: Vec<CueId> = Vec::new();
+            let probe = &self.probe;
             self.pending.retain_mut(|p| {
+                if let Some(r) = &p.reading {
+                    // Waiting for the file to be read, not for time to pass.
+                    return match probe.peek(&r.file) {
+                        Some(ProbeState::Pending) if r.since.elapsed() < PROBE_LIMIT => true,
+                        Some(ProbeState::Pending) => {
+                            gave_up.push(p.cue_id);
+                            false
+                        }
+                        // Answered (or forgotten meanwhile: it asks again).
+                        _ => {
+                            due.push((p.cue_id, r.reveal));
+                            false
+                        }
+                    };
+                }
                 p.remaining -= dt;
                 if p.remaining <= 0.0 {
-                    due.push(p.cue_id);
+                    due.push((p.cue_id, None));
                     false
                 } else {
                     true
                 }
             });
-            for id in due {
-                self.start(show, id);
+            for id in gave_up {
+                let name = show
+                    .cue(id)
+                    .map(|c| format!("{} ({})", c.number, c.name))
+                    .unwrap_or_default();
+                self.log(format!("Cue {name}: reading its file took too long"));
+            }
+            for (id, reveal) in due {
+                self.start_with(show, id, reveal);
             }
         }
 
@@ -1724,7 +1785,7 @@ impl Engine {
             let Some(m) = cue.kind.file_media() else {
                 continue;
             };
-            let info = match self.probe.get(self.ff.as_ref(), &m.file) {
+            let info = match self.probe.get_urgent(self.ff.as_ref(), &m.file) {
                 ProbeState::Ready(info) => info.clone(),
                 _ => continue,
             };
@@ -3274,5 +3335,92 @@ mod tests {
         assert_eq!(video_start(true, true, false, s(1)), Wait);
         // ...then go without it, rather than start it late and let it lag.
         assert_eq!(video_start(true, true, false, s(4)), GoSilent);
+    }
+
+    // ----- Starting a cue whose file isn't read yet ----------------------------
+
+    /// An engine with a video cue that has not been read ahead, the probe held
+    /// up so the cue is waiting on it. None to skip.
+    fn waiting_on_the_probe() -> Option<(Engine, Show, CueId)> {
+        let (ff, clip) = crate::media::test_media("smpte_8s.mp4")?;
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let c = show.make_cue(CueType::Video, Some(clip), 0);
+        let id = c.id;
+        show.cues.push(c);
+        e.probe.hold(true);
+        e.playhead = Some(id);
+        e.go(&show);
+        Some((e, show, id))
+    }
+
+    #[test]
+    fn going_to_a_cue_that_is_not_read_yet_does_not_wait_for_ffprobe() {
+        let Some((mut e, show, id)) = waiting_on_the_probe() else {
+            return;
+        };
+        // GO has returned, with the cue waiting for its file and nothing playing.
+        assert!(e.active.is_empty());
+        assert!(
+            e.pending
+                .iter()
+                .any(|p| p.cue_id == id && p.reading.is_some())
+        );
+        assert!(e.is_active(), "the loop keeps running for it");
+        assert!(matches!(e.status(id), CueStatus::PreWait { .. }));
+        // Time passes meanwhile, and nothing else is held up.
+        for _ in 0..5 {
+            e.tick(&show, 0.1);
+        }
+        assert!(e.active.is_empty(), "still waiting for the file");
+        // The answer comes in and the cue starts.
+        e.probe.hold(false);
+        run_until(&mut e, &show, "the cue to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        assert!(e.pending.is_empty(), "no longer waiting");
+    }
+
+    #[test]
+    fn a_cue_waiting_for_its_file_can_be_stopped() {
+        let Some((mut e, show, id)) = waiting_on_the_probe() else {
+            return;
+        };
+        e.stop_cue(id, 0.0);
+        assert!(e.pending.is_empty());
+        e.probe.hold(false);
+        run_for(&mut e, &show, 0.6);
+        assert!(e.active.is_empty(), "it never starts once stopped");
+        // Stop All does the same.
+        let Some((mut e, show, _)) = waiting_on_the_probe() else {
+            return;
+        };
+        e.stop_all(0.0);
+        e.probe.hold(false);
+        run_for(&mut e, &show, 0.6);
+        assert!(e.active.is_empty() && !e.is_active());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_says_so_instead_of_waiting_for_ever() {
+        let mut e = engine_without_media();
+        let Some((ff, _)) = crate::media::test_media("smpte_8s.mp4") else {
+            return;
+        };
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let c = show.make_cue(CueType::Video, Some(PathBuf::from("/nowhere/gone.mp4")), 0);
+        let id = c.id;
+        show.cues.push(c);
+        e.playhead = Some(id);
+        e.go(&show);
+        // A missing file is answered at once, so nothing waits.
+        assert!(e.pending.is_empty() && e.active.is_empty());
+        assert!(
+            e.messages.iter().any(|(_, m)| m.contains("file not found")),
+            "{:?}",
+            e.messages
+        );
     }
 }

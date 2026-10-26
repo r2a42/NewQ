@@ -1931,7 +1931,11 @@ fn active_panel(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Act
     }
     for p in &engine.pending {
         let name = show.cue(p.cue_id).map(cue_label).unwrap_or_default();
-        ui.label(format!("{name}: pre-wait {}", fmt_time(p.remaining)));
+        if p.reading.is_some() {
+            ui.label(format!("{name}: reading its file…"));
+        } else {
+            ui.label(format!("{name}: pre-wait {}", fmt_time(p.remaining)));
+        }
     }
     for a in engine.active.iter().rev() {
         let mut name = show
@@ -6219,7 +6223,7 @@ mod tests {
         engine.playhead = Some(id);
         engine.go(&show);
         let t0 = std::time::Instant::now();
-        while !engine.active.iter().all(|a| a.started) {
+        while engine.active.is_empty() || !engine.active.iter().all(|a| a.started) {
             assert!(t0.elapsed().as_secs() < 10, "the still never loaded");
             std::thread::sleep(std::time::Duration::from_millis(5));
             engine.tick(&show, 0.005);
