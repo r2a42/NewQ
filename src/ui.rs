@@ -186,6 +186,14 @@ pub struct UiState {
     dialog: Option<OpenDialog>,
     /// A save being written, if any.
     saving: Option<SaveJob>,
+    /// The show as last serialised, for the unsaved-changes mark and the undo
+    /// history, and when (egui time). It is redone when something may have
+    /// changed it, not every frame: serialising a big show is over a
+    /// millisecond.
+    json: Option<String>,
+    json_at: f64,
+    /// Something outside `draw` (a remote command) changed the show.
+    json_stale: bool,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -450,11 +458,47 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         apply(a, show, engine, st);
     }
 
-    let json = serde_json::to_string(show).ok();
-    st.dirty = json != st.saved_json;
-    if let Some(json) = &json {
-        track_history(st, json, ui.ctx().input(|i| i.time), acted);
+    let (now, input) = ui.ctx().input(|i| (i.time, editing_input(i)));
+    if json_due(
+        st.json.is_some(),
+        st.json_stale || acted,
+        input,
+        now - st.json_at,
+    ) {
+        st.json = serde_json::to_string(show).ok();
+        st.json_at = now;
+        st.json_stale = false;
     }
+    st.dirty = st.json != st.saved_json;
+    if let Some(json) = st.json.take() {
+        track_history(st, &json, now, acted);
+        st.json = Some(json);
+    }
+}
+
+/// How long the show may go without being looked at for changes (seconds).
+const JSON_EVERY: f64 = 0.25;
+
+/// Whether the show should be serialised again now: if it never has been, if
+/// something is known to have changed it, if the operator is doing something
+/// that can (anything but moving the mouse about), or, so that nothing is
+/// missed, every so often.
+fn json_due(have: bool, changed: bool, input: bool, age: f64) -> bool {
+    !have || changed || input || age >= JSON_EVERY
+}
+
+/// Whether this frame has input that can edit the show: a button held (a
+/// slider or a drag), a key, text, a click. Just moving the mouse doesn't.
+fn editing_input(i: &egui::InputState) -> bool {
+    i.pointer.any_down()
+        || i.events.iter().any(|e| {
+            !matches!(
+                e,
+                egui::Event::PointerMoved(_)
+                    | egui::Event::MouseMoved(_)
+                    | egui::Event::PointerGone
+            )
+        })
 }
 
 /// Tell the undo history what the show looks like after this frame.
@@ -4495,6 +4539,8 @@ fn load_into(
 
 /// Do what a remote message asks for, as if the operator had done it.
 pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    // It may change the show; look at it again soon.
+    st.json_stale = true;
     let find = |show: &Show, n: &str| {
         show.cues
             .iter()
@@ -6852,5 +6898,45 @@ mod tests {
             hit,
             "the last of 2,000 cues was not on screen after scrolling to it"
         );
+    }
+
+    #[test]
+    fn the_show_is_serialised_when_something_may_have_changed_it_not_every_frame() {
+        // Never, or told it changed, or doing something that edits: yes.
+        assert!(json_due(false, false, false, 0.0), "the first time");
+        assert!(json_due(true, true, false, 0.0), "told so");
+        assert!(json_due(true, false, true, 0.0), "editing input");
+        // Idle, or just the mouse about, a moment after the last time: no.
+        assert!(!json_due(true, false, false, 0.016));
+        assert!(!json_due(true, false, false, JSON_EVERY - 0.01));
+        // But never unlooked at for long, whatever else is going on.
+        assert!(json_due(true, false, false, JSON_EVERY));
+    }
+
+    #[test]
+    fn only_input_that_can_edit_counts_as_editing() {
+        let ctx = egui::Context::default();
+        let frame = |events: Vec<Event>| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+                time: Some(1.0),
+                events,
+                ..Default::default()
+            };
+            let mut seen = false;
+            let mut out = ctx.run_ui(input, |ui| seen = ui.ctx().input(editing_input));
+            out.textures_delta.clear();
+            seen
+        };
+        assert!(!frame(vec![]), "nothing");
+        assert!(
+            !frame(vec![Event::PointerMoved(pos2(10.0, 10.0))]),
+            "just moving"
+        );
+        assert!(frame(vec![Event::Text("a".into())]), "typing");
+        assert!(frame(vec![press(Key::A)]), "a key");
+        assert!(frame(vec![button(pos2(10.0, 10.0), true)]), "a click");
+        // Still held on the next frame: a drag in progress.
+        assert!(frame(vec![]), "the button is still down");
     }
 }
