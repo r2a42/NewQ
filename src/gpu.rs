@@ -812,11 +812,15 @@ pub enum Slot {
     /// that show the same picture, as projectors sharing a wide one do,
     /// must not share a slot.
     Window(u8),
+    /// A stream being sent out (by the number of the stream).
+    Capture(u8),
 }
 
 /// How many windows can draw the same layer at once without sharing a slot.
 const WINDOW_SLOTS: usize = 8;
-const SLOTS: usize = 2 + WINDOW_SLOTS;
+/// And how many streams.
+pub const CAPTURE_SLOTS: usize = 2;
+const SLOTS: usize = 2 + WINDOW_SLOTS + CAPTURE_SLOTS;
 
 impl Slot {
     fn index(self) -> usize {
@@ -824,6 +828,7 @@ impl Slot {
             Slot::Preview => 0,
             Slot::Screen => 1,
             Slot::Window(n) => 2 + n as usize % WINDOW_SLOTS,
+            Slot::Capture(n) => 2 + WINDOW_SLOTS + n as usize % CAPTURE_SLOTS,
         }
     }
 }
@@ -1912,5 +1917,109 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_stream_sends_the_picture_to_ffmpeg() {
+        use crate::media::ffmpeg::Ffmpeg;
+        use crate::render::{CaptureThread, OutputGroup, OutputLayer};
+        use crate::show::StreamKind;
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the stream test");
+            return;
+        };
+        let Some(ff) = Ffmpeg::locate() else {
+            if std::env::var_os("NEWQ_REQUIRE_MEDIA").is_some() {
+                panic!("NEWQ_REQUIRE_MEDIA is set but ffmpeg was not found");
+            }
+            eprintln!("no ffmpeg; skipping the stream test");
+            return;
+        };
+        let dir = std::env::temp_dir().join("newq_test_stream");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.rgba");
+        let _ = std::fs::remove_file(&out);
+        let size = (64u32, 36u32);
+        let kind = StreamKind::Custom {
+            args: format!(
+                "-frames:v 4 -f rawvideo -pix_fmt rgba \"{}\"",
+                out.display()
+            ),
+        };
+        let sink = crate::stream::Sink::start(&ff, size, 30, &kind).expect("ffmpeg starts");
+        let thread = CaptureThread::spawn(gpu.clone(), Slot::Capture(0), size, 30, sink);
+        // A red picture, drawn at the stream's size from a 2×2 layer.
+        let tex = LayerTexture::new_rgba(&gpu, 2, 2);
+        tex.upload_rgba(&gpu.queue, &[255, 0, 0, 255].repeat(4));
+        let identity = corner_pin(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        thread.submit(vec![OutputGroup {
+            layers: vec![OutputLayer {
+                texture: Arc::new(tex),
+                opacity: 1.0,
+                fit: Fit::Stretch,
+                transform: LayerTransform::default(),
+                color: ColorAdjust::default(),
+            }],
+            geometry: Geometry {
+                canvas: (1920, 1080),
+                warp: identity,
+                pin: identity,
+                mesh: None,
+                slice: Geometry::WHOLE,
+            },
+        }]);
+        let want = (size.0 * size.1 * 4 * 4) as u64;
+        let t0 = std::time::Instant::now();
+        while std::fs::metadata(&out).map_or(0, |m| m.len()) < want {
+            assert!(
+                t0.elapsed().as_secs() < 15,
+                "no frames arrived (failure: {:?})",
+                thread.failure()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        thread.stop();
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(bytes.len() as u64, want, "four whole frames");
+        // The last frame is the red picture, all over.
+        let last = &bytes[bytes.len() - (size.0 * size.1 * 4) as usize..];
+        for px in last.chunks(4).step_by(97) {
+            assert_eq!(px, [255, 0, 0, 255], "{px:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stream_that_ffmpeg_refuses_is_reported() {
+        use crate::media::ffmpeg::Ffmpeg;
+        use crate::render::CaptureThread;
+        use crate::show::StreamKind;
+        let Some(gpu) = test_gpu() else { return };
+        let Some(ff) = Ffmpeg::locate() else { return };
+        let size = (64u32, 36u32);
+        let kind = StreamKind::Custom {
+            args: "-f no_such_format nowhere".into(),
+        };
+        // FFmpeg may refuse at once (the sink then can't start properly) or
+        // as soon as a frame arrives; either way the reason comes back.
+        let reason = match crate::stream::Sink::start(&ff, size, 30, &kind) {
+            Err(e) => e,
+            Ok(sink) => {
+                let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, sink);
+                let t0 = std::time::Instant::now();
+                loop {
+                    if let Some(why) = thread.failure() {
+                        break why;
+                    }
+                    assert!(t0.elapsed().as_secs() < 15, "nothing was reported");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        };
+        assert!(!reason.is_empty());
+        assert!(
+            !reason.contains("Broken pipe") || reason.contains("FFmpeg"),
+            "{reason}"
+        );
     }
 }

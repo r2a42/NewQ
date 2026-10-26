@@ -125,6 +125,30 @@ includes FFmpeg, so there's nothing else to install.
   compensation are not done. The preview in the control window shows what a
   projector shows, not the fade: look at the screen. The fade and the parts
   were checked in tests against a software GPU, not against projectors.
+- **Send a display out as video (virtual camera, OBS, streaming):** a display's
+  *Send out* section sends its picture (the one cues are sent to, without any
+  corner pin or blend) to a video call, OBS or a stream, as an FFmpeg output
+  at the height and frame rate you choose (720 px tall at 30 fps to start with;
+  a wide picture keeps its shape). It works for a display that has no monitor
+  too, so a picture can go out without taking a screen. Three destinations:
+  - *Virtual camera* (**Linux only**): a v4l2loopback device, which Zoom, Teams,
+    OBS and browsers then list as a camera. Make the device once with `sudo
+    modprobe v4l2loopback video_nr=10 card_label=NewQ exclusive_caps=1` (the
+    `v4l2loopback-dkms` package), choose it in the list, and tick the box
+    *before* the call starts. NewQ can't have been tested on a real device
+    here, only on the FFmpeg end of the pipe.
+  - *Network stream (for OBS)*: MPEG-TS over UDP (H.264 if your FFmpeg has
+    it) to an address and port. In OBS add a *Media Source*, untick *Local
+    File* and enter `udp://127.0.0.1:5000`; OBS's own **Virtual Camera**
+    then makes it a camera for Zoom or Teams. This is the way on **Windows and
+    macOS**, where a virtual camera needs a signed driver or system extension
+    that NewQ doesn't have. It runs about half a second behind.
+  - *Custom FFmpeg output*: the arguments that follow the input (the picture
+    arrives as raw RGBA), for anything else FFmpeg can send to: RTMP to a
+    streaming service, SRT, a file.
+  Up to two displays can be sent out at once. A stream that can't start or
+  that stops (the device is busy, the address can't be reached) is reported in
+  the status bar and is not retried until its settings are changed.
 - **Sub displays:** split a display into areas that each work like a display
   of their own, e.g. one projector covering two set pieces, or one LED
   processor input feeding several screens. Add one under *Sub displays* (or

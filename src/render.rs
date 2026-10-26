@@ -34,6 +34,15 @@ impl<T> Mailbox<T> {
         self.cv.notify_one();
     }
 
+    /// Wait up to `wait` for a value.
+    fn take_timeout(&self, wait: std::time::Duration) -> Option<T> {
+        let mut slot = self.slot.lock();
+        if slot.is_none() {
+            self.cv.wait_for(&mut slot, wait);
+        }
+        slot.take()
+    }
+
     fn take(&self) -> T {
         let mut slot = self.slot.lock();
         loop {
@@ -222,6 +231,178 @@ fn output_loop(
         window.pre_present_notify();
         gpu.queue.present(frame);
     }
+}
+
+// ----- Streams out ------------------------------------------------------------
+
+enum CaptureJob {
+    Groups(Vec<OutputGroup>),
+    Quit,
+}
+
+/// A display's picture drawn off screen at the rate of a stream and handed to
+/// FFmpeg (see `stream.rs`). It draws what it was last given, again and
+/// again, so a still picture is still a stream.
+pub struct CaptureThread {
+    mailbox: Arc<Mailbox<CaptureJob>>,
+    errors: crossbeam_channel::Receiver<String>,
+    handle: JoinHandle<()>,
+}
+
+impl CaptureThread {
+    pub fn spawn(
+        gpu: Gpu,
+        slot: Slot,
+        size: (u32, u32),
+        fps: u32,
+        sink: crate::stream::Sink,
+    ) -> CaptureThread {
+        let mailbox = Arc::new(Mailbox::new());
+        let mb = mailbox.clone();
+        let (err_tx, errors) = crossbeam_channel::unbounded();
+        let handle = std::thread::Builder::new()
+            .name("stream-render".into())
+            .spawn(move || capture_loop(gpu, slot, size, fps, sink, mb, err_tx))
+            .expect("spawn stream render thread");
+        CaptureThread {
+            mailbox,
+            errors,
+            handle,
+        }
+    }
+
+    /// What to draw from now on (the picture's layers, on its own canvas).
+    pub fn submit(&self, groups: Vec<OutputGroup>) {
+        self.mailbox
+            .put(CaptureJob::Groups(groups), |old, new| match old {
+                CaptureJob::Quit => CaptureJob::Quit,
+                _ => new,
+            });
+    }
+
+    /// Why it stopped, if it has.
+    pub fn failure(&self) -> Option<String> {
+        self.errors.try_recv().ok()
+    }
+
+    pub fn is_running(&self) -> bool {
+        !self.handle.is_finished()
+    }
+
+    /// Stop, letting FFmpeg finish what it has been given, and wait.
+    pub fn stop(self) {
+        self.mailbox.put(CaptureJob::Quit, |_, quit| quit);
+        let _ = self.handle.join();
+    }
+}
+
+fn capture_loop(
+    gpu: Gpu,
+    slot: Slot,
+    size: (u32, u32),
+    fps: u32,
+    mut sink: crate::stream::Sink,
+    mailbox: Arc<Mailbox<CaptureJob>>,
+    errors: crossbeam_channel::Sender<String>,
+) {
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let pipeline = gpu.compositor.pipeline(&gpu.device, format);
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("stream"),
+        size: wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    // Rows are copied out padded to a multiple of 256 bytes.
+    let row = size.0 * 4;
+    let padded =
+        row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("stream readback"),
+        size: u64::from(padded * size.1),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let frame_time = std::time::Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));
+    let mut groups: Vec<OutputGroup> = Vec::new();
+    let mut next = std::time::Instant::now();
+    let mut frame = vec![0u8; (row * size.1) as usize];
+    loop {
+        let now = std::time::Instant::now();
+        if now < next {
+            match mailbox.take_timeout(next - now) {
+                Some(CaptureJob::Quit) => break,
+                Some(CaptureJob::Groups(g)) => groups = g,
+                None => {}
+            }
+            continue;
+        }
+        // Keep to the rate, but don't try to catch up after a long stall.
+        next += frame_time;
+        if next + frame_time * 3 < now {
+            next = now + frame_time;
+        }
+        let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
+        let cmd = gpu.composite(&pipeline, slot, &view, &draw, None);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(size.1),
+                },
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([cmd, encoder.finish()]);
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let polled = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        if polled.is_err() || !matches!(rx.recv(), Ok(Ok(()))) {
+            let _ = errors.send("the graphics device stopped".into());
+            return;
+        }
+        {
+            let Ok(data) = slice.get_mapped_range() else {
+                let _ = errors.send("could not read the picture back".into());
+                return;
+            };
+            for (y, out) in frame.chunks_mut(row as usize).enumerate() {
+                let from = y * padded as usize;
+                out.copy_from_slice(&data[from..from + row as usize]);
+            }
+        }
+        readback.unmap();
+        if let Err(e) = sink
+            .write(&frame)
+            .or_else(|e| sink.failed().map_or(Err(e), Err))
+        {
+            let _ = errors.send(e);
+            return;
+        }
+    }
+    sink.finish();
 }
 
 // ----- Control window (egui) ----------------------------------------------------

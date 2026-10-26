@@ -46,6 +46,10 @@ The README describes the features; this file is about working on the code.
   (`OutputConfig::part_of`): `app.rs::update_outputs` draws the other
   display's layers through that part; windows drawing the same layers need
   different `Slot::Window`s or their uniforms overwrite each other.
+  `src/stream.rs`: sending a display's picture out through an FFmpeg process
+  (argument building, `Sink`); `render.rs::CaptureThread` draws the picture off
+  screen at the stream's rate and feeds it. A test streams to a file through
+  real FFmpeg; the Linux virtual camera itself can't be tested here.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
   picture as the shown time changes; the renderer re-uploads on `version`).
   `src/relink.rs`: finding moved media and copying it into one folder.
