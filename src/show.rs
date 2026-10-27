@@ -934,6 +934,7 @@ pub enum CueKind {
     Text(TextCue),
     Camera(CameraCue),
     Send(SendCue),
+    LiveAudio(LiveAudioCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -948,6 +949,7 @@ pub enum CueType {
     Text,
     Camera,
     Send,
+    LiveAudio,
     /// Ways to make a text cue that shows the time (a cue's own type is
     /// still `Text`).
     Clock,
@@ -967,6 +969,7 @@ impl CueType {
             CueType::Text => "Text",
             CueType::Camera => "Camera",
             CueType::Send => "Send",
+            CueType::LiveAudio => "Live audio",
             CueType::Clock => "Clock",
             CueType::Timer => "Timer",
         }
@@ -983,6 +986,7 @@ impl CueType {
             CueType::Text => "📝",
             CueType::Camera => "📷",
             CueType::Send => "📡",
+            CueType::LiveAudio => "🎙",
             CueType::Clock => "🕒",
             CueType::Timer => "⏳",
         }
@@ -1002,6 +1006,7 @@ impl CueKind {
             CueKind::Text(_) => CueType::Text,
             CueKind::Camera(_) => CueType::Camera,
             CueKind::Send(_) => CueType::Send,
+            CueKind::LiveAudio(_) => CueType::LiveAudio,
         }
     }
     /// The playback settings of a cue that plays something: transitions,
@@ -1011,6 +1016,7 @@ impl CueKind {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
             CueKind::Text(t) => Some(&t.media),
             CueKind::Camera(c) => Some(&c.media),
+            CueKind::LiveAudio(c) => Some(&c.media),
             _ => None,
         }
     }
@@ -1019,6 +1025,7 @@ impl CueKind {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => Some(m),
             CueKind::Text(t) => Some(&mut t.media),
             CueKind::Camera(c) => Some(&mut c.media),
+            CueKind::LiveAudio(c) => Some(&mut c.media),
             _ => None,
         }
     }
@@ -1697,6 +1704,32 @@ pub struct CameraCue {
     pub media: MediaCue,
 }
 
+/// Sound from an audio input (a Dante Virtual Soundcard, a mixer, a line
+/// input) played live on one of the show's audio outputs. Routing, volume,
+/// fades and a time to run for are the shared media settings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiveAudioCue {
+    /// The input device by its name; None is the system's default input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The first input channel, counting from 0: it is the left, the next the
+    /// right (the same again if there is no next).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub input_channel: u16,
+    /// `end` is how long it runs (None = until stopped).
+    pub media: MediaCue,
+}
+
+impl Default for LiveAudioCue {
+    fn default() -> Self {
+        LiveAudioCue {
+            device: None,
+            input_channel: 0,
+            media: MediaCue::new(PathBuf::new(), None),
+        }
+    }
+}
+
 impl CameraCue {
     pub fn new(output: Option<OutputId>) -> CameraCue {
         let mut media = MediaCue::new_visual(PathBuf::new(), output);
@@ -2264,6 +2297,10 @@ impl Show {
                 CueKind::Camera(CameraCue::new(default_output)),
             ),
             CueType::Send => ("Send".into(), CueKind::Send(SendCue::default())),
+            CueType::LiveAudio => (
+                "Live audio".into(),
+                CueKind::LiveAudio(LiveAudioCue::default()),
+            ),
         };
         Cue {
             id,
@@ -4358,5 +4395,31 @@ mod tests {
             Some(0.25)
         );
         assert!(matches!(&back.cue(g).unwrap().kind, CueKind::Group(g) if g.slides.is_some()));
+    }
+
+    #[test]
+    fn live_audio_cues_round_trip_and_keep_the_file_format_small() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::LiveAudio, None, 0);
+        assert_eq!(cue.kind.cue_type(), CueType::LiveAudio);
+        // It has playback settings (volume, fades, output) but reads no file.
+        assert!(cue.kind.media().is_some() && cue.kind.file_media().is_none());
+        assert!(!cue.kind.preloads());
+        let before = serde_json::to_string(&cue).unwrap();
+        assert!(
+            !before.contains("input_channel") && !before.contains("device"),
+            "{before}"
+        );
+        if let CueKind::LiveAudio(c) = &mut cue.kind {
+            c.device = Some("Dante Virtual Soundcard".into());
+            c.input_channel = 6;
+            c.media.volume_db = -3.0;
+        }
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&cue).unwrap()).unwrap();
+        let CueKind::LiveAudio(c) = &back.kind else {
+            panic!()
+        };
+        assert_eq!(c.device.as_deref(), Some("Dante Virtual Soundcard"));
+        assert_eq!((c.input_channel, c.media.volume_db), (6, -3.0));
     }
 }

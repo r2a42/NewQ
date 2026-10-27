@@ -34,6 +34,15 @@ includes FFmpeg, so there's nothing else to install.
   (up to 64) to route cues to; subscribe the channels in Dante Controller.
   Nothing else is needed or possible: Dante has no interface for a program to
   join the network by itself.
+- **Live audio:** *Cue ▸ Add Live audio cue* plays an audio input (a Dante Virtual
+  Soundcard or Dante interface, a mixer's USB output, a line input) on one of the
+  audio outputs, from the input channel you choose (and the next). It has the
+  volume, fades, output and channels of any audio cue and runs until stopped
+  or for a time. The input is opened when the cue starts, not ahead of GO. If the
+  input and output are on different clocks a little sound is dropped now and then
+  so the delay doesn't grow; on one Dante device they stay together. Tested without
+  hardware (the channel and sample-rate conversion and the cue's lifecycle), not
+  against a real input.
 - **Slide shows:** *Cue ▸ Add Slide show…* takes any number of images (chosen
   together, put in name order) and makes one cue that crossfades through them.
   Set one *Fade* (how long each slide takes to fade in over the last) and one

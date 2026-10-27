@@ -254,7 +254,10 @@ impl ActiveCue {
         let media = show.cue(self.cue_id)?.kind.media()?;
         let ok = match &self.kind {
             ActiveKind::Video(v) => !v.player.is_live() && !media.loop_media,
-            ActiveKind::Audio(_) => !media.loop_media,
+            // Live sound has no file to jump about in.
+            ActiveKind::Audio(_) => {
+                !media.loop_media && !matches!(show.cue(self.cue_id)?.kind, CueKind::LiveAudio(_))
+            }
             ActiveKind::Image(_) => true,
             _ => false,
         };
@@ -562,6 +565,7 @@ impl Engine {
             CueKind::Image(m) => Some(m.end.filter(|d| *d > 0.0)),
             CueKind::Text(t) => Some(t.media.end.filter(|d| *d > 0.0)),
             CueKind::Camera(c) => Some(c.media.end.filter(|d| *d > 0.0)),
+            CueKind::LiveAudio(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Stop(_) | CueKind::Send(_) => Some(Some(0.0)),
@@ -914,6 +918,37 @@ impl Engine {
         })
     }
 
+    /// Open an audio input as a voice. It is opened when the cue starts, not
+    /// ahead of GO.
+    fn prepare_live_audio(&self, cue: &Cue, c: &LiveAudioCue) -> Result<Prepared, String> {
+        let m = &c.media;
+        let initial_gain = if m.fade_in > 0.0 {
+            0.0
+        } else {
+            db_to_gain(m.volume_db)
+        };
+        let voice = self
+            .audio
+            .spawn_input_voice(
+                c.device.as_deref(),
+                c.input_channel,
+                initial_gain,
+                (m.audio_output, m.audio_channel),
+            )
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(Prepared {
+            cue_id: cue.id,
+            sig: PrepSig {
+                media: m.clone(),
+                size: (1, 1),
+                camera: None,
+            },
+            kind: PreparedKind::Audio(voice),
+            duration: m.end.filter(|d| *d > 0.0),
+            warning: None,
+        })
+    }
+
     /// Spawn the decoders for a media cue. They start paused/buffering.
     fn prepare(&self, cue: &Cue, info: &MediaInfo) -> Result<Prepared, String> {
         self.prepare_from(cue, info, 0.0)
@@ -1144,12 +1179,14 @@ impl Engine {
             | CueKind::Image(_)
             | CueKind::Audio(_)
             | CueKind::Text(_)
-            | CueKind::Camera(_) => {
+            | CueKind::Camera(_)
+            | CueKind::LiveAudio(_) => {
                 let m = cue.kind.media().expect("these cues have playback settings");
                 let prepared = match self.take_prepared(&cue) {
                     Some(p) => Ok(p),
                     None => match (&cue.kind, &self.ff) {
                         (CueKind::Text(t), _) => Ok(self.prepare_text(&cue, t)),
+                        (CueKind::LiveAudio(c), _) => self.prepare_live_audio(&cue, c),
                         (_, None) => Err("ffmpeg not found".to_string()),
                         (CueKind::Camera(c), Some(_)) => self.prepare_camera(&cue, c),
                         (_, Some(ff)) => {
@@ -3755,5 +3792,29 @@ mod tests {
         run_until(&mut e, &show, "the slide show to end", |e| {
             stack(e, out).is_empty() && !e.is_active()
         });
+    }
+
+    #[test]
+    fn a_live_audio_cue_with_no_input_says_so_and_ends() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::LiveAudio, None, 0);
+        if let CueKind::LiveAudio(c) = &mut cue.kind {
+            // An input that no computer has.
+            c.device = Some("no such input".into());
+        }
+        let id = cue.id;
+        show.cues.push(cue);
+        let (audio, _lost) = AudioOut::with_working_device();
+        let mut e = Engine::for_tests();
+        e.audio = audio;
+        e.playhead = Some(id);
+        e.go(&show);
+        e.tick(&show, 0.01);
+        assert!(!e.is_active(), "it can't play, so it is not left running");
+        assert!(
+            e.messages.iter().any(|(_, l)| l.contains("no such input")),
+            "{:?}",
+            e.messages
+        );
     }
 }

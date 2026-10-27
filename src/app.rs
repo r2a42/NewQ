@@ -190,6 +190,7 @@ struct DeviceList {
     midi_in: Vec<String>,
     midi_out: Vec<String>,
     audio: Option<Vec<String>>,
+    audio_in: Option<Vec<String>>,
 }
 
 pub struct App {
@@ -400,6 +401,9 @@ impl App {
                         self.engine.audio.retry_failed(&devices);
                         self.ui.audio_devices = devices;
                     }
+                    if let Some(devices) = found.audio_in {
+                        self.ui.audio_input_devices = devices;
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.device_scan = None,
@@ -423,6 +427,7 @@ impl App {
                     midi_in: remote::midi_inputs(),
                     midi_out: crate::output::midi_outputs(),
                     audio: with_audio.then(audio::output_devices),
+                    audio_in: with_audio.then(audio::input_devices),
                 });
             });
         if spawned.is_ok() {
