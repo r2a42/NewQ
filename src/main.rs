@@ -8,6 +8,7 @@ mod branding;
 mod clock;
 mod color;
 mod crash;
+mod dock;
 mod edid;
 mod engine;
 mod export;

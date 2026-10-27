@@ -220,7 +220,7 @@ pub fn settings_view(
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
-                    .button("Back to cues")
+                    .button("Close settings")
                     .on_hover_text("Close the settings (Ctrl+,)")
                     .clicked()
                 {

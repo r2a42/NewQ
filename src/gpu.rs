@@ -102,6 +102,26 @@ impl Gpu {
     /// crossfades) happens in gamma space like a video mixer. None if this
     /// adapter can't draw to the surface at all (it reports no formats), as
     /// can happen for a window on a display driven by another graphics card.
+    /// Configure a surface and say whether it took. Configuring waits for the
+    /// device to go idle, which fails if another window is in the middle of a
+    /// frame, so a window opened while the others are drawing tries again.
+    pub fn configure_checked(
+        &self,
+        surface: &wgpu::Surface,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> bool {
+        for attempt in 0..40 {
+            let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            surface.configure(&self.device, config);
+            if pollster::block_on(scope.pop()).is_none() {
+                return true;
+            }
+            log::debug!("surface not configured (try {attempt}); trying again");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
     pub fn surface_config(
         &self,
         surface: &wgpu::Surface,

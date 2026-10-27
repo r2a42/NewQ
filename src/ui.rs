@@ -3,6 +3,7 @@
 mod settings;
 
 use crate::clock::{self, TimeOfDay};
+use crate::dock::{self, Pane};
 use crate::engine::{ActiveCue, CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
@@ -201,13 +202,13 @@ pub struct UiState {
     /// What the OSC and MIDI listeners are doing (set by the app).
     pub remote_status: RemoteStatus,
     pub dirty: bool,
-    /// Whether the cart (buttons for the cues put on it) is showing.
-    pub show_cart: bool,
+    /// Where the panes of the main window are (see `dock`), and the folder the
+    /// layout is saved in (set by the app).
+    pub layout: dock::Layout,
+    pub layout_dir: Option<PathBuf>,
     /// Whether the media window is open, and what it last did.
     pub show_media: bool,
-    /// Whether the settings page is showing (in place of the cue list), and
-    /// which of its pages.
-    pub settings_open: bool,
+    /// Which page the settings pane shows (whether it is open is the layout's).
     pub settings_page: SettingsPage,
     /// The clip being made for lining sound up with picture.
     /// Whether the About window is open, and its logo (made when first needed).
@@ -251,6 +252,11 @@ pub struct UiState {
 }
 
 impl UiState {
+    /// Whether the settings pane is showing, docked or in a window of its own.
+    pub fn settings_open(&self) -> bool {
+        self.layout.is_open(Pane::Settings)
+    }
+
     /// Open the media window if the show has files that can't be found.
     pub fn check_media(&mut self, show: &Show) {
         if !relink::missing(show).is_empty() {
@@ -336,7 +342,12 @@ enum Action {
     FireCue(CueId),
     StopCue(CueId),
     FadeOutCue(CueId),
-    ToggleCart,
+    /// Show or hide a pane.
+    TogglePane(Pane),
+    /// Give a pane a window of its own, or put it back in the main window.
+    PopOut(Pane),
+    DockBack(Pane),
+    ResetLayout,
     ToggleMedia,
     /// Open the settings at a page.
     OpenSettings(SettingsPage),
@@ -466,47 +477,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(10))
         .show(ui, |ui| transport(ui, show, engine, &mut actions));
     egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, show, engine, st));
-    egui::Panel::right("side")
-        .resizable(true)
-        .default_size(420.0)
-        .min_size(280.0)
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    output_previews(ui, show, st);
-                    active_panel(ui, show, engine, st, &mut actions);
-                });
-        });
-    if st.show_cart && !st.settings_open {
-        egui::Panel::bottom("cart")
-            .resizable(true)
-            .default_size(150.0)
-            .min_size(80.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| cart(ui, show, engine, &mut actions));
-            });
-    }
-    if !st.settings_open {
-        egui::Panel::bottom("inspector")
-            .resizable(true)
-            .default_size(300.0)
-            .min_size(120.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| inspector(ui, show, engine, st, &mut actions));
-            });
-    }
-    egui::CentralPanel::default().show(ui, |ui| {
-        if st.settings_open {
-            settings::settings_view(ui, show, engine, st, &mut actions);
-        } else {
-            cue_list(ui, show, engine, st, &mut actions);
-        }
-    });
+    dock_area(ui, show, engine, st, &mut actions);
     media_window(ui.ctx(), show, st, &mut actions);
     about_window(ui.ctx(), st);
 
@@ -762,18 +733,236 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
     });
 }
 
+/// The content of one pane, wherever it is: in the main window's dock or in a
+/// window of its own.
+fn pane_ui(
+    ui: &mut Ui,
+    pane: Pane,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
+    let scrolled = |ui: &mut Ui, body: &mut dyn FnMut(&mut Ui)| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| body(ui));
+    };
+    match pane {
+        Pane::Cues => cue_list(ui, show, engine, st, actions),
+        Pane::Inspector => scrolled(ui, &mut |ui| inspector(ui, show, engine, st, actions)),
+        Pane::Cart => scrolled(ui, &mut |ui| cart(ui, show, engine, actions)),
+        Pane::Preview => scrolled(ui, &mut |ui| output_previews(ui, show, st)),
+        Pane::Active => scrolled(ui, &mut |ui| active_panel(ui, show, engine, st, actions)),
+        Pane::Settings => settings::settings_view(ui, show, engine, st, actions),
+    }
+}
+
+/// Draws the panes of the dock for `egui_dock`.
+struct PaneViewer<'a> {
+    show: &'a mut Show,
+    engine: &'a mut Engine,
+    st: &'a mut UiState,
+    actions: &'a mut Vec<Action>,
+}
+
+impl egui_dock::TabViewer for PaneViewer<'_> {
+    type Tab = Pane;
+
+    fn id(&mut self, tab: &mut Pane) -> egui::Id {
+        egui::Id::new(("newq_pane", *tab))
+    }
+
+    fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Pane) {
+        pane_ui(ui, *tab, self.show, self.engine, self.st, self.actions);
+    }
+
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Pane, _path: egui_dock::NodePath) {
+        if ui.button("Pop out to a window").clicked() {
+            self.actions.push(Action::PopOut(*tab));
+            ui.close();
+        }
+    }
+
+    // Double-clicking a tab pops it out.
+    fn on_tab_button(&mut self, tab: &mut Pane, response: &egui::Response) {
+        if response.double_clicked() {
+            self.actions.push(Action::PopOut(*tab));
+        }
+    }
+
+    fn on_close(&mut self, tab: &mut Pane) -> egui_dock::tab_viewer::OnCloseResponse {
+        if *tab == Pane::Settings {
+            end_preview_edits(self.st);
+        }
+        egui_dock::tab_viewer::OnCloseResponse::Close
+    }
+
+    // Panes only move within the dock or to a window of their own, never float
+    // over each other.
+    fn allowed_in_windows(&self, _tab: &mut Pane) -> bool {
+        false
+    }
+
+    // Each pane scrolls itself where it needs to.
+    fn scroll_bars(&self, _tab: &Pane) -> [bool; 2] {
+        [false, false]
+    }
+}
+
+/// The main window's panes: tiled so that making one bigger makes its
+/// neighbours smaller and nothing overlaps, with tabs that can be dragged to
+/// rearrange them.
+fn dock_area(
+    ui: &mut Ui,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
+    let mut style = egui_dock::Style::from_egui(ui.style());
+    // How close a divider can get to the edge of the space: enough that no
+    // pane is squeezed to nothing.
+    style.separator.extra = 90.0;
+    style.separator.width = 2.0;
+    style.separator.extra_interact_width = 6.0;
+    // The dock is moved out of the state while it is drawn: the panes borrow
+    // the rest of it.
+    let mut dock = std::mem::replace(&mut st.layout.dock, egui_dock::DockState::new(vec![]));
+    egui_dock::DockArea::new(&mut dock)
+        .id(egui::Id::new("newq_dock"))
+        .style(style)
+        .show_add_buttons(false)
+        .show_add_popup(false)
+        .show_leaf_close_all_buttons(false)
+        .show_leaf_collapse_buttons(false)
+        .show_inside(
+            ui,
+            &mut PaneViewer {
+                show,
+                engine,
+                st,
+                actions,
+            },
+        );
+    st.layout.dock = dock;
+}
+
+/// What a pane in a window of its own draws: the pane, under a bar that puts
+/// it back. Hotkeys work here too.
+pub fn draw_popout(
+    ui: &mut Ui,
+    pane: Pane,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+) {
+    let mut actions: Vec<Action> = Vec::new();
+    keyboard(ui.ctx(), show, st, &mut actions);
+    egui::Panel::top("popout_bar").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(pane.title()).strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .button("Dock back")
+                    .on_hover_text("Put it back in the main window")
+                    .clicked()
+                {
+                    actions.push(Action::DockBack(pane));
+                }
+            });
+        });
+    });
+    egui::CentralPanel::default().show(ui, |ui| {
+        pane_ui(ui, pane, show, engine, st, &mut actions);
+    });
+    let acted = !actions.is_empty();
+    if acted {
+        ui.ctx().request_repaint();
+        st.history.end_burst();
+    }
+    for a in actions {
+        apply(a, show, engine, st);
+    }
+    // The main window is what notices that the show has changed (for the
+    // unsaved mark and undo), so tell it to look.
+    if acted || ui.ctx().input(editing_input) {
+        st.json_stale = true;
+    }
+}
+
 /// Closing the settings also puts away what was being edited on the preview,
 /// which has no button of its own once the settings are gone.
 fn close_settings(st: &mut UiState) {
-    st.settings_open = false;
+    st.layout.close(Pane::Settings);
+    end_preview_edits(st);
+}
+
+/// A corner pin or area being edited has no button of its own once the
+/// settings are gone.
+fn end_preview_edits(st: &mut UiState) {
     st.geometry_edit = None;
     st.area_edit = None;
     st.handle_sel.set(None);
 }
 
+/// The Window menu: which panes are showing, and which are in a window of
+/// their own.
+fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    for pane in Pane::ALL {
+        let open = st.layout.is_open(pane);
+        let popped = st.layout.is_popped_out(pane);
+        ui.horizontal(|ui| {
+            let mut shown = open;
+            if ui.checkbox(&mut shown, pane.title()).changed() {
+                actions.push(Action::TogglePane(pane));
+                ui.close();
+            }
+            if open {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let (label, tip, action) = if popped {
+                        (
+                            "Dock back",
+                            "Put it back in the main window",
+                            Action::DockBack(pane),
+                        )
+                    } else {
+                        (
+                            "Pop out",
+                            "Move it to a window of its own",
+                            Action::PopOut(pane),
+                        )
+                    };
+                    if ui.small_button(label).on_hover_text(tip).clicked() {
+                        actions.push(action);
+                        ui.close();
+                    }
+                });
+            }
+        });
+    }
+    ui.separator();
+    ui.label(
+        RichText::new(
+            "Drag a tab to move it; drag the line between panes to resize them. Double-click \
+             a tab to pop it out.",
+        )
+        .weak()
+        .small(),
+    );
+    if ui.button("Reset layout").clicked() {
+        actions.push(Action::ResetLayout);
+        ui.close();
+    }
+}
+
 /// The Settings menu: the same pages as the sidebar, in the same groups.
 fn settings_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
-    let label = if st.settings_open {
+    let label = if st.settings_open() {
         "Close settings"
     } else {
         "Open settings…"
@@ -794,7 +983,7 @@ fn settings_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
                 .color(Color32::from_gray(130)),
         );
         for page in SettingsPage::ALL.into_iter().filter(|p| p.group() == group) {
-            let on = st.settings_open && st.settings_page == page;
+            let on = st.settings_open() && st.settings_page == page;
             if ui.selectable_label(on, page.label()).clicked() {
                 actions.push(Action::OpenSettings(page));
                 ui.close();
@@ -906,14 +1095,14 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             }
             ui.separator();
             if ui
-                .button(if st.show_cart {
+                .button(if st.layout.is_open(Pane::Cart) {
                     "Hide cart"
                 } else {
                     "Show cart"
                 })
                 .clicked()
             {
-                actions.push(Action::ToggleCart);
+                actions.push(Action::TogglePane(Pane::Cart));
             }
             if let Some(id) = st.selected
                 && let Some(c) = show.cue(id)
@@ -989,6 +1178,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 add_sub_display_menu(ui, show, actions);
             });
         });
+        ui.menu_button("Window", |ui| window_menu(ui, st, actions));
         ui.menu_button("Settings", |ui| settings_menu(ui, st, actions));
         ui.menu_button("Help", |ui| {
             if ui.button("About NewQ…").clicked() {
@@ -6000,18 +6190,31 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::FireCue(id) => engine.fire(show, id),
         Action::StopCue(id) => engine.stop_cue(id, 0.0),
         Action::FadeOutCue(id) => engine.fade_out_cue(show, id),
-        Action::ToggleCart => st.show_cart = !st.show_cart,
+        Action::TogglePane(pane) => {
+            if pane == Pane::Settings {
+                if st.settings_open() {
+                    close_settings(st);
+                } else {
+                    st.layout.open(pane);
+                }
+            } else {
+                st.layout.toggle(pane);
+            }
+        }
+        Action::PopOut(pane) => st.layout.pop_out(pane),
+        Action::DockBack(pane) => st.layout.dock_back(pane),
+        Action::ResetLayout => st.layout.reset(),
         Action::ToggleMedia => st.show_media = !st.show_media,
         Action::OpenSettings(page) => {
-            st.settings_open = true;
+            st.layout.open(Pane::Settings);
             st.settings_page = page;
         }
         Action::CloseSettings => close_settings(st),
         Action::ToggleSettings => {
-            if st.settings_open {
+            if st.settings_open() {
                 close_settings(st);
             } else {
-                st.settings_open = true;
+                st.layout.open(Pane::Settings);
             }
         }
         Action::ToggleAbout => st.show_about = !st.show_about,
@@ -7039,11 +7242,50 @@ mod tests {
     }
 
     #[test]
+    fn panes_are_popped_out_docked_back_and_reset_through_actions() {
+        let (mut show, mut e, mut st) = running();
+        assert!(st.layout.is_open(Pane::Preview) && !st.layout.is_popped_out(Pane::Preview));
+        apply(Action::PopOut(Pane::Preview), &mut show, &mut e, &mut st);
+        assert!(st.layout.is_popped_out(Pane::Preview));
+        apply(Action::TogglePane(Pane::Cart), &mut show, &mut e, &mut st);
+        apply(Action::PopOut(Pane::Cart), &mut show, &mut e, &mut st);
+        apply(Action::DockBack(Pane::Preview), &mut show, &mut e, &mut st);
+        assert!(st.layout.is_docked(Pane::Preview));
+        apply(Action::ResetLayout, &mut show, &mut e, &mut st);
+        assert!(st.layout.popouts.is_empty() && !st.layout.is_open(Pane::Cart));
+    }
+
+    #[test]
+    fn the_main_window_and_every_popped_out_pane_draw() {
+        let (mut show, mut e, mut st) = running();
+        let input = || RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 800.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(input(), |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 50);
+        for pane in Pane::ALL {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(input(), |ui| {
+                draw_popout(ui, pane, &mut show, &mut e, &mut st)
+            });
+            out.textures_delta.clear();
+            assert!(
+                out.shapes.len() > 3,
+                "{pane:?} draws in a window of its own"
+            );
+        }
+    }
+
+    #[test]
     fn cart_buttons_fire_and_stop_cues() {
         let (mut show, mut e, mut st) = running();
         let d = number(&show, "4");
-        apply(Action::ToggleCart, &mut show, &mut e, &mut st);
-        assert!(st.show_cart);
+        apply(Action::TogglePane(Pane::Cart), &mut show, &mut e, &mut st);
+        assert!(st.layout.is_open(Pane::Cart));
         apply(Action::FireCue(d), &mut show, &mut e, &mut st);
         assert!(is_playing(&e, d));
         apply(Action::StopCue(d), &mut show, &mut e, &mut st);
@@ -7214,9 +7456,9 @@ mod tests {
         assert!(keys(&st, &[(Key::Comma, M::NONE)]).is_empty());
         let (mut show, mut e, mut st) = running();
         apply(Action::ToggleSettings, &mut show, &mut e, &mut st);
-        assert!(st.settings_open);
+        assert!(st.settings_open());
         apply(Action::ToggleSettings, &mut show, &mut e, &mut st);
-        assert!(!st.settings_open);
+        assert!(!st.settings_open());
     }
 
     #[test]
@@ -7228,7 +7470,7 @@ mod tests {
             &mut e,
             &mut st,
         );
-        assert!(st.settings_open && st.settings_page == SettingsPage::Audio);
+        assert!(st.settings_open() && st.settings_page == SettingsPage::Audio);
         // Closing and toggling open again comes back to the same page.
         apply(Action::CloseSettings, &mut show, &mut e, &mut st);
         apply(Action::ToggleSettings, &mut show, &mut e, &mut st);
@@ -7348,7 +7590,7 @@ mod tests {
         st.display_states.insert(d, DisplayState::Unassigned);
         let ctx = egui::Context::default();
         for page in SettingsPage::ALL {
-            st.settings_open = true;
+            st.layout.open(Pane::Settings);
             st.settings_page = page;
             let input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1100.0, 800.0))),
@@ -7368,7 +7610,7 @@ mod tests {
     #[test]
     fn the_general_page_edits_the_name_and_the_stop_all_fade() {
         let (mut show, mut e, mut st) = running();
-        st.settings_open = true;
+        st.layout.open(Pane::Settings);
         st.settings_page = SettingsPage::General;
         show.panic_fade = 2.5;
         show.name = "Before".into();
@@ -8578,7 +8820,7 @@ mod tests {
         });
         out.textures_delta.clear();
         assert!(out.shapes.len() > 5, "the page has something in it");
-        assert!(actions.is_empty() && st.settings_open);
+        assert!(actions.is_empty() && st.settings_open());
 
         apply(
             Action::AddSyncCue(PathBuf::from("sync.mp4")),

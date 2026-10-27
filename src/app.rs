@@ -4,6 +4,7 @@
 //! presents from its own render thread (see `render.rs`), so nothing here ever
 //! blocks on vsync or on a window the OS is throttling.
 
+use crate::dock::Pane;
 use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::media::audio;
@@ -58,6 +59,18 @@ const TICK_WHILE_PLAYING: Duration = Duration::from_millis(4);
 
 struct ControlWindow {
     window: Arc<Window>,
+    state: egui_winit::State,
+    thread: Option<ControlThread>,
+    next_repaint: Option<Instant>,
+    last_paint: Instant,
+}
+
+/// A pane in a window of its own. It has its own egui context (a context
+/// draws one window), and its own render thread on the shared graphics device.
+struct PopoutWindow {
+    pane: Pane,
+    window: Arc<Window>,
+    ctx: egui::Context,
     state: egui_winit::State,
     thread: Option<ControlThread>,
     next_repaint: Option<Instant>,
@@ -187,6 +200,12 @@ pub struct App {
     /// (`NEWQ_LOSE_GPU_AFTER`, in seconds).
     lose_gpu_at: Option<Instant>,
     control: Option<ControlWindow>,
+    popouts: Vec<PopoutWindow>,
+    /// Pop-out render threads that are shutting down.
+    popout_stopping: Vec<JoinHandle<()>>,
+    /// The layout as last written, to save it again only when it changes.
+    saved_layout: String,
+    last_layout_save: Instant,
     /// Fullscreen windows by monitor index.
     screens: HashMap<usize, ScreenWindow>,
     /// Where each output with a screen is drawn.
@@ -249,6 +268,9 @@ impl App {
     ) -> App {
         let mut engine = Engine::new();
         let mut ui = UiState::default();
+        let layout_dir = crate::crash::log_dir();
+        ui.layout = crate::dock::Layout::load(&layout_dir);
+        ui.layout_dir = Some(layout_dir);
         let show = match initial_show {
             Some(path) => match Show::load(&path) {
                 Ok(show) => {
@@ -284,6 +306,10 @@ impl App {
             screens: HashMap::new(),
             targets: HashMap::new(),
             closing: Vec::new(),
+            popouts: Vec::new(),
+            popout_stopping: Vec::new(),
+            saved_layout: String::new(),
+            last_layout_save: Instant::now(),
             textures: HashMap::new(),
             last_sizes: HashMap::new(),
             patterns: HashMap::new(),
@@ -643,6 +669,10 @@ impl App {
             let mut stopping = Vec::new();
             if let Some(ctl) = &mut self.control {
                 stopping.extend(ctl.thread.take().map(ControlThread::quit));
+            }
+            // Pop-outs are opened again from the layout on the new device.
+            for mut p in self.popouts.drain(..) {
+                stopping.extend(p.thread.take().map(ControlThread::quit));
             }
             for screen in self.screens.values_mut() {
                 stopping.extend(screen.thread.take().map(OutputThread::quit));
@@ -1312,6 +1342,163 @@ impl App {
         }
     }
 
+    /// Give every popped-out pane in the layout a window, and close the
+    /// windows of panes that are not popped out any more.
+    fn reconcile_popouts(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = self.gpu.clone() else { return };
+        let wanted: Vec<Pane> = self.ui.layout.popouts.iter().map(|p| p.pane).collect();
+        let mut i = 0;
+        while i < self.popouts.len() {
+            if wanted.contains(&self.popouts[i].pane) {
+                i += 1;
+            } else {
+                let mut gone = self.popouts.remove(i);
+                self.popout_stopping
+                    .extend(gone.thread.take().map(ControlThread::quit));
+            }
+        }
+        for want in self.ui.layout.popouts.clone() {
+            if self.popouts.iter().any(|p| p.pane == want.pane) {
+                continue;
+            }
+            let (w, h) = match want.size {
+                Some([w, h]) => (w, h),
+                None if want.pane == Pane::Preview => (720.0, 440.0),
+                None => (480.0, 620.0),
+            };
+            let mut attrs = Window::default_attributes()
+                .with_title(format!("NewQ: {}", want.pane.title()))
+                .with_window_icon(crate::branding::window_icon())
+                .with_inner_size(LogicalSize::new(w as f64, h as f64))
+                .with_min_inner_size(LogicalSize::new(240.0, 160.0));
+            if let Some([x, y]) = want.pos {
+                attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x as f64, y as f64));
+            }
+            let window = match event_loop.create_window(attrs) {
+                Ok(w) => Arc::new(w),
+                Err(e) => {
+                    log::warn!("could not open a window for {}: {e}", want.pane.title());
+                    self.ui.layout.dock_back(want.pane);
+                    continue;
+                }
+            };
+            let surface = match gpu.instance.create_surface(window.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("no surface for {}: {e}", want.pane.title());
+                    self.ui.layout.dock_back(want.pane);
+                    continue;
+                }
+            };
+            let size = window.inner_size();
+            let Some(config) = gpu.surface_config(&surface, (size.width, size.height)) else {
+                self.ui.layout.dock_back(want.pane);
+                continue;
+            };
+            if !gpu.configure_checked(&surface, &config) {
+                log::warn!("could not configure a window for {}", want.pane.title());
+                self.ui.layout.dock_back(want.pane);
+                continue;
+            }
+            let ctx = egui::Context::default();
+            ui::setup_style(&ctx);
+            let state = egui_winit::State::new(
+                ctx.clone(),
+                egui::ViewportId::ROOT,
+                &window,
+                Some(window.scale_factor() as f32),
+                window.theme(),
+                Some(gpu.device.limits().max_texture_dimension_2d as usize),
+            );
+            let thread = ControlThread::spawn(gpu.clone(), window.clone(), surface, config);
+            self.popouts.push(PopoutWindow {
+                pane: want.pane,
+                window,
+                ctx,
+                state,
+                thread: Some(thread),
+                next_repaint: Some(Instant::now()),
+                last_paint: Instant::now(),
+            });
+        }
+    }
+
+    fn render_popout(&mut self, id: WindowId) {
+        let Some(p) = self.popouts.iter_mut().find(|p| p.window.id() == id) else {
+            return;
+        };
+        p.last_paint = Instant::now();
+        let raw = p.state.take_egui_input(&p.window);
+        let had_input = !raw.events.is_empty();
+        let pane = p.pane;
+        let (show, engine, st) = (&mut self.show, &mut self.engine, &mut self.ui);
+        let mut full = p
+            .ctx
+            .run_ui(raw, |ui| ui::draw_popout(ui, pane, show, engine, st));
+        p.state
+            .handle_platform_output(&p.window, full.platform_output);
+        p.next_repaint = full
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| Instant::now() + v.repaint_delay.min(Duration::from_secs(3600)));
+        let jobs = p.ctx.tessellate(full.shapes, full.pixels_per_point);
+        let size = p.window.inner_size();
+        let mut textures = std::mem::take(&mut full.textures_delta);
+        match &p.thread {
+            Some(t) => t.submit(EguiFrame {
+                size: (size.width, size.height),
+                pixels_per_point: full.pixels_per_point,
+                jobs,
+                textures,
+            }),
+            None => textures.clear(),
+        }
+        self.note_popout_geometry(id);
+        // The main window notices changes to the show; tell it to look.
+        if had_input && let Some(ctl) = &mut self.control {
+            ctl.next_repaint = Some(Instant::now());
+        }
+    }
+
+    /// Remember where a popped-out pane's window is.
+    fn note_popout_geometry(&mut self, id: WindowId) {
+        let Some(p) = self.popouts.iter().find(|p| p.window.id() == id) else {
+            return;
+        };
+        let sf = p.window.scale_factor();
+        let size = p.window.inner_size().to_logical::<f32>(sf);
+        let pos = p
+            .window
+            .outer_position()
+            .ok()
+            .map(|q| q.to_logical::<f32>(sf))
+            .map(|q| [q.x, q.y]);
+        self.ui
+            .layout
+            .set_popout_geometry(p.pane, pos, [size.width, size.height]);
+    }
+
+    /// Write the layout when it has changed (not more than once a second, and
+    /// again on the way out).
+    fn save_layout(&mut self, force: bool) {
+        let Some(dir) = self.ui.layout_dir.clone() else {
+            return;
+        };
+        if !force && self.last_layout_save.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        let Ok(now) = serde_json::to_string(&self.ui.layout) else {
+            return;
+        };
+        if now != self.saved_layout {
+            self.last_layout_save = Instant::now();
+            match self.ui.layout.save(&dir) {
+                Ok(()) => self.saved_layout = now,
+                Err(e) => log::warn!("could not save the window layout: {e}"),
+            }
+        }
+    }
+
     fn render_control(&mut self, event_loop: &ActiveEventLoop) {
         let Some(ctl) = &mut self.control else { return };
         ctl.last_paint = Instant::now();
@@ -1321,6 +1508,12 @@ impl App {
         }
 
         let raw = ctl.state.take_egui_input(&ctl.window);
+        // A change here shows in the pop-outs too.
+        if !raw.events.is_empty() {
+            for p in &self.popouts {
+                p.window.request_redraw();
+            }
+        }
         let (show, engine, ui_state) = (&mut self.show, &mut self.engine, &mut self.ui);
         let mut full = self
             .egui_ctx
@@ -1466,6 +1659,31 @@ impl ApplicationHandler for App {
             return;
         }
 
+        if let Some(i) = self.popouts.iter().position(|p| p.window.id() == id) {
+            let p = &mut self.popouts[i];
+            let response = p.state.on_window_event(&p.window, &event);
+            if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
+                p.window.request_redraw();
+            }
+            match event {
+                WindowEvent::CloseRequested => {
+                    let pane = p.pane;
+                    self.ui.layout.dock_back(pane);
+                    if let Some(ctl) = &self.control {
+                        ctl.window.request_redraw();
+                    }
+                }
+                WindowEvent::Resized(_) => {
+                    p.window.request_redraw();
+                    self.note_popout_geometry(id);
+                }
+                WindowEvent::Moved(_) => self.note_popout_geometry(id),
+                WindowEvent::RedrawRequested => self.render_popout(id),
+                _ => {}
+            }
+            return;
+        }
+
         let Some(m) = self
             .screens
             .iter()
@@ -1523,6 +1741,9 @@ impl ApplicationHandler for App {
         self.keep_main_window_home();
         self.settle_displays();
         self.reconcile_outputs(event_loop);
+        self.reconcile_popouts(event_loop);
+        self.popout_stopping.retain(|h| !h.is_finished());
+        self.save_layout(false);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
         // However long it has been since the last look, by a steady clock: a
@@ -1564,6 +1785,21 @@ impl ApplicationHandler for App {
                 next = next.min(t);
             }
         }
+        for p in &mut self.popouts {
+            let mut due = p.next_repaint.is_some_and(|t| t <= now);
+            if playing {
+                let frame = Duration::from_secs_f64(1.0 / CONTROL_FPS_WITH_EMBEDDED);
+                due |= now.duration_since(p.last_paint) >= frame;
+                next = next.min(p.last_paint + frame);
+            }
+            if due {
+                p.next_repaint = None;
+                p.window.request_redraw();
+            }
+            if let Some(t) = p.next_repaint {
+                next = next.min(t);
+            }
+        }
         if playing {
             next = next.min(now + TICK_WHILE_PLAYING);
         }
@@ -1572,8 +1808,14 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.engine.stop_all(0.0);
+        self.save_layout(true);
         if let Some(t) = self.control.as_mut().and_then(|c| c.thread.take()) {
             drop(t.quit());
+        }
+        for p in &mut self.popouts {
+            if let Some(t) = p.thread.take() {
+                drop(t.quit());
+            }
         }
         self.screens.clear();
     }
