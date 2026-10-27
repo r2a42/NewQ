@@ -438,8 +438,177 @@ impl AudioOut {
             sample_rate: sr,
             error,
             lost: device.lost.clone(),
+            _input: None,
         })
     }
+
+    /// Play what an input device hears, from its channel `first_in` (and the
+    /// next, or the same again if it has no more), as a voice: Dante Virtual
+    /// Soundcard, a mixer's USB interface, a line input. Starts paused.
+    pub fn spawn_input_voice(
+        &self,
+        input: Option<&str>,
+        first_in: u16,
+        gain: f32,
+        route: (Option<AudioOutputId>, u16),
+    ) -> Result<Voice> {
+        let device = self
+            .device_for(route.0)
+            .ok_or_else(|| anyhow!("no audio output device"))?;
+        if !device.open {
+            return Err(anyhow!(
+                "{}",
+                device.error.as_deref().unwrap_or("no audio output device")
+            ));
+        }
+        let out_sr = device.sample_rate;
+        let source = find_input_device(input)?;
+        let supported = pick_input_config(&source)?;
+        let format = supported.sample_format();
+        let config = supported.config();
+        let shared = Arc::new(VoiceShared::default());
+        shared.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
+        shared.paused.store(true, Ordering::Relaxed);
+        // A fifth of a second is the most that waits to be played: if the
+        // input's clock runs faster than the output's, the extra is dropped
+        // rather than becoming ever more delay.
+        let (producer, consumer) = rtrb::RingBuffer::new(out_sr as usize * 2 / 5);
+        let error = Arc::new(Mutex::new(None));
+        let feed = InputFeed {
+            convert: InputConverter::new(first_in as usize, config.sample_rate, out_sr),
+            channels: config.channels as usize,
+            producer,
+            shared: shared.clone(),
+        };
+        let stream = match format {
+            cpal::SampleFormat::F32 => build_input::<f32>(&source, config, feed, &error)?,
+            cpal::SampleFormat::I16 => build_input::<i16>(&source, config, feed, &error)?,
+            cpal::SampleFormat::U16 => build_input::<u16>(&source, config, feed, &error)?,
+            cpal::SampleFormat::I32 => build_input::<i32>(&source, config, feed, &error)?,
+            other => return Err(anyhow!("unsupported sample format {other:?}")),
+        };
+        stream.play()?;
+        let _ = device.voices_tx.send(MixVoice {
+            shared: shared.clone(),
+            consumer,
+            gain,
+            first_channel: route.1 as usize,
+        });
+        Ok(Voice {
+            shared,
+            children: Children::new(),
+            sample_rate: out_sr,
+            error,
+            lost: device.lost.clone(),
+            _input: Some(stream),
+        })
+    }
+}
+
+/// Turns an input device's interleaved frames into stereo at the output's
+/// rate: the channel chosen and the next (or the same again, for the last),
+/// resampled linearly if the two rates differ.
+struct InputConverter {
+    first: usize,
+    /// Input frames per output frame.
+    step: f64,
+    prev: [f32; 2],
+    /// Input frames seen.
+    seen: u64,
+    /// Where the next output frame lies, in input frames from the first.
+    pos: f64,
+}
+
+impl InputConverter {
+    fn new(first: usize, in_rate: u32, out_rate: u32) -> InputConverter {
+        InputConverter {
+            first,
+            step: f64::from(in_rate.max(1)) / f64::from(out_rate.max(1)),
+            prev: [0.0; 2],
+            seen: 0,
+            pos: 0.0,
+        }
+    }
+
+    /// One input frame in; the output frames that now lie before it (none to
+    /// a few) to `out`.
+    fn feed(&mut self, frame: &[f32], out: &mut impl FnMut([f32; 2])) {
+        let l = frame.get(self.first).copied().unwrap_or(0.0);
+        let r = frame.get(self.first + 1).copied().unwrap_or(l);
+        let cur = [l, r];
+        if self.seen == 0 {
+            out(cur);
+            self.pos = self.step;
+        } else {
+            let base = (self.seen - 1) as f64;
+            while self.pos <= self.seen as f64 {
+                let t = (self.pos - base) as f32;
+                out([
+                    self.prev[0] + (cur[0] - self.prev[0]) * t,
+                    self.prev[1] + (cur[1] - self.prev[1]) * t,
+                ]);
+                self.pos += self.step;
+            }
+        }
+        self.seen += 1;
+        self.prev = cur;
+    }
+}
+
+/// What the input callback needs.
+struct InputFeed {
+    convert: InputConverter,
+    channels: usize,
+    producer: rtrb::Producer<f32>,
+    shared: Arc<VoiceShared>,
+}
+
+fn build_input<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    mut feed: InputFeed,
+    error: &Arc<Mutex<Option<String>>>,
+) -> Result<cpal::Stream>
+where
+    T: SizedSample,
+    f32: FromSample<T>,
+{
+    let (shared, error) = (feed.shared.clone(), error.clone());
+    let mut frame: Vec<f32> = Vec::with_capacity(feed.channels);
+    let stream = device.build_input_stream::<T, _, _>(
+        config,
+        move |data: &[T], _| {
+            let channels = feed.channels.max(1);
+            for chunk in data.chunks_exact(channels) {
+                frame.clear();
+                frame.extend(
+                    chunk
+                        .iter()
+                        .map(|&s| <f32 as FromSample<T>>::from_sample_(s)),
+                );
+                let producer = &mut feed.producer;
+                let received = &feed.shared.received_frames;
+                feed.convert.feed(&frame, &mut |f| {
+                    // Full (the output is slower, or paused): drop it.
+                    if producer.slots() >= 2 {
+                        let _ = producer.push(f[0]);
+                        let _ = producer.push(f[1]);
+                        received.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        },
+        move |e| {
+            log::error!("audio input error: {e}");
+            if ends_stream(e.kind()) {
+                *error.lock() = Some(format!("The audio input was lost: {e}"));
+                // Nothing more will come: the cue is over.
+                shared.eof.store(true, Ordering::Release);
+            }
+        },
+        None,
+    )?;
+    Ok(stream)
 }
 
 /// Handle to a playing voice. Dropping it stops playback and kills ffmpeg.
@@ -450,6 +619,8 @@ pub struct Voice {
     error: Arc<Mutex<Option<String>>>,
     /// Whether the device it plays on has gone.
     lost: Arc<Lost>,
+    /// For live sound: the input stream that feeds it, closed with the voice.
+    _input: Option<cpal::Stream>,
 }
 
 impl Voice {
@@ -519,6 +690,58 @@ pub fn output_devices() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Names of the audio input devices that are connected now.
+pub fn input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|d| d.description().ok().map(|d| d.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The input device called `name` (the default input for None).
+fn find_input_device(name: Option<&str>) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    match name {
+        None => host
+            .default_input_device()
+            .ok_or_else(|| anyhow!("no audio input device")),
+        Some(n) => host
+            .input_devices()?
+            .find(|d| d.description().is_ok_and(|d| d.to_string() == n))
+            .ok_or_else(|| anyhow!("audio input “{n}” is not connected")),
+    }
+}
+
+/// The input's default configuration, widened to the most channels it offers
+/// at the same sample rate (a Dante interface offers up to 64).
+fn pick_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
+    let default = device.default_input_config()?;
+    let rate = default.sample_rate();
+    let widest = device.supported_input_configs().ok().and_then(|configs| {
+        configs
+            .filter(|c| c.min_sample_rate() <= rate && rate <= c.max_sample_rate())
+            .filter(|c| {
+                matches!(
+                    c.sample_format(),
+                    cpal::SampleFormat::F32
+                        | cpal::SampleFormat::I16
+                        | cpal::SampleFormat::U16
+                        | cpal::SampleFormat::I32
+                )
+            })
+            .max_by_key(|c| c.channels())
+            .map(|c| c.with_sample_rate(rate))
+    });
+    Ok(match widest {
+        Some(w) if w.channels() > default.channels() => w,
+        _ => default,
+    })
 }
 
 /// Whether an audio device is a Dante one: Audinate's Dante Virtual
@@ -1127,5 +1350,52 @@ mod dante_tests {
         assert!(is_dante("Dante Via"));
         assert!(is_dante("Focusrite Dante AVIO"));
         assert!(!is_dante("Speakers (Realtek Audio)"));
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::InputConverter;
+
+    fn run(c: &mut InputConverter, frames: &[&[f32]]) -> Vec<[f32; 2]> {
+        let mut out = Vec::new();
+        for f in frames {
+            c.feed(f, &mut |o| out.push(o));
+        }
+        out
+    }
+
+    #[test]
+    fn the_chosen_channel_and_the_next_are_the_stereo_pair() {
+        let mut c = InputConverter::new(2, 48_000, 48_000);
+        let out = run(
+            &mut c,
+            &[&[0.1, 0.2, 0.3, 0.4, 0.5], &[1.0, 2.0, 3.0, 4.0, 5.0]],
+        );
+        assert_eq!(out, vec![[0.3, 0.4], [3.0, 4.0]]);
+        // The last channel is both sides; past the end is silence.
+        let mut c = InputConverter::new(4, 48_000, 48_000);
+        assert_eq!(run(&mut c, &[&[0.0, 0.0, 0.0, 0.0, 0.7]]), vec![[0.7, 0.7]]);
+        let mut c = InputConverter::new(9, 48_000, 48_000);
+        assert_eq!(run(&mut c, &[&[1.0, 1.0]]), vec![[0.0, 0.0]]);
+    }
+
+    #[test]
+    fn a_different_rate_gives_the_right_number_of_frames() {
+        // 44.1 kHz in, 48 kHz out: 48 frames for every 44.1 in.
+        let ramp: Vec<f32> = (0..44_100).map(|i| i as f32).collect();
+        let frames: Vec<[f32; 1]> = ramp.iter().map(|&v| [v]).collect();
+        let refs: Vec<&[f32]> = frames.iter().map(|f| f.as_slice()).collect();
+        let mut c = InputConverter::new(0, 44_100, 48_000);
+        let out = run(&mut c, &refs);
+        assert!((out.len() as i64 - 48_000).abs() <= 2, "{}", out.len());
+        // A ramp stays a smooth ramp.
+        assert!(out.windows(2).all(|w| w[1][0] >= w[0][0]));
+        // And the other way, 96 kHz in, 48 kHz out.
+        let frames: Vec<[f32; 1]> = (0..9_600).map(|i| [i as f32]).collect();
+        let refs: Vec<&[f32]> = frames.iter().map(|f| f.as_slice()).collect();
+        let mut c = InputConverter::new(0, 96_000, 48_000);
+        let out = run(&mut c, &refs);
+        assert!((out.len() as i64 - 4_800).abs() <= 2, "{}", out.len());
     }
 }

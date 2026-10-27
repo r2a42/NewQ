@@ -212,6 +212,8 @@ pub struct UiState {
     pub midi_out_ports: Vec<String>,
     /// Audio output devices that are connected now (set by the app when idle).
     pub audio_devices: Vec<String>,
+    /// The audio input devices that are connected now.
+    pub audio_input_devices: Vec<String>,
     /// What the OSC and MIDI listeners are doing (set by the app).
     pub remote_status: RemoteStatus,
     pub dirty: bool,
@@ -1110,6 +1112,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             ui.separator();
             for ty in [
                 CueType::Camera,
+                CueType::LiveAudio,
                 CueType::Send,
                 CueType::Text,
                 CueType::Clock,
@@ -1397,6 +1400,17 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
 
 pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
     match &c.kind {
+        CueKind::LiveAudio(a) => {
+            let input = a
+                .device
+                .clone()
+                .unwrap_or_else(|| "system default input".into());
+            format!(
+                "{input}  »  channels {}–{}",
+                a.input_channel + 1,
+                a.input_channel + 2
+            )
+        }
         CueKind::Video(m) | CueKind::Image(m) => {
             let file = m
                 .file
@@ -4919,6 +4933,22 @@ fn inspector(
                     actions,
                 );
             }
+            CueKind::LiveAudio(c) => {
+                live_audio_inspector(ui, c, st);
+                ui.separator();
+                media_inspector(
+                    ui,
+                    cue_id,
+                    cue_type,
+                    &mut c.media,
+                    OutputChoices {
+                        video: &outputs,
+                        audio: &audio_outputs,
+                    },
+                    engine,
+                    actions,
+                );
+            }
             CueKind::Group(g) => {
                 egui::Grid::new("group")
                     .num_columns(2)
@@ -4996,11 +5026,17 @@ fn media_inspector(
         video: outputs,
         audio: audio_outputs,
     } = choices;
-    let visual = ty != CueType::Audio;
-    // Text and images are held for a time rather than played from a file.
+    let visual = !matches!(ty, CueType::Audio | CueType::LiveAudio);
+    // Text, images and live sound are held or run for a time rather than
+    // played from a file.
+    let timed = matches!(
+        ty,
+        CueType::Image | CueType::Text | CueType::Camera | CueType::LiveAudio
+    );
+    // What is shown has no sound; the rest is played (with volume and output).
     let still = matches!(ty, CueType::Image | CueType::Text | CueType::Camera);
-    // Text and cameras have no file to choose.
-    let is_text = matches!(ty, CueType::Text | CueType::Camera);
+    // Text, cameras and live sound have no file to choose.
+    let is_text = matches!(ty, CueType::Text | CueType::Camera | CueType::LiveAudio);
     egui::Grid::new("media")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -5165,8 +5201,8 @@ fn media_inspector(
                  faded out by hand or by a Stop cue using own fades.",
             );
             ui.end_row();
-            if still {
-                ui.label(if ty == CueType::Camera {
+            if timed {
+                ui.label(if matches!(ty, CueType::Camera | CueType::LiveAudio) {
                     "Run for"
                 } else {
                     "Hold for"
@@ -5232,7 +5268,7 @@ fn media_inspector(
             .default_open(!m.color.is_default())
             .show(ui, |ui| color_inspector(ui, &mut m.color));
     }
-    if m.loop_media && !still {
+    if m.loop_media && !timed {
         let what = if m.end.is_some() {
             "Loops from the in point to the out point."
         } else {
@@ -5589,6 +5625,50 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
             .small(),
         );
     }
+}
+
+/// Which audio input a live audio cue plays, and from which channel.
+fn live_audio_inspector(ui: &mut Ui, c: &mut LiveAudioCue, st: &UiState) {
+    egui::Grid::new("live_audio")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Input");
+            let selected = c.device.clone().unwrap_or_else(|| "System default".into());
+            egui::ComboBox::from_id_salt("live_audio_device")
+                .selected_text(selected)
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut c.device, None, "System default");
+                    for d in &st.audio_input_devices {
+                        let label = if audio::is_dante(d) {
+                            format!("{d}  (Dante)")
+                        } else {
+                            d.clone()
+                        };
+                        ui.selectable_value(&mut c.device, Some(d.clone()), label);
+                    }
+                });
+            ui.end_row();
+            ui.label("Channels");
+            ui.horizontal(|ui| {
+                let mut first = c.input_channel + 1;
+                ui.add(egui::DragValue::new(&mut first).range(1..=64))
+                    .on_hover_text("The first input channel: left, and the next is right");
+                c.input_channel = first.saturating_sub(1);
+                ui.label(RichText::new(format!("and {}", c.input_channel + 2)).weak());
+            });
+            ui.end_row();
+        });
+    ui.label(
+        RichText::new(
+            "Plays what the input hears on the audio output below, from when the cue starts. \
+             If the input and the output are on different clocks a little may be dropped now \
+             and then; on one Dante device they stay together. Starting opens the input, \
+             which takes a moment.",
+        )
+        .weak(),
+    );
 }
 
 /// What a text cue says and how it looks; where, when and how it plays is the
