@@ -5,7 +5,8 @@
 
 use super::ffmpeg::Ffmpeg;
 use super::playback::{Children, PassFeed, Playback};
-use crate::show::{AudioOutputConfig, AudioOutputId};
+use crate::fx::{AudioChain, FxShared};
+use crate::show::{AudioOutputConfig, AudioOutputId, Effect, EffectKind};
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -43,6 +44,8 @@ struct MixVoice {
     gain: f32,
     /// The device channel the left channel plays on; the right is next.
     first_channel: usize,
+    /// Sound effects, and the numbers the engine sets for them.
+    fx: Option<(AudioChain, Arc<FxShared>)>,
 }
 
 /// The most device channels a stream is opened with.
@@ -95,6 +98,9 @@ struct Device {
     voices_tx: Sender<MixVoice>,
     /// Set if the stream ends under us.
     lost: Arc<Lost>,
+    /// How much of the time the mixing takes of the time it has, in
+    /// thousandths (the worst lately).
+    load: Arc<AtomicU32>,
 }
 
 impl Device {
@@ -109,7 +115,8 @@ impl Device {
     fn open_again(name: Option<&str>, earlier: Option<&str>) -> Device {
         let (voices_tx, voices_rx) = unbounded();
         let lost = Arc::new(Lost::default());
-        match open_stream(name, voices_rx, lost.clone()) {
+        let load = Arc::new(AtomicU32::new(0));
+        match open_stream(name, voices_rx, lost.clone(), load.clone()) {
             Ok((stream, sample_rate, channels, device)) => Device {
                 _stream: Some(stream),
                 open: true,
@@ -119,6 +126,7 @@ impl Device {
                 error: None,
                 voices_tx,
                 lost,
+                load,
             },
             Err(e) => {
                 if earlier != Some(format!("{e:#}").as_str()) {
@@ -133,6 +141,7 @@ impl Device {
                     error: Some(format!("{e:#}")),
                     voices_tx,
                     lost,
+                    load,
                 }
             }
         }
@@ -153,6 +162,7 @@ impl Device {
             error: None,
             voices_tx,
             lost: Arc::new(Lost::default()),
+            load: Arc::new(AtomicU32::new(0)),
         };
         (device, voices_rx)
     }
@@ -165,6 +175,9 @@ pub struct DeviceStatus {
     pub sample_rate: u32,
     pub channels: u16,
     pub error: Option<String>,
+    /// How much of its time the mixing takes, in thousandths (the worst
+    /// lately). Near 1000 the sound breaks up.
+    pub load_permille: u32,
 }
 
 pub struct AudioOut {
@@ -278,6 +291,7 @@ impl AudioOut {
             sample_rate: d.sample_rate,
             channels: d.channels,
             error: d.error.clone().or_else(|| d.lost.why()),
+            load_permille: d.load.load(Ordering::Relaxed),
         })
     }
 
@@ -301,6 +315,7 @@ impl AudioOut {
     }
 
     /// Start decoding `path`. The voice starts paused; call `set_paused(false)` to play.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_voice(
         &self,
         ff: &Ffmpeg,
@@ -309,6 +324,7 @@ impl AudioOut {
         playback: Playback,
         gain: f32,
         route: (Option<AudioOutputId>, u16),
+        sound: &[EffectKind],
     ) -> Result<Voice> {
         let device = self
             .device_for(route.0)
@@ -320,13 +336,25 @@ impl AudioOut {
             ));
         }
         let sr = device.sample_rate;
+        let (chain, fx) = build_chain(sound, sr);
         let make = {
             let (ff, path) = (ff.clone(), path.to_path_buf());
+            // The first pass of a jump into a loop starts part way in.
+            let calls = std::sync::atomic::AtomicUsize::new(0);
             move || {
+                let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
                 let mut cmd = ff.command();
-                cmd.args(playback.input_args(start));
+                cmd.args(if first {
+                    playback.first_input_args(start)
+                } else {
+                    playback.input_args(start)
+                });
                 cmd.arg("-i").arg(&path);
-                cmd.args(playback.limit_args());
+                cmd.args(if first {
+                    playback.first_limit_args()
+                } else {
+                    playback.limit_args()
+                });
                 cmd.args([
                     "-map",
                     "0:a:0",
@@ -349,9 +377,9 @@ impl AudioOut {
         let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
         // Looping passes are cut or padded to an exact length, so repeats
         // don't drift and stay locked to the video's frame count.
-        let per_pass = playback
-            .pass_len()
-            .map(|l| (l * sr as f64).round().max(1.0) as u64);
+        let samples = |l: f64| (l * sr as f64).round().max(1.0) as u64;
+        let per_pass = playback.pass_len().map(samples);
+        let first_pass = playback.first_pass_len().map(samples);
 
         let shared = Arc::new(VoiceShared::default());
         shared.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
@@ -377,8 +405,12 @@ impl AudioOut {
                 };
                 let mut bytes = vec![0u8; 16 * 1024];
                 let mut carry: Vec<u8> = Vec::with_capacity(8);
+                let mut first = true;
                 'outer: loop {
                     let mut n: u64 = 0; // stereo frames queued this pass
+                    // The first pass of a jump into a loop is short.
+                    let limit = if first { first_pass } else { per_pass };
+                    first = false;
                     carry.clear();
                     'pass: loop {
                         let read = match feed.stdout().read(&mut bytes) {
@@ -388,10 +420,10 @@ impl AudioOut {
                         carry.extend_from_slice(&bytes[..read]);
                         let whole = carry.len() / 8 * 8; // whole stereo frames
                         for frame in carry[..whole].as_chunks::<8>().0 {
-                            if per_pass.is_some_and(|p| n >= p) {
+                            if limit.is_some_and(|p| n >= p) {
                                 break 'pass;
                             }
-                            if per_pass.is_some_and(|p| n * 2 >= p) {
+                            if limit.is_some_and(|p| n * 2 >= p) {
                                 feed.prefetch();
                             }
                             let f32_at = |i: usize| {
@@ -410,7 +442,7 @@ impl AudioOut {
                         carry.drain(..whole);
                     }
                     let decoded = n;
-                    if let Some(p) = per_pass {
+                    if let Some(p) = limit {
                         while n < p {
                             if !push([0.0; 2]) {
                                 break 'outer;
@@ -431,6 +463,7 @@ impl AudioOut {
             consumer,
             gain,
             first_channel: route.1 as usize,
+            fx: chain.zip(fx.clone()),
         });
         Ok(Voice {
             shared,
@@ -439,6 +472,7 @@ impl AudioOut {
             error,
             lost: device.lost.clone(),
             _input: None,
+            fx,
         })
     }
 
@@ -451,6 +485,7 @@ impl AudioOut {
         first_in: u16,
         gain: f32,
         route: (Option<AudioOutputId>, u16),
+        sound: &[EffectKind],
     ) -> Result<Voice> {
         let device = self
             .device_for(route.0)
@@ -462,6 +497,7 @@ impl AudioOut {
             ));
         }
         let out_sr = device.sample_rate;
+        let (chain, fx) = build_chain(sound, out_sr);
         let source = find_input_device(input)?;
         let supported = pick_input_config(&source)?;
         let format = supported.sample_format();
@@ -493,6 +529,7 @@ impl AudioOut {
             consumer,
             gain,
             first_channel: route.1 as usize,
+            fx: chain.zip(fx.clone()),
         });
         Ok(Voice {
             shared,
@@ -501,6 +538,7 @@ impl AudioOut {
             error,
             lost: device.lost.clone(),
             _input: Some(stream),
+            fx,
         })
     }
 }
@@ -621,9 +659,39 @@ pub struct Voice {
     lost: Arc<Lost>,
     /// For live sound: the input stream that feeds it, closed with the voice.
     _input: Option<cpal::Stream>,
+    /// The numbers of its sound effects, if it has any.
+    fx: Option<Arc<FxShared>>,
+}
+
+/// The chain for `sound` and the numbers it shares with the engine, or
+/// nothing if there are no sound effects.
+fn build_chain(sound: &[EffectKind], rate: u32) -> (Option<AudioChain>, Option<Arc<FxShared>>) {
+    let chain = AudioChain::new(sound, rate);
+    if chain.is_empty() {
+        return (None, None);
+    }
+    let shared = Arc::new(FxShared::new(
+        sound.iter().filter(|k| !k.is_video()).count(),
+    ));
+    (Some(chain), Some(shared))
 }
 
 impl Voice {
+    /// Set the sound effects to what `effects` say `t` seconds into the cue.
+    /// The effects are those the voice was made with (in the same order);
+    /// they can be switched on and off and their numbers changed, but not
+    /// added to or taken away, while it plays.
+    pub fn set_effects(&self, effects: &[Effect], t: f64) {
+        let Some(shared) = &self.fx else { return };
+        let sound: Vec<&Effect> = effects.iter().filter(|e| !e.kind.is_video()).collect();
+        if sound.len() != shared.len() {
+            return;
+        }
+        for (i, e) in sound.iter().enumerate() {
+            shared.set(i, e.enabled, e.values(t));
+        }
+    }
+
     pub fn set_gain(&self, gain: f32) {
         self.shared
             .gain_bits
@@ -799,6 +867,7 @@ fn open_stream(
     name: Option<&str>,
     voices_rx: Receiver<MixVoice>,
     lost: Arc<Lost>,
+    load: Arc<AtomicU32>,
 ) -> Result<(cpal::Stream, u32, u16, String)> {
     let device = find_device(name)?;
     let mut device_name = device
@@ -817,10 +886,10 @@ fn open_stream(
     let config = supported.config();
     let (sr, channels) = (config.sample_rate, config.channels);
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, voices_rx, master, lost)?,
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, voices_rx, master, lost)?,
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, voices_rx, master, lost)?,
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, voices_rx, master, lost)?,
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, voices_rx, master, lost, load)?,
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, voices_rx, master, lost, load)?,
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, voices_rx, master, lost, load)?,
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, voices_rx, master, lost, load)?,
         other => return Err(anyhow!("unsupported sample format {other:?}")),
     };
     stream.play()?;
@@ -833,11 +902,15 @@ fn build<T>(
     voices_rx: Receiver<MixVoice>,
     master: f32,
     lost: Arc<Lost>,
+    load: Arc<AtomicU32>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
     let channels = config.channels as usize;
+    let rate = config.sample_rate as f32;
+    // The load is the worst of the last second or so: it falls slowly.
+    let mut worst = 0.0f32;
     let mut voices: Vec<MixVoice> = Vec::with_capacity(64);
     // Room for a big buffer up front, so the callback never has to ask for more.
     let mut mix: Vec<f32> = Vec::with_capacity(16_384 * channels);
@@ -850,6 +923,7 @@ where
     let stream = device.build_output_stream::<T, _, _>(
         config,
         move |out: &mut [T], _| {
+            let began = std::time::Instant::now();
             while let Ok(v) = voices_rx.try_recv() {
                 voices.push(v);
             }
@@ -867,6 +941,9 @@ where
             for (s, m) in out.iter_mut().zip(&mix) {
                 *s = T::from_sample((m * master).clamp(-1.0, 1.0));
             }
+            let used = began.elapsed().as_secs_f32() / (frames as f32 / rate).max(1e-6);
+            worst = used.max(worst * 0.99);
+            load.store((worst * 1000.0) as u32, Ordering::Relaxed);
         },
         move |e| {
             log::error!("audio stream error: {e}");
@@ -925,6 +1002,9 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
         }
         return true;
     }
+    if let Some((chain, shared)) = &mut v.fx {
+        chain.sync(shared);
+    }
     // Ramp gain linearly across the buffer to avoid zipper noise.
     let target = f32::from_bits(sh.gain_bits.load(Ordering::Relaxed));
     let step = (target - v.gain) / n as f32;
@@ -937,11 +1017,15 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
                 left = s * v.gain;
             } else {
                 let f = i / 2;
+                let mut pair = [left, s * v.gain];
+                if let Some((chain, _)) = &mut v.fx {
+                    pair = chain.process(pair);
+                }
                 route_frame(
                     &mut mix[f * channels..(f + 1) * channels],
                     v.first_channel,
-                    left,
-                    s * v.gain,
+                    pair[0],
+                    pair[1],
                 );
             }
         }
@@ -995,6 +1079,7 @@ mod tests {
             consumer,
             gain: 1.0,
             first_channel,
+            fx: None,
         }
     }
 
@@ -1196,6 +1281,7 @@ mod tests {
                 Playback::Once { duration: None },
                 1.0,
                 (None, 0),
+                &[],
             )
             .unwrap();
         voice.set_paused(false);
@@ -1218,6 +1304,55 @@ mod tests {
     }
 
     #[test]
+    fn a_voice_with_effects_is_changed_by_them_and_they_can_be_set_while_it_plays() {
+        use crate::show::Effect;
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let play = |effects: &[Effect], t: f64| {
+            let (device, rx) = Device::for_test(2);
+            let mut audio = AudioOut::new();
+            audio.devices.insert(None, device);
+            let kinds: Vec<EffectKind> = effects.iter().map(|e| e.kind).collect();
+            let voice = audio
+                .spawn_voice(
+                    &ff,
+                    &wav,
+                    0.0,
+                    Playback::Once {
+                        duration: Some(1.0),
+                    },
+                    1.0,
+                    (None, 0),
+                    &kinds,
+                )
+                .unwrap();
+            voice.set_effects(effects, t);
+            voice.set_paused(false);
+            let mut mv = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            wait_for(&mv, 4800);
+            let mut mix = vec![0.0; 4800 * 2];
+            assert!(mix_voice(&mut mv, &mut mix, 4800, 2));
+            // The last half is past anything settling.
+            mix[4800..].iter().fold(0.0f32, |p, s| p.max(s.abs()))
+        };
+        let plain = play(&[], 0.0);
+        assert!(plain > 0.05);
+        // A low-pass far below the tone's pitch (440 Hz) takes it away...
+        let mut cut = Effect::new(EffectKind::Filter);
+        cut.p[1].value = 100.0;
+        assert!(play(std::slice::from_ref(&cut), 0.0) < plain * 0.2);
+        // ...unless the effect is off, or keyframed open by the time asked.
+        cut.enabled = false;
+        assert!((play(std::slice::from_ref(&cut), 0.0) - plain).abs() < plain * 0.05);
+        cut.enabled = true;
+        cut.p[1].set_key(0.0, 100.0);
+        cut.p[1].set_key(2.0, 20_000.0);
+        assert!(play(std::slice::from_ref(&cut), 0.0) < plain * 0.2);
+        assert!((play(std::slice::from_ref(&cut), 2.0) - plain).abs() < plain * 0.05);
+    }
+
+    #[test]
     fn a_decoded_file_plays_only_on_its_routed_channels() {
         let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
             return;
@@ -1235,6 +1370,7 @@ mod tests {
                 },
                 1.0,
                 (None, 3),
+                &[],
             )
             .unwrap();
         voice.set_paused(false);
@@ -1268,6 +1404,7 @@ mod tests {
                 },
                 1.0,
                 (None, 0),
+                &[],
             )
             .unwrap();
         voice.set_paused(false);
@@ -1303,6 +1440,7 @@ mod tests {
                     },
                     1.0,
                     (output, 0),
+                    &[],
                 )
                 .unwrap()
         };
@@ -1333,6 +1471,7 @@ mod tests {
                 Playback::Once { duration: None },
                 1.0,
                 (Some(AudioOutputId(1)), 0),
+                &[],
             )
             .err()
             .expect("no device to play on");

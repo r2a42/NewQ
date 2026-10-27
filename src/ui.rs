@@ -1341,6 +1341,32 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
             Ok(text) => ui.label(format!("🔊 {text}")),
             Err(e) => ui.label(RichText::new(format!("🔇 {e}")).color(STOP_RED)),
         };
+        // Effects that are too much for this computer.
+        if let Some(d) = engine.audio.device_status(None)
+            && d.load_permille > 600
+        {
+            ui.label(
+                RichText::new(format!("⚠ audio at {}% of its time", d.load_permille / 10))
+                    .color(STOP_RED),
+            )
+            .on_hover_text(
+                "Mixing the sound is taking most of the time it has, and above about 90% it \
+                 breaks up. Switch off reverb, echo or other effects, or play fewer cues at \
+                 once.",
+            );
+        }
+        let reads = engine.picture_reads();
+        let late = crate::render::late_frames_permille();
+        if reads > engine.picture_layers() && late > 200 {
+            ui.label(
+                RichText::new(format!("⚠ graphics behind ({}% of frames late)", late / 10))
+                    .color(STOP_RED),
+            )
+            .on_hover_text(
+                "The graphics card can't draw the pictures and their effects in time. Lower \
+                 the blur radius, use fewer effects at once, or use smaller pictures.",
+            );
+        }
         // The next cue set for a time of day, if there is one.
         let timed: Vec<_> = show
             .cues
@@ -2556,7 +2582,7 @@ fn active_panel(
     let scrubbable: Vec<(u64, f64, f64)> = engine
         .active
         .iter()
-        .filter_map(|a| Some((a.instance, a.elapsed, a.scrub_length(show)?)))
+        .filter_map(|a| Some((a.instance, a.bar_position(), a.scrub_length(show)?)))
         .collect();
     let now = ui.input(|i| i.time);
     st.scrubs
@@ -2600,7 +2626,16 @@ fn active_panel(
                 fmt_time(d),
                 fmt_time(d - a.elapsed)
             ),
-            None => format!("{} / ∞", fmt_time(a.elapsed)),
+            None => match (a.pass_len, a.pass_number()) {
+                // A loop that never ends: where it is in this pass.
+                (Some(len), Some(n)) => format!(
+                    "{} / {}  (loop {n}, {} in all)",
+                    fmt_time(a.bar_position()),
+                    fmt_time(len),
+                    fmt_time(a.elapsed)
+                ),
+                _ => format!("{} / ∞", fmt_time(a.elapsed)),
+            },
         };
         if !a.started {
             text = "loading…".into();
@@ -2696,7 +2731,7 @@ fn progress_scrubber(
     if held.is_none() {
         st.scrubs.remove(&a.instance);
     }
-    let shown = held.map_or(a.elapsed, |s| s.pos).clamp(0.0, length);
+    let shown = held.map_or(a.bar_position(), |s| s.pos).clamp(0.0, length);
     let shift = ui.input(|i| i.modifiers.shift);
     let at =
         |x: f32| (((x - rect.left()) / rect.width().max(1.0)) as f64 * length).clamp(0.0, length);
@@ -2764,7 +2799,7 @@ fn progress_scrubber(
             let targets: Vec<(u64, f64, f64)> = if shift {
                 scrubbable.to_vec()
             } else {
-                vec![(a.instance, a.elapsed, length)]
+                vec![(a.instance, a.bar_position(), length)]
             };
             for (i, elapsed, len) in targets {
                 let from = st.scrubs.get(&i).map_or(elapsed, |s| s.pos);
@@ -4454,7 +4489,7 @@ fn slides_panel(
     ui.label(
         RichText::new(
             "Change a slide's fade or duration to give it its own (shown in yellow); \
-             ↺ puts it back to the show's.",
+             Reset puts it back to the show's.",
         )
         .weak()
         .small(),
@@ -4508,7 +4543,7 @@ fn slides_panel(
                     }
                     if own {
                         if ui
-                            .small_button("↺")
+                            .small_button("Reset")
                             .on_hover_text("Use the show's")
                             .clicked()
                         {
@@ -4520,19 +4555,19 @@ fn slides_panel(
                 }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(n > 0, egui::Button::new("▲").small())
+                        .add_enabled(n > 0, egui::Button::new("Up").small())
                         .clicked()
                     {
                         actions.push(Action::MoveSlide(r.id, -1));
                     }
                     if ui
-                        .add_enabled(n < last, egui::Button::new("▼").small())
+                        .add_enabled(n < last, egui::Button::new("Down").small())
                         .clicked()
                     {
                         actions.push(Action::MoveSlide(r.id, 1));
                     }
                     if ui
-                        .small_button("✕")
+                        .small_button("Remove")
                         .on_hover_text("Remove this slide")
                         .clicked()
                     {
@@ -5268,6 +5303,7 @@ fn media_inspector(
             .default_open(!m.color.is_default())
             .show(ui, |ui| color_inspector(ui, &mut m.color));
     }
+    effects_inspector(ui, cue_id, ty, m, engine);
     if m.loop_media && !timed {
         let what = if m.end.is_some() {
             "Loops from the in point to the out point."
@@ -5276,6 +5312,398 @@ fn media_inspector(
         };
         ui.label(RichText::new(what).weak());
     }
+}
+
+/// The effects on a cue: the picture's and the sound's, each with numbers
+/// that can be animated (see `show::Effect`).
+fn effects_inspector(ui: &mut Ui, cue_id: CueId, ty: CueType, m: &mut MediaCue, engine: &Engine) {
+    let picture = !matches!(ty, CueType::Audio | CueType::LiveAudio);
+    let sound = matches!(ty, CueType::Video | CueType::Audio | CueType::LiveAudio);
+    let n = m.effects.len();
+    let title = if n == 0 {
+        "Effects".to_string()
+    } else {
+        format!("Effects ({n}) •")
+    };
+    // How long the lanes are: the cue's own length, or ten seconds.
+    let length = m.end.filter(|d| *d > 0.0).unwrap_or(10.0);
+    let playhead = match engine.status(cue_id) {
+        CueStatus::Playing { elapsed, .. } => Some(elapsed),
+        _ => None,
+    };
+    egui::CollapsingHeader::new(title)
+        .id_salt(("effects", cue_id.0))
+        .default_open(n > 0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("+ Add effect", |ui| {
+                    let mut add = None;
+                    for (heading, kinds, allowed) in [
+                        ("Picture", &EffectKind::VIDEO, picture),
+                        ("Sound", &EffectKind::AUDIO, sound),
+                    ] {
+                        if !allowed {
+                            continue;
+                        }
+                        ui.label(RichText::new(heading).weak().small());
+                        for k in kinds {
+                            if ui
+                                .button(k.label())
+                                .on_hover_text(k.description())
+                                .clicked()
+                            {
+                                add = Some(*k);
+                            }
+                        }
+                    }
+                    if let Some(k) = add {
+                        m.effects.push(Effect::new(k));
+                        ui.close();
+                    }
+                });
+                let reads =
+                    crate::fx::VideoFx::at(&m.effects, playhead.unwrap_or(0.0)).taps_per_pixel();
+                if reads > 1 {
+                    let note =
+                        RichText::new(format!("the picture is read {reads}× a pixel")).small();
+                    ui.label(if reads > 40 {
+                        note.color(PREWAIT)
+                    } else {
+                        note.weak()
+                    })
+                    .on_hover_text(
+                        "A rough measure of what the picture effects ask of the graphics \
+                             card: 1 is a plain picture. A wide blur on a big picture is the \
+                             costly one; NewQ warns in the status bar if frames run late.",
+                    );
+                }
+            });
+            if m.effects.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Blur, sharpen, vignette and more for the picture; EQ, filter, \
+                         compressor, echo and reverb for the sound. Any number can be used, \
+                         and each number can change over the cue with keyframes.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
+            let (mut remove, mut up) = (None, None);
+            let count = m.effects.len();
+            for i in 0..count {
+                let e = &mut m.effects[i];
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut e.enabled, "")
+                            .on_hover_text("Switch the effect on or off, even while it plays");
+                        ui.label(RichText::new(e.kind.label()).strong())
+                            .on_hover_text(e.kind.description());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(i);
+                            }
+                            if ui
+                                .add_enabled(i > 0, egui::Button::new("Up").small())
+                                .on_hover_text("Earlier in the chain")
+                                .clicked()
+                            {
+                                up = Some(i);
+                            }
+                        });
+                    });
+                    for (j, spec) in e.kind.params().iter().enumerate() {
+                        if e.p.len() <= j {
+                            e.p.push(Animated::new(spec.default));
+                        }
+                        let id = ui.id().with(("fx", cue_id.0, i, j));
+                        effect_param(ui, id, &mut e.p[j], spec, length, playhead);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                m.effects.remove(i);
+            } else if let Some(i) = up {
+                m.effects.swap(i, i - 1);
+            }
+            if m.effects.iter().any(|e| !e.kind.is_video()) {
+                ui.label(
+                    RichText::new(
+                        "Sound effects are set up when the cue starts: adding or removing one \
+                         applies the next time it plays; their numbers and on/off apply at once. \
+                         An echo or reverb tail stops when the sound does.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
+        });
+}
+
+/// One number of an effect: its value, a switch to animate it, and when it is
+/// animated its keyframes on a lane (click to add, drag to move, right-click
+/// to remove), with the selected one's time, value and easing below.
+fn effect_param(
+    ui: &mut Ui,
+    id: egui::Id,
+    a: &mut Animated,
+    spec: &ParamSpec,
+    length: f64,
+    playhead: Option<f64>,
+) {
+    let range = spec.max - spec.min;
+    ui.horizontal(|ui| {
+        ui.label(spec.name);
+        if !a.is_animated() {
+            ui.add(
+                egui::DragValue::new(&mut a.value)
+                    .range(spec.min..=spec.max)
+                    .speed(range / 200.0)
+                    .fixed_decimals(spec.decimals)
+                    .suffix(spec.unit),
+            );
+        } else if let Some(t) = playhead {
+            ui.label(RichText::new(format!("{:.*}{}", spec.decimals, a.at(t), spec.unit)).weak());
+        }
+        let mut on = a.is_animated();
+        if ui
+            .toggle_value(&mut on, "Animate")
+            .on_hover_text(if a.is_animated() {
+                "Animated with keyframes. Click to go back to one fixed value."
+            } else {
+                "Animate: make this number change over the cue, with keyframes."
+            })
+            .changed()
+        {
+            if on {
+                a.keys.clear();
+                a.set_key(0.0, a.value);
+                a.set_key(length, a.value);
+            } else {
+                a.value = a.keys.first().map_or(a.value, |k| k.v);
+                a.keys.clear();
+            }
+        }
+    });
+    if !a.is_animated() {
+        return;
+    }
+    let lane_len = a
+        .keys
+        .last()
+        .map_or(length, |k| (k.t * 1.1).max(length))
+        .max(1.0);
+    let selected = keyframe_lane(ui, id, a, spec, lane_len, playhead);
+    if let Some(i) = selected.filter(|i| *i < a.keys.len()) {
+        ui.horizontal(|ui| {
+            let (mut t, mut v) = (a.keys[i].t, a.keys[i].v);
+            ui.label(RichText::new("Key at").weak().small());
+            let mut changed = ui
+                .add(
+                    egui::DragValue::new(&mut t)
+                        .range(0.0..=36_000.0)
+                        .speed(0.02)
+                        .fixed_decimals(2)
+                        .suffix(" s"),
+                )
+                .changed();
+            ui.label(RichText::new("is").weak().small());
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut v)
+                        .range(spec.min..=spec.max)
+                        .speed(range / 200.0)
+                        .fixed_decimals(spec.decimals)
+                        .suffix(spec.unit),
+                )
+                .changed();
+            if changed {
+                let at = a.move_key(i, t, v);
+                ui.data_mut(|d| d.insert_temp(id.with("sel"), at));
+            }
+            let mut curve = a.keys.get(i).map_or(Curve::Linear, |k| k.curve);
+            egui::ComboBox::from_id_salt(id.with("curve"))
+                .selected_text(curve.label())
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    for c in Curve::ALL {
+                        ui.selectable_value(&mut curve, c, c.label());
+                    }
+                });
+            if let Some(k) = a.keys.get_mut(i) {
+                k.curve = curve;
+            }
+            if ui
+                .small_button("Remove")
+                .on_hover_text("Remove this keyframe")
+                .clicked()
+            {
+                remove_key(a, i);
+            }
+        });
+    }
+}
+
+/// Take keyframe `i` out; the last one going leaves the number fixed at its value.
+fn remove_key(a: &mut Animated, i: usize) {
+    if a.keys.len() <= 1 {
+        a.value = a.keys.first().map_or(a.value, |k| k.v);
+        a.keys.clear();
+    } else {
+        a.remove_key(i);
+    }
+}
+
+/// The keyframes of `a` as a lane `len` seconds long: the curve they make, a
+/// diamond for each, the cue's own time as a line. Returns the selected one.
+fn keyframe_lane(
+    ui: &mut Ui,
+    id: egui::Id,
+    a: &mut Animated,
+    spec: &ParamSpec,
+    len: f64,
+    playhead: Option<f64>,
+) -> Option<usize> {
+    let (resp, painter) = ui.allocate_painter(
+        Vec2::new(ui.available_width().max(120.0), 48.0),
+        Sense::click_and_drag(),
+    );
+    let rect = resp.rect.shrink2(Vec2::new(8.0, 5.0));
+    let range = (spec.max - spec.min).max(1e-6);
+    let pos = |t: f64, v: f32| {
+        pos2(
+            rect.left() + (t / len) as f32 * rect.width(),
+            rect.bottom() - ((v - spec.min) / range).clamp(0.0, 1.0) * rect.height(),
+        )
+    };
+    let at = |p: egui::Pos2| {
+        (
+            (f64::from(p.x - rect.left()) / f64::from(rect.width()) * len).clamp(0.0, len),
+            spec.min + ((rect.bottom() - p.y) / rect.height()).clamp(0.0, 1.0) * range,
+        )
+    };
+    let near = |a: &Animated, p: egui::Pos2| {
+        a.keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (i, pos(k.t, k.v).distance(p)))
+            .filter(|(_, d)| *d < 10.0)
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(i, _)| i)
+    };
+    let sel_id = id.with("sel");
+    let drag_id = id.with("drag");
+    let mut selected: Option<usize> = ui.data(|d| d.get_temp(sel_id));
+    let mut dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+
+    let hover = resp.hover_pos();
+    if resp.drag_started()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let i = near(a, p).unwrap_or_else(|| {
+            let (t, v) = at(p);
+            a.set_key(t, v)
+        });
+        dragging = Some(i);
+        selected = Some(i);
+    }
+    if resp.dragged()
+        && let (Some(i), Some(p)) = (dragging, resp.interact_pointer_pos())
+    {
+        let (t, v) = at(p);
+        let now = a.move_key(i, t, v);
+        dragging = Some(now);
+        selected = Some(now);
+    }
+    if resp.drag_stopped() {
+        dragging = None;
+    }
+    if resp.clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        selected = Some(near(a, p).unwrap_or_else(|| {
+            let (t, v) = at(p);
+            a.set_key(t, v)
+        }));
+    }
+    if resp.secondary_clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(i) = near(a, p)
+    {
+        remove_key(a, i);
+        selected = None;
+    }
+    ui.data_mut(|d| {
+        match selected {
+            Some(i) => {
+                d.insert_temp(sel_id, i);
+            }
+            None => d.remove::<usize>(sel_id),
+        }
+        match dragging {
+            Some(i) => {
+                d.insert_temp(drag_id, i);
+            }
+            None => d.remove::<usize>(drag_id),
+        }
+    });
+
+    // Draw.
+    let visuals = ui.visuals();
+    painter.rect_filled(resp.rect, 3.0, visuals.extreme_bg_color);
+    let grid = Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
+    let step = if len > 60.0 {
+        10.0
+    } else if len > 20.0 {
+        5.0
+    } else {
+        1.0
+    };
+    let mut t = 0.0;
+    while t <= len + 1e-9 {
+        let x = pos(t, spec.min).x;
+        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], grid);
+        t += step;
+    }
+    let line: Vec<egui::Pos2> = (0..=96)
+        .map(|i| {
+            let t = len * f64::from(i) / 96.0;
+            pos(t, a.at(t))
+        })
+        .collect();
+    painter.add(egui::Shape::line(line, Stroke::new(1.5, PLAYHEAD)));
+    for (i, k) in a.keys.iter().enumerate() {
+        let c = pos(k.t, k.v);
+        let hot = selected == Some(i) || hover.is_some_and(|h| h.distance(c) < 10.0);
+        let r = if hot { 6.0 } else { 4.5 };
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pos2(c.x, c.y - r),
+                pos2(c.x + r, c.y),
+                pos2(c.x, c.y + r),
+                pos2(c.x - r, c.y),
+            ],
+            if selected == Some(i) {
+                PLAYHEAD
+            } else {
+                Color32::from_gray(30)
+            },
+            Stroke::new(1.5, if hot { Color32::WHITE } else { PLAYHEAD }),
+        ));
+    }
+    if let Some(t) = playhead {
+        let x = pos(t.min(len), spec.min).x;
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.5, Color32::WHITE),
+        );
+    }
+    resp.on_hover_text(format!(
+        "{} from {:.1} to {:.1}{} over {len:.0} s. Click to add a keyframe, drag to move one, \
+         right-click to remove it.",
+        spec.name, spec.min, spec.max, spec.unit
+    ));
+    selected
 }
 
 /// What a send cue sends, and where.
@@ -7833,6 +8261,54 @@ mod tests {
         apply(Action::RemoveSlide(ids[0]), &mut show, &mut e, &mut st);
         assert_eq!(show.children(g).len(), 2);
         assert_eq!(show.children(g)[0].pre_wait, 0.0);
+    }
+
+    #[test]
+    fn the_effects_section_draws_and_keyframes_are_added_and_removed_in_the_lane() {
+        let (mut show, mut e, mut st) = running();
+        let cue = show.make_cue(CueType::Video, Some("a.mp4".into()), show.cues.len());
+        let id = cue.id;
+        show.cues.push(cue);
+        st.selected = Some(id);
+        {
+            let m = show.cue_mut(id).unwrap().kind.media_mut().unwrap();
+            let mut blur = Effect::new(EffectKind::Blur);
+            blur.p[0].set_key(0.0, 0.0);
+            blur.p[0].set_key(4.0, 30.0);
+            m.effects = vec![
+                blur,
+                Effect::new(EffectKind::Vignette),
+                Effect::new(EffectKind::Reverb),
+                Effect::new(EffectKind::Compressor),
+            ];
+        }
+        let ctx = egui::Context::default();
+        let run = |show: &mut Show, e: &mut Engine, st: &mut UiState, input: RawInput| {
+            let mut out = ctx.run_ui(input, |ui| draw(ui, show, e, st));
+            out.textures_delta.clear();
+        };
+        let size = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 1400.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        run(&mut show, &mut e, &mut st, size.clone());
+        // Open the section and draw again: nothing breaks with every kind in it.
+        let mut again = size.clone();
+        again.time = Some(2.0);
+        run(&mut show, &mut e, &mut st, again);
+        // The animated number is still animated; the plain ones are as added.
+        let m = show.cue(id).unwrap().kind.media().unwrap();
+        assert!(m.effects[0].p[0].is_animated());
+        assert!(!m.effects[1].p[0].is_animated());
+        assert_eq!(m.effects.len(), 4);
+        // Round trip, and an old show has none.
+        let json = serde_json::to_string(m).unwrap();
+        let back: MediaCue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.effects, m.effects);
+        let mut plain = m.clone();
+        plain.effects.clear();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("effects"));
     }
 
     #[test]
