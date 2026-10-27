@@ -19,6 +19,12 @@ includes FFmpeg, so there's nothing else to install.
 
 ## Features
 
+- **Dante audio:** NewQ reaches a Dante network through an audio device: Dante
+  Virtual Soundcard on this computer, or an interface with Dante built in. It
+  shows in an audio output's device list marked *(Dante)*, with all its channels
+  (up to 64) to route cues to; subscribe the channels in Dante Controller.
+  Nothing else is needed or possible: Dante has no interface for a program to
+  join the network by itself.
 - **Slide shows:** *Cue ▸ Add Slide show…* takes any number of images (chosen
   together, put in name order) and makes one cue that crossfades through them.
   Set one *Fade* (how long each slide takes to fade in over the last) and one

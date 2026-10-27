@@ -521,6 +521,15 @@ pub fn output_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether an audio device is a Dante one: Audinate's Dante Virtual
+/// Soundcard, or an interface with Dante built in, which shows up under the
+/// system's audio as an ordinary device with up to 64 channels, named for
+/// Dante. (There is no way to talk to a Dante network from a program other
+/// than through such a device.)
+pub fn is_dante(device: &str) -> bool {
+    device.to_ascii_lowercase().contains("dante")
+}
+
 /// The device called `name` (the default device for None).
 fn find_device(name: Option<&str>) -> Result<cpal::Device> {
     let host = cpal::default_host();
@@ -1105,5 +1114,18 @@ mod tests {
             .err()
             .expect("no device to play on");
         assert!(err.to_string().contains("Missing Interface"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod dante_tests {
+    use super::is_dante;
+
+    #[test]
+    fn dante_devices_are_known_by_name() {
+        assert!(is_dante("Dante Virtual Soundcard (x64)"));
+        assert!(is_dante("Dante Via"));
+        assert!(is_dante("Focusrite Dante AVIO"));
+        assert!(!is_dante("Speakers (Realtek Audio)"));
     }
 }
