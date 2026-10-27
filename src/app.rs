@@ -63,6 +63,9 @@ struct ControlWindow {
     thread: Option<ControlThread>,
     next_repaint: Option<Instant>,
     last_paint: Instant,
+    /// Windows start hidden and appear once a frame is on them.
+    shown: bool,
+    created: Instant,
 }
 
 /// A pane in a window of its own. It has its own egui context (a context
@@ -75,7 +78,12 @@ struct PopoutWindow {
     thread: Option<ControlThread>,
     next_repaint: Option<Instant>,
     last_paint: Instant,
+    shown: bool,
+    created: Instant,
 }
+
+/// How long a window may stay hidden waiting for its first frame.
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
 
 /// Where an output is drawn: an area of a physical display (the whole of it
 /// unless the output is on a sub display).
@@ -1368,6 +1376,7 @@ impl App {
             };
             let mut attrs = Window::default_attributes()
                 .with_title(format!("NewQ: {}", want.pane.title()))
+                .with_visible(false)
                 .with_window_icon(crate::branding::window_icon())
                 .with_inner_size(LogicalSize::new(w as f64, h as f64))
                 .with_min_inner_size(LogicalSize::new(240.0, 160.0));
@@ -1419,7 +1428,51 @@ impl App {
                 thread: Some(thread),
                 next_repaint: Some(Instant::now()),
                 last_paint: Instant::now(),
+                shown: false,
+                created: Instant::now(),
             });
+        }
+    }
+
+    /// Show the control window and the pop-outs once each has had a frame
+    /// drawn on it (or after a few seconds, so a window can't stay hidden).
+    /// Until then they are drawn while hidden: some systems don't ask a hidden
+    /// window to repaint, so ask for it here.
+    fn reveal_windows(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(ctl) = &self.control
+            && !ctl.shown
+            && ctl.last_paint.elapsed() > Duration::from_millis(30)
+        {
+            self.render_control(event_loop);
+        }
+        if let Some(ctl) = &mut self.control
+            && !ctl.shown
+            && (ctl.thread.as_ref().is_some_and(|t| t.has_presented())
+                || ctl.created.elapsed() > FIRST_FRAME_WAIT)
+        {
+            ctl.shown = true;
+            ctl.window.set_visible(true);
+            ctl.window.focus_window();
+            ctl.next_repaint = Some(Instant::now());
+        }
+        let hidden: Vec<WindowId> = self
+            .popouts
+            .iter()
+            .filter(|p| !p.shown && p.last_paint.elapsed() > Duration::from_millis(30))
+            .map(|p| p.window.id())
+            .collect();
+        for id in hidden {
+            self.render_popout(id);
+        }
+        for p in &mut self.popouts {
+            if !p.shown
+                && (p.thread.as_ref().is_some_and(|t| t.has_presented())
+                    || p.created.elapsed() > FIRST_FRAME_WAIT)
+            {
+                p.shown = true;
+                p.window.set_visible(true);
+                p.next_repaint = Some(Instant::now());
+            }
         }
     }
 
@@ -1593,6 +1646,7 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("NewQ")
+                        .with_visible(false)
                         .with_window_icon(crate::branding::window_icon())
                         .with_inner_size(LogicalSize::new(1280.0, 760.0))
                         .with_min_inner_size(LogicalSize::new(800.0, 500.0))
@@ -1632,6 +1686,8 @@ impl ApplicationHandler for App {
             thread: Some(thread),
             next_repaint: Some(Instant::now()),
             last_paint: Instant::now(),
+            shown: false,
+            created: Instant::now(),
         });
         self.scan_monitors(event_loop);
         self.reconcile_outputs(event_loop);
@@ -1762,6 +1818,8 @@ impl ApplicationHandler for App {
         let playing = self.engine.is_active();
         // One extra frame after the last layer stops, so outputs go to black.
         self.update_outputs(playing || removed_layer);
+
+        self.reveal_windows(event_loop);
 
         let mut next = now + Duration::from_millis(500);
         if let Some(ctl) = &mut self.control {
