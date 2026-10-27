@@ -18,6 +18,7 @@ mod media;
 mod mesh;
 mod monitor;
 mod output;
+mod pattern;
 mod projector;
 mod recovery;
 mod relink;

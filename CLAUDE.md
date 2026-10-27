@@ -50,6 +50,8 @@ The README describes the features; this file is about working on the code.
   (argument building, `Sink`); `render.rs::CaptureThread` draws the picture off
   screen at the stream's rate and feeds it. A test streams to a file through
   real FFmpeg; the Linux virtual camera itself can't be tested here.
+  `src/pattern.rs`: the twelve test patterns (`show::PatternKind`), drawn on the
+  CPU; `app.rs` caches one per display by kind, number and size.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
   picture as the shown time changes; the renderer re-uploads on `version`).
   `src/relink.rs`: finding moved media and copying it into one folder.
