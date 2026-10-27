@@ -1,5 +1,7 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
+mod settings;
+
 use crate::clock::{self, TimeOfDay};
 use crate::engine::{ActiveCue, CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
@@ -13,6 +15,7 @@ use crate::remote::{Command, RemoteStatus};
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, pos2};
+pub use settings::SettingsPage;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -202,9 +205,11 @@ pub struct UiState {
     pub show_cart: bool,
     /// Whether the media window is open, and what it last did.
     pub show_media: bool,
-    /// Whether the window for lining sound up with picture is open, and the
-    /// clip being made for it.
-    pub show_sync: bool,
+    /// Whether the settings page is showing (in place of the cue list), and
+    /// which of its pages.
+    pub settings_open: bool,
+    pub settings_page: SettingsPage,
+    /// The clip being made for lining sound up with picture.
     /// Whether the About window is open, and its logo (made when first needed).
     pub show_about: bool,
     about_logo: Option<egui::TextureHandle>,
@@ -333,7 +338,10 @@ enum Action {
     FadeOutCue(CueId),
     ToggleCart,
     ToggleMedia,
-    ToggleSync,
+    /// Open the settings at a page.
+    OpenSettings(SettingsPage),
+    CloseSettings,
+    ToggleSettings,
     ToggleAbout,
     /// Make the clip for checking the sync (about a second of work).
     MakeSyncClip,
@@ -468,17 +476,9 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 .show(ui, |ui| {
                     output_previews(ui, show, st);
                     active_panel(ui, show, engine, st, &mut actions);
-                    ui.add_space(12.0);
-                    displays_panel(ui, show, engine, st, &mut actions);
-                    ui.add_space(12.0);
-                    sub_displays_panel(ui, show, st, &mut actions);
-                    ui.add_space(12.0);
-                    audio_panel(ui, show, engine, st, &mut actions);
-                    ui.add_space(12.0);
-                    remote_panel(ui, show, st, engine);
                 });
         });
-    if st.show_cart {
+    if st.show_cart && !st.settings_open {
         egui::Panel::bottom("cart")
             .resizable(true)
             .default_size(150.0)
@@ -489,18 +489,25 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     .show(ui, |ui| cart(ui, show, engine, &mut actions));
             });
     }
-    egui::Panel::bottom("inspector")
-        .resizable(true)
-        .default_size(300.0)
-        .min_size(120.0)
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| inspector(ui, show, engine, st, &mut actions));
-        });
-    egui::CentralPanel::default().show(ui, |ui| cue_list(ui, show, engine, st, &mut actions));
+    if !st.settings_open {
+        egui::Panel::bottom("inspector")
+            .resizable(true)
+            .default_size(300.0)
+            .min_size(120.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| inspector(ui, show, engine, st, &mut actions));
+            });
+    }
+    egui::CentralPanel::default().show(ui, |ui| {
+        if st.settings_open {
+            settings::settings_view(ui, show, engine, st, &mut actions);
+        } else {
+            cue_list(ui, show, engine, st, &mut actions);
+        }
+    });
     media_window(ui.ctx(), show, st, &mut actions);
-    sync_window(ui.ctx(), show, st, &mut actions);
     about_window(ui.ctx(), st);
 
     // Actions change state after this frame was laid out; show the result now
@@ -653,6 +660,9 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
         if fresh_key(i, egui::Modifiers::COMMAND, Key::N) {
             actions.push(Action::New);
         }
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::Comma) {
+            actions.push(Action::ToggleSettings);
+        }
         if typing {
             // A text box has its own undo.
             return;
@@ -752,6 +762,47 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
     });
 }
 
+/// Closing the settings also puts away what was being edited on the preview,
+/// which has no button of its own once the settings are gone.
+fn close_settings(st: &mut UiState) {
+    st.settings_open = false;
+    st.geometry_edit = None;
+    st.area_edit = None;
+    st.handle_sel.set(None);
+}
+
+/// The Settings menu: the same pages as the sidebar, in the same groups.
+fn settings_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    let label = if st.settings_open {
+        "Close settings"
+    } else {
+        "Open settings…"
+    };
+    if ui
+        .add(egui::Button::new(label).shortcut_text("Ctrl+,"))
+        .clicked()
+    {
+        actions.push(Action::ToggleSettings);
+        ui.close();
+    }
+    for group in settings::SettingsGroup::ALL {
+        ui.separator();
+        ui.label(
+            RichText::new(group.label())
+                .small()
+                .strong()
+                .color(Color32::from_gray(130)),
+        );
+        for page in SettingsPage::ALL.into_iter().filter(|p| p.group() == group) {
+            let on = st.settings_open && st.settings_page == page;
+            if ui.selectable_label(on, page.label()).clicked() {
+                actions.push(Action::OpenSettings(page));
+                ui.close();
+            }
+        }
+    }
+}
+
 fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
     egui::containers::menu::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
@@ -788,7 +839,8 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 .on_hover_text("Line the sound up with the picture.")
                 .clicked()
             {
-                actions.push(Action::ToggleSync);
+                actions.push(Action::OpenSettings(SettingsPage::Sync));
+                ui.close();
             }
             if ui
                 .button("Export cue sheet…")
@@ -937,6 +989,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 add_sub_display_menu(ui, show, actions);
             });
         });
+        ui.menu_button("Settings", |ui| settings_menu(ui, st, actions));
         ui.menu_button("Help", |ui| {
             if ui.button("About NewQ…").clicked() {
                 actions.push(Action::ToggleAbout);
@@ -1843,108 +1896,6 @@ fn about_window(ctx: &egui::Context, st: &mut UiState) {
 }
 
 /// The window for lining sound up with picture: how long to hold each back.
-fn sync_window(ctx: &egui::Context, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
-    if !st.show_sync {
-        return;
-    }
-    if let Some(rx) = &st.sync_clip {
-        match rx.try_recv() {
-            Ok(Ok(path)) => {
-                st.sync_clip = None;
-                actions.push(Action::AddSyncCue(path));
-            }
-            Ok(Err(e)) => {
-                st.sync_clip = None;
-                st.sync_note = format!("Couldn't make the test clip: {e}");
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.sync_clip = None,
-        }
-    }
-    let delay = |ui: &mut Ui, ms: &mut u32| {
-        ui.add(
-            egui::DragValue::new(ms)
-                .range(0..=MAX_DELAY_MS)
-                .speed(1.0)
-                .suffix(" ms"),
-        )
-        .changed()
-    };
-    let mut open = true;
-    egui::Window::new("Sync")
-        .open(&mut open)
-        .default_width(420.0)
-        .show(ctx, |ui| {
-            ui.label(
-                "Hold back whichever comes first. If the picture is ahead of the sound, \
-                 delay the picture; if the sound is ahead, delay the sound.",
-            );
-            egui::Grid::new("sync_all").num_columns(2).show(ui, |ui| {
-                ui.label("Sound delay");
-                delay(ui, &mut show.sync.audio_ms);
-                ui.end_row();
-                ui.label("Picture delay");
-                delay(ui, &mut show.sync.video_ms);
-                ui.end_row();
-            });
-            ui.label(
-                RichText::new("These apply to every output. A delay changes cues as they start.")
-                    .weak()
-                    .small(),
-            );
-            if !show.audio_outputs.is_empty() || !show.outputs.is_empty() {
-                ui.separator();
-                ui.label("On top of that, for one output:");
-                egui::Grid::new("sync_outputs")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        for o in &mut show.audio_outputs {
-                            ui.label(format!("Sound: {}", o.name));
-                            delay(ui, &mut o.delay_ms);
-                            ui.end_row();
-                        }
-                        for o in &mut show.outputs {
-                            ui.label(format!("Picture: {}", o.name));
-                            delay(ui, &mut o.delay_ms);
-                            ui.end_row();
-                        }
-                    });
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                let making = st.sync_clip.is_some();
-                if ui
-                    .add_enabled(!making, egui::Button::new("Add a sync test cue"))
-                    .on_hover_text(
-                        "A looping clip that flashes white and beeps together once a second. \
-                         Play it and adjust until the flash and the beep land together.",
-                    )
-                    .clicked()
-                {
-                    actions.push(Action::MakeSyncClip);
-                }
-                if making {
-                    ui.spinner();
-                }
-                if ui.button("Reset").clicked() {
-                    show.sync = SyncSettings::default();
-                    for o in &mut show.audio_outputs {
-                        o.delay_ms = 0;
-                    }
-                    for o in &mut show.outputs {
-                        o.delay_ms = 0;
-                    }
-                }
-            });
-            if !st.sync_note.is_empty() {
-                ui.label(RichText::new(&st.sync_note).color(STOP_RED).small());
-            }
-        });
-    st.show_sync = open;
-}
-
 fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
     if !st.show_media {
         return;
@@ -2995,7 +2946,6 @@ fn audio_panel(
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
-        ui.heading("Audio outputs");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.button("+ Add").clicked() {
                 actions.push(Action::AddAudioOutput);
@@ -3061,158 +3011,6 @@ fn audio_panel(
     );
 }
 
-/// Settings for controlling NewQ from OSC and MIDI.
-fn remote_panel(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
-    ui.heading("Remote control");
-    ui.label(
-        RichText::new("Run NewQ from a lighting desk, Companion, a phone or a MIDI controller.")
-            .weak()
-            .small(),
-    );
-    let status = &st.remote_status;
-    let r = &mut show.remote;
-    ui.checkbox(&mut r.osc, "OSC over UDP");
-    if r.osc {
-        ui.horizontal(|ui| {
-            ui.label("Port");
-            ui.add(
-                egui::DragValue::new(&mut r.osc_port)
-                    .range(1..=65535)
-                    .speed(1.0),
-            );
-        });
-        match (&status.osc_port, &status.osc_error) {
-            (_, Some(e)) => {
-                ui.label(RichText::new(format!("⚠ {e}")).color(STOP_RED));
-            }
-            (Some(p), None) => {
-                ui.label(RichText::new(format!("Listening on UDP port {p}")).color(GO_GREEN));
-            }
-            _ => {
-                ui.label(RichText::new("Starting…").weak());
-            }
-        }
-        ui.label(
-            RichText::new(
-                "/go  /panic  /stop  /pause  /resume\n/playhead/next  /playhead/previous\n\
-                 /cue/<number>/start  go  select  stop  fade",
-            )
-            .weak()
-            .small(),
-        );
-        ui.label(
-            RichText::new("Anyone who can reach this port on your network can control the show.")
-                .small()
-                .color(PREWAIT),
-        );
-    }
-    ui.add_space(4.0);
-    ui.checkbox(&mut r.midi, "MIDI input");
-    if r.midi {
-        ui.horizontal(|ui| {
-            ui.label("Input");
-            egui::ComboBox::from_id_salt("midi_port")
-                .selected_text(r.midi_port.clone().unwrap_or_else(|| "Choose…".into()))
-                .show_ui(ui, |ui| {
-                    for p in &st.midi_ports {
-                        ui.selectable_value(&mut r.midi_port, Some(p.clone()), p);
-                    }
-                });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Channel");
-            let text = r
-                .midi_channel
-                .map_or("Any".to_string(), |c| (c + 1).to_string());
-            egui::ComboBox::from_id_salt("midi_channel")
-                .selected_text(text)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut r.midi_channel, None, "Any");
-                    for c in 0..16u8 {
-                        ui.selectable_value(&mut r.midi_channel, Some(c), (c + 1).to_string());
-                    }
-                });
-        });
-        match (&status.midi_port, &status.midi_error) {
-            (_, Some(e)) => {
-                ui.label(RichText::new(format!("⚠ {e}")).color(STOP_RED));
-            }
-            (Some(p), None) => {
-                ui.label(RichText::new(format!("Listening to {p}")).color(GO_GREEN));
-            }
-            _ => {}
-        }
-        ui.label(
-            RichText::new(
-                "Note on N: fire the cue given that note, else cue N · Program change N: \
-                 select cue N\nMIDI Show Control: GO, STOP, RESUME, LOAD, ALL OFF (cue numbers work)",
-            )
-            .weak()
-            .small(),
-        );
-        ui.checkbox(&mut r.mtc, "Follow MIDI Time Code")
-            .on_hover_text("Fire cues that have a timecode as the incoming time reaches it.");
-        if r.mtc {
-            match engine.timecode.position() {
-                Some((tc, rate)) if engine.timecode.running() => {
-                    ui.label(RichText::new(format!("{tc}  ·  {}", rate.label())).color(GO_GREEN))
-                }
-                Some((tc, _)) => ui.label(RichText::new(format!("{tc}  ·  stopped")).weak()),
-                None => ui.label(RichText::new("Waiting for timecode…").weak()),
-            };
-        }
-    }
-    ui.add_space(4.0);
-    ui.checkbox(&mut r.web, "Web remote (phone or tablet)")
-        .on_hover_text("Serves a page that runs the show from a browser on this network.");
-    if r.web {
-        ui.horizontal(|ui| {
-            ui.label("Port");
-            ui.add(
-                egui::DragValue::new(&mut r.web_port)
-                    .range(1..=65535)
-                    .speed(1.0),
-            );
-            ui.label("PIN");
-            ui.add(
-                egui::TextEdit::singleline(&mut r.web_pin)
-                    .password(true)
-                    .desired_width(70.0)
-                    .hint_text("none"),
-            );
-            // What the page can send: no spaces or accented letters.
-            let clean = crate::web::clean_pin(&r.web_pin);
-            if clean != r.web_pin {
-                r.web_pin = clean;
-            }
-        });
-        match (&status.web_port, &status.web_error) {
-            (_, Some(e)) => {
-                ui.label(RichText::new(format!("⚠ {e}")).color(STOP_RED));
-            }
-            (Some(p), None) => {
-                let host = crate::web::lan_address()
-                    .map_or("<this computer>".to_string(), |ip| ip.to_string());
-                ui.label(
-                    RichText::new(format!("Open http://{host}:{p} on a phone")).color(GO_GREEN),
-                );
-            }
-            _ => {
-                ui.label(RichText::new("Starting…").weak());
-            }
-        }
-        ui.label(
-            RichText::new(
-                "GO, Stop All, Pause, the playhead and a button for every cue. Anyone on \
-                 your network who can reach the port (and has the PIN, if you set one) \
-                 can run the show. The PIN is saved in the show file.",
-            )
-            .small()
-            .color(PREWAIT),
-        );
-    }
-}
-
 /// What to tell the user about a display, from what it is attached to.
 fn display_status(d: &OutputConfig, st: &UiState) -> (String, Option<Color32>) {
     let monitor = d.monitor.as_ref().map_or("", |r| r.name.as_str());
@@ -3249,7 +3047,6 @@ fn displays_panel(
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
-        ui.heading("Displays");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.menu_button("+ Add", |ui| {
                 if ui.button("Display").clicked() {
@@ -3756,7 +3553,6 @@ fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
 
 fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        ui.heading("Sub displays");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.menu_button("+ Add", |ui| add_sub_display_menu(ui, show, actions))
                 .response
@@ -6206,7 +6002,18 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::FadeOutCue(id) => engine.fade_out_cue(show, id),
         Action::ToggleCart => st.show_cart = !st.show_cart,
         Action::ToggleMedia => st.show_media = !st.show_media,
-        Action::ToggleSync => st.show_sync = !st.show_sync,
+        Action::OpenSettings(page) => {
+            st.settings_open = true;
+            st.settings_page = page;
+        }
+        Action::CloseSettings => close_settings(st),
+        Action::ToggleSettings => {
+            if st.settings_open {
+                close_settings(st);
+            } else {
+                st.settings_open = true;
+            }
+        }
         Action::ToggleAbout => st.show_about = !st.show_about,
         Action::MakeSyncClip => match engine.ff.clone() {
             None => st.sync_note = "ffmpeg wasn't found, so there's no clip to make.".into(),
@@ -7397,6 +7204,190 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_comma_opens_and_closes_the_settings() {
+        use egui::Modifiers as M;
+        let st = UiState::default();
+        assert!(matches!(
+            keys(&st, &[(Key::Comma, M::COMMAND)])[..],
+            [Action::ToggleSettings]
+        ));
+        assert!(keys(&st, &[(Key::Comma, M::NONE)]).is_empty());
+        let (mut show, mut e, mut st) = running();
+        apply(Action::ToggleSettings, &mut show, &mut e, &mut st);
+        assert!(st.settings_open);
+        apply(Action::ToggleSettings, &mut show, &mut e, &mut st);
+        assert!(!st.settings_open);
+    }
+
+    #[test]
+    fn opening_a_page_remembers_it_and_closing_puts_away_what_was_being_edited() {
+        let (mut show, mut e, mut st) = running();
+        apply(
+            Action::OpenSettings(SettingsPage::Audio),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(st.settings_open && st.settings_page == SettingsPage::Audio);
+        // Closing and toggling open again comes back to the same page.
+        apply(Action::CloseSettings, &mut show, &mut e, &mut st);
+        apply(Action::ToggleSettings, &mut show, &mut e, &mut st);
+        assert_eq!(st.settings_page, SettingsPage::Audio);
+        // A corner pin or area being edited has no button once the settings
+        // are gone, so closing ends it.
+        let id = show.outputs[0].id;
+        st.geometry_edit = Some(id);
+        st.area_edit = Some(id);
+        apply(Action::CloseSettings, &mut show, &mut e, &mut st);
+        assert!(st.geometry_edit.is_none() && st.area_edit.is_none());
+    }
+
+    #[test]
+    fn the_settings_pages_are_grouped_once_each_with_names_and_blurbs() {
+        let all = SettingsPage::ALL;
+        assert_eq!(all.len(), 9);
+        let mut labels: Vec<&str> = all.iter().map(|p| p.label()).collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 9, "names are different");
+        assert!(all.iter().all(|p| !p.blurb().is_empty()));
+        // Each page is in exactly one group, and every group has pages, in
+        // the order the sidebar lists them.
+        for g in settings::SettingsGroup::ALL {
+            assert!(all.iter().any(|p| p.group() == g), "{g:?} has pages");
+        }
+        let groups: Vec<_> = all.iter().map(|p| p.group()).collect();
+        let mut seen = Vec::new();
+        for g in groups {
+            if seen.last() != Some(&g) {
+                assert!(!seen.contains(&g), "{g:?} is in one run, not scattered");
+                seen.push(g);
+            }
+        }
+        assert_eq!(SettingsPage::default(), SettingsPage::General);
+    }
+
+    #[test]
+    fn the_sidebar_badges_say_what_needs_attention_and_what_is_on() {
+        use settings::page_badge;
+        let mut show = Show::default();
+        let mut st = UiState::default();
+        // A new show: nothing needs attention.
+        for page in [
+            SettingsPage::General,
+            SettingsPage::Media,
+            SettingsPage::Sync,
+        ] {
+            assert!(page_badge(page, &show, &st).is_none(), "{page:?}");
+        }
+        let d = show.outputs[0].id;
+        assert_eq!(
+            page_badge(SettingsPage::Displays, &show, &st).map(|b| b.text),
+            Some("1".to_string())
+        );
+        // A display whose monitor is gone is flagged in red.
+        st.display_states.insert(d, DisplayState::Missing);
+        let b = page_badge(SettingsPage::Displays, &show, &st).unwrap();
+        assert_eq!((b.text.as_str(), b.color), ("⚠", STOP_RED));
+        // Sub displays and audio outputs are counted.
+        assert!(page_badge(SettingsPage::SubDisplays, &show, &st).is_none());
+        show.add_sub_display(d);
+        assert_eq!(
+            page_badge(SettingsPage::SubDisplays, &show, &st).map(|b| b.text),
+            Some("1".to_string())
+        );
+        show.add_audio_output();
+        assert_eq!(
+            page_badge(SettingsPage::Audio, &show, &st).map(|b| b.text),
+            Some("1".to_string())
+        );
+        // A delay marks Sync.
+        show.sync.audio_ms = 40;
+        assert_eq!(
+            page_badge(SettingsPage::Sync, &show, &st).map(|b| b.text),
+            Some("set".to_string())
+        );
+        // Remote control: nothing when off, then starting, listening, a problem.
+        assert!(page_badge(SettingsPage::Osc, &show, &st).is_none());
+        show.remote.osc = true;
+        assert_eq!(
+            page_badge(SettingsPage::Osc, &show, &st).map(|b| b.text),
+            Some("…".to_string())
+        );
+        st.remote_status.osc_port = Some(53000);
+        assert_eq!(
+            page_badge(SettingsPage::Osc, &show, &st).map(|b| b.text),
+            Some("on".to_string())
+        );
+        st.remote_status.osc_error = Some("in use".into());
+        assert_eq!(
+            page_badge(SettingsPage::Osc, &show, &st).map(|b| b.color),
+            Some(STOP_RED)
+        );
+        // Files that can't be found are counted on Media.
+        let mut c = show.make_cue(CueType::Video, Some(PathBuf::from("/nowhere/a.mp4")), 0);
+        c.number = "1".into();
+        show.cues.push(c);
+        st.missing.insert(PathBuf::from("/nowhere/a.mp4"));
+        let b = page_badge(SettingsPage::Media, &show, &st).unwrap();
+        assert_eq!((b.text.as_str(), b.color), ("⚠ 1", STOP_RED));
+    }
+
+    #[test]
+    fn every_settings_page_draws_with_a_realistic_show() {
+        let (mut show, mut e, mut st) = running();
+        let d = show.outputs[0].id;
+        show.add_sub_display(d);
+        show.add_audio_output();
+        show.remote.osc = true;
+        show.remote.midi = true;
+        show.remote.mtc = true;
+        show.remote.web = true;
+        show.name = "Opening night".into();
+        st.show_path = Some(PathBuf::from("/shows/opening.newq"));
+        st.display_states.insert(d, DisplayState::Unassigned);
+        let ctx = egui::Context::default();
+        for page in SettingsPage::ALL {
+            st.settings_open = true;
+            st.settings_page = page;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1100.0, 800.0))),
+                time: Some(1.0),
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut out = ctx.run_ui(input, |ui| {
+                settings::settings_view(ui, &mut show, &mut e, &mut st, &mut actions)
+            });
+            out.textures_delta.clear();
+            assert!(out.shapes.len() > 20, "{page:?} has something on it");
+            assert!(actions.is_empty(), "{page:?} did nothing by itself");
+        }
+    }
+
+    #[test]
+    fn the_general_page_edits_the_name_and_the_stop_all_fade() {
+        let (mut show, mut e, mut st) = running();
+        st.settings_open = true;
+        st.settings_page = SettingsPage::General;
+        show.panic_fade = 2.5;
+        show.name = "Before".into();
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| {
+            settings::settings_view(ui, &mut show, &mut e, &mut st, &mut actions)
+        });
+        out.textures_delta.clear();
+        // Drawing changes neither.
+        assert_eq!((show.name.as_str(), show.panic_fade), ("Before", 2.5));
+    }
+
+    #[test]
     fn a_restored_show_still_shows_unsaved_changes() {
         let (mut show, mut e, mut st) = running();
         st.set_saved(&show);
@@ -8566,10 +8557,15 @@ mod tests {
     }
 
     #[test]
-    fn the_sync_window_draws_and_the_test_cue_loops() {
+    fn the_sync_page_draws_and_the_test_cue_loops() {
         let mut show = Show::default();
         let (mut e, mut st) = (Engine::for_tests(), UiState::default());
-        st.show_sync = true;
+        apply(
+            Action::OpenSettings(SettingsPage::Sync),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
         let ctx = egui::Context::default();
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
@@ -8578,11 +8574,11 @@ mod tests {
         };
         let mut actions = Vec::new();
         let mut out = ctx.run_ui(input, |ui| {
-            sync_window(ui.ctx(), &mut show, &mut st, &mut actions)
+            settings::settings_view(ui, &mut show, &mut e, &mut st, &mut actions)
         });
         out.textures_delta.clear();
-        assert!(out.shapes.len() > 5, "the window has something in it");
-        assert!(actions.is_empty() && st.show_sync);
+        assert!(out.shapes.len() > 5, "the page has something in it");
+        assert!(actions.is_empty() && st.settings_open);
 
         apply(
             Action::AddSyncCue(PathBuf::from("sync.mp4")),

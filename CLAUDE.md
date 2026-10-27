@@ -13,6 +13,10 @@ The README describes the features; this file is about working on the code.
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
+  `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
+  groups, with badges; it replaces the cue list while open). A setting goes on
+  the page it belongs to; the displays, audio and sub display panels are
+  functions in `ui.rs` that the pages call.
 - `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.
