@@ -457,6 +457,8 @@ enum ControlJob {
 pub struct ControlThread {
     mailbox: Arc<Mailbox<ControlJob>>,
     handle: JoinHandle<()>,
+    /// Set once the first frame has been presented.
+    presented: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ControlThread {
@@ -468,11 +470,24 @@ impl ControlThread {
     ) -> ControlThread {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
+        let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = presented.clone();
         let handle = std::thread::Builder::new()
             .name("control-render".into())
-            .spawn(move || control_loop(gpu, window, surface, config, mb))
+            .spawn(move || control_loop(gpu, window, surface, config, mb, flag))
             .expect("spawn control render thread");
-        ControlThread { mailbox, handle }
+        ControlThread {
+            mailbox,
+            handle,
+            presented,
+        }
+    }
+
+    /// Whether a frame has reached the window yet. A window is kept hidden
+    /// until then, so what the user first sees is the finished picture and
+    /// not the system's blank window.
+    pub fn has_presented(&self) -> bool {
+        self.presented.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn submit(&self, frame: EguiFrame) {
@@ -514,6 +529,7 @@ fn control_loop(
     surface: wgpu::Surface<'static>,
     mut config: wgpu::SurfaceConfiguration,
     mailbox: Arc<Mailbox<ControlJob>>,
+    presented: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut renderer = egui_wgpu::Renderer::new(
         &gpu.device,
@@ -582,6 +598,7 @@ fn control_loop(
             gpu.queue.submit(cmds);
             window.pre_present_notify();
             gpu.queue.present(frame);
+            presented.store(true, std::sync::atomic::Ordering::Release);
         }
         for id in &freed {
             renderer.free_texture(id);
