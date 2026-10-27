@@ -18,6 +18,7 @@ mod live_text;
 mod media;
 mod mesh;
 mod monitor;
+mod ndi;
 mod output;
 mod pattern;
 mod projector;
@@ -54,6 +55,12 @@ fn startup_options(
 }
 
 fn main() -> anyhow::Result<()> {
+    // A copy of this program started to talk to NDI's library for the show
+    // (see ndi.rs): it does that and nothing else.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = ndi::run_helper_if_asked(&args) {
+        std::process::exit(code);
+    }
     let mut logger = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu=warn,naga=warn"),
     );

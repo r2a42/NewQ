@@ -585,6 +585,8 @@ pub enum StreamKind {
     Udp { host: String, port: u16 },
     /// Any FFmpeg output: the arguments that follow the input.
     Custom { args: String },
+    /// An NDI source of this name on the network (needs NDI's runtime).
+    Ndi { name: String },
 }
 
 impl Default for StreamKind {

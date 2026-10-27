@@ -3653,6 +3653,7 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                 StreamKind::VirtualCamera { .. } => "Virtual camera",
                 StreamKind::Udp { .. } => "Network stream (for OBS)",
                 StreamKind::Custom { .. } => "Custom FFmpeg output",
+                StreamKind::Ndi { .. } => "NDI source",
             };
             egui::Grid::new(("stream_grid", d.id.0))
                 .num_columns(2)
@@ -3669,6 +3670,9 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                                 StreamKind::Udp {
                                     host: "127.0.0.1".into(),
                                     port: 5000,
+                                },
+                                StreamKind::Ndi {
+                                    name: "NewQ".into(),
                                 },
                                 StreamKind::Custom {
                                     args: String::new(),
@@ -3717,6 +3721,11 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                             });
                             ui.end_row();
                         }
+                        StreamKind::Ndi { name } => {
+                            ui.label("Name");
+                            ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+                            ui.end_row();
+                        }
                         StreamKind::Custom { args } => {
                             ui.label("FFmpeg output");
                             ui.add(
@@ -3754,6 +3763,15 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                         "In OBS add a Media Source, untick Local File and give it \
                          udp://127.0.0.1:5000 (the same address and port). OBS's Virtual Camera \
                          then shows it in Zoom and Teams. About half a second behind."
+                    }
+                    StreamKind::Ndi { .. } => {
+                        if crate::ndi::runtime_installed() {
+                            "Other computers on the network list it as an NDI source with this \
+                             name. Picture only, no sound."
+                        } else {
+                            "⚠ The NDI runtime isn't installed on this computer: get the NDI \
+                             Runtime or NDI Tools from ndi.video, then restart NewQ."
+                        }
                     }
                     StreamKind::Custom { .. } => {
                         "The arguments that follow the input: the picture arrives as raw RGBA, \
@@ -5485,6 +5503,9 @@ fn projector_inspector(ui: &mut Ui, p: &mut crate::show::ProjectorOut) {
 
 /// A camera's name as shown to the operator.
 fn device_label(device: &str) -> String {
+    if let Some(name) = crate::ndi::source_of(device) {
+        return format!("NDI · {name}");
+    }
     if device.starts_with("/dev/")
         && let Some(name) = camera::v4l2_label(device)
     {
@@ -5548,6 +5569,24 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
         ui.label(
             RichText::new("A moving test picture, for trying a camera cue without a camera.")
                 .weak(),
+        );
+    }
+    if crate::ndi::source_of(&c.device).is_some() {
+        ui.label(
+            RichText::new(
+                "An NDI source: the picture is scaled to the mode above (its native size is \
+                 best). Picture only, no sound. If the source isn't found or the runtime \
+                 is missing, the cue says so when it starts.",
+            )
+            .weak(),
+        );
+    } else if !crate::ndi::runtime_installed() {
+        ui.label(
+            RichText::new(
+                "NDI sources are listed here too once the NDI Runtime (ndi.video) is installed.",
+            )
+            .weak()
+            .small(),
         );
     }
 }

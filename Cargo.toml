@@ -20,6 +20,7 @@ egui-winit = "0.36.2"
 egui_dock = { version = "0.21.1", features = ["serde"] }
 env_logger = "0.11.11"
 jiff = "0.2"
+libloading = "0.8"
 log = "0.4.34"
 md-5 = "0.11.0"
 midir = "0.11.1"
