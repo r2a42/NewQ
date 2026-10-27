@@ -24,6 +24,14 @@ The README describes the features; this file is about working on the code.
   `ui::draw_popout`. Opening a surface while other windows draw can fail to
   configure, so `Gpu::configure_checked` retries. A lost device drops the
   pop-outs and `reconcile_popouts` opens them again from the layout.
+- `src/ndi.rs`: NDI in and out. The runtime (NDI's own library, not shipped) is
+  loaded with `libloading` only inside a helper that is NewQ's own program run as
+  `newq --ndi-list|--ndi-receive|--ndi-send` (see `main.rs`), so its faults can't
+  take the show down; pictures cross over stdin/stdout. An NDI source is a camera
+  cue's device (`ndi:` + the source's name), and `StreamKind::Ndi` is the output.
+  The structures follow NDI's SDK 6 headers (not vendored: their licence);
+  tests build a fake runtime in C with `cc` (skipped without one) and the pure
+  converters are tested, but no real NDI has been tried.
 - `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.

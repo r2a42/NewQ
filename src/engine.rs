@@ -863,12 +863,31 @@ impl Engine {
     /// Open a camera. It starts delivering frames at once and keeps only the
     /// newest, so it can be opened ahead of GO.
     fn prepare_camera(&self, cue: &Cue, c: &CameraCue) -> Result<Prepared, String> {
-        let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let sig = self.signature(cue).ok_or("not a camera cue")?;
         if c.device.is_empty() {
             return Err("no camera chosen".into());
         }
         let size = video::decode_size((c.width, c.height), sig.size, c.media.fit == Fit::Cover);
+        if let Some(source) = crate::ndi::source_of(&c.device) {
+            let matrix = if c.height >= 720 {
+                ColorMatrix::Bt709
+            } else {
+                ColorMatrix::Bt601
+            };
+            let player = VideoPlayer::spawn_ndi(source, matrix, c.fps, size)
+                .map_err(|e| format!("{e:#}"))?;
+            return Ok(Prepared {
+                cue_id: cue.id,
+                sig,
+                kind: PreparedKind::Video {
+                    player,
+                    voice: None,
+                },
+                duration: c.media.end.filter(|d| *d > 0.0),
+                warning: None,
+            });
+        }
+        let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let input = camera::input_args(
             camera::Platform::current(),
             &c.device,

@@ -19,6 +19,15 @@ includes FFmpeg, so there's nothing else to install.
 
 ## Features
 
+- **NDI video in and out:** with the NDI Runtime (from ndi.video; NewQ can't
+  ship it) installed, *NDI sources on the network appear in a camera cue's list*
+  as *NDI · name* and play like a camera, scaled to the mode set on the cue. A
+  display's *Send out* section has *NDI source*: give it a name and other
+  computers see it as an NDI source of that picture. Picture only, no sound.
+  NewQ talks to NDI in a separate helper process, so a fault in NDI's library
+  can't stop the show. SMPTE ST 2110 isn't supported: it needs PTP timing and
+  packet pacing that a program can't do through a normal network card; use a
+  2110 gateway fed from a display output or NDI.
 - **Dante audio:** NewQ reaches a Dante network through an audio device: Dante
   Virtual Soundcard on this computer, or an interface with Dante built in. It
   shows in an audio output's device list marked *(Dante)*, with all its channels

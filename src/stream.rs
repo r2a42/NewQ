@@ -116,6 +116,7 @@ pub fn output_args(kind: &StreamKind, x264: bool) -> Result<Vec<String>, String>
             a.push(format!("udp://{host}:{port}?pkt_size=1316"));
             Ok(a)
         }
+        StreamKind::Ndi { .. } => Err("an NDI source is sent by NewQ itself, not FFmpeg".into()),
         StreamKind::Custom { args } => {
             let a = split_args(args);
             if a.is_empty() {
@@ -154,9 +155,27 @@ impl Sink {
         fps: u32,
         kind: &StreamKind,
     ) -> Result<Sink, String> {
-        let output = output_args(kind, has_x264(ff))?;
-        let mut cmd = ff.command();
-        cmd.args(input_args(size, fps)).args(output);
+        let mut cmd = if let StreamKind::Ndi { name } = kind {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("no name for the NDI source".into());
+            }
+            if !crate::ndi::runtime_installed() {
+                return Err(crate::ndi::NOT_INSTALLED.into());
+            }
+            crate::ndi::helper(&[
+                "--ndi-send".into(),
+                name.into(),
+                size.0.to_string(),
+                size.1.to_string(),
+                fps.to_string(),
+            ])?
+        } else {
+            let output = output_args(kind, has_x264(ff))?;
+            let mut cmd = ff.command();
+            cmd.args(input_args(size, fps)).args(output);
+            cmd
+        };
         cmd.stdin(Stdio::piped()).stdout(Stdio::null());
         let mut child = cmd
             .spawn()

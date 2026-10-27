@@ -163,6 +163,43 @@ impl VideoPlayer {
         )
     }
 
+    /// Take an NDI source as a live picture of `size`. NewQ's own helper
+    /// program talks to NDI and writes yuv420p frames (see `ndi.rs`).
+    pub fn spawn_ndi(
+        source: &str,
+        matrix: ColorMatrix,
+        fps: u32,
+        size: (u32, u32),
+    ) -> Result<VideoPlayer> {
+        let args: Vec<String> = [
+            "--ndi-receive",
+            source,
+            &size.0.to_string(),
+            &size.1.to_string(),
+            if matrix == ColorMatrix::Bt601 {
+                "601"
+            } else {
+                "709"
+            },
+        ]
+        .map(String::from)
+        .to_vec();
+        let make = move || {
+            // `current_exe` can fail only if the program was removed under
+            // us; then the start below fails with the reason.
+            crate::ndi::helper(&args).unwrap_or_else(|_| std::process::Command::new("false"))
+        };
+        Self::start(
+            make,
+            Some(1),
+            None,
+            f64::from(fps.max(1)),
+            matrix,
+            size,
+            true,
+        )
+    }
+
     fn start(
         make: impl Fn() -> std::process::Command + Send + 'static,
         passes: Option<u32>,

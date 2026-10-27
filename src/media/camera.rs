@@ -89,6 +89,15 @@ pub fn list_devices(ff: &Ffmpeg) -> Vec<String> {
             devices.extend(parse_avfoundation_devices(&text));
         }
     }
+    // NDI sources on the network, if NDI's runtime is installed (asked of a
+    // helper, which takes a couple of seconds). Not in tests: the test program
+    // is not NewQ's and can't be a helper.
+    #[cfg(not(test))]
+    devices.extend(
+        crate::ndi::list_sources()
+            .iter()
+            .map(|n| crate::ndi::device(n)),
+    );
     devices
 }
 
