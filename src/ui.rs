@@ -2830,6 +2830,25 @@ fn mesh_handles(
     };
     let range = quad.range();
     let (lo, hi) = (*range.start(), *range.end());
+    // Ctrl-click (Cmd on a Mac) on the picture puts a point exactly there. The
+    // handles are made after this, so they take the click when it is on one.
+    let background = ui.interact(screen, ui.id().with((quad, "add")), Sense::click());
+    if background.clicked()
+        && ui.input(|i| i.modifiers.command || i.modifiers.ctrl)
+        && let Some(pos) = background.interact_pointer_pos()
+    {
+        let p = [
+            (pos.x - screen.min.x) / screen.width(),
+            (pos.y - screen.min.y) / screen.height(),
+        ];
+        if let Some(k) = mesh.insert_point_at(p) {
+            sel.set(Some(HandleSel {
+                quad,
+                corner: Some(k),
+            }));
+            return;
+        }
+    }
     let cols = mesh.cols();
     let mut pressed_on = None;
     let mut hits = vec![false; mesh.points.len()];
@@ -4102,8 +4121,8 @@ fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions:
         });
 }
 
-/// Controls for a mesh warp: how many lines, adding a line where it is wanted,
-/// removing one, and the exact place of the selected point.
+/// Controls for a mesh warp: how many lines, removing one, and the exact place
+/// of the selected point. (A point is added by Ctrl-clicking the preview.)
 fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
     let id = out.id;
     let Some(mesh) = out.mesh.as_mut() else {
@@ -4135,56 +4154,6 @@ fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
                 );
             });
             ui.end_row();
-            // A line of points can be put anywhere, not only evenly.
-            for (label, vertical) in [("Add column at", true), ("Add row at", false)] {
-                ui.label(label);
-                ui.horizontal(|ui| {
-                    let key = ui.id().with(("mesh_add", id, vertical));
-                    let mut at: f32 = ui.data(|d| d.get_temp(key)).unwrap_or(25.0);
-                    ui.add(
-                        egui::DragValue::new(&mut at)
-                            .speed(0.5)
-                            .range(1.0..=99.0)
-                            .fixed_decimals(0)
-                            .suffix(if vertical { "% across" } else { "% down" }),
-                    );
-                    ui.data_mut(|d| d.insert_temp(key, at));
-                    let frac = at / 100.0;
-                    let room = if vertical {
-                        mesh.can_insert_column(frac)
-                    } else {
-                        mesh.can_insert_row(frac)
-                    };
-                    if ui
-                        .add_enabled(room, egui::Button::new("Add"))
-                        .on_hover_text("The shape stays as it is; the new points can then be moved")
-                        .on_disabled_hover_text(
-                            "No room: at most 9 lines, and not close to another line",
-                        )
-                        .clicked()
-                    {
-                        let new = if vertical {
-                            mesh.insert_column(frac)
-                        } else {
-                            mesh.insert_row(frac)
-                        };
-                        if let Some(k) = new {
-                            // Select the middle of the new line.
-                            let (c, r) = (mesh.cols(), mesh.rows());
-                            let point = if vertical {
-                                (r / 2) * c + k
-                            } else {
-                                k * c + c / 2
-                            };
-                            st.handle_sel.set(Some(HandleSel {
-                                quad: Quad::Mesh(id),
-                                corner: Some(point),
-                            }));
-                        }
-                    }
-                });
-                ui.end_row();
-            }
         });
     if (cols, rows) != (mesh.cols(), mesh.rows()) {
         *mesh = mesh.resampled(cols, rows);
@@ -4241,8 +4210,9 @@ fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
         None => {
             ui.label(
                 RichText::new(
-                    "Drag the points on the preview (Shift = fine). Click one to see its \
-                     place, remove its line or move it with the arrow keys.",
+                    "Drag the points on the preview (Shift = fine). Ctrl-click the preview to \
+                     add a point exactly there. Click a point to see its place, remove its \
+                     line or move it with the arrow keys.",
                 )
                 .weak()
                 .small(),
@@ -7278,6 +7248,58 @@ mod tests {
                 "{pane:?} draws in a window of its own"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_click_on_the_preview_adds_a_mesh_point_there() {
+        let mut mesh = Mesh::from_pin(3, 3, |u, v| [u, v]);
+        let sel = Cell::new(None);
+        let id = OutputId(1);
+        let screen = Rect::from_min_size(pos2(100.0, 100.0), vec2(400.0, 300.0));
+        let ctx = egui::Context::default();
+        let click = |ctrl: bool, at: Pos2| {
+            let modifiers = egui::Modifiers {
+                ctrl,
+                command: ctrl,
+                ..Default::default()
+            };
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(700.0, 600.0))),
+                time: Some(1.0),
+                events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(at),
+                    button(true),
+                    button(false),
+                ],
+                ..Default::default()
+            }
+        };
+        let run = |input: RawInput, mesh: &mut Mesh| {
+            let mut out = ctx.run_ui(input, |ui| mesh_handles(ui, screen, id, mesh, &sel));
+            out.textures_delta.clear();
+        };
+        // A plain click on the picture adds nothing.
+        run(click(false, pos2(180.0, 330.0)), &mut mesh);
+        assert_eq!((mesh.cols(), mesh.rows()), (3, 3));
+        // A Ctrl-click does, at the spot clicked, and selects it.
+        run(click(true, pos2(180.0, 330.0)), &mut mesh);
+        assert_eq!((mesh.cols(), mesh.rows()), (4, 4));
+        let k = sel
+            .get()
+            .and_then(|s| s.corner)
+            .expect("the new point is selected");
+        let p = mesh.points[k];
+        assert!(
+            (p[0] - 0.2).abs() < 0.005 && (p[1] - 0.7667).abs() < 0.005,
+            "{p:?}"
+        );
     }
 
     #[test]
