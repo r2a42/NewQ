@@ -1188,6 +1188,13 @@ pub struct MediaCue {
     /// Video: hold the last frame when the media ends instead of stopping.
     #[serde(default)]
     pub hold_last_frame: bool,
+    /// In a slide show: this slide's own fade-in time, in place of the show's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_fade: Option<f64>,
+    /// In a slide show: how long this slide is shown in full before the next
+    /// one starts to fade in, in place of the show's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_duration: Option<f64>,
     /// Legacy (pre-transition) crossfade flag, migrated on load.
     #[serde(default, skip_serializing)]
     crossfade: bool,
@@ -1235,6 +1242,8 @@ impl MediaCue {
             loop_media: false,
             loop_count: 0,
             hold_last_frame: false,
+            slide_fade: None,
+            slide_duration: None,
             crossfade: false,
         }
     }
@@ -1740,6 +1749,29 @@ pub struct GroupCue {
     /// Hide the children in the cue list.
     #[serde(default)]
     pub collapsed: bool,
+    /// A slide show: a group of images that crossfade one into the next. The
+    /// group's children are timed from these settings (and each slide's own,
+    /// if it has them); see `Show::relay_slides`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slides: Option<SlideShow>,
+}
+
+/// What every slide in a slide show gets unless it has its own.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SlideShow {
+    /// Seconds each slide takes to fade in over the one before.
+    pub fade: f64,
+    /// Seconds each slide is shown in full, between its fade and the next.
+    pub duration: f64,
+}
+
+impl Default for SlideShow {
+    fn default() -> Self {
+        SlideShow {
+            fade: 1.0,
+            duration: 5.0,
+        }
+    }
 }
 
 impl Show {
@@ -2312,6 +2344,7 @@ impl Show {
             }
         }
         show.normalize_groups();
+        show.relay_slides();
         // A mesh that doesn't make sense (a hand-edited file) is dropped, not
         // trusted with the picture.
         for o in &mut show.outputs {
@@ -2604,6 +2637,128 @@ impl Show {
             idx + 1
         };
         self.cues.drain(idx..end).map(|c| c.id).collect()
+    }
+
+    /// Time the slides of every slide show: a slide starts when the one before
+    /// has faded in and been shown for its duration, and crossfades in over it.
+    /// The last one is shown for its duration and fades out. Run after any
+    /// change to a slide show or its slides. Returns whether anything changed.
+    pub fn relay_slides(&mut self) -> bool {
+        let mut changed = false;
+        let groups: Vec<(usize, SlideShow)> = self
+            .cues
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match &c.kind {
+                CueKind::Group(g) => g.slides.map(|s| (i, s)),
+                _ => None,
+            })
+            .collect();
+        for (g, defaults) in groups {
+            let end = self.block_end(g);
+            let slides: Vec<usize> = (g + 1..end)
+                .filter(|&i| self.cues[i].armed && matches!(self.cues[i].kind, CueKind::Image(_)))
+                .collect();
+            let mut t = 0.0;
+            for (n, &i) in slides.iter().enumerate() {
+                let last = n + 1 == slides.len();
+                let cue = &mut self.cues[i];
+                let CueKind::Image(m) = &mut cue.kind else {
+                    continue;
+                };
+                let fade = m.slide_fade.unwrap_or(defaults.fade).max(0.0);
+                let hold = m.slide_duration.unwrap_or(defaults.duration).max(0.0);
+                let finish = last.then_some(fade + hold + fade);
+                if cue.pre_wait != t
+                    || m.transition != Transition::Crossfade
+                    || m.fade_in != fade
+                    || m.fade_out != fade
+                    || m.end != finish
+                    || m.loop_media
+                {
+                    cue.pre_wait = t;
+                    m.transition = Transition::Crossfade;
+                    m.fade_in = fade;
+                    m.fade_out = fade;
+                    m.end = finish;
+                    m.loop_media = false;
+                    changed = true;
+                }
+                t += fade + hold;
+            }
+        }
+        changed
+    }
+
+    /// Add the images `files` to the end of the slide show `group`, in order.
+    pub fn add_slides(&mut self, group: CueId, files: Vec<PathBuf>) {
+        let Some(g) = self.cue_index(group) else {
+            return;
+        };
+        let output = self
+            .children(group)
+            .iter()
+            .find_map(|c| c.kind.media().and_then(|m| m.output))
+            .or_else(|| self.outputs.first().map(|o| o.id));
+        let number = self.cues[g].number.clone();
+        let mut n = self.children(group).len();
+        for file in files {
+            n += 1;
+            let g = self.cue_index(group).unwrap_or(g);
+            let at = self.block_end(g);
+            let name = file
+                .file_stem()
+                .map_or_else(|| "Slide".into(), |s| s.to_string_lossy().into_owned());
+            let id = CueId(self.alloc_id());
+            self.cues.insert(
+                at,
+                Cue {
+                    id,
+                    number: format!("{number}.{n}"),
+                    name,
+                    notes: String::new(),
+                    pre_wait: 0.0,
+                    continue_mode: ContinueMode::default(),
+                    armed: true,
+                    parent: Some(group),
+                    hotkey: None,
+                    midi_note: None,
+                    cart: false,
+                    timecode: None,
+                    clock: None,
+                    kind: CueKind::Image(MediaCue::new_visual(file, output)),
+                },
+            );
+        }
+        self.relay_slides();
+    }
+
+    /// Total seconds a slide show runs, with the slides as timed now.
+    pub fn slides_length(&self, group: CueId) -> f64 {
+        let Some(CueKind::Group(g)) = self.cue(group).map(|c| &c.kind) else {
+            return 0.0;
+        };
+        let Some(d) = g.slides else { return 0.0 };
+        let slides: Vec<&MediaCue> = self
+            .children(group)
+            .iter()
+            .filter(|c| c.armed)
+            .filter_map(|c| match &c.kind {
+                CueKind::Image(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        let each = |m: &MediaCue| {
+            (
+                m.slide_fade.unwrap_or(d.fade).max(0.0),
+                m.slide_duration.unwrap_or(d.duration).max(0.0),
+            )
+        };
+        let mut t: f64 = slides.iter().map(|m| each(m).0 + each(m).1).sum();
+        if let Some(l) = slides.last() {
+            t += each(l).0;
+        }
+        t
     }
 
     /// Wrap the (top-level, non-group) cue at `idx` in a new group that takes
@@ -4075,5 +4230,131 @@ mod tests {
         assert!(show.save(&nowhere).is_err());
         assert_eq!(Show::load(&path).unwrap().name, "Second");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn slide_show(show: &mut Show, n: usize) -> CueId {
+        let slot = show.insert_slot(None, true);
+        let mut g = show.make_cue(CueType::Group, None, slot.at);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.slides = Some(SlideShow {
+                fade: 2.0,
+                duration: 4.0,
+            });
+        }
+        let id = g.id;
+        show.insert_cue(slot, g);
+        show.add_slides(
+            id,
+            (0..n).map(|i| PathBuf::from(format!("s{i}.png"))).collect(),
+        );
+        id
+    }
+
+    fn slide_times(show: &Show, g: CueId) -> Vec<(f64, f64, Option<f64>)> {
+        show.children(g)
+            .iter()
+            .map(|c| {
+                let m = c.kind.media().unwrap();
+                (c.pre_wait, m.fade_in, m.end)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slides_start_when_the_one_before_has_faded_in_and_been_shown() {
+        let mut show = Show::default();
+        let g = slide_show(&mut show, 3);
+        // Each takes 2 s to fade in and is shown for 4 s: 6 s apart. The last
+        // is shown for its 4 s and fades out over 2 s.
+        assert_eq!(
+            slide_times(&show, g),
+            vec![(0.0, 2.0, None), (6.0, 2.0, None), (12.0, 2.0, Some(8.0))]
+        );
+        assert_eq!(show.slides_length(g), 20.0);
+        assert!(
+            show.children(g)
+                .iter()
+                .all(|c| c.kind.media().unwrap().transition == Transition::Crossfade)
+        );
+        assert_eq!(
+            show.children(g)[1].number,
+            format!("{}.2", show.cue(g).unwrap().number)
+        );
+        // Nothing to do the second time.
+        assert!(!show.relay_slides());
+    }
+
+    #[test]
+    fn a_slide_can_have_its_own_fade_and_duration() {
+        let mut show = Show::default();
+        let g = slide_show(&mut show, 3);
+        let first = show.children(g)[0].id;
+        let last = show.children(g)[2].id;
+        for (id, fade, dur) in [(first, Some(0.5), Some(1.0)), (last, Some(0.0), None)] {
+            let i = show.cue_index(id).unwrap();
+            let CueKind::Image(m) = &mut show.cues[i].kind else {
+                panic!()
+            };
+            m.slide_fade = fade;
+            m.slide_duration = dur;
+        }
+        assert!(show.relay_slides());
+        // 0.5 + 1.0 = 1.5 for the first, then the default 2 + 4 for the second.
+        assert_eq!(
+            slide_times(&show, g),
+            vec![(0.0, 0.5, None), (1.5, 2.0, None), (7.5, 0.0, Some(4.0))]
+        );
+        // The show's settings reach only the slides without their own.
+        let gi = show.cue_index(g).unwrap();
+        if let CueKind::Group(gc) = &mut show.cues[gi].kind {
+            gc.slides = Some(SlideShow {
+                fade: 1.0,
+                duration: 3.0,
+            });
+        }
+        show.relay_slides();
+        assert_eq!(
+            slide_times(&show, g),
+            vec![(0.0, 0.5, None), (1.5, 1.0, None), (5.5, 0.0, Some(3.0))]
+        );
+    }
+
+    #[test]
+    fn disarmed_slides_and_other_cues_in_a_slide_show_are_not_timed() {
+        let mut show = Show::default();
+        let g = slide_show(&mut show, 3);
+        let second = show.children(g)[1].id;
+        let i = show.cue_index(second).unwrap();
+        show.cues[i].armed = false;
+        show.relay_slides();
+        let t = slide_times(&show, g);
+        assert_eq!((t[0].0, t[2].0), (0.0, 6.0));
+        assert_eq!(t[2].2, Some(8.0));
+    }
+
+    #[test]
+    fn slide_shows_are_backwards_compatible() {
+        let mut show = Show::default();
+        let plain = show.make_cue(CueType::Group, None, 0);
+        let gid = plain.id;
+        show.cues.push(plain);
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(!json.contains("slides") && !json.contains("slide_fade"));
+        // A show saved before there were slide shows loads as plain groups.
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert!(matches!(&back.cue(gid).unwrap().kind, CueKind::Group(g) if g.slides.is_none()));
+        // A slide show and its slides' own times round-trip.
+        let g = slide_show(&mut show, 2);
+        let first = show.children(g)[0].id;
+        let i = show.cue_index(first).unwrap();
+        if let CueKind::Image(m) = &mut show.cues[i].kind {
+            m.slide_fade = Some(0.25);
+        }
+        let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+        assert_eq!(
+            back.children(g)[0].kind.media().unwrap().slide_fade,
+            Some(0.25)
+        );
+        assert!(matches!(&back.cue(g).unwrap().kind, CueKind::Group(g) if g.slides.is_some()));
     }
 }

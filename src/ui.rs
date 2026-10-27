@@ -144,6 +144,12 @@ struct SaveJob {
     snapshot: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SlideField {
+    Fade,
+    Duration,
+}
+
 /// A file or folder dialog that is open on a thread of its own, so the show
 /// keeps running behind it: a dialog on the event loop's thread would freeze
 /// every fade, wait and picture until it was closed.
@@ -152,6 +158,13 @@ struct OpenDialog {
     answer: std::sync::mpsc::Receiver<Option<PathBuf>>,
     /// The show as it was when the dialog opened.
     shown: String,
+}
+
+/// The dialog that picks the images of a slide show (several at once, so it
+/// has its own answer: a list), for a new slide show or for `group`.
+struct SlideDialog {
+    group: Option<CueId>,
+    answer: std::sync::mpsc::Receiver<Vec<PathBuf>>,
 }
 
 /// Copying a show's media into a folder, on its own thread.
@@ -225,6 +238,8 @@ pub struct UiState {
     folder_search: Option<relink::FolderSearch>,
     /// The file dialog that is open, if any.
     dialog: Option<OpenDialog>,
+    /// The dialog for picking slides, if open.
+    slide_dialog: Option<SlideDialog>,
     /// A save being written, if any.
     saving: Option<SaveJob>,
     /// The show as last serialised, for the unsaved-changes mark and the undo
@@ -330,6 +345,15 @@ enum Action {
     SelectRelative(i32),
     AddCue(CueType),
     AddFiles(Vec<PathBuf>),
+    /// Pick images for a new slide show, or for the slide show `Some(group)`.
+    AskSlides(Option<CueId>),
+    /// Images chosen for a slide show (a new one when no group).
+    AddSlides(Option<CueId>, Vec<PathBuf>),
+    /// Change a slide's own fade or duration (None = the show's).
+    SetSlide(CueId, SlideField, Option<f64>),
+    /// Move a slide up (-1) or down (+1) within its slide show.
+    MoveSlide(CueId, i32),
+    RemoveSlide(CueId),
     Delete,
     Duplicate,
     Move(i32),
@@ -456,6 +480,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     poll_collect(ui.ctx(), show, st);
     poll_folder_search(ui.ctx(), show, st);
     poll_dialog(ui.ctx(), show, st, &mut actions);
+    poll_slide_dialog(ui.ctx(), st, &mut actions);
     poll_save(ui.ctx(), engine, st);
     refresh_missing(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
@@ -472,6 +497,11 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         actions.push(Action::AddFiles(dropped));
     }
 
+    // Slides are timed from the slide show's settings, so anything that moves
+    // them (an undo, a drag in the cue list) keeps them in step.
+    if show.relay_slides() {
+        st.json_stale = true;
+    }
     egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, show, st, &mut actions));
     egui::Panel::top("transport")
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(10))
@@ -1074,6 +1104,9 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                     actions.push(Action::AddCue(ty));
                 }
             }
+            if ui.button("🖼 Add Slide show…").clicked() {
+                actions.push(Action::AskSlides(None));
+            }
             ui.separator();
             for ty in [
                 CueType::Camera,
@@ -1427,6 +1460,18 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
                 .map(|o| o.name.as_str())
                 .unwrap_or("no output");
             format!("{device}  »  {out}")
+        }
+        CueKind::Group(g) if g.slides.is_some() => {
+            let n = show
+                .children(c.id)
+                .iter()
+                .filter(|c| matches!(c.kind, CueKind::Image(_)))
+                .count();
+            format!(
+                "{n} slide{} · {}",
+                if n == 1 { "" } else { "s" },
+                fmt_time(show.slides_length(c.id))
+            )
         }
         CueKind::Group(g) => {
             let n = show.children(c.id).len();
@@ -1937,6 +1982,44 @@ fn refresh_missing(ctx: &egui::Context, show: &Show, st: &mut UiState) {
         });
     if spawned.is_ok() {
         st.missing_check = Some(rx);
+    }
+}
+
+/// Open the picker for slides (any number of images) on a thread of its own.
+fn start_slide_dialog(st: &mut UiState, group: Option<CueId>) {
+    if st.slide_dialog.is_some() || st.dialog.is_some() {
+        return;
+    }
+    let (tx, answer) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("file-dialog".into())
+        .spawn(move || {
+            let files = media_dialog(CueType::Image)
+                .set_title("Choose the images for the slide show")
+                .pick_files()
+                .unwrap_or_default();
+            let _ = tx.send(files);
+        });
+    if spawned.is_ok() {
+        st.slide_dialog = Some(SlideDialog { group, answer });
+    }
+}
+
+/// Take the images chosen for a slide show when the dialog has closed.
+fn poll_slide_dialog(ctx: &egui::Context, st: &mut UiState, actions: &mut Vec<Action>) {
+    let Some(d) = &st.slide_dialog else { return };
+    match d.answer.try_recv() {
+        Ok(files) => {
+            let group = d.group;
+            st.slide_dialog = None;
+            if !files.is_empty() {
+                actions.push(Action::AddSlides(group, files));
+            }
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => st.slide_dialog = None,
     }
 }
 
@@ -4228,6 +4311,182 @@ fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
     }
 }
 
+/// One slide as the slide show panel lists it.
+struct SlideRow {
+    id: CueId,
+    name: String,
+    fade: f64,
+    duration: f64,
+    own_fade: bool,
+    own_duration: bool,
+    armed: bool,
+}
+
+struct SlideRows {
+    rows: Vec<SlideRow>,
+    length: f64,
+}
+
+/// The slides of the slide show at `idx`, if that is one.
+fn slide_rows(show: &Show, idx: usize) -> Option<SlideRows> {
+    let CueKind::Group(g) = &show.cues[idx].kind else {
+        return None;
+    };
+    let d = g.slides?;
+    let id = show.cues[idx].id;
+    let rows = show
+        .children(id)
+        .iter()
+        .filter_map(|c| match &c.kind {
+            CueKind::Image(m) => Some(SlideRow {
+                id: c.id,
+                name: c.name.clone(),
+                fade: m.slide_fade.unwrap_or(d.fade),
+                duration: m.slide_duration.unwrap_or(d.duration),
+                own_fade: m.slide_fade.is_some(),
+                own_duration: m.slide_duration.is_some(),
+                armed: c.armed,
+            }),
+            _ => None,
+        })
+        .collect();
+    Some(SlideRows {
+        rows,
+        length: show.slides_length(id),
+    })
+}
+
+/// The slide show's settings and its slides, each with its own fade and
+/// duration if it has been given any.
+fn slides_panel(
+    ui: &mut Ui,
+    group: CueId,
+    d: &mut SlideShow,
+    list: &SlideRows,
+    actions: &mut Vec<Action>,
+) {
+    ui.separator();
+    ui.label(RichText::new("Slide show").strong());
+    egui::Grid::new("slide_defaults")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Fade");
+            secs(ui, &mut d.fade)
+                .on_hover_text("How long each slide takes to fade in over the last");
+            ui.end_row();
+            ui.label("Duration");
+            secs(ui, &mut d.duration).on_hover_text(
+                "How long each slide is shown in full before the next starts to fade in",
+            );
+            ui.end_row();
+        });
+    ui.horizontal(|ui| {
+        if ui.button("Add images…").clicked() {
+            actions.push(Action::AskSlides(Some(group)));
+        }
+        ui.label(
+            RichText::new(format!(
+                "{} slides, {} in all",
+                list.rows.len(),
+                fmt_time(list.length)
+            ))
+            .weak(),
+        );
+    });
+    ui.label(
+        RichText::new(
+            "Change a slide's fade or duration to give it its own (shown in yellow); \
+             ↺ puts it back to the show's.",
+        )
+        .weak()
+        .small(),
+    );
+    egui::Grid::new("slides")
+        .num_columns(6)
+        .spacing([8.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(RichText::new("Slide").weak());
+            ui.label(RichText::new("Fade").weak());
+            ui.label("");
+            ui.label(RichText::new("Duration").weak());
+            ui.label("");
+            ui.label("");
+            ui.end_row();
+            let last = list.rows.len().saturating_sub(1);
+            for (n, r) in list.rows.iter().enumerate() {
+                let name = RichText::new(format!("{}. {}", n + 1, r.name));
+                if ui
+                    .selectable_label(false, if r.armed { name } else { name.weak() })
+                    .clicked()
+                {
+                    actions.push(Action::Select(r.id));
+                }
+                for (field, value, own) in [
+                    (SlideField::Fade, r.fade, r.own_fade),
+                    (SlideField::Duration, r.duration, r.own_duration),
+                ] {
+                    let mut v = value;
+                    let mut edit = egui::DragValue::new(&mut v)
+                        .speed(0.05)
+                        .range(0.0..=3600.0)
+                        .fixed_decimals(2)
+                        .suffix(" s");
+                    if own {
+                        edit = edit.custom_formatter(|n, _| format!("{n:.2} s"));
+                    }
+                    let resp = if own {
+                        ui.scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.fg_stroke.color = PLAYHEAD;
+                            ui.visuals_mut().widgets.hovered.fg_stroke.color = PLAYHEAD;
+                            ui.add(edit)
+                        })
+                        .inner
+                    } else {
+                        ui.add(edit)
+                    };
+                    if resp.changed() {
+                        actions.push(Action::SetSlide(r.id, field, Some(v)));
+                    }
+                    if own {
+                        if ui
+                            .small_button("↺")
+                            .on_hover_text("Use the show's")
+                            .clicked()
+                        {
+                            actions.push(Action::SetSlide(r.id, field, None));
+                        }
+                    } else {
+                        ui.label("");
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(n > 0, egui::Button::new("▲").small())
+                        .clicked()
+                    {
+                        actions.push(Action::MoveSlide(r.id, -1));
+                    }
+                    if ui
+                        .add_enabled(n < last, egui::Button::new("▼").small())
+                        .clicked()
+                    {
+                        actions.push(Action::MoveSlide(r.id, 1));
+                    }
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Remove this slide")
+                        .clicked()
+                    {
+                        actions.push(Action::RemoveSlide(r.id));
+                    }
+                });
+                ui.end_row();
+            }
+        });
+}
+
 fn secs(ui: &mut Ui, v: &mut f64) -> egui::Response {
     ui.add(
         egui::DragValue::new(v)
@@ -4308,6 +4567,11 @@ fn inspector(
         .iter()
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    let slide_rows = slide_rows(show, idx);
+    let in_slides = show.cues[idx]
+        .parent
+        .and_then(|p| show.cue(p))
+        .is_some_and(|g| matches!(&g.kind, CueKind::Group(g) if g.slides.is_some()));
     let cue = &mut show.cues[idx];
 
     ui.horizontal(|ui| {
@@ -4486,6 +4750,15 @@ fn inspector(
         let ui = &mut cols[1];
         let cue_type = cue.kind.cue_type();
         let cue_id = cue.id;
+        if in_slides {
+            ui.label(
+                RichText::new(
+                    "A slide: its start, fade and hold are set by the slide show (select the \
+                     slide show to change them). The rest is as for any image.",
+                )
+                .weak(),
+            );
+        }
         match &mut cue.kind {
             CueKind::Video(m) | CueKind::Image(m) | CueKind::Audio(m) => media_inspector(
                 ui,
@@ -4627,6 +4900,9 @@ fn inspector(
                     )
                     .weak(),
                 );
+                if let (Some(d), Some(rows)) = (&mut g.slides, &slide_rows) {
+                    slides_panel(ui, cue_id, d, rows, actions);
+                }
             }
             CueKind::Wait(w) => {
                 egui::Grid::new("wait")
@@ -6058,6 +6334,57 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         },
         Action::AddCueFile(ty, file) => add_cue(show, st, engine, ty, Some(file)),
         Action::AskFile(purpose) => start_dialog(st, show, purpose),
+        Action::AskSlides(group) => start_slide_dialog(st, group),
+        Action::AddSlides(Some(group), files) => show.add_slides(group, files),
+        Action::AddSlides(None, mut files) => {
+            files.sort();
+            let slot = show.insert_slot(st.selected, true);
+            let mut cue = show.make_cue(CueType::Group, None, slot.at);
+            cue.name = "Slide show".into();
+            if let CueKind::Group(g) = &mut cue.kind {
+                g.slides = Some(SlideShow::default());
+            }
+            let gid = cue.id;
+            show.insert_cue(slot, cue);
+            show.add_slides(gid, files);
+            select_new(show, st, engine, None, gid);
+        }
+        Action::SetSlide(id, field, value) => {
+            if let Some(i) = show.cue_index(id)
+                && let CueKind::Image(m) = &mut show.cues[i].kind
+            {
+                match field {
+                    SlideField::Fade => m.slide_fade = value,
+                    SlideField::Duration => m.slide_duration = value,
+                }
+                show.relay_slides();
+            }
+        }
+        Action::MoveSlide(id, d) => {
+            if let Some(i) = show.cue_index(id)
+                && let Some(p) = show.cues[i].parent
+            {
+                let target = i as i32 + d;
+                let inside = target >= 0
+                    && (target as usize) < show.cues.len()
+                    && show.cues[target as usize].parent == Some(p);
+                if inside {
+                    show.cues.swap(i, target as usize);
+                    show.relay_slides();
+                }
+            }
+        }
+        Action::RemoveSlide(id) => {
+            if let Some(i) = show.cue_index(id) {
+                for gone in show.delete(i) {
+                    engine.stop_cue(gone, 0.0);
+                }
+                if st.selected == Some(id) {
+                    st.selected = None;
+                }
+                show.relay_slides();
+            }
+        }
         Action::SetCueFile(id, file) => {
             if let Some(i) = show.cue_index(id)
                 && let Some(m) = show.cues[i].kind.media_mut()
@@ -7300,6 +7627,68 @@ mod tests {
             (p[0] - 0.2).abs() < 0.005 && (p[1] - 0.7667).abs() < 0.005,
             "{p:?}"
         );
+    }
+
+    #[test]
+    fn a_slide_show_is_made_edited_reordered_and_drawn() {
+        let (mut show, mut e, mut st) = running();
+        let files: Vec<PathBuf> = ["b.png", "a.png", "c.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        apply(Action::AddSlides(None, files), &mut show, &mut e, &mut st);
+        let g = st.selected.unwrap();
+        let ids: Vec<CueId> = show.children(g).iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), 3);
+        // Chosen files are put in name order.
+        assert_eq!(show.cue(ids[0]).unwrap().name, "a");
+        apply(
+            Action::SetSlide(ids[1], SlideField::Duration, Some(9.0)),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        let m = show.cue(ids[1]).unwrap().kind.media().unwrap().clone();
+        assert_eq!(m.slide_duration, Some(9.0));
+        assert_eq!(show.cue(ids[2]).unwrap().pre_wait, 6.0 + 1.0 + 9.0);
+        // Down one place: the order and the timing follow.
+        apply(Action::MoveSlide(ids[1], 1), &mut show, &mut e, &mut st);
+        let order: Vec<CueId> = show.children(g).iter().map(|c| c.id).collect();
+        assert_eq!(order, vec![ids[0], ids[2], ids[1]]);
+        assert_eq!(show.cue(ids[1]).unwrap().pre_wait, 12.0);
+        // The ends stay where they are.
+        apply(Action::MoveSlide(ids[1], 1), &mut show, &mut e, &mut st);
+        assert_eq!(show.children(g).len(), 3);
+        assert_eq!(show.children(g)[2].id, ids[1]);
+        // Back to the show's own time.
+        apply(
+            Action::SetSlide(ids[1], SlideField::Duration, None),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(
+            show.cue(ids[1])
+                .unwrap()
+                .kind
+                .media()
+                .unwrap()
+                .slide_duration,
+            None
+        );
+        // The inspector draws with the slide show selected.
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 800.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 100);
+        apply(Action::RemoveSlide(ids[0]), &mut show, &mut e, &mut st);
+        assert_eq!(show.children(g).len(), 2);
+        assert_eq!(show.children(g)[0].pre_wait, 0.0);
     }
 
     #[test]
