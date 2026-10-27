@@ -8,7 +8,7 @@ use crate::engine::{ActiveCue, CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
 use crate::media::waveform::WaveState;
-use crate::media::{ProbeState, camera};
+use crate::media::{ProbeState, audio, camera};
 use crate::mesh::Mesh;
 use crate::recovery;
 use crate::relink;
@@ -3272,15 +3272,29 @@ fn audio_panel(
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut o.device, None, "System default");
                     for d in &st.audio_devices {
-                        ui.selectable_value(&mut o.device, Some(d.clone()), d);
+                        let label = if audio::is_dante(d) {
+                            format!("{d}  (Dante)")
+                        } else {
+                            d.clone()
+                        };
+                        ui.selectable_value(&mut o.device, Some(d.clone()), label);
                     }
                 });
             match engine.audio.device_status(Some(o.id)) {
                 Some(d) if d.error.is_none() => {
                     ui.label(
-                        RichText::new(format!("{} channels · {} Hz", d.channels, d.sample_rate))
-                            .color(GO_GREEN)
-                            .small(),
+                        RichText::new(format!(
+                            "{} channels · {} Hz{}",
+                            d.channels,
+                            d.sample_rate,
+                            if o.device.as_deref().is_some_and(audio::is_dante) {
+                                " · Dante: route channels in Dante Controller"
+                            } else {
+                                ""
+                            }
+                        ))
+                        .color(GO_GREEN)
+                        .small(),
                     );
                 }
                 Some(d) => {
@@ -3301,6 +3315,17 @@ fn audio_panel(
             .weak()
             .small(),
     );
+    if !st.audio_devices.iter().any(|d| audio::is_dante(d)) {
+        ui.label(
+            RichText::new(
+                "Dante: NewQ reaches a Dante network through an audio device, either Dante \
+                 Virtual Soundcard running on this computer or an interface with Dante built \
+                 in. None is connected now; when one is, it is listed here.",
+            )
+            .weak()
+            .small(),
+        );
+    }
 }
 
 /// What to tell the user about a display, from what it is attached to.
