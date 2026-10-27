@@ -786,6 +786,7 @@ mod tests {
     /// for every capture, and every picture sent noted in a file. It checks
     /// the plumbing (loading, structures, loops, cleaning up), not that NDI's
     /// own library agrees with the headers.
+    #[cfg(target_os = "linux")]
     const FAKE: &str = r#"
 #include <stdbool.h>
 #include <stdint.h>
@@ -825,6 +826,7 @@ void NDIlib_send_send_video_v2(void* s, const Video* v) {
 
     /// Build the fake library into a folder of its own, and point the helpers
     /// at it. None if there is no C compiler here.
+    #[cfg(target_os = "linux")]
     fn fake_runtime() -> Option<PathBuf> {
         static BUILT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
         BUILT
