@@ -19,6 +19,20 @@ includes FFmpeg, so there's nothing else to install.
 
 ## Features
 
+- **Settings:** every setting of the show is in one place, *Settings ▸ Open
+  settings…* (**Ctrl+,** to open and close it). It takes the place of the cue
+  list, so GO, Stop All and the live preview stay where they are and a setting
+  can be tried while the show runs; *Back to cues* returns. A sidebar groups
+  the pages: **Show** (*General*: the show's name, how long Stop All takes to
+  fade, where the recovery copies and logs go; *Media*: whether every file can
+  be found), **Picture and sound** (*Displays*, *Sub displays*, *Audio
+  outputs* and *Sync*) and **Remote control** (*OSC*, *MIDI* with MIDI Time
+  Code, and the *Web remote*). Beside a page the sidebar shows what needs
+  attention or is on: a red warning when a display's monitor is missing, an
+  output has a problem, files can't be found or a listener failed to start, a
+  green *on* for a listener that is working, and counts of displays and audio
+  outputs. The *Settings* menu lists the same pages and jumps straight to one.
+  Settings are saved in the show, as before.
 - **Cue list with a GO button.** Space fires the cue at the playhead and the
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
@@ -45,7 +59,7 @@ includes FFmpeg, so there's nothing else to install.
 - **Stop All / Panic** (Esc) fades everything out; press it again to stop instantly.
 - **Displays and sub displays:** cues are sent to a **display** (*Display 1*,
   a name you choose such as *Stage TV*) or to a **sub display**, an area of
-  one. Each display is assigned by hand to a monitor in the Displays panel,
+  one. Each display is assigned by hand to a monitor on the *Displays* page of the settings,
   so moving a show to another venue means reassigning each display once.
   **Nothing is ever reassigned automatically.** If the monitor a display is
   assigned to is unplugged, what was sent to it **keeps playing, to no
@@ -250,7 +264,7 @@ includes FFmpeg, so there's nothing else to install.
   Windows, AVFoundation on macOS, where the first use asks for camera
   permission). Cameras can't be tested in NewQ's automated tests, only the
   built-in test pattern; please report any device that doesn't work.
-- **Web remote:** tick *Web remote* under Remote control and a phone or
+- **Web remote:** tick *Serve the web remote* on the *Web remote* page of the settings and a phone or
   tablet on the same network can open the address shown (`http://<this
   computer>:8080`) to run the show from a browser: a big GO, Stop All, Pause,
   Prev and Next, and a line for every cue with its status and a Fire or Stop
@@ -298,8 +312,8 @@ includes FFmpeg, so there's nothing else to install.
   the middle of the picture, and edits apply live while the cue plays. Parts
   that leave the output are clipped. Two videos can share one screen this way,
   without sub displays.
-- **Remote control (OSC and MIDI):** turn these on under *Remote control* in
-  the side panel; the settings are saved in the show. Both are off until you
+- **Remote control (OSC and MIDI):** turn these on on the *OSC* and *MIDI* pages of
+  the settings; they are saved in the show. Both are off until you
   enable them, because anyone who can reach the OSC port on your network can
   drive the show. Cues are named by their cue number.
   - *OSC over UDP* (port 53000 by default): `/go`, `/panic`, `/stop`,
@@ -312,8 +326,8 @@ includes FFmpeg, so there's nothing else to install.
     cue whose number is the note number; a program change selects the cue
     with that number; and MIDI Show Control GO (with or without a cue
     number), STOP, RESUME, LOAD and ALL OFF drive the transport.
-- **Audio outputs and channel routing:** under *Audio outputs* in the side
-  panel, add named outputs and put each on any audio device (or the system
+- **Audio outputs and channel routing:** on the *Audio outputs* page of the settings,
+  add named outputs and put each on any audio device (or the system
   default). Each cue then picks an output and the first device channel its
   stereo pair plays on, so one show can feed a PA, a monitor desk and a
   multichannel interface at once. The first output is the default for cues
@@ -343,7 +357,7 @@ includes FFmpeg, so there's nothing else to install.
   fires again each day the show is left running. Disarmed cues are skipped, and
   the playhead doesn't move.
 - **MIDI Time Code triggers:** give a cue (or a group) a timecode in its
-  inspector, turn on *Follow MIDI Time Code* under Remote control (it listens
+  inspector, turn on *Follow MIDI Time Code* on the *MIDI* page of the settings (it listens
   to the MIDI input you chose), and the cue fires when the incoming time
   reaches it, wherever the playhead is. NewQ follows the clock from 24, 25,
   29.97 and 30 fps sources. Cues are fired only by time that actually plays
@@ -377,7 +391,7 @@ includes FFmpeg, so there's nothing else to install.
   the background and kept, so even long files only wait the first time. A file
   with no sound (or an image) shows no waveform. The In / Out boxes still take
   typed times, and both stay in step.
-- **Lining sound up with picture:** *File ▸ Sync…* sets how long to hold
+- **Lining sound up with picture:** *Settings ▸ Sync* (or *File ▸ Sync…*) sets how long to hold
   back the sound and the picture, in milliseconds, for the whole show, and
   again for each audio output (a Bluetooth speaker, a long cable run) and each
   video output (a projector that processes its picture). Whichever arrives
@@ -434,7 +448,7 @@ path. Please send that file (and `newq.log`) when you report a crash.
 If the displays are what stops NewQ starting, run it with `--main-window-only`
 (or set `NEWQ_MAIN_WINDOW_ONLY=1`): every output then stays in the main window
 and no output windows are opened, so you can open the app and set up the
-displays from the Displays panel.
+displays from the *Displays* page of the settings.
 
 ## Keyboard
 
