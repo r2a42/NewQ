@@ -216,6 +216,70 @@ impl Mesh {
         Some(k)
     }
 
+    /// The place in the picture (`u`, `v`, each 0..1) that lands nearest `p` on
+    /// the display: a coarse search over the picture, then a finer one around
+    /// the best place, narrowing each time.
+    pub fn locate(&self, p: [f32; 2]) -> [f32; 2] {
+        let dist = |uv: [f32; 2]| {
+            let q = self.eval(uv[0], uv[1]);
+            (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)
+        };
+        const N: usize = 32;
+        let mut best = ([0.5, 0.5], f32::MAX);
+        for i in 0..=N {
+            for j in 0..=N {
+                let uv = [i as f32 / N as f32, j as f32 / N as f32];
+                let d = dist(uv);
+                if d < best.1 {
+                    best = (uv, d);
+                }
+            }
+        }
+        let mut half = 1.0 / N as f32;
+        for _ in 0..14 {
+            let centre = best.0;
+            for i in -2..=2 {
+                for j in -2..=2 {
+                    let uv = [
+                        (centre[0] + half * i as f32 / 2.0).clamp(0.0, 1.0),
+                        (centre[1] + half * j as f32 / 2.0).clamp(0.0, 1.0),
+                    ];
+                    let d = dist(uv);
+                    if d < best.1 {
+                        best = (uv, d);
+                    }
+                }
+            }
+            half *= 0.5;
+        }
+        best.0
+    }
+
+    /// Put a control point where the display shows `p`: a column and a row
+    /// cross there (a grid can't have a lone point), and either is skipped if
+    /// a line already runs close by. The shape doesn't change. Returns the
+    /// index of the point, or None if there isn't room for what is needed.
+    pub fn insert_point_at(&mut self, p: [f32; 2]) -> Option<usize> {
+        const MIN_GAP: f32 = 0.02;
+        let [u, v] = self.locate(p);
+        let near = |lines: &[f32], at: f32| lines.iter().position(|l| (l - at).abs() < MIN_GAP);
+        let (col, row) = (near(&self.xs, u), near(&self.ys, v));
+        if (col.is_none() && !self.can_insert_column(u))
+            || (row.is_none() && !self.can_insert_row(v))
+        {
+            return None;
+        }
+        let col = match col {
+            Some(c) => c,
+            None => self.insert_column(u)?,
+        };
+        let row = match row {
+            Some(r) => r,
+            None => self.insert_row(v)?,
+        };
+        Some(row * self.cols() + col)
+    }
+
     /// Where `at` would go among `lines`, if there is room and it isn't on
     /// top of one.
     fn slot(lines: &[f32], at: f32) -> Option<usize> {
@@ -497,5 +561,43 @@ mod tests {
         *m.point_mut(1, 1) = [0.3, 0.3];
         m.flatten();
         assert_eq!((m.xs[1], m.point(1, 1)[0]), (0.1, 0.1));
+    }
+
+    #[test]
+    fn a_point_is_added_where_the_display_shows_it_and_nothing_moves() {
+        let mut m = Mesh::from_pin(3, 3, |u, v| [0.1 + 0.8 * u, 0.1 + 0.8 * v]);
+        // Bend it a little so the picture and display places differ.
+        m.points[4] = [0.55, 0.42];
+        let before: Vec<[f32; 2]> = (0..=10).map(|i| m.eval(i as f32 / 10.0, 0.37)).collect();
+        let want = [0.3, 0.65];
+        let k = m.insert_point_at(want).unwrap();
+        assert_eq!((m.cols(), m.rows()), (4, 4));
+        let got = m.points[k];
+        assert!(
+            (got[0] - want[0]).abs() < 0.002 && (got[1] - want[1]).abs() < 0.002,
+            "{got:?} is near {want:?}"
+        );
+        for (i, b) in before.iter().enumerate() {
+            let a = m.eval(i as f32 / 10.0, 0.37);
+            assert!((a[0] - b[0]).abs() < 0.02 && (a[1] - b[1]).abs() < 0.02);
+        }
+    }
+
+    #[test]
+    fn a_point_beside_an_existing_line_reuses_it_and_a_full_mesh_refuses() {
+        let mut m = Mesh::from_pin(3, 3, |u, v| [u, v]);
+        // On the middle column already: only a row is added.
+        let k = m.insert_point_at([0.5, 0.25]).unwrap();
+        assert_eq!((m.cols(), m.rows()), (3, 4));
+        assert!((m.points[k][0] - 0.5).abs() < 0.002 && (m.points[k][1] - 0.25).abs() < 0.002);
+        // On an existing point: nothing is added.
+        let before = m.clone();
+        let k = m.insert_point_at([0.5, 0.5]).unwrap();
+        assert_eq!(m, before);
+        assert_eq!(m.points[k], [0.5, 0.5]);
+        let mut full = Mesh::from_pin(MAX_LINES, MAX_LINES, |u, v| [u, v]);
+        let same = full.clone();
+        assert_eq!(full.insert_point_at([0.33, 0.33]), None);
+        assert_eq!(full, same);
     }
 }
