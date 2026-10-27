@@ -7,7 +7,9 @@ use crate::gpu::{BlendPass, DrawGroup, DrawLayer, Geometry, Gpu, LayerTexture, L
 use crate::show::{ColorAdjust, EdgeBlend, Fit, LayerTransform};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use winit::window::Window;
 
 /// A single-slot, latest-wins handoff between threads.
@@ -89,6 +91,64 @@ fn resize(
     }
 }
 
+// ----- How the graphics are keeping up ------------------------------------------
+
+/// For each output window, in thousandths, how many of its last frames took
+/// clearly longer than the display's own rate (the graphics card falling
+/// behind).
+static LATE: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+/// The worst of the outputs: how much of the time frames are late, in
+/// thousandths, while something is playing.
+pub fn late_frames_permille() -> u32 {
+    LATE.iter()
+        .map(|l| l.load(Ordering::Relaxed))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Judges whether a window's frames are late: a frame takes as long as the
+/// display's refresh (when presenting waits for it) or less, so one taking
+/// much longer than the quickest seen is late. Only runs of frames close
+/// together count; a still picture, drawn now and then, says nothing.
+#[derive(Default)]
+struct FrameTimer {
+    quickest: Option<Duration>,
+    last_start: Option<Instant>,
+    frames: u32,
+    late: u32,
+}
+
+impl FrameTimer {
+    const WINDOW: u32 = 60;
+
+    /// A frame that began at `start` took `took`. Returns the share of late
+    /// frames, in thousandths, each time a window of frames has been seen.
+    fn frame(&mut self, start: Instant, took: Duration) -> Option<u32> {
+        let gap = self.last_start.map(|l| start.duration_since(l));
+        self.last_start = Some(start);
+        if gap.is_none_or(|g| g > Duration::from_millis(150)) {
+            // Not playing continuously: start counting again.
+            self.frames = 0;
+            self.late = 0;
+            return gap.map(|_| 0);
+        }
+        let quickest = self.quickest.map_or(took, |q| q.min(took));
+        self.quickest = Some(quickest);
+        self.frames += 1;
+        if took > quickest.mul_f32(1.6) + Duration::from_millis(2) {
+            self.late += 1;
+        }
+        if self.frames >= Self::WINDOW {
+            let share = self.late * 1000 / self.frames;
+            self.frames = 0;
+            self.late = 0;
+            return Some(share);
+        }
+        None
+    }
+}
+
 // ----- Output windows ---------------------------------------------------------
 
 #[derive(Clone)]
@@ -98,6 +158,7 @@ pub struct OutputLayer {
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    pub fx: crate::fx::VideoFx,
 }
 
 /// One output's layers, placed on a screen.
@@ -119,6 +180,7 @@ impl OutputGroup {
                     fit: l.fit,
                     transform: l.transform,
                     color: l.color,
+                    fx: l.fx,
                 })
                 .collect(),
             geometry: self.geometry.clone(),
@@ -193,6 +255,8 @@ fn output_loop(
     let fade = BlendPass::new(&gpu.device, config.format);
     // NEWQ_TRACE_OUTPUT=1 logs every composited frame's layer opacities.
     let trace = std::env::var_os("NEWQ_TRACE_OUTPUT").is_some();
+    let mut timer = FrameTimer::default();
+    let late = &LATE[slot_index(slot)];
     loop {
         let (size, groups, blend) = match mailbox.take() {
             OutputJob::Quit => break,
@@ -202,6 +266,7 @@ fn output_loop(
                 blend,
             } => (size, groups, blend),
         };
+        let started = Instant::now();
         resize(&gpu, &surface, &mut config, size);
         let Some(frame) = acquire(&gpu, &surface, &config) else {
             continue;
@@ -230,6 +295,18 @@ fn output_loop(
         gpu.queue.submit([cmd]);
         window.pre_present_notify();
         gpu.queue.present(frame);
+        if let Some(share) = timer.frame(started, started.elapsed()) {
+            late.store(share, Ordering::Relaxed);
+        }
+    }
+    late.store(0, Ordering::Relaxed);
+}
+
+/// Which of the lateness counters a window's own slot uses.
+fn slot_index(slot: Slot) -> usize {
+    match slot {
+        Slot::Window(n) => n as usize % LATE.len(),
+        _ => 0,
     }
 }
 
@@ -641,6 +718,7 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
                         fit: l.fit,
                         transform: l.transform,
                         color: l.color,
+                        fx: l.fx,
                     },
                 );
             }
@@ -678,5 +756,48 @@ mod tests {
         assert_eq!(mb.take(), 3);
         mb.put(5, |_, n| n);
         assert_eq!(mb.take(), 5);
+    }
+}
+
+#[cfg(test)]
+mod late_tests {
+    use super::*;
+
+    fn run(timer: &mut FrameTimer, frames: &[(u64, u64)]) -> Option<u32> {
+        // (ms between frame starts, ms the frame took)
+        let mut t = Instant::now();
+        let mut last = None;
+        for &(gap, took) in frames {
+            t += Duration::from_millis(gap);
+            if let Some(share) = timer.frame(t, Duration::from_millis(took)) {
+                last = Some(share);
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn frames_at_the_display_rate_are_not_late_and_slow_ones_are() {
+        let mut t = FrameTimer::default();
+        // 60 fps, each taking a frame time to present: all on time.
+        let steady: Vec<(u64, u64)> = vec![(17, 16); 130];
+        assert_eq!(run(&mut t, &steady), Some(0));
+        // Then every other frame takes twice as long: half are late.
+        let mut slow = Vec::new();
+        for _ in 0..70 {
+            slow.push((17, 16));
+            slow.push((34, 33));
+        }
+        let share = run(&mut t, &slow).unwrap();
+        assert!((450..=550).contains(&share), "{share}");
+    }
+
+    #[test]
+    fn a_still_picture_redrawn_now_and_then_says_nothing() {
+        let mut t = FrameTimer::default();
+        // Frames seconds apart never fill a window, and reset it.
+        let rare: Vec<(u64, u64)> = vec![(2000, 30); 100];
+        assert_eq!(run(&mut t, &rare), Some(0));
+        assert_eq!(t.frames, 0);
     }
 }

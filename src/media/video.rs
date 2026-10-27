@@ -75,11 +75,22 @@ impl VideoPlayer {
         let fps = info.fps;
         let make = {
             let (ff, path) = (ff.clone(), path.to_path_buf());
+            // The first pass of a jump into a loop starts part way in.
+            let calls = std::sync::atomic::AtomicUsize::new(0);
             move || {
+                let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
                 let mut cmd = ff.command();
-                cmd.args(playback.input_args(start));
+                cmd.args(if first {
+                    playback.first_input_args(start)
+                } else {
+                    playback.input_args(start)
+                });
                 cmd.arg("-i").arg(&path);
-                cmd.args(playback.limit_args());
+                cmd.args(if first {
+                    playback.first_limit_args()
+                } else {
+                    playback.limit_args()
+                });
                 cmd.args([
                     "-map",
                     "0:v:0",
@@ -103,13 +114,14 @@ impl VideoPlayer {
         };
         // Looping passes are cut to an exact frame count so the timeline
         // stays locked to the audio's, whatever the decoder delivers.
-        let per_pass = playback
-            .pass_len()
-            .map(|l| (l * fps).round().max(1.0) as u64);
+        let frames = |l: f64| (l * fps).round().max(1.0) as u64;
+        let per_pass = playback.pass_len().map(frames);
+        let first_pass = playback.first_pass_len().map(frames);
         Self::start(
             make,
             playback.passes(),
             per_pass,
+            first_pass,
             fps,
             info.matrix,
             size,
@@ -156,6 +168,7 @@ impl VideoPlayer {
             make,
             Some(1),
             None,
+            None,
             f64::from(fps.max(1)),
             matrix,
             size,
@@ -193,6 +206,7 @@ impl VideoPlayer {
             make,
             Some(1),
             None,
+            None,
             f64::from(fps.max(1)),
             matrix,
             size,
@@ -200,10 +214,12 @@ impl VideoPlayer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start(
         make: impl Fn() -> std::process::Command + Send + 'static,
         passes: Option<u32>,
         per_pass: Option<u64>,
+        first_pass: Option<u64>,
         fps: f64,
         matrix: ColorMatrix,
         size: (u32, u32),
@@ -233,10 +249,14 @@ impl VideoPlayer {
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
                 let mut base: u64 = 0; // index of the current pass's first frame
+                let mut first = true;
                 loop {
                     let mut n: u64 = 0;
-                    while per_pass.is_none_or(|p| n < p) {
-                        if per_pass.is_some_and(|p| n * 2 >= p) {
+                    // The first pass of a jump into a loop is short.
+                    let limit = if first { first_pass } else { per_pass };
+                    first = false;
+                    while limit.is_none_or(|p| n < p) {
+                        if limit.is_some_and(|p| n * 2 >= p) {
                             feed.prefetch();
                         }
                         let mut buf = recycle_rx
@@ -276,7 +296,7 @@ impl VideoPlayer {
                     if n == 0 || !feed.advance() {
                         break;
                     }
-                    base += per_pass.unwrap_or(n);
+                    base += limit.unwrap_or(n);
                 }
                 eof2.store(true, Ordering::Release);
             })?;

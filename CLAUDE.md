@@ -32,6 +32,15 @@ The README describes the features; this file is about working on the code.
   The structures follow NDI's SDK 6 headers (not vendored: their licence);
   tests build a fake runtime in C with `cc` (skipped without one) and the pure
   converters are tested, but no real NDI has been tried.
+- `src/fx.rs`: cue effects. `show::Effect` (kind and up to four `Animated`
+  numbers, each a value or keyframes) is on `MediaCue::effects`. `fx::VideoFx::at`
+  turns the picture effects into the numbers in the compositor shader (blur,
+  sharpen, pixelate, negative, vignette in `gpu.rs`, one pass, a test renders them);
+  the sound effects (`AudioChain`: biquad EQ/filter, compressor, echo, freeverb)
+  are built when a voice is, kept in step with the show by `FxShared` atomics
+  that `Engine::tick` sets from the cue's time, and run per frame in
+  `audio.rs::mix_voice`. `render.rs::FrameTimer` and the mixer callback's load
+  feed the status-bar warnings.
 - `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.

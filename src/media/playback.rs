@@ -22,6 +22,14 @@ pub enum Playback {
     Once { duration: Option<f64> },
     /// Repeat the `len` seconds after the in point; `passes` None = forever.
     Slice { len: f64, passes: Option<u32> },
+    /// A `Slice` started part way through: the first pass begins `skip`
+    /// seconds into the slice (and so is `len - skip` long); the passes after
+    /// it are whole. This is what a jump inside a loop plays.
+    SliceFrom {
+        len: f64,
+        passes: Option<u32>,
+        skip: f64,
+    },
     /// The length isn't known: let ffmpeg loop the whole file forever.
     WholeFile,
 }
@@ -53,6 +61,9 @@ impl Playback {
         match self {
             Playback::Once { duration } => duration.or(file_len),
             Playback::Slice { len, passes } => passes.map(|n| len * n as f64),
+            Playback::SliceFrom { len, passes, skip } => {
+                passes.map(|n| (len * n as f64 - skip).max(0.0))
+            }
             Playback::WholeFile => None,
         }
     }
@@ -60,7 +71,7 @@ impl Playback {
     /// Number of passes the decoders make.
     pub fn passes(self) -> Option<u32> {
         match self {
-            Playback::Slice { passes, .. } => passes,
+            Playback::Slice { passes, .. } | Playback::SliceFrom { passes, .. } => passes,
             _ => Some(1),
         }
     }
@@ -68,8 +79,57 @@ impl Playback {
     /// Exact length of a pass, if passes are trimmed to a fixed length.
     pub fn pass_len(self) -> Option<f64> {
         match self {
-            Playback::Slice { len, .. } => Some(len),
+            Playback::Slice { len, .. } | Playback::SliceFrom { len, .. } => Some(len),
             _ => None,
+        }
+    }
+
+    /// The length of the first pass: a whole one unless the playback began
+    /// part way through the slice.
+    pub fn first_pass_len(self) -> Option<f64> {
+        match self {
+            Playback::SliceFrom { len, skip, .. } => Some((len - skip).max(0.0)),
+            other => other.pass_len(),
+        }
+    }
+
+    /// This playback as it is started `pos` seconds into its running (a jump
+    /// in a loop): in the pass `pos` falls in, `pos` minus the passes before
+    /// it into the slice, with only the passes that are left to play. Playbacks
+    /// that aren't loops are returned as they are.
+    pub fn started_at(self, pos: f64) -> Playback {
+        let (len, passes) = match self {
+            Playback::Slice { len, passes } => (len, passes),
+            Playback::SliceFrom { len, passes, .. } => (len, passes),
+            other => return other,
+        };
+        let pos = pos.max(0.0);
+        let done = (pos / len).floor();
+        let done_passes = done as u32;
+        let left = passes.map(|n| n.saturating_sub(done_passes).max(1));
+        Playback::SliceFrom {
+            len,
+            passes: left,
+            skip: pos - done * len,
+        }
+    }
+
+    /// The ffmpeg input options for the first pass, which a jump in a loop
+    /// starts part way through the slice.
+    pub fn first_input_args(self, start: f64) -> Vec<String> {
+        match self {
+            Playback::SliceFrom { skip, .. } => self.input_args(start + skip),
+            other => other.input_args(start),
+        }
+    }
+
+    /// `limit_args` for the first pass.
+    pub fn first_limit_args(self) -> Vec<String> {
+        match self.first_pass_len() {
+            Some(d) if self.pass_len().is_some() => {
+                vec!["-t".to_string(), format!("{d:.3}")]
+            }
+            _ => self.limit_args(),
         }
     }
 
@@ -89,7 +149,7 @@ impl Playback {
     pub fn limit_args(self) -> Vec<String> {
         let d = match self {
             Playback::Once { duration } => duration,
-            Playback::Slice { len, .. } => Some(len),
+            Playback::Slice { len, .. } | Playback::SliceFrom { len, .. } => Some(len),
             Playback::WholeFile => None,
         };
         d.map(|d| vec!["-t".to_string(), format!("{d:.3}")])
@@ -317,5 +377,50 @@ mod tests {
         assert_eq!(Playback::WholeFile.input_args(0.0), ["-stream_loop", "-1"]);
         assert!(Playback::WholeFile.limit_args().is_empty());
         assert!(Playback::Once { duration: None }.limit_args().is_empty());
+    }
+
+    #[test]
+    fn a_jump_in_a_loop_starts_part_way_through_a_pass() {
+        let s = Playback::Slice {
+            len: 4.0,
+            passes: None,
+        };
+        // 1.5 s into the slice: the first pass is the last 2.5 s of it, then whole ones.
+        let j = s.started_at(1.5);
+        assert_eq!(
+            j,
+            Playback::SliceFrom {
+                len: 4.0,
+                passes: None,
+                skip: 1.5
+            }
+        );
+        assert_eq!(j.first_pass_len(), Some(2.5));
+        assert_eq!(j.pass_len(), Some(4.0));
+        assert_eq!(j.first_input_args(2.0), ["-ss", "3.500"]);
+        assert_eq!(j.first_limit_args(), ["-t", "2.500"]);
+        assert_eq!(j.input_args(2.0), ["-ss", "2.000"]);
+        assert_eq!(j.limit_args(), ["-t", "4.000"]);
+        // A set number of plays: 9 s in of three 4 s plays is 1 s into the
+        // third, which is the only one left, and 3 s of it remain.
+        let three = Playback::Slice {
+            len: 4.0,
+            passes: Some(3),
+        };
+        let j = three.started_at(9.0);
+        assert_eq!(
+            j,
+            Playback::SliceFrom {
+                len: 4.0,
+                passes: Some(1),
+                skip: 1.0
+            }
+        );
+        assert_eq!(j.total(None), Some(3.0));
+        // Not a loop: unchanged. A plain pass: its own first length.
+        let once = Playback::Once { duration: None };
+        assert_eq!(once.started_at(3.0), once);
+        assert_eq!(s.first_pass_len(), Some(4.0));
+        assert_eq!(s.first_input_args(2.0), s.input_args(2.0));
     }
 }

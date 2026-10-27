@@ -12,6 +12,7 @@ mod dock;
 mod edid;
 mod engine;
 mod export;
+mod fx;
 mod gpu;
 mod history;
 mod live_text;

@@ -2,6 +2,7 @@
 //! opacity onto output windows.
 
 use crate::color;
+use crate::fx::VideoFx;
 use crate::media::ffmpeg::ColorMatrix;
 use crate::mesh::{self, Mesh};
 use crate::show::{ColorAdjust, EdgeBlend, Fit, LayerTransform};
@@ -195,6 +196,11 @@ struct LayerUniform {
     /// Where the mesh sees the picture, for a display showing part of a
     /// bigger one: (left, top, 1 / width, 1 / height) of the part.
     slice: [f32; 4],
+    /// Picture effects: (blur radius, sharpen, block size, negative), and
+    /// (vignette, its softness, 1 / texture width, 1 / texture height)
+    /// (see [`VideoFx`]).
+    fx0: [f32; 4],
+    fx1: [f32; 4],
 }
 
 /// Room in the shader for a mesh of `MAX_LINES` by `MAX_LINES` points, two
@@ -241,6 +247,10 @@ struct Params {
     mesh: array<vec4<f32>, 41>,
     // Where the mesh sees the picture: (left, top, 1 / width, 1 / height).
     slice: vec4<f32>,
+    // Picture effects: (blur radius, sharpen, block size, negative), and
+    // (vignette, softness, texel width, texel height).
+    fx0: vec4<f32>,
+    fx1: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var t0: texture_2d<f32>;
@@ -369,6 +379,20 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     return o;
 }
 
+// The layer's picture at `uv`, in RGB.
+fn layer_at(uv: vec2<f32>) -> vec4<f32> {
+    if (p.mode == 0u) {
+        return textureSampleLevel(t0, s, uv, 0.0);
+    }
+    let yuv = vec4<f32>(
+        textureSampleLevel(t0, s, uv, 0.0).r,
+        textureSampleLevel(t1, s, uv, 0.0).r,
+        textureSampleLevel(t2, s, uv, 0.0).r,
+        1.0);
+    return vec4<f32>(clamp(vec3<f32>(dot(p.r, yuv), dot(p.g, yuv), dot(p.b, yuv)),
+                           vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     // Layers that overhang the canvas (fill/crop) must not show outside the pinned shape.
@@ -381,17 +405,32 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     if (any(d < vec2<f32>(0.0)) || any(d > vec2<f32>(1.0))) {
         discard;
     }
-    var rgba: vec4<f32>;
-    if (p.mode == 0u) {
-        rgba = textureSample(t0, s, in.uv);
-    } else {
-        let yuv = vec4<f32>(
-            textureSample(t0, s, in.uv).r,
-            textureSample(t1, s, in.uv).r,
-            textureSample(t2, s, in.uv).r,
-            1.0);
-        rgba = vec4<f32>(clamp(vec3<f32>(dot(p.r, yuv), dot(p.g, yuv), dot(p.b, yuv)),
-                               vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    let texel = p.fx1.zw;
+    var uv = in.uv;
+    // Pixelate: every pixel of a block looks at the block's middle.
+    if (p.fx0.z >= 2.0) {
+        let cell = p.fx0.z * texel;
+        uv = (floor(uv / cell) + 0.5) * cell;
+    }
+    var rgba = layer_at(uv);
+    // Blur: the average of samples spread over a disc, turned a different
+    // way at each pixel so the pattern doesn't show (fx::blur_taps).
+    if (p.fx0.x >= 0.25) {
+        let n = clamp(u32(round(p.fx0.x * 0.7)), 8u, 48u);
+        let turn = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715)))) * 6.2831853;
+        var acc = rgba;
+        for (var i = 0u; i < n; i = i + 1u) {
+            let r = sqrt((f32(i) + 0.5) / f32(n)) * p.fx0.x;
+            let a = f32(i) * 2.39996323 + turn;
+            acc = acc + layer_at(uv + vec2<f32>(cos(a), sin(a)) * r * texel);
+        }
+        rgba = acc / f32(n + 1u);
+    }
+    // Sharpen: push each pixel away from the average of its four neighbours.
+    if (p.fx0.y >= 0.01) {
+        let near = (layer_at(uv + vec2<f32>(texel.x, 0.0)) + layer_at(uv - vec2<f32>(texel.x, 0.0))
+            + layer_at(uv + vec2<f32>(0.0, texel.y)) + layer_at(uv - vec2<f32>(0.0, texel.y))) * 0.25;
+        rgba = vec4<f32>(clamp(rgba.rgb + p.fx0.y * (rgba.rgb - near.rgb), vec3<f32>(0.0), vec3<f32>(1.0)), rgba.a);
     }
     // Key out the screen colour (and pull its spill from what stays), then
     // correct the colour. This is what color::apply does, number for number.
@@ -413,6 +452,15 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             dot(p.cm1.xyz, rgb) + p.cm1.w,
             dot(p.cm2.xyz, rgb) + p.cm2.w),
         vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb = mix(rgb, vec3<f32>(1.0) - rgb, p.fx0.w);
+    if (p.fx1.x > 0.0) {
+        // Darker towards the corners of the picture (fx::vignette_factor).
+        let c = (in.uv - p.uvr.xy) / (p.uvr.zw - p.uvr.xy);
+        let r = length((c - vec2<f32>(0.5)) * 2.0) / 1.41421356;
+        let soft = clamp(p.fx1.y, 0.05, 1.0);
+        let t = clamp((r - (1.0 - soft)) / soft, 0.0, 1.0);
+        rgb = rgb * (1.0 - p.fx1.x * t * t * (3.0 - 2.0 * t));
+    }
     let a = rgba.a * key_a * p.opacity;
     return vec4<f32>(rgb * a, a);
 }
@@ -1021,6 +1069,7 @@ impl LayerTexture {
             fit,
             transform,
             color,
+            fx,
         } = look;
         let rows = yuv_rows(self.matrix);
         let (kc, ks) = color
@@ -1055,6 +1104,13 @@ impl LayerTexture {
             my,
             mesh: points,
             slice: geometry.slice,
+            fx0: [fx.blur, fx.sharpen, fx.pixel, fx.negative],
+            fx1: [
+                fx.vignette,
+                fx.softness,
+                1.0 / self.width.max(1) as f32,
+                1.0 / self.height.max(1) as f32,
+            ],
         };
         queue.write_buffer(&self.slots[slot.index()].0, 0, bytemuck::bytes_of(&u));
     }
@@ -1082,6 +1138,7 @@ pub struct Look {
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    pub fx: VideoFx,
 }
 
 pub struct DrawLayer<'a> {
@@ -1090,6 +1147,7 @@ pub struct DrawLayer<'a> {
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    pub fx: VideoFx,
 }
 
 /// Where an output's picture (its canvas) lands on a screen.
@@ -1163,6 +1221,7 @@ impl Gpu {
                         fit: l.fit,
                         transform: l.transform,
                         color: l.color,
+                        fx: l.fx,
                     },
                 );
             }
@@ -1470,6 +1529,7 @@ mod tests {
                 fit: Fit::Stretch,
                 transform: LayerTransform::default(),
                 color: *color,
+                fx: VideoFx::default(),
             }],
             geometry: Geometry {
                 canvas: (2, 2),
@@ -1590,6 +1650,11 @@ mod tests {
         render_faded(gpu, pixels, size, geometry, None)
     }
 
+    /// A picture drawn with picture effects.
+    fn render_fx(gpu: &Gpu, pixels: &[u8], size: u32, fx: VideoFx) -> Vec<u8> {
+        render_all(gpu, pixels, size, identity_geometry(size), None, fx)
+    }
+
     /// `render_picture`, with the edges faded.
     fn render_faded(
         gpu: &Gpu,
@@ -1597,6 +1662,17 @@ mod tests {
         size: u32,
         geometry: Geometry,
         blend: Option<EdgeBlend>,
+    ) -> Vec<u8> {
+        render_all(gpu, pixels, size, geometry, blend, VideoFx::default())
+    }
+
+    fn render_all(
+        gpu: &Gpu,
+        pixels: &[u8],
+        size: u32,
+        geometry: Geometry,
+        blend: Option<EdgeBlend>,
+        fx: VideoFx,
     ) -> Vec<u8> {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let tex = LayerTexture::new_rgba(gpu, size, size);
@@ -1624,6 +1700,7 @@ mod tests {
                 fit: Fit::Stretch,
                 transform: LayerTransform::default(),
                 color: ColorAdjust::default(),
+                fx,
             }],
             geometry,
         }];
@@ -1898,6 +1975,7 @@ mod tests {
                 fit: Fit::Stretch,
                 transform: LayerTransform::default(),
                 color: ColorAdjust::default(),
+                fx: VideoFx::default(),
             }],
             geometry: Geometry {
                 canvas: (1920, 1080),
@@ -1967,5 +2045,147 @@ mod tests {
             !reason.contains("Broken pipe") || reason.contains("FFmpeg"),
             "{reason}"
         );
+    }
+
+    /// A picture of `size` square: black on the left half, white on the right.
+    fn half_and_half(size: u32) -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for _y in 0..size {
+            for x in 0..size {
+                let v = if x < size / 2 { 0 } else { 255 };
+                pixels.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        pixels
+    }
+
+    fn px(out: &[u8], size: u32, x: u32, y: u32) -> [u8; 3] {
+        let i = ((y * size + x) * 4) as usize;
+        [out[i], out[i + 1], out[i + 2]]
+    }
+
+    #[test]
+    fn blur_softens_an_edge_and_leaves_flat_colour_alone() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the effects shader test");
+            return;
+        };
+        const SIZE: u32 = 64;
+        let plain = render_fx(&gpu, &half_and_half(SIZE), SIZE, VideoFx::default());
+        assert_eq!(px(&plain, SIZE, SIZE / 2 - 1, 30)[0], 0);
+        assert_eq!(px(&plain, SIZE, SIZE / 2, 30)[0], 255);
+        let fx = VideoFx {
+            blur: 10.0,
+            ..Default::default()
+        };
+        let blurred = render_fx(&gpu, &half_and_half(SIZE), SIZE, fx);
+        // Either side of the edge is now grey, in between the two.
+        let (a, b) = (
+            px(&blurred, SIZE, SIZE / 2 - 2, 30)[0],
+            px(&blurred, SIZE, SIZE / 2 + 1, 30)[0],
+        );
+        assert!(a > 20 && a < 140 && b > 120 && b < 235 && a < b, "{a} {b}");
+        // Well away from the edge it is as it was, and the middle is half way.
+        assert!(px(&blurred, SIZE, 4, 30)[0] < 6);
+        assert!(px(&blurred, SIZE, SIZE - 5, 30)[0] > 249);
+        // Flat colour stays flat and the same colour.
+        let flat: Vec<u8> = [90u8, 140, 200, 255].repeat((SIZE * SIZE) as usize);
+        let out = render_fx(&gpu, &flat, SIZE, fx);
+        for (x, y) in [(2, 2), (32, 32), (60, 10)] {
+            let p = px(&out, SIZE, x, y);
+            assert!(
+                (i32::from(p[0]) - 90).abs() <= 2 && (i32::from(p[2]) - 200).abs() <= 2,
+                "{p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sharpen_pushes_edges_apart_and_pixelate_makes_blocks() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the effects shader test");
+            return;
+        };
+        const SIZE: u32 = 64;
+        // A grey step: dark grey then light grey.
+        let mut step = Vec::new();
+        for _y in 0..SIZE {
+            for x in 0..SIZE {
+                let v = if x < SIZE / 2 { 100 } else { 150 };
+                step.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let fx = VideoFx {
+            sharpen: 1.0,
+            ..Default::default()
+        };
+        let out = render_fx(&gpu, &step, SIZE, fx);
+        let (dark, light) = (
+            px(&out, SIZE, SIZE / 2 - 1, 30)[0],
+            px(&out, SIZE, SIZE / 2, 30)[0],
+        );
+        assert!(dark < 92 && light > 158, "overshoots: {dark} {light}");
+        assert_eq!(px(&out, SIZE, 10, 30)[0], 100, "flat parts are unchanged");
+        // Blocks of 16: every pixel in a block is the same, and different
+        // blocks of a gradient differ.
+        let ramp = gradient(SIZE);
+        let fx = VideoFx {
+            pixel: 16.0,
+            ..Default::default()
+        };
+        let out = render_fx(&gpu, &ramp, SIZE, fx);
+        assert_eq!(px(&out, SIZE, 17, 17), px(&out, SIZE, 30, 30));
+        assert_ne!(px(&out, SIZE, 5, 5), px(&out, SIZE, 50, 5));
+    }
+
+    #[test]
+    fn negative_and_vignette_are_what_the_reference_maths_says() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("no GPU adapter here; skipping the effects shader test");
+            return;
+        };
+        const SIZE: u32 = 64;
+        let flat: Vec<u8> = [200u8, 100, 50, 255].repeat((SIZE * SIZE) as usize);
+        let fx = VideoFx {
+            negative: 1.0,
+            ..Default::default()
+        };
+        let out = render_fx(&gpu, &flat, SIZE, fx);
+        let p = px(&out, SIZE, 20, 20);
+        assert!(
+            (i32::from(p[0]) - 55).abs() <= 1
+                && (i32::from(p[1]) - 155).abs() <= 1
+                && (i32::from(p[2]) - 205).abs() <= 1,
+            "{p:?}"
+        );
+        // Half way between: halfway to the inverse.
+        let half = render_fx(
+            &gpu,
+            &flat,
+            SIZE,
+            VideoFx {
+                negative: 0.5,
+                ..Default::default()
+            },
+        );
+        assert!((i32::from(px(&half, SIZE, 20, 20)[0]) - 127).abs() <= 2);
+        // The vignette: the middle clear, the corners as the maths says.
+        let white: Vec<u8> = [255u8; 4].repeat((SIZE * SIZE) as usize);
+        let fx = VideoFx {
+            vignette: 0.8,
+            softness: 0.5,
+            ..Default::default()
+        };
+        let out = render_fx(&gpu, &white, SIZE, fx);
+        assert_eq!(px(&out, SIZE, 32, 32)[0], 255);
+        for (x, y) in [(0u32, 0u32), (5, 40), (60, 20), (63, 63)] {
+            let c = [
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            ];
+            let want = crate::fx::vignette_factor(c, 0.8, 0.5) * 255.0;
+            let got = f32::from(px(&out, SIZE, x, y)[0]);
+            assert!((got - want).abs() <= 3.0, "({x},{y}) {got} vs {want}");
+        }
     }
 }

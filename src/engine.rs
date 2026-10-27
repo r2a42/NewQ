@@ -2,6 +2,7 @@
 //! and owns the decoders for everything that is playing.
 
 use crate::clock::{ClockFollower, TimeOfDay};
+use crate::fx::VideoFx;
 use crate::media::audio::{AudioOut, Voice};
 use crate::media::camera;
 use crate::media::ffmpeg::{ColorMatrix, Ffmpeg, MediaInfo};
@@ -114,6 +115,8 @@ pub struct VideoState {
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    /// The picture effects now (see `fx::VideoFx`).
+    pub fx: VideoFx,
     spawned_at: Instant,
 }
 
@@ -127,6 +130,7 @@ pub struct ImageState {
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    pub fx: VideoFx,
     /// Set for a clock or timer: the picture is redrawn as the time changes.
     live: Option<LiveText>,
 }
@@ -201,6 +205,9 @@ pub struct ActiveCue {
     pub elapsed: f64,
     /// None = runs until stopped.
     pub duration: Option<f64>,
+    /// The length of one pass of a loop, if it is a loop whose passes have a
+    /// length (the bar shows where it is in the pass and jumps within it).
+    pub pass_len: Option<f64>,
     pub opacity: Param,
     /// Volume in dB.
     pub volume: Param,
@@ -244,25 +251,53 @@ struct Seek {
 }
 
 impl ActiveCue {
-    /// The length of the cue if it can be scrubbed: a file that plays once
-    /// (not a camera, not a loop), or a still with a time.
+    /// The length of the bar for the cue if it can be scrubbed: a file that
+    /// plays once (not a camera), or a still with a time; a loop with a set
+    /// number of plays, all of them; a loop that never ends, one pass.
     pub fn scrub_length(&self, show: &Show) -> Option<f64> {
-        let d = self.duration.filter(|d| *d > 0.0)?;
         if !self.started || self.stopping || self.held {
             return None;
         }
         let media = show.cue(self.cue_id)?.kind.media()?;
-        let ok = match &self.kind {
-            ActiveKind::Video(v) => !v.player.is_live() && !media.loop_media,
-            // Live sound has no file to jump about in.
-            ActiveKind::Audio(_) => {
-                !media.loop_media && !matches!(show.cue(self.cue_id)?.kind, CueKind::LiveAudio(_))
+        // Live sound has no file to jump about in.
+        let live_sound = matches!(show.cue(self.cue_id)?.kind, CueKind::LiveAudio(_));
+        match &self.kind {
+            ActiveKind::Video(v) if v.player.is_live() => None,
+            ActiveKind::Video(_) | ActiveKind::Audio(_) if live_sound => None,
+            ActiveKind::Video(_) | ActiveKind::Audio(_) => {
+                if media.loop_media {
+                    let pass = self.pass_len?;
+                    // Set plays: the whole of them. Forever: one pass.
+                    Some(self.duration.filter(|d| *d > 0.0).unwrap_or(pass))
+                } else {
+                    self.duration.filter(|d| *d > 0.0)
+                }
             }
-            ActiveKind::Image(_) => true,
-            _ => false,
-        };
-        ok.then_some(d)
+            ActiveKind::Image(_) => self.duration.filter(|d| *d > 0.0),
+            _ => None,
+        }
     }
+
+    /// Whether this is a loop that never ends, whose bar shows the pass.
+    pub fn loops_forever(&self) -> bool {
+        self.pass_len.is_some() && self.duration.is_none()
+    }
+
+    /// Where the bar is: the time into the cue, or for a loop that never
+    /// ends the time into the current pass.
+    pub fn bar_position(&self) -> f64 {
+        match self.pass_len.filter(|_| self.loops_forever()) {
+            Some(len) => self.elapsed.rem_euclid(len),
+            None => self.elapsed,
+        }
+    }
+
+    /// Which pass of a loop it is in, counting from 1.
+    pub fn pass_number(&self) -> Option<u32> {
+        let len = self.pass_len?;
+        Some((self.elapsed / len).floor() as u32 + 1)
+    }
+
     /// Jumping in a cue starts its automatic fade-out over: it is at full
     /// level again until it comes round to fading out once more.
     fn restart_auto_fade(&mut self) {
@@ -359,6 +394,8 @@ enum PreparedKind {
 }
 
 struct Prepared {
+    /// How long one pass of a loop is, for jumping about in it.
+    pass_len: Option<f64>,
     cue_id: CueId,
     sig: PrepSig,
     kind: PreparedKind,
@@ -380,6 +417,7 @@ pub struct LayerRef<'a> {
     pub fit: Fit,
     pub transform: LayerTransform,
     pub color: ColorAdjust,
+    pub fx: VideoFx,
     pub source: LayerSource<'a>,
 }
 
@@ -882,6 +920,7 @@ impl Engine {
                 .map_err(|e| format!("{e:#}"))?;
             return Ok(Prepared {
                 cue_id: cue.id,
+                pass_len: None,
                 sig,
                 kind: PreparedKind::Video {
                     player,
@@ -908,6 +947,7 @@ impl Engine {
             .map_err(|e| format!("{e:#}"))?;
         Ok(Prepared {
             cue_id: cue.id,
+            pass_len: None,
             sig,
             kind: PreparedKind::Video {
                 player,
@@ -934,10 +974,12 @@ impl Engine {
                 c.input_channel,
                 initial_gain,
                 (m.audio_output, m.audio_channel),
+                &m.sound_chain(),
             )
             .map_err(|e| format!("{e:#}"))?;
         Ok(Prepared {
             cue_id: cue.id,
+            pass_len: None,
             sig: PrepSig {
                 media: m.clone(),
                 size: (1, 1),
@@ -959,9 +1001,18 @@ impl Engine {
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let sig = self.signature(cue).ok_or("not a media cue")?;
         let mut shifted = sig.media.clone();
-        shifted.start += shift;
+        let looping = shifted.loop_media && shifted.playback(info.duration).pass_len().is_some();
+        // A loop is jumped about in without moving its in point: the first
+        // pass starts part way in and the ones after it are whole.
+        if !looping {
+            shifted.start += shift;
+        }
         let m = &shifted;
-        let playback = m.playback(info.duration);
+        let mut playback = m.playback(info.duration);
+        let pass_len = playback.pass_len();
+        if looping && shift > 0.0 {
+            playback = playback.started_at(shift);
+        }
         let duration = match playback {
             Playback::Once { duration } => {
                 duration.or(info.duration.map(|d| (d - m.start).max(0.0)))
@@ -988,6 +1039,7 @@ impl Engine {
                         playback,
                         initial_gain,
                         (m.audio_output, m.audio_channel),
+                        &m.sound_chain(),
                     ) {
                         Ok(voice) => Some(voice),
                         Err(e) => {
@@ -1018,6 +1070,7 @@ impl Engine {
                         playback,
                         initial_gain,
                         (m.audio_output, m.audio_channel),
+                        &m.sound_chain(),
                     )
                     .map_err(|e| format!("{e:#}"))?;
                 PreparedKind::Audio(voice)
@@ -1030,6 +1083,7 @@ impl Engine {
         };
         Ok(Prepared {
             cue_id: cue.id,
+            pass_len,
             sig,
             kind,
             duration,
@@ -1041,6 +1095,7 @@ impl Engine {
     fn prepare_text(&self, cue: &Cue, t: &TextCue) -> Prepared {
         let size = self.output_size(t.media.output);
         Prepared {
+            pass_len: None,
             cue_id: cue.id,
             sig: PrepSig {
                 media: t.media.clone(),
@@ -1106,6 +1161,7 @@ impl Engine {
             }),
             elapsed: 0.0,
             duration: Some(m.fade_in),
+            pass_len: None,
             opacity,
             volume: Param::new(0.0),
             started: true,
@@ -1155,6 +1211,7 @@ impl Engine {
             kind: ActiveKind::Wait,
             elapsed: 0.0,
             duration: None,
+            pass_len: None,
             opacity: Param::new(1.0),
             volume: Param::new(0.0),
             started: true,
@@ -1224,6 +1281,7 @@ impl Engine {
                             self.log(format!("Cue {} ({}): {w}", cue.number, cue.name));
                         }
                         active.duration = p.duration;
+                        active.pass_len = p.pass_len;
                         active.started = false;
                         active.audio_lead = show.audio_delay_ms(m.audio_output) as f64 / 1000.0;
                         active.video_lag = show.video_delay_ms(m.output) as f64 / 1000.0;
@@ -1237,6 +1295,7 @@ impl Engine {
                                     fit: m.fit,
                                     transform: m.transform,
                                     color: m.color,
+                                    fx: VideoFx::at(&m.effects, 0.0),
                                     spawned_at: Instant::now(),
                                 }))
                             }
@@ -1249,6 +1308,7 @@ impl Engine {
                                 fit: m.fit,
                                 transform: m.transform,
                                 color: m.color,
+                                fx: VideoFx::at(&m.effects, 0.0),
                                 live: None,
                             }),
                             PreparedKind::Audio(voice) => ActiveKind::Audio(voice),
@@ -1262,6 +1322,7 @@ impl Engine {
                                 fit: Fit::Stretch,
                                 transform: m.transform,
                                 color: m.color,
+                                fx: VideoFx::at(&m.effects, 0.0),
                                 live: match &cue.kind {
                                     CueKind::Text(t) if t.source.is_live() => {
                                         crate::live_text::resolve(
@@ -1730,11 +1791,17 @@ impl Engine {
                     ActiveKind::Video(v) => {
                         v.transform = m.transform;
                         v.color = m.color;
+                        v.fx = VideoFx::at(&m.effects, a.elapsed);
+                        if let Some(voice) = &v.voice {
+                            voice.set_effects(&m.effects, a.elapsed);
+                        }
                     }
                     ActiveKind::Image(i) => {
                         i.transform = m.transform;
                         i.color = m.color;
+                        i.fx = VideoFx::at(&m.effects, a.elapsed);
                     }
+                    ActiveKind::Audio(voice) => voice.set_effects(&m.effects, a.elapsed),
                     _ => {}
                 }
                 if a.relevel {
@@ -1982,6 +2049,27 @@ impl Engine {
             })
     }
 
+    /// How many pictures are being drawn, and how many reads of them each
+    /// pixel of those layers takes in all (a plain picture is one): when the
+    /// second is well above the first, effects are costing the graphics card.
+    pub fn picture_layers(&self) -> u32 {
+        self.active
+            .iter()
+            .filter(|a| matches!(a.kind, ActiveKind::Video(_) | ActiveKind::Image(_)))
+            .count() as u32
+    }
+
+    pub fn picture_reads(&self) -> u32 {
+        self.active
+            .iter()
+            .map(|a| match &a.kind {
+                ActiveKind::Video(v) => v.fx.taps_per_pixel(),
+                ActiveKind::Image(i) => i.fx.taps_per_pixel(),
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// Visual layers on an output, bottom to top.
     pub fn layers(&self, output: OutputId) -> Vec<LayerRef<'_>> {
         let mut layers: Vec<(i32, LayerRef)> = Vec::new();
@@ -1990,12 +2078,13 @@ impl Engine {
             if !a.started || a.age < a.video_lag {
                 continue;
             }
-            let (layer, fit, transform, color, source) = match &a.kind {
+            let (layer, fit, transform, color, fx, source) = match &a.kind {
                 ActiveKind::Video(v) if v.output == Some(output) => (
                     v.layer,
                     v.fit,
                     v.transform,
                     v.color,
+                    v.fx,
                     LayerSource::Video(&v.player),
                 ),
                 ActiveKind::Image(i) if i.output == Some(output) => match &i.image {
@@ -2004,6 +2093,7 @@ impl Engine {
                         i.fit,
                         i.transform,
                         i.color,
+                        i.fx,
                         LayerSource::Image(img, i.version),
                     ),
                     None => continue,
@@ -2014,6 +2104,7 @@ impl Engine {
                     Fit::Stretch,
                     LayerTransform::default(),
                     ColorAdjust::default(),
+                    VideoFx::default(),
                     LayerSource::Solid(m.color),
                 ),
                 _ => continue,
@@ -2026,6 +2117,7 @@ impl Engine {
                     fit,
                     transform,
                     color,
+                    fx,
                     source,
                 },
             ));
@@ -3452,13 +3544,78 @@ mod tests {
     }
 
     #[test]
-    fn looping_and_finished_cues_are_not_scrubbable() {
-        let Some((mut e, show, _, instance)) = playing_video(true) else {
+    fn a_loop_that_never_ends_shows_and_jumps_within_its_pass() {
+        let Some((mut e, show, out, instance)) = playing_video(true) else {
             return;
         };
-        assert!(e.active[0].scrub_length(&show).is_none());
-        assert!(e.seek(&show, instance, 2.0).is_err());
+        let cue = show.cues[0].id;
+        // The bar is one pass long (the whole 10 s clip) and moves as it plays.
+        let a = &e.active[0];
+        assert!(a.loops_forever());
+        let length = a.scrub_length(&show).expect("a loop can be scrubbed");
+        assert!((length - 10.0).abs() < 0.5, "{length}");
+        let before = e.active[0].bar_position();
+        run_for(&mut e, &show, 0.4);
+        assert!(e.active[0].bar_position() > before, "the bar advances");
+        assert_eq!(e.active[0].pass_number(), Some(1));
+        // Jump to 8 s in: the bar is there, and the cue is still playing.
+        e.seek(&show, instance, 8.0).unwrap();
+        run_until(&mut e, &show, "the jump", |e| {
+            e.active[0].bar_position() >= 8.0 && !e.active[0].seeking()
+        });
+        let at = e.active[0].bar_position();
+        assert!((8.0..9.0).contains(&at), "{at}");
+        // The pass runs out at the end of the clip and the loop begins again:
+        // the bar wraps to the start instead of the cue ending.
+        run_until(&mut e, &show, "the loop to come round", |e| {
+            e.active
+                .first()
+                .is_some_and(|a| a.bar_position() < 3.0 && a.elapsed > 8.5)
+        });
+        assert_eq!(e.active.len(), 1, "it is still playing");
+        assert!(e.active[0].started && e.active[0].loops_forever());
+        let _ = (cue, out);
+    }
+
+    #[test]
+    fn a_loop_with_a_set_number_of_plays_is_scrubbed_over_all_of_them() {
+        let Some((mut e, mut show, _, _)) = playing_video(false) else {
+            return;
+        };
+        e.stop_all(0.0);
+        let id = show.cues[0].id;
+        {
+            let m = show.cue_mut(id).unwrap().kind.media_mut().unwrap();
+            m.loop_media = true;
+            m.loop_count = 3;
+            m.end = Some(2.0);
+        }
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the clip to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        let a = &e.active[0];
+        assert!(!a.loops_forever());
+        let length = a.scrub_length(&show).unwrap();
+        assert!((length - 6.0).abs() < 0.1, "three 2 s plays: {length}");
+        // 5 s in is 1 s into the third play.
+        let instance = a.instance;
+        e.seek(&show, instance, 5.0).unwrap();
+        run_until(&mut e, &show, "the jump", |e| !e.active[0].seeking());
+        assert!((5.0..5.6).contains(&elapsed(&e, instance)));
+        // Only a second of it is left to play.
+        run_until(&mut e, &show, "the cue to end", |e| e.active.is_empty());
+    }
+
+    #[test]
+    fn a_finished_cue_is_not_scrubbable() {
+        let Some((mut e, show, _, instance)) = playing_video(false) else {
+            return;
+        };
         assert!(e.seek(&show, instance + 99, 2.0).is_err());
+        e.stop_all(0.0);
+        assert!(e.seek(&show, instance, 2.0).is_err());
     }
 
     #[test]
@@ -3816,5 +3973,50 @@ mod tests {
             "{:?}",
             e.messages
         );
+    }
+
+    #[test]
+    fn picture_effects_follow_their_keyframes_as_the_cue_plays() {
+        use crate::show::{Effect, EffectKind};
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let a = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        let i = show.cue_index(a).unwrap();
+        let mut blur = Effect::new(EffectKind::Blur);
+        blur.p[0].set_key(0.0, 0.0);
+        blur.p[0].set_key(1.0, 40.0);
+        show.cues[i]
+            .kind
+            .media_mut()
+            .unwrap()
+            .effects
+            .push(blur.clone());
+        e.playhead = Some(a);
+        e.go(&show);
+        run_until(&mut e, &show, "the picture on screen", |e| {
+            !e.layers(out).is_empty()
+        });
+        let early = e.layers(out)[0].fx.blur;
+        run_for(&mut e, &show, 0.5);
+        let mid = e.layers(out)[0].fx.blur;
+        run_for(&mut e, &show, 0.8);
+        let late = e.layers(out)[0].fx.blur;
+        assert!(
+            early < 15.0 && mid > early && late >= mid,
+            "{early} {mid} {late}"
+        );
+        assert!((late - 40.0).abs() < 0.5, "held at the last key: {late}");
+        // Editing an effect while it plays reaches the picture at once.
+        blur.p[0].keys.clear();
+        blur.p[0].value = 3.0;
+        show.cues[i].kind.media_mut().unwrap().effects = vec![blur];
+        run_for(&mut e, &show, 0.1);
+        assert_eq!(e.layers(out)[0].fx.blur, 3.0);
+        show.cues[i].kind.media_mut().unwrap().effects.clear();
+        run_for(&mut e, &show, 0.1);
+        assert!(e.layers(out)[0].fx.is_none());
     }
 }

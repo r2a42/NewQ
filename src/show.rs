@@ -1142,6 +1142,287 @@ impl ColorAdjust {
     }
 }
 
+/// One keyframe of an animated parameter: its value `v` at `t` seconds into
+/// the cue, easing to the next keyframe by `curve`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    pub t: f64,
+    pub v: f32,
+    #[serde(default = "linear", skip_serializing_if = "is_linear")]
+    pub curve: Curve,
+}
+
+fn linear() -> Curve {
+    Curve::Linear
+}
+
+fn is_linear(c: &Curve) -> bool {
+    *c == Curve::Linear
+}
+
+/// A number that can change over the length of a cue: `value` while it has no
+/// keyframes, otherwise the keyframes (kept in time order) say.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Animated {
+    pub value: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<Keyframe>,
+}
+
+impl Animated {
+    pub fn new(value: f32) -> Animated {
+        Animated {
+            value,
+            keys: Vec::new(),
+        }
+    }
+
+    pub fn is_animated(&self) -> bool {
+        !self.keys.is_empty()
+    }
+
+    /// The value `t` seconds into the cue: the first keyframe's before it,
+    /// the last's after the last, and between two the first's value eased
+    /// towards the second's.
+    pub fn at(&self, t: f64) -> f32 {
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
+            return self.value;
+        };
+        if t <= first.t {
+            return first.v;
+        }
+        if t >= last.t {
+            return last.v;
+        }
+        let i = self.keys.partition_point(|k| k.t <= t) - 1;
+        let (a, b) = (self.keys[i], self.keys[i + 1]);
+        let f = a.curve.apply((t - a.t) / (b.t - a.t).max(1e-9)) as f32;
+        a.v + (b.v - a.v) * f
+    }
+
+    /// Put a keyframe at `t` (replacing the value of one already there, to
+    /// the nearest millisecond). Returns its index.
+    pub fn set_key(&mut self, t: f64, v: f32) -> usize {
+        let t = t.max(0.0);
+        if let Some(i) = self.keys.iter().position(|k| (k.t - t).abs() < 0.001) {
+            self.keys[i].v = v;
+            return i;
+        }
+        let i = self.keys.partition_point(|k| k.t < t);
+        self.keys.insert(
+            i,
+            Keyframe {
+                t,
+                v,
+                curve: Curve::Linear,
+            },
+        );
+        i
+    }
+
+    /// Move keyframe `i` to `t` and `v`, keeping the order. Returns where it
+    /// is now.
+    pub fn move_key(&mut self, i: usize, t: f64, v: f32) -> usize {
+        if i >= self.keys.len() {
+            return i;
+        }
+        let mut key = self.keys.remove(i);
+        key.t = t.max(0.0);
+        key.v = v;
+        let at = self.keys.partition_point(|k| k.t < key.t);
+        self.keys.insert(at, key);
+        at
+    }
+
+    pub fn remove_key(&mut self, i: usize) {
+        if i < self.keys.len() {
+            self.keys.remove(i);
+        }
+    }
+}
+
+/// What an effect on a cue does. The first five act on the picture, the rest
+/// on the sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EffectKind {
+    Blur,
+    Sharpen,
+    Vignette,
+    Pixelate,
+    Negative,
+    Eq,
+    Filter,
+    Compressor,
+    Echo,
+    Reverb,
+}
+
+/// One number an effect takes.
+pub struct ParamSpec {
+    pub name: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub default: f32,
+    pub unit: &'static str,
+    pub decimals: usize,
+}
+
+const fn spec(
+    name: &'static str,
+    min: f32,
+    max: f32,
+    default: f32,
+    unit: &'static str,
+    decimals: usize,
+) -> ParamSpec {
+    ParamSpec {
+        name,
+        min,
+        max,
+        default,
+        unit,
+        decimals,
+    }
+}
+
+impl EffectKind {
+    pub const VIDEO: [EffectKind; 5] = [
+        EffectKind::Blur,
+        EffectKind::Sharpen,
+        EffectKind::Vignette,
+        EffectKind::Pixelate,
+        EffectKind::Negative,
+    ];
+    pub const AUDIO: [EffectKind; 5] = [
+        EffectKind::Eq,
+        EffectKind::Filter,
+        EffectKind::Compressor,
+        EffectKind::Echo,
+        EffectKind::Reverb,
+    ];
+
+    pub fn is_video(self) -> bool {
+        Self::VIDEO.contains(&self)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EffectKind::Blur => "Blur",
+            EffectKind::Sharpen => "Sharpen",
+            EffectKind::Vignette => "Vignette",
+            EffectKind::Pixelate => "Pixelate",
+            EffectKind::Negative => "Negative",
+            EffectKind::Eq => "3-band EQ",
+            EffectKind::Filter => "High / low-pass filter",
+            EffectKind::Compressor => "Compressor",
+            EffectKind::Echo => "Echo",
+            EffectKind::Reverb => "Reverb",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            EffectKind::Blur => "Softens the picture (a disc blur, drawn on the graphics card)",
+            EffectKind::Sharpen => "Brings out edges and detail",
+            EffectKind::Vignette => "Darkens the edges of the picture",
+            EffectKind::Pixelate => "Turns the picture into big blocks",
+            EffectKind::Negative => "Inverts the colours",
+            EffectKind::Eq => "Boosts or cuts the low, middle and high of the sound",
+            EffectKind::Filter => "Cuts the lows (high-pass) and the highs (low-pass)",
+            EffectKind::Compressor => "Evens out loud and quiet",
+            EffectKind::Echo => "Repeats the sound after a delay",
+            EffectKind::Reverb => "Puts the sound in a room",
+        }
+    }
+
+    /// The numbers it takes, in order (at most four).
+    pub fn params(self) -> &'static [ParamSpec] {
+        match self {
+            EffectKind::Blur => &BLUR,
+            EffectKind::Sharpen => &SHARPEN,
+            EffectKind::Vignette => &VIGNETTE,
+            EffectKind::Pixelate => &PIXELATE,
+            EffectKind::Negative => &NEGATIVE,
+            EffectKind::Eq => &EQ,
+            EffectKind::Filter => &FILTER,
+            EffectKind::Compressor => &COMPRESSOR,
+            EffectKind::Echo => &ECHO,
+            EffectKind::Reverb => &REVERB,
+        }
+    }
+}
+
+static BLUR: [ParamSpec; 1] = [spec("Radius", 0.0, 100.0, 8.0, " px", 1)];
+static SHARPEN: [ParamSpec; 1] = [spec("Amount", 0.0, 5.0, 1.0, "", 2)];
+static VIGNETTE: [ParamSpec; 2] = [
+    spec("Amount", 0.0, 1.0, 0.6, "", 2),
+    spec("Softness", 0.05, 1.0, 0.5, "", 2),
+];
+static PIXELATE: [ParamSpec; 1] = [spec("Block size", 1.0, 200.0, 16.0, " px", 0)];
+static NEGATIVE: [ParamSpec; 1] = [spec("Amount", 0.0, 1.0, 1.0, "", 2)];
+static EQ: [ParamSpec; 3] = [
+    spec("Low", -18.0, 18.0, 0.0, " dB", 1),
+    spec("Mid", -18.0, 18.0, 0.0, " dB", 1),
+    spec("High", -18.0, 18.0, 0.0, " dB", 1),
+];
+static FILTER: [ParamSpec; 2] = [
+    spec("High-pass at", 20.0, 20_000.0, 20.0, " Hz", 0),
+    spec("Low-pass at", 20.0, 20_000.0, 20_000.0, " Hz", 0),
+];
+static COMPRESSOR: [ParamSpec; 4] = [
+    spec("Threshold", -60.0, 0.0, -18.0, " dB", 1),
+    spec("Ratio", 1.0, 20.0, 4.0, " : 1", 1),
+    spec("Make-up gain", 0.0, 24.0, 0.0, " dB", 1),
+    spec("Release", 20.0, 1000.0, 150.0, " ms", 0),
+];
+static ECHO: [ParamSpec; 3] = [
+    spec("Time", 20.0, 2000.0, 350.0, " ms", 0),
+    spec("Feedback", 0.0, 0.95, 0.4, "", 2),
+    spec("Mix", 0.0, 1.0, 0.35, "", 2),
+];
+static REVERB: [ParamSpec; 3] = [
+    spec("Size", 0.0, 1.0, 0.6, "", 2),
+    spec("Damping", 0.0, 1.0, 0.5, "", 2),
+    spec("Mix", 0.0, 1.0, 0.25, "", 2),
+];
+
+/// An effect on a cue, with each of its numbers (which can be animated).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Effect {
+    pub kind: EffectKind,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    pub p: Vec<Animated>,
+}
+
+impl Effect {
+    pub fn new(kind: EffectKind) -> Effect {
+        Effect {
+            kind,
+            enabled: true,
+            p: kind
+                .params()
+                .iter()
+                .map(|s| Animated::new(s.default))
+                .collect(),
+        }
+    }
+
+    /// Its numbers `t` seconds into the cue, each kept within its range;
+    /// missing ones (a hand-edited file) are the defaults.
+    pub fn values(&self, t: f64) -> [f32; 4] {
+        let mut out = [0.0; 4];
+        for (i, spec) in self.kind.params().iter().enumerate() {
+            out[i] = self
+                .p
+                .get(i)
+                .map_or(spec.default, |a| a.at(t))
+                .clamp(spec.min, spec.max);
+        }
+        out
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MediaCue {
     pub file: PathBuf,
@@ -1197,6 +1478,9 @@ pub struct MediaCue {
     /// Video: hold the last frame when the media ends instead of stopping.
     #[serde(default)]
     pub hold_last_frame: bool,
+    /// Effects on the picture and the sound, in order (see `EffectKind`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
     /// In a slide show: this slide's own fade-in time, in place of the show's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_fade: Option<f64>,
@@ -1251,6 +1535,7 @@ impl MediaCue {
             loop_media: false,
             loop_count: 0,
             hold_last_frame: false,
+            effects: Vec::new(),
             slide_fade: None,
             slide_duration: None,
             crossfade: false,
@@ -1285,6 +1570,18 @@ impl MediaCue {
             && self.loop_count == other.loop_count
             && self.audio_output == other.audio_output
             && self.audio_channel == other.audio_channel
+            && self.sound_chain() == other.sound_chain()
+    }
+
+    /// The sound effects, in order, whether or not they are on. A voice is
+    /// built with them (switching one on or off is done live), so a change
+    /// here is a change to what must be decoded for.
+    pub fn sound_chain(&self) -> Vec<EffectKind> {
+        self.effects
+            .iter()
+            .filter(|e| !e.kind.is_video())
+            .map(|e| e.kind)
+            .collect()
     }
 
     /// How this cue's decoders should run, given the file's duration if known.

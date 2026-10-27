@@ -1204,6 +1204,7 @@ impl App {
                     fit: l.fit,
                     transform: l.transform,
                     color: l.color,
+                    fx: l.fx,
                 });
             }
 
@@ -1218,6 +1219,7 @@ impl App {
                     fit: Fit::Stretch,
                     transform: LayerTransform::default(),
                     color: ColorAdjust::default(),
+                    fx: Default::default(),
                 });
             }
             // The test pattern is drawn at the canvas's shape, so its circles
@@ -1272,6 +1274,7 @@ impl App {
                     fit: Fit::Stretch,
                     transform,
                     color: ColorAdjust::default(),
+                    fx: Default::default(),
                 });
             }
             if pattern_changed {

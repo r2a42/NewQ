@@ -34,6 +34,25 @@ includes FFmpeg, so there's nothing else to install.
   (up to 64) to route cues to; subscribe the channels in Dante Controller.
   Nothing else is needed or possible: Dante has no interface for a program to
   join the network by itself.
+- **Effects with keyframes:** the *Effects* section of a cue's inspector takes
+  any number of effects. **Picture:** *Blur* (a disc blur, up to 100 px),
+  *Sharpen*, *Vignette*, *Pixelate* and *Negative*, drawn by the graphics card in
+  the same pass as the picture. **Sound:** a *3-band EQ*, a *high/low-pass
+  filter*, a *compressor*, *echo* and *reverb*, run on the cue's sound before it
+  reaches its output. Each effect can be switched on and off, even while the cue
+  plays, and put in order. Every number (blur radius, EQ gain, echo time…) has an
+  **Animate** switch: it becomes a lane of keyframes over the cue's time, where
+  you click to add a keyframe, drag one to move it in time and value, right-click
+  to remove it, and choose how it eases into the next. The white line is the cue's
+  own time while it plays. Effects follow the cue's time, so a scrub or a loop
+  carries them with it. There is no fixed limit on how many run at once: a
+  plain picture is read once a pixel, a blur reads it up to about fifty times, so
+  a few big blurs ask a lot of a slow graphics card, and long reverbs and echoes
+  take a little memory when a cue starts. NewQ watches for trouble and says so in
+  the status bar: *graphics behind* when frames start arriving late while effects
+  are running, and *audio at N% of its time* when mixing the sound takes most of
+  the time it has (above about 90% it breaks up). Adding or removing a *sound*
+  effect applies the next time the cue plays; everything else is live.
 - **Live audio:** *Cue ▸ Add Live audio cue* plays an audio input (a Dante Virtual
   Soundcard or Dante interface, a mixer's USB output, a line input) on one of the
   audio outputs, from the input channel you choose (and the next). It has the
@@ -48,7 +67,7 @@ includes FFmpeg, so there's nothing else to install.
   Set one *Fade* (how long each slide takes to fade in over the last) and one
   *Duration* (how long each is shown in full before the next starts) for the
   whole show, and give any slide its own: change its fade or duration in the
-  slide list (it turns yellow; ↺ puts it back to the show's). The same list
+  slide list (it turns yellow; Reset puts it back to the show's). The same list
   adds images, removes them and puts them in order, and says how long the
   show runs. A slide show is a group of image cues whose start times and
   fades are worked out from those settings, so each slide is still an
@@ -150,8 +169,12 @@ includes FFmpeg, so there's nothing else to install.
   main window isn't on, once (the log says what was done).
 - **Scrubbing:** each playing cue's **progress bar in the Active panel is also
   its scrubber**: click or drag it to jump around in a video, a sound or a
-  timed still (it works while paused; a looping cue, a camera and a cue that is
-  fading out can't be scrubbed). Scroll over a bar to move that cue by the
+  timed still (it works while paused; a camera and a cue that is fading out
+  can't be scrubbed). A **loop with a set number of plays** has a bar over all
+  of them; a **loop that never ends** has a bar one pass long that moves as it
+  plays and wraps round with each pass (the text says which loop it is on and
+  the time in all), and clicking it jumps to that point in the pass, after
+  which the loop carries on as before. Scroll over a bar to move that cue by the
   wheel. Hold **Shift** while dragging or scrolling to move every cue that can
   be scrubbed by the same amount, keeping their positions relative to each
   other.
