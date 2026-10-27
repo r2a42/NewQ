@@ -565,6 +565,8 @@ impl Engine {
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Stop(_) | CueKind::Send(_) => Some(Some(0.0)),
+            // Slide show: the slides are timed to end together with the last.
+            CueKind::Group(g) if g.slides.is_some() => Some(Some(show.slides_length(cue.id))),
             CueKind::Group(g) => {
                 // Timeline: until the last child ends. Playlist: all of them in turn.
                 let mut total = 0.0_f64;
@@ -3693,5 +3695,46 @@ mod tests {
             "{:?}",
             e.messages
         );
+    }
+
+    #[test]
+    fn a_slide_show_crossfades_through_its_slides_and_ends() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let slot = show.insert_slot(None, true);
+        let mut g = show.make_cue(CueType::Group, None, slot.at);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.slides = Some(SlideShow {
+                fade: 0.2,
+                duration: 0.3,
+            });
+        }
+        let gid = g.id;
+        show.insert_cue(slot, g);
+        show.add_slides(gid, vec![img.clone(), img.clone(), img]);
+        let slides: Vec<CueId> = show.children(gid).iter().map(|c| c.id).collect();
+        e.playhead = Some(gid);
+        e.go(&show);
+        // The first is up, alone.
+        run_until(&mut e, &show, "slide 1 on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(slides[0]))
+        });
+        // The second fades in over it, and then the first is gone.
+        run_until(&mut e, &show, "slide 2 on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(slides[1]))
+        });
+        run_until(&mut e, &show, "slide 1 gone", |e| {
+            stack(e, out).iter().all(|l| l.0 != Some(slides[0]))
+        });
+        run_until(&mut e, &show, "slide 3 on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(slides[2]))
+        });
+        // The last is shown, fades out, and the show ends with nothing on screen.
+        run_until(&mut e, &show, "the slide show to end", |e| {
+            stack(e, out).is_empty() && !e.is_active()
+        });
     }
 }

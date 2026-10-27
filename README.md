@@ -19,6 +19,17 @@ includes FFmpeg, so there's nothing else to install.
 
 ## Features
 
+- **Slide shows:** *Cue ▸ Add Slide show…* takes any number of images (chosen
+  together, put in name order) and makes one cue that crossfades through them.
+  Set one *Fade* (how long each slide takes to fade in over the last) and one
+  *Duration* (how long each is shown in full before the next starts) for the
+  whole show, and give any slide its own: change its fade or duration in the
+  slide list (it turns yellow; ↺ puts it back to the show's). The same list
+  adds images, removes them and puts them in order, and says how long the
+  show runs. A slide show is a group of image cues whose start times and
+  fades are worked out from those settings, so each slide is still an
+  ordinary image cue to give a position, size or colour (its timing is the
+  slide show's). It plays once and the last slide fades out.
 - **Panes you can rearrange and pop out:** the main window is a set of panes
   (*Cue list*, *Inspector*, *Preview*, *Active*, the *Cart* and the *Settings*)
   that tile it: drag a pane's tab onto another to move it, beside or above or
