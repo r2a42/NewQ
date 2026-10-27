@@ -19,10 +19,20 @@ includes FFmpeg, so there's nothing else to install.
 
 ## Features
 
+- **Panes you can rearrange and pop out:** the main window is a set of panes
+  (*Cue list*, *Inspector*, *Preview*, *Active*, the *Cart* and the *Settings*)
+  that tile it: drag a pane's tab onto another to move it, beside or above or
+  below or as a tab, and drag the lines between panes to resize. Making one
+  bigger makes its neighbours smaller, so nothing overlaps. *Double-click a
+  tab* (or right-click it ▸ *Pop out to a window*, or *Window ▸ Pop out*) to give a
+  pane a window of its own, e.g. the preview on a second monitor; *Dock back*
+  (or closing that window) puts it back. The *Window* menu shows and hides
+  each pane and has *Reset layout*. The arrangement is remembered on this
+  computer (not in the show file).
 - **Settings:** every setting of the show is in one place, *Settings ▸ Open
   settings…* (**Ctrl+,** to open and close it). It takes the place of the cue
   list, so GO, Stop All and the live preview stay where they are and a setting
-  can be tried while the show runs; *Back to cues* returns. A sidebar groups
+  can be tried while the show runs; *Close settings* returns. A sidebar groups
   the pages: **Show** (*General*: the show's name, how long Stop All takes to
   fade, where the recovery copies and logs go; *Media*: whether every file can
   be found), **Picture and sound** (*Displays*, *Sub displays*, *Audio
@@ -291,7 +301,7 @@ includes FFmpeg, so there's nothing else to install.
   giving it to another cue moves it. A *MIDI note* does the same from a
   note-on (with MIDI control on); a note with no cue bound to it still fires
   the cue whose number is the note, as before. Tick *On cart* for the cues you
-  want as buttons, then *Cue ▸ Show cart* for a grid of them: click to fire,
+  want as buttons, then *Cue ▸ Show cart* (or *Window ▸ Cart*) for a grid of them: click to fire,
   right-click to stop or fade out. Buttons show the hotkey, fill as the cue
   plays, and have a green dot when preloaded. Hotkeys don't fire while you're
   typing in a text box. Copies of a cue don't inherit its hotkey or note.

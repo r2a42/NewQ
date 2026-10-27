@@ -17,6 +17,13 @@ The README describes the features; this file is about working on the code.
   groups, with badges; it replaces the cue list while open). A setting goes on
   the page it belongs to; the displays, audio and sub display panels are
   functions in `ui.rs` that the pages call.
+- `src/dock.rs`: the pane layout (an `egui_dock` tree plus the popped-out panes),
+  saved per computer as `layout.json` in the log folder, not in the show.
+  `ui.rs::dock_area` draws the tiles; each pop-out is an OS window in
+  `app.rs` (`PopoutWindow`) with its own egui context and render thread, drawn by
+  `ui::draw_popout`. Opening a surface while other windows draw can fail to
+  configure, so `Gpu::configure_checked` retries. A lost device drops the
+  pop-outs and `reconcile_popouts` opens them again from the layout.
 - `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.
