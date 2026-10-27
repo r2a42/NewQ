@@ -332,6 +332,110 @@ fn is_whole(c: &Corners) -> bool {
     *c == Corners::default()
 }
 
+fn is_default_pattern(p: &PatternKind) -> bool {
+    *p == PatternKind::default()
+}
+
+/// The pictures a display can show to line it up (see `pattern`). The first
+/// is the one displays have always shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PatternKind {
+    #[default]
+    Bars,
+    Grid,
+    Crosshatch,
+    Checkerboard,
+    Circles,
+    GreySteps,
+    Ramp,
+    White,
+    Black,
+    Colours,
+    Frame,
+    Focus,
+}
+
+impl PatternKind {
+    pub const ALL: [PatternKind; 12] = [
+        PatternKind::Bars,
+        PatternKind::Grid,
+        PatternKind::Crosshatch,
+        PatternKind::Checkerboard,
+        PatternKind::Circles,
+        PatternKind::GreySteps,
+        PatternKind::Ramp,
+        PatternKind::White,
+        PatternKind::Black,
+        PatternKind::Colours,
+        PatternKind::Frame,
+        PatternKind::Focus,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PatternKind::Bars => "Colour bars and number",
+            PatternKind::Grid => "Grid",
+            PatternKind::Crosshatch => "Crosshatch",
+            PatternKind::Checkerboard => "Checkerboard",
+            PatternKind::Circles => "Circles",
+            PatternKind::GreySteps => "Grey steps",
+            PatternKind::Ramp => "Grey ramp",
+            PatternKind::White => "White",
+            PatternKind::Black => "Black",
+            PatternKind::Colours => "Red, green, blue, cyan, magenta, yellow",
+            PatternKind::Frame => "Edges and safe areas",
+            PatternKind::Focus => "Focus lines",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            PatternKind::Bars => {
+                "Colour bars with a grid and the display's number: which screen is which, and colour"
+            }
+            PatternKind::Grid => {
+                "A coarse grid with a centre cross and the number: squareness, keystone and where the picture lands"
+            }
+            PatternKind::Crosshatch => {
+                "A fine grid of square cells, one pixel lines: straightness and warp, mesh and corner pin"
+            }
+            PatternKind::Checkerboard => {
+                "Black and white squares: edges, sharpness and the shape of a warped picture"
+            }
+            PatternKind::Circles => {
+                "Concentric circles and diagonals: they are round when the picture has the right shape"
+            }
+            PatternKind::GreySteps => {
+                "Eleven steps from black to white: brightness and contrast, and that dark greys can be told apart"
+            }
+            PatternKind::Ramp => {
+                "A smooth ramp from black to white: banding and whether the whole range shows"
+            }
+            PatternKind::White => {
+                "All white: uniformity, hot spots, dust, and how bright the screen is"
+            }
+            PatternKind::Black => {
+                "All black: black level and light leaking from the projector or panel"
+            }
+            PatternKind::Colours => {
+                "Pure red, green and blue over cyan, magenta and yellow: colour balance and dead pixels"
+            }
+            PatternKind::Frame => {
+                "Frames at the very edge, at 90% (action safe) and at 80% (title safe), with diagonals: overscan and cropping"
+            }
+            PatternKind::Focus => {
+                "Lines one and two pixels wide in both directions: focus, and whether pixels are shown one for one"
+            }
+        }
+    }
+
+    /// Whether the pattern is made of single pixels, so it is drawn at the
+    /// display's own size rather than a smaller one scaled up.
+    pub fn pixel_exact(self) -> bool {
+        matches!(self, PatternKind::Crosshatch | PatternKind::Focus)
+    }
+}
+
 /// A display, assigned to a monitor, or a sub display, an area of one. Cues
 /// are sent to either.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -342,6 +446,9 @@ pub struct OutputConfig {
     pub enabled: bool,
     #[serde(default)]
     pub test_pattern: bool,
+    /// Which test pattern it shows when `test_pattern` is on.
+    #[serde(default, skip_serializing_if = "is_default_pattern")]
+    pub pattern: PatternKind,
     /// Keystone / corner pin applied to everything on a display. (A sub
     /// display's area is its keystone.)
     #[serde(default)]
@@ -405,6 +512,7 @@ impl OutputConfig {
             name,
             enabled: true,
             test_pattern: false,
+            pattern: PatternKind::default(),
             corners: Corners::default(),
             mesh: None,
             part_of: None,
@@ -2772,6 +2880,26 @@ mod tests {
         );
         assert_eq!(o(right).picture, Some((1, 16_384)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_test_pattern_choice_round_trips_and_the_default_is_not_written() {
+        let mut show = Show::default();
+        let plain = serde_json::to_string(&show).unwrap();
+        assert!(!plain.contains("\"pattern\""), "{plain}");
+        // A show from before there was a choice loads with the bars.
+        let back: Show = serde_json::from_str(&plain).unwrap();
+        assert_eq!(back.outputs[0].pattern, PatternKind::Bars);
+        // Every pattern survives a save and load, and is written under its name.
+        for kind in PatternKind::ALL {
+            show.outputs[0].pattern = kind;
+            show.outputs[0].test_pattern = true;
+            let json = serde_json::to_string(&show).unwrap();
+            let back: Show = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.outputs[0].pattern, kind);
+            assert!(back.outputs[0].test_pattern);
+            assert_eq!(json.contains("\"pattern\""), kind != PatternKind::Bars);
+        }
     }
 
     #[test]

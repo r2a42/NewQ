@@ -3377,8 +3377,12 @@ fn displays_panel(
             });
             ui.horizontal(|ui| {
                 ui.checkbox(&mut d.enabled, "On");
-                ui.checkbox(&mut d.test_pattern, "Test pattern")
-                    .on_hover_text("Show colour bars with the display's number");
+                pattern_picker(
+                    ui,
+                    ("display_pattern", d.id.0),
+                    &mut d.test_pattern,
+                    &mut d.pattern,
+                );
             });
             let state_size = match state {
                 Some(DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i)) => {
@@ -3715,6 +3719,32 @@ fn edge_blend_editor(ui: &mut Ui, d: &mut OutputConfig, size: (u32, u32)) {
         });
 }
 
+/// The "Test pattern" checkbox and the choice of which of the twelve patterns
+/// it shows. Choosing one turns the pattern on.
+fn pattern_picker(ui: &mut Ui, id: (&str, u64), on: &mut bool, kind: &mut PatternKind) {
+    ui.checkbox(on, "Test pattern")
+        .on_hover_text("Show a picture for lining the display up: choose which on the right");
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(kind.label())
+        .width(150.0)
+        // All twelve at once, without scrolling.
+        .height(400.0)
+        .show_ui(ui, |ui| {
+            for k in PatternKind::ALL {
+                if ui
+                    .selectable_label(*kind == k, k.label())
+                    .on_hover_text(k.description())
+                    .clicked()
+                {
+                    *kind = k;
+                    *on = true;
+                }
+            }
+        })
+        .response
+        .on_hover_text(kind.description());
+}
+
 fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
     for d in show.outputs.iter().filter(|o| !o.is_sub_display()) {
         if ui.button(&d.name).clicked() {
@@ -3802,8 +3832,12 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
             ui.label(RichText::new(status).color(color).small());
             ui.horizontal(|ui| {
                 ui.checkbox(&mut v.enabled, "On");
-                ui.checkbox(&mut v.test_pattern, "Test pattern")
-                    .on_hover_text("Show colour bars with the sub display's name");
+                pattern_picker(
+                    ui,
+                    ("sub_pattern", v.id.0),
+                    &mut v.test_pattern,
+                    &mut v.pattern,
+                );
             });
             let editing = st.area_edit == Some(v.id);
             ui.horizontal(|ui| {
@@ -8095,6 +8129,15 @@ mod tests {
             time: Some(1.0),
             ..Default::default()
         };
+        // A pattern other than the bars, on, on a display and a sub display.
+        show.outputs[0].pattern = PatternKind::Circles;
+        show.outputs[0].test_pattern = true;
+        let sub_idx = show
+            .outputs
+            .iter()
+            .position(|o| o.is_sub_display())
+            .unwrap();
+        show.outputs[sub_idx].pattern = PatternKind::Focus;
         let mut actions = Vec::new();
         let mut engine = Engine::for_tests();
         let mut out = ctx.run_ui(input, |ui| {

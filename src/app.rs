@@ -8,6 +8,7 @@ use crate::engine::{Engine, LayerSource};
 use crate::gpu::{self, Geometry, Gpu, Homography, LayerTexture};
 use crate::media::audio;
 use crate::mesh::Mesh;
+use crate::pattern;
 use crate::recovery;
 use crate::remote::{self, Remote};
 use crate::render::{
@@ -15,7 +16,7 @@ use crate::render::{
 };
 use crate::show::{
     ColorAdjust, Corners, DisplayState, EdgeBlend, Fit, LayerTransform, MonitorKey, OutputConfig,
-    OutputId, PartOf, RemoteSettings, Show, StreamOut, display_state,
+    OutputId, PartOf, PatternKind, RemoteSettings, Show, StreamOut, display_state,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -37,6 +38,7 @@ struct OutputSetup {
     name: String,
     /// Whether it shows the test pattern, and the number it shows.
     test_pattern: bool,
+    pattern: PatternKind,
     number: usize,
     corners: Corners,
     mesh: Option<Arc<Mesh>>,
@@ -146,7 +148,9 @@ struct GpuRecovery {
 }
 
 /// A test-pattern texture, with the output number and size it shows.
-type Pattern = (Arc<LayerTexture>, usize, (u32, u32));
+/// A drawn test pattern: its picture, the display number and size it was
+/// drawn for, and which pattern it is.
+type Pattern = (Arc<LayerTexture>, usize, (u32, u32), PatternKind);
 
 /// What of an output's placement was last sent to a window: id, warp, mesh and
 /// the part of the picture the mesh sees.
@@ -1035,6 +1039,7 @@ impl App {
                     id: o.id,
                     name: o.name.clone(),
                     test_pattern: o.test_pattern,
+                    pattern: o.pattern,
                     number: i + 1,
                     corners,
                     mesh,
@@ -1049,6 +1054,7 @@ impl App {
                 id,
                 name,
                 test_pattern: want_pattern,
+                pattern: kind,
                 number,
                 corners,
                 mesh,
@@ -1161,7 +1167,7 @@ impl App {
             // The test pattern of the picture it shows part of, so projectors
             // can be lined up across their overlap.
             if source != id
-                && let Some((tex, _, _)) = self.patterns.get(&source)
+                && let Some((tex, ..)) = self.patterns.get(&source)
             {
                 layers.push(OutputLayer {
                     texture: tex.clone(),
@@ -1175,24 +1181,33 @@ impl App {
             // and grid stay true on a sub display of any size.
             let mut pattern_changed = false;
             if want_pattern {
-                let scale = (1280.0 / own_canvas.0.max(own_canvas.1) as f32).min(1.0);
-                // In 32 px steps, so dragging an area doesn't redraw it every frame.
-                let step = |v: u32| ((v as f32 * scale / 32.0).round() as u32).max(1) * 32;
-                let size = (step(own_canvas.0), step(own_canvas.1));
+                // Drawn small and stretched, except the patterns made of single
+                // pixels, which need the display's own size (up to 4K).
+                let size = if kind.pixel_exact() {
+                    let scale = (3840.0 / own_canvas.0.max(own_canvas.1) as f32).min(1.0);
+                    let px = |v: u32| ((v as f32 * scale).round() as u32).max(2);
+                    (px(own_canvas.0), px(own_canvas.1))
+                } else {
+                    let scale = (1280.0 / own_canvas.0.max(own_canvas.1) as f32).min(1.0);
+                    // In 32 px steps, so dragging an area doesn't redraw it every frame.
+                    let step = |v: u32| ((v as f32 * scale / 32.0).round() as u32).max(1) * 32;
+                    (step(own_canvas.0), step(own_canvas.1))
+                };
                 if self
                     .patterns
                     .get(&id)
-                    .is_none_or(|(_, n, s)| *n != number || *s != size)
+                    .is_none_or(|(_, n, s, k)| *n != number || *s != size || *k != kind)
                 {
                     let tex = LayerTexture::new_rgba(gpu, size.0, size.1);
-                    tex.upload_rgba(&gpu.queue, &gpu::test_pattern(size.0, size.1, number));
-                    self.patterns.insert(id, (Arc::new(tex), number, size));
+                    tex.upload_rgba(&gpu.queue, &pattern::render(kind, size.0, size.1, number));
+                    self.patterns
+                        .insert(id, (Arc::new(tex), number, size, kind));
                     pattern_changed = true;
                 }
             } else if self.patterns.remove(&id).is_some() {
                 pattern_changed = true;
             }
-            if let Some((tex, _, _)) = self.patterns.get(&id) {
+            if let Some((tex, ..)) = self.patterns.get(&id) {
                 // On a display showing part of a picture, the pattern covers
                 // that part (the layer is placed on the whole picture).
                 let transform = match part {

@@ -67,8 +67,23 @@ includes FFmpeg, so there's nothing else to install.
   display can't cover the monitor NewQ's main window is on; it stays in the
   main window and the panel says so. The main window has a live preview of
   any display or sub display; with more than one, a menu above it picks which.
-  *Test pattern* shows colour bars with the display's name so you can tell
-  which projector is which. Shows from before displays and outputs were one
+  *Test pattern* shows a picture for lining a display up, with a dropdown of
+  twelve beside it (choosing one turns the pattern on; it works the same on
+  sub displays, and the choice is saved with the show). *Colour bars and
+  number* is the one NewQ has always had, for telling which projector is which.
+  The others: *Grid* (squareness and where the picture lands), *Crosshatch*
+  (a fine grid of one pixel lines, for straightness when setting a mesh or
+  corner pin), *Checkerboard*, *Circles* (round when the shape is right),
+  *Grey steps* (eleven steps, for brightness and contrast), *Grey ramp*
+  (banding), *White* and *Black* (uniformity, black level), *Red, green, blue,
+  cyan, magenta, yellow* (colour balance and dead pixels), *Edges and safe
+  areas* (the edge, 90% and 80%, for overscan) and *Focus lines* (one and two
+  pixel lines both ways). The grid, circles, edges and bars show the display's
+  number as well. Crosshatch and Focus lines are drawn at the display's own
+  pixel size (up to 4K) so each line is a real pixel line; the others are
+  drawn smaller and stretched. The patterns are checked against what they should
+  contain, not against a calibration meter: use a meter for real colour or
+  brightness work. Shows from before displays and outputs were one
   thing are converted when they are opened, with the same cues pointing at the
   same things: an output becomes a display on its monitor (or a sub display if
   it was on one; a second output that shared a display becomes a sub display
