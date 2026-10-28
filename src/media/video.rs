@@ -63,6 +63,7 @@ pub fn decode_size(src: (u32, u32), max: (u32, u32), cover: bool) -> (u32, u32) 
 impl VideoPlayer {
     /// Start decoding `path` from `start`; `playback` says whether to play
     /// once or loop a slice.
+    #[cfg(test)]
     pub fn spawn(
         ff: &Ffmpeg,
         path: &Path,
@@ -71,8 +72,28 @@ impl VideoPlayer {
         playback: Playback,
         size: (u32, u32),
     ) -> Result<VideoPlayer> {
+        Self::spawn_at_rate(ff, path, info, start, playback, size, 1.0)
+    }
+
+    /// `spawn`, playing `rate` times as fast: the picture's time is the file's
+    /// divided by `rate`, at the same frame rate (frames are dropped or
+    /// repeated to keep it).
+    pub fn spawn_at_rate(
+        ff: &Ffmpeg,
+        path: &Path,
+        info: &VideoInfo,
+        start: f64,
+        playback: Playback,
+        size: (u32, u32),
+        rate: f64,
+    ) -> Result<VideoPlayer> {
         let (w, h) = size;
         let fps = info.fps;
+        let speed = if (rate - 1.0).abs() < 1e-9 {
+            String::new()
+        } else {
+            format!("setpts=PTS/{rate:.6},")
+        };
         let make = {
             let (ff, path) = (ff.clone(), path.to_path_buf());
             // The first pass of a jump into a loop starts part way in.
@@ -87,9 +108,9 @@ impl VideoPlayer {
                 });
                 cmd.arg("-i").arg(&path);
                 cmd.args(if first {
-                    playback.first_limit_args()
+                    playback.first_limit_args_at(rate)
                 } else {
-                    playback.limit_args()
+                    playback.limit_args_at(rate)
                 });
                 cmd.args([
                     "-map",
@@ -98,7 +119,7 @@ impl VideoPlayer {
                     "-sn",
                     "-dn",
                     "-vf",
-                    &format!("scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
+                    &format!("{speed}scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
                     "-fps_mode",
                     "cfr",
                     "-r",
@@ -114,7 +135,7 @@ impl VideoPlayer {
         };
         // Looping passes are cut to an exact frame count so the timeline
         // stays locked to the audio's, whatever the decoder delivers.
-        let frames = |l: f64| (l * fps).round().max(1.0) as u64;
+        let frames = |l: f64| (l / rate * fps).round().max(1.0) as u64;
         let per_pass = playback.pass_len().map(frames);
         let first_pass = playback.first_pass_len().map(frames);
         Self::start(

@@ -626,10 +626,13 @@ impl Engine {
                     ProbeState::Ready(info) => info.duration,
                     _ => None,
                 };
+                let rate = m.speed();
                 match m.playback(total) {
                     // Without an out point or a known length there's nothing to count.
-                    Playback::Once { duration: None } => Some(Some((total? - m.start).max(0.0))),
-                    pb => Some(pb.total(None)),
+                    Playback::Once { duration: None } => {
+                        Some(Some((total? - m.start).max(0.0) / rate))
+                    }
+                    pb => Some(pb.total(None).map(|d| d / rate)),
                 }
             }
             CueKind::Image(m) => Some(m.end.filter(|d| *d > 0.0)),
@@ -1162,24 +1165,28 @@ impl Engine {
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let sig = self.signature(cue).ok_or("not a media cue")?;
         let mut shifted = sig.media.clone();
+        let rate = shifted.speed();
+        // `shift` is in the cue's time; the file moves `rate` times as fast.
+        let shift_file = shift * rate;
         let looping = shifted.loop_media && shifted.playback(info.duration).pass_len().is_some();
         // A loop is jumped about in without moving its in point: the first
         // pass starts part way in and the ones after it are whole.
         if !looping {
-            shifted.start += shift;
+            shifted.start += shift_file;
         }
         let m = &shifted;
         let mut playback = m.playback(info.duration);
-        let pass_len = playback.pass_len();
+        let pass_len = playback.pass_len().map(|l| l / rate);
         if looping && shift > 0.0 {
-            playback = playback.started_at(shift);
+            playback = playback.started_at(shift_file);
         }
         let duration = match playback {
             Playback::Once { duration } => {
                 duration.or(info.duration.map(|d| (d - m.start).max(0.0)))
             }
             pb => pb.total(None),
-        };
+        }
+        .map(|d| d / rate);
         let initial_gain = if m.fade_in > 0.0 {
             0.0
         } else {
@@ -1190,10 +1197,11 @@ impl Engine {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
                 let size = video::decode_size((vi.width, vi.height), sig.size, m.fit == Fit::Cover);
-                let player = VideoPlayer::spawn(ff, &m.file, vi, m.start, playback, size)
-                    .map_err(|e| format!("{e:#}"))?;
+                let player =
+                    VideoPlayer::spawn_at_rate(ff, &m.file, vi, m.start, playback, size, rate)
+                        .map_err(|e| format!("{e:#}"))?;
                 let voice = if info.has_audio && self.audio.available() {
-                    match self.audio.spawn_voice(
+                    match self.audio.spawn_voice_at_rate(
                         ff,
                         &m.file,
                         m.start,
@@ -1201,6 +1209,7 @@ impl Engine {
                         initial_gain,
                         (m.audio_output, m.audio_channel),
                         &m.sound_chain(),
+                        rate,
                     ) {
                         Ok(voice) => Some(voice),
                         Err(e) => {
@@ -1224,7 +1233,7 @@ impl Engine {
                 }
                 let voice = self
                     .audio
-                    .spawn_voice(
+                    .spawn_voice_at_rate(
                         ff,
                         &m.file,
                         m.start,
@@ -1232,6 +1241,7 @@ impl Engine {
                         initial_gain,
                         (m.audio_output, m.audio_channel),
                         &m.sound_chain(),
+                        rate,
                     )
                     .map_err(|e| format!("{e:#}"))?;
                 PreparedKind::Audio(voice)
@@ -3675,6 +3685,36 @@ mod tests {
             .find(|a| a.instance == instance)
             .unwrap()
             .elapsed
+    }
+
+    #[test]
+    fn a_faster_cue_is_shorter_and_ends_when_its_picture_does() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some(clip), 0);
+        let m = c.kind.media_mut().unwrap();
+        m.end = Some(4.0);
+        m.rate = 2.0;
+        let id = c.id;
+        show.cues.push(c.clone());
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the clip to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        let d = e.active[0].duration.expect("a known length");
+        assert!(
+            (d - 2.0).abs() < 0.1,
+            "4 s of file at double speed is 2 s, not {d}"
+        );
+        assert_eq!(e.cue_duration(&show, &c), Some(Some(2.0)));
+        run_until(&mut e, &show, "the cue to end", |e| {
+            matches!(e.status(id), CueStatus::Idle)
+        });
     }
 
     #[test]

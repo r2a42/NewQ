@@ -124,12 +124,19 @@ impl Playback {
     }
 
     /// `limit_args` for the first pass.
+    #[cfg(test)]
     pub fn first_limit_args(self) -> Vec<String> {
+        self.first_limit_args_at(1.0)
+    }
+
+    /// `first_limit_args` for a cue played at `rate` times its speed: the
+    /// limit is on what comes out, which takes `1 / rate` of the file's time.
+    pub fn first_limit_args_at(self, rate: f64) -> Vec<String> {
         match self.first_pass_len() {
             Some(d) if self.pass_len().is_some() => {
-                vec!["-t".to_string(), format!("{d:.3}")]
+                vec!["-t".to_string(), format!("{:.3}", d / rate)]
             }
-            _ => self.limit_args(),
+            _ => self.limit_args_at(rate),
         }
     }
 
@@ -146,15 +153,38 @@ impl Playback {
     }
 
     /// The ffmpeg option placed after `-i` to end a pass, if any.
+    #[cfg(test)]
     pub fn limit_args(self) -> Vec<String> {
+        self.limit_args_at(1.0)
+    }
+
+    /// `limit_args` for a cue played at `rate` times its speed.
+    pub fn limit_args_at(self, rate: f64) -> Vec<String> {
         let d = match self {
             Playback::Once { duration } => duration,
             Playback::Slice { len, .. } | Playback::SliceFrom { len, .. } => Some(len),
             Playback::WholeFile => None,
         };
-        d.map(|d| vec!["-t".to_string(), format!("{d:.3}")])
+        d.map(|d| vec!["-t".to_string(), format!("{:.3}", d / rate)])
             .unwrap_or_default()
     }
+}
+
+/// FFmpeg's `atempo` chain for speed `rate` (each stage takes 0.5 to 2), which
+/// changes the speed without changing the pitch.
+pub fn atempo_filter(rate: f64) -> String {
+    let mut stages = Vec::new();
+    let mut r = rate.clamp(0.1, 16.0);
+    while r > 2.0 {
+        stages.push("atempo=2.0".to_string());
+        r /= 2.0;
+    }
+    while r < 0.5 {
+        stages.push("atempo=0.5".to_string());
+        r *= 2.0;
+    }
+    stages.push(format!("atempo={r:.6}"));
+    stages.join(",")
 }
 
 struct State {
@@ -422,5 +452,30 @@ mod tests {
         assert_eq!(once.started_at(3.0), once);
         assert_eq!(s.first_pass_len(), Some(4.0));
         assert_eq!(s.first_input_args(2.0), s.input_args(2.0));
+    }
+
+    #[test]
+    fn speed_changes_the_limits_and_chains_atempo() {
+        let s = Playback::Slice {
+            len: 4.0,
+            passes: None,
+        };
+        // 4 s of file at double speed is 2 s of output.
+        assert_eq!(s.limit_args_at(2.0), ["-t", "2.000"]);
+        assert_eq!(s.limit_args_at(1.0), s.limit_args());
+        let j = s.started_at(1.0);
+        assert_eq!(j.first_limit_args_at(0.5), ["-t", "6.000"]);
+        assert_eq!(
+            Playback::Once {
+                duration: Some(3.0)
+            }
+            .limit_args_at(2.0),
+            ["-t", "1.500"]
+        );
+        // Each stage takes 0.5 to 2: more is chained.
+        assert_eq!(atempo_filter(1.5), "atempo=1.500000");
+        assert_eq!(atempo_filter(4.0), "atempo=2.0,atempo=2.000000");
+        assert_eq!(atempo_filter(0.25), "atempo=0.5,atempo=0.500000");
+        assert_eq!(atempo_filter(0.7), "atempo=0.700000");
     }
 }

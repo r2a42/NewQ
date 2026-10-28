@@ -5508,6 +5508,18 @@ fn media_inspector(
                     waveform_trim(ui, m, engine);
                     ui.end_row();
                 }
+                if matches!(ty, CueType::Video | CueType::Audio) {
+                    ui.label("Speed");
+                    ui.add(
+                        egui::DragValue::new(&mut m.rate)
+                            .range(crate::show::MIN_RATE..=crate::show::MAX_RATE)
+                            .speed(0.01)
+                            .max_decimals(3)
+                            .prefix("× "),
+                    )
+                    .on_hover_text("Playback speed; sound keeps its pitch");
+                    ui.end_row();
+                }
                 ui.label("");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut m.loop_media, "Loop");

@@ -1565,6 +1565,10 @@ pub struct MediaCue {
     /// Effects on the picture and the sound, in order (see `EffectKind`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Video and audio files: playback speed, 1.0 = as recorded. Sound keeps
+    /// its pitch.
+    #[serde(default = "unit_rate", skip_serializing_if = "is_unit_rate")]
+    pub rate: f64,
     /// In a slide show: this slide's own fade-in time, in place of the show's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_fade: Option<f64>,
@@ -1597,6 +1601,17 @@ fn is_true(v: &bool) -> bool {
     *v
 }
 
+pub const MIN_RATE: f64 = 0.25;
+pub const MAX_RATE: f64 = 4.0;
+
+fn unit_rate() -> f64 {
+    1.0
+}
+
+fn is_unit_rate(v: &f64) -> bool {
+    *v == 1.0
+}
+
 impl MediaCue {
     pub fn new(file: PathBuf, output: Option<OutputId>) -> Self {
         MediaCue {
@@ -1620,6 +1635,7 @@ impl MediaCue {
             loop_count: 0,
             hold_last_frame: false,
             effects: Vec::new(),
+            rate: 1.0,
             slide_fade: None,
             slide_duration: None,
             crossfade: false,
@@ -1633,6 +1649,15 @@ impl MediaCue {
             fade_in: 1.0,
             fade_out: 1.0,
             ..MediaCue::new(file, output)
+        }
+    }
+
+    /// The playback speed, kept to what FFmpeg's filters do well.
+    pub fn speed(&self) -> f64 {
+        if self.rate.is_finite() {
+            self.rate.clamp(MIN_RATE, MAX_RATE)
+        } else {
+            1.0
         }
     }
 
@@ -1652,6 +1677,7 @@ impl MediaCue {
             && self.end == other.end
             && self.loop_media == other.loop_media
             && self.loop_count == other.loop_count
+            && self.speed() == other.speed()
             && self.audio_output == other.audio_output
             && self.audio_channel == other.audio_channel
             && self.sound_chain() == other.sound_chain()
@@ -5100,6 +5126,34 @@ mod tests {
         // A group shows with the child that matched, even if it is folded away.
         assert_eq!(find("thunder"), vec![2, 3]);
         assert!(find("nothing like this").is_empty());
+    }
+
+    #[test]
+    fn speed_is_kept_in_range_and_not_written_when_normal() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some("a.mp4".into()), 0);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(!json.contains("rate"), "the default isn't written: {json}");
+        let m = c.kind.media_mut().unwrap();
+        assert_eq!(m.speed(), 1.0);
+        m.rate = 100.0;
+        assert_eq!(m.speed(), MAX_RATE);
+        m.rate = 0.0;
+        assert_eq!(m.speed(), MIN_RATE);
+        m.rate = f64::NAN;
+        assert_eq!(m.speed(), 1.0);
+        m.rate = 1.5;
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.kind.media().unwrap().rate, 1.5);
+        let mut other = back.kind.media().unwrap().clone();
+        assert!(other.decodes_like(back.kind.media().unwrap()));
+        other.rate = 1.0;
+        assert!(!other.decodes_like(back.kind.media().unwrap()));
+        // Cues saved before speed existed load at normal speed.
+        let old =
+            serde_json::to_string(&show.make_cue(CueType::Video, Some("a.mp4".into()), 0)).unwrap();
+        let old: Cue = serde_json::from_str(&old).unwrap();
+        assert_eq!(old.kind.media().unwrap().rate, 1.0);
     }
 
     #[test]

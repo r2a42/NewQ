@@ -316,6 +316,7 @@ impl AudioOut {
 
     /// Start decoding `path`. The voice starts paused; call `set_paused(false)` to play.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn spawn_voice(
         &self,
         ff: &Ffmpeg,
@@ -325,6 +326,22 @@ impl AudioOut {
         gain: f32,
         route: (Option<AudioOutputId>, u16),
         sound: &[EffectKind],
+    ) -> Result<Voice> {
+        self.spawn_voice_at_rate(ff, path, start, playback, gain, route, sound, 1.0)
+    }
+
+    /// `spawn_voice`, playing `rate` times as fast with the pitch kept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_voice_at_rate(
+        &self,
+        ff: &Ffmpeg,
+        path: &Path,
+        start: f64,
+        playback: Playback,
+        gain: f32,
+        route: (Option<AudioOutputId>, u16),
+        sound: &[EffectKind],
+        rate: f64,
     ) -> Result<Voice> {
         let device = self
             .device_for(route.0)
@@ -351,10 +368,13 @@ impl AudioOut {
                 });
                 cmd.arg("-i").arg(&path);
                 cmd.args(if first {
-                    playback.first_limit_args()
+                    playback.first_limit_args_at(rate)
                 } else {
-                    playback.limit_args()
+                    playback.limit_args_at(rate)
                 });
+                if (rate - 1.0).abs() > 1e-9 {
+                    cmd.args(["-af", &super::playback::atempo_filter(rate)]);
+                }
                 cmd.args([
                     "-map",
                     "0:a:0",
@@ -377,7 +397,7 @@ impl AudioOut {
         let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
         // Looping passes are cut or padded to an exact length, so repeats
         // don't drift and stay locked to the video's frame count.
-        let samples = |l: f64| (l * sr as f64).round().max(1.0) as u64;
+        let samples = |l: f64| (l / rate * sr as f64).round().max(1.0) as u64;
         let per_pass = playback.pass_len().map(samples);
         let first_pass = playback.first_pass_len().map(samples);
 
