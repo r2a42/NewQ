@@ -226,6 +226,11 @@ includes FFmpeg, so there's nothing else to install.
   whenever you fade the cue out by hand (the *Fade out* buttons in the inspector,
   the Active panel and the right-click menu). New Stop cues default to fading
   everything out with each cue's own fade-out.
+- **Program (script) cues.** A Send cue's *Program* tab runs a program with arguments
+  when it fires (no shell, so name a script for pipes; quotes keep words together),
+  stopped after 60 seconds, with failures in the log. Because a show can come from
+  anywhere, it does nothing until *Settings → General → Programs* is ticked on this
+  computer (a per-computer setting, not stored in the show).
 - **OSC feedback.** *Settings → OSC → Feedback*: give a `host:port` and NewQ sends
   the show's state there as OSC: `/newq/playhead <number> <name>`, `/newq/paused`,
   `/newq/running`, `/newq/cue/<number>/status` (idle, prewait, playing) and

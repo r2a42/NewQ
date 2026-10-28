@@ -2187,6 +2187,8 @@ pub enum SendTarget {
     Projector(ProjectorOut),
     /// Bytes to any device on the network, over TCP or UDP.
     Network(NetworkOut),
+    /// A program run on this computer (only if this computer allows it).
+    Script(ScriptOut),
 }
 
 impl Default for SendTarget {
@@ -2253,6 +2255,15 @@ pub fn input_name(code: u8) -> String {
         _ => "?",
     };
     format!("{kind} {}", code % 10)
+}
+
+/// A program to run: its path or name and its arguments, as typed (quotes group
+/// words; there is no shell, so no pipes or wildcards).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScriptOut {
+    pub command: String,
+    #[serde(default)]
+    pub args: String,
 }
 
 /// Bytes sent to a host and port, as typed with escapes (see `output::unescape`).
@@ -4775,6 +4786,23 @@ mod tests {
         on.remote.osc_feedback = "10.0.0.5:9000".into();
         let back: Show = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert_eq!(back.remote.osc_feedback, "10.0.0.5:9000");
+    }
+
+    #[test]
+    fn a_program_send_cue_round_trips() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Send, None, 0);
+        if let CueKind::Send(s) = &mut cue.kind {
+            s.target = SendTarget::Script(ScriptOut {
+                command: "lights".into(),
+                args: "--scene 4".into(),
+            });
+        }
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&cue).unwrap()).unwrap();
+        let CueKind::Send(s) = back.kind else {
+            panic!("not a send cue")
+        };
+        assert!(matches!(s.target, SendTarget::Script(ref x) if x.args == "--scene 4"));
     }
 
     #[test]

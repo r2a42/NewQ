@@ -417,6 +417,26 @@ fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Acti
              together.",
         );
     });
+    section(ui, "Programs (this computer)", |ui| {
+        let mut on = st.prefs.allow_scripts;
+        if ui
+            .checkbox(&mut on, "Let send cues run programs on this computer")
+            .changed()
+        {
+            st.prefs.allow_scripts = on;
+            crate::output::set_scripts_allowed(on);
+            if let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
+        warning(
+            ui,
+            "A show can come from anywhere and a program can do anything you can. Leave this off \
+             unless you have read the send cues of the show.",
+        );
+    });
     section(ui, "Decoding (this computer)", |ui| {
         let mut on = st.prefs.hw_decode;
         if ui
