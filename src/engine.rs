@@ -3499,12 +3499,24 @@ mod tests {
     }
 
     /// Tick in real time (decoders run on threads) until `cond` holds.
-    fn run_until(e: &mut Engine, show: &Show, what: &str, mut cond: impl FnMut(&Engine) -> bool) {
+    fn run_until(e: &mut Engine, show: &Show, what: &str, cond: impl FnMut(&Engine) -> bool) {
+        run_until_within(e, show, what, 10, cond);
+    }
+
+    /// `run_until`, for something that takes real time (a sound that plays
+    /// for several seconds) on a slow machine.
+    fn run_until_within(
+        e: &mut Engine,
+        show: &Show,
+        what: &str,
+        secs: u64,
+        mut cond: impl FnMut(&Engine) -> bool,
+    ) {
         let t0 = Instant::now();
         let mut last = Instant::now();
         while !cond(e) {
             assert!(
-                t0.elapsed() < Duration::from_secs(10),
+                t0.elapsed() < Duration::from_secs(secs),
                 "timed out waiting for {what}"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -4952,7 +4964,7 @@ mod tests {
         // The end of this pass and then the 4 s that are left of the file.
         let end = a.duration.unwrap();
         assert!((5.0 - 1e-6..7.0).contains(&end), "{end}");
-        run_until(&mut e, &show, "it to play to the end", |e| {
+        run_until_within(&mut e, &show, "it to play to the end", 40, |e| {
             matches!(e.status(id), CueStatus::Idle)
         });
     }
