@@ -281,6 +281,7 @@ impl App {
         ui.layout = crate::dock::Layout::load(&layout_dir);
         ui.prefs = crate::prefs::Prefs::load(&layout_dir);
         crate::media::video::set_hw_decode(ui.prefs.hw_decode);
+        ui.show_mode = ui.prefs.show_mode;
         ui.layout_dir = Some(layout_dir);
         let show = match initial_show {
             Some(path) => match Show::load(&path) {

@@ -41,11 +41,14 @@ includes FFmpeg, so there's nothing else to install.
   "video"), file name or colour; a group stays with the matching child inside
   it, and **Esc** clears the box (and isn't Panic while you're typing in it).
   *Edit ▸ Renumber cues* numbers them 1, 2, 3 down the list (a group's
-  children 3.1, 3.2), and can be undone. *Edit ▸ Lock the show*
-  (**Ctrl+Shift+L**) refuses every edit — the inspector, settings and the
-  list's editing commands — while GO, stop, pause, arming and the rest of running
-  the show still work, so nothing gets changed by accident during a
-  performance; it isn't saved in the show.
+  children 3.1, 3.2), and can be undone. **Show mode and edit mode:** the **EDIT MODE / SHOW MODE** button at the top
+  right (or *Edit ▸ Show mode*, **Ctrl+Shift+L**) switches between them. In show
+  mode nothing in the show can be changed by accident: the inspector, settings,
+  the list's editing commands, arming, dropping files, New and Open are all
+  refused, and a cue's right-click menu is only Fire, Fade out and Stop; GO, stop,
+  pause, the cart, hotkeys, OSC, MIDI and the web remote work as always. Leaving
+  show mode asks first. The mode is remembered for this computer, so a restart
+  in the middle of a show comes back in show mode; it isn't saved in the show.
 - **Control cues:** *Cue ▸ Add Control cue* makes a cue that acts on another
   cue (or the list) and takes no time: **Start** (fire it as if by hand),
   **Pause** and **Resume** (hold just that cue, picture and sound, while the
