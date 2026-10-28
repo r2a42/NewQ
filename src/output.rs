@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OscArg {
@@ -153,6 +154,107 @@ pub enum Outgoing {
         port: u16,
         payload: Vec<u8>,
     },
+    /// A program, run from a thread of its own (it may take a while).
+    Script { command: String, args: Vec<String> },
+}
+
+static SCRIPTS_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this computer lets send cues run programs. Off until the person at
+/// this computer turns it on, so that a show from somewhere else can't run
+/// anything just by being opened and played.
+pub fn set_scripts_allowed(on: bool) {
+    SCRIPTS_ALLOWED.store(on, Ordering::Relaxed);
+}
+
+/// Words from text, where double or single quotes keep a space in a word and
+/// a backslash inside double quotes escapes the next character.
+pub fn split_args(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(n) = chars.next() {
+                    if n != '"' && n != '\\' {
+                        word.push('\\');
+                    }
+                    word.push(n);
+                }
+            }
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    out.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        out.push(word);
+    }
+    out
+}
+
+/// How long a program may run before it is stopped.
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn run_script(command: &str, args: &[String]) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    if !SCRIPTS_ALLOWED.load(Ordering::Relaxed) {
+        return Err(format!(
+            "Script “{command}” not run: this computer doesn't allow send cues to run programs \
+             (Settings → General)"
+        ));
+    }
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Script “{command}”: {e}"))?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                let mut err = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = e.by_ref().take(400).read_to_string(&mut err);
+                }
+                let err = err.trim();
+                return Err(format!(
+                    "Script “{command}” ended with {status}{}{err}",
+                    if err.is_empty() { "" } else { ": " }
+                ));
+            }
+            Ok(None) if start.elapsed() > SCRIPT_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Script “{command}” was stopped after {} seconds",
+                    SCRIPT_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => return Err(format!("Script “{command}”: {e}")),
+        }
+    }
 }
 
 impl Outgoing {
@@ -168,6 +270,10 @@ impl Outgoing {
                 bytes: midi_bytes(m),
             },
             SendTarget::Projector(p) => Outgoing::Projector(p.clone()),
+            SendTarget::Script(sc) => Outgoing::Script {
+                command: sc.command.trim().to_string(),
+                args: split_args(&sc.args),
+            },
             SendTarget::Network(NetworkOut {
                 host,
                 port,
@@ -250,6 +356,9 @@ pub fn unescape(text: &str) -> Vec<u8> {
 pub fn describe(cue: &SendCue) -> String {
     match &cue.target {
         SendTarget::Projector(p) => format!("Projector {}: {}", p.host.trim(), p.action.label()),
+        SendTarget::Script(sc) => format!("Run {} {}", sc.command.trim(), sc.args.trim())
+            .trim()
+            .to_string(),
         SendTarget::Network(n) => format!(
             "{} {}:{} {}",
             if n.tcp { "TCP" } else { "UDP" },
@@ -327,6 +436,7 @@ impl Outbox {
                             Some(format!("pjlink {}:{}", p.host.trim(), p.port))
                         }
                         Outgoing::Tcp { host, port, .. } => Some(format!("tcp {host}:{port}")),
+                        Outgoing::Script { command, .. } => Some(format!("script {command}")),
                         _ => None,
                     };
                     if let Some(key) = host_key {
@@ -412,6 +522,7 @@ fn send_network(job: &Outgoing) -> Result<(), String> {
                 .and_then(|()| stream.flush())
                 .map_err(|e| format!("TCP to {host}:{port}: {e}"))
         }
+        Outgoing::Script { command, args } => run_script(command, args),
         _ => Err("internal: not a network message".into()),
     }
 }
@@ -453,7 +564,9 @@ impl SocketSet {
                     .map_err(|e| format!("UDP to {host}:{port}: {e}"))?;
                 Ok(())
             }
-            Outgoing::Projector(_) | Outgoing::Tcp { .. } => send_network(job),
+            Outgoing::Projector(_) | Outgoing::Tcp { .. } | Outgoing::Script { .. } => {
+                send_network(job)
+            }
             Outgoing::Midi { port, bytes } => {
                 let name = port.as_ref().ok_or("MIDI: no output chosen")?;
                 if !self.midi.contains_key(name) {
@@ -486,6 +599,54 @@ impl SocketSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arguments_are_split_into_words_and_quotes_group_them() {
+        assert_eq!(split_args("a b  c"), ["a", "b", "c"]);
+        assert_eq!(
+            split_args(r#"--scene 4 "two words""#),
+            ["--scene", "4", "two words"]
+        );
+        assert_eq!(split_args("'it is' x"), ["it is", "x"]);
+        assert_eq!(split_args(r#""say \"hi\"""#), [r#"say "hi""#]);
+        assert_eq!(split_args(r#""" x"#), ["", "x"], "an empty word is a word");
+        assert!(split_args("   ").is_empty());
+    }
+
+    #[test]
+    fn a_program_runs_only_when_allowed_and_failures_are_reported() {
+        let sh = if cfg!(windows) { None } else { Some("/bin/sh") };
+        set_scripts_allowed(false);
+        let denied = run_script("anything", &[]).unwrap_err();
+        assert!(denied.contains("doesn't allow"), "{denied}");
+        set_scripts_allowed(true);
+        if let Some(sh) = sh {
+            run_script(sh, &["-c".into(), "exit 0".into()]).unwrap();
+            let e = run_script(sh, &["-c".into(), "echo boom >&2; exit 3".into()]).unwrap_err();
+            assert!(e.contains("boom") && e.contains('3'), "{e}");
+        }
+        let e = run_script("/no/such/program", &[]).unwrap_err();
+        assert!(e.contains("/no/such/program"), "{e}");
+        set_scripts_allowed(false);
+    }
+
+    #[test]
+    fn a_program_cue_is_described_and_becomes_a_script_message() {
+        let cue = SendCue {
+            target: SendTarget::Script(crate::show::ScriptOut {
+                command: " lights ".into(),
+                args: "--scene 4".into(),
+            }),
+        };
+        assert_eq!(describe(&cue), "Run lights --scene 4");
+        assert_eq!(
+            Outgoing::from_cue(&cue),
+            Outgoing::Script {
+                command: "lights".into(),
+                args: vec!["--scene".into(), "4".into()]
+            }
+        );
+    }
+
     use super::*;
     use crate::remote::{Command, parse_midi, parse_osc};
     use std::time::Duration;

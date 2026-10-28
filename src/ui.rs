@@ -6618,6 +6618,11 @@ fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
                 matches!(s.target, SendTarget::Network(_)),
                 SendTarget::Network(NetworkOut::default()),
             ),
+            (
+                "Program",
+                matches!(s.target, SendTarget::Script(_)),
+                SendTarget::Script(crate::show::ScriptOut::default()),
+            ),
         ];
         for (label, selected, fresh) in tabs {
             if ui.selectable_label(selected, label).clicked() && !selected {
@@ -6627,6 +6632,36 @@ fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
     });
     match &mut s.target {
         SendTarget::Projector(p) => projector_inspector(ui, p),
+        SendTarget::Script(sc) => {
+            egui::Grid::new("send_script")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Program");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut sc.command)
+                            .desired_width(260.0)
+                            .hint_text("/usr/local/bin/lights-on"),
+                    );
+                    ui.end_row();
+                    ui.label("Arguments");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut sc.args)
+                            .desired_width(260.0)
+                            .hint_text("--scene 4 \"two words\""),
+                    );
+                    ui.end_row();
+                });
+            ui.label(
+                RichText::new(
+                    "Runs the program when the cue fires, without a shell (no pipes or \
+                     wildcards: name a script to do those). Quotes keep words together. It is \
+                     stopped after 60 seconds, and a failure is shown in the log. It runs only \
+                     if this computer allows it (Settings → General → Programs).",
+                )
+                .weak(),
+            );
+        }
         SendTarget::Network(n) => {
             egui::Grid::new("send_network")
                 .num_columns(2)

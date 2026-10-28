@@ -13,6 +13,10 @@ pub struct Prefs {
     /// Started in show mode (the show can't be edited), as it was left.
     #[serde(default)]
     pub show_mode: bool,
+    /// Let send cues run programs on this computer. Off unless turned on here,
+    /// since a show can come from anywhere.
+    #[serde(default)]
+    pub allow_scripts: bool,
 }
 
 const FILE: &str = "prefs.json";
@@ -49,6 +53,7 @@ mod tests {
         let p = Prefs {
             hw_decode: true,
             show_mode: true,
+            allow_scripts: true,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
