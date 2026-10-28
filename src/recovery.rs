@@ -70,10 +70,34 @@ pub fn write_in_background(show: Show, show_path: Option<PathBuf>) -> bool {
     true
 }
 
+/// Remove the recovery copy, waiting for a write in progress first (so it
+/// can't come back). For when waiting is fine: leaving the show, and tests.
 pub fn clear(show_path: Option<&Path>) {
     CLEARED.fetch_add(1, Ordering::AcqRel);
+    remove(&path_for(show_path));
+}
+
+/// `clear` without the wait: a write in progress to a slow disk would hold
+/// the main thread, and the show with it, until it was done. The copy is
+/// gone a moment later; a write asked for before this is still cancelled.
+pub fn clear_in_background(show_path: Option<&Path>) {
+    CLEARED.fetch_add(1, Ordering::AcqRel);
+    let path = path_for(show_path);
+    if std::thread::Builder::new()
+        .name("recovery-clear".into())
+        .spawn({
+            let path = path.clone();
+            move || remove(&path)
+        })
+        .is_err()
+    {
+        remove(&path);
+    }
+}
+
+fn remove(path: &Path) {
     let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = std::fs::remove_file(path_for(show_path));
+    let _ = std::fs::remove_file(path);
 }
 
 /// Put a recovery copy aside (as `<name>.recovery.old`, replacing an earlier
@@ -201,6 +225,30 @@ mod tests {
         wait_idle();
         let rec = pending(Some(&path)).expect("the copy was written");
         assert_eq!(Show::load(&rec).unwrap().cues.len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn clearing_in_the_background_does_not_wait_for_a_write_in_progress() {
+        let _only = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let d = dir("clear_bg");
+        let path = d.join("a.newq");
+        write(&Show::default(), Some(&path)).unwrap();
+        let rec = path_for(Some(&path));
+        assert!(rec.exists());
+        // A write in progress holds the lock; clearing returns at once...
+        let held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let t0 = std::time::Instant::now();
+        clear_in_background(Some(&path));
+        assert!(t0.elapsed() < std::time::Duration::from_millis(500));
+        assert!(rec.exists(), "not until the write is done");
+        // ...and the copy goes once the write has finished.
+        drop(held);
+        let t0 = std::time::Instant::now();
+        while rec.exists() {
+            assert!(t0.elapsed().as_secs() < 10, "the copy was never removed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

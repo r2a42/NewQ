@@ -1188,13 +1188,19 @@ impl Animated {
         let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
             return self.value;
         };
-        if t <= first.t {
+        if t <= first.t || t.is_nan() {
             return first.v;
         }
         if t >= last.t {
             return last.v;
         }
-        let i = self.keys.partition_point(|k| k.t <= t) - 1;
+        // Strictly between the first and the last, so there are two to ease
+        // between (kept in range should the keys be out of order).
+        let i = self
+            .keys
+            .partition_point(|k| k.t <= t)
+            .clamp(1, self.keys.len() - 1)
+            - 1;
         let (a, b) = (self.keys[i], self.keys[i + 1]);
         let f = a.curve.apply((t - a.t) / (b.t - a.t).max(1e-9)) as f32;
         a.v + (b.v - a.v) * f
@@ -1238,6 +1244,18 @@ impl Animated {
         if i < self.keys.len() {
             self.keys.remove(i);
         }
+    }
+
+    /// Put the keyframes in time order, which `at` relies on and a
+    /// hand-edited file may not keep. A value that isn't a number becomes
+    /// `default` and keyframes that aren't are dropped (a file can't hold
+    /// those, but nothing else here should have to check).
+    pub fn sanitize(&mut self, default: f32) {
+        if !self.value.is_finite() {
+            self.value = default;
+        }
+        self.keys.retain(|k| k.t.is_finite() && k.v.is_finite());
+        self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
     }
 }
 
@@ -1413,13 +1431,19 @@ impl Effect {
     pub fn values(&self, t: f64) -> [f32; 4] {
         let mut out = [0.0; 4];
         for (i, spec) in self.kind.params().iter().enumerate() {
-            out[i] = self
-                .p
-                .get(i)
-                .map_or(spec.default, |a| a.at(t))
-                .clamp(spec.min, spec.max);
+            let v = self.p.get(i).map_or(spec.default, |a| a.at(t));
+            // Not a number (keys at infinity): the default rather than a
+            // NaN, which the sound filters would never recover from.
+            out[i] = if v.is_finite() { v } else { spec.default }.clamp(spec.min, spec.max);
         }
         out
+    }
+
+    /// Put a hand-edited file's numbers right (see `Animated::sanitize`).
+    pub fn sanitize(&mut self) {
+        for (a, spec) in self.p.iter_mut().zip(self.kind.params()) {
+            a.sanitize(spec.default);
+        }
     }
 }
 
@@ -2678,6 +2702,11 @@ impl Show {
             {
                 m.file = base.join(&m.file);
             }
+            if let Some(m) = cue.kind.media_mut() {
+                for e in &mut m.effects {
+                    e.sanitize();
+                }
+            }
         }
         show.normalize_groups();
         show.relay_slides();
@@ -3448,6 +3477,53 @@ mod tests {
         show.outputs[0].mesh.as_mut().unwrap().points.pop();
         show.save(&path).unwrap();
         assert!(Show::load(&path).unwrap().outputs[0].mesh.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn keyframes_out_of_order_or_off_the_scale_are_put_right_on_load() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, None, 0);
+        let mut blur = Effect::new(EffectKind::Blur);
+        blur.p[0].keys = vec![
+            Keyframe {
+                t: 2.0,
+                v: 40.0,
+                curve: Curve::Linear,
+            },
+            Keyframe {
+                t: 0.0,
+                v: 0.0,
+                curve: Curve::Linear,
+            },
+        ];
+        // Out of order, they still read without a panic...
+        assert!(blur.values(1.0)[0].is_finite());
+        c.kind.media_mut().unwrap().effects.push(blur);
+        show.cues.push(c);
+        let dir = std::env::temp_dir().join("newq_test_keyframes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.newq");
+        show.save(&path).unwrap();
+        // ...and come back from the file in order. (JSON has no NaN or
+        // infinity, and a number too big for a float fails to load, so the
+        // numbers themselves can be trusted; the order can't.)
+        let back = Show::load(&path).unwrap();
+        let e = &back.cues[0].kind.media().unwrap().effects[0];
+        let times: Vec<f64> = e.p[0].keys.iter().map(|k| k.t).collect();
+        assert_eq!(times, vec![0.0, 2.0]);
+        assert_eq!(e.values(1.0)[0], 20.0);
+        // A NaN time asks for the first key, never a panic.
+        assert_eq!(e.p[0].at(f64::NAN), 0.0);
+        // Nonsense from elsewhere is put right too.
+        let mut a = Animated::new(f32::NAN);
+        a.keys.push(Keyframe {
+            t: f64::INFINITY,
+            v: 1.0,
+            curve: Curve::Linear,
+        });
+        a.sanitize(3.0);
+        assert_eq!((a.value, a.keys.len()), (3.0, 0));
         std::fs::remove_dir_all(&dir).ok();
     }
 

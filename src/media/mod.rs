@@ -39,6 +39,8 @@ type Probed = (PathBuf, Result<MediaInfo, String>);
 /// nearest the playhead first.
 pub struct ProbeCache {
     entries: HashMap<PathBuf, ProbeState>,
+    /// When each missing file was last looked for.
+    rechecked: HashMap<PathBuf, std::time::Instant>,
     tx: Sender<Probed>,
     rx: Receiver<Probed>,
     jobs: Arc<Jobs>,
@@ -50,6 +52,7 @@ impl Default for ProbeCache {
         let (tx, rx) = unbounded();
         ProbeCache {
             entries: HashMap::new(),
+            rechecked: HashMap::new(),
             tx,
             rx,
             jobs: Arc::new(Jobs {
@@ -100,15 +103,38 @@ fn probe_worker(jobs: &Jobs, tx: &Sender<Probed>) {
 /// What a lookup of a file that isn't there says.
 const NOT_FOUND: &str = "file not found";
 
+/// How often a file that was missing is looked for again.
+const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl ProbeCache {
     /// Forget that a file was missing once it is there (a drive mounted, a
     /// copy finished); otherwise it would stay missing until NewQ restarted.
+    /// Looked for every couple of seconds, not every time it is asked about:
+    /// the cue list asks for every cue every frame, and asking the disk about
+    /// a file on a drive that has gone can take a long time.
     fn recheck(&mut self, path: &Path) {
-        if matches!(self.entries.get(path), Some(ProbeState::Failed(e)) if e == NOT_FOUND)
-            && path.is_file()
-        {
-            self.entries.remove(path);
+        if !matches!(self.entries.get(path), Some(ProbeState::Failed(e)) if e == NOT_FOUND) {
+            return;
         }
+        let now = std::time::Instant::now();
+        let due = self
+            .rechecked
+            .get(path)
+            .is_none_or(|at| now.duration_since(*at) >= RECHECK_EVERY);
+        if !due {
+            return;
+        }
+        self.rechecked.insert(path.to_path_buf(), now);
+        if path.is_file() {
+            self.entries.remove(path);
+            self.rechecked.remove(path);
+        }
+    }
+
+    /// Look for the missing files again at the next ask (for tests).
+    #[cfg(test)]
+    pub fn recheck_now(&mut self) {
+        self.rechecked.clear();
     }
 
     pub fn poll(&mut self) {
@@ -143,7 +169,11 @@ impl ProbeCache {
         if !self.entries.contains_key(path) {
             let state = match ff {
                 None => ProbeState::Failed("ffmpeg not found".into()),
-                Some(_) if !path.is_file() => ProbeState::Failed(NOT_FOUND.into()),
+                Some(_) if !path.is_file() => {
+                    self.rechecked
+                        .insert(path.to_path_buf(), std::time::Instant::now());
+                    ProbeState::Failed(NOT_FOUND.into())
+                }
                 Some(ff) => {
                     self.queue(ff.clone(), path.to_path_buf(), urgent);
                     ProbeState::Pending
@@ -199,6 +229,7 @@ impl ProbeCache {
     /// Forget a path so it is probed again (e.g. after the user relinks a file).
     pub fn invalidate(&mut self, path: &Path) {
         self.entries.remove(path);
+        self.rechecked.remove(path);
     }
 }
 
@@ -276,6 +307,13 @@ mod tests {
         ));
         // The drive is mounted / the copy finishes.
         std::fs::copy(&clip, &later).unwrap();
+        // Asked again at once, the disk isn't troubled (the cue list asks
+        // every frame); when it is time to look again, the file is found.
+        assert!(matches!(
+            cache.get(Some(&ff), &later),
+            super::ProbeState::Failed(_)
+        ));
+        cache.recheck_now();
         assert!(
             !matches!(cache.get(Some(&ff), &later), super::ProbeState::Failed(_)),
             "found now"

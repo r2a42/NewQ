@@ -202,14 +202,29 @@ impl Layout {
     /// The layout saved in `dir`, or the default if there is none or it makes
     /// no sense.
     pub fn load(dir: &Path) -> Layout {
-        std::fs::read_to_string(dir.join(FILE))
+        let mut layout = std::fs::read_to_string(dir.join(FILE))
             .ok()
             .and_then(|t| Layout::from_json(&t))
             .filter(Layout::is_valid)
             // Never start with nothing to see. The cue list itself is not
             // needed: the cart alone is a fine arrangement.
             .filter(|l| Pane::ALL.iter().any(|p| l.is_open(*p)))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        layout.forget_impossible_places();
+        layout
+    }
+
+    /// A pop-out window's remembered place that can't be one (a hand-edited
+    /// file: a size of nothing or of miles, a position off any screen) is
+    /// forgotten, so the window opens at its usual size instead of failing
+    /// to open at all.
+    fn forget_impossible_places(&mut self) {
+        const SIZE: std::ops::RangeInclusive<f32> = 100.0..=16_384.0;
+        const FAR: f32 = 100_000.0;
+        for p in &mut self.popouts {
+            p.size = p.size.filter(|[w, h]| SIZE.contains(w) && SIZE.contains(h));
+            p.pos = p.pos.filter(|[x, y]| x.abs() <= FAR && y.abs() <= FAR);
+        }
     }
 
     /// Read a layout saved as JSON. The docking library keeps the size of
@@ -446,6 +461,31 @@ mod tests {
         let loaded = Layout::load(&dir);
         assert!(!loaded.is_open(Pane::Cues) && loaded.is_docked(Pane::Cart));
         assert!(loaded.is_popped_out(Pane::Inspector));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pop_out_window_place_that_cannot_be_is_forgotten() {
+        let dir = std::env::temp_dir().join("newq_test_layout_places");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut l = Layout::default();
+        l.pop_out(Pane::Preview);
+        l.set_popout_geometry(Pane::Preview, Some([10.0, 20.0]), [800.0, 600.0]);
+        l.pop_out(Pane::Active);
+        // Off any screen, and no size at all. (JSON has no NaN or infinity,
+        // and a number too big for a float is no layout at all.)
+        l.set_popout_geometry(Pane::Active, Some([1e9, -1e9]), [0.0, 1e9]);
+        l.save(&dir).unwrap();
+        let back = Layout::load(&dir);
+        let find = |p: Pane| back.popouts.iter().find(|q| q.pane == p).copied().unwrap();
+        assert_eq!(
+            (find(Pane::Preview).pos, find(Pane::Preview).size),
+            (Some([10.0, 20.0]), Some([800.0, 600.0]))
+        );
+        assert_eq!(
+            (find(Pane::Active).pos, find(Pane::Active).size),
+            (None, None)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

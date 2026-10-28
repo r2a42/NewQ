@@ -109,6 +109,8 @@ const FOURCC_BGRX: u32 = fourcc(b'B', b'G', b'R', b'X');
 const FOURCC_RGBA: u32 = fourcc(b'R', b'G', b'B', b'A');
 
 const FRAME_TYPE_VIDEO: i32 = 1;
+/// `NDIlib_frame_type_error`: the connection to the source has failed.
+const FRAME_TYPE_ERROR: i32 = 4;
 const COLOR_FORMAT_UYVY_BGRA: i32 = 1;
 const BANDWIDTH_HIGHEST: i32 = 100;
 const FRAME_FORMAT_PROGRESSIVE: i32 = 1;
@@ -404,6 +406,12 @@ pub fn run_receive(args: &[String], out: &mut impl Write) -> i32 {
                 1000,
             )
         };
+        if kind == FRAME_TYPE_ERROR {
+            // Leaving is how the show hears of it (the picture would
+            // otherwise stand still for good, with nothing said).
+            eprintln!("The NDI source “{name}” was lost");
+            break 3;
+        }
         if kind != FRAME_TYPE_VIDEO {
             continue;
         }

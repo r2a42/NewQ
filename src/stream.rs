@@ -140,6 +140,15 @@ pub fn has_x264(ff: &Ffmpeg) -> bool {
     })
 }
 
+/// Keep only the end of what FFmpeg has said, once it has said a lot. Cut as
+/// bytes, not as a string: FFmpeg's messages have characters of more than one
+/// byte in them (quotes, file names), and a string cut inside one is a panic.
+fn keep_tail(text: &mut Vec<u8>) {
+    if text.len() > 4000 {
+        text.drain(..text.len() - 2000);
+    }
+}
+
 /// A running FFmpeg taking frames on its standard input.
 pub struct Sink {
     child: Child,
@@ -187,18 +196,15 @@ impl Sink {
             let _ = std::thread::Builder::new()
                 .name("stream-ffmpeg-log".into())
                 .spawn(move || {
-                    let mut text = String::new();
+                    let mut text: Vec<u8> = Vec::new();
                     let mut buf = [0u8; 1024];
                     while let Ok(n) = std::io::Read::read(&mut err, &mut buf) {
                         if n == 0 {
                             break;
                         }
-                        text.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        // The end is what matters.
-                        if text.len() > 4000 {
-                            text = text.split_off(text.len() - 2000);
-                        }
-                        *said.lock() = text.clone();
+                        text.extend_from_slice(&buf[..n]);
+                        keep_tail(&mut text);
+                        *said.lock() = String::from_utf8_lossy(&text).into_owned();
                     }
                 });
         }
@@ -265,6 +271,20 @@ mod tests {
         // Nonsense is kept in range.
         let (w, h) = size_for((0, 0), 0);
         assert!(w >= 16 && h >= 16 && w % 2 == 0 && h % 2 == 0);
+    }
+
+    #[test]
+    fn what_ffmpeg_said_is_cut_to_its_end_between_characters() {
+        // Quotes of three bytes each: a cut by string length would land
+        // inside one and panic the thread that listens to FFmpeg.
+        let mut text: Vec<u8> = "“x”".repeat(1000).into_bytes();
+        keep_tail(&mut text);
+        assert_eq!(text.len(), 2000);
+        let tail = String::from_utf8_lossy(&text);
+        assert!(tail.ends_with("x”"));
+        let mut short: Vec<u8> = b"fine".to_vec();
+        keep_tail(&mut short);
+        assert_eq!(short, b"fine");
     }
 
     #[test]
