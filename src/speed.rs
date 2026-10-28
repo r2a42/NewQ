@@ -183,7 +183,7 @@ impl Stretcher {
     }
 
     /// Whether all of the output has been produced.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn is_done(&self) -> bool {
         self.done
     }

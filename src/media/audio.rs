@@ -581,47 +581,9 @@ impl AudioOut {
                     shared2.received_frames.fetch_add(1, Ordering::Relaxed);
                     true
                 };
-                if let Some(plan) = speed {
-                    // The speed changes as it plays: stretch what is decoded
-                    // (at its own speed) along the plan, keeping the pitch.
-                    let mut st = Stretcher::new(src, sr, plan);
-                    let mut bytes = vec![0u8; 64 * 1024];
-                    let (mut carry, mut floats, mut out) = (Vec::new(), Vec::new(), Vec::new());
-                    let mut ok = true;
-                    'stretch: loop {
-                        let read = feed.stdout().read(&mut bytes).unwrap_or(0);
-                        if read == 0 {
-                            st.finish();
-                        } else {
-                            carry.extend_from_slice(&bytes[..read]);
-                            let whole = carry.len() / 4 * 4;
-                            floats.clear();
-                            floats.extend(
-                                carry[..whole]
-                                    .as_chunks::<4>()
-                                    .0
-                                    .iter()
-                                    .map(|b| f32::from_le_bytes(*b)),
-                            );
-                            carry.drain(..whole);
-                            st.push(&floats);
-                        }
-                        out.clear();
-                        st.pull(&mut out);
-                        for frame in out.chunks_exact(src) {
-                            if !push(frame) {
-                                ok = false;
-                                break 'stretch;
-                            }
-                        }
-                        if read == 0 {
-                            break;
-                        }
-                    }
-                    let _ = ok;
-                    shared2.eof.store(true, Ordering::Release);
-                    return;
-                }
+                // With a keyframed speed what is decoded (loops and all, at its
+                // own speed) is stretched along the plan, keeping the pitch.
+                let mut stretch = speed.map(|plan| (Stretcher::new(src, sr, plan), Vec::new(), 0));
                 let mut bytes = vec![0u8; 16 * 1024];
                 let mut carry: Vec<u8> = Vec::with_capacity(4 * src);
                 let frame_bytes = 4 * src;
@@ -657,7 +619,7 @@ impl AudioOut {
                             for (k, b) in frame.as_chunks::<4>().0.iter().enumerate() {
                                 samples_in[k] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
                             }
-                            if !push(&samples_in[..src]) {
+                            if !emit(&mut push, &mut stretch, &samples_in[..src], src) {
                                 break 'outer;
                             }
                             n += 1;
@@ -667,7 +629,7 @@ impl AudioOut {
                     let decoded = n;
                     if let Some(p) = limit {
                         while n < p {
-                            if !push(&silence[..src]) {
+                            if !emit(&mut push, &mut stretch, &silence[..src], src) {
                                 break 'outer;
                             }
                             n += 1;
@@ -680,6 +642,17 @@ impl AudioOut {
                     if feed.in_tail() && shared2.tail_from.load(Ordering::Relaxed) == 0 {
                         let at = shared2.received_frames.load(Ordering::Relaxed);
                         shared2.tail_from.store(at + 1, Ordering::Relaxed);
+                    }
+                }
+                if let Some((st, out, _)) = &mut stretch {
+                    // The last of it, now that there is no more input.
+                    st.finish();
+                    out.clear();
+                    st.pull(out);
+                    for f in out.chunks_exact(src) {
+                        if !push(f) {
+                            break;
+                        }
                     }
                 }
                 shared2.eof.store(true, Ordering::Release);
@@ -1267,6 +1240,29 @@ fn route_frame(frame: &mut [f32], first: usize, l: f32, r: f32) {
     }
 }
 
+/// What a reader does with a frame it has decoded: queue it, or with a
+/// keyframed speed hand it to the stretcher and queue what that has ready.
+/// False if the voice was stopped.
+fn emit(
+    push: &mut impl FnMut(&[f32]) -> bool,
+    stretch: &mut Option<(Stretcher, Vec<f32>, usize)>,
+    frame: &[f32],
+    src: usize,
+) -> bool {
+    let Some((st, out, count)) = stretch else {
+        return push(frame);
+    };
+    st.push(frame);
+    *count += 1;
+    if *count < 1024 {
+        return true;
+    }
+    *count = 0;
+    out.clear();
+    st.pull(out);
+    out.chunks_exact(src).all(push)
+}
+
 /// Add a frame to a device frame through crosspoints, at an overall gain.
 fn cross(out: &mut [f32], frame: &[f32], matrix: &[(usize, usize, f32)], gain: f32) {
     for &(from, to, g) in matrix {
@@ -1846,6 +1842,56 @@ mod tests {
         let secs = mv.shared.played_frames.load(Ordering::Relaxed) as f64 / 48_000.0;
         assert!((secs - expect).abs() < 0.15, "{secs} s, not {expect}");
         assert!(loud > 0.05, "it was heard");
+    }
+
+    #[test]
+    fn a_looping_sound_follows_a_keyframed_speed_through_its_passes() {
+        use crate::show::Animated;
+        use crate::speed::SpeedMap;
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        // Double speed from the start: three passes of a second take 1.5 s.
+        let mut a = Animated::new(2.0);
+        a.set_key(0.0, 2.0);
+        let (device, rx) = Device::for_test(2);
+        let mut audio = AudioOut::new();
+        audio.devices.insert(None, device);
+        let voice = audio
+            .spawn_voice_routed(
+                &ff,
+                &wav,
+                0.0,
+                Playback::Slice {
+                    len: 1.0,
+                    passes: Some(3),
+                },
+                1.0,
+                (None, 0),
+                &[],
+                1.0,
+                None,
+                None,
+                Some(SpeedPlan {
+                    map: std::sync::Arc::new(SpeedMap::new(&a)),
+                    t0: 0.0,
+                }),
+            )
+            .unwrap();
+        voice.set_paused(false);
+        let mut mv = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = std::time::Instant::now();
+        let mut mix = vec![0.0; 480 * 2];
+        while mix_voice(&mut mv, &mut mix, 480, 2) {
+            mix.fill(0.0);
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never finished"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let secs = mv.shared.played_frames.load(Ordering::Relaxed) as f64 / 48_000.0;
+        assert!((secs - 1.5).abs() < 0.15, "{secs} s");
     }
 
     #[test]

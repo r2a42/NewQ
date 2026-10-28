@@ -40,7 +40,9 @@ The README describes the features; this file is about working on the code.
   (`MediaCue::rate`, an `Animated`) into file time and back; `Stretcher` is a
   WSOLA time stretcher the audio reader runs along a `SpeedPlan`; the video
   reader (`video.rs::read_at_speed`) picks frames by the same plan. A steady
-  speed still uses FFmpeg's `atempo`/`setpts`; loops use only the steady one.
+  speed still uses FFmpeg's `atempo`/`setpts`. Loops follow the plan too: the readers
+  see the passes as one run of frames, and `ActiveCue::pass_len` is then in the
+  file's seconds (`pass_time` maps the cue's time into them).
 - `src/fx.rs`: cue effects. `show::Effect` (kind and up to four `Animated`
   numbers, each a value or keyframes) is on `MediaCue::effects`. `fx::VideoFx::at`
   turns the picture effects into the numbers in the compositor shader (blur,

@@ -113,8 +113,10 @@ includes FFmpeg, so there's nothing else to install.
   and slow again. The cue's length, scrub bar and fades follow, and the cue ends
   when the file does. Sound is time-stretched along the keyframes, so it is best
   between half and double speed (pitch is kept; very slow or fast sound gets
-  grainy); the picture holds or skips frames to keep up. Keyframed speed is for
-  cues that play once: a loop plays at a steady speed.
+  grainy); the picture holds or skips frames to keep up. A loop follows the
+  keyframes too, going round faster and slower; its bar then shows the place in the
+  file's slice, and Devamp still ends it at the end of the pass (*Devamp plays on*
+  isn't used with keyframed speed).
 - **Effects with keyframes:** the *Effects* section of a cue's inspector takes
   any number of effects. **Picture:** *Blur* (a disc blur, up to 100 px),
   *Sharpen*, *Vignette*, *Pixelate* and *Negative*, drawn by the graphics card in

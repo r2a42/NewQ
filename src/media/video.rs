@@ -80,7 +80,10 @@ pub fn decode_size(src: (u32, u32), max: (u32, u32), cover: bool) -> (u32, u32) 
 /// Read a file's frames (at `fps`, in the file's own time) and send the
 /// cue's: the cue's frame `j` is at `j / fps` and shows the file's frame the
 /// plan has got to by then, so a frame is held while the speed is low and
-/// skipped while it is high. Ends when the file does.
+/// skipped while it is high. A loop's passes (`first_pass` and `per_pass`
+/// frames each) are one run of frames, which the plan goes round and round.
+/// Ends when the file does, or the passes are used up.
+#[allow(clippy::too_many_arguments)]
 fn read_at_speed(
     plan: &SpeedPlan,
     fps: f64,
@@ -88,19 +91,49 @@ fn read_at_speed(
     tx: &Sender<VideoFrame>,
     recycle: &Receiver<Vec<u8>>,
     frame_len: usize,
+    first_pass: Option<u64>,
+    per_pass: Option<u64>,
 ) {
     let mut current = vec![0u8; frame_len];
-    // The file's frame that `current` holds (none yet).
-    let mut held: Option<u64> = None;
+    // The file's frame that `current` holds (none yet), counting through the passes.
+    let held: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+    let mut limit = first_pass;
+    let mut in_pass: u64 = 0;
+    // The next frame of the file's run, false when there is none.
+    let mut next_frame = |feed: &mut PassFeed, current: &mut Vec<u8>| -> bool {
+        if limit.is_some_and(|l| in_pass >= l) {
+            if !feed.advance() {
+                return false;
+            }
+            in_pass = 0;
+            limit = per_pass;
+        }
+        if limit.is_some_and(|l| in_pass * 2 >= l) {
+            feed.prefetch();
+        }
+        if feed.stdout().read_exact(current).is_err() {
+            // A pass that is cut short holds its last frame to its length; one
+            // that gave nothing, or no pass at all, is the end.
+            if in_pass == 0 || limit.is_none() {
+                return false;
+            }
+        }
+        in_pass += 1;
+        held.set(Some(held.get().map_or(0, |h| h + 1)));
+        true
+    };
     let mut j: u64 = 0;
     loop {
         let t = j as f64 / fps;
         let want = (plan.media_after(t) * fps).round().max(0.0) as u64;
-        while held.is_none_or(|h| h < want) {
-            if feed.stdout().read_exact(&mut current).is_err() {
+        loop {
+            // (`held` is only changed by `next_frame`: look at it between calls.)
+            if held.get().is_some_and(|h| h >= want) {
+                break;
+            }
+            if !next_frame(feed, &mut current) {
                 return;
             }
-            held = Some(held.map_or(0, |h| h + 1));
         }
         let mut buf = recycle.try_recv().unwrap_or_else(|_| vec![0u8; frame_len]);
         buf.resize(frame_len, 0);
@@ -357,7 +390,16 @@ impl VideoPlayer {
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
                 if let Some(plan) = speed {
-                    read_at_speed(&plan, fps, &mut feed, &tx, &recycle_rx, frame_len);
+                    read_at_speed(
+                        &plan,
+                        fps,
+                        &mut feed,
+                        &tx,
+                        &recycle_rx,
+                        frame_len,
+                        first_pass,
+                        per_pass,
+                    );
                     eof2.store(true, Ordering::Release);
                     return;
                 }
@@ -755,6 +797,54 @@ mod tests {
             (secs - 5.0).abs() < 0.3,
             "{secs} s of picture, {frames} frames"
         );
+    }
+
+    #[test]
+    fn a_looping_picture_follows_a_keyframed_speed_through_its_passes() {
+        use crate::show::Animated;
+        use crate::speed::SpeedMap;
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        // Two passes of two seconds at double speed: two seconds of picture.
+        let mut a = Animated::new(2.0);
+        a.set_key(0.0, 2.0);
+        let plan = SpeedPlan {
+            map: std::sync::Arc::new(SpeedMap::new(&a)),
+            t0: 0.0,
+        };
+        let mut p = VideoPlayer::spawn_at_rate(
+            &ff,
+            &clip,
+            vi,
+            0.0,
+            Playback::Slice {
+                len: 2.0,
+                passes: Some(2),
+            },
+            (160, 90),
+            1.0,
+            Some(plan),
+        )
+        .expect("spawn");
+        let t0 = std::time::Instant::now();
+        let (mut last_pts, mut t) = (-1.0, 0.0);
+        loop {
+            assert!(t0.elapsed().as_secs() < 30, "never ended");
+            p.update(t);
+            if let Some(f) = p.current() {
+                last_pts = f64::max(last_pts, f.pts);
+            }
+            if p.finished() {
+                break;
+            }
+            t += 1.0 / vi.fps;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let secs = last_pts + 1.0 / vi.fps;
+        assert!((secs - 2.0).abs() < 0.3, "{secs} s of picture");
     }
 
     #[test]
