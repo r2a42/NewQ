@@ -78,7 +78,9 @@ impl Param {
         Param { value, ramp: None }
     }
     pub fn ramp_to(&mut self, to: f32, duration: f64, curve: Curve) {
-        if duration <= 0.0 {
+        // A time that isn't one (a hand-edited file) would never run out,
+        // and a fade that never ends is a cue that never stops.
+        if !duration.is_finite() || duration <= 0.0 {
             self.value = to;
             self.ramp = None;
         } else {
@@ -456,6 +458,13 @@ pub struct Engine {
     clock: ClockFollower,
     /// Where send cues' messages go.
     outbox: Outbox,
+    /// Cues asked to fire while one is being fired (a continue, a group's
+    /// children), taken in order once it has started. Starting them from
+    /// inside each other would nest once per cue, and a long chain of
+    /// auto-continues (or of auto-follows that fail at once, say with their
+    /// media missing) would run out of stack.
+    fire_queue: VecDeque<CueId>,
+    firing: bool,
 }
 
 impl Engine {
@@ -482,6 +491,8 @@ impl Engine {
             timecode: Follower::default(),
             clock: ClockFollower::default(),
             outbox: Outbox::recording(),
+            fire_queue: VecDeque::new(),
+            firing: false,
         }
     }
 
@@ -511,6 +522,8 @@ impl Engine {
             timecode: Follower::default(),
             clock: ClockFollower::default(),
             outbox: Outbox::new(),
+            fire_queue: VecDeque::new(),
+            firing: false,
         }
     }
 
@@ -677,7 +690,21 @@ impl Engine {
     }
 
     /// Fire a cue (honouring its pre-wait) without touching the playhead.
+    /// Cues it leads to (continues, a group's children) are fired after it,
+    /// in order, before this returns.
     pub fn fire(&mut self, show: &Show, id: CueId) {
+        self.fire_queue.push_back(id);
+        if self.firing {
+            return;
+        }
+        self.firing = true;
+        while let Some(id) = self.fire_queue.pop_front() {
+            self.fire_one(show, id);
+        }
+        self.firing = false;
+    }
+
+    fn fire_one(&mut self, show: &Show, id: CueId) {
         let Some(cue) = show.cue(id) else { return };
         if show.cue_index(id).is_some_and(|i| !show.is_armed(i)) {
             self.log(format!("Cue {} ({}) is disarmed", cue.number, cue.name));
@@ -2453,6 +2480,52 @@ mod tests {
         e.playhead = Some(g);
         e.go(&show);
         assert!(playing(&e, after));
+    }
+
+    /// A chain this long once nested a call per cue and ran out of stack
+    /// (in a test's 2 MB at about 500 cues; Windows gives the main thread 1 MB).
+    const LONG_CHAIN: usize = 3000;
+
+    #[test]
+    fn a_long_chain_of_auto_continues_starts_every_cue_in_order() {
+        let mut show = Show::default();
+        let ids: Vec<CueId> = (0..LONG_CHAIN)
+            .map(|_| wait_cue(&mut show, 5.0, ContinueMode::AutoContinue))
+            .collect();
+        let mut e = engine_without_media();
+        e.playhead = Some(ids[0]);
+        e.go(&show);
+        let started: Vec<CueId> = e.active.iter().map(|a| a.cue_id).collect();
+        assert_eq!(started, ids);
+        assert_eq!(e.playhead, None);
+    }
+
+    #[test]
+    fn a_long_chain_of_auto_follows_that_fail_at_once_is_walked_to_its_end() {
+        // Video cues with no ffmpeg fail as they start, and each follows on
+        // to the next: a show whose media drive has gone, say.
+        let mut show = Show::default();
+        for _ in 0..LONG_CHAIN {
+            let mut c = show.make_cue(CueType::Video, None, show.cues.len());
+            c.continue_mode = ContinueMode::AutoFollow;
+            show.cues.push(c);
+        }
+        let last = wait_cue(&mut show, 5.0, ContinueMode::DoNotContinue);
+        let mut e = engine_without_media();
+        e.playhead = Some(show.cues[0].id);
+        e.go(&show);
+        assert!(playing(&e, last), "the wait at the end of the chain runs");
+        assert_eq!(e.active.len(), 1);
+    }
+
+    #[test]
+    fn a_fade_with_a_nonsense_time_is_instant_not_endless() {
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let mut p = Param::new(0.0);
+            p.ramp_to(1.0, bad, Curve::Linear);
+            assert_eq!(p.value, 1.0, "{bad}");
+            assert!(!p.ramping(), "{bad}");
+        }
     }
 
     #[test]

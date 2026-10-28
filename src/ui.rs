@@ -2373,7 +2373,10 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                     .striped(true)
                     .show(ui, |ui| {
                         for (cue, m) in &files {
-                            let gone = !m.file.is_file();
+                            // What the background check last found: asking the
+                            // disk here, for every file every frame, would hold
+                            // the show up on a slow or unplugged drive.
+                            let gone = st.missing.contains(&m.file);
                             ui.label(if gone {
                                 RichText::new("⚠").color(STOP_RED)
                             } else {
@@ -6638,9 +6641,11 @@ fn write_show(show: &Show, st: &mut UiState, path: &Path) -> bool {
 
 /// The show is on the disk at `path`, as `snapshot`.
 fn saved(st: &mut UiState, path: PathBuf, snapshot: Option<String>) {
-    // What was kept as a recovery copy, for the old name and the new, is now saved.
-    recovery::clear(st.show_path.as_deref());
-    recovery::clear(Some(&path));
+    // What was kept as a recovery copy, for the old name and the new, is now
+    // saved. (Not waited for: an autosave still being written to the same
+    // slow disk would hold the show up.)
+    recovery::clear_in_background(st.show_path.as_deref());
+    recovery::clear_in_background(Some(&path));
     st.show_path = Some(path);
     st.saved_json = snapshot;
 }
@@ -9718,10 +9723,15 @@ mod tests {
         assert_eq!(Show::load(&path).unwrap().name, "Saved");
         assert!(!d.join("other.newq").exists());
         assert_eq!(st.show_path.as_deref(), Some(path.as_path()));
-        assert!(
-            !recovery::path_for(Some(&path)).exists(),
-            "the recovery copy is cleared"
-        );
+        // The recovery copy is cleared (on a thread of its own, so a moment later).
+        let t0 = std::time::Instant::now();
+        while recovery::path_for(Some(&path)).exists() {
+            assert!(
+                t0.elapsed().as_secs() < 10,
+                "the recovery copy was not cleared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(st.saved_json, serde_json::to_string(&show).ok());
         // Save with a path already known saves there, without asking.
         show.name = "Saved again".into();

@@ -310,6 +310,7 @@ impl App {
             lose_gpu_at: std::env::var("NEWQ_LOSE_GPU_AFTER")
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
+                .filter(|s| s.is_finite() && *s >= 0.0)
                 .map(|s| Instant::now() + Duration::from_secs_f64(s)),
             control: None,
             screens: HashMap::new(),
@@ -1539,8 +1540,9 @@ impl App {
             .set_popout_geometry(p.pane, pos, [size.width, size.height]);
     }
 
-    /// Write the layout when it has changed (not more than once a second, and
-    /// again on the way out).
+    /// Write the layout when it has changed (looked at no more than once a
+    /// second: this runs every tick, and serialising the layout each time
+    /// would be work on every frame; and again on the way out).
     fn save_layout(&mut self, force: bool) {
         let Some(dir) = self.ui.layout_dir.clone() else {
             return;
@@ -1548,11 +1550,11 @@ impl App {
         if !force && self.last_layout_save.elapsed() < Duration::from_secs(1) {
             return;
         }
+        self.last_layout_save = Instant::now();
         let Ok(now) = serde_json::to_string(&self.ui.layout) else {
             return;
         };
         if now != self.saved_layout {
-            self.last_layout_save = Instant::now();
             match self.ui.layout.save(&dir) {
                 Ok(()) => self.saved_layout = now,
                 Err(e) => log::warn!("could not save the window layout: {e}"),
@@ -1591,7 +1593,7 @@ impl App {
             self.last_autosave = Instant::now();
             let path = self.ui.show_path.as_deref();
             if !self.ui.dirty {
-                recovery::clear(path);
+                recovery::clear_in_background(path);
             } else {
                 // On a thread of its own: the write and its flush are a dropped
                 // frame on every output if they happen here.
