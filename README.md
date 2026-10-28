@@ -34,6 +34,15 @@ includes FFmpeg, so there's nothing else to install.
   (up to 64) to route cues to; subscribe the channels in Dante Controller.
   Nothing else is needed or possible: Dante has no interface for a program to
   join the network by itself.
+- **Control cues:** *Cue ▸ Add Control cue* makes a cue that acts on another
+  cue (or the list) and takes no time: **Start** (fire it as if by hand),
+  **Pause** and **Resume** (hold just that cue, picture and sound, while the
+  rest play on; a group's children too), **Load** (get it ready ahead of time so it
+  starts at once), **Reset** (stop it now and forget what was ready),
+  **Go to** (put the playhead on it without firing it), **Arm** and **Disarm**
+  (change whether GO and continues fire it), **Devamp** (a loop that is playing
+  finishes its pass and goes on instead of going round again) and **Memo** (does
+  nothing: a note in the list). Pick the action and the cue in the inspector.
 - **Effects with keyframes:** the *Effects* section of a cue's inspector takes
   any number of effects. **Picture:** *Blur* (a disc blur, up to 100 px),
   *Sharpen*, *Vignette*, *Pixelate* and *Negative*, drawn by the graphics card in

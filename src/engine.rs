@@ -14,7 +14,7 @@ use crate::output::{Outbox, Outgoing};
 use crate::show::*;
 use crate::timecode::{Follower, Rate, Timecode};
 use crossbeam_channel::Receiver;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -215,6 +215,8 @@ pub struct ActiveCue {
     pub volume: Param,
     /// Media is decoded and playing (pre-roll finished).
     pub started: bool,
+    /// Held where it is by a control cue (a pause of this cue alone).
+    pub hold: bool,
     /// Fading out; removed once the fade completes.
     pub stopping: bool,
     /// Ended and is holding its last frame.
@@ -465,6 +467,19 @@ pub struct Engine {
     /// media missing) would run out of stack.
     fire_queue: VecDeque<CueId>,
     firing: bool,
+    /// Cues a control cue asked to be got ready ahead of time (kept ready
+    /// until they are fired or reset).
+    loads: HashSet<CueId>,
+    /// Changes to the show that control cues ask for (the engine only reads
+    /// the show); the app makes them after each tick.
+    edits: Vec<ShowEdit>,
+}
+
+/// A change to the show asked for by a control cue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShowEdit {
+    /// Arm (true) or disarm (false) a cue.
+    Arm(CueId, bool),
 }
 
 impl Engine {
@@ -493,6 +508,8 @@ impl Engine {
             outbox: Outbox::recording(),
             fire_queue: VecDeque::new(),
             firing: false,
+            loads: HashSet::new(),
+            edits: Vec::new(),
         }
     }
 
@@ -524,6 +541,8 @@ impl Engine {
             outbox: Outbox::new(),
             fire_queue: VecDeque::new(),
             firing: false,
+            loads: HashSet::new(),
+            edits: Vec::new(),
         }
     }
 
@@ -619,7 +638,7 @@ impl Engine {
             CueKind::LiveAudio(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
-            CueKind::Stop(_) | CueKind::Send(_) => Some(Some(0.0)),
+            CueKind::Stop(_) | CueKind::Send(_) | CueKind::Control(_) => Some(Some(0.0)),
             // Slide show: the slides are timed to end together with the last.
             CueKind::Group(g) if g.slides.is_some() => Some(Some(show.slides_length(cue.id))),
             CueKind::Group(g) => {
@@ -713,6 +732,8 @@ impl Engine {
         if self.paused {
             self.set_paused(false);
         }
+        // Fired: it is no longer waiting to be got ready.
+        self.loads.remove(&id);
         if cue.pre_wait > 0.0 {
             self.pending.push(PendingCue {
                 cue_id: id,
@@ -745,8 +766,101 @@ impl Engine {
             if a.started
                 && let Some(v) = a.voice()
             {
-                v.set_paused(paused);
+                v.set_paused(paused || a.hold);
             }
+        }
+    }
+
+    /// The changes to the show that control cues have asked for since the last
+    /// call (arming and disarming), to be made by whoever owns the show.
+    pub fn take_show_edits(&mut self) -> Vec<ShowEdit> {
+        std::mem::take(&mut self.edits)
+    }
+
+    /// Hold the cue `id` (a group's children too), or let it go on.
+    fn hold_cue(&mut self, show: &Show, id: CueId, hold: bool) -> bool {
+        let targets = show.with_children(id);
+        let paused = self.paused;
+        let mut hit = false;
+        for a in &mut self.active {
+            if !targets.contains(&a.cue_id) || a.is_matte() {
+                continue;
+            }
+            hit = true;
+            a.hold = hold;
+            if a.started
+                && let Some(v) = a.voice()
+            {
+                v.set_paused(paused || hold);
+            }
+        }
+        hit
+    }
+
+    /// Let loops that are playing in `id` (a group's children too) finish
+    /// the pass they are on and go on from there.
+    fn devamp(&mut self, show: &Show, id: CueId) -> bool {
+        let targets = show.with_children(id);
+        let mut hit = false;
+        for a in &mut self.active {
+            if !targets.contains(&a.cue_id) || a.stopping {
+                continue;
+            }
+            let Some(len) = a.pass_len else { continue };
+            let end = ((a.elapsed / len).floor() + 1.0) * len;
+            a.duration = Some(a.duration.map_or(end, |d| d.min(end)));
+            hit = true;
+        }
+        hit
+    }
+
+    /// Do what a control cue says.
+    fn control(&mut self, show: &Show, cue: &Cue, c: &ControlCue) {
+        if !c.action.needs_target() {
+            return;
+        }
+        let name = format!("{} ({})", cue.number, cue.name);
+        let Some(target) = c.target.filter(|t| show.cue(*t).is_some()) else {
+            self.log(format!("Cue {name}: it has no cue to act on"));
+            return;
+        };
+        let tname = show
+            .cue(target)
+            .map(|t| format!("{} ({})", t.number, t.name))
+            .unwrap_or_default();
+        match c.action {
+            ControlAction::Start => self.fire(show, target),
+            ControlAction::Pause => {
+                if !self.hold_cue(show, target, true) {
+                    self.log(format!("Cue {name}: {tname} is not playing"));
+                }
+            }
+            ControlAction::Resume => {
+                if !self.hold_cue(show, target, false) {
+                    self.log(format!("Cue {name}: {tname} is not playing"));
+                }
+            }
+            ControlAction::Load => {
+                for id in show.with_children(target) {
+                    self.loads.insert(id);
+                }
+            }
+            ControlAction::Reset => {
+                for id in show.with_children(target) {
+                    self.loads.remove(&id);
+                    self.prepared.retain(|p| p.cue_id != id);
+                    self.stop_cue(id, 0.0);
+                }
+            }
+            ControlAction::GoTo => self.playhead = Some(show.top_id(target)),
+            ControlAction::Arm => self.edits.push(ShowEdit::Arm(target, true)),
+            ControlAction::Disarm => self.edits.push(ShowEdit::Arm(target, false)),
+            ControlAction::Devamp => {
+                if !self.devamp(show, target) {
+                    self.log(format!("Cue {name}: {tname} is not a loop that is playing"));
+                }
+            }
+            ControlAction::Memo => {}
         }
     }
 
@@ -1192,6 +1306,7 @@ impl Engine {
             opacity,
             volume: Param::new(0.0),
             started: true,
+            hold: false,
             stopping: false,
             held: false,
             seek_base: 0.0,
@@ -1242,6 +1357,7 @@ impl Engine {
             opacity: Param::new(1.0),
             volume: Param::new(0.0),
             started: true,
+            hold: false,
             stopping: false,
             held: false,
             seek_base: 0.0,
@@ -1468,6 +1584,10 @@ impl Engine {
                 active.kind = ActiveKind::Wait;
                 active.duration = Some(w.duration);
             }
+            CueKind::Control(c) => {
+                ok = false; // instantaneous; nothing stays active
+                self.control(show, &cue, c);
+            }
             CueKind::Send(s) => {
                 ok = false; // instantaneous; nothing stays active
                 self.outbox.send(Outgoing::from_cue(s));
@@ -1612,6 +1732,8 @@ impl Engine {
         let mut entries = Vec::new();
         let mut midpoints = Vec::new();
         self.active.retain_mut(|a| {
+            // A cue held by a control cue stands still while the rest go on.
+            let paused = paused || a.hold;
             let cue = show.cue(a.cue_id);
             let media = cue.and_then(|c| c.kind.media()).filter(|_| !a.is_matte());
             let mut completed = false;
@@ -1947,6 +2069,10 @@ impl Engine {
         // Cues that have already been fired but not started yet: in a
         // pre-wait, or waiting for a dip's midpoint.
         let mut wanted: Vec<CueId> = self.pending.iter().map(|p| p.cue_id).collect();
+        // Cues a control cue asked to have ready (the ones that exist and can be).
+        self.loads
+            .retain(|id| show.cue(*id).is_some_and(|c| c.kind.preloads()));
+        wanted.extend(self.loads.iter().copied());
         for a in &self.active {
             if let ActiveKind::Matte(m) = &a.kind
                 && !m.fired
@@ -4091,5 +4217,152 @@ mod tests {
         show.cues[i].kind.media_mut().unwrap().effects.clear();
         run_for(&mut e, &show, 0.1);
         assert!(e.layers(out)[0].fx.is_none());
+    }
+
+    /// A control cue acting on `target`, appended to the list.
+    fn control_cue(show: &mut Show, action: ControlAction, target: CueId) -> CueId {
+        let mut c = show.make_cue(CueType::Control, None, show.cues.len());
+        c.kind = CueKind::Control(ControlCue {
+            action,
+            target: Some(target),
+        });
+        let id = c.id;
+        show.cues.push(c);
+        id
+    }
+
+    #[test]
+    fn a_start_cue_fires_its_target_and_a_memo_does_nothing() {
+        let mut show = Show::default();
+        let w = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let start = control_cue(&mut show, ControlAction::Start, w);
+        let mut memo = show.make_cue(CueType::Control, None, show.cues.len());
+        memo.kind = CueKind::Control(ControlCue {
+            action: ControlAction::Memo,
+            target: None,
+        });
+        let memo_id = memo.id;
+        show.cues.push(memo);
+        let mut e = engine_without_media();
+        // The playhead is on the memo; the start cue is fired from elsewhere.
+        e.playhead = Some(memo_id);
+        e.go(&show);
+        assert!(e.active.is_empty(), "a memo does nothing");
+        e.fire(&show, start);
+        assert!(playing(&e, w));
+        // It took no time itself and left nothing running.
+        assert!(!playing(&e, start));
+    }
+
+    #[test]
+    fn pause_holds_one_cue_while_the_rest_go_on_and_resume_lets_it_go() {
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let b = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let pause = control_cue(&mut show, ControlAction::Pause, a);
+        let resume = control_cue(&mut show, ControlAction::Resume, a);
+        let mut e = engine_without_media();
+        e.fire(&show, a);
+        e.fire(&show, b);
+        e.tick(&show, 1.0);
+        e.fire(&show, pause);
+        e.tick(&show, 1.0);
+        e.tick(&show, 1.0);
+        let at = |e: &Engine, id| e.active.iter().find(|x| x.cue_id == id).unwrap().elapsed;
+        assert_eq!(at(&e, a), 1.0, "held");
+        assert_eq!(at(&e, b), 3.0, "the other goes on");
+        // A global pause and resume leaves the held one held.
+        e.set_paused(true);
+        e.set_paused(false);
+        e.tick(&show, 1.0);
+        assert_eq!(at(&e, a), 1.0);
+        e.fire(&show, resume);
+        e.tick(&show, 1.0);
+        assert_eq!(at(&e, a), 2.0);
+        // Pausing what isn't playing says so and nothing breaks.
+        e.stop_all(0.0);
+        e.fire(&show, pause);
+        assert!(e.messages.iter().any(|(_, m)| m.contains("is not playing")));
+    }
+
+    #[test]
+    fn goto_moves_the_playhead_and_arm_and_disarm_ask_the_show_for_the_change() {
+        let mut show = Show::default();
+        let a = wait_cue(&mut show, 1.0, ContinueMode::DoNotContinue);
+        let b = wait_cue(&mut show, 1.0, ContinueMode::DoNotContinue);
+        let goto = control_cue(&mut show, ControlAction::GoTo, b);
+        let disarm = control_cue(&mut show, ControlAction::Disarm, a);
+        let arm = control_cue(&mut show, ControlAction::Arm, a);
+        let mut e = engine_without_media();
+        e.playhead = Some(a);
+        e.fire(&show, goto);
+        assert_eq!(e.playhead, Some(b));
+        assert!(!playing(&e, b), "go to does not fire it");
+        e.fire(&show, disarm);
+        e.fire(&show, arm);
+        assert_eq!(
+            e.take_show_edits(),
+            vec![ShowEdit::Arm(a, false), ShowEdit::Arm(a, true)]
+        );
+        assert!(e.take_show_edits().is_empty());
+        // A control cue with no target says so.
+        let mut none = show.make_cue(CueType::Control, None, show.cues.len());
+        none.kind = CueKind::Control(ControlCue::default());
+        let none_id = none.id;
+        show.cues.push(none);
+        e.fire(&show, none_id);
+        assert!(
+            e.messages
+                .iter()
+                .any(|(_, m)| m.contains("no cue to act on"))
+        );
+    }
+
+    #[test]
+    fn load_gets_a_cue_ready_and_reset_forgets_it_and_stops_it() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        // Far down the list, so the playhead doesn't prepare it by itself.
+        let first = wait_cue(&mut show, 1.0, ContinueMode::DoNotContinue);
+        let target = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        let load = control_cue(&mut show, ControlAction::Load, target);
+        let reset = control_cue(&mut show, ControlAction::Reset, target);
+        e.playhead = Some(first);
+        e.update_preload(&show);
+        assert!(!e.is_prepared(target));
+        e.fire(&show, load);
+        run_until(&mut e, &show, "the load", |e| e.is_prepared(target));
+        // Fired, it uses what was ready; it is on screen.
+        e.fire(&show, target);
+        run_until(&mut e, &show, "on screen", |e| stack(e, out).len() == 1);
+        // Reset stops it and forgets any load.
+        e.fire(&show, load);
+        e.fire(&show, reset);
+        run_for(&mut e, &show, 0.1);
+        assert!(stack(&e, out).is_empty() && !e.is_prepared(target));
+        e.update_preload(&show);
+        assert!(!e.is_prepared(target), "the reset cancelled the load");
+    }
+
+    #[test]
+    fn devamp_lets_a_loop_finish_its_pass_and_end() {
+        let Some((mut e, mut show, _, _)) = playing_video(true) else {
+            return;
+        };
+        let id = show.cues[0].id;
+        let devamp = control_cue(&mut show, ControlAction::Devamp, id);
+        run_for(&mut e, &show, 0.3);
+        assert!(e.active[0].loops_forever());
+        e.fire(&show, devamp);
+        assert!(!e.active[0].loops_forever(), "it now has an end");
+        let end = e.active[0].duration.unwrap();
+        assert!((end - 10.0).abs() < 0.5, "the end of the pass: {end}");
+        // Devamping what is not a loop says so.
+        e.stop_all(0.0);
+        e.fire(&show, devamp);
+        assert!(e.messages.iter().any(|(_, m)| m.contains("not a loop")));
     }
 }

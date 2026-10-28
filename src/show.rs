@@ -935,6 +935,7 @@ pub enum CueKind {
     Camera(CameraCue),
     Send(SendCue),
     LiveAudio(LiveAudioCue),
+    Control(ControlCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -950,6 +951,7 @@ pub enum CueType {
     Camera,
     Send,
     LiveAudio,
+    Control,
     /// Ways to make a text cue that shows the time (a cue's own type is
     /// still `Text`).
     Clock,
@@ -970,6 +972,7 @@ impl CueType {
             CueType::Camera => "Camera",
             CueType::Send => "Send",
             CueType::LiveAudio => "Live audio",
+            CueType::Control => "Control",
             CueType::Clock => "Clock",
             CueType::Timer => "Timer",
         }
@@ -987,6 +990,7 @@ impl CueType {
             CueType::Camera => "📷",
             CueType::Send => "📡",
             CueType::LiveAudio => "🎙",
+            CueType::Control => "🎛",
             CueType::Clock => "🕒",
             CueType::Timer => "⏳",
         }
@@ -1007,6 +1011,7 @@ impl CueKind {
             CueKind::Camera(_) => CueType::Camera,
             CueKind::Send(_) => CueType::Send,
             CueKind::LiveAudio(_) => CueType::LiveAudio,
+            CueKind::Control(_) => CueType::Control,
         }
     }
     /// The playback settings of a cue that plays something: transitions,
@@ -1651,6 +1656,92 @@ pub struct StopCue {
     /// Fade each stopped cue out with its own fade-out time instead of `fade`.
     #[serde(default)]
     pub use_own_fade: bool,
+}
+
+/// What a control cue does to its target.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlAction {
+    /// Fire the target, as if it were fired by hand (honouring its pre-wait).
+    #[default]
+    Start,
+    /// Hold the target (and a group's children) where it is.
+    Pause,
+    /// Let a paused target go on.
+    Resume,
+    /// Get the target ready ahead of time, so starting it is instant.
+    Load,
+    /// Stop the target at once and forget what was ready of it.
+    Reset,
+    /// Put the playhead on the target (without firing it).
+    GoTo,
+    /// Arm the target, so GO and continues fire it.
+    Arm,
+    /// Disarm the target, so it is passed over as if it weren't there.
+    Disarm,
+    /// Let a loop that is playing finish its pass and go on, instead of going round again.
+    Devamp,
+    /// Does nothing: a note in the cue list.
+    Memo,
+}
+
+impl ControlAction {
+    pub const ALL: [ControlAction; 10] = [
+        ControlAction::Start,
+        ControlAction::Pause,
+        ControlAction::Resume,
+        ControlAction::Load,
+        ControlAction::Reset,
+        ControlAction::GoTo,
+        ControlAction::Arm,
+        ControlAction::Disarm,
+        ControlAction::Devamp,
+        ControlAction::Memo,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ControlAction::Start => "Start",
+            ControlAction::Pause => "Pause",
+            ControlAction::Resume => "Resume",
+            ControlAction::Load => "Load",
+            ControlAction::Reset => "Reset",
+            ControlAction::GoTo => "Go to",
+            ControlAction::Arm => "Arm",
+            ControlAction::Disarm => "Disarm",
+            ControlAction::Devamp => "Devamp",
+            ControlAction::Memo => "Memo",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            ControlAction::Start => "Fire the target as if by hand, whatever the playhead is on",
+            ControlAction::Pause => "Hold the target where it is, picture and sound",
+            ControlAction::Resume => "Let a paused target carry on",
+            ControlAction::Load => "Get the target ready ahead of time, so it starts at once",
+            ControlAction::Reset => "Stop the target at once and forget what was ready of it",
+            ControlAction::GoTo => "Put the playhead on the target, without firing it",
+            ControlAction::Arm => "Arm the target so GO and continues fire it",
+            ControlAction::Disarm => "Disarm the target so it is passed over",
+            ControlAction::Devamp => {
+                "Let a loop that is playing finish its pass and go on, rather than go round again"
+            }
+            ControlAction::Memo => "Does nothing: a note in the cue list",
+        }
+    }
+
+    /// Whether it acts on a cue.
+    pub fn needs_target(self) -> bool {
+        self != ControlAction::Memo
+    }
+}
+
+/// A cue that controls other cues (or the list). It takes no time.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ControlCue {
+    #[serde(default)]
+    pub action: ControlAction,
+    pub target: Option<CueId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -2621,6 +2712,10 @@ impl Show {
             CueType::LiveAudio => (
                 "Live audio".into(),
                 CueKind::LiveAudio(LiveAudioCue::default()),
+            ),
+            CueType::Control => (
+                ControlAction::default().label().into(),
+                CueKind::Control(ControlCue::default()),
             ),
         };
         Cue {
@@ -4794,5 +4889,33 @@ mod tests {
         };
         assert_eq!(c.device.as_deref(), Some("Dante Virtual Soundcard"));
         assert_eq!((c.input_channel, c.media.volume_db), (6, -3.0));
+    }
+
+    #[test]
+    fn control_cues_round_trip_and_old_files_still_load() {
+        let mut show = Show::default();
+        let target = show.make_cue(CueType::Wait, None, 0);
+        let tid = target.id;
+        show.cues.push(target);
+        let mut c = show.make_cue(CueType::Control, None, 1);
+        assert_eq!(c.kind.cue_type(), CueType::Control);
+        assert_eq!(c.name, "Start");
+        assert!(c.kind.media().is_none() && !c.kind.preloads());
+        c.kind = CueKind::Control(ControlCue {
+            action: ControlAction::Devamp,
+            target: Some(tid),
+        });
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        let CueKind::Control(b) = &back.kind else {
+            panic!()
+        };
+        assert_eq!((b.action, b.target), (ControlAction::Devamp, Some(tid)));
+        // An action left out of a file is the default one.
+        let old: ControlCue = serde_json::from_str(r#"{"target":null}"#).unwrap();
+        assert_eq!(old.action, ControlAction::Start);
+        for a in ControlAction::ALL {
+            assert!(!a.label().is_empty() && !a.description().is_empty());
+        }
+        assert!(!ControlAction::Memo.needs_target());
     }
 }

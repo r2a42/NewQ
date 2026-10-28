@@ -1818,6 +1818,17 @@ impl ApplicationHandler for App {
         self.last_clock_look = now;
         self.engine.on_clock(&self.show, crate::clock::now(), gap);
         self.engine.tick(&self.show, dt);
+        // What control cues asked of the show (arming, disarming).
+        for edit in self.engine.take_show_edits() {
+            match edit {
+                crate::engine::ShowEdit::Arm(id, on) => {
+                    if let Some(c) = self.show.cues.iter_mut().find(|c| c.id == id) {
+                        c.armed = on;
+                    }
+                }
+            }
+            self.ui.json_stale = true;
+        }
 
         // Drop GPU textures of cues that are no longer playing.
         let live: HashSet<u64> = self.engine.active.iter().map(|a| a.instance).collect();
