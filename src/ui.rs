@@ -251,7 +251,7 @@ pub struct UiState {
     json: Option<String>,
     json_at: f64,
     /// Something outside `draw` (a remote command) changed the show.
-    json_stale: bool,
+    pub json_stale: bool,
     /// The media files that aren't there, checked once a second on a thread of
     /// its own (a stat of a file on a network share that has gone can take
     /// seconds, and the cue list must not wait for it), and when that was
@@ -1113,6 +1113,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             for ty in [
                 CueType::Camera,
                 CueType::LiveAudio,
+                CueType::Control,
                 CueType::Send,
                 CueType::Text,
                 CueType::Clock,
@@ -1466,6 +1467,18 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Control(c) => {
+            let target = c
+                .target
+                .and_then(|t| show.cue(t))
+                .map(cue_label)
+                .unwrap_or_else(|| "(no cue)".into());
+            if c.action.needs_target() {
+                format!("{} » {target}", c.action.label())
+            } else {
+                String::new()
+            }
+        }
         CueKind::Send(s) => crate::output::describe(s),
         CueKind::Text(t) => {
             let first = match t.source {
@@ -4646,6 +4659,7 @@ fn inspector(
         .filter(|c| c.kind.media().is_some() || matches!(c.kind, CueKind::Group(_)))
         .map(|c| (c.id, cue_label(c)))
         .collect();
+    let show_cues: Vec<(CueId, String)> = show.cues.iter().map(|c| (c.id, cue_label(c))).collect();
     // Displays first, then sub displays with the display they are part of.
     let outputs: Vec<(OutputId, String)> = show
         .outputs
@@ -4845,6 +4859,8 @@ fn inspector(
         let ui = &mut cols[1];
         let cue_type = cue.kind.cue_type();
         let cue_id = cue.id;
+        let cue_name = cue.name.clone();
+        let mut new_name: Option<String> = None;
         if in_slides {
             ui.label(
                 RichText::new(
@@ -4921,6 +4937,39 @@ fn inspector(
                         });
                         ui.end_row();
                     });
+            }
+            CueKind::Control(c) => {
+                let candidates: Vec<(CueId, String)> = show_cues
+                    .iter()
+                    .filter(|x| x.0 != cue_id)
+                    .cloned()
+                    .collect();
+                let before = c.action;
+                egui::Grid::new("control")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Do");
+                        egui::ComboBox::from_id_salt("control_action")
+                            .selected_text(c.action.label())
+                            .show_ui(ui, |ui| {
+                                for a in ControlAction::ALL {
+                                    ui.selectable_value(&mut c.action, a, a.label())
+                                        .on_hover_text(a.description());
+                                }
+                            });
+                        ui.end_row();
+                        if c.action.needs_target() {
+                            ui.label("Cue");
+                            cue_picker(ui, "control_target", &candidates, &mut c.target, "(none)");
+                            ui.end_row();
+                        }
+                    });
+                ui.label(RichText::new(c.action.description()).weak());
+                // A cue still called what its action was follows it.
+                if before != c.action && cue_name == before.label() {
+                    new_name = Some(c.action.label().to_string());
+                }
             }
             CueKind::Stop(s) => {
                 egui::Grid::new("stop")
@@ -5031,6 +5080,9 @@ fn inspector(
                     .weak(),
                 );
             }
+        }
+        if let Some(n) = new_name {
+            cue.name = n;
         }
     });
 }
@@ -8314,6 +8366,30 @@ mod tests {
         let mut plain = m.clone();
         plain.effects.clear();
         assert!(!serde_json::to_string(&plain).unwrap().contains("effects"));
+    }
+
+    #[test]
+    fn a_control_cue_draws_and_is_added_from_the_menu_action() {
+        let (mut show, mut e, mut st) = running();
+        apply(Action::AddCue(CueType::Control), &mut show, &mut e, &mut st);
+        let id = st.selected.unwrap();
+        assert_eq!(show.cue(id).unwrap().kind.cue_type(), CueType::Control);
+        let target = number(&show, "4");
+        if let CueKind::Control(c) = &mut show.cue_mut(id).unwrap().kind {
+            c.action = ControlAction::Pause;
+            c.target = Some(target);
+        }
+        let label = cue_target_text(&show, show.cue(id).unwrap());
+        assert!(label.starts_with("Pause » "), "{label}");
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 900.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 100);
     }
 
     #[test]
