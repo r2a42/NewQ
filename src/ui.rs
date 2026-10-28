@@ -5801,6 +5801,13 @@ fn media_inspector(
                     if ty == CueType::Video {
                         ui.checkbox(&mut m.hold_last_frame, "Hold last frame");
                     }
+                    if ty == CueType::Audio && m.loop_media && m.loop_count == 0 {
+                        ui.checkbox(&mut m.play_on, "Devamp plays on").on_hover_text(
+                            "Devamp (a control cue, OSC or MSC) ends the loop at the end of \
+                             its pass and plays what is in the file after the out point, \
+                             instead of stopping there",
+                        );
+                    }
                 });
                 ui.end_row();
             }

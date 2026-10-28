@@ -811,6 +811,15 @@ impl Engine {
             }
             let Some(len) = a.pass_len else { continue };
             let end = ((a.elapsed / len).floor() + 1.0) * len;
+            // A loop that plays on goes on to the rest of the file instead.
+            if let ActiveKind::Audio(vo) = &a.kind
+                && vo.release()
+            {
+                a.duration = Some(end + vo.tail_len());
+                a.pass_len = None;
+                hit = true;
+                continue;
+            }
             a.duration = Some(a.duration.map_or(end, |d| d.min(end)));
             hit = true;
         }
@@ -1222,6 +1231,21 @@ impl Engine {
         };
         let mut warning = None;
         let matrix = Self::matrix_for(m, info.audio_channels);
+        // A loop that never ends can go on past its out point once devamped.
+        let play_on = match (m.play_on, playback, info.duration) {
+            (
+                true,
+                Playback::Slice { len, passes: None }
+                | Playback::SliceFrom {
+                    len, passes: None, ..
+                },
+                Some(total),
+            ) if total - (m.start + len) > 0.05 => Some(crate::media::audio::PlayOn {
+                from: m.start + len,
+                len: (total - (m.start + len)) / rate,
+            }),
+            _ => None,
+        };
         let kind = match &cue.kind {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
@@ -1240,6 +1264,7 @@ impl Engine {
                         &m.sound_chain(),
                         rate,
                         matrix.as_ref(),
+                        None,
                     ) {
                         Ok(voice) => Some(voice),
                         Err(e) => {
@@ -1273,6 +1298,7 @@ impl Engine {
                         &m.sound_chain(),
                         rate,
                         matrix.as_ref(),
+                        play_on,
                     )
                     .map_err(|e| format!("{e:#}"))?;
                 PreparedKind::Audio(voice)
@@ -1947,6 +1973,12 @@ impl Engine {
                     }
                     if a.started {
                         a.elapsed = a.seek_base + vo.clock();
+                        // Once the released loop has gone on, its end is known.
+                        if vo.released()
+                            && let Some(at) = vo.tail_begins()
+                        {
+                            a.duration = Some(a.seek_base + at + vo.tail_len());
+                        }
                         if vo.finished() {
                             completed = true;
                         }
@@ -4476,6 +4508,40 @@ mod tests {
         assert!(stack(&e, out).is_empty() && !e.is_prepared(target));
         e.update_preload(&show);
         assert!(!e.is_prepared(target), "the reset cancelled the load");
+    }
+
+    #[test]
+    fn devamp_plays_a_looping_sound_on_past_its_out_point() {
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let mut e = engine_without_media();
+        e.audio = AudioOut::with_playing_device();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Audio, Some(wav), 0);
+        let m = c.kind.media_mut().unwrap();
+        m.loop_media = true;
+        m.end = Some(1.0);
+        m.play_on = true;
+        let id = c.id;
+        show.cues.push(c);
+        let devamp = control_cue(&mut show, ControlAction::Devamp, id);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the loop to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        assert!(e.active[0].loops_forever());
+        e.fire(&show, devamp);
+        let a = &e.active[0];
+        assert!(!a.loops_forever(), "it has an end now");
+        // The end of this pass and then the 4 s that are left of the file.
+        let end = a.duration.unwrap();
+        assert!((5.0 - 1e-6..7.0).contains(&end), "{end}");
+        run_until(&mut e, &show, "it to play to the end", |e| {
+            matches!(e.status(id), CueStatus::Idle)
+        });
     }
 
     #[test]

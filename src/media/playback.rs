@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::process::{Child, ChildStdout, Command};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Slices shorter than this are not looped (a restart per few frames would
 /// spend more time starting ffmpeg than playing).
@@ -261,6 +262,9 @@ fn reap(mut child: Child) {
         });
 }
 
+/// The decoder of a released loop's last pass, and the flag that releases it.
+type Tail = (Box<dyn Fn() -> Command + Send>, Arc<AtomicBool>);
+
 /// Supplies a reader thread with the decoder output of each pass in turn.
 pub struct PassFeed {
     children: Children,
@@ -270,6 +274,12 @@ pub struct PassFeed {
     pass: u32,
     current: Option<(u64, ChildStdout)>,
     next: Option<(u64, ChildStdout)>,
+    /// A last pass that follows the loop's current pass once `released` is
+    /// set (see `with_tail`).
+    tail: Option<Tail>,
+    /// `next` is the tail's decoder, not another pass of the loop's.
+    next_is_tail: bool,
+    in_tail: bool,
 }
 
 impl PassFeed {
@@ -289,7 +299,43 @@ impl PassFeed {
             pass: 0,
             current: Some(first),
             next: None,
+            tail: None,
+            next_is_tail: false,
+            in_tail: false,
         })
+    }
+
+    /// Let the loop be released: once `released` is set, the pass after the
+    /// one that is playing is the one `make` builds (and the last), not another
+    /// of the loop.
+    pub fn with_tail(
+        mut self,
+        make: impl Fn() -> Command + Send + 'static,
+        released: Arc<AtomicBool>,
+    ) -> PassFeed {
+        self.tail = Some((Box::new(make), released));
+        self
+    }
+
+    /// The pass being read is the tail.
+    pub fn in_tail(&self) -> bool {
+        self.in_tail
+    }
+
+    fn wants_tail(&self) -> bool {
+        !self.in_tail
+            && self
+                .tail
+                .as_ref()
+                .is_some_and(|(_, r)| r.load(Ordering::Acquire))
+    }
+
+    fn spawn_next(&mut self, tail: bool) -> Option<(u64, ChildStdout)> {
+        let mut cmd = match (&self.tail, tail) {
+            (Some((make, _)), true) => make(),
+            _ => (self.make)(),
+        };
+        self.children.spawn(&mut cmd, &self.error).ok()
     }
 
     pub fn stdout(&mut self) -> &mut ChildStdout {
@@ -297,13 +343,15 @@ impl PassFeed {
     }
 
     fn has_more(&self) -> bool {
-        self.passes.is_none_or(|n| self.pass + 1 < n)
+        !self.in_tail && (self.wants_tail() || self.passes.is_none_or(|n| self.pass + 1 < n))
     }
 
     /// Start the next pass's ffmpeg now, so `advance` has nothing to wait for.
     pub fn prefetch(&mut self) {
         if self.next.is_none() && self.has_more() {
-            self.next = self.children.spawn(&mut (self.make)(), &self.error).ok();
+            let tail = self.wants_tail();
+            self.next = self.spawn_next(tail);
+            self.next_is_tail = tail;
         }
     }
 
@@ -315,11 +363,20 @@ impl PassFeed {
         if !self.has_more() {
             return false;
         }
+        let tail = self.wants_tail();
+        // A decoder started before the release is for the wrong pass.
+        if self.next_is_tail != tail
+            && let Some((id, _)) = self.next.take()
+        {
+            self.children.release(id);
+        }
         self.pass += 1;
-        self.current = self
-            .next
-            .take()
-            .or_else(|| self.children.spawn(&mut (self.make)(), &self.error).ok());
+        self.current = match self.next.take() {
+            Some(n) => Some(n),
+            None => self.spawn_next(tail),
+        };
+        self.in_tail = tail;
+        self.next_is_tail = false;
         self.current.is_some()
     }
 }

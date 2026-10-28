@@ -1539,6 +1539,10 @@ pub struct MediaCue {
     /// channel plays there and the right on the next.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub audio_channel: u16,
+    /// A looping sound that is devamped plays on from its out point to the
+    /// end of the file, rather than ending where the loop does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub play_on: bool,
     /// A grid of crosspoints in place of `audio_channel`: which channel of the
     /// file plays on which channel of the device, and how loud. Empty = the
     /// stereo pair at `audio_channel`.
@@ -1641,6 +1645,7 @@ impl MediaCue {
             audio_output: None,
             audio_channel: 0,
             matrix: Vec::new(),
+            play_on: false,
             transform: LayerTransform::default(),
             color: ColorAdjust::default(),
             volume_db: 0.0,
@@ -1696,6 +1701,7 @@ impl MediaCue {
             && self.audio_output == other.audio_output
             && self.audio_channel == other.audio_channel
             && self.matrix == other.matrix
+            && self.play_on == other.play_on
             && self.sound_chain() == other.sound_chain()
     }
 
@@ -5191,6 +5197,18 @@ mod tests {
         let mut other = back.kind.media().unwrap().clone();
         other.matrix[0].to = 4;
         assert!(!other.decodes_like(back.kind.media().unwrap()));
+    }
+
+    #[test]
+    fn play_on_is_not_written_when_off_and_changes_what_is_decoded() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Audio, Some("a.wav".into()), 0);
+        assert!(!serde_json::to_string(&c).unwrap().contains("play_on"));
+        let off = c.kind.media().unwrap().clone();
+        c.kind.media_mut().unwrap().play_on = true;
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.kind.media().unwrap().play_on);
+        assert!(!off.decodes_like(back.kind.media().unwrap()));
     }
 
     #[test]
