@@ -210,6 +210,9 @@ pub struct ActiveCue {
     /// The length of one pass of a loop, if it is a loop whose passes have a
     /// length (the bar shows where it is in the pass and jumps within it).
     pub pass_len: Option<f64>,
+    /// Its keyframed speed, if it has one: then `pass_len` is in the file's
+    /// seconds (a pass is that long in the file, however long it takes).
+    pub speed: Option<std::sync::Arc<crate::speed::SpeedMap>>,
     pub opacity: Param,
     /// Volume in dB.
     pub volume: Param,
@@ -282,6 +285,15 @@ impl ActiveCue {
         }
     }
 
+    /// How far through the loop's passes it is, in the units of `pass_len`: its
+    /// time, or with a keyframed speed the file's time that has been played.
+    fn pass_time(&self) -> f64 {
+        match &self.speed {
+            Some(map) => map.media_at(self.elapsed),
+            None => self.elapsed,
+        }
+    }
+
     /// Whether this is a loop that never ends, whose bar shows the pass.
     pub fn loops_forever(&self) -> bool {
         self.pass_len.is_some() && self.duration.is_none()
@@ -291,7 +303,7 @@ impl ActiveCue {
     /// ends the time into the current pass.
     pub fn bar_position(&self) -> f64 {
         match self.pass_len.filter(|_| self.loops_forever()) {
-            Some(len) => self.elapsed.rem_euclid(len),
+            Some(len) => self.pass_time().rem_euclid(len),
             None => self.elapsed,
         }
     }
@@ -299,7 +311,7 @@ impl ActiveCue {
     /// Which pass of a loop it is in, counting from 1.
     pub fn pass_number(&self) -> Option<u32> {
         let len = self.pass_len?;
-        Some((self.elapsed / len).floor() as u32 + 1)
+        Some((self.pass_time() / len).floor() as u32 + 1)
     }
 
     /// Jumping in a cue starts its automatic fade-out over: it is at full
@@ -407,6 +419,7 @@ enum PreparedKind {
 struct Prepared {
     /// How long one pass of a loop is, for jumping about in it.
     pass_len: Option<f64>,
+    speed: Option<std::sync::Arc<crate::speed::SpeedMap>>,
     cue_id: CueId,
     sig: PrepSig,
     kind: PreparedKind,
@@ -645,7 +658,7 @@ impl Engine {
         id: CueId,
         m: &MediaCue,
     ) -> Option<std::sync::Arc<crate::speed::SpeedMap>> {
-        if !m.rate.is_animated() || m.loop_media {
+        if !m.rate.is_animated() {
             self.speed_maps.remove(&id);
             return None;
         }
@@ -915,7 +928,11 @@ impl Engine {
                 continue;
             }
             let Some(len) = a.pass_len else { continue };
-            let end = ((a.elapsed / len).floor() + 1.0) * len;
+            // The end of the pass that is playing, in the cue's time.
+            let end = match &a.speed {
+                Some(map) => map.time_for(((map.media_at(a.elapsed) / len).floor() + 1.0) * len),
+                None => ((a.elapsed / len).floor() + 1.0) * len,
+            };
             // A loop that plays on goes on to the rest of the file instead.
             if let ActiveKind::Audio(vo) = &a.kind
                 && vo.release()
@@ -1108,6 +1125,17 @@ impl Engine {
             .ok_or("that cue is no longer playing")?;
         let length = a.scrub_length(show).ok_or("that cue can't be scrubbed")?;
         let to = to.clamp(0.0, (length - 0.1).max(0.0));
+        // A loop with a keyframed speed that never ends has its bar in the
+        // file's time: jump to where in this pass of the file `to` is, which
+        // is a time in the cue that keeps the speed where the keyframes put it.
+        let to = match (&a.speed, a.loops_forever()) {
+            (Some(map), true) => {
+                let len = a.pass_len.unwrap_or(1.0).max(1e-6);
+                let pass = (map.media_at(a.elapsed) / len).floor();
+                map.time_for(pass * len + to)
+            }
+            _ => to,
+        };
         let cue = show.cue(a.cue_id).ok_or("that cue was deleted")?.clone();
         let is_image = matches!(a.kind, ActiveKind::Image(_));
         let (player, voice) = if is_image {
@@ -1215,6 +1243,7 @@ impl Engine {
             return Ok(Prepared {
                 cue_id: cue.id,
                 pass_len: None,
+                speed: None,
                 sig,
                 kind: PreparedKind::Video {
                     player,
@@ -1242,6 +1271,7 @@ impl Engine {
         Ok(Prepared {
             cue_id: cue.id,
             pass_len: None,
+            speed: None,
             sig,
             kind: PreparedKind::Video {
                 player,
@@ -1274,6 +1304,7 @@ impl Engine {
         Ok(Prepared {
             cue_id: cue.id,
             pass_len: None,
+            speed: None,
             sig: PrepSig {
                 media: m.clone(),
                 size: (1, 1),
@@ -1363,7 +1394,8 @@ impl Engine {
         let mut warning = None;
         let matrix = Self::matrix_for(m, info.audio_channels);
         // A loop that never ends can go on past its out point once devamped.
-        let play_on = match (m.play_on, playback, info.duration) {
+        // (Not with a keyframed speed: where its pass ends in the cue's time varies.)
+        let play_on = match (m.play_on && speed.is_none(), playback, info.duration) {
             (
                 true,
                 Playback::Slice { len, passes: None }
@@ -1453,6 +1485,7 @@ impl Engine {
         Ok(Prepared {
             cue_id: cue.id,
             pass_len,
+            speed: speed.as_ref().map(|p| p.map.clone()),
             sig,
             kind,
             duration,
@@ -1465,6 +1498,7 @@ impl Engine {
         let size = self.output_size(t.media.output);
         Prepared {
             pass_len: None,
+            speed: None,
             cue_id: cue.id,
             sig: PrepSig {
                 media: t.media.clone(),
@@ -1531,6 +1565,7 @@ impl Engine {
             elapsed: 0.0,
             duration: Some(m.fade_in),
             pass_len: None,
+            speed: None,
             opacity,
             volume: Param::new(0.0),
             started: true,
@@ -1582,6 +1617,7 @@ impl Engine {
             elapsed: 0.0,
             duration: None,
             pass_len: None,
+            speed: None,
             opacity: Param::new(1.0),
             volume: Param::new(0.0),
             started: true,
@@ -1653,6 +1689,7 @@ impl Engine {
                         }
                         active.duration = p.duration;
                         active.pass_len = p.pass_len;
+                        active.speed = p.speed.clone();
                         active.started = false;
                         active.audio_lead = show.audio_delay_ms(m.audio_output) as f64 / 1000.0;
                         active.video_lag = show.video_delay_ms(m.output) as f64 / 1000.0;
@@ -2232,6 +2269,11 @@ impl Engine {
                 ));
             }
 
+            // A loop that has been given an end (a devamp) is over when it gets there: its
+            // decoders would go round for ever.
+            if a.pass_len.is_some() && a.started && a.duration.is_some_and(|d| a.elapsed >= d) {
+                completed = true;
+            }
             if a.stopping && !a.opacity.ramping() && !a.volume.ramping() {
                 return false;
             }
@@ -2668,7 +2710,10 @@ mod tests {
         m2.rate.set_key(10.0, 3.0);
         let c2 = e.speed_map_cached(c.id, &m2).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&a, &c2), "new keys, a new table");
+        // A loop follows its keyframes too; with none the map is let go.
         m2.loop_media = true;
+        assert!(e.speed_map_cached(c.id, &m2).is_some());
+        m2.rate.keys.clear();
         assert!(e.speed_map_cached(c.id, &m2).is_none() && e.speed_maps.is_empty());
     }
 
@@ -4084,6 +4129,76 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_loop_with_a_keyframed_speed_knows_where_it_is_and_how_to_end() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some(clip), 0);
+        let m = c.kind.media_mut().unwrap();
+        m.loop_media = true;
+        m.end = Some(2.0);
+        // 2x all the way: a 2 s pass takes 1 s of the cue.
+        m.rate.set_key(0.0, 2.0);
+        let id = c.id;
+        show.cues.push(c.clone());
+        let devamp = control_cue(&mut show, ControlAction::Devamp, id);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the loop to start", |e| {
+            e.active
+                .first()
+                .is_some_and(|a| a.started && a.elapsed > 0.3)
+        });
+        let a = &e.active[0];
+        assert!(a.loops_forever() && a.speed.is_some());
+        // The bar is in the file's seconds, one pass of them, and moves with the speed.
+        assert_eq!(a.pass_len, Some(2.0));
+        let (pos, el) = (a.bar_position(), a.elapsed);
+        assert!((pos - (el * 2.0) % 2.0).abs() < 1e-6, "{pos} at {el}");
+        assert_eq!(a.scrub_length(&show), Some(2.0));
+        // A jump to 0.5 s into the pass stays in this pass of the cue's time.
+        let instance = a.instance;
+        e.seek(&show, instance, 0.5).unwrap();
+        run_until(&mut e, &show, "the seek to land", |e| {
+            e.active.iter().all(|a| !a.seeking())
+        });
+        let a = &e.active[0];
+        assert!((a.bar_position() - 0.5).abs() < 0.4, "{}", a.bar_position());
+        // Devamp ends it at the end of the pass, in the cue's time.
+        e.fire(&show, devamp);
+        let a = &e.active[0];
+        assert!(!a.loops_forever());
+        let end = a.duration.unwrap();
+        assert!(end > a.elapsed && end <= a.elapsed + 1.0 + 1e-6, "{end}");
+        run_until(&mut e, &show, "the cue to end", |e| {
+            matches!(e.status(id), CueStatus::Idle)
+        });
+    }
+
+    #[test]
+    fn a_loop_with_a_set_number_of_plays_and_a_ramped_speed_has_the_length_the_map_says() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some("x.mp4".into()), 0);
+        let m = c.kind.media_mut().unwrap();
+        m.loop_media = true;
+        m.loop_count = 3;
+        m.end = Some(2.0);
+        m.rate.set_key(0.0, 1.0);
+        m.rate.set_key(4.0, 2.0);
+        let want = m.speed_map().unwrap().time_for(6.0);
+        assert!(want > 3.0 && want < 6.0, "{want}");
+        let total = Some(10.0);
+        let map = m.speed_map().unwrap();
+        assert_eq!(
+            m.playback(total).total(None).map(|d| map.time_for(d)),
+            Some(want)
+        );
+    }
+
     fn m_speed_time(c: &Cue, file: f64) -> f64 {
         c.kind.media().unwrap().speed_map().unwrap().time_for(file)
     }
@@ -4855,6 +4970,10 @@ mod tests {
         assert!(!e.active[0].loops_forever(), "it now has an end");
         let end = e.active[0].duration.unwrap();
         assert!((end - 10.0).abs() < 0.5, "the end of the pass: {end}");
+        // ...and it does end there, rather than going round unseen.
+        e.active[0].elapsed = end;
+        run_for(&mut e, &show, 1.5);
+        assert!(e.active.is_empty(), "the devamped loop ended");
         // Devamping what is not a loop says so.
         e.stop_all(0.0);
         e.fire(&show, devamp);

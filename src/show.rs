@@ -1712,10 +1712,10 @@ impl MediaCue {
         }
     }
 
-    /// The speed over the cue's time, when it is keyframed and the cue plays
-    /// once (a loop is played at a steady speed).
+    /// The speed over the cue's time, when it is keyframed.
     pub fn speed_map(&self) -> Option<std::sync::Arc<crate::speed::SpeedMap>> {
-        (self.rate.is_animated() && !self.loop_media)
+        self.rate
+            .is_animated()
             .then(|| std::sync::Arc::new(crate::speed::SpeedMap::new(&self.rate)))
     }
 
@@ -5373,7 +5373,7 @@ mod tests {
     }
 
     #[test]
-    fn speed_can_be_keyframed_for_a_cue_that_plays_once() {
+    fn speed_can_be_keyframed() {
         let mut show = Show::default();
         let mut c = show.make_cue(CueType::Video, Some("a.mp4".into()), 0);
         let m = c.kind.media_mut().unwrap();
@@ -5394,10 +5394,10 @@ mod tests {
             !other.decodes_like(back.kind.media().unwrap()),
             "a change is a new decode"
         );
-        // A loop plays at a steady speed.
+        // A loop follows it too.
         let m = c.kind.media_mut().unwrap();
         m.loop_media = true;
-        assert!(m.speed_map().is_none());
+        assert!(m.speed_map().is_some());
     }
 
     #[test]

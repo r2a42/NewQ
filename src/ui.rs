@@ -6036,7 +6036,9 @@ fn speed_inspector(ui: &mut Ui, cue_id: CueId, m: &mut MediaCue, engine: &Engine
     );
     if m.rate.is_animated() {
         let note = if m.loop_media {
-            "A loop plays at a steady speed: turn the loop off to use the keyframes."
+            "The keyframes are in the cue's own time and go on through the passes of the loop, so \
+             the loop speeds up and slows down as it goes round. (Devamp plays on doesn't \
+             apply while the speed is keyframed.)"
         } else {
             "The keyframes are in the cue's own time: the cue ends when the file does. Sound \
              keeps its pitch (best between half and double speed)."
