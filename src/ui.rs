@@ -222,8 +222,11 @@ pub struct UiState {
     pub layout: dock::Layout,
     /// What the cue list is searched for (empty = every cue shows).
     pub cue_filter: String,
-    /// Edits to the show are refused (a performance in progress).
-    pub locked: bool,
+    /// Show mode: edits to the show are refused, so nothing can be changed by
+    /// accident during a performance. Edit mode has everything.
+    pub show_mode: bool,
+    /// Asking whether to leave show mode.
+    pub confirm_edit_mode: bool,
     /// Put the cursor in the search box on the next frame.
     find_focus: bool,
     /// The search box has the keyboard (so Esc clears it, not panics).
@@ -472,13 +475,15 @@ enum Action {
     /// Number the cues 1, 2, 3 down the list.
     Renumber,
     /// Refuse (or allow again) edits to the show.
-    ToggleLock,
+    ToggleShowMode,
+    /// Go to show mode (true) or edit mode (false), without asking.
+    SetShowMode(bool),
     /// Go to the search box.
     FocusFind,
 }
 
 impl Action {
-    /// Whether this changes the show, and so is refused while it is locked.
+    /// Whether this changes the show (or replaces it), and so is refused in show mode.
     fn edits_the_show(&self) -> bool {
         matches!(
             self,
@@ -522,6 +527,14 @@ impl Action {
                 | Action::RemoveList(..)
                 | Action::MoveToList(..)
                 | Action::Renumber
+                | Action::New
+                | Action::Open
+                | Action::SetArmed(..)
+                | Action::ToggleArmed
+                | Action::EditGeometry(Some(_))
+                | Action::EditArea(Some(_))
+                | Action::Nudge(_)
+                | Action::OpenShowFile(..)
         )
     }
 }
@@ -585,11 +598,28 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, show, st, &mut actions));
     egui::Panel::top("transport")
         .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(10))
-        .show(ui, |ui| transport(ui, show, engine, &mut actions));
+        .show(ui, |ui| transport(ui, show, engine, st, &mut actions));
     egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, show, engine, st));
     dock_area(ui, show, engine, st, &mut actions);
     media_window(ui.ctx(), show, st, &mut actions);
     about_window(ui.ctx(), st);
+    if st.confirm_edit_mode {
+        egui::Window::new("Leave show mode?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label("Cues, settings and files can be changed again.");
+                ui.horizontal(|ui| {
+                    if ui.button("Stay in show mode").clicked() {
+                        st.confirm_edit_mode = false;
+                    }
+                    if ui.button("Edit mode").clicked() {
+                        actions.push(Action::SetShowMode(false));
+                    }
+                });
+            });
+    }
 
     // Actions change state after this frame was laid out; show the result now
     // rather than on the next mouse move.
@@ -746,7 +776,7 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
             actions.push(Action::ToggleSettings);
         }
         if fresh_key(i, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::L) {
-            actions.push(Action::ToggleLock);
+            actions.push(Action::ToggleShowMode);
         }
         if fresh_key(i, egui::Modifiers::COMMAND, Key::F) {
             actions.push(Action::FocusFind);
@@ -868,7 +898,7 @@ fn pane_ui(
     match pane {
         Pane::Cues => cue_list(ui, show, engine, st, actions),
         Pane::Inspector => {
-            let locked = st.locked;
+            let locked = st.show_mode;
             ui.add_enabled_ui(!locked, |ui| {
                 scrolled(ui, &mut |ui| inspector(ui, show, engine, st, actions))
             });
@@ -877,7 +907,7 @@ fn pane_ui(
         Pane::Preview => scrolled(ui, &mut |ui| output_previews(ui, show, st)),
         Pane::Active => scrolled(ui, &mut |ui| active_panel(ui, show, engine, st, actions)),
         Pane::Settings => {
-            let locked = st.locked;
+            let locked = st.show_mode;
             ui.add_enabled_ui(!locked, |ui| {
                 settings::settings_view(ui, show, engine, st, actions)
             });
@@ -1200,7 +1230,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 ui.close();
             }
             if ui
-                .add_enabled(!st.locked, egui::Button::new("Renumber cues"))
+                .add_enabled(!st.show_mode, egui::Button::new("Renumber cues"))
                 .on_hover_text(
                     "Number the cues 1, 2, 3 down the list (a group's children 3.1, 3.2)",
                 )
@@ -1211,20 +1241,21 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             }
             if ui
                 .add(
-                    egui::Button::new(if st.locked {
-                        "Unlock the show"
+                    egui::Button::new(if st.show_mode {
+                        "Edit mode…"
                     } else {
-                        "Lock the show"
+                        "Show mode"
                     })
                     .shortcut_text("Ctrl+Shift+L"),
                 )
                 .on_hover_text(
-                    "While it is locked, nothing in the show can be edited by accident: \
-                     GO, stopping, pausing and the rest of running a show still work",
+                    "In show mode nothing in the show can be edited by accident: GO, \
+                     stopping, pausing and the rest of running a show still work. Leaving it \
+                     asks first.",
                 )
                 .clicked()
             {
-                actions.push(Action::ToggleLock);
+                actions.push(Action::ToggleShowMode);
                 ui.close();
             }
         });
@@ -1263,7 +1294,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             }
             ui.separator();
             if ui
-                .add_enabled(!st.locked, egui::Button::new("New cue list"))
+                .add_enabled(!st.show_mode, egui::Button::new("New cue list"))
                 .on_hover_text(
                     "Another list of cues with a playhead of its own, in a tab above the cue list",
                 )
@@ -1386,7 +1417,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
     });
 }
 
-fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
+fn transport(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         let go = egui::Button::new(
             RichText::new("GO")
@@ -1453,6 +1484,23 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
             {
                 actions.push(Action::Panic);
             }
+            let mode = if st.show_mode {
+                egui::Button::new(RichText::new("SHOW MODE").size(14.0).strong().color(Color32::BLACK))
+                    .fill(PLAYHEAD)
+            } else {
+                egui::Button::new(RichText::new("EDIT MODE").size(14.0))
+            };
+            if ui
+                .add(mode.min_size(Vec2::new(120.0, 50.0)))
+                .on_hover_text(if st.show_mode {
+                    "Show mode: the show can't be edited by accident. Click to leave it (asks first)."
+                } else {
+                    "Edit mode: everything is available. Click for show mode, where nothing can be edited."
+                })
+                .clicked()
+            {
+                actions.push(Action::ToggleShowMode);
+            }
             let label = if engine.paused {
                 "▶ Resume"
             } else {
@@ -1474,9 +1522,9 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
 
 fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
     ui.horizontal(|ui| {
-        if st.locked {
-            ui.label(RichText::new("🔒 locked").color(PREWAIT))
-                .on_hover_text("Edits are refused. Edit ▸ Unlock the show (Ctrl+Shift+L).");
+        if st.show_mode {
+            ui.label(RichText::new("SHOW MODE").color(PREWAIT))
+                .on_hover_text("Edits are refused. Edit ▸ Edit mode (Ctrl+Shift+L).");
         }
         match &engine.ff {
             Some(_) => ui.label(RichText::new("✔ ffmpeg").color(GO_GREEN)),
@@ -1706,7 +1754,7 @@ fn cue_list_tabs(
                 let mut edited = name.clone();
                 if ui
                     .add_enabled(
-                        !st.locked,
+                        !st.show_mode,
                         egui::TextEdit::singleline(&mut edited).desired_width(140.0),
                     )
                     .changed()
@@ -1719,7 +1767,7 @@ fn cue_list_tabs(
                 }
                 if id != 0
                     && ui
-                        .add_enabled(!st.locked, egui::Button::new("Delete list and its cues"))
+                        .add_enabled(!st.show_mode, egui::Button::new("Delete list and its cues"))
                         .clicked()
                 {
                     actions.push(Action::RemoveList(id));
@@ -1728,7 +1776,7 @@ fn cue_list_tabs(
             });
         }
         if ui
-            .add_enabled(!st.locked, egui::Button::new("+").small())
+            .add_enabled(!st.show_mode, egui::Button::new("+").small())
             .on_hover_text("New cue list")
             .clicked()
         {
@@ -1852,6 +1900,7 @@ fn cue_list(
                     ui.scroll_to_rect(egui::Rect::from_min_size(at, Vec2::new(total, ROW_H)), None);
                 }
             }
+            let show_mode = st.show_mode;
             let groups: Vec<(CueId, String)> = show
                 .cues
                 .iter()
@@ -1893,7 +1942,9 @@ fn cue_list(
                 if resp.double_clicked() {
                     actions.push(Action::FireSelected);
                 }
-                resp.context_menu(|ui| cue_context_menu(ui, c, &groups, &lists, actions));
+                resp.context_menu(|ui| {
+                    cue_context_menu(ui, c, &groups, &lists, show_mode, actions)
+                });
                 let status = engine.status(c.id);
                 let selected = st.selected == Some(c.id);
                 let at_playhead = engine.playhead == Some(c.id);
@@ -2762,6 +2813,7 @@ fn cue_context_menu(
     c: &Cue,
     groups: &[(CueId, String)],
     lists: &[(u32, String)],
+    show_mode: bool,
     actions: &mut Vec<Action>,
 ) {
     actions.push(Action::Select(c.id));
@@ -2776,6 +2828,10 @@ fn cue_context_menu(
     if ui.button("⏹ Stop").clicked() {
         actions.push(Action::StopSelected);
         ui.close();
+    }
+    // Show mode is for running the show: nothing below changes it.
+    if show_mode {
+        return;
     }
     if let Some(m) = c
         .kind
@@ -7720,9 +7776,27 @@ fn select(show: &Show, st: &mut UiState, engine: &mut Engine, id: Option<CueId>)
     engine.playhead = id.map(|id| show.top_id(id));
 }
 
+fn set_show_mode(st: &mut UiState, engine: &mut Engine, on: bool) {
+    st.show_mode = on;
+    st.confirm_edit_mode = false;
+    st.capture_hotkey = None;
+    engine.log(if on {
+        "Show mode: the show can't be edited"
+    } else {
+        "Edit mode"
+    });
+    // Kept for this computer, so a restart in the middle of a show comes back protected.
+    st.prefs.show_mode = on;
+    if let Some(dir) = &st.layout_dir
+        && let Err(e) = st.prefs.save(dir)
+    {
+        log::warn!("could not save the settings of this computer: {e}");
+    }
+}
+
 fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
-    if st.locked && action.edits_the_show() {
-        engine.log("The show is locked: unlock it (Edit menu) to make changes");
+    if st.show_mode && action.edits_the_show() {
+        engine.log("Show mode: switch to edit mode (Edit menu, or the button at the top right) to make changes");
         return;
     }
     let sel_idx = st.selected.and_then(|id| show.cue_index(id));
@@ -7795,14 +7869,15 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             let n = show.renumber();
             engine.log(format!("Renumbered the cues ({n} changed)"));
         }
-        Action::ToggleLock => {
-            st.locked = !st.locked;
-            engine.log(if st.locked {
-                "The show is locked"
+        // Into show mode at once; out of it only once it is confirmed.
+        Action::ToggleShowMode => {
+            if st.show_mode {
+                st.confirm_edit_mode = true;
             } else {
-                "The show is unlocked"
-            });
+                set_show_mode(st, engine, true);
+            }
         }
+        Action::SetShowMode(on) => set_show_mode(st, engine, on),
         Action::FocusFind => st.find_focus = true,
         Action::SelectRelative(d) => {
             if show.cues.is_empty() {
@@ -9342,7 +9417,7 @@ mod tests {
             assert_eq!(show.cues[0].pre_wait, 0.0);
         }
         // Locked, it is refused like any edit.
-        apply(Action::ToggleLock, &mut show, &mut e, &mut st);
+        apply(Action::ToggleShowMode, &mut show, &mut e, &mut st);
         apply(Action::SetPreWait(id, 4.0), &mut show, &mut e, &mut st);
         assert_eq!(show.cues[0].pre_wait, 0.0);
 
@@ -9469,12 +9544,12 @@ mod tests {
     }
 
     #[test]
-    fn a_locked_show_refuses_edits_but_still_runs() {
+    fn show_mode_refuses_edits_but_still_runs() {
         let (mut show, mut e, mut st) = running();
         let n = show.cues.len();
         let id = show.cues[0].id;
-        apply(Action::ToggleLock, &mut show, &mut e, &mut st);
-        assert!(st.locked);
+        apply(Action::ToggleShowMode, &mut show, &mut e, &mut st);
+        assert!(st.show_mode);
         // Edits are turned away, with a word about why.
         for a in [
             Action::AddCue(CueType::Wait),
@@ -9484,19 +9559,29 @@ mod tests {
             Action::SetColor(id, Some(CueColor::Red)),
             Action::Renumber,
             Action::Undo,
+            Action::New,
+            Action::Open,
+            Action::OpenShowFile("x.newq".into(), false),
+            Action::SetArmed(id, false),
+            Action::ToggleArmed,
         ] {
             apply(a, &mut show, &mut e, &mut st);
         }
+        assert!(show.cues[0].armed, "arming is an edit too");
         assert_eq!(show.cues.len(), n);
         assert!(show.cues[0].color.is_none());
-        assert!(e.messages.back().unwrap().1.contains("locked"));
+        assert!(e.messages.back().unwrap().1.contains("Show mode"));
         // Running the show is not editing it.
         apply(Action::Select(id), &mut show, &mut e, &mut st);
         apply(Action::Go, &mut show, &mut e, &mut st);
         assert!(e.is_active() || e.playhead != Some(id));
         apply(Action::Panic, &mut show, &mut e, &mut st);
-        // Unlocked, the same edits go through.
-        apply(Action::ToggleLock, &mut show, &mut e, &mut st);
+        // Out of show mode takes a second step: it asks first.
+        apply(Action::ToggleShowMode, &mut show, &mut e, &mut st);
+        assert!(st.show_mode && st.confirm_edit_mode);
+        apply(Action::SetShowMode(false), &mut show, &mut e, &mut st);
+        assert!(!st.show_mode && !st.confirm_edit_mode);
+        // In edit mode the same edits go through.
         apply(
             Action::SetColor(id, Some(CueColor::Red)),
             &mut show,
@@ -9508,6 +9593,14 @@ mod tests {
         assert_eq!(show.cues.len(), n + 1);
         apply(Action::Renumber, &mut show, &mut e, &mut st);
         assert_eq!(show.cues[0].number, "1");
+        // The mode is kept for this computer.
+        let dir = std::env::temp_dir().join("newq_test_mode");
+        st.layout_dir = Some(dir.clone());
+        apply(Action::SetShowMode(true), &mut show, &mut e, &mut st);
+        assert!(crate::prefs::Prefs::load(&dir).show_mode);
+        apply(Action::SetShowMode(false), &mut show, &mut e, &mut st);
+        assert!(!crate::prefs::Prefs::load(&dir).show_mode);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

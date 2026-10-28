@@ -10,6 +10,9 @@ pub struct Prefs {
     /// `-hwaccel auto`, which falls back to the processor for what it can't).
     #[serde(default)]
     pub hw_decode: bool,
+    /// Started in show mode (the show can't be edited), as it was left.
+    #[serde(default)]
+    pub show_mode: bool,
 }
 
 const FILE: &str = "prefs.json";
@@ -43,7 +46,10 @@ mod tests {
         let dir = std::env::temp_dir().join("newq_test_prefs");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(Prefs::load(&dir), Prefs::default());
-        let p = Prefs { hw_decode: true };
+        let p = Prefs {
+            hw_decode: true,
+            show_mode: true,
+        };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
         std::fs::write(dir.join(FILE), "not json").unwrap();
