@@ -6616,6 +6616,13 @@ fn device_label(device: &str) -> String {
     if let Some(name) = crate::ndi::source_of(device) {
         return format!("NDI · {name}");
     }
+    if let Some(target) = camera::screen_target(device) {
+        return match target {
+            "desktop" => "Screen · the whole desktop".to_string(),
+            t if t.starts_with("title=") => format!("Window · {}", &t["title=".len()..]),
+            n => format!("Screen · {n}"),
+        };
+    }
     if device.starts_with("/dev/")
         && let Some(name) = camera::v4l2_label(device)
     {
@@ -6680,6 +6687,38 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
             RichText::new("A moving test picture, for trying a camera cue without a camera.")
                 .weak(),
         );
+    }
+    if camera::screen_target(&c.device).is_some() {
+        ui.label(
+            RichText::new(
+                "A picture of the screen, to take in what another program shows (a Spout or \
+                 Syphon sender's output, a media server's window): put that program's output \
+                 on a screen of its own, or in a window you can see, and capture it here. Set \
+                 the mode to the screen's shape. The capture is the screen as it is drawn, so \
+                 NewQ's own outputs must not be on the screen it captures.",
+            )
+            .weak(),
+        );
+    }
+    if cfg!(windows) {
+        // A window can only be asked for by name.
+        let mut title = camera::screen_target(&c.device)
+            .and_then(|t| t.strip_prefix("title="))
+            .unwrap_or("")
+            .to_string();
+        ui.horizontal(|ui| {
+            ui.label("Capture the window titled");
+            if ui
+                .add(egui::TextEdit::singleline(&mut title).desired_width(180.0))
+                .changed()
+            {
+                c.device = if title.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("{}title={}", camera::SCREEN_PREFIX, title.trim())
+                };
+            }
+        });
     }
     if crate::ndi::source_of(&c.device).is_some() {
         ui.label(
