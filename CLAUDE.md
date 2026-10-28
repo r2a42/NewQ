@@ -50,6 +50,12 @@ The README describes the features; this file is about working on the code.
   speed still uses FFmpeg's `atempo`/`setpts`. Loops follow the plan too: the readers
   see the passes as one run of frames, and `ActiveCue::pass_len` is then in the
   file's seconds (`pass_time` maps the cue's time into them).
+- Animated geometry: `show::Motion` (six optional `Animated` tracks on
+  `MediaCue::motion`, evaluated in `Engine::tick`); a fade cue's `geometry` ramps an
+  `ActiveCue::live_transform` (`LiveTransform`) that then wins over the tracks.
+  Fade cue `matrix` targets set `VoiceShared::xp_target/xp_rate` (up to
+  `audio::MAX_FADEABLE` crosspoints, kept in `Matrix::keys` order); `mix_voice`
+  moves the gains per buffer. Silent crosspoints are kept in the matrix for this.
 - `src/fx.rs`: cue effects. `show::Effect` (kind and up to four `Animated`
   numbers, each a value or keyframes) is on `MediaCue::effects`. `fx::VideoFx::at`
   turns the picture effects into the numbers in the compositor shader (blur,

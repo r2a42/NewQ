@@ -109,6 +109,52 @@ impl Param {
     }
 }
 
+/// A cue's position, scale and rotation once a fade cue has taken them over:
+/// they ramp to where it says and stay there (as a faded level does).
+pub struct LiveTransform {
+    x: Param,
+    y: Param,
+    scale_x: Param,
+    scale_y: Param,
+    rotation: Param,
+}
+
+impl LiveTransform {
+    fn from(t: &LayerTransform) -> LiveTransform {
+        LiveTransform {
+            x: Param::new(t.x),
+            y: Param::new(t.y),
+            scale_x: Param::new(t.scale_x),
+            scale_y: Param::new(t.scale_y),
+            rotation: Param::new(t.rotation),
+        }
+    }
+
+    fn advance(&mut self, dt: f64) {
+        for p in [
+            &mut self.x,
+            &mut self.y,
+            &mut self.scale_x,
+            &mut self.scale_y,
+            &mut self.rotation,
+        ] {
+            p.advance(dt);
+        }
+    }
+
+    /// `base` (for its crop) with these.
+    fn apply(&self, base: &LayerTransform) -> LayerTransform {
+        LayerTransform {
+            x: self.x.value,
+            y: self.y.value,
+            scale_x: self.scale_x.value,
+            scale_y: self.scale_y.value,
+            rotation: self.rotation.value,
+            crop: base.crop,
+        }
+    }
+}
+
 pub struct VideoState {
     pub player: VideoPlayer,
     pub voice: Option<Voice>,
@@ -213,6 +259,8 @@ pub struct ActiveCue {
     /// Its keyframed speed, if it has one: then `pass_len` is in the file's
     /// seconds (a pass is that long in the file, however long it takes).
     pub speed: Option<std::sync::Arc<crate::speed::SpeedMap>>,
+    /// Set once a fade cue has moved the cue's geometry: it then keeps what that says.
+    live_transform: Option<LiveTransform>,
     pub opacity: Param,
     /// Volume in dB.
     pub volume: Param,
@@ -1326,19 +1374,27 @@ impl Engine {
             return None;
         }
         let have = usize::from(file_channels.max(1));
-        let points: Vec<(usize, usize, f32)> = m
+        // Silent crosspoints stay, so that a fade cue can bring them up.
+        let kept: Vec<&crate::show::Crosspoint> = m
             .matrix
             .iter()
             .filter(|p| {
                 usize::from(p.from) < have.min(crate::media::audio::MAX_SOURCE_CHANNELS)
                     && p.db.is_finite()
-                    && p.db > -120.0
             })
-            .map(|p| (usize::from(p.from), usize::from(p.to), db_to_gain(p.db)))
             .collect();
+        let points: Vec<(usize, usize, f32)> = kept
+            .iter()
+            .map(|p| {
+                let g = if p.db > -120.0 { db_to_gain(p.db) } else { 0.0 };
+                (usize::from(p.from), usize::from(p.to), g)
+            })
+            .collect();
+        let keys: Vec<(u8, u16)> = kept.iter().map(|p| (p.from, p.to)).collect();
         let max = crate::media::audio::MAX_SOURCE_CHANNELS;
         Some(crate::media::audio::Matrix {
             points,
+            keys,
             source_channels: have.min(max),
             crop: have > max,
         })
@@ -1571,6 +1627,7 @@ impl Engine {
             duration: Some(m.fade_in),
             pass_len: None,
             speed: None,
+            live_transform: None,
             opacity,
             volume: Param::new(0.0),
             started: true,
@@ -1623,6 +1680,7 @@ impl Engine {
             duration: None,
             pass_len: None,
             speed: None,
+            live_transform: None,
             opacity: Param::new(1.0),
             volume: Param::new(0.0),
             started: true,
@@ -1808,6 +1866,37 @@ impl Engine {
                     }
                     if let Some(v) = f.volume_db {
                         t.volume.ramp_to(v, f.duration, f.curve);
+                    }
+                    if !f.geometry.is_empty()
+                        && let Some(m) = show.cue(t.cue_id).and_then(|c| c.kind.media())
+                    {
+                        // From where the picture is now.
+                        let now = match &t.live_transform {
+                            Some(lt) => lt.apply(&m.transform),
+                            None => m.motion.transform_at(&m.transform, t.elapsed),
+                        };
+                        let lt = t
+                            .live_transform
+                            .get_or_insert_with(|| LiveTransform::from(&now));
+                        let g = f.geometry;
+                        for (param, to) in [
+                            (&mut lt.x, g.x),
+                            (&mut lt.y, g.y),
+                            (&mut lt.scale_x, g.scale_x),
+                            (&mut lt.scale_y, g.scale_y),
+                            (&mut lt.rotation, g.rotation),
+                        ] {
+                            if let Some(to) = to.filter(|v| v.is_finite()) {
+                                param.ramp_to(to, f.duration, f.curve);
+                            }
+                        }
+                    }
+                    if let Some(v) = t.voice() {
+                        for c in &f.matrix {
+                            if c.db.is_finite() {
+                                v.fade_crosspoint(c.from, c.to, c.db, f.duration);
+                            }
+                        }
                     }
                     if f.stop_target {
                         // Ensure the stop happens after `duration` even if no level changes.
@@ -2200,6 +2289,9 @@ impl Engine {
             if a.started && !paused {
                 a.opacity.advance(dt);
                 a.volume.advance(dt);
+                if let Some(lt) = &mut a.live_transform {
+                    lt.advance(dt);
+                }
             }
             if !was_started
                 && a.started
@@ -2212,9 +2304,13 @@ impl Engine {
                 // Live level edits apply until a fade cue takes over.
                 // So does position, scale, rotation and crop, so a cue can be
                 // lined up while it plays.
+                let geometry = match &a.live_transform {
+                    Some(lt) => lt.apply(&m.transform),
+                    None => m.motion.transform_at(&m.transform, a.elapsed),
+                };
                 match &mut a.kind {
                     ActiveKind::Video(v) => {
-                        v.transform = m.transform;
+                        v.transform = geometry;
                         v.color = m.color;
                         v.fx = VideoFx::at(&m.effects, a.elapsed);
                         if let Some(voice) = &v.voice {
@@ -2222,7 +2318,7 @@ impl Engine {
                         }
                     }
                     ActiveKind::Image(i) => {
-                        i.transform = m.transform;
+                        i.transform = geometry;
                         i.color = m.color;
                         i.fx = VideoFx::at(&m.effects, a.elapsed);
                     }
@@ -2238,7 +2334,7 @@ impl Engine {
                 }
                 if !a.faded && !a.stopping && !a.auto_faded {
                     if !a.opacity.ramping() {
-                        a.opacity.value = m.opacity;
+                        a.opacity.value = m.motion.opacity_at(m.opacity, a.elapsed);
                     }
                     if !a.volume.ramping() {
                         a.volume.value = m.volume_db;
@@ -4090,7 +4186,8 @@ mod tests {
                 to: 2,
                 db: -6.0,
             },
-            // Not in a stereo file, and so dropped; and a level that is silence.
+            // Not in a stereo file, and so dropped; and a level that is silence
+            // (kept, as a gain of nothing, for a fade cue to bring up).
             Crosspoint {
                 from: 3,
                 to: 0,
@@ -4105,10 +4202,66 @@ mod tests {
         let x = Engine::matrix_for(&m, 6).unwrap();
         assert_eq!(x.source_channels, 6);
         assert!(!x.crop);
-        assert_eq!(x.points.len(), 3);
+        assert_eq!(x.points.len(), 4);
+        assert_eq!(x.points[3], (1, 0, 0.0));
+        assert_eq!(x.keys[1], (5, 2));
         let stereo = Engine::matrix_for(&m, 2).unwrap();
-        assert_eq!((stereo.source_channels, stereo.points.len()), (2, 1));
+        assert_eq!((stereo.source_channels, stereo.points.len()), (2, 2));
         assert!(Engine::matrix_for(&m, 12).unwrap().crop);
+    }
+
+    #[test]
+    fn a_fade_cue_moves_a_picture_and_an_animated_track_is_followed() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let mut c = show.make_cue(CueType::Video, Some(clip), 0);
+        let m = c.kind.media_mut().unwrap();
+        m.transform.x = 0.1;
+        // Slides across from 0 to 0.5 over the first second of the cue.
+        m.motion.x = Some(Animated::new(0.0));
+        m.motion.x.as_mut().unwrap().set_key(0.0, 0.0);
+        m.motion.x.as_mut().unwrap().set_key(1.0, 0.5);
+        let id = c.id;
+        show.cues.push(c);
+        let mut fade = show.make_cue(CueType::Fade, None, 0);
+        if let CueKind::Fade(f) = &mut fade.kind {
+            f.target = Some(id);
+            f.duration = 1.0;
+            f.curve = Curve::Linear;
+            f.opacity = None;
+            f.volume_db = None;
+            f.stop_target = false;
+            f.geometry.x = Some(1.0);
+            f.geometry.scale_x = Some(2.0);
+        }
+        let fade_id = fade.id;
+        show.cues.push(fade);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the clip to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        let x_at = |e: &Engine| e.layers(out)[0].transform;
+        let t = x_at(&e);
+        assert!(t.x <= 0.5 && (t.scale_x - 1.0).abs() < 1e-6, "{t:?}");
+        // The fade starts from wherever the track has got to.
+        e.playhead = Some(fade_id);
+        e.go(&show);
+        e.tick(&show, 0.0);
+        let start = x_at(&e).x;
+        e.tick(&show, 0.5);
+        let mid = x_at(&e);
+        assert!(mid.x > start && mid.x < 1.0, "{start} -> {}", mid.x);
+        assert!(mid.scale_x > 1.0 && mid.scale_x < 2.0, "{}", mid.scale_x);
+        e.tick(&show, 0.6);
+        let end = x_at(&e);
+        assert_eq!((end.x, end.scale_x), (1.0, 2.0));
+        assert_eq!(end.y, 0.0, "what the fade did not name is left");
     }
 
     #[test]

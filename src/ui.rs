@@ -5544,6 +5544,63 @@ fn inspector(
                         ui.add_enabled_ui(set_vol, |ui| db_slider(ui, &mut vol));
                         f.volume_db = set_vol.then_some(vol);
                         ui.end_row();
+                        for (label, field, range, speed) in [
+                            ("Position X", &mut f.geometry.x, -2.0..=2.0, 0.005),
+                            ("Position Y", &mut f.geometry.y, -2.0..=2.0, 0.005),
+                            ("Scale X", &mut f.geometry.scale_x, 0.0..=4.0, 0.01),
+                            ("Scale Y", &mut f.geometry.scale_y, 0.0..=4.0, 0.01),
+                            ("Rotation", &mut f.geometry.rotation, -360.0..=360.0, 0.5),
+                        ] {
+                            let mut set = field.is_some();
+                            ui.checkbox(&mut set, label)
+                                .on_hover_text("Move the target's picture here over the duration");
+                            let mut v = field.unwrap_or(match label {
+                                "Scale X" | "Scale Y" => 1.0,
+                                _ => 0.0,
+                            });
+                            ui.add_enabled(
+                                set,
+                                egui::DragValue::new(&mut v).range(range).speed(speed),
+                            );
+                            *field = set.then_some(v);
+                            ui.end_row();
+                        }
+                        ui.label("Crosspoints")
+                            .on_hover_text("Fade crosspoints the target's matrix already has");
+                        ui.vertical(|ui| {
+                            let mut remove = None;
+                            for (i, c) in f.matrix.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label("in");
+                                    let mut from = u32::from(c.from) + 1;
+                                    ui.add(egui::DragValue::new(&mut from).range(1..=64));
+                                    c.from = (from - 1) as u8;
+                                    ui.label("out");
+                                    let mut to = u32::from(c.to) + 1;
+                                    ui.add(egui::DragValue::new(&mut to).range(1..=256));
+                                    c.to = (to - 1) as u16;
+                                    ui.add(
+                                        egui::DragValue::new(&mut c.db)
+                                            .range(MIN_DB..=12.0)
+                                            .suffix(" dB"),
+                                    );
+                                    if ui.small_button("x").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                            }
+                            if let Some(i) = remove {
+                                f.matrix.remove(i);
+                            }
+                            if ui.small_button("+ crosspoint").clicked() {
+                                f.matrix.push(crate::show::Crosspoint {
+                                    from: 0,
+                                    to: 0,
+                                    db: 0.0,
+                                });
+                            }
+                        });
+                        ui.end_row();
                         ui.label("");
                         ui.checkbox(&mut f.stop_target, "Stop target when done");
                         ui.end_row();
@@ -6041,6 +6098,7 @@ fn media_inspector(
             .id_salt("geometry")
             .default_open(!m.transform.is_identity())
             .show(ui, |ui| geometry_inspector(ui, &mut m.transform));
+        motion_inspector(ui, cue_id, m, engine);
         let title = if m.color.is_default() {
             "Colour and key"
         } else {
@@ -6063,6 +6121,51 @@ fn media_inspector(
         };
         ui.label(RichText::new(what).weak());
     }
+}
+
+/// Position, scale, rotation and opacity that change over the cue's time. An
+/// animated track replaces the static value above while the cue plays (a fade
+/// cue can move it on from there).
+fn motion_inspector(ui: &mut Ui, cue_id: CueId, m: &mut MediaCue, engine: &Engine) {
+    let length = m.end.filter(|d| *d > 0.0).unwrap_or(10.0);
+    let playhead = match engine.status(cue_id) {
+        CueStatus::Playing { elapsed, .. } => Some(elapsed),
+        _ => None,
+    };
+    let n = MotionTrack::ALL
+        .iter()
+        .filter(|t| m.motion.track(**t).is_some())
+        .count();
+    let title = if n == 0 {
+        "Animate".to_string()
+    } else {
+        format!("Animate ({n}) •")
+    };
+    egui::CollapsingHeader::new(title)
+        .id_salt(("motion", cue_id.0))
+        .default_open(n > 0)
+        .show(ui, |ui| {
+            for t in MotionTrack::ALL {
+                let spec = t.spec();
+                let start = match t {
+                    MotionTrack::X => m.transform.x,
+                    MotionTrack::Y => m.transform.y,
+                    MotionTrack::ScaleX => m.transform.scale_x,
+                    MotionTrack::ScaleY => m.transform.scale_y,
+                    MotionTrack::Rotation => m.transform.rotation,
+                    MotionTrack::Opacity => m.opacity,
+                };
+                let slot = m.motion.track_mut(t);
+                let mut on = slot.is_some();
+                if ui.checkbox(&mut on, spec.name).changed() {
+                    *slot = on.then(|| Animated::new(start));
+                }
+                if let Some(a) = slot {
+                    let id = egui::Id::new(("motion_track", cue_id.0, spec.name));
+                    effect_param(ui, id, a, &spec, length, playhead);
+                }
+            }
+        });
 }
 
 /// The effects on a cue: the picture's and the sound's, each with numbers

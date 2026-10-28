@@ -23,8 +23,25 @@ use std::time::Duration;
 /// Seconds of decoded audio buffered ahead of playback.
 const BUFFER_SECONDS: usize = 2;
 
+/// How many crosspoints of a voice's matrix can be faded while it plays.
+pub const MAX_FADEABLE: usize = 64;
+
+/// Per-crosspoint numbers shared between the engine and the mixer (an `f32`'s bits each).
+struct Crosspoints([AtomicU32; MAX_FADEABLE]);
+
+impl Default for Crosspoints {
+    fn default() -> Crosspoints {
+        Crosspoints(std::array::from_fn(|_| AtomicU32::new(0)))
+    }
+}
+
 #[derive(Default)]
 struct VoiceShared {
+    /// Where each crosspoint's gain is heading, how fast it goes there (gain
+    /// a second; infinity is at once) and where it is now.
+    xp_target: Crosspoints,
+    xp_rate: Crosspoints,
+    xp_now: Crosspoints,
     gain_bits: AtomicU32,
     paused: AtomicBool,
     stopped: AtomicBool,
@@ -52,9 +69,12 @@ struct MixVoice {
     fx: Option<(AudioChain, Arc<FxShared>)>,
     /// How many channels a queued frame has (2 unless a matrix wants more).
     src: usize,
-    /// Crosspoints (source channel, device channel, gain). Empty = the
-    /// stereo pair goes to `first_channel` and the next.
+    /// Crosspoints (source channel, device channel, gain now). Empty = the
+    /// stereo pair goes to `first_channel` and the next. The gains move
+    /// towards the voice's `xp_target`s as buffers are mixed.
     matrix: Vec<(usize, usize, f32)>,
+    /// The device's sample rate, for how far a gain moves in a buffer.
+    sr: f32,
 }
 
 /// The most channels of a file a matrix can use.
@@ -65,6 +85,9 @@ pub const MAX_SOURCE_CHANNELS: usize = 8;
 #[derive(Clone, Debug, Default)]
 pub struct Matrix {
     pub points: Vec<(usize, usize, f32)>,
+    /// Which crosspoint of the cue each point is, as (file channel, device
+    /// channel), so that one can be found to fade it.
+    pub keys: Vec<(u8, u16)>,
     /// How many of the file's channels to decode (1 to `MAX_SOURCE_CHANNELS`).
     /// All of them, as FFmpeg's `-ac` would mix them down otherwise.
     pub source_channels: usize,
@@ -546,6 +569,13 @@ impl AudioOut {
         let shared = Arc::new(VoiceShared::default());
         shared.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
         shared.paused.store(true, Ordering::Relaxed);
+        if let Some(m) = matrix {
+            for (i, p) in m.points.iter().take(MAX_FADEABLE).enumerate() {
+                shared.xp_target.0[i].store(p.2.to_bits(), Ordering::Relaxed);
+                shared.xp_now.0[i].store(p.2.to_bits(), Ordering::Relaxed);
+                shared.xp_rate.0[i].store(f32::INFINITY.to_bits(), Ordering::Relaxed);
+            }
+        }
         let (mut producer, consumer) = rtrb::RingBuffer::new(sr as usize * src * BUFFER_SECONDS);
 
         let shared2 = shared.clone();
@@ -666,6 +696,7 @@ impl AudioOut {
             fx: chain.zip(fx.clone()),
             src,
             matrix: matrix.map(|m| m.points.clone()).unwrap_or_default(),
+            sr: sr as f32,
         });
         Ok(Voice {
             shared,
@@ -677,6 +708,7 @@ impl AudioOut {
             fx,
             release,
             tail_len: play_on.map_or(0.0, |p| p.len),
+            matrix_keys: matrix.map(|m| m.keys.clone()).unwrap_or_default(),
         })
     }
 
@@ -736,6 +768,7 @@ impl AudioOut {
             fx: chain.zip(fx.clone()),
             src: 2,
             matrix: Vec::new(),
+            sr: out_sr as f32,
         });
         Ok(Voice {
             shared,
@@ -747,6 +780,7 @@ impl AudioOut {
             fx,
             release: None,
             tail_len: 0.0,
+            matrix_keys: Vec::new(),
         })
     }
 }
@@ -873,6 +907,35 @@ pub struct Voice {
     release: Option<Arc<AtomicBool>>,
     /// How long the part after the loop lasts, in the cue's time.
     tail_len: f64,
+    /// The crosspoints of its matrix, in the order the mixer has them.
+    matrix_keys: Vec<(u8, u16)>,
+}
+
+/// See `Voice::fade_crosspoint`.
+fn fade_crosspoint(
+    shared: &VoiceShared,
+    keys: &[(u8, u16)],
+    key: (u8, u16),
+    db: f32,
+    over: f64,
+) -> bool {
+    let Some(i) = keys
+        .iter()
+        .position(|k| *k == key)
+        .filter(|i| *i < MAX_FADEABLE)
+    else {
+        return false;
+    };
+    let target = crate::show::db_to_gain(db);
+    let now = f32::from_bits(shared.xp_now.0[i].load(Ordering::Relaxed));
+    let rate = if over.is_finite() && over > 0.0 {
+        (target - now).abs() / over as f32
+    } else {
+        f32::INFINITY
+    };
+    shared.xp_rate.0[i].store(rate.to_bits(), Ordering::Relaxed);
+    shared.xp_target.0[i].store(target.to_bits(), Ordering::Relaxed);
+    true
 }
 
 /// What a loop plays on to when it is released: the part of the file from
@@ -940,6 +1003,13 @@ impl Voice {
     pub fn tail_len(&self) -> f64 {
         self.tail_len
     }
+    /// Fade crosspoint (`from`, `to`) of the matrix to `db` over `over` seconds
+    /// (at once if not above 0). False if the voice has no such crosspoint, or
+    /// more of them than can be faded.
+    pub fn fade_crosspoint(&self, from: u8, to: u16, db: f32, over: f64) -> bool {
+        fade_crosspoint(&self.shared, &self.matrix_keys, (from, to), db, over)
+    }
+
     /// Whether `release` has been called.
     pub fn released(&self) -> bool {
         self.release
@@ -1296,6 +1366,21 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
         return true;
     }
     let src = v.src.clamp(1, MAX_SOURCE_CHANNELS);
+    // Crosspoint gains go on towards where they are being faded to.
+    if !v.matrix.is_empty() {
+        let dt = frames as f32 / v.sr.max(1.0);
+        for (i, c) in v.matrix.iter_mut().enumerate().take(MAX_FADEABLE) {
+            let target = f32::from_bits(sh.xp_target.0[i].load(Ordering::Relaxed));
+            let step = f32::from_bits(sh.xp_rate.0[i].load(Ordering::Relaxed)) * dt;
+            let d = target - c.2;
+            c.2 += if step.is_finite() {
+                d.clamp(-step, step)
+            } else {
+                d
+            };
+            sh.xp_now.0[i].store(c.2.to_bits(), Ordering::Relaxed);
+        }
+    }
     let available = v.consumer.slots() / src;
     let n = available.min(frames);
     if n == 0 {
@@ -1397,6 +1482,7 @@ mod tests {
             fx: None,
             src: 2,
             matrix: Vec::new(),
+            sr: 48_000.0,
         }
     }
 
@@ -1702,6 +1788,7 @@ mod tests {
             src: 4,
             // 1 -> 3, 4 -> 3 at half (they add), 3 -> 0, and 2 -> a channel the device lacks.
             matrix: vec![(0, 2, 1.0), (3, 2, 0.5), (2, 0, 1.0), (1, 9, 1.0)],
+            sr: 48_000.0,
         };
         let mut mix = vec![0.0; 3 * 3];
         assert!(mix_voice(&mut v, &mut mix, 3, 3));
@@ -1712,6 +1799,56 @@ mod tests {
             assert!((out[2] - 0.3).abs() < 1e-6, "{out:?}"); // 0.1 + 0.4 * 0.5
         }
         assert_eq!(&mix[6..], [0.0; 3], "the third frame had nothing");
+    }
+
+    #[test]
+    fn a_crosspoint_fades_to_its_target_at_the_rate_given() {
+        let mut v = voice(&[1.0; 8], 0);
+        v.sr = 4.0;
+        v.matrix = vec![(0, 0, 1.0), (1, 1, 1.0)];
+        let sh = v.shared.clone();
+        for i in 0..2 {
+            sh.xp_target.0[i].store(1.0f32.to_bits(), Ordering::Relaxed);
+            sh.xp_now.0[i].store(1.0f32.to_bits(), Ordering::Relaxed);
+        }
+        // The first crosspoint goes down to silence at 2 a second; the other stays.
+        sh.xp_target.0[0].store(0.0f32.to_bits(), Ordering::Relaxed);
+        sh.xp_rate.0[0].store(2.0f32.to_bits(), Ordering::Relaxed);
+        let mut left = Vec::new();
+        for _ in 0..3 {
+            let mut mix = vec![0.0; 2];
+            assert!(mix_voice(&mut v, &mut mix, 1, 2));
+            assert_eq!(mix[1], 1.0, "the other crosspoint is untouched");
+            left.push(mix[0]);
+        }
+        assert_eq!(left, [0.5, 0.0, 0.0]);
+        assert_eq!(f32::from_bits(sh.xp_now.0[0].load(Ordering::Relaxed)), 0.0);
+        // An infinite rate jumps at once.
+        sh.xp_target.0[0].store(0.8f32.to_bits(), Ordering::Relaxed);
+        sh.xp_rate.0[0].store(f32::INFINITY.to_bits(), Ordering::Relaxed);
+        let mut mix = vec![0.0; 2];
+        assert!(mix_voice(&mut v, &mut mix, 1, 2));
+        assert_eq!(mix[0], 0.8);
+    }
+
+    #[test]
+    fn a_voice_finds_its_crosspoints_to_fade_them() {
+        let mut v = voice(&[], 0);
+        v.matrix = vec![(2, 5, 0.5)];
+        let sh = v.shared.clone();
+        sh.xp_now.0[0].store(0.5f32.to_bits(), Ordering::Relaxed);
+        let keys = [(2, 5)];
+        assert!(fade_crosspoint(&sh, &keys, (2, 5), 0.0, 2.0));
+        assert!(
+            !fade_crosspoint(&sh, &keys, (0, 0), 0.0, 2.0),
+            "no such crosspoint"
+        );
+        assert_eq!(
+            f32::from_bits(sh.xp_target.0[0].load(Ordering::Relaxed)),
+            1.0
+        );
+        let rate = f32::from_bits(sh.xp_rate.0[0].load(Ordering::Relaxed));
+        assert!((rate - 0.25).abs() < 1e-6, "{rate}");
     }
 
     #[test]
@@ -1920,6 +2057,7 @@ mod tests {
         // File channel 3 (index 2) plays on device channel 6 (index 5), at half.
         let matrix = Matrix {
             points: vec![(2, 5, 0.5), (1, 0, 1.0)],
+            keys: vec![(2, 5), (1, 0)],
             source_channels: 4,
             crop: false,
         };

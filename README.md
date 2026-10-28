@@ -134,6 +134,14 @@ includes FFmpeg, so there's nothing else to install.
   keyframes too, going round faster and slower; its bar then shows the place in the
   file's slice, and Devamp still ends it at the end of the pass (*Devamp plays on*
   isn't used with keyframed speed).
+- **Animated position, scale, rotation and opacity.** The *Animate* section of a
+  picture cue's inspector puts any of the six on keyframes over the cue's own time
+  (the same lane as speed and effects); an animated track replaces the static value
+  while the cue plays. A **Fade cue** can also move a playing picture to a position,
+  scale or rotation over its duration (from wherever it is then), and can fade the
+  target's audio **crosspoints** (the ones its matrix already has) to new levels
+  live. A seek or a restart of the cue goes back to the cue's own settings. Speed
+  can be keyframed but not faded by a fade cue.
 - **Effects with keyframes:** the *Effects* section of a cue's inspector takes
   any number of effects. **Picture:** *Blur* (a disc blur, up to 100 px),
   *Sharpen*, *Vignette*, *Pixelate* and *Negative*, drawn by the graphics card in
