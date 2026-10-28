@@ -1539,6 +1539,11 @@ pub struct MediaCue {
     /// channel plays there and the right on the next.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub audio_channel: u16,
+    /// A grid of crosspoints in place of `audio_channel`: which channel of the
+    /// file plays on which channel of the device, and how loud. Empty = the
+    /// stereo pair at `audio_channel`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matrix: Vec<Crosspoint>,
     /// Position, scale, rotation and crop on the output (visual cues).
     #[serde(default, skip_serializing_if = "LayerTransform::is_identity")]
     pub transform: LayerTransform,
@@ -1601,6 +1606,15 @@ fn is_true(v: &bool) -> bool {
     *v
 }
 
+/// One crosspoint of a cue's audio matrix: file channel `from` (counting
+/// from 0) plays on device channel `to` at `db`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Crosspoint {
+    pub from: u8,
+    pub to: u16,
+    pub db: f32,
+}
+
 pub const MIN_RATE: f64 = 0.25;
 pub const MAX_RATE: f64 = 4.0;
 
@@ -1626,6 +1640,7 @@ impl MediaCue {
             opacity: 1.0,
             audio_output: None,
             audio_channel: 0,
+            matrix: Vec::new(),
             transform: LayerTransform::default(),
             color: ColorAdjust::default(),
             volume_db: 0.0,
@@ -1680,6 +1695,7 @@ impl MediaCue {
             && self.speed() == other.speed()
             && self.audio_output == other.audio_output
             && self.audio_channel == other.audio_channel
+            && self.matrix == other.matrix
             && self.sound_chain() == other.sound_chain()
     }
 
@@ -5154,6 +5170,27 @@ mod tests {
             serde_json::to_string(&show.make_cue(CueType::Video, Some("a.mp4".into()), 0)).unwrap();
         let old: Cue = serde_json::from_str(&old).unwrap();
         assert_eq!(old.kind.media().unwrap().rate, 1.0);
+    }
+
+    #[test]
+    fn a_matrix_round_trips_and_is_not_written_when_empty() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Audio, Some("a.wav".into()), 0);
+        assert!(!serde_json::to_string(&c).unwrap().contains("matrix"));
+        c.kind.media_mut().unwrap().matrix = vec![Crosspoint {
+            from: 2,
+            to: 5,
+            db: -6.0,
+        }];
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(
+            back.kind.media().unwrap().matrix,
+            c.kind.media().unwrap().matrix
+        );
+        // Another matrix is another decode.
+        let mut other = back.kind.media().unwrap().clone();
+        other.matrix[0].to = 4;
+        assert!(!other.decodes_like(back.kind.media().unwrap()));
     }
 
     #[test]

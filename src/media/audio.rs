@@ -46,6 +46,26 @@ struct MixVoice {
     first_channel: usize,
     /// Sound effects, and the numbers the engine sets for them.
     fx: Option<(AudioChain, Arc<FxShared>)>,
+    /// How many channels a queued frame has (2 unless a matrix wants more).
+    src: usize,
+    /// Crosspoints (source channel, device channel, gain). Empty = the
+    /// stereo pair goes to `first_channel` and the next.
+    matrix: Vec<(usize, usize, f32)>,
+}
+
+/// The most channels of a file a matrix can use.
+pub const MAX_SOURCE_CHANNELS: usize = 8;
+
+/// A cue's routing as a grid: each crosspoint feeds a source channel of the
+/// file into a device channel at a gain.
+#[derive(Clone, Debug, Default)]
+pub struct Matrix {
+    pub points: Vec<(usize, usize, f32)>,
+    /// How many of the file's channels to decode (1 to `MAX_SOURCE_CHANNELS`).
+    /// All of them, as FFmpeg's `-ac` would mix them down otherwise.
+    pub source_channels: usize,
+    /// The file has more channels than that: keep its first ones.
+    pub crop: bool,
 }
 
 /// The most device channels a stream is opened with.
@@ -98,9 +118,25 @@ struct Device {
     voices_tx: Sender<MixVoice>,
     /// Set if the stream ends under us.
     lost: Arc<Lost>,
-    /// How much of the time the mixing takes of the time it has, in
-    /// thousandths (the worst lately).
-    load: Arc<AtomicU32>,
+    /// How hard the mixing works and how loud each channel is.
+    stats: Arc<Stats>,
+}
+
+/// What the device's callback reports: the mixing load (the time it takes of
+/// the time it has, in thousandths, the worst lately) and each channel's
+/// recent peak (an `f32`'s bits), which falls away by itself.
+struct Stats {
+    load: AtomicU32,
+    peaks: [AtomicU32; 64],
+}
+
+impl Default for Stats {
+    fn default() -> Stats {
+        Stats {
+            load: AtomicU32::new(0),
+            peaks: std::array::from_fn(|_| AtomicU32::new(0)),
+        }
+    }
 }
 
 impl Device {
@@ -115,8 +151,8 @@ impl Device {
     fn open_again(name: Option<&str>, earlier: Option<&str>) -> Device {
         let (voices_tx, voices_rx) = unbounded();
         let lost = Arc::new(Lost::default());
-        let load = Arc::new(AtomicU32::new(0));
-        match open_stream(name, voices_rx, lost.clone(), load.clone()) {
+        let stats = Arc::new(Stats::default());
+        match open_stream(name, voices_rx, lost.clone(), stats.clone()) {
             Ok((stream, sample_rate, channels, device)) => Device {
                 _stream: Some(stream),
                 open: true,
@@ -126,7 +162,7 @@ impl Device {
                 error: None,
                 voices_tx,
                 lost,
-                load,
+                stats,
             },
             Err(e) => {
                 if earlier != Some(format!("{e:#}").as_str()) {
@@ -141,7 +177,7 @@ impl Device {
                     error: Some(format!("{e:#}")),
                     voices_tx,
                     lost,
-                    load,
+                    stats,
                 }
             }
         }
@@ -162,7 +198,7 @@ impl Device {
             error: None,
             voices_tx,
             lost: Arc::new(Lost::default()),
-            load: Arc::new(AtomicU32::new(0)),
+            stats: Arc::new(Stats::default()),
         };
         (device, voices_rx)
     }
@@ -285,13 +321,28 @@ impl AudioOut {
     }
 
     /// The state of the device behind an audio output (None = the default).
+    /// Each channel's recent peak, 0 to 1 and more if it clips, for the
+    /// device `output` plays on (empty if it isn't open).
+    pub fn meters(&self, output: Option<AudioOutputId>) -> Vec<f32> {
+        match self.device_for(output) {
+            Some(d) if d.open => d
+                .stats
+                .peaks
+                .iter()
+                .take(usize::from(d.channels))
+                .map(|p| f32::from_bits(p.load(Ordering::Relaxed)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn device_status(&self, output: Option<AudioOutputId>) -> Option<DeviceStatus> {
         self.device_for(output).map(|d| DeviceStatus {
             name: d.name.clone(),
             sample_rate: d.sample_rate,
             channels: d.channels,
             error: d.error.clone().or_else(|| d.lost.why()),
-            load_permille: d.load.load(Ordering::Relaxed),
+            load_permille: d.stats.load.load(Ordering::Relaxed),
         })
     }
 
@@ -330,6 +381,7 @@ impl AudioOut {
         self.spawn_voice_at_rate(ff, path, start, playback, gain, route, sound, 1.0)
     }
 
+    #[cfg(test)]
     /// `spawn_voice`, playing `rate` times as fast with the pitch kept.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_voice_at_rate(
@@ -343,6 +395,25 @@ impl AudioOut {
         sound: &[EffectKind],
         rate: f64,
     ) -> Result<Voice> {
+        self.spawn_voice_routed(ff, path, start, playback, gain, route, sound, rate, None)
+    }
+
+    /// `spawn_voice_at_rate`, with a crosspoint grid in place of the
+    /// stereo-pair route when `matrix` is given.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_voice_routed(
+        &self,
+        ff: &Ffmpeg,
+        path: &Path,
+        start: f64,
+        playback: Playback,
+        gain: f32,
+        route: (Option<AudioOutputId>, u16),
+        sound: &[EffectKind],
+        rate: f64,
+        matrix: Option<&Matrix>,
+    ) -> Result<Voice> {
+        let src = matrix.map_or(2, |m| m.source_channels.clamp(1, MAX_SOURCE_CHANNELS));
         let device = self
             .device_for(route.0)
             .ok_or_else(|| anyhow!("no audio output device"))?;
@@ -352,8 +423,10 @@ impl AudioOut {
                 device.error.as_deref().unwrap_or("no audio output device")
             ));
         }
+        let matrixed = matrix.is_some_and(|m| m.source_channels > 2 || m.crop);
         let sr = device.sample_rate;
-        let (chain, fx) = build_chain(sound, sr);
+        // Effects work on a stereo pair: they run on one, and not on a wider file.
+        let (chain, fx) = build_chain(if src <= 2 { sound } else { &[] }, sr);
         let make = {
             let (ff, path) = (ff.clone(), path.to_path_buf());
             // The first pass of a jump into a loop starts part way in.
@@ -372,8 +445,22 @@ impl AudioOut {
                 } else {
                     playback.limit_args_at(rate)
                 });
+                let mut filters = Vec::new();
+                if matrixed {
+                    // The file's own channels as they are, not mixed to a layout.
+                    filters.push(format!(
+                        "pan={src}c|{}",
+                        (0..src)
+                            .map(|c| format!("c{c}=c{c}"))
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    ));
+                }
                 if (rate - 1.0).abs() > 1e-9 {
-                    cmd.args(["-af", &super::playback::atempo_filter(rate)]);
+                    filters.push(super::playback::atempo_filter(rate));
+                }
+                if !filters.is_empty() {
+                    cmd.args(["-af", &filters.join(",")]);
                 }
                 cmd.args([
                     "-map",
@@ -382,7 +469,7 @@ impl AudioOut {
                     "-sn",
                     "-dn",
                     "-ac",
-                    "2",
+                    &src.to_string(),
                     "-ar",
                     &sr.to_string(),
                     "-f",
@@ -404,15 +491,16 @@ impl AudioOut {
         let shared = Arc::new(VoiceShared::default());
         shared.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
         shared.paused.store(true, Ordering::Relaxed);
-        let (mut producer, consumer) = rtrb::RingBuffer::new(sr as usize * 2 * BUFFER_SECONDS);
+        let (mut producer, consumer) = rtrb::RingBuffer::new(sr as usize * src * BUFFER_SECONDS);
 
         let shared2 = shared.clone();
         std::thread::Builder::new()
             .name("audio-reader".into())
             .spawn(move || {
-                // Queue one stereo frame; false if the voice was stopped meanwhile.
-                let mut push = |frame: [f32; 2]| -> bool {
+                // Queue one frame; false if the voice was stopped meanwhile.
+                let mut push = |frame: &[f32]| -> bool {
                     for v in frame {
+                        let v = *v;
                         while producer.push(v).is_err() {
                             if shared2.stopped.load(Ordering::Relaxed) {
                                 return false;
@@ -424,7 +512,10 @@ impl AudioOut {
                     true
                 };
                 let mut bytes = vec![0u8; 16 * 1024];
-                let mut carry: Vec<u8> = Vec::with_capacity(8);
+                let mut carry: Vec<u8> = Vec::with_capacity(4 * src);
+                let frame_bytes = 4 * src;
+                let silence = [0.0f32; MAX_SOURCE_CHANNELS];
+                let mut samples_in = [0.0f32; MAX_SOURCE_CHANNELS];
                 let mut first = true;
                 'outer: loop {
                     let mut n: u64 = 0; // stereo frames queued this pass
@@ -438,23 +529,18 @@ impl AudioOut {
                             Ok(read) => read,
                         };
                         carry.extend_from_slice(&bytes[..read]);
-                        let whole = carry.len() / 8 * 8; // whole stereo frames
-                        for frame in carry[..whole].as_chunks::<8>().0 {
+                        let whole = carry.len() / frame_bytes * frame_bytes; // whole frames
+                        for frame in carry[..whole].chunks_exact(frame_bytes) {
                             if limit.is_some_and(|p| n >= p) {
                                 break 'pass;
                             }
                             if limit.is_some_and(|p| n * 2 >= p) {
                                 feed.prefetch();
                             }
-                            let f32_at = |i: usize| {
-                                f32::from_le_bytes([
-                                    frame[i],
-                                    frame[i + 1],
-                                    frame[i + 2],
-                                    frame[i + 3],
-                                ])
-                            };
-                            if !push([f32_at(0), f32_at(4)]) {
+                            for (k, b) in frame.as_chunks::<4>().0.iter().enumerate() {
+                                samples_in[k] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                            }
+                            if !push(&samples_in[..src]) {
                                 break 'outer;
                             }
                             n += 1;
@@ -464,7 +550,7 @@ impl AudioOut {
                     let decoded = n;
                     if let Some(p) = limit {
                         while n < p {
-                            if !push([0.0; 2]) {
+                            if !push(&silence[..src]) {
                                 break 'outer;
                             }
                             n += 1;
@@ -484,6 +570,8 @@ impl AudioOut {
             gain,
             first_channel: route.1 as usize,
             fx: chain.zip(fx.clone()),
+            src,
+            matrix: matrix.map(|m| m.points.clone()).unwrap_or_default(),
         });
         Ok(Voice {
             shared,
@@ -550,6 +638,8 @@ impl AudioOut {
             gain,
             first_channel: route.1 as usize,
             fx: chain.zip(fx.clone()),
+            src: 2,
+            matrix: Vec::new(),
         });
         Ok(Voice {
             shared,
@@ -887,7 +977,7 @@ fn open_stream(
     name: Option<&str>,
     voices_rx: Receiver<MixVoice>,
     lost: Arc<Lost>,
-    load: Arc<AtomicU32>,
+    stats: Arc<Stats>,
 ) -> Result<(cpal::Stream, u32, u16, String)> {
     let device = find_device(name)?;
     let mut device_name = device
@@ -906,10 +996,10 @@ fn open_stream(
     let config = supported.config();
     let (sr, channels) = (config.sample_rate, config.channels);
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, voices_rx, master, lost, load)?,
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, voices_rx, master, lost, load)?,
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, voices_rx, master, lost, load)?,
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, voices_rx, master, lost, load)?,
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, voices_rx, master, lost, stats)?,
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, voices_rx, master, lost, stats)?,
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, voices_rx, master, lost, stats)?,
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, voices_rx, master, lost, stats)?,
         other => return Err(anyhow!("unsupported sample format {other:?}")),
     };
     stream.play()?;
@@ -922,7 +1012,7 @@ fn build<T>(
     voices_rx: Receiver<MixVoice>,
     master: f32,
     lost: Arc<Lost>,
-    load: Arc<AtomicU32>,
+    stats: Arc<Stats>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -963,7 +1053,10 @@ where
             }
             let used = began.elapsed().as_secs_f32() / (frames as f32 / rate).max(1e-6);
             worst = used.max(worst * 0.99);
-            load.store((worst * 1000.0) as u32, Ordering::Relaxed);
+            stats.load.store((worst * 1000.0) as u32, Ordering::Relaxed);
+            // Peaks fall by half about every 0.3 s.
+            let fall = 0.5f32.powf(frames as f32 / rate / 0.3);
+            update_peaks(&stats.peaks, &mix, channels, master, fall);
         },
         move |e| {
             log::error!("audio stream error: {e}");
@@ -976,6 +1069,20 @@ where
     Ok(stream)
 }
 
+/// Raise each channel's stored peak to what `mix` (interleaved, `channels`
+/// wide) holds, after the old one has fallen by `fall`.
+fn update_peaks(peaks: &[AtomicU32], mix: &[f32], channels: usize, master: f32, fall: f32) {
+    for (c, slot) in peaks.iter().enumerate().take(channels) {
+        let now = mix
+            .iter()
+            .skip(c)
+            .step_by(channels)
+            .fold(0.0f32, |p, m| p.max((m * master).abs()));
+        let before = f32::from_bits(slot.load(Ordering::Relaxed));
+        slot.store(now.max(before * fall).to_bits(), Ordering::Relaxed);
+    }
+}
+
 /// Add one stereo frame to a device frame, the left channel on channel
 /// `first` and the right on the next. With one channel left to play on, the
 /// two are summed to mono; with none, the frame is dropped.
@@ -986,6 +1093,15 @@ fn route_frame(frame: &mut [f32], first: usize, l: f32, r: f32) {
         _ => {
             frame[first] += l;
             frame[first + 1] += r;
+        }
+    }
+}
+
+/// Add a frame to a device frame through crosspoints, at an overall gain.
+fn cross(out: &mut [f32], frame: &[f32], matrix: &[(usize, usize, f32)], gain: f32) {
+    for &(from, to, g) in matrix {
+        if let (Some(s), Some(o)) = (frame.get(from), out.get_mut(to)) {
+            *o += s * g * gain;
         }
     }
 }
@@ -1013,7 +1129,8 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
     if frames == 0 {
         return true;
     }
-    let available = v.consumer.slots() / 2;
+    let src = v.src.clamp(1, MAX_SOURCE_CHANNELS);
+    let available = v.consumer.slots() / src;
     let n = available.min(frames);
     if n == 0 {
         if sh.eof.load(Ordering::Acquire) && v.consumer.is_empty() {
@@ -1028,25 +1145,37 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
     // Ramp gain linearly across the buffer to avoid zipper noise.
     let target = f32::from_bits(sh.gain_bits.load(Ordering::Relaxed));
     let step = (target - v.gain) / n as f32;
-    if let Ok(chunk) = v.consumer.read_chunk(n * 2) {
+    if let Ok(chunk) = v.consumer.read_chunk(n * src) {
         let (a, b) = chunk.as_slices();
-        let mut left = 0.0;
-        for (i, s) in a.iter().chain(b.iter()).enumerate() {
-            if i % 2 == 0 {
-                v.gain += step;
-                left = s * v.gain;
-            } else {
-                let f = i / 2;
-                let mut pair = [left, s * v.gain];
+        let mut frame = [0.0f32; MAX_SOURCE_CHANNELS];
+        let (mut k, mut f) = (0, 0);
+        for s in a.iter().chain(b.iter()) {
+            frame[k] = *s;
+            k += 1;
+            if k < src {
+                continue;
+            }
+            k = 0;
+            v.gain += step;
+            let g = v.gain;
+            let out = &mut mix[f * channels..(f + 1) * channels];
+            f += 1;
+            // A stereo (or mono) frame passes through the sound effects.
+            if src <= 2 {
+                let l = frame[0] * g;
+                let mut pair = [l, if src == 2 { frame[1] * g } else { l }];
                 if let Some((chain, _)) = &mut v.fx {
                     pair = chain.process(pair);
                 }
-                route_frame(
-                    &mut mix[f * channels..(f + 1) * channels],
-                    v.first_channel,
-                    pair[0],
-                    pair[1],
-                );
+                if v.matrix.is_empty() {
+                    route_frame(out, v.first_channel, pair[0], pair[1]);
+                } else {
+                    frame[0] = pair[0];
+                    frame[1] = pair[1];
+                    cross(out, &frame[..src.max(2)], &v.matrix, 1.0);
+                }
+            } else {
+                cross(out, &frame[..src], &v.matrix, g);
             }
         }
         chunk.commit_all();
@@ -1100,6 +1229,8 @@ mod tests {
             gain: 1.0,
             first_channel,
             fx: None,
+            src: 2,
+            matrix: Vec::new(),
         }
     }
 
@@ -1257,7 +1388,7 @@ mod tests {
     /// Wait for a voice to have decoded `frames` frames.
     fn wait_for(v: &MixVoice, frames: usize) {
         let t0 = std::time::Instant::now();
-        while v.consumer.slots() < frames * 2 {
+        while v.consumer.slots() < frames * v.src {
             assert!(
                 t0.elapsed() < Duration::from_secs(10),
                 "voice never decoded"
@@ -1370,6 +1501,109 @@ mod tests {
         cut.p[1].set_key(2.0, 20_000.0);
         assert!(play(std::slice::from_ref(&cut), 0.0) < plain * 0.2);
         assert!((play(std::slice::from_ref(&cut), 2.0) - plain).abs() < plain * 0.05);
+    }
+
+    #[test]
+    fn meters_rise_with_the_sound_and_fall_without_it() {
+        let stats = Stats::default();
+        // Two channels, three frames: channel 0 peaks at 0.5, channel 1 is silent.
+        update_peaks(&stats.peaks, &[0.5, 0.0, -0.25, 0.0, 0.1, 0.0], 2, 1.0, 0.5);
+        let peak = |c: usize| f32::from_bits(stats.peaks[c].load(Ordering::Relaxed));
+        assert_eq!((peak(0), peak(1), peak(2)), (0.5, 0.0, 0.0));
+        // Silence: it falls, by the factor given.
+        update_peaks(&stats.peaks, &[0.0; 6], 2, 1.0, 0.5);
+        assert_eq!(peak(0), 0.25);
+        // A louder moment takes over at once, and the master level counts.
+        update_peaks(&stats.peaks, &[0.8, 0.0], 2, 0.5, 0.5);
+        assert_eq!(peak(0), 0.4);
+    }
+
+    #[test]
+    fn crosspoints_send_each_source_channel_where_asked() {
+        // Two four-channel frames: channel n carries n + 1 (times a tenth).
+        let (mut producer, consumer) = rtrb::RingBuffer::new(8);
+        for s in [0.1, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.4] {
+            producer.push(s).unwrap();
+        }
+        let shared = Arc::new(VoiceShared::default());
+        shared.gain_bits.store(1.0f32.to_bits(), Ordering::Relaxed);
+        let mut v = MixVoice {
+            shared,
+            consumer,
+            gain: 1.0,
+            first_channel: 0,
+            fx: None,
+            src: 4,
+            // 1 -> 3, 4 -> 3 at half (they add), 3 -> 0, and 2 -> a channel the device lacks.
+            matrix: vec![(0, 2, 1.0), (3, 2, 0.5), (2, 0, 1.0), (1, 9, 1.0)],
+        };
+        let mut mix = vec![0.0; 3 * 3];
+        assert!(mix_voice(&mut v, &mut mix, 3, 3));
+        for f in 0..2 {
+            let out = &mix[f * 3..f * 3 + 3];
+            assert!((out[0] - 0.3).abs() < 1e-6);
+            assert_eq!(out[1], 0.0);
+            assert!((out[2] - 0.3).abs() < 1e-6, "{out:?}"); // 0.1 + 0.4 * 0.5
+        }
+        assert_eq!(&mix[6..], [0.0; 3], "the third frame had nothing");
+    }
+
+    #[test]
+    fn a_four_channel_file_is_decoded_and_matrixed() {
+        let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("newq_test_quad");
+        std::fs::create_dir_all(&dir).unwrap();
+        let quad = dir.join("quad.wav");
+        // Tone on channels 1 and 3 only.
+        let ok = ff
+            .command()
+            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args(["-af", "pan=4c|c0=c0|c1=0*c0|c2=c0|c3=0*c0"])
+            .arg(&quad)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ffmpeg could not make the four-channel file");
+        let info = ff.probe(&quad).unwrap();
+        assert_eq!(info.audio_channels, 4);
+        let (device, rx) = Device::for_test(6);
+        let mut audio = AudioOut::new();
+        audio.devices.insert(None, device);
+        // File channel 3 (index 2) plays on device channel 6 (index 5), at half.
+        let matrix = Matrix {
+            points: vec![(2, 5, 0.5), (1, 0, 1.0)],
+            source_channels: 4,
+            crop: false,
+        };
+        let voice = audio
+            .spawn_voice_routed(
+                &ff,
+                &quad,
+                0.0,
+                Playback::Once {
+                    duration: Some(1.0),
+                },
+                1.0,
+                (None, 0),
+                &[],
+                1.0,
+                Some(&matrix),
+            )
+            .unwrap();
+        voice.set_paused(false);
+        let mut mv = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(mv.src, 4);
+        wait_for(&mv, 4800);
+        let mut mix = vec![0.0; 4800 * 6];
+        assert!(mix_voice(&mut mv, &mut mix, 4800, 6));
+        let p = peak(&mix, 6, 5);
+        // FFmpeg's sine is at an eighth of full scale; half of that plays.
+        assert!((p - 0.0625).abs() < 0.01, "{p}");
+        for silent in [0, 1, 2, 3, 4] {
+            assert_eq!(peak(&mix, 6, silent), 0.0, "channel {}", silent + 1);
+        }
     }
 
     #[test]

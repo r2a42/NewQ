@@ -55,6 +55,13 @@ includes FFmpeg, so there's nothing else to install.
   (change whether GO and continues fire it), **Devamp** (a loop that is playing
   finishes its pass and goes on instead of going round again) and **Memo** (does
   nothing: a note in the list). Pick the action and the cue in the inspector.
+- **Audio matrix and meters.** Tick **Matrix** on a video or audio cue and each
+  channel of its file (up to eight, so 5.1 and stems work) becomes a row of a grid
+  whose columns are the output device's channels (up to 64, for Dante). Click a dot
+  to connect, drag the number for the level in dB, right-click it to disconnect.
+  A stereo file can have sound effects as well; a file with more channels plays
+  without them. Settings → Audio shows a level meter for each channel of each
+  output.
 - **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
   its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
   in the cue's own (sped) time. A change re-decodes a cue that was already loaded.

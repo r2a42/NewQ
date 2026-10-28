@@ -1155,6 +1155,34 @@ impl Engine {
         })
     }
 
+    /// The cue's crosspoints as the mixer wants them, for a file with
+    /// `file_channels` channels; None when the cue routes a stereo pair.
+    fn matrix_for(
+        m: &crate::show::MediaCue,
+        file_channels: u16,
+    ) -> Option<crate::media::audio::Matrix> {
+        if m.matrix.is_empty() {
+            return None;
+        }
+        let have = usize::from(file_channels.max(1));
+        let points: Vec<(usize, usize, f32)> = m
+            .matrix
+            .iter()
+            .filter(|p| {
+                usize::from(p.from) < have.min(crate::media::audio::MAX_SOURCE_CHANNELS)
+                    && p.db.is_finite()
+                    && p.db > -120.0
+            })
+            .map(|p| (usize::from(p.from), usize::from(p.to), db_to_gain(p.db)))
+            .collect();
+        let max = crate::media::audio::MAX_SOURCE_CHANNELS;
+        Some(crate::media::audio::Matrix {
+            points,
+            source_channels: have.min(max),
+            crop: have > max,
+        })
+    }
+
     /// Spawn the decoders for a media cue. They start paused/buffering.
     fn prepare(&self, cue: &Cue, info: &MediaInfo) -> Result<Prepared, String> {
         self.prepare_from(cue, info, 0.0)
@@ -1193,6 +1221,7 @@ impl Engine {
             db_to_gain(m.volume_db)
         };
         let mut warning = None;
+        let matrix = Self::matrix_for(m, info.audio_channels);
         let kind = match &cue.kind {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
@@ -1201,7 +1230,7 @@ impl Engine {
                     VideoPlayer::spawn_at_rate(ff, &m.file, vi, m.start, playback, size, rate)
                         .map_err(|e| format!("{e:#}"))?;
                 let voice = if info.has_audio && self.audio.available() {
-                    match self.audio.spawn_voice_at_rate(
+                    match self.audio.spawn_voice_routed(
                         ff,
                         &m.file,
                         m.start,
@@ -1210,6 +1239,7 @@ impl Engine {
                         (m.audio_output, m.audio_channel),
                         &m.sound_chain(),
                         rate,
+                        matrix.as_ref(),
                     ) {
                         Ok(voice) => Some(voice),
                         Err(e) => {
@@ -1233,7 +1263,7 @@ impl Engine {
                 }
                 let voice = self
                     .audio
-                    .spawn_voice_at_rate(
+                    .spawn_voice_routed(
                         ff,
                         &m.file,
                         m.start,
@@ -1242,6 +1272,7 @@ impl Engine {
                         (m.audio_output, m.audio_channel),
                         &m.sound_chain(),
                         rate,
+                        matrix.as_ref(),
                     )
                     .map_err(|e| format!("{e:#}"))?;
                 PreparedKind::Audio(voice)
@@ -3685,6 +3716,46 @@ mod tests {
             .find(|a| a.instance == instance)
             .unwrap()
             .elapsed
+    }
+
+    #[test]
+    fn a_matrix_keeps_the_channels_the_file_has() {
+        use crate::show::Crosspoint;
+        let mut m = crate::show::MediaCue::new("a.wav".into(), None);
+        assert!(
+            Engine::matrix_for(&m, 6).is_none(),
+            "no matrix, the stereo pair"
+        );
+        m.matrix = vec![
+            Crosspoint {
+                from: 0,
+                to: 1,
+                db: 0.0,
+            },
+            Crosspoint {
+                from: 5,
+                to: 2,
+                db: -6.0,
+            },
+            // Not in a stereo file, and so dropped; and a level that is silence.
+            Crosspoint {
+                from: 3,
+                to: 0,
+                db: 0.0,
+            },
+            Crosspoint {
+                from: 1,
+                to: 0,
+                db: -200.0,
+            },
+        ];
+        let x = Engine::matrix_for(&m, 6).unwrap();
+        assert_eq!(x.source_channels, 6);
+        assert!(!x.crop);
+        assert_eq!(x.points.len(), 3);
+        let stereo = Engine::matrix_for(&m, 2).unwrap();
+        assert_eq!((stereo.source_channels, stereo.points.len()), (2, 1));
+        assert!(Engine::matrix_for(&m, 12).unwrap().crop);
     }
 
     #[test]
