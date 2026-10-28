@@ -1994,6 +1994,7 @@ fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, u
                 // The show on disk stays the saved one, so the title shows the edits.
                 ui.set_saved(show);
                 *show = recovered;
+                engine.forget_lists();
                 engine.playhead = show.cues.first().map(|c| c.id);
                 ui.selected = engine.playhead;
                 return;

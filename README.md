@@ -82,6 +82,17 @@ includes FFmpeg, so there's nothing else to install.
   so it is not the zero-copy decoding of a native player. A file or card it can't
   do falls back to the processor. It is off by default and only the machine you
   will run on can say whether it helps.
+- **Cue lists.** *Cue ▸ New cue list* (or the **+** by the tabs) adds a list of
+  cues with a playhead of its own; the lists are tabs above the cue list. GO, the
+  playhead, the arrow keys and the web remote work on the list being shown; the
+  other lists keep their place until you come back to them. Right-click a tab to
+  rename a list, GO on it without leaving the one you are in, or delete it with
+  its cues. Right-click a cue and *Move to list* sends it (a group with its
+  children) to the end of another list. Cues in any list can be fired, stopped or
+  targeted by number, and a *Go to* control cue on a cue in another list sets
+  that list's playhead. A continue or the end of a list never runs on into the
+  next list, and each list is numbered from 1. Over OSC, `/cuelist/N/go` and
+  `/cuelist/N/select` take the lists in the order of the tabs, from 1.
 - **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
   its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
   in the cue's own (sped) time. A change re-decodes a cue that was already loaded.
