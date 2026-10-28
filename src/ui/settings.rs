@@ -382,7 +382,7 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
     });
 }
 
-fn media_page(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
+fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let files = show
         .cues
         .iter()
@@ -415,6 +415,31 @@ fn media_page(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>)
             ui,
             "Files are saved in the show relative to it, so a show and its media can be moved \
              together.",
+        );
+    });
+    section(ui, "Decoding (this computer)", |ui| {
+        let mut on = st.prefs.hw_decode;
+        if ui
+            .checkbox(
+                &mut on,
+                "Decode video on the graphics hardware where possible",
+            )
+            .changed()
+        {
+            st.prefs.hw_decode = on;
+            crate::media::video::set_hw_decode(on);
+            if let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
+        hint(
+            ui,
+            "Takes decoding of 4K and many-layer shows off the processor, at the cost of \
+             copying each picture back from the card. Takes effect for cues that start after \
+             the change. Try it on this computer with the show you mean to run; a file or card \
+             it can't do is decoded by the processor as before.",
         );
     });
 }

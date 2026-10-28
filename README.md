@@ -75,6 +75,13 @@ includes FFmpeg, so there's nothing else to install.
   costs more to play than an ordinary clip (the picture is sent to the
   graphics card as four bytes a pixel, not one and a half), so a 4K alpha clip
   is a bigger ask of a modest machine than a plain one.
+- **Hardware video decoding.** Settings → Media has a switch (saved for this
+  computer, not in the show) that has FFmpeg decode video on the graphics card
+  (NVDEC, VideoToolbox, D3D11/DXVA, VAAPI) where it can. It frees the processor
+  for 4K and for many layers; each picture is still copied back to be composited,
+  so it is not the zero-copy decoding of a native player. A file or card it can't
+  do falls back to the processor. It is off by default and only the machine you
+  will run on can say whether it helps.
 - **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
   its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
   in the cue's own (sped) time. A change re-decodes a cue that was already loaded.
