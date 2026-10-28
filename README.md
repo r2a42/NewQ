@@ -411,7 +411,10 @@ includes FFmpeg, so there's nothing else to install.
   - *MIDI input*: pick a port and, if you like, a channel. A note-on fires the
     cue whose number is the note number; a program change selects the cue
     with that number; and MIDI Show Control GO (with or without a cue
-    number), STOP, RESUME, LOAD and ALL OFF drive the transport.
+    number), STOP, RESUME, LOAD (gets the cue ready and puts the playhead on
+    it), ALL OFF and RESET drive the transport. On the *MIDI* page *Show control
+    device* limits that to messages sent to one device id (and to everyone, 127),
+    for when several machines share a MIDI line.
 - **Audio outputs and channel routing:** on the *Audio outputs* page of the settings,
   add named outputs and put each on any audio device (or the system
   default). Each cue then picks an output and the first device channel its
