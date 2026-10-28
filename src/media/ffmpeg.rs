@@ -105,7 +105,7 @@ impl Ffmpeg {
             "error",
             "-show_entries",
             "format=duration,format_name:stream=index,codec_type,codec_name,width,height,\
-             avg_frame_rate,r_frame_rate,color_space,color_range,sample_aspect_ratio,channels,duration:\
+             avg_frame_rate,r_frame_rate,color_space,color_range,sample_aspect_ratio,channels,pix_fmt,duration:\
              stream_disposition=attached_pic:stream_side_data=rotation",
             "-of",
             "json",
@@ -148,6 +148,8 @@ pub struct VideoInfo {
     pub height: u32,
     pub fps: f64,
     pub matrix: ColorMatrix,
+    /// The picture has transparency (ProRes 4444, HAP Alpha, a PNG sequence).
+    pub has_alpha: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +187,7 @@ struct ProbeStream {
     sample_aspect_ratio: Option<String>,
     duration: Option<String>,
     channels: Option<u16>,
+    pix_fmt: Option<String>,
     disposition: Option<Disposition>,
     #[serde(default)]
     side_data_list: Vec<SideData>,
@@ -281,6 +284,7 @@ fn parse_probe(json: &[u8]) -> Result<MediaInfo> {
                     height: dh,
                     fps,
                     matrix,
+                    has_alpha: s.pix_fmt.as_deref().is_some_and(pix_fmt_has_alpha),
                 });
             }
             _ => {}
@@ -298,6 +302,17 @@ fn parse_probe(json: &[u8]) -> Result<MediaInfo> {
     })
 }
 
+/// Whether a pixel format (as ffprobe names it) carries transparency.
+pub fn pix_fmt_has_alpha(pix_fmt: &str) -> bool {
+    // yuva420p, yuva444p12le, gbrap, ya8, rgba, bgra, argb, abgr, rgba64le...
+    pix_fmt.starts_with("yuva")
+        || pix_fmt.starts_with("gbrap")
+        || pix_fmt.starts_with("ya")
+        || ["rgba", "bgra", "argb", "abgr"]
+            .iter()
+            .any(|n| pix_fmt.starts_with(n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +328,32 @@ mod tests {
         assert!(info.video.is_some() && info.has_audio);
         assert!((info.duration.unwrap_or(0.0) - 4.0).abs() < 0.3);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pixel_formats_with_transparency_are_known() {
+        for yes in [
+            "yuva420p",
+            "yuva444p12le",
+            "rgba",
+            "bgra",
+            "argb",
+            "gbrapf32le",
+            "ya8",
+        ] {
+            assert!(pix_fmt_has_alpha(yes), "{yes}");
+        }
+        for no in [
+            "yuv420p",
+            "yuv444p10le",
+            "rgb24",
+            "bgr0",
+            "gray",
+            "pal8",
+            "yuvj420p",
+        ] {
+            assert!(!pix_fmt_has_alpha(no), "{no}");
+        }
     }
 
     #[test]
