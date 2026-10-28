@@ -691,7 +691,11 @@ fn restore(json: &str, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
         Ok(back) => {
             *show = back;
             engine.sync_lists(show);
-            if engine.playhead.is_some_and(|id| show.cue(id).is_none()) {
+            // A playhead is on a cue of the list being worked.
+            if engine
+                .playhead
+                .is_some_and(|id| show.cue(id).is_none_or(|c| c.list != engine.active_list))
+            {
                 engine.playhead = show.cues.first().map(|c| c.id);
             }
             if st.selected.is_some_and(|id| show.cue(id).is_none()) {
@@ -5237,7 +5241,6 @@ fn inspector(
         .filter(|c| c.kind.media().is_some() || matches!(c.kind, CueKind::Group(_)))
         .map(|c| (c.id, cue_label(c)))
         .collect();
-    let show_cues: Vec<(CueId, String)> = show.cues.iter().map(|c| (c.id, cue_label(c))).collect();
     // Displays first, then sub displays with the display they are part of.
     let outputs: Vec<(OutputId, String)> = show
         .outputs
@@ -5254,6 +5257,12 @@ fn inspector(
         .iter()
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    // Only a control cue picks from the other cues.
+    let show_cues: Vec<(CueId, String)> = if matches!(show.cues[idx].kind, CueKind::Control(_)) {
+        show.cues.iter().map(|c| (c.id, cue_label(c))).collect()
+    } else {
+        Vec::new()
+    };
     let slide_rows = slide_rows(show, idx);
     let timeline = timeline_rows(show, idx, engine);
     let selected_id = show.cues[idx].id;
@@ -7851,9 +7860,8 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::RemoveList(id) => {
-            let gone = show.remove_list(id);
-            if !gone.is_empty() || !show.has_list(id) {
-                engine.stop_all(0.0);
+            for cue in show.remove_list(id) {
+                engine.stop_cue(cue, 0.0);
             }
             engine.sync_lists(show);
             if st.selected.is_some_and(|id| show.cue(id).is_none()) {
@@ -9537,6 +9545,16 @@ mod tests {
         assert!(st.selected.is_none_or(|s| show.cue(s).is_some()));
         // GO on a list that doesn't exist does nothing.
         apply(Action::GoList(9), &mut show, &mut e, &mut st);
+        // Deleting a list stops only what it was playing.
+        let main_cue = show.cues[0].id;
+        e.fire(&show, main_cue);
+        apply(Action::AddList, &mut show, &mut e, &mut st);
+        let list = e.active_list;
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        let other_cue = show.cues.iter().find(|c| c.list == list).unwrap().id;
+        e.fire(&show, other_cue);
+        apply(Action::RemoveList(list), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, main_cue) && !is_playing(&e, other_cue));
     }
 
     #[test]
