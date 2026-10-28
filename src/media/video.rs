@@ -2,6 +2,7 @@
 
 use super::ffmpeg::{ColorMatrix, Ffmpeg, VideoInfo};
 use super::playback::{Children, PassFeed, Playback};
+use crate::speed::SpeedPlan;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use parking_lot::Mutex;
@@ -76,6 +77,41 @@ pub fn decode_size(src: (u32, u32), max: (u32, u32), cover: bool) -> (u32, u32) 
     (even(w * s), even(h * s))
 }
 
+/// Read a file's frames (at `fps`, in the file's own time) and send the
+/// cue's: the cue's frame `j` is at `j / fps` and shows the file's frame the
+/// plan has got to by then, so a frame is held while the speed is low and
+/// skipped while it is high. Ends when the file does.
+fn read_at_speed(
+    plan: &SpeedPlan,
+    fps: f64,
+    feed: &mut PassFeed,
+    tx: &Sender<VideoFrame>,
+    recycle: &Receiver<Vec<u8>>,
+    frame_len: usize,
+) {
+    let mut current = vec![0u8; frame_len];
+    // The file's frame that `current` holds (none yet).
+    let mut held: Option<u64> = None;
+    let mut j: u64 = 0;
+    loop {
+        let t = j as f64 / fps;
+        let want = (plan.media_after(t) * fps).round().max(0.0) as u64;
+        while held.is_none_or(|h| h < want) {
+            if feed.stdout().read_exact(&mut current).is_err() {
+                return;
+            }
+            held = Some(held.map_or(0, |h| h + 1));
+        }
+        let mut buf = recycle.try_recv().unwrap_or_else(|_| vec![0u8; frame_len]);
+        buf.resize(frame_len, 0);
+        buf.copy_from_slice(&current);
+        if tx.send(VideoFrame { pts: t, data: buf }).is_err() {
+            return; // player dropped
+        }
+        j += 1;
+    }
+}
+
 impl VideoPlayer {
     /// Start decoding `path` from `start`; `playback` says whether to play
     /// once or loop a slice.
@@ -88,12 +124,17 @@ impl VideoPlayer {
         playback: Playback,
         size: (u32, u32),
     ) -> Result<VideoPlayer> {
-        Self::spawn_at_rate(ff, path, info, start, playback, size, 1.0)
+        Self::spawn_at_rate(ff, path, info, start, playback, size, 1.0, None)
     }
 
     /// `spawn`, playing `rate` times as fast: the picture's time is the file's
     /// divided by `rate`, at the same frame rate (frames are dropped or
     /// repeated to keep it).
+    ///
+    /// With a `speed` plan the speed changes as the cue plays: the picture is
+    /// decoded at its own speed and each frame of the cue shows the frame of
+    /// the file the plan has got to (`rate` is then 1).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_at_rate(
         ff: &Ffmpeg,
         path: &Path,
@@ -102,6 +143,7 @@ impl VideoPlayer {
         playback: Playback,
         size: (u32, u32),
         rate: f64,
+        speed: Option<SpeedPlan>,
     ) -> Result<VideoPlayer> {
         let (w, h) = size;
         let fps = info.fps;
@@ -121,7 +163,7 @@ impl VideoPlayer {
         } else {
             ("out_range=tv,format=yuv420p".to_string(), "yuv420p")
         };
-        let speed = if (rate - 1.0).abs() < 1e-9 {
+        let setpts = if (rate - 1.0).abs() < 1e-9 {
             String::new()
         } else {
             format!("setpts=PTS/{rate:.6},")
@@ -152,7 +194,7 @@ impl VideoPlayer {
                     "-sn",
                     "-dn",
                     "-vf",
-                    &format!("{speed}scale={w}:{h}:flags=bicubic:{scale_tail}"),
+                    &format!("{setpts}scale={w}:{h}:flags=bicubic:{scale_tail}"),
                     "-fps_mode",
                     "cfr",
                     "-r",
@@ -181,6 +223,7 @@ impl VideoPlayer {
             size,
             false,
             alpha,
+            speed,
         )
     }
 
@@ -229,6 +272,7 @@ impl VideoPlayer {
             size,
             true,
             false,
+            None,
         )
     }
 
@@ -268,6 +312,7 @@ impl VideoPlayer {
             size,
             true,
             false,
+            None,
         )
     }
 
@@ -282,6 +327,7 @@ impl VideoPlayer {
         size: (u32, u32),
         live: bool,
         rgba: bool,
+        speed: Option<SpeedPlan>,
     ) -> Result<VideoPlayer> {
         let (w, h) = size;
         let children = Children::new();
@@ -310,6 +356,11 @@ impl VideoPlayer {
             .name("video-reader".into())
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
+                if let Some(plan) = speed {
+                    read_at_speed(&plan, fps, &mut feed, &tx, &recycle_rx, frame_len);
+                    eof2.store(true, Ordering::Release);
+                    return;
+                }
                 let mut base: u64 = 0; // index of the current pass's first frame
                 let mut first = true;
                 loop {
@@ -650,6 +701,60 @@ mod tests {
         };
         set_hw_decode(false);
         assert!(ok, "no frame with hardware decoding asked for");
+    }
+
+    #[test]
+    fn a_ramped_speed_shows_the_frames_the_plan_has_got_to() {
+        use crate::show::Animated;
+        use crate::speed::SpeedMap;
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        // Double speed from the start: ten seconds of file in five.
+        let mut a = Animated::new(2.0);
+        a.set_key(0.0, 2.0);
+        let plan = SpeedPlan {
+            map: std::sync::Arc::new(SpeedMap::new(&a)),
+            t0: 0.0,
+        };
+        let mut p = VideoPlayer::spawn_at_rate(
+            &ff,
+            &clip,
+            vi,
+            0.0,
+            Playback::Once { duration: None },
+            (160, 90),
+            1.0,
+            Some(plan),
+        )
+        .expect("spawn");
+        let t0 = std::time::Instant::now();
+        let mut last_pts = -1.0;
+        let mut frames = 0u64;
+        // Step the clock a frame at a time until the picture has ended.
+        let mut t = 0.0;
+        loop {
+            assert!(t0.elapsed().as_secs() < 30, "never ended");
+            p.update(t);
+            if let Some(f) = p.current()
+                && f.pts > last_pts
+            {
+                last_pts = f.pts;
+                frames += 1;
+            }
+            if p.finished() {
+                break;
+            }
+            t += 1.0 / vi.fps;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let secs = last_pts + 1.0 / vi.fps;
+        assert!(
+            (secs - 5.0).abs() < 0.3,
+            "{secs} s of picture, {frames} frames"
+        );
     }
 
     #[test]
