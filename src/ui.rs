@@ -6855,35 +6855,113 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
                 None => engine.log(format!("Remote: no cue for MIDI note {note}")),
             }
         }
+        Command::Reset => {
+            engine.reset_all(show);
+            st.selected = engine.playhead;
+            st.scroll_to_selected = true;
+        }
         Command::GoCue(ref n)
         | Command::Select(ref n)
         | Command::Fire(ref n)
         | Command::Stop(ref n)
         | Command::FadeOut(ref n)
         | Command::Arm(ref n)
-        | Command::Disarm(ref n) => {
-            let Some(id) = find(show, n) else {
-                engine.log(format!("Remote: there is no cue numbered {n}"));
+        | Command::Disarm(ref n)
+        | Command::LoadCue(ref n)
+        | Command::PauseCue(ref n)
+        | Command::ResumeCue(ref n)
+        | Command::ResetCue(ref n)
+        | Command::Devamp(ref n) => {
+            let targets = remote_targets(show, st, engine, n);
+            if targets.is_empty() {
+                // Every cue playing is none at all if nothing is; a number
+                // that names no cue is worth saying.
+                if n != "active" {
+                    engine.log(format!("Remote: there is no cue {}", remote_name(n)));
+                }
                 return;
-            };
-            match cmd {
-                Command::GoCue(_) => {
-                    select(show, st, engine, Some(id));
-                    apply(Action::Go, show, engine, st);
+            }
+            for id in targets {
+                match &cmd {
+                    Command::GoCue(_) => {
+                        select(show, st, engine, Some(id));
+                        apply(Action::Go, show, engine, st);
+                    }
+                    Command::Select(_) => {
+                        select(show, st, engine, Some(id));
+                        st.scroll_to_selected = true;
+                    }
+                    Command::Fire(_) => engine.fire(show, id),
+                    Command::Stop(_) => engine.stop_cue(id, 0.0),
+                    Command::Arm(_) | Command::Disarm(_) => {
+                        let armed = matches!(cmd, Command::Arm(_));
+                        apply(Action::SetArmed(id, armed), show, engine, st);
+                    }
+                    Command::LoadCue(_) => {
+                        engine.control_target(show, ControlAction::Load, id, "Remote");
+                        select(show, st, engine, Some(id));
+                        st.scroll_to_selected = true;
+                    }
+                    Command::PauseCue(_) => {
+                        engine.control_target(show, ControlAction::Pause, id, "Remote")
+                    }
+                    Command::ResumeCue(_) => {
+                        engine.control_target(show, ControlAction::Resume, id, "Remote")
+                    }
+                    Command::ResetCue(_) => {
+                        engine.control_target(show, ControlAction::Reset, id, "Remote")
+                    }
+                    Command::Devamp(_) => {
+                        engine.control_target(show, ControlAction::Devamp, id, "Remote")
+                    }
+                    _ => engine.fade_out_cue(show, id),
                 }
-                Command::Select(_) => {
-                    select(show, st, engine, Some(id));
-                    st.scroll_to_selected = true;
-                }
-                Command::Fire(_) => engine.fire(show, id),
-                Command::Stop(_) => engine.stop_cue(id, 0.0),
-                Command::Arm(_) | Command::Disarm(_) => {
-                    let armed = matches!(cmd, Command::Arm(_));
-                    apply(Action::SetArmed(id, armed), show, engine, st);
-                }
-                _ => engine.fade_out_cue(show, id),
             }
         }
+    }
+}
+
+/// How a remote message names a cue in a message to the log.
+fn remote_name(n: &str) -> String {
+    match n {
+        "selected" | "playhead" | "active" => format!("“{n}”"),
+        _ if n.starts_with('#') => format!("with the id {}", &n[1..]),
+        _ => format!("numbered {n}"),
+    }
+}
+
+/// The cues a remote message means by `n`: a cue number as written, `selected`
+/// (the one selected in the list), `playhead` (the one the playhead is on),
+/// `active` (every one that is playing), or `#<id>` (a cue's own id).
+fn remote_targets(show: &Show, st: &UiState, engine: &Engine, n: &str) -> Vec<CueId> {
+    let by_number = |n: &str| {
+        show.cues
+            .iter()
+            .find(|c| c.number == n.trim())
+            .map(|c| c.id)
+    };
+    match n {
+        "selected" => st
+            .selected
+            .filter(|id| show.cue(*id).is_some())
+            .into_iter()
+            .collect(),
+        "playhead" => engine
+            .playhead
+            .filter(|id| show.cue(*id).is_some())
+            .into_iter()
+            .collect(),
+        "active" => {
+            let mut ids: Vec<CueId> = engine.active.iter().map(|a| a.cue_id).collect();
+            ids.dedup();
+            ids.retain(|id| show.cue(*id).is_some());
+            ids
+        }
+        _ => match n.strip_prefix('#').map(|id| id.trim().parse::<u64>()) {
+            Some(Ok(id)) => show.cue(CueId(id)).map(|c| c.id).into_iter().collect(),
+            Some(Err(_)) => Vec::new(),
+            None => by_number(n).into_iter().collect(),
+        },
     }
 }
 
@@ -8390,6 +8468,78 @@ mod tests {
         let mut out = ctx.run_ui(input, |ui| draw(ui, &mut show, &mut e, &mut st));
         out.textures_delta.clear();
         assert!(out.shapes.len() > 100);
+    }
+
+    #[test]
+    fn remote_messages_can_name_cues_by_where_they_are_or_by_id() {
+        let (mut show, mut e, mut st) = running();
+        let a = show.make_cue(CueType::Wait, None, show.cues.len());
+        let b = show.make_cue(CueType::Wait, None, show.cues.len() + 1);
+        let (a_id, b_id) = (a.id, b.id);
+        show.cues.push(a);
+        show.cues.push(b);
+        // By id, and by the one selected.
+        run_remote(
+            Command::Fire(format!("#{}", a_id.0)),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(is_playing(&e, a_id));
+        st.selected = Some(b_id);
+        run_remote(Command::Fire("selected".into()), &mut show, &mut e, &mut st);
+        assert!(is_playing(&e, b_id));
+        // Every one playing at once: pause them all, resume them, stop them.
+        run_remote(
+            Command::PauseCue("active".into()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(e.active.iter().all(|x| x.hold));
+        run_remote(
+            Command::ResumeCue("active".into()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(e.active.iter().all(|x| !x.hold));
+        run_remote(Command::Stop("active".into()), &mut show, &mut e, &mut st);
+        run_for_ticks(&mut e, &show);
+        assert!(!is_playing(&e, a_id) && !is_playing(&e, b_id));
+        // Nothing playing: "active" is quietly nothing; a bad number is said.
+        let before = e.messages.len();
+        run_remote(Command::Stop("active".into()), &mut show, &mut e, &mut st);
+        assert_eq!(e.messages.len(), before);
+        run_remote(Command::Fire("nope".into()), &mut show, &mut e, &mut st);
+        assert!(e.messages.back().unwrap().1.contains("numbered nope"));
+        run_remote(
+            Command::Fire("#99999999".into()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(
+            e.messages
+                .back()
+                .unwrap()
+                .1
+                .contains("with the id 99999999")
+        );
+        // Reset: everything stops and the playhead goes back to the top.
+        run_remote(Command::Fire("selected".into()), &mut show, &mut e, &mut st);
+        e.playhead = Some(b_id);
+        run_remote(Command::Reset, &mut show, &mut e, &mut st);
+        assert_eq!(e.playhead, Some(show.cues[0].id));
+        run_for_ticks(&mut e, &show);
+        assert!(!e.is_active());
+    }
+
+    /// Let stopped cues be cleared away.
+    fn run_for_ticks(e: &mut Engine, show: &Show) {
+        for _ in 0..5 {
+            e.tick(show, 0.01);
+        }
     }
 
     #[test]

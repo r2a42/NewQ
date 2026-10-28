@@ -40,6 +40,17 @@ pub enum Command {
     /// Arm or disarm a cue.
     Arm(String),
     Disarm(String),
+    /// Get a cue ready ahead of time, and put the playhead on it.
+    LoadCue(String),
+    /// Hold a cue where it is, or let it go on.
+    PauseCue(String),
+    ResumeCue(String),
+    /// Stop a cue at once and forget what was ready of it.
+    ResetCue(String),
+    /// Let a loop that is playing finish its pass and go on.
+    Devamp(String),
+    /// Stop everything and put the playhead back at the top of the list.
+    Reset,
     /// MIDI Time Code reached this position (every two frames while it runs).
     Timecode(Timecode, Rate),
     /// The timecode source located here (a full frame message).
@@ -84,16 +95,55 @@ fn parse_osc_into(packet: &[u8], out: &mut Vec<Command>, depth: u32) {
         }
         return;
     }
-    if let Some((address, _)) = osc_string(packet)
-        && let Some(cmd) = osc_address(address)
+    if let Some((address, rest)) = osc_string(packet)
+        && let Some(cmd) = osc_command(address, osc_first_number(rest))
     {
         out.push(cmd);
     }
 }
 
-/// The command for an OSC address such as `/go` or `/cue/3.5/start`.
-pub fn osc_address(address: &str) -> Option<Command> {
-    let parts: Vec<&str> = address.split('/').skip(1).collect();
+/// The first argument of an OSC message as a number, if it has one: what
+/// follows the address is a type tag string (`,if`) and then the arguments.
+/// Ints, floats, doubles, 64-bit ints and true and false count.
+fn osc_first_number(rest: &[u8]) -> Option<f64> {
+    let (tags, mut data) = osc_string(rest)?;
+    let tags = tags.strip_prefix(',')?;
+    let first = tags.chars().next()?;
+    let take = |n: usize, data: &mut &[u8]| -> Option<Vec<u8>> {
+        let bytes = data.get(..n)?.to_vec();
+        *data = &data[n..];
+        Some(bytes)
+    };
+    match first {
+        'T' => Some(1.0),
+        'F' => Some(0.0),
+        'i' => Some(f64::from(i32::from_be_bytes(
+            take(4, &mut data)?.try_into().ok()?,
+        ))),
+        'f' => Some(f64::from(f32::from_be_bytes(
+            take(4, &mut data)?.try_into().ok()?,
+        ))),
+        'd' => Some(f64::from_be_bytes(take(8, &mut data)?.try_into().ok()?)),
+        'h' => Some(i64::from_be_bytes(take(8, &mut data)?.try_into().ok()?) as f64),
+        's' => osc_string(data)?.0.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// The command for an OSC message, in the shape of QLab's: an optional
+/// `/workspace/<id>` in front (what Companion and Stream Deck modules send),
+/// `/go`, `/stop`, `/pause`, `/resume`, `/panic`, `/reset`, `/playhead/<next|
+/// previous|number>`, `/select/<next|previous|number>`, and `/cue/<number>/…`
+/// (also `/cue/selected`, `/cue/playhead` and `/cue/active` for the cue
+/// selected, at the playhead, or every one playing, and `/cue_id/<id>/…`) with
+/// start, go, select, load, stop, hardStop, pause, resume, reset, devamp,
+/// fade, panic, arm, disarm, and armed (with 1 or 0 as its argument).
+pub fn osc_command(address: &str, arg: Option<f64>) -> Option<Command> {
+    let mut parts: Vec<&str> = address.split('/').skip(1).collect();
+    // Whichever workspace it names is the one that is open.
+    if parts.len() >= 3 && parts[0].eq_ignore_ascii_case("workspace") {
+        parts.drain(..2);
+    }
     let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
     let words: Vec<&str> = lower.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -102,19 +152,43 @@ pub fn osc_address(address: &str) -> Option<Command> {
         ["stop"] => Some(Command::StopAll),
         ["pause"] => Some(Command::Pause),
         ["resume"] => Some(Command::Resume),
-        ["playhead", "next"] => Some(Command::PlayheadNext),
-        ["playhead", "previous"] => Some(Command::PlayheadPrevious),
+        ["reset"] => Some(Command::Reset),
+        ["playhead" | "select", "next"] => Some(Command::PlayheadNext),
+        ["playhead" | "select", "previous"] => Some(Command::PlayheadPrevious),
         // Cue numbers are matched as written, not lower-cased.
-        ["cue", _, action] if !parts[1].is_empty() => {
-            let n = parts[1].to_string();
+        ["playhead" | "select", _] if !parts[1].is_empty() => {
+            Some(Command::Select(parts[1].to_string()))
+        }
+        ["cue" | "cue_id", _, action] if !parts[1].is_empty() => {
+            // Which cue: a number as written, or one of the words for a
+            // cue found by where it is, or (cue_id) the cue's own id.
+            let n = if words[0] == "cue_id" {
+                format!("#{}", parts[1])
+            } else if matches!(words[1], "selected" | "playhead" | "active") {
+                words[1].to_string()
+            } else {
+                parts[1].to_string()
+            };
             match *action {
                 "start" => Some(Command::Fire(n)),
                 "go" => Some(Command::GoCue(n)),
-                "select" | "load" => Some(Command::Select(n)),
-                "stop" => Some(Command::Stop(n)),
+                "select" => Some(Command::Select(n)),
+                "load" => Some(Command::LoadCue(n)),
+                "stop" | "hardstop" | "panic" => Some(Command::Stop(n)),
                 "fade" => Some(Command::FadeOut(n)),
+                "pause" => Some(Command::PauseCue(n)),
+                "resume" => Some(Command::ResumeCue(n)),
+                "reset" => Some(Command::ResetCue(n)),
+                "devamp" => Some(Command::Devamp(n)),
                 "arm" => Some(Command::Arm(n)),
                 "disarm" => Some(Command::Disarm(n)),
+                "armed" => arg.map(|a| {
+                    if a != 0.0 {
+                        Command::Arm(n)
+                    } else {
+                        Command::Disarm(n)
+                    }
+                }),
                 _ => None,
             }
         }
@@ -483,7 +557,7 @@ mod tests {
             ("/cue/12/start", Command::Fire("12".into())),
             ("/cue/3.5/go", Command::GoCue("3.5".into())),
             ("/cue/3.5/select", Command::Select("3.5".into())),
-            ("/cue/3.5/load", Command::Select("3.5".into())),
+            ("/cue/3.5/load", Command::LoadCue("3.5".into())),
             ("/cue/7/stop", Command::Stop("7".into())),
             ("/cue/7/fade", Command::FadeOut("7".into())),
             ("/cue/7/arm", Command::Arm("7".into())),
@@ -494,6 +568,81 @@ mod tests {
         for (addr, want) in cases {
             assert_eq!(parse_osc(&osc(addr)), vec![want], "{addr}");
         }
+    }
+
+    /// An OSC message with one argument of the given type tag.
+    fn osc_with(address: &str, tag: &str, arg: &[u8]) -> Vec<u8> {
+        let mut v = address.as_bytes().to_vec();
+        v.push(0);
+        while !v.len().is_multiple_of(4) {
+            v.push(0);
+        }
+        v.push(b',');
+        v.extend_from_slice(tag.as_bytes());
+        v.push(0);
+        while !v.len().is_multiple_of(4) {
+            v.push(0);
+        }
+        v.extend_from_slice(arg);
+        v
+    }
+
+    #[test]
+    fn osc_in_the_shape_of_qlabs_is_understood() {
+        let cases = [
+            // The workspace in front is whichever is open.
+            ("/workspace/ABC-123/go", Command::Go),
+            ("/workspace/ABC-123/cue/5/start", Command::Fire("5".into())),
+            (
+                "/workspace/x/cue/selected/stop",
+                Command::Stop("selected".into()),
+            ),
+            ("/reset", Command::Reset),
+            ("/select/next", Command::PlayheadNext),
+            ("/select/previous", Command::PlayheadPrevious),
+            ("/select/4", Command::Select("4".into())),
+            ("/playhead/4.5", Command::Select("4.5".into())),
+            ("/cue/playhead/start", Command::Fire("playhead".into())),
+            ("/cue/active/pause", Command::PauseCue("active".into())),
+            ("/cue/active/stop", Command::Stop("active".into())),
+            ("/cue/3/hardStop", Command::Stop("3".into())),
+            ("/cue/3/panic", Command::Stop("3".into())),
+            ("/cue/3/pause", Command::PauseCue("3".into())),
+            ("/cue/3/resume", Command::ResumeCue("3".into())),
+            ("/cue/3/reset", Command::ResetCue("3".into())),
+            ("/cue/3/devamp", Command::Devamp("3".into())),
+            ("/cue/3/load", Command::LoadCue("3".into())),
+            ("/cue_id/12345/start", Command::Fire("#12345".into())),
+        ];
+        for (addr, want) in cases {
+            assert_eq!(parse_osc(&osc(addr)), vec![want], "{addr}");
+        }
+        // `armed` takes its answer from the argument, whatever type it is.
+        let one = 1i32.to_be_bytes();
+        let zero = 0.0f32.to_be_bytes();
+        assert_eq!(
+            parse_osc(&osc_with("/cue/2/armed", "i", &one)),
+            vec![Command::Arm("2".into())]
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/cue/2/armed", "f", &zero)),
+            vec![Command::Disarm("2".into())]
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/cue/2/armed", "T", &[])),
+            vec![Command::Arm("2".into())]
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/cue/2/armed", "F", &[])),
+            vec![Command::Disarm("2".into())]
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/cue/2/armed", "s", b"1\0\0\0")),
+            vec![Command::Arm("2".into())]
+        );
+        // Without an answer it isn't a message about arming.
+        assert!(parse_osc(&osc("/cue/2/armed")).is_empty());
+        assert!(parse_osc(&osc_with("/cue/2/armed", "i", &[0, 0])).is_empty());
     }
 
     #[test]

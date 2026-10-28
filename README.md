@@ -394,12 +394,20 @@ includes FFmpeg, so there's nothing else to install.
   the settings; they are saved in the show. Both are off until you
   enable them, because anyone who can reach the OSC port on your network can
   drive the show. Cues are named by their cue number.
-  - *OSC over UDP* (port 53000 by default): `/go`, `/panic`, `/stop`,
-    `/pause`, `/resume`, `/playhead/next`, `/playhead/previous`, and
-    `/cue/<number>/start` (fire it, playhead unchanged), `go` (select it and
-    GO), `select` (or `load`), `stop`, `fade` (fade out with its own time),
-    `arm` and `disarm`.
-    Arguments are ignored and bundles work.
+  - *OSC over UDP* (port 53000 by default), in the shape of QLab's so the
+    Companion and Stream Deck modules for it can drive NewQ: `/go`, `/panic`,
+    `/stop`, `/pause`, `/resume`, `/reset` (stop everything and put the
+    playhead back at the top), `/playhead/next`, `/playhead/previous`,
+    `/playhead/<number>` (or `/select/…`), and `/cue/<number>/…` with `start`
+    (fire it, playhead unchanged), `go` (select it and GO), `select`, `load`
+    (get it ready), `stop` (or `hardStop`, `panic`), `fade` (fade out with its
+    own time), `pause`, `resume`, `reset`, `devamp`, `arm`, `disarm`, and `armed`
+    with 1 or 0 as its argument. Where a cue number goes you can say
+    `selected`, `playhead` or `active` (every cue playing), or use
+    `/cue_id/<id>/…` with a cue's own id. A `/workspace/<id>` in front is
+    accepted and ignored. Other arguments are ignored and bundles work.
+    (NewQ doesn't send QLab's replies and updates, so a button can fire a cue
+    but won't show its state.)
   - *MIDI input*: pick a port and, if you like, a channel. A note-on fires the
     cue whose number is the note number; a program change selects the cue
     with that number; and MIDI Show Control GO (with or without a cue

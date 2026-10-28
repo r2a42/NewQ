@@ -814,6 +814,14 @@ impl Engine {
         hit
     }
 
+    /// Stop everything, forget what was asked to be ready and put the
+    /// playhead back at the top of the list.
+    pub fn reset_all(&mut self, show: &Show) {
+        self.stop_all(0.0);
+        self.loads.clear();
+        self.playhead = show.armed_top_from(0).map(|i| show.cues[i].id);
+    }
+
     /// Do what a control cue says.
     fn control(&mut self, show: &Show, cue: &Cue, c: &ControlCue) {
         if !c.action.needs_target() {
@@ -824,11 +832,23 @@ impl Engine {
             self.log(format!("Cue {name}: it has no cue to act on"));
             return;
         };
+        self.control_target(show, c.action, target, &name);
+    }
+
+    /// Do `action` to the cue `target`; `from` is who asked, for the log.
+    pub fn control_target(
+        &mut self,
+        show: &Show,
+        action: ControlAction,
+        target: CueId,
+        from: &str,
+    ) {
+        let name = from;
         let tname = show
             .cue(target)
             .map(|t| format!("{} ({})", t.number, t.name))
             .unwrap_or_default();
-        match c.action {
+        match action {
             ControlAction::Start => self.fire(show, target),
             ControlAction::Pause => {
                 if !self.hold_cue(show, target, true) {
