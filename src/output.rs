@@ -114,6 +114,7 @@ pub fn midi_bytes(m: &MidiOut) -> Vec<u8> {
                 MscCommand::Resume => 0x03,
                 MscCommand::Load => 0x05,
                 MscCommand::AllOff => 0x08,
+                MscCommand::Reset => 0x0A,
             };
             // Format 01 is "lighting (general)", which desks of all kinds accept.
             let mut v = vec![0xF0, 0x7F, 0x7F, 0x02, 0x01, code];
@@ -599,7 +600,11 @@ mod tests {
         );
         assert_eq!(
             parse_midi(&msc(MscCommand::Load, "4"), None),
-            vec![Command::Select("4".into())]
+            vec![Command::LoadCue("4".into())]
+        );
+        assert_eq!(
+            parse_midi(&msc(MscCommand::Reset, "ignored"), None),
+            vec![Command::Reset]
         );
         assert_eq!(
             parse_midi(&msc(MscCommand::AllOff, "ignored"), None),

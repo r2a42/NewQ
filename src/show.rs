@@ -114,6 +114,9 @@ pub struct RemoteSettings {
     pub midi_port: Option<String>,
     /// Only accept channel messages on this channel (0 to 15); None = any.
     pub midi_channel: Option<u8>,
+    /// Only act on MIDI Show Control messages for this device id (0 to 111;
+    /// messages to everyone, 127, always count); None = any.
+    pub msc_device: Option<u8>,
     /// Follow MIDI Time Code on that input, firing cues at their timecodes.
     pub mtc: bool,
     /// Serve the web remote (a page for a phone or tablet) on `web_port`.
@@ -131,6 +134,7 @@ impl Default for RemoteSettings {
             midi: false,
             midi_port: None,
             midi_channel: None,
+            msc_device: None,
             mtc: false,
             web: false,
             web_port: 8080,
@@ -2016,6 +2020,7 @@ pub enum MscCommand {
     Resume,
     Load,
     AllOff,
+    Reset,
 }
 
 impl MscCommand {
@@ -2026,11 +2031,15 @@ impl MscCommand {
             MscCommand::Resume => "RESUME",
             MscCommand::Load => "LOAD",
             MscCommand::AllOff => "ALL OFF",
+            MscCommand::Reset => "RESET",
         }
     }
     /// Whether the command takes a cue number.
     pub fn takes_cue(self) -> bool {
-        !matches!(self, MscCommand::Resume | MscCommand::AllOff)
+        !matches!(
+            self,
+            MscCommand::Resume | MscCommand::AllOff | MscCommand::Reset
+        )
     }
 }
 
@@ -2045,7 +2054,7 @@ pub enum MidiKind {
 }
 
 impl MidiKind {
-    pub const ALL: [MidiKind; 9] = [
+    pub const ALL: [MidiKind; 10] = [
         MidiKind::NoteOn,
         MidiKind::NoteOff,
         MidiKind::ControlChange,
@@ -2055,6 +2064,7 @@ impl MidiKind {
         MidiKind::ShowControl(MscCommand::Resume),
         MidiKind::ShowControl(MscCommand::Load),
         MidiKind::ShowControl(MscCommand::AllOff),
+        MidiKind::ShowControl(MscCommand::Reset),
     ];
     pub fn label(self) -> String {
         match self {

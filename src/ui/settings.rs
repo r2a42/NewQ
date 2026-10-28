@@ -617,6 +617,22 @@ fn midi_page(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
                             }
                         });
                     ui.end_row();
+                    ui.label("Show control device");
+                    let text = r.msc_device.map_or("Any".to_string(), |d| d.to_string());
+                    egui::ComboBox::from_id_salt("msc_device")
+                        .selected_text(text)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut r.msc_device, None, "Any");
+                            for d in 0..=111u8 {
+                                ui.selectable_value(&mut r.msc_device, Some(d), d.to_string());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Act only on MIDI Show Control sent to this device id (and to \
+                             everyone, 127), when several machines share a MIDI line.",
+                        );
+                    ui.end_row();
                 });
             listener_status(
                 ui,
@@ -630,7 +646,7 @@ fn midi_page(ui: &mut Ui, show: &mut Show, st: &UiState, engine: &Engine) {
             hint(
                 ui,
                 "Note on N: fire the cue given that note, else cue N · Program change N: select \
-                 cue N\nMIDI Show Control: GO, STOP, RESUME, LOAD, ALL OFF (cue numbers work)",
+                 cue N\nMIDI Show Control: GO, STOP, RESUME, LOAD, ALL OFF, RESET (cue numbers work)",
             );
         }
     });

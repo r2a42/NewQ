@@ -213,8 +213,15 @@ fn msc_cue(data: &[u8]) -> Option<String> {
 /// Commands for one MIDI message. `channel` limits channel messages to one
 /// channel (0 to 15); None accepts any. A note-on fires the cue given that
 /// note (or else the cue with that number), a program change puts the playhead on it, and MIDI Show Control
-/// (GO, STOP, RESUME, LOAD and ALL_OFF) drives the transport.
+/// (GO, STOP, RESUME, LOAD, ALL_OFF and RESET) drives the transport.
+#[cfg(test)]
 pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
+    parse_midi_for(msg, channel, None)
+}
+
+/// `parse_midi`, acting only on MIDI Show Control sent to `device` (or to
+/// everyone, id 127) when one is given.
+pub fn parse_midi_for(msg: &[u8], channel: Option<u8>, device: Option<u8>) -> Vec<Command> {
     let Some(&status) = msg.first() else {
         return Vec::new();
     };
@@ -224,6 +231,10 @@ pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
         }
         // F0 7F <device> 02 <format> <command> <data...> F7
         if msg.len() < 7 || msg[1] != 0x7F || msg[3] != 0x02 {
+            return Vec::new();
+        }
+        // Another device's message is not for us.
+        if device.is_some_and(|d| msg[2] != d && msg[2] != 0x7F) {
             return Vec::new();
         }
         let end = if msg.last() == Some(&0xF7) {
@@ -237,9 +248,11 @@ pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
             (0x01 | 0x04, None) => vec![Command::Go],
             (0x02, Some(n)) => vec![Command::Stop(n)],
             (0x02, None) => vec![Command::StopAll],
-            (0x03, _) => vec![Command::Resume],
-            (0x05, Some(n)) => vec![Command::Select(n)],
+            (0x03, Some(n)) => vec![Command::ResumeCue(n)],
+            (0x03, None) => vec![Command::Resume],
+            (0x05, Some(n)) => vec![Command::LoadCue(n)],
             (0x08, _) => vec![Command::Panic],
+            (0x0A, _) => vec![Command::Reset],
             _ => Vec::new(),
         };
     }
@@ -262,6 +275,7 @@ pub fn parse_midi(msg: &[u8], channel: Option<u8>) -> Vec<Command> {
 pub fn midi_commands(
     msg: &[u8],
     channel: Option<u8>,
+    device: Option<u8>,
     mtc: bool,
     quarter_frames: &mut QuarterFrames,
 ) -> Vec<Command> {
@@ -271,7 +285,7 @@ pub fn midi_commands(
             _ => Vec::new(),
         };
     }
-    parse_midi(msg, channel)
+    parse_midi_for(msg, channel, device)
         .into_iter()
         .filter(|c| mtc || !matches!(c, Command::TimecodeLocate(..)))
         .collect()
@@ -444,7 +458,11 @@ impl Remote {
         }
         // The channel filter applies in the callback, which reads it at connect
         // time, so a changed channel needs a reconnect too.
-        if !first && old.midi_channel != wanted.midi_channel && wanted.midi && self.midi.is_some() {
+        if !first
+            && (old.midi_channel != wanted.midi_channel || old.msc_device != wanted.msc_device)
+            && wanted.midi
+            && self.midi.is_some()
+        {
             self.midi = None;
             match self.connect_midi(wanted) {
                 Ok(c) => self.midi = Some(c),
@@ -471,6 +489,7 @@ impl Remote {
             .find(|p| input.port_name(p).is_ok_and(|n| n == name))
             .ok_or_else(|| format!("MIDI input “{name}” is not connected"))?;
         let (tx, wake, channel) = (self.tx.clone(), self.wake.clone(), wanted.midi_channel);
+        let device = wanted.msc_device;
         let mtc = wanted.mtc;
         let mut quarter_frames = QuarterFrames::default();
         input
@@ -478,7 +497,7 @@ impl Remote {
                 &port,
                 "newq-in",
                 move |_, msg, _| {
-                    let commands = midi_commands(msg, channel, mtc, &mut quarter_frames);
+                    let commands = midi_commands(msg, channel, device, mtc, &mut quarter_frames);
                     if !commands.is_empty() {
                         for c in commands {
                             let _ = tx.send(c);
@@ -716,11 +735,16 @@ mod tests {
         assert_eq!(parse_midi(&msc(0x03, b""), None), vec![Command::Resume]);
         assert_eq!(
             parse_midi(&msc(0x05, b"9"), None),
-            vec![Command::Select("9".into())]
+            vec![Command::LoadCue("9".into())]
         );
+        assert_eq!(
+            parse_midi(&msc(0x03, b"6"), None),
+            vec![Command::ResumeCue("6".into())]
+        );
+        assert_eq!(parse_midi(&msc(0x0A, b""), None), vec![Command::Reset]);
         assert_eq!(parse_midi(&msc(0x08, b""), None), vec![Command::Panic]);
         // Commands NewQ doesn't act on, and other sysex.
-        assert!(parse_midi(&msc(0x0A, b""), None).is_empty());
+        assert!(parse_midi(&msc(0x0B, b""), None).is_empty());
         assert!(parse_midi(&[0xF0, 0x41, 0x10, 0xF7], None).is_empty());
         assert!(parse_midi(&[0xF0, 0x7F, 0x00, 0x04, 0x01, 0x01, 0xF7], None).is_empty());
         // The device id and channel filter don't apply to show control.
@@ -844,9 +868,9 @@ mod tests {
             let mut q = QuarterFrames::default();
             let mut got = Vec::new();
             for b in run {
-                got.extend(midi_commands(&[0xF1, b], None, mtc, &mut q));
+                got.extend(midi_commands(&[0xF1, b], None, None, mtc, &mut q));
             }
-            got.extend(midi_commands(&full, None, mtc, &mut q));
+            got.extend(midi_commands(&full, None, None, mtc, &mut q));
             if mtc {
                 assert_eq!(
                     got,
@@ -863,9 +887,41 @@ mod tests {
         // a channel message.
         let mut q = QuarterFrames::default();
         assert_eq!(
-            midi_commands(&[0x90, 60, 100], None, false, &mut q),
+            midi_commands(&[0x90, 60, 100], None, None, false, &mut q),
             vec![Command::Note(60)]
         );
         assert!(parse_midi(&[0xF1, 0x00], None).is_empty());
+    }
+
+    #[test]
+    fn show_control_for_another_device_is_left_alone() {
+        // Sent to device 5 (the id is the third byte).
+        let mut to_five = msc(0x01, b"2");
+        to_five[2] = 5;
+        let mut to_all = msc(0x01, b"2");
+        to_all[2] = 0x7F;
+        let go = vec![Command::GoCue("2".into())];
+        assert_eq!(parse_midi_for(&to_five, None, None), go);
+        assert_eq!(parse_midi_for(&to_five, None, Some(5)), go);
+        assert!(parse_midi_for(&to_five, None, Some(6)).is_empty());
+        // Everyone is everyone.
+        assert_eq!(parse_midi_for(&to_all, None, Some(6)), go);
+        // Notes and the like don't have device ids.
+        assert_eq!(
+            parse_midi_for(&[0x90, 60, 100], None, Some(6)),
+            vec![Command::Note(60)]
+        );
+    }
+
+    #[test]
+    fn the_listeners_apply_the_show_control_device() {
+        let mut q = QuarterFrames::default();
+        let mut to_five = msc(0x01, b"2");
+        to_five[2] = 5;
+        assert_eq!(
+            midi_commands(&to_five, None, Some(5), false, &mut q),
+            vec![Command::GoCue("2".into())]
+        );
+        assert!(midi_commands(&to_five, None, Some(9), false, &mut q).is_empty());
     }
 }
