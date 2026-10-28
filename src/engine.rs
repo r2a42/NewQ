@@ -226,6 +226,8 @@ pub enum ActiveKind {
     Matte(MatteState),
     Fade,
     Wait,
+    /// Makes MIDI Time Code while it lives (none in a test outbox).
+    Timecode(Option<crate::output::MtcRunner>),
     Group(GroupState),
 }
 
@@ -754,6 +756,7 @@ impl Engine {
             CueKind::LiveAudio(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
+            CueKind::Timecode(t) => Some((t.duration > 0.0).then_some(t.duration)),
             CueKind::Stop(_) | CueKind::Send(_) | CueKind::Control(_) => Some(Some(0.0)),
             // Slide show: the slides are timed to end together with the last.
             CueKind::Group(g) if g.slides.is_some() => Some(Some(show.slides_length(cue.id))),
@@ -1943,6 +1946,14 @@ impl Engine {
                 active.kind = ActiveKind::Wait;
                 active.duration = Some(w.duration);
             }
+            CueKind::Timecode(t) => {
+                active.duration = (t.duration > 0.0).then_some(t.duration);
+                active.kind = ActiveKind::Timecode(self.outbox.start_timecode(
+                    t.port.clone(),
+                    t.start,
+                    t.rate,
+                ));
+            }
             CueKind::Control(c) => {
                 ok = false; // instantaneous; nothing stays active
                 self.control(show, &cue, c);
@@ -2270,7 +2281,16 @@ impl Engine {
                         a.stopping = true;
                     }
                 }
-                ActiveKind::Fade | ActiveKind::Wait => {
+                ActiveKind::Fade | ActiveKind::Wait | ActiveKind::Timecode(_) => {
+                    if let ActiveKind::Timecode(Some(clock)) = &a.kind {
+                        clock.set_paused(paused);
+                        if let Some(e) = clock.take_error() {
+                            messages.push(format!(
+                                "Cue {}: {e}",
+                                cue.map(|c| c.number.as_str()).unwrap_or("?")
+                            ));
+                        }
+                    }
                     if !paused {
                         a.elapsed += dt;
                     }
@@ -4022,6 +4042,50 @@ mod tests {
         assert_eq!(sent_addresses(&e), ["/one"]);
         assert!(e.active.is_empty(), "nothing is left running");
         assert_eq!(e.cue_duration(&show, show.cue(a).unwrap()), Some(Some(0.0)));
+    }
+
+    #[test]
+    fn a_timecode_cue_starts_its_clock_and_ends_after_its_time() {
+        use crate::timecode::{Rate, Timecode, parse_full_frame};
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Timecode, None, 0);
+        if let CueKind::Timecode(t) = &mut c.kind {
+            t.port = Some("Desk".into());
+            t.start = Timecode::new(1, 0, 0, 0);
+            t.rate = Rate::Fps30;
+            t.duration = 2.0;
+        }
+        let id = c.id;
+        show.cues.push(c);
+        let mut forever = show.make_cue(CueType::Timecode, None, 1);
+        if let CueKind::Timecode(t) = &mut forever.kind {
+            t.duration = 0.0;
+        }
+        let forever_id = forever.id;
+        show.cues.push(forever);
+        let mut e = engine_without_media();
+        e.playhead = Some(id);
+        e.go(&show);
+        let sent = e.outbox.sent();
+        let Some(Outgoing::Midi { port, bytes }) = sent.first() else {
+            panic!("no clock was started: {sent:?}")
+        };
+        assert_eq!(port.as_deref(), Some("Desk"));
+        assert_eq!(
+            parse_full_frame(bytes),
+            Some((Timecode::new(1, 0, 0, 0), Rate::Fps30))
+        );
+        e.tick(&show, 1.0);
+        assert!(playing(&e, id));
+        e.tick(&show, 1.1);
+        assert!(idle(&e, id), "it ends when its time is up");
+        // With no time given it runs until it is stopped.
+        e.playhead = Some(forever_id);
+        e.go(&show);
+        e.tick(&show, 100.0);
+        assert!(playing(&e, forever_id));
+        e.stop_all(0.0);
+        assert!(idle(&e, forever_id));
     }
 
     #[test]

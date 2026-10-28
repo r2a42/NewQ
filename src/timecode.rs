@@ -88,7 +88,7 @@ impl<'de> Deserialize<'de> for Timecode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rate {
     Fps24,
     #[default]
@@ -114,6 +114,29 @@ impl Rate {
             Rate::Fps25 => "25 fps",
             Rate::Fps2997 => "29.97 fps",
             Rate::Fps30 => "30 fps",
+        }
+    }
+
+    pub const ALL: [Rate; 4] = [Rate::Fps24, Rate::Fps25, Rate::Fps2997, Rate::Fps30];
+
+    /// The two bits that say the rate in a quarter-frame or full-frame message.
+    fn bits(self) -> u8 {
+        match self {
+            Rate::Fps24 => 0,
+            Rate::Fps25 => 1,
+            Rate::Fps2997 => 2,
+            Rate::Fps30 => 3,
+        }
+    }
+
+    /// Seconds from one frame to the next as the clock really runs (29.97 is
+    /// 30000/1001; it is counted without dropping frame numbers).
+    pub fn frame_seconds(self) -> f64 {
+        match self {
+            Rate::Fps24 => 1.0 / 24.0,
+            Rate::Fps25 => 1.0 / 25.0,
+            Rate::Fps2997 => 1001.0 / 30000.0,
+            Rate::Fps30 => 1.0 / 30.0,
         }
     }
 
@@ -187,6 +210,74 @@ pub fn parse_full_frame(msg: &[u8]) -> Option<(Timecode, Rate)> {
         frames: msg[8],
     };
     valid(tc, rate).then_some((tc, rate))
+}
+
+/// Makes the messages of MIDI Time Code from a start position: a full frame
+/// message to say where it begins, then quarter-frame messages, four a frame.
+pub struct Generator {
+    start: Timecode,
+    rate: Rate,
+    /// Quarter frames made so far.
+    made: u64,
+}
+
+impl Generator {
+    pub fn new(start: Timecode, rate: Rate) -> Generator {
+        Generator {
+            start,
+            rate,
+            made: 0,
+        }
+    }
+
+    /// Time from one quarter frame to the next.
+    pub fn interval(&self) -> f64 {
+        self.rate.frame_seconds() / 4.0
+    }
+
+    /// Quarter frames made so far.
+    pub fn made(&self) -> u64 {
+        self.made
+    }
+
+    /// The sysex that says the clock is at the start (sent before it runs).
+    pub fn full_frame(&self) -> Vec<u8> {
+        let t = self.start;
+        vec![
+            0xF0,
+            0x7F,
+            0x7F,
+            0x01,
+            0x01,
+            (self.rate.bits() << 5) | (t.hours & 0x1F),
+            t.minutes,
+            t.seconds,
+            t.frames,
+            0xF7,
+        ]
+    }
+
+    /// The next quarter-frame message, `[0xF1, data]`. A run of eight says
+    /// the frame where the run began, which is two frames behind when it ends.
+    pub fn next_quarter(&mut self) -> [u8; 2] {
+        let piece = (self.made % 8) as u8;
+        let run = self.made / 8;
+        let t = self
+            .start
+            .plus_frames((run * 2) as u32, self.rate.nominal());
+        self.made += 1;
+        let data = match piece {
+            0 => t.frames & 0xF,
+            1 => t.frames >> 4,
+            2 => t.seconds & 0xF,
+            3 => t.seconds >> 4,
+            4 => t.minutes & 0xF,
+            5 => t.minutes >> 4,
+            6 => t.hours & 0xF,
+            _ => (self.rate.bits() << 1) | (t.hours >> 4),
+        };
+        [0xF1, (piece << 4) | data]
+    }
 }
 
 /// A position further on than this many seconds is a locate, not playing.
@@ -568,5 +659,45 @@ mod tests {
         assert_eq!(tc(0, 0, 1, 0).frame_number(30), 30);
         assert_eq!(tc(0, 1, 0, 0).frame_number(Rate::Fps2997.nominal()), 1800);
         assert_eq!(Rate::Fps2997.label(), "29.97 fps");
+    }
+
+    #[test]
+    fn the_generators_messages_are_read_back_by_our_own_decoder() {
+        for rate in Rate::ALL {
+            let start = tc(1, 59, 58, 4);
+            let mut g = Generator::new(start, rate);
+            assert_eq!(parse_full_frame(&g.full_frame()), Some((start, rate)));
+            let mut q = QuarterFrames::default();
+            let mut seen = Vec::new();
+            for _ in 0..8 * 40 {
+                let m = g.next_quarter();
+                assert_eq!(m[0], 0xF1);
+                assert!(m[1] < 0x80);
+                if let Some(p) = q.push(m[1]) {
+                    seen.push(p);
+                }
+            }
+            // A run ends 7 quarter frames in and says the position two frames on
+            // from where it began; the next run is two frames after that.
+            assert_eq!(seen.len(), 40, "{rate:?}");
+            for (n, (t, r)) in seen.iter().enumerate() {
+                assert_eq!(*r, rate);
+                assert_eq!(
+                    *t,
+                    start.plus_frames(2 * n as u32 + 2, rate.nominal()),
+                    "{n}"
+                );
+            }
+            // It crossed a minute and an hour boundary without a wrong digit.
+            assert!(seen.iter().any(|(t, _)| t.hours == 2));
+        }
+    }
+
+    #[test]
+    fn a_quarter_frame_comes_every_quarter_of_a_frame() {
+        let g = Generator::new(tc(0, 0, 0, 0), Rate::Fps25);
+        assert!((g.interval() - 0.01).abs() < 1e-12);
+        let g = Generator::new(tc(0, 0, 0, 0), Rate::Fps2997);
+        assert!((g.interval() - 1001.0 / 120000.0).abs() < 1e-12);
     }
 }

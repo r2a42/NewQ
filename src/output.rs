@@ -476,6 +476,25 @@ impl Outbox {
         }
     }
 
+    /// Start making timecode on a MIDI output; it stops when the runner is
+    /// dropped. A recording outbox keeps the full frame message that a real
+    /// clock would begin with, and makes no clock.
+    pub fn start_timecode(
+        &self,
+        port: Option<String>,
+        start: crate::timecode::Timecode,
+        rate: crate::timecode::Rate,
+    ) -> Option<MtcRunner> {
+        if let Some(r) = &self.recorded {
+            r.lock().push(Outgoing::Midi {
+                port,
+                bytes: crate::timecode::Generator::new(start, rate).full_frame(),
+            });
+            return None;
+        }
+        Some(MtcRunner::start(port, start, rate))
+    }
+
     pub fn send(&self, message: Outgoing) {
         if let Some(r) = &self.recorded {
             r.lock().push(message);
@@ -524,6 +543,125 @@ fn send_network(job: &Outgoing) -> Result<(), String> {
         }
         Outgoing::Script { command, args } => run_script(command, args),
         _ => Err("internal: not a network message".into()),
+    }
+}
+
+/// Makes MIDI Time Code on a MIDI output while it lives (see `timecode::Generator`).
+/// Dropping it stops the clock.
+pub struct MtcRunner {
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    error: Arc<parking_lot::Mutex<Option<String>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Sends the generator's messages through `send` at the pace of its clock
+/// until `stop`. `send` returns false when the output has gone. Time that
+/// passes while `paused` is not counted, so the clock holds and goes on from there.
+fn run_mtc(
+    mut generator: crate::timecode::Generator,
+    mut send: impl FnMut(&[u8]) -> bool,
+    stop: &AtomicBool,
+    paused: &AtomicBool,
+) {
+    if !send(&generator.full_frame()) {
+        return;
+    }
+    let step = Duration::from_secs_f64(generator.interval());
+    let mut anchor = Instant::now();
+    let mut held_since: Option<Instant> = None;
+    while !stop.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            held_since.get_or_insert_with(Instant::now);
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        if let Some(since) = held_since.take() {
+            anchor += since.elapsed();
+        }
+        let due = anchor + step.mul_f64(generator.made() as f64);
+        // Sleep most of the way and spin the last moment: an operating
+        // system's sleep is too loose for ten milliseconds.
+        loop {
+            let now = Instant::now();
+            if now >= due || stop.load(Ordering::Relaxed) || paused.load(Ordering::Relaxed) {
+                break;
+            }
+            let left = due - now;
+            if left > Duration::from_millis(2) {
+                std::thread::sleep(left - Duration::from_millis(1));
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+        if stop.load(Ordering::Relaxed) || paused.load(Ordering::Relaxed) {
+            continue;
+        }
+        if !send(&generator.next_quarter()) {
+            return;
+        }
+    }
+}
+
+impl MtcRunner {
+    pub fn start(
+        port: Option<String>,
+        start: crate::timecode::Timecode,
+        rate: crate::timecode::Rate,
+    ) -> MtcRunner {
+        let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(parking_lot::Mutex::new(None));
+        let (s, p, e) = (stop.clone(), paused.clone(), error.clone());
+        let thread = std::thread::Builder::new()
+            .name("mtc-out".into())
+            .spawn(move || {
+                let conn = (|| {
+                    let name = port.ok_or("MIDI: no output chosen for the timecode")?;
+                    let out = midir::MidiOutput::new("NewQ").map_err(|e| format!("MIDI: {e}"))?;
+                    let found = out
+                        .ports()
+                        .into_iter()
+                        .find(|p| out.port_name(p).is_ok_and(|n| n == name))
+                        .ok_or_else(|| format!("MIDI output “{name}” is not connected"))?;
+                    out.connect(&found, "newq-mtc")
+                        .map_err(|e| format!("MIDI: {e}"))
+                })();
+                let mut conn = match conn {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        *e.lock() = Some(msg);
+                        return;
+                    }
+                };
+                let generator = crate::timecode::Generator::new(start, rate);
+                run_mtc(generator, |bytes| conn.send(bytes).is_ok(), &s, &p);
+            })
+            .ok();
+        MtcRunner {
+            stop,
+            paused,
+            error,
+            thread,
+        }
+    }
+
+    pub fn set_paused(&self, on: bool) {
+        self.paused.store(on, Ordering::Relaxed);
+    }
+
+    /// A problem the clock has had, once.
+    pub fn take_error(&self) -> Option<String> {
+        self.error.lock().take()
+    }
+}
+
+impl Drop for MtcRunner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -599,6 +737,52 @@ impl SocketSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_timecode_clock_runs_at_its_rate_holds_when_paused_and_stops() {
+        use crate::timecode::{Generator, Rate, Timecode};
+        let sent = Arc::new(parking_lot::Mutex::new(Vec::<(Instant, Vec<u8>)>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (s2, stop2, paused2) = (sent.clone(), stop.clone(), paused.clone());
+        let thread = std::thread::spawn(move || {
+            let generator = Generator::new(Timecode::new(0, 0, 0, 0), Rate::Fps25);
+            run_mtc(
+                generator,
+                |b| {
+                    s2.lock().push((Instant::now(), b.to_vec()));
+                    true
+                },
+                &stop2,
+                &paused2,
+            );
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        paused.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(50));
+        let held = sent.lock().len();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(sent.lock().len(), held, "nothing is sent while paused");
+        paused.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(200));
+        stop.store(true, Ordering::Relaxed);
+        thread.join().unwrap();
+        let sent = sent.lock();
+        assert_eq!(sent[0].1[0], 0xF0, "the full frame comes first");
+        // About 100 quarter frames a second at 25 fps; 0.7 s of running.
+        let quarters = sent.len() - 1;
+        assert!((55..=80).contains(&quarters), "{quarters}");
+        // Spaced by 10 ms, give or take the scheduler (not gaps of a pause's length
+        // after the pause is taken out).
+        let gaps: Vec<f64> = sent[1..]
+            .windows(2)
+            .map(|w| w[1].0.duration_since(w[0].0).as_secs_f64())
+            .collect();
+        let mut sorted = gaps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted[sorted.len() / 2];
+        assert!((0.008..=0.013).contains(&median), "{median}");
+    }
+
     #[test]
     fn arguments_are_split_into_words_and_quotes_group_them() {
         assert_eq!(split_args("a b  c"), ["a", "b", "c"]);
