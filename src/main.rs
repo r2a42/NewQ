@@ -29,6 +29,7 @@ mod relink;
 mod remote;
 mod render;
 mod show;
+mod speed;
 mod stream;
 mod text;
 mod timecode;

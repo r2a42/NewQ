@@ -5939,18 +5939,6 @@ fn media_inspector(
                     waveform_trim(ui, m, engine);
                     ui.end_row();
                 }
-                if matches!(ty, CueType::Video | CueType::Audio) {
-                    ui.label("Speed");
-                    ui.add(
-                        egui::DragValue::new(&mut m.rate)
-                            .range(crate::show::MIN_RATE..=crate::show::MAX_RATE)
-                            .speed(0.01)
-                            .max_decimals(3)
-                            .prefix("× "),
-                    )
-                    .on_hover_text("Playback speed; sound keeps its pitch");
-                    ui.end_row();
-                }
                 ui.label("");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut m.loop_media, "Loop");
@@ -6005,6 +5993,9 @@ fn media_inspector(
             .default_open(!m.color.is_default())
             .show(ui, |ui| color_inspector(ui, &mut m.color));
     }
+    if matches!(ty, CueType::Video | CueType::Audio) {
+        speed_inspector(ui, cue_id, m, engine);
+    }
     effects_inspector(ui, cue_id, ty, m, engine);
     if m.loop_media && !timed {
         let what = if m.end.is_some() {
@@ -6018,6 +6009,35 @@ fn media_inspector(
 
 /// The effects on a cue: the picture's and the sound's, each with numbers
 /// that can be animated (see `show::Effect`).
+/// A cue's speed: one number, or keyframes over the cue's time (a ramp up,
+/// a slow-down).
+fn speed_inspector(ui: &mut Ui, cue_id: CueId, m: &mut MediaCue, engine: &Engine) {
+    let length = m.end.filter(|d| *d > 0.0).unwrap_or(10.0);
+    let playhead = match engine.status(cue_id) {
+        CueStatus::Playing { elapsed, .. } => Some(elapsed),
+        _ => None,
+    };
+    effect_param(
+        ui,
+        egui::Id::new(("speed", cue_id.0)),
+        &mut m.rate,
+        &SPEED_SPEC,
+        length,
+        playhead,
+    );
+    if m.rate.is_animated() {
+        let note = if m.loop_media {
+            "A loop plays at a steady speed: turn the loop off to use the keyframes."
+        } else {
+            "The keyframes are in the cue's own time: the cue ends when the file does. Sound \
+             keeps its pitch (best between half and double speed)."
+        };
+        ui.label(RichText::new(note).weak().small());
+    } else if (m.rate.value - 1.0).abs() > 1e-6 {
+        ui.label(RichText::new("Sound keeps its pitch.").weak().small());
+    }
+}
+
 fn effects_inspector(ui: &mut Ui, cue_id: CueId, ty: CueType, m: &mut MediaCue, engine: &Engine) {
     let picture = !matches!(ty, CueType::Audio | CueType::LiveAudio);
     let sound = matches!(ty, CueType::Video | CueType::Audio | CueType::LiveAudio);

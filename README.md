@@ -106,9 +106,15 @@ includes FFmpeg, so there's nothing else to install.
   (many Spout and Syphon tools have an NDI bridge), and NewQ takes NDI sources
   directly. On Linux this needs an X11 session (not Wayland), and NewQ's own
   outputs must not be on the screen it is capturing.
-- **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
-  its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
-  in the cue's own (sped) time. A change re-decodes a cue that was already loaded.
+- **Speed, steady or keyframed.** A video or audio cue has a **Speed** (× 0.25 to
+  × 4); sound keeps its pitch. Press **Animate** to ramp or keyframe it over the cue's
+  own time: click the lane to add a keyframe, drag one, and choose how it eases into
+  the next, as with an effect's numbers. A cue can start slow and speed up, hold,
+  and slow again. The cue's length, scrub bar and fades follow, and the cue ends
+  when the file does. Sound is time-stretched along the keyframes, so it is best
+  between half and double speed (pitch is kept; very slow or fast sound gets
+  grainy); the picture holds or skips frames to keep up. Keyframed speed is for
+  cues that play once: a loop plays at a steady speed.
 - **Effects with keyframes:** the *Effects* section of a cue's inspector takes
   any number of effects. **Picture:** *Blur* (a disc blur, up to 100 px),
   *Sharpen*, *Vignette*, *Pixelate* and *Negative*, drawn by the graphics card in

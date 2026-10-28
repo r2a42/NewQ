@@ -1602,8 +1602,10 @@ pub struct MediaCue {
     pub effects: Vec<Effect>,
     /// Video and audio files: playback speed, 1.0 = as recorded. Sound keeps
     /// its pitch.
+    /// It can be keyframed over the cue's own time (a ramp, a slow-down), which
+    /// a cue that doesn't loop plays; `value` is it while it has no keyframes.
     #[serde(default = "unit_rate", skip_serializing_if = "is_unit_rate")]
-    pub rate: f64,
+    pub rate: Animated,
     /// In a slide show: this slide's own fade-in time, in place of the show's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_fade: Option<f64>,
@@ -1648,13 +1650,16 @@ pub struct Crosspoint {
 pub const MIN_RATE: f64 = 0.25;
 pub const MAX_RATE: f64 = 4.0;
 
-fn unit_rate() -> f64 {
-    1.0
+fn unit_rate() -> Animated {
+    Animated::new(1.0)
 }
 
-fn is_unit_rate(v: &f64) -> bool {
-    *v == 1.0
+fn is_unit_rate(v: &Animated) -> bool {
+    v.value == 1.0 && v.keys.is_empty()
 }
+
+/// The playback speed, as the speed of a cue is edited.
+pub const SPEED_SPEC: ParamSpec = spec("Speed", MIN_RATE as f32, MAX_RATE as f32, 1.0, "×", 2);
 
 impl MediaCue {
     pub fn new(file: PathBuf, output: Option<OutputId>) -> Self {
@@ -1681,7 +1686,7 @@ impl MediaCue {
             loop_count: 0,
             hold_last_frame: false,
             effects: Vec::new(),
-            rate: 1.0,
+            rate: unit_rate(),
             slide_fade: None,
             slide_duration: None,
             crossfade: false,
@@ -1700,11 +1705,18 @@ impl MediaCue {
 
     /// The playback speed, kept to what FFmpeg's filters do well.
     pub fn speed(&self) -> f64 {
-        if self.rate.is_finite() {
-            self.rate.clamp(MIN_RATE, MAX_RATE)
+        if self.rate.value.is_finite() {
+            f64::from(self.rate.value).clamp(MIN_RATE, MAX_RATE)
         } else {
             1.0
         }
+    }
+
+    /// The speed over the cue's time, when it is keyframed and the cue plays
+    /// once (a loop is played at a steady speed).
+    pub fn speed_map(&self) -> Option<std::sync::Arc<crate::speed::SpeedMap>> {
+        (self.rate.is_animated() && !self.loop_media)
+            .then(|| std::sync::Arc::new(crate::speed::SpeedMap::new(&self.rate)))
     }
 
     /// How many passes a looping cue makes; None = forever.
@@ -1723,7 +1735,7 @@ impl MediaCue {
             && self.end == other.end
             && self.loop_media == other.loop_media
             && self.loop_count == other.loop_count
-            && self.speed() == other.speed()
+            && self.rate == other.rate
             && self.audio_output == other.audio_output
             && self.audio_channel == other.audio_channel
             && self.matrix == other.matrix
@@ -2938,6 +2950,7 @@ impl Show {
                 for e in &mut m.effects {
                     e.sanitize();
                 }
+                m.rate.sanitize(1.0);
             }
         }
         show.normalize_groups();
@@ -5339,24 +5352,52 @@ mod tests {
         assert!(!json.contains("rate"), "the default isn't written: {json}");
         let m = c.kind.media_mut().unwrap();
         assert_eq!(m.speed(), 1.0);
-        m.rate = 100.0;
+        m.rate.value = 100.0;
         assert_eq!(m.speed(), MAX_RATE);
-        m.rate = 0.0;
+        m.rate.value = 0.0;
         assert_eq!(m.speed(), MIN_RATE);
-        m.rate = f64::NAN;
+        m.rate.value = f32::NAN;
         assert_eq!(m.speed(), 1.0);
-        m.rate = 1.5;
+        m.rate.value = 1.5;
         let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
-        assert_eq!(back.kind.media().unwrap().rate, 1.5);
+        assert_eq!(back.kind.media().unwrap().rate.value, 1.5);
         let mut other = back.kind.media().unwrap().clone();
         assert!(other.decodes_like(back.kind.media().unwrap()));
-        other.rate = 1.0;
+        other.rate.value = 1.0;
         assert!(!other.decodes_like(back.kind.media().unwrap()));
         // Cues saved before speed existed load at normal speed.
         let old =
             serde_json::to_string(&show.make_cue(CueType::Video, Some("a.mp4".into()), 0)).unwrap();
         let old: Cue = serde_json::from_str(&old).unwrap();
-        assert_eq!(old.kind.media().unwrap().rate, 1.0);
+        assert_eq!(old.kind.media().unwrap().rate.value, 1.0);
+    }
+
+    #[test]
+    fn speed_can_be_keyframed_for_a_cue_that_plays_once() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some("a.mp4".into()), 0);
+        let m = c.kind.media_mut().unwrap();
+        assert!(m.speed_map().is_none());
+        m.rate.set_key(0.0, 1.0);
+        m.rate.set_key(4.0, 2.0);
+        assert!(m.speed_map().is_some());
+        // It is written, and read back, with its keyframes.
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(
+            back.kind.media().unwrap().rate,
+            c.kind.media().unwrap().rate
+        );
+        let mut other = back.kind.media().unwrap().clone();
+        assert!(other.decodes_like(back.kind.media().unwrap()));
+        other.rate.keys[1].v = 3.0;
+        assert!(
+            !other.decodes_like(back.kind.media().unwrap()),
+            "a change is a new decode"
+        );
+        // A loop plays at a steady speed.
+        let m = c.kind.media_mut().unwrap();
+        m.loop_media = true;
+        assert!(m.speed_map().is_none());
     }
 
     #[test]

@@ -7,6 +7,7 @@ use super::ffmpeg::Ffmpeg;
 use super::playback::{Children, PassFeed, Playback};
 use crate::fx::{AudioChain, FxShared};
 use crate::show::{AudioOutputConfig, AudioOutputId, Effect, EffectKind};
+use crate::speed::{SpeedPlan, Stretcher};
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -423,7 +424,7 @@ impl AudioOut {
         rate: f64,
     ) -> Result<Voice> {
         self.spawn_voice_routed(
-            ff, path, start, playback, gain, route, sound, rate, None, None,
+            ff, path, start, playback, gain, route, sound, rate, None, None, None,
         )
     }
 
@@ -442,6 +443,7 @@ impl AudioOut {
         rate: f64,
         matrix: Option<&Matrix>,
         play_on: Option<PlayOn>,
+        speed: Option<SpeedPlan>,
     ) -> Result<Voice> {
         let src = matrix.map_or(2, |m| m.source_channels.clamp(1, MAX_SOURCE_CHANNELS));
         let device = self
@@ -579,6 +581,47 @@ impl AudioOut {
                     shared2.received_frames.fetch_add(1, Ordering::Relaxed);
                     true
                 };
+                if let Some(plan) = speed {
+                    // The speed changes as it plays: stretch what is decoded
+                    // (at its own speed) along the plan, keeping the pitch.
+                    let mut st = Stretcher::new(src, sr, plan);
+                    let mut bytes = vec![0u8; 64 * 1024];
+                    let (mut carry, mut floats, mut out) = (Vec::new(), Vec::new(), Vec::new());
+                    let mut ok = true;
+                    'stretch: loop {
+                        let read = feed.stdout().read(&mut bytes).unwrap_or(0);
+                        if read == 0 {
+                            st.finish();
+                        } else {
+                            carry.extend_from_slice(&bytes[..read]);
+                            let whole = carry.len() / 4 * 4;
+                            floats.clear();
+                            floats.extend(
+                                carry[..whole]
+                                    .as_chunks::<4>()
+                                    .0
+                                    .iter()
+                                    .map(|b| f32::from_le_bytes(*b)),
+                            );
+                            carry.drain(..whole);
+                            st.push(&floats);
+                        }
+                        out.clear();
+                        st.pull(&mut out);
+                        for frame in out.chunks_exact(src) {
+                            if !push(frame) {
+                                ok = false;
+                                break 'stretch;
+                            }
+                        }
+                        if read == 0 {
+                            break;
+                        }
+                    }
+                    let _ = ok;
+                    shared2.eof.store(true, Ordering::Release);
+                    return;
+                }
                 let mut bytes = vec![0u8; 16 * 1024];
                 let mut carry: Vec<u8> = Vec::with_capacity(4 * src);
                 let frame_bytes = 4 * src;
@@ -1702,6 +1745,7 @@ mod tests {
                     from: 1.0,
                     len: 4.0,
                 }),
+                None,
             )
             .unwrap();
         assert!(!voice.released() && voice.tail_begins().is_none());
@@ -1755,6 +1799,56 @@ mod tests {
     }
 
     #[test]
+    fn a_ramped_speed_plays_a_file_in_the_time_the_plan_says() {
+        use crate::show::Animated;
+        use crate::speed::SpeedMap;
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        // Normal speed, then up to double by 2 s: 5 s of file takes less than 5.
+        let mut a = Animated::new(1.0);
+        a.set_key(0.0, 1.0);
+        a.set_key(2.0, 2.0);
+        let map = std::sync::Arc::new(SpeedMap::new(&a));
+        let expect = map.time_for(5.0);
+        let (device, rx) = Device::for_test(2);
+        let mut audio = AudioOut::new();
+        audio.devices.insert(None, device);
+        let voice = audio
+            .spawn_voice_routed(
+                &ff,
+                &wav,
+                0.0,
+                Playback::Once { duration: None },
+                1.0,
+                (None, 0),
+                &[],
+                1.0,
+                None,
+                None,
+                Some(SpeedPlan { map, t0: 0.0 }),
+            )
+            .unwrap();
+        voice.set_paused(false);
+        let mut mv = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = std::time::Instant::now();
+        let mut mix = vec![0.0; 480 * 2];
+        let mut loud = 0.0f32;
+        while mix_voice(&mut mv, &mut mix, 480, 2) {
+            loud = loud.max(mix.iter().fold(0.0f32, |p, s| p.max(s.abs())));
+            mix.fill(0.0);
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never finished"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let secs = mv.shared.played_frames.load(Ordering::Relaxed) as f64 / 48_000.0;
+        assert!((secs - expect).abs() < 0.15, "{secs} s, not {expect}");
+        assert!(loud > 0.05, "it was heard");
+    }
+
+    #[test]
     fn a_four_channel_file_is_decoded_and_matrixed() {
         let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
             return;
@@ -1796,6 +1890,7 @@ mod tests {
                 &[],
                 1.0,
                 Some(&matrix),
+                None,
                 None,
             )
             .unwrap();
