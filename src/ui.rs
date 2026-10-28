@@ -220,6 +220,14 @@ pub struct UiState {
     /// Where the panes of the main window are (see `dock`), and the folder the
     /// layout is saved in (set by the app).
     pub layout: dock::Layout,
+    /// What the cue list is searched for (empty = every cue shows).
+    pub cue_filter: String,
+    /// Edits to the show are refused (a performance in progress).
+    pub locked: bool,
+    /// Put the cursor in the search box on the next frame.
+    find_focus: bool,
+    /// The search box has the keyboard (so Esc clears it, not panics).
+    finding: bool,
     pub layout_dir: Option<PathBuf>,
     /// Whether the media window is open, and what it last did.
     pub show_media: bool,
@@ -446,6 +454,58 @@ enum Action {
     Undo,
     Redo,
     Quit,
+    /// Label a cue with a colour (None: take it off).
+    SetColor(CueId, Option<CueColor>),
+    /// Number the cues 1, 2, 3 down the list.
+    Renumber,
+    /// Refuse (or allow again) edits to the show.
+    ToggleLock,
+    /// Go to the search box.
+    FocusFind,
+}
+
+impl Action {
+    /// Whether this changes the show, and so is refused while it is locked.
+    fn edits_the_show(&self) -> bool {
+        matches!(
+            self,
+            Action::AddCue(_)
+                | Action::AddFiles(_)
+                | Action::AskSlides(_)
+                | Action::AddSlides(..)
+                | Action::SetSlide(..)
+                | Action::MoveSlide(..)
+                | Action::RemoveSlide(_)
+                | Action::Delete
+                | Action::Duplicate
+                | Action::Move(_)
+                | Action::AddSyncCue(_)
+                | Action::RelinkFolder(_)
+                | Action::RelinkCue(..)
+                | Action::CollectMedia(_)
+                | Action::RelinkMany(_)
+                | Action::SetHotkey(..)
+                | Action::SetMidiNote(..)
+                | Action::AddCueFile(..)
+                | Action::SetCueFile(..)
+                | Action::AddSubDisplay(_)
+                | Action::AddDisplay
+                | Action::AddBlendedPair
+                | Action::ShowPartOf(..)
+                | Action::SetTransition(..)
+                | Action::GroupCue(_)
+                | Action::Ungroup(_)
+                | Action::MoveIntoGroup(..)
+                | Action::MoveOutOfGroup(_)
+                | Action::RemoveOutput(_)
+                | Action::AddAudioOutput
+                | Action::RemoveAudioOutput(_)
+                | Action::Undo
+                | Action::Redo
+                | Action::SetColor(..)
+                | Action::Renumber
+        )
+    }
 }
 
 pub fn setup_style(ctx: &egui::Context) {
@@ -647,7 +707,7 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
     let typing = ctx.egui_wants_keyboard_input();
     let nudging = st.selected_handle().is_some();
     ctx.input_mut(|i| {
-        if fresh_key(i, egui::Modifiers::NONE, Key::Escape) {
+        if fresh_key(i, egui::Modifiers::NONE, Key::Escape) && !st.finding {
             actions.push(Action::Panic);
         }
         // Before Ctrl+S, which also matches with Shift held.
@@ -665,6 +725,12 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
         }
         if fresh_key(i, egui::Modifiers::COMMAND, Key::Comma) {
             actions.push(Action::ToggleSettings);
+        }
+        if fresh_key(i, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::L) {
+            actions.push(Action::ToggleLock);
+        }
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::F) {
+            actions.push(Action::FocusFind);
         }
         if typing {
             // A text box has its own undo.
@@ -782,11 +848,21 @@ fn pane_ui(
     };
     match pane {
         Pane::Cues => cue_list(ui, show, engine, st, actions),
-        Pane::Inspector => scrolled(ui, &mut |ui| inspector(ui, show, engine, st, actions)),
+        Pane::Inspector => {
+            let locked = st.locked;
+            ui.add_enabled_ui(!locked, |ui| {
+                scrolled(ui, &mut |ui| inspector(ui, show, engine, st, actions))
+            });
+        }
         Pane::Cart => scrolled(ui, &mut |ui| cart(ui, show, engine, actions)),
         Pane::Preview => scrolled(ui, &mut |ui| output_previews(ui, show, st)),
         Pane::Active => scrolled(ui, &mut |ui| active_panel(ui, show, engine, st, actions)),
-        Pane::Settings => settings::settings_view(ui, show, engine, st, actions),
+        Pane::Settings => {
+            let locked = st.locked;
+            ui.add_enabled_ui(!locked, |ui| {
+                settings::settings_view(ui, show, engine, st, actions)
+            });
+        }
     }
 }
 
@@ -1096,6 +1172,42 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             {
                 actions.push(Action::Redo);
             }
+            ui.separator();
+            if ui
+                .add(egui::Button::new("Find cues").shortcut_text("Ctrl+F"))
+                .clicked()
+            {
+                actions.push(Action::FocusFind);
+                ui.close();
+            }
+            if ui
+                .add_enabled(!st.locked, egui::Button::new("Renumber cues"))
+                .on_hover_text(
+                    "Number the cues 1, 2, 3 down the list (a group's children 3.1, 3.2)",
+                )
+                .clicked()
+            {
+                actions.push(Action::Renumber);
+                ui.close();
+            }
+            if ui
+                .add(
+                    egui::Button::new(if st.locked {
+                        "Unlock the show"
+                    } else {
+                        "Lock the show"
+                    })
+                    .shortcut_text("Ctrl+Shift+L"),
+                )
+                .on_hover_text(
+                    "While it is locked, nothing in the show can be edited by accident: \
+                     GO, stopping, pausing and the rest of running a show still work",
+                )
+                .clicked()
+            {
+                actions.push(Action::ToggleLock);
+                ui.close();
+            }
         });
         ui.menu_button("Cue", |ui| {
             for ty in [CueType::Video, CueType::Image, CueType::Audio] {
@@ -1329,6 +1441,10 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
 
 fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
     ui.horizontal(|ui| {
+        if st.locked {
+            ui.label(RichText::new("🔒 locked").color(PREWAIT))
+                .on_hover_text("Edits are refused. Edit ▸ Unlock the show (Ctrl+Shift+L).");
+        }
         match &engine.ff {
             Some(_) => ui.label(RichText::new("✔ ffmpeg").color(GO_GREEN)),
             None => ui
@@ -1556,6 +1672,29 @@ fn cue_list(
         });
         return;
     }
+    // The search box: only the cues that match show.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Find").weak());
+        let find = ui.add(
+            egui::TextEdit::singleline(&mut st.cue_filter)
+                .id(egui::Id::new("cue_find"))
+                .hint_text("number, name, notes, type or file")
+                .desired_width((ui.available_width() - 70.0).max(80.0)),
+        );
+        if st.find_focus {
+            st.find_focus = false;
+            find.request_focus();
+        }
+        st.finding = find.has_focus();
+        if find.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+            st.cue_filter.clear();
+            find.surrender_focus();
+            st.finding = false;
+        }
+        if !st.cue_filter.is_empty() && ui.small_button("Clear").clicked() {
+            st.cue_filter.clear();
+        }
+    });
     // Column layout: (title, width); a width of 0 takes the remaining space.
     let cols: [(&str, f32); 9] = [
         ("", 26.0),
@@ -1594,7 +1733,15 @@ fn cue_list(
 
     // Only the rows in view are laid out and drawn: a show of thousands of cues
     // costs no more per frame than one of a few dozen.
-    let visible = show.visible_indices();
+    let query = st.cue_filter.trim().to_lowercase();
+    let visible = if query.is_empty() {
+        show.visible_indices()
+    } else {
+        show.matching_indices(&query)
+    };
+    if !query.is_empty() && visible.is_empty() {
+        ui.label(RichText::new("No cue matches.").weak());
+    }
     ui.spacing_mut().item_spacing.y = 1.0;
     let row_pitch = ROW_H + ui.spacing().item_spacing.y;
     egui::ScrollArea::vertical()
@@ -1662,6 +1809,17 @@ fn cue_list(
                     v.faint_bg_color
                 };
                 painter.rect_filled(rect, 2.0, bg);
+                // A colour label: a faint wash over the row and a stripe at its edge.
+                if let Some(label) = c.color {
+                    let [r, g, b] = label.rgb();
+                    let tint = Color32::from_rgb(r, g, b);
+                    painter.rect_filled(rect, 2.0, tint.gamma_multiply(0.14));
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(rect.min, Vec2::new(4.0, ROW_H)),
+                        2.0,
+                        tint,
+                    );
+                }
                 // Progress fill for running cues.
                 let (frac, color) = match status {
                     CueStatus::Playing { elapsed, duration } => (
@@ -2530,6 +2688,23 @@ fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &
         }
     }
     ui.separator();
+    ui.menu_button("Colour", |ui| {
+        for color in CueColor::ALL {
+            let [r, g, b] = color.rgb();
+            let label = RichText::new(color.label()).color(Color32::from_rgb(r, g, b));
+            if ui.radio(c.color == Some(color), label).clicked() {
+                actions.push(Action::SetColor(c.id, Some(color)));
+                ui.close();
+            }
+        }
+        if ui
+            .add_enabled(c.color.is_some(), egui::Button::new("None"))
+            .clicked()
+        {
+            actions.push(Action::SetColor(c.id, None));
+            ui.close();
+        }
+    });
     if ui.button(if c.armed { "Disarm" } else { "Arm" }).clicked() {
         actions.push(Action::SetArmed(c.id, !c.armed));
         ui.close();
@@ -4847,6 +5022,22 @@ fn inspector(
                         });
                 }
                 ui.end_row();
+                ui.label("Colour");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    for color in CueColor::ALL {
+                        let [r, g, b] = color.rgb();
+                        let on = cue.color == Some(color);
+                        let swatch = egui::Button::new("")
+                            .fill(Color32::from_rgb(r, g, b))
+                            .stroke(Stroke::new(if on { 2.0 } else { 0.0 }, Color32::WHITE))
+                            .min_size(Vec2::new(18.0, 18.0));
+                        if ui.add(swatch).on_hover_text(color.label()).clicked() {
+                            cue.color = if on { None } else { Some(color) };
+                        }
+                    }
+                });
+                ui.end_row();
                 ui.label("Notes");
                 ui.add(
                     egui::TextEdit::multiline(&mut cue.notes)
@@ -7007,6 +7198,10 @@ fn select(show: &Show, st: &mut UiState, engine: &mut Engine, id: Option<CueId>)
 }
 
 fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    if st.locked && action.edits_the_show() {
+        engine.log("The show is locked: unlock it (Edit menu) to make changes");
+        return;
+    }
     let sel_idx = st.selected.and_then(|id| show.cue_index(id));
     match action {
         Action::Go => {
@@ -7020,6 +7215,24 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             engine.set_paused(p);
         }
         Action::Select(id) => select(show, st, engine, Some(id)),
+        Action::SetColor(id, color) => {
+            if let Some(i) = show.cue_index(id) {
+                show.cues[i].color = color;
+            }
+        }
+        Action::Renumber => {
+            let n = show.renumber();
+            engine.log(format!("Renumbered the cues ({n} changed)"));
+        }
+        Action::ToggleLock => {
+            st.locked = !st.locked;
+            engine.log(if st.locked {
+                "The show is locked"
+            } else {
+                "The show is unlocked"
+            });
+        }
+        Action::FocusFind => st.find_focus = true,
         Action::SelectRelative(d) => {
             if show.cues.is_empty() {
                 return;
@@ -8540,6 +8753,92 @@ mod tests {
         for _ in 0..5 {
             e.tick(show, 0.01);
         }
+    }
+
+    #[test]
+    fn a_locked_show_refuses_edits_but_still_runs() {
+        let (mut show, mut e, mut st) = running();
+        let n = show.cues.len();
+        let id = show.cues[0].id;
+        apply(Action::ToggleLock, &mut show, &mut e, &mut st);
+        assert!(st.locked);
+        // Edits are turned away, with a word about why.
+        for a in [
+            Action::AddCue(CueType::Wait),
+            Action::Delete,
+            Action::Duplicate,
+            Action::Move(1),
+            Action::SetColor(id, Some(CueColor::Red)),
+            Action::Renumber,
+            Action::Undo,
+        ] {
+            apply(a, &mut show, &mut e, &mut st);
+        }
+        assert_eq!(show.cues.len(), n);
+        assert!(show.cues[0].color.is_none());
+        assert!(e.messages.back().unwrap().1.contains("locked"));
+        // Running the show is not editing it.
+        apply(Action::Select(id), &mut show, &mut e, &mut st);
+        apply(Action::Go, &mut show, &mut e, &mut st);
+        assert!(e.is_active() || e.playhead != Some(id));
+        apply(Action::Panic, &mut show, &mut e, &mut st);
+        // Unlocked, the same edits go through.
+        apply(Action::ToggleLock, &mut show, &mut e, &mut st);
+        apply(
+            Action::SetColor(id, Some(CueColor::Red)),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(show.cues[0].color, Some(CueColor::Red));
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        assert_eq!(show.cues.len(), n + 1);
+        apply(Action::Renumber, &mut show, &mut e, &mut st);
+        assert_eq!(show.cues[0].number, "1");
+    }
+
+    #[test]
+    fn the_list_can_be_searched_and_escape_in_the_search_is_not_a_panic() {
+        let (mut show, mut e, mut st) = running();
+        st.cue_filter = "blackout".into();
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 900.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 50);
+        // With the search box in use, Esc is for clearing it.
+        st.finding = true;
+        let esc = |pressed| Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            events: vec![esc(true), esc(false)],
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), &show, &st, &mut actions));
+        out.textures_delta.clear();
+        assert!(!actions.iter().any(|a| matches!(a, Action::Panic)));
+        // Otherwise it is the panic key as ever.
+        st.finding = false;
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            events: vec![esc(true), esc(false)],
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), &show, &st, &mut actions));
+        out.textures_delta.clear();
+        assert!(actions.iter().any(|a| matches!(a, Action::Panic)));
     }
 
     #[test]
