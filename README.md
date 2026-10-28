@@ -62,6 +62,13 @@ includes FFmpeg, so there's nothing else to install.
   A stereo file can have sound effects as well; a file with more channels plays
   without them. Settings → Audio shows a level meter for each channel of each
   output.
+- **Vamping a sound.** A sound that loops with no count (set the loop between the
+  in and out points) can be **devamped** (a Devamp control cue, `/cue/N/devamp`
+  over OSC, or MSC): it finishes the pass it is on and stops. Tick **Devamp plays on**
+  and it goes on instead, at the end of the pass, into whatever the file holds
+  after the out point, to the end of the file. The loop is read less than a
+  second ahead, so a devamp in the last second of a pass can ride the next pass.
+  For something before the loop, put it in a cue of its own that auto-follows.
 - **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
   its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
   in the cue's own (sped) time. A change re-decodes a cue that was already loaded.

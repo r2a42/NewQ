@@ -36,6 +36,9 @@ struct VoiceShared {
     /// How many frames the lead was in all.
     lead_total: AtomicU64,
     received_frames: AtomicU64,
+    /// Once a released loop has gone on to its last pass: the frames queued
+    /// before it, plus one (0 = it hasn't).
+    tail_from: AtomicU64,
 }
 
 struct MixVoice {
@@ -255,6 +258,30 @@ impl AudioOut {
         (out, lost)
     }
 
+    /// A default device whose voices are mixed (and dropped) in real time by a
+    /// thread of its own, which ends with the device, for tests.
+    #[cfg(test)]
+    pub fn with_playing_device() -> AudioOut {
+        let (good, rx) = Device::for_test(2);
+        let mut out = AudioOut::new();
+        out.devices.insert(None, good);
+        std::thread::spawn(move || {
+            let mut voices: Vec<MixVoice> = Vec::new();
+            let mut mix = vec![0.0f32; 480 * 2];
+            loop {
+                match rx.try_recv() {
+                    Ok(v) => voices.push(v),
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                    Err(_) => {}
+                }
+                mix.fill(0.0);
+                voices.retain_mut(|v| mix_voice(v, &mut mix, 480, 2));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        out
+    }
+
     /// A default device that works, and `broken` routed to one that failed to
     /// open (an unplugged interface), for tests.
     #[cfg(test)]
@@ -395,7 +422,9 @@ impl AudioOut {
         sound: &[EffectKind],
         rate: f64,
     ) -> Result<Voice> {
-        self.spawn_voice_routed(ff, path, start, playback, gain, route, sound, rate, None)
+        self.spawn_voice_routed(
+            ff, path, start, playback, gain, route, sound, rate, None, None,
+        )
     }
 
     /// `spawn_voice_at_rate`, with a crosspoint grid in place of the
@@ -412,6 +441,7 @@ impl AudioOut {
         sound: &[EffectKind],
         rate: f64,
         matrix: Option<&Matrix>,
+        play_on: Option<PlayOn>,
     ) -> Result<Voice> {
         let src = matrix.map_or(2, |m| m.source_channels.clamp(1, MAX_SOURCE_CHANNELS));
         let device = self
@@ -427,24 +457,14 @@ impl AudioOut {
         let sr = device.sample_rate;
         // Effects work on a stereo pair: they run on one, and not on a wider file.
         let (chain, fx) = build_chain(if src <= 2 { sound } else { &[] }, sr);
-        let make = {
+        // One decoder: the file from where `input` says, as far as `limit` says.
+        let command = Arc::new({
             let (ff, path) = (ff.clone(), path.to_path_buf());
-            // The first pass of a jump into a loop starts part way in.
-            let calls = std::sync::atomic::AtomicUsize::new(0);
-            move || {
-                let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
+            move |input: Vec<String>, limit: Vec<String>| {
                 let mut cmd = ff.command();
-                cmd.args(if first {
-                    playback.first_input_args(start)
-                } else {
-                    playback.input_args(start)
-                });
+                cmd.args(input);
                 cmd.arg("-i").arg(&path);
-                cmd.args(if first {
-                    playback.first_limit_args_at(rate)
-                } else {
-                    playback.limit_args_at(rate)
-                });
+                cmd.args(limit);
                 let mut filters = Vec::new();
                 if matrixed {
                     // The file's own channels as they are, not mixed to a layout.
@@ -478,10 +498,43 @@ impl AudioOut {
                 ]);
                 cmd
             }
+        });
+        let make = {
+            let command = command.clone();
+            // The first pass of a jump into a loop starts part way in.
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            move || {
+                let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
+                if first {
+                    command(
+                        playback.first_input_args(start),
+                        playback.first_limit_args_at(rate),
+                    )
+                } else {
+                    command(playback.input_args(start), playback.limit_args_at(rate))
+                }
+            }
         };
         let children = Children::new();
         let error = Arc::new(Mutex::new(None));
+        let release = play_on.map(|_| Arc::new(AtomicBool::new(false)));
         let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
+        if let (Some(PlayOn { from, .. }), Some(release)) = (play_on, &release) {
+            // Released, the loop plays on past its out point to the end of the file.
+            let command = command.clone();
+            feed = feed.with_tail(
+                move || {
+                    command(
+                        Playback::Once { duration: None }.input_args(from),
+                        Vec::new(),
+                    )
+                },
+                release.clone(),
+            );
+        }
+        // A loop that can be released is not read far ahead, so that a release
+        // takes effect near the end of the pass that is playing.
+        let throttle = play_on.is_some();
         // Looping passes are cut or padded to an exact length, so repeats
         // don't drift and stay locked to the video's frame count.
         let samples = |l: f64| (l / rate * sr as f64).round().max(1.0) as u64;
@@ -499,6 +552,21 @@ impl AudioOut {
             .spawn(move || {
                 // Queue one frame; false if the voice was stopped meanwhile.
                 let mut push = |frame: &[f32]| -> bool {
+                    if throttle {
+                        let ahead = |s: &VoiceShared| {
+                            let played = s.played_frames.load(Ordering::Relaxed);
+                            let lead = s.lead_total.load(Ordering::Relaxed);
+                            s.received_frames
+                                .load(Ordering::Relaxed)
+                                .saturating_sub(played.saturating_sub(lead))
+                        };
+                        while ahead(&shared2) > RELEASE_LOOKAHEAD * sr as u64 / 10 {
+                            if shared2.stopped.load(Ordering::Relaxed) {
+                                return false;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
                     for v in frame {
                         let v = *v;
                         while producer.push(v).is_err() {
@@ -520,7 +588,13 @@ impl AudioOut {
                 'outer: loop {
                     let mut n: u64 = 0; // stereo frames queued this pass
                     // The first pass of a jump into a loop is short.
-                    let limit = if first { first_pass } else { per_pass };
+                    let limit = if feed.in_tail() {
+                        None
+                    } else if first {
+                        first_pass
+                    } else {
+                        per_pass
+                    };
                     first = false;
                     carry.clear();
                     'pass: loop {
@@ -560,6 +634,10 @@ impl AudioOut {
                     if decoded == 0 || !feed.advance() {
                         break;
                     }
+                    if feed.in_tail() && shared2.tail_from.load(Ordering::Relaxed) == 0 {
+                        let at = shared2.received_frames.load(Ordering::Relaxed);
+                        shared2.tail_from.store(at + 1, Ordering::Relaxed);
+                    }
                 }
                 shared2.eof.store(true, Ordering::Release);
             })?;
@@ -581,6 +659,8 @@ impl AudioOut {
             lost: device.lost.clone(),
             _input: None,
             fx,
+            release,
+            tail_len: play_on.map_or(0.0, |p| p.len),
         })
     }
 
@@ -649,6 +729,8 @@ impl AudioOut {
             lost: device.lost.clone(),
             _input: Some(stream),
             fx,
+            release: None,
+            tail_len: 0.0,
         })
     }
 }
@@ -771,7 +853,22 @@ pub struct Voice {
     _input: Option<cpal::Stream>,
     /// The numbers of its sound effects, if it has any.
     fx: Option<Arc<FxShared>>,
+    /// For a loop that plays on when released: set to release it.
+    release: Option<Arc<AtomicBool>>,
+    /// How long the part after the loop lasts, in the cue's time.
+    tail_len: f64,
 }
+
+/// What a loop plays on to when it is released: the part of the file from
+/// `from` (seconds into the file) to its end, `len` seconds of the cue's time.
+#[derive(Clone, Copy, Debug)]
+pub struct PlayOn {
+    pub from: f64,
+    pub len: f64,
+}
+
+/// How far ahead, in tenths of a second, a loop that can be released is read.
+const RELEASE_LOOKAHEAD: u64 = 8;
 
 /// The chain for `sound` and the numbers it shares with the engine, or
 /// nothing if there are no sound effects.
@@ -812,6 +909,36 @@ impl Voice {
     }
     /// Hold the sound back by `secs`: the voice plays that much silence first.
     /// Call before the voice is first unpaused.
+    /// Let a loop that plays on go on from its out point at the end of the
+    /// pass; false if this voice is not one.
+    pub fn release(&self) -> bool {
+        match &self.release {
+            Some(r) => {
+                r.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+    /// How long what follows the loop lasts, in the cue's time.
+    pub fn tail_len(&self) -> f64 {
+        self.tail_len
+    }
+    /// Whether `release` has been called.
+    pub fn released(&self) -> bool {
+        self.release
+            .as_ref()
+            .is_some_and(|r| r.load(Ordering::Acquire))
+    }
+    /// Seconds of the sound at which the released loop goes on past its out
+    /// point, once that is settled (the reader's own position, a little ahead
+    /// of what is heard).
+    pub fn tail_begins(&self) -> Option<f64> {
+        match self.shared.tail_from.load(Ordering::Relaxed) {
+            0 => None,
+            n => Some((n - 1) as f64 / self.sample_rate as f64),
+        }
+    }
     pub fn set_lead(&self, secs: f64) {
         let frames = (secs.max(0.0) * self.sample_rate as f64).round() as u64;
         self.shared.lead_total.store(frames, Ordering::Relaxed);
@@ -1549,6 +1676,85 @@ mod tests {
     }
 
     #[test]
+    fn a_released_loop_plays_on_to_the_end_of_the_file() {
+        let Some((ff, wav)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let (device, rx) = Device::for_test(2);
+        let mut audio = AudioOut::new();
+        audio.devices.insert(None, device);
+        // The first second loops; the other four seconds come after it.
+        let voice = audio
+            .spawn_voice_routed(
+                &ff,
+                &wav,
+                0.0,
+                Playback::Slice {
+                    len: 1.0,
+                    passes: None,
+                },
+                1.0,
+                (None, 0),
+                &[],
+                1.0,
+                None,
+                Some(PlayOn {
+                    from: 1.0,
+                    len: 4.0,
+                }),
+            )
+            .unwrap();
+        assert!(!voice.released() && voice.tail_begins().is_none());
+        voice.set_paused(false);
+        let mut mv = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = std::time::Instant::now();
+        let mut mix = vec![0.0; 480 * 2];
+        let mut released = false;
+        loop {
+            mix.fill(0.0);
+            let alive = mix_voice(&mut mv, &mut mix, 480, 2);
+            let played = mv.shared.played_frames.load(Ordering::Relaxed);
+            // Long after the loop has come round twice, let it go.
+            if played >= 110_000 && !released {
+                assert!(voice.release());
+                released = true;
+            }
+            if !alive {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never finished"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(voice.finished());
+        let total = mv.shared.played_frames.load(Ordering::Relaxed);
+        let at = voice.tail_begins().expect("it went on to the tail");
+        // The loop ended on a pass boundary, after the release, and the
+        // whole of the rest of the file followed it.
+        assert!((at - at.round()).abs() < 1e-6 && at >= 3.0, "{at}");
+        assert_eq!(total, ((at + 4.0) * 48_000.0) as u64, "{total} frames");
+        // A voice that is not a loop that plays on can't be released.
+        let (device, _rx) = Device::for_test(2);
+        audio.devices.insert(None, device);
+        let plain = audio
+            .spawn_voice(
+                &ff,
+                &wav,
+                0.0,
+                Playback::Once {
+                    duration: Some(1.0),
+                },
+                1.0,
+                (None, 0),
+                &[],
+            )
+            .unwrap();
+        assert!(!plain.release() && !plain.released());
+    }
+
+    #[test]
     fn a_four_channel_file_is_decoded_and_matrixed() {
         let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
             return;
@@ -1590,6 +1796,7 @@ mod tests {
                 &[],
                 1.0,
                 Some(&matrix),
+                None,
             )
             .unwrap();
         voice.set_paused(false);
