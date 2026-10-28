@@ -93,6 +93,16 @@ includes FFmpeg, so there's nothing else to install.
   that list's playhead. A continue or the end of a list never runs on into the
   next list, and each list is numbered from 1. Over OSC, `/cuelist/N/go` and
   `/cuelist/N/select` take the lists in the order of the tabs, from 1.
+- **Screen capture, for Spout and Syphon senders.** A camera cue can take **Screen ·
+  the whole desktop** (on Windows also *a window by its title*; on a Mac, further
+  screens too) as its source. It is how to bring in what another program on the
+  same computer shows, such as a media server or a Spout or Syphon sender, by
+  capturing the screen or window it draws on. NewQ does not read Spout or Syphon's
+  shared textures themselves (that needs each one's own graphics interface, and
+  could not be tried here); NDI is the better route when a sender can send it
+  (many Spout and Syphon tools have an NDI bridge), and NewQ takes NDI sources
+  directly. On Linux this needs an X11 session (not Wayland), and NewQ's own
+  outputs must not be on the screen it is capturing.
 - **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
   its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
   in the cue's own (sped) time. A change re-decodes a cue that was already loaded.
