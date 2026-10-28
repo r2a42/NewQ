@@ -1154,10 +1154,12 @@ impl App {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
                         let new_texture = || {
-                            (
-                                Arc::new(LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix)),
-                                0,
-                            )
+                            let tex = if p.rgba {
+                                LayerTexture::new_rgba(gpu, p.width, p.height)
+                            } else {
+                                LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix)
+                            };
+                            (Arc::new(tex), 0)
                         };
                         let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
                         // A seek can bring a player of another size (the output
@@ -1167,7 +1169,11 @@ impl App {
                             *entry = new_texture();
                         }
                         if entry.1 != p.serial {
-                            entry.0.upload_yuv(&gpu.queue, &frame.data);
+                            if p.rgba {
+                                entry.0.upload_rgba(&gpu.queue, &frame.data);
+                            } else {
+                                entry.0.upload_yuv(&gpu.queue, &frame.data);
+                            }
                             entry.1 = p.serial;
                         }
                         entry

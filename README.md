@@ -69,6 +69,12 @@ includes FFmpeg, so there's nothing else to install.
   after the out point, to the end of the file. The loop is read less than a
   second ahead, so a devamp in the last second of a pass can ride the next pass.
   For something before the loop, put it in a cue of its own that auto-follows.
+- **Video with transparency.** A clip with an alpha channel (ProRes 4444, HAP
+  Alpha, QuickTime Animation, a PNG sequence in a movie) is found by NewQ and
+  shows through to whatever is under it, on its own or over other cues. It
+  costs more to play than an ordinary clip (the picture is sent to the
+  graphics card as four bytes a pixel, not one and a half), so a 4K alpha clip
+  is a bigger ask of a modest machine than a plain one.
 - **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
   its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
   in the cue's own (sped) time. A change re-decodes a cue that was already loaded.

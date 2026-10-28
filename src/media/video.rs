@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct VideoFrame {
     /// Presentation time in seconds, relative to the cue's in point.
     pub pts: f64,
-    /// Planar Y, U, V (yuv420p).
+    /// Planar Y, U, V (yuv420p), or for a picture with transparency RGBA.
     pub data: Vec<u8>,
 }
 
@@ -32,6 +32,8 @@ impl Drop for ReaderDone {
 pub struct VideoPlayer {
     pub width: u32,
     pub height: u32,
+    /// Frames are RGBA (the picture has transparency), not yuv420p.
+    pub rgba: bool,
     pub matrix: ColorMatrix,
     rx: Receiver<VideoFrame>,
     recycle: Sender<Vec<u8>>,
@@ -89,6 +91,22 @@ impl VideoPlayer {
     ) -> Result<VideoPlayer> {
         let (w, h) = size;
         let fps = info.fps;
+        // A picture with transparency is decoded to RGBA, with the matrix and
+        // range its file says, since the compositor's yuv path has no alpha.
+        let alpha = info.has_alpha;
+        let matrix_name = match info.matrix {
+            ColorMatrix::Bt601 => "bt601",
+            ColorMatrix::Bt709 => "bt709",
+            ColorMatrix::Bt2020 => "bt2020",
+        };
+        let (scale_tail, pix_fmt) = if alpha {
+            (
+                format!("in_color_matrix={matrix_name}:out_range=pc,format=rgba"),
+                "rgba",
+            )
+        } else {
+            ("out_range=tv,format=yuv420p".to_string(), "yuv420p")
+        };
         let speed = if (rate - 1.0).abs() < 1e-9 {
             String::new()
         } else {
@@ -119,7 +137,7 @@ impl VideoPlayer {
                     "-sn",
                     "-dn",
                     "-vf",
-                    &format!("{speed}scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
+                    &format!("{speed}scale={w}:{h}:flags=bicubic:{scale_tail}"),
                     "-fps_mode",
                     "cfr",
                     "-r",
@@ -127,7 +145,7 @@ impl VideoPlayer {
                     "-f",
                     "rawvideo",
                     "-pix_fmt",
-                    "yuv420p",
+                    pix_fmt,
                     "pipe:1",
                 ]);
                 cmd
@@ -147,6 +165,7 @@ impl VideoPlayer {
             info.matrix,
             size,
             false,
+            alpha,
         )
     }
 
@@ -194,6 +213,7 @@ impl VideoPlayer {
             matrix,
             size,
             true,
+            false,
         )
     }
 
@@ -232,6 +252,7 @@ impl VideoPlayer {
             matrix,
             size,
             true,
+            false,
         )
     }
 
@@ -245,13 +266,18 @@ impl VideoPlayer {
         matrix: ColorMatrix,
         size: (u32, u32),
         live: bool,
+        rgba: bool,
     ) -> Result<VideoPlayer> {
         let (w, h) = size;
         let children = Children::new();
         let error = Arc::new(Mutex::new(None));
         let mut feed = PassFeed::start(&children, passes, &error, make)?;
 
-        let frame_len = (w * h + 2 * (w / 2) * (h / 2)) as usize;
+        let frame_len = if rgba {
+            (w * h * 4) as usize
+        } else {
+            (w * h + 2 * (w / 2) * (h / 2)) as usize
+        };
         let (tx, rx) = bounded::<VideoFrame>(QUEUE_FRAMES);
         let (recycle, recycle_rx) = unbounded::<Vec<u8>>();
         let eof = Arc::new(AtomicBool::new(false));
@@ -325,6 +351,7 @@ impl VideoPlayer {
         Ok(VideoPlayer {
             width: w,
             height: h,
+            rgba,
             matrix,
             rx,
             recycle,
@@ -517,6 +544,63 @@ mod tests {
             drop(p);
         }
         assert!(all_set(&flags, 5), "a reader thread outlived its player");
+    }
+
+    #[test]
+    fn a_clip_with_transparency_is_decoded_to_rgba() {
+        let Some((ff, _)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("newq_test_alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("alpha.mov");
+        // Half-transparent red, in ProRes 4444.
+        let made = ff
+            .command()
+            .args(["-y", "-f", "lavfi", "-i"])
+            .arg("color=c=red@0.5:s=64x64:d=1:r=25,format=yuva444p10le")
+            .args(["-c:v", "prores_ks", "-profile:v", "4444"])
+            .args(["-pix_fmt", "yuva444p10le"])
+            .arg(&clip)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            // A build of ffmpeg without the ProRes encoder can't make the clip.
+            assert!(
+                std::env::var_os("NEWQ_REQUIRE_MEDIA").is_none(),
+                "ffmpeg could not make the alpha clip"
+            );
+            return;
+        }
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        assert!(vi.has_alpha, "ProRes 4444 has an alpha channel");
+        let mut p = VideoPlayer::spawn(
+            &ff,
+            &clip,
+            vi,
+            0.0,
+            Playback::Once { duration: None },
+            (64, 64),
+        )
+        .expect("spawn");
+        let t0 = std::time::Instant::now();
+        while !p.ready() {
+            assert!(t0.elapsed().as_secs() < 10, "no first frame");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        p.update(0.0);
+        assert!(p.rgba);
+        let f = p.current().expect("a frame");
+        assert_eq!(f.data.len(), 64 * 64 * 4);
+        let (r, a) = (f.data[0], f.data[3]);
+        assert!(r > 200, "red: {r}");
+        assert!((i32::from(a) - 127).abs() <= 2, "half transparent: {a}");
+        // A picture without transparency stays on the yuv path.
+        let (_, plain) = crate::media::test_media("testsrc_10s.mp4").unwrap();
+        assert!(!ff.probe(&plain).unwrap().video.unwrap().has_alpha);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
