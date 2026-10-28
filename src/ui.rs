@@ -217,6 +217,8 @@ pub struct UiState {
     pub audio_input_devices: Vec<String>,
     /// What the OSC and MIDI listeners are doing (set by the app).
     pub remote_status: RemoteStatus,
+    /// A problem with the OSC feedback address (set by the app).
+    pub feedback_error: Option<String>,
     pub dirty: bool,
     /// Where the panes of the main window are (see `dock`), and the folder the
     /// layout is saved in (set by the app).

@@ -591,6 +591,37 @@ fn osc_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
             );
         }
     });
+    section(ui, "Feedback", |ui| {
+        ui.label(
+            RichText::new(
+                "Send the show's state to a controller (a TouchOSC page, a desk): the playhead, \
+                 which cues are playing and how far on they are.",
+            )
+            .weak(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Send to");
+            ui.add(
+                egui::TextEdit::singleline(&mut r.osc_feedback)
+                    .hint_text("192.168.1.20:9000 (empty = off)")
+                    .desired_width(220.0),
+            );
+        });
+        if !r.osc_feedback.trim().is_empty() {
+            if let Some(e) = &st.feedback_error {
+                warning(ui, e);
+            }
+            ui.label(
+                RichText::new(
+                    "/newq/playhead <number> <name>   /newq/paused <0|1>   /newq/running <n>\n\
+                     /newq/cue/<number>/status <idle|prewait|playing>\n\
+                     /newq/cue/<number>/progress <0 to 1>",
+                )
+                .monospace()
+                .small(),
+            );
+        }
+    });
     if r.osc {
         section(ui, "What it understands", |ui| {
             ui.label(

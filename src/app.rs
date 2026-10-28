@@ -259,6 +259,7 @@ pub struct App {
     last_autosave: Instant,
     /// When the web remote's page was last given the show's state.
     last_web_state: Instant,
+    feedback: crate::feedback::Feedback,
     /// A recovery file from a session that didn't end properly, to offer once.
     pending_recovery: Option<PathBuf>,
     /// Whether something was playing at the previous tick.
@@ -342,6 +343,7 @@ impl App {
             last_clock_look: Instant::now(),
             last_autosave: Instant::now(),
             last_web_state: Instant::now(),
+            feedback: crate::feedback::Feedback::new(),
             pending_recovery,
             was_active: false,
             main_window_only,
@@ -448,7 +450,10 @@ impl App {
         let settled = now.duration_since(self.remote_seen.1) > Duration::from_millis(400);
         if settled {
             self.remote.sync(&self.show.remote);
+            self.feedback.set_target(&self.show.remote.osc_feedback);
         }
+        self.feedback.update(&self.show, &self.engine, now);
+        self.ui.feedback_error = self.feedback.error.clone();
         self.ui.remote_status = self.remote.status.clone();
         if self.remote.web_running()
             && now.duration_since(self.last_web_state) >= Duration::from_millis(250)
