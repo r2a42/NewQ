@@ -55,6 +55,9 @@ includes FFmpeg, so there's nothing else to install.
   (change whether GO and continues fire it), **Devamp** (a loop that is playing
   finishes its pass and goes on instead of going round again) and **Memo** (does
   nothing: a note in the list). Pick the action and the cue in the inspector.
+- **Speed.** A video or audio cue has a **Speed** (× 0.25 to × 4). The sound keeps
+  its pitch; the cue's length, in/out points, loops, scrub bar and effects are all
+  in the cue's own (sped) time. A change re-decodes a cue that was already loaded.
 - **Effects with keyframes:** the *Effects* section of a cue's inspector takes
   any number of effects. **Picture:** *Blur* (a disc blur, up to 100 px),
   *Sharpen*, *Vignette*, *Pixelate* and *Negative*, drawn by the graphics card in
