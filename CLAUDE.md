@@ -58,6 +58,9 @@ The README describes the features; this file is about working on the code.
   moves the gains per buffer. Silent crosspoints are kept in the matrix for this.
 - `src/feedback.rs`: OSC feedback to the address in `RemoteSettings::osc_feedback`
   (`snapshot`/`changes`/`repeat` are pure and tested; `Feedback` paces and sends).
+- `timecode::Generator` makes MTC messages; `output::MtcRunner` is its paced thread
+  (`ActiveKind::Timecode`, dropped to stop). Send cues' `Program` target runs only
+  when `Prefs::allow_scripts` (per computer; `output::set_scripts_allowed`).
 - `src/fx.rs`: cue effects. `show::Effect` (kind and up to four `Animated`
   numbers, each a value or keyframes) is on `MediaCue::effects`. `fx::VideoFx::at`
   turns the picture effects into the numbers in the compositor shader (blur,

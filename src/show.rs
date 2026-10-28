@@ -1020,6 +1020,7 @@ pub enum CueKind {
     Send(SendCue),
     LiveAudio(LiveAudioCue),
     Control(ControlCue),
+    Timecode(TimecodeCue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1040,6 +1041,8 @@ pub enum CueType {
     /// still `Text`).
     Clock,
     Timer,
+    /// Makes MIDI Time Code on a MIDI output while it runs.
+    Timecode,
 }
 
 impl CueType {
@@ -1059,6 +1062,7 @@ impl CueType {
             CueType::Control => "Control",
             CueType::Clock => "Clock",
             CueType::Timer => "Timer",
+            CueType::Timecode => "Timecode",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -1077,6 +1081,7 @@ impl CueType {
             CueType::Control => "🎛",
             CueType::Clock => "🕒",
             CueType::Timer => "⏳",
+            CueType::Timecode => "🎞",
         }
     }
 }
@@ -1096,6 +1101,7 @@ impl CueKind {
             CueKind::Send(_) => CueType::Send,
             CueKind::LiveAudio(_) => CueType::LiveAudio,
             CueKind::Control(_) => CueType::Control,
+            CueKind::Timecode(_) => CueType::Timecode,
         }
     }
     /// The playback settings of a cue that plays something: transitions,
@@ -2033,6 +2039,19 @@ pub struct ControlCue {
     #[serde(default)]
     pub action: ControlAction,
     pub target: Option<CueId>,
+}
+
+/// Sends MIDI Time Code from `start` on a MIDI output until it has run for
+/// `duration` seconds (0 = until it is stopped).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TimecodeCue {
+    pub port: Option<String>,
+    #[serde(default)]
+    pub rate: crate::timecode::Rate,
+    #[serde(default)]
+    pub start: Timecode,
+    #[serde(default)]
+    pub duration: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -3009,6 +3028,15 @@ impl Show {
             CueType::Clock => (
                 "Clock".into(),
                 CueKind::Text(TextCue::clock(default_output)),
+            ),
+            CueType::Timecode => (
+                "Timecode".into(),
+                CueKind::Timecode(TimecodeCue {
+                    port: None,
+                    rate: Default::default(),
+                    start: Timecode::default(),
+                    duration: 0.0,
+                }),
             ),
             CueType::Timer => (
                 "Speaker timer".into(),
@@ -4803,6 +4831,29 @@ mod tests {
             panic!("not a send cue")
         };
         assert!(matches!(s.target, SendTarget::Script(ref x) if x.args == "--scene 4"));
+    }
+
+    #[test]
+    fn a_timecode_cue_round_trips_and_old_files_without_one_are_unaffected() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Timecode, None, 0);
+        assert_eq!(cue.kind.cue_type(), CueType::Timecode);
+        if let CueKind::Timecode(t) = &mut cue.kind {
+            t.port = Some("Desk".into());
+            t.start = Timecode::new(10, 0, 0, 0);
+            t.rate = crate::timecode::Rate::Fps2997;
+            t.duration = 90.0;
+        }
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(json.contains("10:00:00:00"), "{json}");
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        let CueKind::Timecode(t) = back.kind else {
+            panic!("not a timecode cue")
+        };
+        assert_eq!((t.duration, t.rate), (90.0, crate::timecode::Rate::Fps2997));
+        // Fields left out take their defaults.
+        let bare: TimecodeCue = serde_json::from_str(r#"{"port":null}"#).unwrap();
+        assert_eq!((bare.duration, bare.start), (0.0, Timecode::default()));
     }
 
     #[test]

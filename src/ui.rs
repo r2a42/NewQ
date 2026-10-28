@@ -1308,6 +1308,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 CueType::LiveAudio,
                 CueType::Control,
                 CueType::Send,
+                CueType::Timecode,
                 CueType::Text,
                 CueType::Clock,
                 CueType::Timer,
@@ -1695,6 +1696,12 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Timecode(t) => format!(
+            "{} from {} ({})",
+            t.port.as_deref().unwrap_or("(no output)"),
+            t.start,
+            t.rate.label()
+        ),
         CueKind::Control(c) => {
             let target = c
                 .target
@@ -5693,6 +5700,7 @@ fn inspector(
                 );
             }
             CueKind::Send(s) => send_inspector(ui, s, &st.midi_out_ports),
+            CueKind::Timecode(t) => timecode_out_inspector(ui, t, &st.midi_out_ports),
             CueKind::Camera(c) => {
                 camera_inspector(ui, c, engine);
                 ui.separator();
@@ -6591,6 +6599,62 @@ fn keyframe_lane(
         spec.name, spec.min, spec.max, spec.unit
     ));
     selected
+}
+
+/// The MIDI Time Code a timecode cue makes: where, from when, how fast, how long.
+fn timecode_out_inspector(ui: &mut Ui, t: &mut TimecodeCue, midi_outputs: &[String]) {
+    egui::Grid::new("timecode_out")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Output");
+            egui::ComboBox::from_id_salt("tc_out")
+                .selected_text(t.port.clone().unwrap_or_else(|| "Choose…".into()))
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for p in midi_outputs {
+                        ui.selectable_value(&mut t.port, Some(p.clone()), p);
+                    }
+                });
+            ui.end_row();
+            ui.label("Rate");
+            egui::ComboBox::from_id_salt("tc_rate")
+                .selected_text(t.rate.label())
+                .show_ui(ui, |ui| {
+                    for r in crate::timecode::Rate::ALL {
+                        ui.selectable_value(&mut t.rate, r, r.label());
+                    }
+                });
+            ui.end_row();
+            ui.label("Start at");
+            ui.horizontal(|ui| {
+                let fps = t.rate.nominal() as u8;
+                for (v, max) in [
+                    (&mut t.start.hours, 23),
+                    (&mut t.start.minutes, 59),
+                    (&mut t.start.seconds, 59),
+                    (&mut t.start.frames, fps - 1),
+                ] {
+                    ui.add(egui::DragValue::new(v).range(0..=max).speed(0.2));
+                    ui.label(":");
+                }
+            });
+            ui.end_row();
+            ui.label("Run for");
+            secs(ui, &mut t.duration);
+            ui.end_row();
+        });
+    t.start.frames = t.start.frames.min(t.rate.nominal() as u8 - 1);
+    ui.label(
+        RichText::new(
+            "Makes MIDI Time Code on that output while the cue runs (0 seconds = until it is \
+             stopped): for a lighting desk, a sound desk or a recorder to follow. Stopping the \
+             cue stops the clock; pausing the show holds it. 29.97 fps counts frames without \
+             dropping numbers. Timing is as steady as the operating system lets a program \
+             be, which is within a millisecond or two.",
+        )
+        .weak(),
+    );
 }
 
 /// What a send cue sends, and where.
@@ -9569,6 +9633,33 @@ mod tests {
         }
         let label = cue_target_text(&show, show.cue(id).unwrap());
         assert!(label.starts_with("Pause » "), "{label}");
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 900.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 100);
+    }
+
+    #[test]
+    fn a_timecode_cue_is_added_from_the_menu_and_draws() {
+        let (mut show, mut e, mut st) = running();
+        apply(
+            Action::AddCue(CueType::Timecode),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        let id = st.selected.unwrap();
+        assert_eq!(show.cue(id).unwrap().kind.cue_type(), CueType::Timecode);
+        if let CueKind::Timecode(t) = &mut show.cue_mut(id).unwrap().kind {
+            t.port = Some("Desk".into());
+        }
+        let label = cue_target_text(&show, show.cue(id).unwrap());
+        assert_eq!(label, "Desk from 00:00:00:00 (25 fps)");
         let ctx = egui::Context::default();
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 900.0))),

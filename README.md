@@ -226,6 +226,11 @@ includes FFmpeg, so there's nothing else to install.
   whenever you fade the cue out by hand (the *Fade out* buttons in the inspector,
   the Active panel and the right-click menu). New Stop cues default to fading
   everything out with each cue's own fade-out.
+- **Timecode cue.** Makes MIDI Time Code on a MIDI output from a start position at
+  24, 25, 29.97 or 30 fps, for as long as you say (or until stopped); stopping the cue
+  stops the clock and pausing the show holds it. For desks and recorders that chase
+  timecode. (Tested against our own MTC reader and a timing test; not with real
+  hardware here.)
 - **Program (script) cues.** A Send cue's *Program* tab runs a program with arguments
   when it fires (no shell, so name a script for pipes; quotes keep words together),
   stopped after 60 seconds, with failures in the log. Because a show can come from
