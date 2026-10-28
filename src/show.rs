@@ -923,7 +923,58 @@ pub struct Cue {
     /// Fire this cue when the time of day reaches this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<TimeOfDay>,
+    /// A colour label, to find it by in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<CueColor>,
     pub kind: CueKind,
+}
+
+/// The colours a cue can be labelled with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CueColor {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Blue,
+    Purple,
+    Pink,
+}
+
+impl CueColor {
+    pub const ALL: [CueColor; 7] = [
+        CueColor::Red,
+        CueColor::Orange,
+        CueColor::Yellow,
+        CueColor::Green,
+        CueColor::Blue,
+        CueColor::Purple,
+        CueColor::Pink,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CueColor::Red => "Red",
+            CueColor::Orange => "Orange",
+            CueColor::Yellow => "Yellow",
+            CueColor::Green => "Green",
+            CueColor::Blue => "Blue",
+            CueColor::Purple => "Purple",
+            CueColor::Pink => "Pink",
+        }
+    }
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            CueColor::Red => [226, 72, 72],
+            CueColor::Orange => [232, 140, 52],
+            CueColor::Yellow => [222, 196, 60],
+            CueColor::Green => [84, 184, 96],
+            CueColor::Blue => [76, 140, 232],
+            CueColor::Purple => [158, 104, 216],
+            CueColor::Pink => [226, 112, 176],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2742,6 +2793,7 @@ impl Show {
             cart: false,
             timecode: None,
             clock: None,
+            color: None,
             kind,
         }
     }
@@ -3065,6 +3117,73 @@ impl Show {
         self.cues.insert(slot.at.min(self.cues.len()), cue);
     }
 
+    /// Give the cues numbers in order: 1, 2, 3 down the list, and a group's
+    /// children 3.1, 3.2 inside group 3. Returns how many numbers changed.
+    pub fn renumber(&mut self) -> usize {
+        let mut changed = 0;
+        let (mut top, mut child) = (0u32, 0u32);
+        let mut group = String::new();
+        for c in &mut self.cues {
+            let number = if c.parent.is_some() {
+                child += 1;
+                format!("{group}.{child}")
+            } else {
+                top += 1;
+                child = 0;
+                group = top.to_string();
+                group.clone()
+            };
+            if c.number != number {
+                c.number = number;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// The cues that answer a search for `query` (lower case), in order, wherever
+    /// they are (folded away or not), and a group that has one of its children
+    /// among them.
+    pub fn matching_indices(&self, query: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.cues.len() {
+            if self.is_group(i) {
+                let end = self.block_end(i);
+                let children: Vec<usize> = (i + 1..end)
+                    .filter(|&k| self.cue_matches(k, query))
+                    .collect();
+                if self.cue_matches(i, query) || !children.is_empty() {
+                    out.push(i);
+                    out.extend(children);
+                }
+                i = end;
+            } else {
+                if self.cue_matches(i, query) {
+                    out.push(i);
+                }
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Whether the cue at `idx` answers a search for `query` (lower case): its
+    /// number, name, notes, what kind of cue it is or its file's name.
+    pub fn cue_matches(&self, idx: usize, query: &str) -> bool {
+        let c = &self.cues[idx];
+        let has = |text: &str| text.to_lowercase().contains(query);
+        has(&c.number)
+            || has(&c.name)
+            || has(&c.notes)
+            || has(c.kind.cue_type().label())
+            || c.color.is_some_and(|k| has(k.label()))
+            || c.kind
+                .file_media()
+                .and_then(|m| m.file.file_name())
+                .is_some_and(|f| has(&f.to_string_lossy()))
+    }
+
     /// Copy the cue at `idx` (a group is copied with its children) just after
     /// the original. Returns the copy's id.
     pub fn duplicate(&mut self, idx: usize) -> CueId {
@@ -3196,6 +3315,7 @@ impl Show {
                     cart: false,
                     timecode: None,
                     clock: None,
+                    color: None,
                     kind: CueKind::Image(MediaCue::new_visual(file, output)),
                 },
             );
@@ -4927,5 +5047,71 @@ mod tests {
             assert!(!a.label().is_empty() && !a.description().is_empty());
         }
         assert!(!ControlAction::Memo.needs_target());
+    }
+
+    #[test]
+    fn cues_are_renumbered_in_order_with_children_under_their_group() {
+        let mut show = Show::default();
+        for n in ["7", "3.5", "x"] {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.number = n.into();
+            show.cues.push(c);
+        }
+        let g = show.make_cue(CueType::Group, None, show.cues.len());
+        show.cues.push(g);
+        for _ in 0..2 {
+            let slot = show.insert_slot(Some(show.cues[3].id), false);
+            let c = show.make_cue(CueType::Wait, None, slot.at);
+            show.insert_cue(slot, c);
+        }
+        let last = show.make_cue(CueType::Wait, None, show.cues.len());
+        show.cues.push(last);
+        let changed = show.renumber();
+        let numbers: Vec<&str> = show.cues.iter().map(|c| c.number.as_str()).collect();
+        assert_eq!(numbers, ["1", "2", "3", "4", "4.1", "4.2", "5"]);
+        assert!(changed >= 3);
+        // Nothing to change the second time.
+        assert_eq!(show.renumber(), 0);
+    }
+
+    #[test]
+    fn a_search_finds_cues_by_number_name_notes_kind_file_and_colour() {
+        let mut show = Show::default();
+        let mut a = show.make_cue(CueType::Video, Some("/m/Opening Titles.mp4".into()), 0);
+        a.name = "Curtain up".into();
+        a.number = "12".into();
+        let mut b = show.make_cue(CueType::Wait, None, 1);
+        b.notes = "Check the fog machine".into();
+        b.color = Some(CueColor::Red);
+        let g = show.make_cue(CueType::Group, None, 2);
+        let gid = g.id;
+        show.cues.extend([a, b, g]);
+        let slot = show.insert_slot(Some(gid), false);
+        let mut child = show.make_cue(CueType::Audio, Some("storm.wav".into()), slot.at);
+        child.name = "Thunder".into();
+        show.insert_cue(slot, child);
+        let find = |q: &str| show.matching_indices(q);
+        assert_eq!(find("curtain"), vec![0]);
+        assert_eq!(find("TITLES".to_lowercase().as_str()), vec![0], "by file");
+        assert_eq!(find("fog"), vec![1], "by notes");
+        assert_eq!(find("red"), vec![1], "by colour");
+        assert_eq!(find("12"), vec![0], "by number");
+        assert_eq!(find("wait"), vec![1], "by type");
+        // A group shows with the child that matched, even if it is folded away.
+        assert_eq!(find("thunder"), vec![2, 3]);
+        assert!(find("nothing like this").is_empty());
+    }
+
+    #[test]
+    fn a_colour_label_round_trips_and_is_left_out_when_there_is_none() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Wait, None, 0);
+        assert!(!serde_json::to_string(&c).unwrap().contains("color"));
+        c.color = Some(CueColor::Purple);
+        let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.color, Some(CueColor::Purple));
+        for k in CueColor::ALL {
+            assert!(!k.label().is_empty());
+        }
     }
 }
