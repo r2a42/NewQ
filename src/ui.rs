@@ -460,6 +460,15 @@ enum Action {
     Quit,
     /// Label a cue with a colour (None: take it off).
     SetColor(CueId, Option<CueColor>),
+    /// Work another cue list (its tab).
+    SelectList(u32),
+    AddList,
+    RenameList(u32, String),
+    RemoveList(u32),
+    /// Move a cue (a group with its children) to the end of another list.
+    MoveToList(CueId, u32),
+    /// GO on a cue list (by its place in the tabs, from 1) without making it the one being worked.
+    GoList(u32),
     /// Number the cues 1, 2, 3 down the list.
     Renumber,
     /// Refuse (or allow again) edits to the show.
@@ -508,6 +517,10 @@ impl Action {
                 | Action::Undo
                 | Action::Redo
                 | Action::SetColor(..)
+                | Action::AddList
+                | Action::RenameList(..)
+                | Action::RemoveList(..)
+                | Action::MoveToList(..)
                 | Action::Renumber
         )
     }
@@ -647,6 +660,7 @@ fn restore(json: &str, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     match serde_json::from_str::<Show>(json) {
         Ok(back) => {
             *show = back;
+            engine.sync_lists(show);
             if engine.playhead.is_some_and(|id| show.cue(id).is_none()) {
                 engine.playhead = show.cues.first().map(|c| c.id);
             }
@@ -1249,6 +1263,15 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             }
             ui.separator();
             if ui
+                .add_enabled(!st.locked, egui::Button::new("New cue list"))
+                .on_hover_text(
+                    "Another list of cues with a playhead of its own, in a tab above the cue list",
+                )
+                .clicked()
+            {
+                actions.push(Action::AddList);
+            }
+            if ui
                 .button(if st.layout.is_open(Pane::Cart) {
                     "Hide cart"
                 } else {
@@ -1388,7 +1411,12 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action
             let next = at_playhead
                 .and_then(|i| show.armed_top_from(i))
                 .map(|i| &show.cues[i]);
-            ui.label(RichText::new("STANDING BY").small().weak());
+            let standing = if show.lists.is_empty() {
+                "STANDING BY".to_string()
+            } else {
+                format!("STANDING BY · {}", show.list_name(engine.active_list))
+            };
+            ui.label(RichText::new(standing).small().weak());
             match next {
                 Some(c) => {
                     ui.label(
@@ -1658,6 +1686,57 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
     }
 }
 
+/// The tabs of the cue lists. Right-click one to rename it, GO on it or remove it.
+fn cue_list_tabs(
+    ui: &mut Ui,
+    show: &Show,
+    engine: &Engine,
+    st: &UiState,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        for (n, id) in show.list_ids().into_iter().enumerate() {
+            let name = show.list_name(id);
+            let here = engine.active_list == id;
+            let resp = ui.selectable_label(here, &name);
+            if resp.clicked() && !here {
+                actions.push(Action::SelectList(id));
+            }
+            resp.context_menu(|ui| {
+                let mut edited = name.clone();
+                if ui
+                    .add_enabled(
+                        !st.locked,
+                        egui::TextEdit::singleline(&mut edited).desired_width(140.0),
+                    )
+                    .changed()
+                {
+                    actions.push(Action::RenameList(id, edited));
+                }
+                if ui.button("▶ GO on this list").clicked() {
+                    actions.push(Action::GoList(n as u32 + 1));
+                    ui.close();
+                }
+                if id != 0
+                    && ui
+                        .add_enabled(!st.locked, egui::Button::new("Delete list and its cues"))
+                        .clicked()
+                {
+                    actions.push(Action::RemoveList(id));
+                    ui.close();
+                }
+            });
+        }
+        if ui
+            .add_enabled(!st.locked, egui::Button::new("+").small())
+            .on_hover_text("New cue list")
+            .clicked()
+        {
+            actions.push(Action::AddList);
+        }
+    });
+}
+
 fn cue_list(
     ui: &mut Ui,
     show: &Show,
@@ -1665,7 +1744,7 @@ fn cue_list(
     st: &mut UiState,
     actions: &mut Vec<Action>,
 ) {
-    if show.cues.is_empty() {
+    if show.cues.is_empty() && show.lists.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(
                 RichText::new(
@@ -1676,6 +1755,9 @@ fn cue_list(
             );
         });
         return;
+    }
+    if !show.lists.is_empty() {
+        cue_list_tabs(ui, show, engine, st, actions);
     }
     // The search box: only the cues that match show.
     ui.horizontal(|ui| {
@@ -1739,13 +1821,19 @@ fn cue_list(
     // Only the rows in view are laid out and drawn: a show of thousands of cues
     // costs no more per frame than one of a few dozen.
     let query = st.cue_filter.trim().to_lowercase();
-    let visible = if query.is_empty() {
+    let mut visible = if query.is_empty() {
         show.visible_indices()
     } else {
         show.matching_indices(&query)
     };
+    visible.retain(|&i| show.cues[i].list == engine.active_list);
     if !query.is_empty() && visible.is_empty() {
         ui.label(RichText::new("No cue matches.").weak());
+    } else if visible.is_empty() {
+        ui.label(
+            RichText::new("This list has no cues yet. Use the Cue menu, or drag files here.")
+                .weak(),
+        );
     }
     ui.spacing_mut().item_spacing.y = 1.0;
     let row_pitch = ROW_H + ui.spacing().item_spacing.y;
@@ -1767,8 +1855,13 @@ fn cue_list(
             let groups: Vec<(CueId, String)> = show
                 .cues
                 .iter()
-                .filter(|c| matches!(c.kind, CueKind::Group(_)))
+                .filter(|c| matches!(c.kind, CueKind::Group(_)) && c.list == engine.active_list)
                 .map(|c| (c.id, cue_label(c)))
+                .collect();
+            let lists: Vec<(u32, String)> = show
+                .list_ids()
+                .into_iter()
+                .map(|l| (l, show.list_name(l)))
                 .collect();
             for &idx in &visible[rows] {
                 let c = &show.cues[idx];
@@ -1800,7 +1893,7 @@ fn cue_list(
                 if resp.double_clicked() {
                     actions.push(Action::FireSelected);
                 }
-                resp.context_menu(|ui| cue_context_menu(ui, c, &groups, actions));
+                resp.context_menu(|ui| cue_context_menu(ui, c, &groups, &lists, actions));
                 let status = engine.status(c.id);
                 let selected = st.selected == Some(c.id);
                 let at_playhead = engine.playhead == Some(c.id);
@@ -2664,7 +2757,13 @@ pub(crate) fn fades_text(c: &Cue) -> String {
     }
 }
 
-fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &mut Vec<Action>) {
+fn cue_context_menu(
+    ui: &mut Ui,
+    c: &Cue,
+    groups: &[(CueId, String)],
+    lists: &[(u32, String)],
+    actions: &mut Vec<Action>,
+) {
     actions.push(Action::Select(c.id));
     if ui.button("▶ Fire").clicked() {
         actions.push(Action::FireSelected);
@@ -2693,6 +2792,16 @@ fn cue_context_menu(ui: &mut Ui, c: &Cue, groups: &[(CueId, String)], actions: &
         }
     }
     ui.separator();
+    if lists.len() > 1 {
+        ui.menu_button("Move to list", |ui| {
+            for (id, name) in lists.iter().filter(|(id, _)| *id != c.list) {
+                if ui.button(name).clicked() {
+                    actions.push(Action::MoveToList(c.id, *id));
+                    ui.close();
+                }
+            }
+        });
+    }
     ui.menu_button("Colour", |ui| {
         for color in CueColor::ALL {
             let [r, g, b] = color.rgb();
@@ -7353,6 +7462,7 @@ fn load_into(
 ) {
     engine.stop_all(0.0);
     *show = new;
+    engine.forget_lists();
     engine.playhead = show.cues.first().map(|c| c.id);
     st.selected = engine.playhead;
     st.show_path = path;
@@ -7376,6 +7486,12 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
     };
     match cmd {
         Command::Go => apply(Action::Go, show, engine, st),
+        Command::GoList(n) => apply(Action::GoList(n), show, engine, st),
+        Command::SelectList(n) => {
+            if let Some(&l) = show.list_ids().get((n as usize).saturating_sub(1)) {
+                apply(Action::SelectList(l), show, engine, st);
+            }
+        }
         Command::Panic => apply(Action::Panic, show, engine, st),
         Command::StopAll => engine.stop_all(0.0),
         Command::Pause => engine.set_paused(true),
@@ -7528,7 +7644,7 @@ fn add_cue(
     ty: CueType,
     file: Option<PathBuf>,
 ) {
-    let slot = show.insert_slot(st.selected, ty == CueType::Group);
+    let slot = show.insert_slot(st.selected, ty == CueType::Group, engine.active_list);
     let cue = show.make_cue(ty, file, slot.at);
     select_new(show, st, engine, slot.parent, cue.id);
     show.insert_cue(slot, cue);
@@ -7557,6 +7673,10 @@ fn select_new(
 
 /// Selecting a cue puts the playhead on it, or on its group for a child.
 fn select(show: &Show, st: &mut UiState, engine: &mut Engine, id: Option<CueId>) {
+    // A cue in another list brings that list up.
+    if let Some(c) = id.and_then(|id| show.cue(id)) {
+        engine.switch_list(show, c.list);
+    }
     st.selected = id;
     engine.playhead = id.map(|id| show.top_id(id));
 }
@@ -7579,6 +7699,54 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             engine.set_paused(p);
         }
         Action::Select(id) => select(show, st, engine, Some(id)),
+        Action::SelectList(list) => {
+            engine.switch_list(show, list);
+            st.selected = engine.playhead;
+            st.scroll_to_selected = true;
+        }
+        Action::AddList => {
+            let n = show.lists.len() + 2;
+            let id = show.add_list(&format!("List {n}"));
+            engine.switch_list(show, id);
+            st.selected = None;
+        }
+        Action::RenameList(id, name) => {
+            if id == 0 {
+                show.main_list_name = (!name.trim().is_empty()).then_some(name);
+            } else if let Some(l) = show.lists.iter_mut().find(|l| l.id == id) {
+                l.name = name;
+            }
+        }
+        Action::RemoveList(id) => {
+            let gone = show.remove_list(id);
+            if !gone.is_empty() || !show.has_list(id) {
+                engine.stop_all(0.0);
+            }
+            engine.sync_lists(show);
+            if st.selected.is_some_and(|id| show.cue(id).is_none()) {
+                st.selected = engine.playhead;
+            }
+        }
+        Action::MoveToList(id, list) => {
+            if let Some(i) = show.cue_index(id)
+                && show.move_to_list(i, list).is_some()
+            {
+                // Where it was is no longer where the playhead can be.
+                if engine
+                    .playhead
+                    .is_some_and(|p| show.cue(p).is_some_and(|c| c.list != engine.active_list))
+                {
+                    engine.playhead = None;
+                }
+                st.selected = engine.playhead;
+            }
+        }
+        Action::GoList(n) => {
+            let ids = show.list_ids();
+            if let Some(&list) = ids.get((n as usize).saturating_sub(1)) {
+                engine.go_list(show, list);
+            }
+        }
         Action::SetColor(id, color) => {
             if let Some(i) = show.cue_index(id) {
                 show.cues[i].color = color;
@@ -7622,7 +7790,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddSlides(Some(group), files) => show.add_slides(group, files),
         Action::AddSlides(None, mut files) => {
             files.sort();
-            let slot = show.insert_slot(st.selected, true);
+            let slot = show.insert_slot(st.selected, true, engine.active_list);
             let mut cue = show.make_cue(CueType::Group, None, slot.at);
             cue.name = "Slide show".into();
             if let CueKind::Group(g) = &mut cue.kind {
@@ -9185,6 +9353,80 @@ mod tests {
         }
         assert!(timeline_rows(&show, gi, &mut e).is_none());
         assert!(timeline_rows(&show, 0, &mut e).is_none());
+    }
+
+    #[test]
+    fn cue_lists_are_added_worked_and_removed_from_the_ui() {
+        let (mut show, mut e, mut st) = running();
+        let n = show.cues.len();
+        apply(Action::AddList, &mut show, &mut e, &mut st);
+        let other = e.active_list;
+        assert_ne!(other, 0, "the new list is the one being worked");
+        assert_eq!(show.lists.len(), 1);
+        // A cue added now goes in it, not at the end of the main list.
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        assert_eq!(show.cues.len(), n + 1);
+        let new = show.cues.last().unwrap();
+        assert_eq!(new.list, other);
+        let id = new.id;
+        assert_eq!(st.selected, Some(id));
+        // Back to the main list: a cue added there stays in the main list.
+        apply(Action::SelectList(0), &mut show, &mut e, &mut st);
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        assert_eq!(show.cues.iter().filter(|c| c.list == 0).count(), n + 1);
+        assert_eq!(show.cues.last().unwrap().id, id);
+        // Selecting a cue of the other list brings its list up.
+        apply(Action::Select(id), &mut show, &mut e, &mut st);
+        assert_eq!(e.active_list, other);
+        // Move a cue across.
+        let first = show.cues[0].id;
+        apply(Action::MoveToList(first, other), &mut show, &mut e, &mut st);
+        assert_eq!(show.cue(first).unwrap().list, other);
+        // Rename, then remove: its cues go and the main list is back.
+        apply(
+            Action::RenameList(other, "Video".into()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(show.list_name(other), "Video");
+        apply(
+            Action::RenameList(0, "House".into()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(show.list_name(0), "House");
+        apply(Action::RemoveList(other), &mut show, &mut e, &mut st);
+        assert!(show.lists.is_empty() && show.cue(id).is_none() && show.cue(first).is_none());
+        assert_eq!(e.active_list, 0);
+        assert!(st.selected.is_none_or(|s| show.cue(s).is_some()));
+        // GO on a list that doesn't exist does nothing.
+        apply(Action::GoList(9), &mut show, &mut e, &mut st);
+    }
+
+    #[test]
+    fn osc_and_the_web_page_work_on_the_cue_list_being_worked() {
+        let (mut show, mut e, mut st) = running();
+        apply(Action::AddList, &mut show, &mut e, &mut st);
+        apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
+        apply(Action::SelectList(0), &mut show, &mut e, &mut st);
+        // The page lists the cues of the list being worked.
+        let main = crate::web::snapshot_json(&show, &e);
+        let v: serde_json::Value = serde_json::from_str(&main).unwrap();
+        assert_eq!(
+            v["cues"].as_array().unwrap().len(),
+            show.list_range(0).len()
+        );
+        // /cuelist/2/go goes on the second list (the tabs count from 1).
+        run_remote(Command::GoList(2), &mut show, &mut e, &mut st);
+        let second = show.cues.last().unwrap().id;
+        assert!(is_playing(&e, second));
+        assert_eq!(e.active_list, 0);
+        run_remote(Command::SelectList(2), &mut show, &mut e, &mut st);
+        assert_ne!(e.active_list, 0);
+        run_remote(Command::SelectList(1), &mut show, &mut e, &mut st);
+        assert_eq!(e.active_list, 0);
     }
 
     #[test]

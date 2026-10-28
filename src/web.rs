@@ -309,7 +309,12 @@ pub fn snapshot_json(show: &Show, engine: &Engine) -> String {
     // milliseconds, a dropped frame each time.
     let mut cues = String::with_capacity(show.cues.len() * 120 + 2);
     cues.push('[');
-    for (n, c) in show.cues.iter().enumerate() {
+    for (n, c) in show
+        .cues
+        .iter()
+        .filter(|c| c.list == engine.active_list)
+        .enumerate()
+    {
         let (status, progress) = match engine.status(c.id) {
             CueStatus::Idle => ("idle", 0.0),
             CueStatus::PreWait { remaining, total } => {

@@ -7,7 +7,11 @@ The README describes the features; this file is about working on the code.
 ## Layout
 
 - `src/show.rs`: the show data model and `.newq` (de)serialisation, plus the
-  group, arm and audio-output structure helpers.
+  group, arm, cue-list and audio-output structure helpers. Cue lists: `Cue::list`
+  (0 = main) and `Show::lists`; the cues of a list are kept together in
+  `Show::cues`, the main list first (`normalize_lists` repairs a loaded show), so
+  `next_top`, `move_cue` and `insert_slot` stay inside a list. The engine's
+  `playhead` is the active list's; the other lists' are in `list_playheads`.
 - `src/engine.rs`: GO, pre-waits, continues, transitions, fades, groups, preload.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).

@@ -50,6 +50,13 @@ pub struct Show {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_outputs: Vec<AudioOutputConfig>,
     pub cues: Vec<Cue>,
+    /// Cue lists besides the main one, each with a playhead of its own. The
+    /// cues of a list are together in `cues`, the main list first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lists: Vec<CueList>,
+    /// What the main list is called, if not "Main".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_list_name: Option<String>,
     pub next_id: u64,
     /// Fade time used by the Panic / Stop All button.
     #[serde(default = "default_panic_fade")]
@@ -162,6 +169,8 @@ impl Default for Show {
             legacy_displays: Vec::new(),
             legacy_sub_displays: Vec::new(),
             audio_outputs: Vec::new(),
+            lists: Vec::new(),
+            main_list_name: None,
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
@@ -926,7 +935,24 @@ pub struct Cue {
     /// A colour label, to find it by in the list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<CueColor>,
+    /// The cue list it is in: 0 is the main list, others are `Show::lists`.
+    /// A group's children are in its list.
+    #[serde(default, skip_serializing_if = "is_main_list")]
+    pub list: u32,
     pub kind: CueKind,
+}
+
+fn is_main_list(l: &u32) -> bool {
+    *l == 0
+}
+
+/// A cue list besides the main one. Each has its own playhead, and its cues
+/// are kept together in `Show::cues`, the lists in the order they are
+/// listed, the main list first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CueList {
+    pub id: u32,
+    pub name: String,
 }
 
 /// The colours a cue can be labelled with.
@@ -2842,6 +2868,7 @@ impl Show {
             timecode: None,
             clock: None,
             color: None,
+            list: 0,
             kind,
         }
     }
@@ -2914,6 +2941,7 @@ impl Show {
             }
         }
         show.normalize_groups();
+        show.normalize_lists();
         show.relay_slides();
         // A mesh that doesn't make sense (a hand-edited file) is dropped, not
         // trusted with the picture.
@@ -2985,9 +3013,142 @@ impl Show {
 pub struct Slot {
     pub at: usize,
     pub parent: Option<CueId>,
+    /// The cue list it goes in.
+    pub list: u32,
 }
 
 impl Show {
+    /// The ids of the cue lists, in the order they are listed: the main
+    /// list, 0, first.
+    pub fn list_ids(&self) -> Vec<u32> {
+        std::iter::once(0)
+            .chain(self.lists.iter().map(|l| l.id))
+            .collect()
+    }
+
+    pub fn list_name(&self, id: u32) -> String {
+        if id == 0 {
+            self.main_list_name.clone().unwrap_or_else(|| "Main".into())
+        } else {
+            self.lists
+                .iter()
+                .find(|l| l.id == id)
+                .map_or_else(|| "?".into(), |l| l.name.clone())
+        }
+    }
+
+    pub fn has_list(&self, id: u32) -> bool {
+        id == 0 || self.lists.iter().any(|l| l.id == id)
+    }
+
+    /// Where list `id` comes in the order of lists.
+    fn list_order(&self, id: u32) -> usize {
+        if id == 0 {
+            0
+        } else {
+            self.lists
+                .iter()
+                .position(|l| l.id == id)
+                .map_or(0, |p| p + 1)
+        }
+    }
+
+    /// The places in `cues` of the cues of list `id` (empty, at the right
+    /// place, if there are none).
+    pub fn list_range(&self, id: u32) -> std::ops::Range<usize> {
+        let order = self.list_order(id);
+        let before = self
+            .cues
+            .iter()
+            .filter(|c| self.list_order(c.list) < order)
+            .count();
+        let inside = self.cues.iter().filter(|c| c.list == id).count();
+        before..before + inside
+    }
+
+    /// Where a cue added at the end of list `id` goes.
+    pub fn list_end(&self, id: u32) -> usize {
+        self.list_range(id).end
+    }
+
+    /// Add a cue list, named `name`. Returns its id.
+    pub fn add_list(&mut self, name: &str) -> u32 {
+        let id = self.lists.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+        self.lists.push(CueList {
+            id,
+            name: name.to_string(),
+        });
+        id
+    }
+
+    /// Remove a list and its cues. The main list can't be removed. Returns
+    /// the ids of the cues removed.
+    pub fn remove_list(&mut self, id: u32) -> Vec<CueId> {
+        if id == 0 || !self.has_list(id) {
+            return Vec::new();
+        }
+        let gone: Vec<CueId> = self
+            .cues
+            .iter()
+            .filter(|c| c.list == id)
+            .map(|c| c.id)
+            .collect();
+        self.cues.retain(|c| c.list != id);
+        self.lists.retain(|l| l.id != id);
+        gone
+    }
+
+    /// Move the cue at `idx` (a group with its children) to the end of list
+    /// `list`. Returns where it is now.
+    pub fn move_to_list(&mut self, idx: usize, list: u32) -> Option<usize> {
+        if !self.has_list(list) {
+            return None;
+        }
+        let top = self.top_index(idx);
+        if self.cues[top].list == list {
+            return None;
+        }
+        let end = self.block_end(top);
+        let mut block: Vec<Cue> = self.cues.drain(top..end).collect();
+        for c in &mut block {
+            c.list = list;
+        }
+        let at = self.list_end(list);
+        for (n, c) in block.into_iter().enumerate() {
+            self.cues.insert(at + n, c);
+        }
+        Some(at)
+    }
+
+    /// Repair the lists of a loaded show: a cue is in a list that exists, a
+    /// group's children are in its list, and the cues of a list are together
+    /// in the order of the lists.
+    pub fn normalize_lists(&mut self) {
+        let known: std::collections::HashSet<u32> = self.list_ids().into_iter().collect();
+        let mut group_list = None;
+        for c in &mut self.cues {
+            if !known.contains(&c.list) {
+                c.list = 0;
+            }
+            match c.parent {
+                None => group_list = Some(c.list),
+                Some(_) => {
+                    if let Some(l) = group_list {
+                        c.list = l;
+                    }
+                }
+            }
+        }
+        // Stable, so the cues of a list stay as they were, groups with their children.
+        let orders: Vec<usize> = self.cues.iter().map(|c| self.list_order(c.list)).collect();
+        if orders.windows(2).any(|w| w[0] > w[1]) {
+            let mut keyed: Vec<(usize, Cue)> =
+                orders.into_iter().zip(self.cues.drain(..)).collect();
+            keyed.sort_by_key(|(o, _)| *o);
+            self.cues = keyed.into_iter().map(|(_, c)| c).collect();
+        }
+    }
+
     pub fn is_group(&self, idx: usize) -> bool {
         matches!(self.cues[idx].kind, CueKind::Group(_))
     }
@@ -3021,7 +3182,7 @@ impl Show {
     /// The top-level cue after the block containing `idx`.
     pub fn next_top(&self, idx: usize) -> Option<usize> {
         let end = self.block_end(self.top_index(idx));
-        (end < self.cues.len()).then_some(end)
+        (end < self.cues.len() && self.cues[end].list == self.cues[idx].list).then_some(end)
     }
 
     /// Whether the cue at `idx` will run: it and its group are armed.
@@ -3101,7 +3262,10 @@ impl Show {
         let mut i = idx as i32;
         loop {
             i += d.signum();
-            if i < 0 || i as usize >= self.cues.len() {
+            if i < 0
+                || i as usize >= self.cues.len()
+                || self.cues[i as usize].list != self.cues[idx].list
+            {
                 return None;
             }
             if self.is_visible(i as usize) {
@@ -3130,11 +3294,15 @@ impl Show {
 
     /// Where a new cue goes when `selected` is selected: after a child, as a
     /// sibling; into a selected group, at the end of it; otherwise after the cue.
-    pub fn insert_slot(&self, selected: Option<CueId>, new_is_group: bool) -> Slot {
-        let Some(i) = selected.and_then(|id| self.cue_index(id)) else {
+    pub fn insert_slot(&self, selected: Option<CueId>, new_is_group: bool, list: u32) -> Slot {
+        let selected = selected
+            .and_then(|id| self.cue_index(id))
+            .filter(|&i| self.cues[i].list == list);
+        let Some(i) = selected else {
             return Slot {
-                at: self.cues.len(),
+                at: self.list_end(list),
                 parent: None,
+                list,
             };
         };
         if let Some(p) = self.cues[i].parent {
@@ -3145,23 +3313,27 @@ impl Show {
                     i + 1
                 },
                 parent: if new_is_group { None } else { Some(p) },
+                list,
             };
         }
         if self.is_group(i) && !new_is_group {
             return Slot {
                 at: self.block_end(i),
                 parent: Some(self.cues[i].id),
+                list,
             };
         }
         Slot {
             at: self.block_end(i),
             parent: None,
+            list,
         }
     }
 
     /// Insert a cue made by `make_cue` into `slot`.
     pub fn insert_cue(&mut self, slot: Slot, mut cue: Cue) {
         cue.parent = slot.parent;
+        cue.list = slot.list;
         self.cues.insert(slot.at.min(self.cues.len()), cue);
     }
 
@@ -3171,7 +3343,14 @@ impl Show {
         let mut changed = 0;
         let (mut top, mut child) = (0u32, 0u32);
         let mut group = String::new();
+        let mut list = 0;
         for c in &mut self.cues {
+            // Each list is numbered from 1.
+            if c.list != list {
+                list = c.list;
+                top = 0;
+                child = 0;
+            }
             let number = if c.parent.is_some() {
                 child += 1;
                 format!("{group}.{child}")
@@ -3364,6 +3543,7 @@ impl Show {
                     timecode: None,
                     clock: None,
                     color: None,
+                    list: self.cues[g].list,
                     kind: CueKind::Image(MediaCue::new_visual(file, output)),
                 },
             );
@@ -3406,6 +3586,7 @@ impl Show {
             return None;
         }
         let mut group = self.make_cue(CueType::Group, None, idx);
+        group.list = self.cues[idx].list;
         group.name = format!("Group of {}", self.cues[idx].name);
         group.pre_wait = std::mem::take(&mut self.cues[idx].pre_wait);
         group.continue_mode = std::mem::take(&mut self.cues[idx].continue_mode);
@@ -3489,7 +3670,7 @@ impl Show {
         }
         let end = self.block_end(idx);
         if up {
-            if idx == 0 {
+            if idx == 0 || self.cues[idx - 1].list != self.cues[idx].list {
                 return None;
             }
             let prev = self.top_index(idx - 1);
@@ -3499,7 +3680,7 @@ impl Show {
             }
             Some(prev)
         } else {
-            if end >= self.cues.len() {
+            if end >= self.cues.len() || self.cues[end].list != self.cues[idx].list {
                 return None;
             }
             let next_end = self.block_end(end);
@@ -4225,7 +4406,7 @@ mod tests {
         let ids: Vec<CueId> = show.cues.iter().map(|c| c.id).collect();
         let (a, g, b, c, d) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
         let slot = |sel, group| {
-            let s = show.insert_slot(sel, group);
+            let s = show.insert_slot(sel, group, 0);
             (s.at, s.parent)
         };
         assert_eq!(slot(None, false), (5, None));
@@ -4918,7 +5099,7 @@ mod tests {
     }
 
     fn slide_show(show: &mut Show, n: usize) -> CueId {
-        let slot = show.insert_slot(None, true);
+        let slot = show.insert_slot(None, true, 0);
         let mut g = show.make_cue(CueType::Group, None, slot.at);
         if let CueKind::Group(gc) = &mut g.kind {
             gc.slides = Some(SlideShow {
@@ -5108,7 +5289,7 @@ mod tests {
         let g = show.make_cue(CueType::Group, None, show.cues.len());
         show.cues.push(g);
         for _ in 0..2 {
-            let slot = show.insert_slot(Some(show.cues[3].id), false);
+            let slot = show.insert_slot(Some(show.cues[3].id), false, 0);
             let c = show.make_cue(CueType::Wait, None, slot.at);
             show.insert_cue(slot, c);
         }
@@ -5134,7 +5315,7 @@ mod tests {
         let g = show.make_cue(CueType::Group, None, 2);
         let gid = g.id;
         show.cues.extend([a, b, g]);
-        let slot = show.insert_slot(Some(gid), false);
+        let slot = show.insert_slot(Some(gid), false, 0);
         let mut child = show.make_cue(CueType::Audio, Some("storm.wav".into()), slot.at);
         child.name = "Thunder".into();
         show.insert_cue(slot, child);
@@ -5209,6 +5390,155 @@ mod tests {
         let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert!(back.kind.media().unwrap().play_on);
         assert!(!off.decodes_like(back.kind.media().unwrap()));
+    }
+
+    fn three_cues_in_two_lists() -> (Show, u32) {
+        let mut show = Show::default();
+        let other = show.add_list("Video");
+        for (n, list) in [(1, 0), (2, other), (3, 0)] {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.number = n.to_string();
+            c.list = list;
+            show.cues.push(c);
+        }
+        show.normalize_lists();
+        (show, other)
+    }
+
+    #[test]
+    fn lists_are_not_written_when_there_is_only_the_main_one() {
+        let mut show = Show::default();
+        let c = show.make_cue(CueType::Wait, None, 0);
+        show.cues.push(c);
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(
+            !json.contains("lists")
+                && !json.contains("\"list\"")
+                && !json.contains("main_list_name")
+        );
+        // A show from before lists loads with one.
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.list_ids(), [0]);
+        assert_eq!(back.list_name(0), "Main");
+    }
+
+    #[test]
+    fn the_cues_of_a_list_are_kept_together_and_found_by_their_list() {
+        let (show, other) = three_cues_in_two_lists();
+        let numbers: Vec<&str> = show.cues.iter().map(|c| c.number.as_str()).collect();
+        assert_eq!(
+            numbers,
+            ["1", "3", "2"],
+            "the main list first, then the others"
+        );
+        assert_eq!(show.list_range(0), 0..2);
+        assert_eq!(show.list_range(other), 2..3);
+        assert_eq!(show.list_end(0), 2);
+        // A list with nothing in it has a place too.
+        let mut show = show;
+        let empty = show.add_list("Empty");
+        assert_eq!(show.list_range(empty), 3..3);
+        assert_eq!(show.list_end(empty), 3);
+        assert_eq!(show.list_ids(), [0, other, empty]);
+        assert_eq!(show.list_name(empty), "Empty");
+        show.main_list_name = Some("House".into());
+        assert_eq!(show.list_name(0), "House");
+    }
+
+    #[test]
+    fn walking_the_list_stops_at_its_end_and_moves_stay_inside_it() {
+        let (mut show, other) = three_cues_in_two_lists();
+        // 1, 3 (main) then 2 (the other list).
+        assert_eq!(show.next_top(0), Some(1));
+        assert_eq!(show.next_top(1), None, "the end of the main list");
+        assert_eq!(show.armed_top_from(1), Some(1));
+        assert_eq!(show.move_cue(1, 1), None, "can't step into the other list");
+        assert_eq!(show.move_cue(2, -1), None, "nor back out of it");
+        assert_eq!(show.move_cue(1, -1), Some(0));
+        assert_eq!(show.step_visible(1, 1), None);
+        // A new cue goes in the list asked for, at its end or after the selection.
+        let sel = show.cues[0].id;
+        assert_eq!(show.insert_slot(None, false, 0).at, 2);
+        assert_eq!(show.insert_slot(None, false, other).at, 3);
+        let slot = show.insert_slot(Some(sel), false, 0);
+        assert_eq!((slot.at, slot.list), (1, 0));
+        // A selection in another list is not where it goes.
+        let slot = show.insert_slot(Some(sel), false, other);
+        assert_eq!((slot.at, slot.list), (3, other));
+        let mut c = show.make_cue(CueType::Wait, None, slot.at);
+        c.number = "9".into();
+        show.insert_cue(slot, c);
+        assert_eq!(show.cues[3].list, other);
+    }
+
+    #[test]
+    fn cues_move_between_lists_and_lists_are_removed_with_their_cues() {
+        let (mut show, other) = three_cues_in_two_lists();
+        let g = show.make_cue(CueType::Group, None, 0);
+        let gid = g.id;
+        show.insert_cue(
+            Slot {
+                at: 0,
+                parent: None,
+                list: 0,
+            },
+            g,
+        );
+        let mut kid = show.make_cue(CueType::Wait, None, 1);
+        kid.number = "k".into();
+        show.insert_cue(
+            Slot {
+                at: 1,
+                parent: Some(gid),
+                list: 0,
+            },
+            kid,
+        );
+        // The group goes with its child, to the end of the other list.
+        let at = show.move_to_list(0, other).unwrap();
+        assert_eq!(show.cues[at].id, gid);
+        assert!(show.cues[at..].iter().all(|c| c.list == other));
+        assert_eq!(show.cues[at + 1].parent, Some(gid));
+        assert_eq!(show.move_to_list(at, other), None, "already there");
+        assert_eq!(show.move_to_list(0, 99), None, "no such list");
+        // Removing the list takes its cues; the main list can't go.
+        let gone = show.remove_list(other);
+        assert_eq!(gone.len(), 3);
+        assert!(show.cues.iter().all(|c| c.list == 0));
+        assert!(show.remove_list(0).is_empty());
+        assert_eq!(show.list_ids(), [0]);
+    }
+
+    #[test]
+    fn a_hand_edited_show_with_scrambled_lists_is_put_right_on_load() {
+        let (mut show, other) = three_cues_in_two_lists();
+        // Out of order, a cue in a list that doesn't exist, a child in the wrong list.
+        let g = show.make_cue(CueType::Group, None, 0);
+        let gid = g.id;
+        show.cues.insert(0, g);
+        show.cues[0].list = other;
+        let mut kid = show.make_cue(CueType::Wait, None, 1);
+        kid.parent = Some(gid);
+        kid.list = 0;
+        show.cues.insert(1, kid);
+        show.cues[3].list = 77;
+        show.normalize_lists();
+        let lists: Vec<u32> = show.cues.iter().map(|c| c.list).collect();
+        assert!(lists.windows(2).all(|w| w[0] <= w[1]), "{lists:?}");
+        let g = show.cues.iter().find(|c| c.id == gid).unwrap();
+        let kid = show.cues.iter().find(|c| c.parent == Some(gid)).unwrap();
+        assert_eq!(g.list, kid.list, "a child is in its group's list");
+        assert!(show.cues.iter().all(|c| show.has_list(c.list)));
+        let at = show.cue_index(gid).unwrap();
+        assert_eq!(show.cues[at + 1].parent, Some(gid), "and still follows it");
+    }
+
+    #[test]
+    fn each_list_is_numbered_from_one() {
+        let (mut show, _) = three_cues_in_two_lists();
+        show.renumber();
+        let numbers: Vec<&str> = show.cues.iter().map(|c| c.number.as_str()).collect();
+        assert_eq!(numbers, ["1", "2", "1"]);
     }
 
     #[test]

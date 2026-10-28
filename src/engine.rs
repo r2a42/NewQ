@@ -437,7 +437,12 @@ pub struct Engine {
     pub audio: AudioOut,
     pub active: Vec<ActiveCue>,
     pub pending: Vec<PendingCue>,
+    /// The playhead of the cue list being worked (`active_list`).
     pub playhead: Option<CueId>,
+    /// The cue list GO, the playhead and the transport are for.
+    pub active_list: u32,
+    /// The playheads the other cue lists have been left at.
+    list_playheads: HashMap<u32, Option<CueId>>,
     pub paused: bool,
     pub messages: VecDeque<(Instant, String)>,
     /// Current size of each open output window, used to pick decode resolution.
@@ -492,6 +497,8 @@ impl Engine {
             active: Vec::new(),
             pending: Vec::new(),
             playhead: None,
+            active_list: 0,
+            list_playheads: HashMap::new(),
             paused: false,
             messages: VecDeque::new(),
             output_sizes: HashMap::new(),
@@ -525,6 +532,8 @@ impl Engine {
             active: Vec::new(),
             pending: Vec::new(),
             playhead: None,
+            active_list: 0,
+            list_playheads: HashMap::new(),
             paused: false,
             messages: VecDeque::new(),
             output_sizes: HashMap::new(),
@@ -711,6 +720,59 @@ impl Engine {
         self.fire(show, show.cues[idx].id);
     }
 
+    /// Work another cue list: the playhead of the one being left is kept
+    /// where it is, and the other's is taken up again (the first cue that
+    /// will run, if it hasn't been used).
+    pub fn switch_list(&mut self, show: &Show, list: u32) {
+        let list = if show.has_list(list) { list } else { 0 };
+        if list == self.active_list {
+            return;
+        }
+        self.list_playheads.insert(self.active_list, self.playhead);
+        self.active_list = list;
+        self.playhead = match self.list_playheads.remove(&list) {
+            Some(p) => p.filter(|id| show.cue(*id).is_some_and(|c| c.list == list)),
+            None => Self::first_in_list(show, list),
+        };
+    }
+
+    fn first_in_list(show: &Show, list: u32) -> Option<CueId> {
+        let r = show.list_range(list);
+        (!r.is_empty())
+            .then(|| show.armed_top_from(r.start))
+            .flatten()
+            .map(|i| show.cues[i].id)
+    }
+
+    /// Put the playheads right after the show has changed under them: a list
+    /// that is gone is left, and a playhead on a cue that is gone is dropped.
+    pub fn sync_lists(&mut self, show: &Show) {
+        self.list_playheads
+            .retain(|l, _| show.has_list(*l) && *l != self.active_list);
+        if !show.has_list(self.active_list) {
+            self.active_list = 0;
+            self.playhead = Self::first_in_list(show, 0);
+        }
+    }
+
+    /// Forget where the playheads were (another show was opened).
+    pub fn forget_lists(&mut self) {
+        self.active_list = 0;
+        self.list_playheads.clear();
+    }
+
+    /// GO on a cue list that is not the one being worked, leaving that one as
+    /// it is. Does nothing if there is no such list.
+    pub fn go_list(&mut self, show: &Show, list: u32) {
+        if !show.has_list(list) {
+            return;
+        }
+        let was = self.active_list;
+        self.switch_list(show, list);
+        self.go(show);
+        self.switch_list(show, was);
+    }
+
     /// Fire a cue (honouring its pre-wait) without touching the playhead.
     /// Cues it leads to (continues, a group's children) are fired after it,
     /// in order, before this returns.
@@ -831,7 +893,15 @@ impl Engine {
     pub fn reset_all(&mut self, show: &Show) {
         self.stop_all(0.0);
         self.loads.clear();
-        self.playhead = show.armed_top_from(0).map(|i| show.cues[i].id);
+        self.list_playheads.clear();
+        for l in show.list_ids() {
+            let first = Self::first_in_list(show, l);
+            if l == self.active_list {
+                self.playhead = first;
+            } else {
+                self.list_playheads.insert(l, first);
+            }
+        }
     }
 
     /// Do what a control cue says.
@@ -884,7 +954,15 @@ impl Engine {
                     self.stop_cue(id, 0.0);
                 }
             }
-            ControlAction::GoTo => self.playhead = Some(show.top_id(target)),
+            ControlAction::GoTo => {
+                let top = show.top_id(target);
+                let list = show.cue(top).map_or(0, |c| c.list);
+                if list == self.active_list {
+                    self.playhead = Some(top);
+                } else {
+                    self.list_playheads.insert(list, Some(top));
+                }
+            }
             ControlAction::Arm => self.edits.push(ShowEdit::Arm(target, true)),
             ControlAction::Disarm => self.edits.push(ShowEdit::Arm(target, false)),
             ControlAction::Devamp => {
@@ -2477,6 +2555,87 @@ mod tests {
         let id = c.id;
         show.cues.push(c);
         id
+    }
+
+    /// Cues 1 and 2 in the main list, 3 and 4 in a second list.
+    fn two_lists() -> (Show, u32, [CueId; 4]) {
+        let mut show = Show::default();
+        let other = show.add_list("Second");
+        let mut ids = [CueId(0); 4];
+        for (n, list) in [0, 0, other, other].into_iter().enumerate() {
+            let id = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+            let i = show.cue_index(id).unwrap();
+            show.cues[i].list = list;
+            ids[n] = id;
+        }
+        show.normalize_lists();
+        (show, other, ids)
+    }
+
+    #[test]
+    fn each_cue_list_has_a_playhead_of_its_own() {
+        let (show, other, ids) = two_lists();
+        let mut e = Engine::for_tests();
+        e.playhead = Some(ids[0]);
+        e.go(&show);
+        assert_eq!(e.playhead, Some(ids[1]));
+        e.go(&show);
+        assert_eq!(
+            e.playhead, None,
+            "the end of the main list: GO doesn't run into the next"
+        );
+        assert!(matches!(e.status(ids[2]), CueStatus::Idle));
+        // Another list starts at its first cue and keeps its place when left.
+        e.switch_list(&show, other);
+        assert_eq!((e.active_list, e.playhead), (other, Some(ids[2])));
+        e.go(&show);
+        assert_eq!(e.playhead, Some(ids[3]));
+        e.switch_list(&show, 0);
+        assert_eq!(e.playhead, None, "the main list is where it was left");
+        e.switch_list(&show, other);
+        assert_eq!(e.playhead, Some(ids[3]));
+        // A list that isn't there is the main list.
+        e.switch_list(&show, 42);
+        assert_eq!(e.active_list, 0);
+    }
+
+    #[test]
+    fn go_on_another_list_leaves_the_one_being_worked_alone() {
+        let (show, other, ids) = two_lists();
+        let mut e = Engine::for_tests();
+        e.playhead = Some(ids[0]);
+        e.go_list(&show, other);
+        assert!(matches!(e.status(ids[2]), CueStatus::Playing { .. }));
+        assert!(matches!(e.status(ids[0]), CueStatus::Idle));
+        assert_eq!((e.active_list, e.playhead), (0, Some(ids[0])));
+        // And its playhead has moved on for next time.
+        e.switch_list(&show, other);
+        assert_eq!(e.playhead, Some(ids[3]));
+    }
+
+    #[test]
+    fn reset_and_go_to_know_about_every_list() {
+        let (show, other, ids) = two_lists();
+        let mut e = Engine::for_tests();
+        e.playhead = Some(ids[1]);
+        e.switch_list(&show, other);
+        e.go(&show);
+        e.reset_all(&show);
+        assert_eq!(e.playhead, Some(ids[2]));
+        e.switch_list(&show, 0);
+        assert_eq!(
+            e.playhead,
+            Some(ids[0]),
+            "every list was put back to its top"
+        );
+        // Go to a cue in the other list sets that list's playhead, not this one's.
+        e.control_target(&show, ControlAction::GoTo, ids[3], "test");
+        assert_eq!(e.playhead, Some(ids[0]));
+        e.switch_list(&show, other);
+        assert_eq!(e.playhead, Some(ids[3]));
+        // Opening another show forgets all of it.
+        e.forget_lists();
+        assert_eq!(e.active_list, 0);
     }
 
     #[test]
@@ -4279,7 +4438,7 @@ mod tests {
         };
         let mut show = Show::default();
         let out = show.outputs[0].id;
-        let slot = show.insert_slot(None, true);
+        let slot = show.insert_slot(None, true, 0);
         let mut g = show.make_cue(CueType::Group, None, slot.at);
         if let CueKind::Group(gc) = &mut g.kind {
             gc.slides = Some(SlideShow {

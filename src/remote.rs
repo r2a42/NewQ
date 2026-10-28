@@ -51,6 +51,9 @@ pub enum Command {
     Devamp(String),
     /// Stop everything and put the playhead back at the top of the list.
     Reset,
+    /// GO on, or work, the cue list at this place in the tabs (from 1).
+    GoList(u32),
+    SelectList(u32),
     /// MIDI Time Code reached this position (every two frames while it runs).
     Timecode(Timecode, Rate),
     /// The timecode source located here (a full frame message).
@@ -153,6 +156,8 @@ pub fn osc_command(address: &str, arg: Option<f64>) -> Option<Command> {
         ["pause"] => Some(Command::Pause),
         ["resume"] => Some(Command::Resume),
         ["reset"] => Some(Command::Reset),
+        ["cuelist", n, "go"] => n.parse().ok().map(Command::GoList),
+        ["cuelist", n, "select"] => n.parse().ok().map(Command::SelectList),
         ["playhead" | "select", "next"] => Some(Command::PlayheadNext),
         ["playhead" | "select", "previous"] => Some(Command::PlayheadPrevious),
         // Cue numbers are matched as written, not lower-cased.
@@ -630,6 +635,8 @@ mod tests {
             ("/cue/3/resume", Command::ResumeCue("3".into())),
             ("/cue/3/reset", Command::ResetCue("3".into())),
             ("/cue/3/devamp", Command::Devamp("3".into())),
+            ("/cuelist/2/go", Command::GoList(2)),
+            ("/workspace/X/cuelist/3/select", Command::SelectList(3)),
             ("/cue/3/load", Command::LoadCue("3".into())),
             ("/cue_id/12345/start", Command::Fire("#12345".into())),
         ];
