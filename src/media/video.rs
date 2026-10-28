@@ -10,6 +10,20 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Whether files are decoded by the graphics hardware where it can (a
+/// setting of this computer, see `prefs`).
+static HW_DECODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_hw_decode(on: bool) {
+    HW_DECODE.store(on, Ordering::Relaxed);
+}
+
+/// FFmpeg's input options for hardware decoding, if it is on. It falls back to
+/// the processor for a file the hardware can't do.
+fn hw_input_args(on: bool) -> &'static [&'static str] {
+    if on { &["-hwaccel", "auto"] } else { &[] }
+}
+
 pub struct VideoFrame {
     /// Presentation time in seconds, relative to the cue's in point.
     pub pts: f64,
@@ -124,6 +138,7 @@ impl VideoPlayer {
                 } else {
                     playback.input_args(start)
                 });
+                cmd.args(hw_input_args(HW_DECODE.load(Ordering::Relaxed)));
                 cmd.arg("-i").arg(&path);
                 cmd.args(if first {
                     playback.first_limit_args_at(rate)
@@ -601,6 +616,40 @@ mod tests {
         let (_, plain) = crate::media::test_media("testsrc_10s.mp4").unwrap();
         assert!(!ff.probe(&plain).unwrap().video.unwrap().has_alpha);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hardware_decoding_asks_ffmpeg_and_still_decodes_what_it_cannot() {
+        assert_eq!(hw_input_args(true), ["-hwaccel", "auto"]);
+        assert!(hw_input_args(false).is_empty());
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        // Where there is no hardware (as here) FFmpeg decodes in software.
+        set_hw_decode(true);
+        let p = VideoPlayer::spawn(
+            &ff,
+            &clip,
+            vi,
+            0.0,
+            Playback::Once { duration: None },
+            (320, 180),
+        );
+        let mut p = p.expect("spawn");
+        let t0 = std::time::Instant::now();
+        let ok = loop {
+            if p.ready() {
+                break true;
+            }
+            if t0.elapsed().as_secs() > 10 {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        set_hw_decode(false);
+        assert!(ok, "no frame with hardware decoding asked for");
     }
 
     #[test]

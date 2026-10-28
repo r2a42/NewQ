@@ -229,6 +229,8 @@ pub struct UiState {
     /// The search box has the keyboard (so Esc clears it, not panics).
     finding: bool,
     pub layout_dir: Option<PathBuf>,
+    /// Settings of this computer (see `prefs`).
+    pub prefs: crate::prefs::Prefs,
     /// Whether the media window is open, and what it last did.
     pub show_media: bool,
     /// Which page the settings pane shows (whether it is open is the layout's).

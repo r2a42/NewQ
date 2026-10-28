@@ -279,6 +279,8 @@ impl App {
         let mut ui = UiState::default();
         let layout_dir = crate::crash::log_dir();
         ui.layout = crate::dock::Layout::load(&layout_dir);
+        ui.prefs = crate::prefs::Prefs::load(&layout_dir);
+        crate::media::video::set_hw_decode(ui.prefs.hw_decode);
         ui.layout_dir = Some(layout_dir);
         let show = match initial_show {
             Some(path) => match Show::load(&path) {
