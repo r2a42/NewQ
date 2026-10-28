@@ -4,6 +4,7 @@
 use crate::color;
 use crate::fx::VideoFx;
 use crate::media::ffmpeg::ColorMatrix;
+use crate::media::hap::HapFormat;
 use crate::mesh::{self, Mesh};
 use crate::show::{ColorAdjust, EdgeBlend, Fit, LayerTransform};
 use anyhow::{Result, anyhow};
@@ -80,10 +81,18 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("newq"),
+                // Hap's textures are block compressed, which most cards (and
+                // Metal on a Mac) can read; the rest decode Hap as other video.
+                required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
                 required_limits:
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 ..Default::default()
             }))?;
+        crate::media::video::set_bc_supported(
+            device
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+        );
         let lost = DeviceLost::watch(&device);
         let compositor = Arc::new(Compositor::new(&device));
         Ok((
@@ -97,6 +106,47 @@ impl Gpu {
             },
             surface,
         ))
+    }
+
+    /// A GPU with no window (for the benchmark and the tests), if this machine has
+    /// one, or a software one. Not tied to a surface.
+    pub fn headless() -> Option<Gpu> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let adapter =
+            pollster::block_on(
+                instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::from_env()
+                        .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    apply_limit_buckets: false,
+                }),
+            )
+            .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("headless"),
+            required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        }))
+        .ok()?;
+        let compositor = Arc::new(Compositor::new(&device));
+        Some(Gpu {
+            lost: DeviceLost::watch(&device),
+            instance,
+            adapter,
+            device,
+            queue,
+            compositor,
+        })
+    }
+
+    /// Whether the device reads block-compressed textures (Hap).
+    pub fn reads_bc(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
     }
 
     /// A surface configuration in a non-sRGB format, so that blending (fades and
@@ -383,6 +433,16 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
 fn layer_at(uv: vec2<f32>) -> vec4<f32> {
     if (p.mode == 0u) {
         return textureSampleLevel(t0, s, uv, 0.0);
+    }
+    if (p.mode == 2u) {
+        // Hap Q: scaled YCoCg in a BC3 texture (Co red, Cg green, the scale in
+        // blue, Y in alpha).
+        let q = textureSampleLevel(t0, s, uv, 0.0);
+        let k = 1.0 / (q.b * (255.0 / 8.0) + 1.0);
+        let co = (q.r - 128.0 / 255.0) * k;
+        let cg = (q.g - 128.0 / 255.0) * k;
+        return vec4<f32>(clamp(vec3<f32>(q.a + co - cg, q.a + cg, q.a - co - cg),
+                               vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
     let yuv = vec4<f32>(
         textureSampleLevel(t0, s, uv, 0.0).r,
@@ -865,6 +925,8 @@ impl BlendPass {
 enum Planes {
     Yuv([wgpu::Texture; 3]),
     Rgba(wgpu::Texture),
+    /// A block-compressed texture, as a Hap frame holds one.
+    Bc(wgpu::Texture, HapFormat),
 }
 
 /// Who is drawing a layer. An output window and its previews in the main
@@ -984,6 +1046,67 @@ impl LayerTexture {
         )
     }
 
+    /// A texture for Hap frames of `format`, `w` by `h` (both a multiple of 4).
+    /// Needs a device that reads block-compressed textures (see `Gpu::new`).
+    pub fn new_bc(gpu: &Gpu, w: u32, h: u32, format: HapFormat) -> LayerTexture {
+        let bc = match format {
+            HapFormat::Dxt1 => wgpu::TextureFormat::Bc1RgbaUnorm,
+            HapFormat::Dxt5 | HapFormat::Dxt5YCoCg => wgpu::TextureFormat::Bc3RgbaUnorm,
+        };
+        let tex = plane(&gpu.device, w, h, bc);
+        let view = tex.create_view(&Default::default());
+        let dummy = &gpu.compositor.dummy;
+        Self::finish(
+            gpu,
+            Planes::Bc(tex, format),
+            [&view, dummy, dummy],
+            w,
+            h,
+            ColorMatrix::Bt709,
+        )
+    }
+
+    /// Whether this is a texture for Hap frames of `format`.
+    pub fn is_bc(&self, format: HapFormat) -> bool {
+        matches!(&self.planes, Planes::Bc(_, f) if *f == format)
+    }
+
+    /// Whether this is a texture for Hap frames of any format.
+    pub fn is_bc_any(&self) -> bool {
+        matches!(self.planes, Planes::Bc(..))
+    }
+
+    /// Whether this holds a plain RGBA picture.
+    pub fn is_rgba(&self) -> bool {
+        matches!(self.planes, Planes::Rgba(_))
+    }
+
+    /// Upload a Hap frame's texture data (its blocks, row by row).
+    pub fn upload_bc(&self, queue: &wgpu::Queue, data: &[u8]) {
+        let Planes::Bc(t, format) = &self.planes else {
+            return;
+        };
+        let (bw, bh) = (self.width / 4, self.height / 4);
+        if data.len() < format.texture_len(self.width, self.height) {
+            return;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: t,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bw * format.block_bytes() as u32),
+                rows_per_image: Some(bh),
+            },
+            t.size(),
+        );
+    }
+
     fn finish(
         gpu: &Gpu,
         planes: Planes,
@@ -1038,10 +1161,6 @@ impl LayerTexture {
         }
     }
 
-    pub fn is_yuv(&self) -> bool {
-        matches!(self.planes, Planes::Yuv(_))
-    }
-
     /// Upload a yuv420p frame (Y plane followed by U and V).
     pub fn upload_yuv(&self, queue: &wgpu::Queue, data: &[u8]) {
         let Planes::Yuv(p) = &self.planes else { return };
@@ -1086,7 +1205,11 @@ impl LayerTexture {
         let u = LayerUniform {
             rect: place.rect,
             opacity,
-            mode: u32::from(self.is_yuv()),
+            mode: match &self.planes {
+                Planes::Yuv(_) => 1,
+                Planes::Bc(_, HapFormat::Dxt5YCoCg) => 2,
+                _ => 0,
+            },
             key_on: u32::from(color.key.is_some()),
             _pad: 0,
             r: rows[0],
@@ -1464,6 +1587,7 @@ mod tests {
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("test"),
+                    required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
                     required_limits:
                         wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                     ..Default::default()
@@ -1486,6 +1610,65 @@ mod tests {
         gpu
     }
 
+    /// A 4x4 BC1 block of one colour (565), the picture a Hap frame is.
+    fn bc1_solid(rgb565: u16) -> [u8; 8] {
+        let c = rgb565.to_le_bytes();
+        [c[0], c[1], c[0], c[1], 0, 0, 0, 0]
+    }
+
+    #[test]
+    fn hap_textures_are_drawn_as_the_colours_they_hold() {
+        let Some(gpu) = test_gpu() else { return };
+        if !gpu
+            .device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+        {
+            // No block-compressed textures here: Hap plays as other video does.
+            return;
+        }
+        let plain = ColorAdjust::default();
+        // BC1: pure red, and a blue.
+        let tex = LayerTexture::new_bc(&gpu, 4, 4, HapFormat::Dxt1);
+        assert!(tex.is_bc(HapFormat::Dxt1) && tex.is_bc_any() && !tex.is_rgba());
+        tex.upload_bc(&gpu.queue, &bc1_solid(0xF800));
+        let px = render_tex(&gpu, &tex, (4, 4), 1.0, &plain);
+        assert!(
+            px[0] >= 250 && px[1] <= 4 && px[2] <= 4 && px[3] == 255,
+            "{px:?}"
+        );
+        tex.upload_bc(&gpu.queue, &bc1_solid(0x001F));
+        let px = render_tex(&gpu, &tex, (4, 4), 1.0, &plain);
+        assert!(px[2] >= 250 && px[0] <= 4, "{px:?}");
+        // BC3 with alpha: half transparent green over black comes out half as bright.
+        let tex = LayerTexture::new_bc(&gpu, 4, 4, HapFormat::Dxt5);
+        let mut block = [0u8; 16];
+        block[0] = 128; // alpha 128 for every pixel (both endpoints the same)
+        block[1] = 128;
+        block[8..10].copy_from_slice(&0x07E0u16.to_le_bytes());
+        block[10..12].copy_from_slice(&0x07E0u16.to_le_bytes());
+        tex.upload_bc(&gpu.queue, &block);
+        let px = render_tex(&gpu, &tex, (4, 4), 1.0, &plain);
+        assert!((i32::from(px[1]) - 128).abs() <= 3 && px[0] <= 3, "{px:?}");
+        // Hap Q: YCoCg. Y = 0.5 in alpha, Co = Cg = 0 (128/255 stored), scale 0:
+        // a grey of one half.
+        let tex = LayerTexture::new_bc(&gpu, 4, 4, HapFormat::Dxt5YCoCg);
+        let mut block = [0u8; 16];
+        block[0] = 128;
+        block[1] = 128;
+        // Colour endpoints: red 128/255 and green 128/255 (565: 16/31, 32/63), blue 0.
+        let c = (16u16 << 11) | (32 << 5);
+        block[8..10].copy_from_slice(&c.to_le_bytes());
+        block[10..12].copy_from_slice(&c.to_le_bytes());
+        tex.upload_bc(&gpu.queue, &block);
+        let px = render_tex(&gpu, &tex, (4, 4), 1.0, &plain);
+        for v in &px[..3] {
+            assert!((i32::from(*v) - 128).abs() <= 6, "{px:?}");
+        }
+        // A texture kind is not another's.
+        assert!(!tex.is_bc(HapFormat::Dxt1));
+    }
+
     #[test]
     fn a_destroyed_device_is_noticed() {
         let Some(gpu) = test_gpu() else { return };
@@ -1502,14 +1685,26 @@ mod tests {
     /// Draw a 2×2 layer of one colour over black through the real compositor
     /// and read back a pixel.
     fn render_solid(gpu: &Gpu, px: [u8; 4], opacity: f32, color: &ColorAdjust) -> [u8; 4] {
-        let format = wgpu::TextureFormat::Rgba8Unorm;
         let tex = LayerTexture::new_rgba(gpu, 2, 2);
         tex.upload_rgba(&gpu.queue, &px.repeat(4));
+        render_tex(gpu, &tex, (2, 2), opacity, color)
+    }
+
+    /// Draw `tex` (a picture of `size`, stretched over a target of that size) and
+    /// read back its first pixel.
+    fn render_tex(
+        gpu: &Gpu,
+        tex: &LayerTexture,
+        size: (u32, u32),
+        opacity: f32,
+        color: &ColorAdjust,
+    ) -> [u8; 4] {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
         let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {
-                width: 2,
-                height: 2,
+                width: size.0,
+                height: size.1,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1524,7 +1719,7 @@ mod tests {
         let pin = corner_pin(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         let groups = [DrawGroup {
             layers: vec![DrawLayer {
-                texture: &tex,
+                texture: tex,
                 opacity,
                 fit: Fit::Stretch,
                 transform: LayerTransform::default(),
@@ -1532,7 +1727,7 @@ mod tests {
                 fx: VideoFx::default(),
             }],
             geometry: Geometry {
-                canvas: (2, 2),
+                canvas: size,
                 warp: pin,
                 pin,
                 mesh: None,
@@ -1542,7 +1737,7 @@ mod tests {
         let draw = gpu.composite(&pipeline, Slot::Window(0), &view, &groups, None);
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: 256 * 2,
+            size: 256 * u64::from(size.1),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1556,12 +1751,12 @@ mod tests {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(256),
-                    rows_per_image: Some(2),
+                    rows_per_image: Some(size.1),
                 },
             },
             wgpu::Extent3d {
-                width: 2,
-                height: 2,
+                width: size.0,
+                height: size.1,
                 depth_or_array_layers: 1,
             },
         );

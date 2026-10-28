@@ -36,6 +36,13 @@ The README describes the features; this file is about working on the code.
   The structures follow NDI's SDK 6 headers (not vendored: their licence);
   tests build a fake runtime in C with `cc` (skipped without one) and the pure
   converters are tested, but no real NDI has been tried.
+- `src/media/hap.rs`: Hap frames (section header, Snappy, chunked); FFmpeg only
+  demuxes (`-c copy`, `video.rs::spawn_hap`) and the texture data goes to
+  `LayerTexture::new_bc/upload_bc` (BC1/BC3, Hap Q's YCoCg is shader mode 2). Needs
+  `TEXTURE_COMPRESSION_BC` (`video::plays_as_hap`; `Gpu::new` sets the flag); a
+  speed is in the frames' times. `media/convert.rs` makes Hap copies; `bench.rs` is
+  `newq --bench-video` (headless; `Gpu::headless`). Tests compare our decode to
+  FFmpeg's own for every format.
 - `src/speed.rs`: keyframed playback speed. `SpeedMap` integrates a cue's speed
   (`MediaCue::rate`, an `Animated`) into file time and back; `Stretcher` is a
   WSOLA time stretcher the audio reader runs along a `SpeedPlan`; the video

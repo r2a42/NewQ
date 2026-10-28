@@ -106,6 +106,23 @@ includes FFmpeg, so there's nothing else to install.
   (many Spout and Syphon tools have an NDI bridge), and NewQ takes NDI sources
   directly. On Linux this needs an X11 session (not Wayland), and NewQ's own
   outputs must not be on the screen it is capturing.
+- **Hap video, the fast way to play many big pictures.** A Hap file (QuickTime
+  `.mov`, made by FFmpeg, Resolume, TouchDesigner and the like) holds frames the
+  graphics card reads as they are, so playing one costs a decompress and an upload
+  with no decoding or colour conversion. On a card that reads block-compressed
+  textures (nearly all of them, and Metal on a Mac) NewQ plays Hap that way,
+  with Hap, Hap Alpha and Hap Q, at any speed, in loops and with keyframed speed;
+  anything else (or a card that can't) plays it like other video. Hap files are
+  large (about 10 to 60 times an H.264 file's size), so use a fast disk. An
+  ordinary video cue's file row has **Convert to Hap**, which makes a copy beside
+  the original (`name_hap.mov`, sizes made a whole number of blocks) in the
+  background and then plays that. Set `NEWQ_NO_HAP=1` to turn the fast path off.
+- **Benchmark.** `newq --bench-video clip.mp4 --layers 4 --seconds 10 [--gpu]
+  [--size 3840x2160] [--no-hap]` plays a file on several layers for a while and
+  reports frames per second, dropped 60 Hz ticks, processor used (NewQ and the
+  FFmpeg processes together), memory and, with `--gpu`, the time to upload and
+  draw every layer. Run it on the computer that will run the show, with the
+  files it will play, to see how many layers it can carry.
 - **Speed, steady or keyframed.** A video or audio cue has a **Speed** (× 0.25 to
   × 4); sound keeps its pitch. Press **Animate** to ramp or keyframe it over the cue's
   own time: click the lane to add a keyframe, drag one, and choose how it eases into
