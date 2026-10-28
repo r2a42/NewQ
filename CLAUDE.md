@@ -56,6 +56,8 @@ The README describes the features; this file is about working on the code.
   Fade cue `matrix` targets set `VoiceShared::xp_target/xp_rate` (up to
   `audio::MAX_FADEABLE` crosspoints, kept in `Matrix::keys` order); `mix_voice`
   moves the gains per buffer. Silent crosspoints are kept in the matrix for this.
+- `src/feedback.rs`: OSC feedback to the address in `RemoteSettings::osc_feedback`
+  (`snapshot`/`changes`/`repeat` are pure and tested; `Feedback` paces and sends).
 - `src/fx.rs`: cue effects. `show::Effect` (kind and up to four `Animated`
   numbers, each a value or keyframes) is on `MediaCue::effects`. `fx::VideoFx::at`
   turns the picture effects into the numbers in the compositor shader (blur,

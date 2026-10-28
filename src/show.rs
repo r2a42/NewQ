@@ -131,6 +131,8 @@ pub struct RemoteSettings {
     pub web_port: u16,
     /// Asked for by the web remote; empty = none. Kept in the show file.
     pub web_pin: String,
+    /// Send the show's state as OSC to this `host:port` (see `feedback.rs`); empty = off.
+    pub osc_feedback: String,
 }
 
 impl Default for RemoteSettings {
@@ -146,6 +148,7 @@ impl Default for RemoteSettings {
             web: false,
             web_port: 8080,
             web_pin: String::new(),
+            osc_feedback: String::new(),
         }
     }
 }
@@ -4757,6 +4760,21 @@ mod tests {
         assert!(json.contains("motion"));
         let back: Cue = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn osc_feedback_defaults_off_and_old_files_load() {
+        let show = Show::default();
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(!json.contains("osc_feedback"), "{json}");
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["remote"] = serde_json::json!({"osc": true});
+        let old: Show = serde_json::from_value(v).unwrap();
+        assert!(old.remote.osc && old.remote.osc_feedback.is_empty());
+        let mut on = Show::default();
+        on.remote.osc_feedback = "10.0.0.5:9000".into();
+        let back: Show = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert_eq!(back.remote.osc_feedback, "10.0.0.5:9000");
     }
 
     #[test]

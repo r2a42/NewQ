@@ -226,6 +226,13 @@ includes FFmpeg, so there's nothing else to install.
   whenever you fade the cue out by hand (the *Fade out* buttons in the inspector,
   the Active panel and the right-click menu). New Stop cues default to fading
   everything out with each cue's own fade-out.
+- **OSC feedback.** *Settings → OSC → Feedback*: give a `host:port` and NewQ sends
+  the show's state there as OSC: `/newq/playhead <number> <name>`, `/newq/paused`,
+  `/newq/running`, `/newq/cue/<number>/status` (idle, prewait, playing) and
+  `/newq/cue/<number>/progress` (0 to 1), at most ten times a second and only what
+  changed, with everything repeated every five seconds so a controller started late
+  catches up. For TouchOSC pages, tally lights and other desks. (Only tested here
+  against a loopback listener, not a real controller.)
 - **Fade cues** are still available for dimming or ramping another cue's
   opacity and volume mid-cue.
 - **Stop All / Panic** (Esc) fades everything out; press it again to stop instantly.

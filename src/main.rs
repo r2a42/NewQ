@@ -13,6 +13,7 @@ mod dock;
 mod edid;
 mod engine;
 mod export;
+mod feedback;
 mod fx;
 mod gpu;
 mod history;
