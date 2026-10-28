@@ -105,7 +105,7 @@ impl Ffmpeg {
             "error",
             "-show_entries",
             "format=duration,format_name:stream=index,codec_type,codec_name,width,height,\
-             avg_frame_rate,r_frame_rate,color_space,color_range,sample_aspect_ratio,duration:\
+             avg_frame_rate,r_frame_rate,color_space,color_range,sample_aspect_ratio,channels,duration:\
              stream_disposition=attached_pic:stream_side_data=rotation",
             "-of",
             "json",
@@ -155,6 +155,8 @@ pub struct MediaInfo {
     pub duration: Option<f64>,
     pub video: Option<VideoInfo>,
     pub has_audio: bool,
+    /// How many channels the first audio stream has (0 if none).
+    pub audio_channels: u16,
     /// A single still image (png, jpg, ...).
     pub is_still: bool,
 }
@@ -182,6 +184,7 @@ struct ProbeStream {
     color_space: Option<String>,
     sample_aspect_ratio: Option<String>,
     duration: Option<String>,
+    channels: Option<u16>,
     disposition: Option<Disposition>,
     #[serde(default)]
     side_data_list: Vec<SideData>,
@@ -220,9 +223,15 @@ fn parse_probe(json: &[u8]) -> Result<MediaInfo> {
         .and_then(|d| d.parse::<f64>().ok());
     let mut video = None;
     let mut has_audio = false;
+    let mut audio_channels = 0;
     for s in &p.streams {
         match s.codec_type.as_deref() {
-            Some("audio") => has_audio = true,
+            Some("audio") => {
+                if !has_audio {
+                    audio_channels = s.channels.unwrap_or(2);
+                }
+                has_audio = true;
+            }
             Some("video") if video.is_none() => {
                 if s.disposition.as_ref().is_some_and(|d| d.attached_pic != 0) {
                     continue;
@@ -284,6 +293,7 @@ fn parse_probe(json: &[u8]) -> Result<MediaInfo> {
         duration: if is_still { None } else { duration },
         video,
         has_audio,
+        audio_channels,
         is_still,
     })
 }

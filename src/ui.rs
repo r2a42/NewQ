@@ -3470,6 +3470,46 @@ fn monitor_label(st: &UiState, i: usize) -> String {
 }
 
 /// Where the show's sound goes: named outputs on audio devices.
+/// A thin bar for each channel of an output: its recent peak, red past 0 dB.
+fn meter_bars(ui: &mut Ui, peaks: &[f32]) {
+    if peaks.is_empty() {
+        return;
+    }
+    let shown = peaks.len().min(64);
+    let h = 10.0;
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width().min(shown as f32 * 14.0), h),
+        egui::Sense::hover(),
+    );
+    let w = rect.width() / shown as f32;
+    let painter = ui.painter_at(rect);
+    let mut moving = false;
+    for (i, p) in peaks.iter().take(shown).enumerate() {
+        let x = rect.left() + i as f32 * w;
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(x + 1.0, rect.top()),
+            egui::pos2(x + w - 1.0, rect.bottom()),
+        );
+        painter.rect_filled(cell, 1.0, ui.visuals().extreme_bg_color);
+        // A scale in dB so quiet sound still shows: -60 dB is empty, 0 is full.
+        let db = 20.0 * p.max(1e-6).log10();
+        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        moving |= *p > 0.001;
+        if level > 0.0 {
+            let colour = if *p >= 1.0 { STOP_RED } else { GO_GREEN };
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(cell.left(), cell.bottom() - cell.height() * level),
+                cell.right_bottom(),
+            );
+            painter.rect_filled(bar, 1.0, colour);
+        }
+    }
+    if moving {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+}
+
 fn audio_panel(
     ui: &mut Ui,
     show: &mut Show,
@@ -3485,6 +3525,7 @@ fn audio_panel(
         });
     });
     if show.audio_outputs.is_empty() {
+        meter_bars(ui, &engine.audio.meters(None));
         ui.label(
             RichText::new(
                 "All sound plays on the system's default device. Add an output to choose a \
@@ -3548,6 +3589,7 @@ fn audio_panel(
                     ui.label(RichText::new("Starting…").weak().small());
                 }
             }
+            meter_bars(ui, &engine.audio.meters(Some(o.id)));
         });
     }
     ui.label(
@@ -5443,6 +5485,25 @@ fn media_inspector(
                         None => RichText::new("").weak(),
                     };
                     ui.label(hint);
+                    let mut on = !m.matrix.is_empty();
+                    if ui
+                        .checkbox(&mut on, "Matrix")
+                        .on_hover_text("Send each channel of the file where you like, at its own level")
+                        .changed()
+                    {
+                        m.matrix = if on {
+                            let have = engine_channels(engine, &m.file).min(2);
+                            (0..have)
+                                .map(|i| crate::show::Crosspoint {
+                                    from: i as u8,
+                                    to: m.audio_channel + i as u16,
+                                    db: 0.0,
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                    }
                 });
                 ui.end_row();
             }
@@ -5541,6 +5602,12 @@ fn media_inspector(
                 ui.end_row();
             }
         });
+    if !m.matrix.is_empty() && !matches!(ty, CueType::Image | CueType::Text | CueType::Camera) {
+        let device = engine.audio.device_status(m.audio_output);
+        let rows = engine_channels(engine, &m.file).clamp(1, 8);
+        let cols = device.map_or(2, |d| usize::from(d.channels)).clamp(2, 64);
+        audio_matrix(ui, m, rows, cols);
+    }
     if visual {
         let title = if m.transform.is_identity() {
             "Geometry"
@@ -6575,6 +6642,79 @@ fn move_handle(
 
 /// The sound of a media cue, with the played part marked: drag the yellow
 /// ends to set the in and out points by eye (click moves the nearer one).
+/// How many channels the cue's file has (2 if not known yet).
+fn engine_channels(engine: &mut Engine, file: &Path) -> usize {
+    match engine.probe_state(file) {
+        ProbeState::Ready(i) if i.audio_channels > 0 => usize::from(i.audio_channels),
+        _ => 2,
+    }
+}
+
+/// The crosspoint grid: a row for each channel of the file, a column for each
+/// channel of the device. Click a dot to connect; drag the level; right-click
+/// a level to disconnect.
+fn audio_matrix(ui: &mut Ui, m: &mut MediaCue, rows: usize, cols: usize) {
+    use crate::show::Crosspoint;
+    ui.label(
+        RichText::new("Audio matrix (dB; right-click a level to remove it)")
+            .small()
+            .weak(),
+    );
+    egui::ScrollArea::horizontal()
+        .id_salt("matrix_scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("audio_matrix")
+                .spacing([4.0, 2.0])
+                .show(ui, |ui| {
+                    ui.label("");
+                    for c in 0..cols {
+                        ui.label(RichText::new(format!("{}", c + 1)).small().weak());
+                    }
+                    ui.end_row();
+                    for r in 0..rows {
+                        ui.label(RichText::new(format!("In {}", r + 1)).small());
+                        for c in 0..cols {
+                            let at = m
+                                .matrix
+                                .iter()
+                                .position(|p| usize::from(p.from) == r && usize::from(p.to) == c);
+                            match at {
+                                Some(i) => {
+                                    let resp = ui.add(
+                                        egui::DragValue::new(&mut m.matrix[i].db)
+                                            .range(-60.0..=12.0)
+                                            .speed(0.2)
+                                            .max_decimals(1),
+                                    );
+                                    if resp.secondary_clicked() {
+                                        m.matrix.remove(i);
+                                    }
+                                }
+                                None => {
+                                    if ui
+                                        .small_button("·")
+                                        .on_hover_text(format!(
+                                            "Send In {} to out {}",
+                                            r + 1,
+                                            c + 1
+                                        ))
+                                        .clicked()
+                                    {
+                                        m.matrix.push(Crosspoint {
+                                            from: r as u8,
+                                            to: c as u16,
+                                            db: 0.0,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 fn waveform_trim(ui: &mut Ui, m: &mut MediaCue, engine: &mut Engine) {
     if m.file.as_os_str().is_empty() {
         ui.label(RichText::new("Choose a file").weak());
