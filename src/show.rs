@@ -1168,6 +1168,121 @@ impl LayerTransform {
     }
 }
 
+/// Position, scale, rotation and opacity that change over a cue's time: each
+/// with keyframes takes the place of the steady value in `MediaCue::transform`
+/// (or `opacity`) while the cue plays.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Motion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<Animated>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<Animated>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_x: Option<Animated>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_y: Option<Animated>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<Animated>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<Animated>,
+}
+
+/// The tracks of a `Motion`, for editing and for walking over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionTrack {
+    X,
+    Y,
+    ScaleX,
+    ScaleY,
+    Rotation,
+    Opacity,
+}
+
+impl MotionTrack {
+    pub const ALL: [MotionTrack; 6] = [
+        MotionTrack::X,
+        MotionTrack::Y,
+        MotionTrack::ScaleX,
+        MotionTrack::ScaleY,
+        MotionTrack::Rotation,
+        MotionTrack::Opacity,
+    ];
+
+    pub fn spec(self) -> ParamSpec {
+        match self {
+            MotionTrack::X => spec("Across", -2.0, 2.0, 0.0, "", 3),
+            MotionTrack::Y => spec("Down", -2.0, 2.0, 0.0, "", 3),
+            MotionTrack::ScaleX => spec("Width scale", -5.0, 5.0, 1.0, "×", 2),
+            MotionTrack::ScaleY => spec("Height scale", -5.0, 5.0, 1.0, "×", 2),
+            MotionTrack::Rotation => spec("Rotation", -720.0, 720.0, 0.0, "°", 1),
+            MotionTrack::Opacity => spec("Opacity", 0.0, 1.0, 1.0, "", 3),
+        }
+    }
+}
+
+impl Motion {
+    pub fn is_empty(&self) -> bool {
+        MotionTrack::ALL.iter().all(|t| self.track(*t).is_none())
+    }
+
+    pub fn track(&self, t: MotionTrack) -> &Option<Animated> {
+        match t {
+            MotionTrack::X => &self.x,
+            MotionTrack::Y => &self.y,
+            MotionTrack::ScaleX => &self.scale_x,
+            MotionTrack::ScaleY => &self.scale_y,
+            MotionTrack::Rotation => &self.rotation,
+            MotionTrack::Opacity => &self.opacity,
+        }
+    }
+
+    pub fn track_mut(&mut self, t: MotionTrack) -> &mut Option<Animated> {
+        match t {
+            MotionTrack::X => &mut self.x,
+            MotionTrack::Y => &mut self.y,
+            MotionTrack::ScaleX => &mut self.scale_x,
+            MotionTrack::ScaleY => &mut self.scale_y,
+            MotionTrack::Rotation => &mut self.rotation,
+            MotionTrack::Opacity => &mut self.opacity,
+        }
+    }
+
+    /// Put a loaded `Motion` right: keyframes in order and finite, a track
+    /// with none dropped (it would only be the steady value).
+    pub fn sanitize(&mut self) {
+        for t in MotionTrack::ALL {
+            let default = t.spec().default;
+            let slot = self.track_mut(t);
+            if let Some(a) = slot {
+                a.sanitize(default);
+                if !a.is_animated() {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    /// `base` with the animated tracks' values `t` seconds into the cue.
+    pub fn transform_at(&self, base: &LayerTransform, t: f64) -> LayerTransform {
+        let mut out = *base;
+        let at = |a: &Option<Animated>, v: &mut f32| {
+            if let Some(a) = a {
+                *v = a.at(t);
+            }
+        };
+        at(&self.x, &mut out.x);
+        at(&self.y, &mut out.y);
+        at(&self.scale_x, &mut out.scale_x);
+        at(&self.scale_y, &mut out.scale_y);
+        at(&self.rotation, &mut out.rotation);
+        out
+    }
+
+    pub fn opacity_at(&self, base: f32, t: f64) -> f32 {
+        self.opacity.as_ref().map_or(base, |a| a.at(t))
+    }
+}
+
 /// A colour to make clear (a green or blue screen).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1577,6 +1692,9 @@ pub struct MediaCue {
     /// Position, scale, rotation and crop on the output (visual cues).
     #[serde(default, skip_serializing_if = "LayerTransform::is_identity")]
     pub transform: LayerTransform,
+    /// Parts of the position, scale, rotation and opacity that change over the cue.
+    #[serde(default, skip_serializing_if = "Motion::is_empty")]
+    pub motion: Motion,
     /// Colour correction and chroma key (visual cues).
     #[serde(default, skip_serializing_if = "ColorAdjust::is_default")]
     pub color: ColorAdjust,
@@ -1677,6 +1795,7 @@ impl MediaCue {
             audio_channel: 0,
             matrix: Vec::new(),
             play_on: false,
+            motion: Motion::default(),
             transform: LayerTransform::default(),
             color: ColorAdjust::default(),
             volume_db: 0.0,
@@ -1787,6 +1906,34 @@ pub struct FadeCue {
     pub volume_db: Option<f32>,
     /// Stop the target when the fade completes.
     pub stop_target: bool,
+    /// Where to move the target's picture (visual cues); what is not given is left.
+    #[serde(default, skip_serializing_if = "GeometryTarget::is_empty")]
+    pub geometry: GeometryTarget,
+    /// Levels (dB) to fade the target's matrix crosspoints to; each names a
+    /// crosspoint the target already has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matrix: Vec<Crosspoint>,
+}
+
+/// The position, scale and rotation a fade cue moves a picture to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GeometryTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_y: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
+}
+
+impl GeometryTarget {
+    pub fn is_empty(&self) -> bool {
+        *self == GeometryTarget::default()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -2830,6 +2977,8 @@ impl Show {
                     opacity: Some(0.0),
                     volume_db: Some(MIN_DB),
                     stop_target: true,
+                    geometry: GeometryTarget::default(),
+                    matrix: Vec::new(),
                 }),
             ),
             CueType::Stop => (
@@ -2951,6 +3100,7 @@ impl Show {
                     e.sanitize();
                 }
                 m.rate.sanitize(1.0);
+                m.motion.sanitize();
             }
         }
         show.normalize_groups();
@@ -4575,6 +4725,38 @@ mod tests {
         let t = serde_json::from_value::<Cue>(v).unwrap();
         let t = t.kind.media().unwrap().transform;
         assert_eq!((t.rotation, t.scale_x, t.scale_y), (15.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn motion_and_fade_targets_default_empty_stay_out_of_old_files_and_evaluate() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Video, Some("a.mp4".into()), 0);
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(!json.contains("motion"), "{json}");
+        let fade = show.make_cue(CueType::Fade, None, 0);
+        let json = serde_json::to_string(&fade).unwrap();
+        assert!(
+            !json.contains("geometry") && !json.contains("matrix"),
+            "{json}"
+        );
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+
+        let m = cue.kind.media_mut().unwrap();
+        m.transform.x = 0.25;
+        m.transform.scale_x = 1.5;
+        m.motion.rotation = Some(Animated::new(0.0));
+        m.motion.rotation.as_mut().unwrap().set_key(0.0, 0.0);
+        m.motion.rotation.as_mut().unwrap().set_key(2.0, 90.0);
+        let t = m.motion.transform_at(&m.transform, 1.0);
+        assert!((t.rotation - 45.0).abs() < 1.0, "{}", t.rotation);
+        assert_eq!((t.x, t.scale_x), (0.25, 1.5), "untracked values stay");
+        assert_eq!(m.motion.opacity_at(0.7, 1.0), 0.7);
+        // It round-trips.
+        let json = serde_json::to_string(&cue).unwrap();
+        assert!(json.contains("motion"));
+        let back: Cue = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
     #[test]
