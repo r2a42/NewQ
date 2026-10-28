@@ -35,7 +35,12 @@ fn clamp_rate(r: f32) -> f64 {
 
 impl SpeedMap {
     pub fn new(speed: &Animated) -> SpeedMap {
-        let end = speed.keys.last().map_or(0.0, |k| k.t.max(0.0));
+        let end = speed
+            .keys
+            .last()
+            .map_or(0.0, |k| k.t.max(0.0))
+            .min(36_000.0);
+        let end = if end.is_finite() { end } else { 0.0 };
         let step = STEP.max(end / MAX_ENTRIES as f64);
         let n = (end / step).ceil() as usize + 1;
         let rate_at = |t: f64| clamp_rate(speed.at(t));

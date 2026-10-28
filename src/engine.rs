@@ -338,6 +338,13 @@ impl ActiveCue {
         }
     }
     fn fade_out_and_stop(&mut self, fade: f64, curve: Curve) {
+        // A cue held by a control cue lets go to fade: its levels don't move while held.
+        if self.hold {
+            self.hold = false;
+            if let Some(v) = self.voice() {
+                v.set_paused(false);
+            }
+        }
         self.opacity.ramp_to(0.0, fade, curve);
         self.volume.ramp_to(MIN_DB, fade, curve);
         self.stopping = true;
@@ -439,6 +446,9 @@ pub struct Engine {
     pub pending: Vec<PendingCue>,
     /// The playhead of the cue list being worked (`active_list`).
     pub playhead: Option<CueId>,
+    /// Keyframed speeds' maps, kept while the keyframes are as they were (tabulating one
+    /// is work, and the cue list asks for every cue's length every frame).
+    speed_maps: HashMap<CueId, (Animated, std::sync::Arc<crate::speed::SpeedMap>)>,
     /// The cue list GO, the playhead and the transport are for.
     pub active_list: u32,
     /// The playheads the other cue lists have been left at.
@@ -497,6 +507,7 @@ impl Engine {
             active: Vec::new(),
             pending: Vec::new(),
             playhead: None,
+            speed_maps: HashMap::new(),
             active_list: 0,
             list_playheads: HashMap::new(),
             paused: false,
@@ -532,6 +543,7 @@ impl Engine {
             active: Vec::new(),
             pending: Vec::new(),
             playhead: None,
+            speed_maps: HashMap::new(),
             active_list: 0,
             list_playheads: HashMap::new(),
             paused: false,
@@ -627,6 +639,30 @@ impl Engine {
         self.probe.get(self.ff.as_ref(), path)
     }
 
+    /// `MediaCue::speed_map`, kept while the cue's keyframes don't change.
+    fn speed_map_cached(
+        &mut self,
+        id: CueId,
+        m: &MediaCue,
+    ) -> Option<std::sync::Arc<crate::speed::SpeedMap>> {
+        if !m.rate.is_animated() || m.loop_media {
+            self.speed_maps.remove(&id);
+            return None;
+        }
+        if let Some((keys, map)) = self.speed_maps.get(&id)
+            && *keys == m.rate
+        {
+            return Some(map.clone());
+        }
+        let map = m.speed_map()?;
+        // A few cues at a time have keyframed speeds; a show of thousands doesn't keep thousands.
+        if self.speed_maps.len() > 256 {
+            self.speed_maps.clear();
+        }
+        self.speed_maps.insert(id, (m.rate.clone(), map.clone()));
+        Some(map)
+    }
+
     /// Duration of a cue's action, if it can be known. `Some(None)` = infinite.
     pub fn cue_duration(&mut self, show: &Show, cue: &Cue) -> Option<Option<f64>> {
         match &cue.kind {
@@ -638,7 +674,7 @@ impl Engine {
                 let rate = m.speed();
                 // File seconds to the cue's own, at a steady speed or along
                 // the keyframes.
-                let map = m.speed_map();
+                let map = self.speed_map_cached(cue.id, m);
                 let cue_secs = |file: f64| match &map {
                     Some(map) => map.time_for(file),
                     None => file / rate,
@@ -2597,6 +2633,43 @@ mod tests {
         }
         show.normalize_lists();
         (show, other, ids)
+    }
+
+    #[test]
+    fn a_cue_held_by_a_control_cue_can_still_be_faded_out() {
+        let mut show = Show::default();
+        let id = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let mut e = Engine::for_tests();
+        e.fire(&show, id);
+        e.control_target(&show, ControlAction::Pause, id, "test");
+        assert!(e.active[0].hold);
+        e.stop_cue(id, 0.5);
+        assert!(!e.active[0].hold, "a fade lets it go");
+        let t0 = Instant::now();
+        // (A wait has no levels of its own; the stop is what is being checked.)
+        e.stop_instance(e.active[0].instance, 0.0);
+        assert!(t0.elapsed().as_secs() < 1 && e.active.is_empty());
+    }
+
+    #[test]
+    fn keyframed_speed_lengths_are_kept_and_follow_the_keyframes() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some("x.mp4".into()), 0);
+        c.kind.media_mut().unwrap().rate.set_key(0.0, 2.0);
+        let mut e = Engine::for_tests();
+        let m = c.kind.media().unwrap().clone();
+        let a = e.speed_map_cached(c.id, &m).unwrap();
+        let b = e.speed_map_cached(c.id, &m).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "the same table while the keys are"
+        );
+        let mut m2 = m.clone();
+        m2.rate.set_key(10.0, 3.0);
+        let c2 = e.speed_map_cached(c.id, &m2).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&a, &c2), "new keys, a new table");
+        m2.loop_media = true;
+        assert!(e.speed_map_cached(c.id, &m2).is_none() && e.speed_maps.is_empty());
     }
 
     #[test]
