@@ -1,6 +1,8 @@
 pub mod audio;
 pub mod camera;
+pub mod convert;
 pub mod ffmpeg;
+pub mod hap;
 pub mod playback;
 pub mod video;
 pub mod waveform;

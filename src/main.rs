@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bench;
 #[cfg(test)]
 mod blend;
 mod branding;
@@ -62,6 +63,10 @@ fn main() -> anyhow::Result<()> {
     // (see ndi.rs): it does that and nothing else.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = ndi::run_helper_if_asked(&args) {
+        std::process::exit(code);
+    }
+    // The video benchmark (see bench.rs) is a command line tool, not the app.
+    if let Some(code) = bench::run_if_asked(&args) {
         std::process::exit(code);
     }
     let mut logger = env_logger::Builder::from_env(

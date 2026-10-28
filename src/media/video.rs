@@ -1,6 +1,7 @@
 //! Video decoding via an ffmpeg subprocess that writes raw YUV 4:2:0 frames to a pipe.
 
 use super::ffmpeg::{ColorMatrix, Ffmpeg, VideoInfo};
+use super::hap::{self, HapFormat};
 use super::playback::{Children, PassFeed, Playback};
 use crate::speed::SpeedPlan;
 use anyhow::Result;
@@ -15,6 +16,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// setting of this computer, see `prefs`).
 static HW_DECODE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the graphics device reads block-compressed textures, which Hap
+/// needs (see `Gpu::new`); without, Hap is decoded to a picture like any other.
+static BC_SUPPORTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_bc_supported(on: bool) {
+    BC_SUPPORTED.store(on, Ordering::Relaxed);
+}
+
+/// Whether a file can be played as Hap frames sent to the card as they are:
+/// it is Hap, its picture is a whole number of blocks and has no rotation or
+/// odd pixel shape, and the card can read them.
+pub fn plays_as_hap(info: &VideoInfo) -> bool {
+    BC_SUPPORTED.load(Ordering::Relaxed)
+        && std::env::var_os("NEWQ_NO_HAP").is_none()
+        && info.codec == "hap"
+        && info.coded.0.is_multiple_of(4)
+        && info.coded.1.is_multiple_of(4)
+        && (info.width, info.height) == info.coded
+}
+
 pub fn set_hw_decode(on: bool) {
     HW_DECODE.store(on, Ordering::Relaxed);
 }
@@ -28,6 +49,8 @@ fn hw_input_args(on: bool) -> &'static [&'static str] {
 pub struct VideoFrame {
     /// Presentation time in seconds, relative to the cue's in point.
     pub pts: f64,
+    /// A Hap frame: `data` is its texture, of this format, not a picture in the usual sense.
+    pub hap: Option<HapFormat>,
     /// Planar Y, U, V (yuv420p), or for a picture with transparency RGBA.
     pub data: Vec<u8>,
 }
@@ -138,7 +161,14 @@ fn read_at_speed(
         let mut buf = recycle.try_recv().unwrap_or_else(|_| vec![0u8; frame_len]);
         buf.resize(frame_len, 0);
         buf.copy_from_slice(&current);
-        if tx.send(VideoFrame { pts: t, data: buf }).is_err() {
+        if tx
+            .send(VideoFrame {
+                pts: t,
+                hap: None,
+                data: buf,
+            })
+            .is_err()
+        {
             return; // player dropped
         }
         j += 1;
@@ -258,6 +288,141 @@ impl VideoPlayer {
             alpha,
             speed,
         )
+    }
+
+    /// Play a Hap file: FFmpeg only demuxes it and the frames, which are
+    /// textures, go to the graphics card as they are (see `hap`). Its speed is
+    /// in the times of the frames, so a `rate` or a keyframed `speed` costs
+    /// nothing here; the player shows whichever frame is due. Loops and the
+    /// in and out points are the same as for other video.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_hap(
+        ff: &Ffmpeg,
+        path: &Path,
+        info: &VideoInfo,
+        start: f64,
+        playback: Playback,
+        rate: f64,
+        speed: Option<SpeedPlan>,
+    ) -> Result<VideoPlayer> {
+        let (w, h) = info.coded;
+        let fps = info.fps;
+        let make = {
+            let (ff, path) = (ff.clone(), path.to_path_buf());
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            move || {
+                let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
+                let mut cmd = ff.command();
+                cmd.args(if first {
+                    playback.first_input_args(start)
+                } else {
+                    playback.input_args(start)
+                });
+                cmd.arg("-i").arg(&path);
+                // The frames' own times are what is counted, so the limit is in the file's.
+                cmd.args(if first {
+                    playback.first_limit_args_at(1.0)
+                } else {
+                    playback.limit_args_at(1.0)
+                });
+                cmd.args([
+                    "-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy", "-f", "rawvideo",
+                    "pipe:1",
+                ]);
+                cmd
+            }
+        };
+        let children = Children::new();
+        let error = Arc::new(Mutex::new(None));
+        let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
+        let frames = |l: f64| (l * fps).round().max(1.0) as u64;
+        let per_pass = playback.pass_len().map(frames);
+        let first_pass = playback.first_pass_len().map(frames);
+        let (tx, rx) = bounded::<VideoFrame>(QUEUE_FRAMES);
+        let (recycle, recycle_rx) = unbounded::<Vec<u8>>();
+        let eof = Arc::new(AtomicBool::new(false));
+        let eof2 = eof.clone();
+        let error2 = error.clone();
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let reader_done2 = reader_done.clone();
+        std::thread::Builder::new()
+            .name("hap-reader".into())
+            .spawn(move || {
+                let _done = ReaderDone(reader_done2);
+                let pts = |g: u64| match &speed {
+                    Some(p) => p.time_after(g as f64 / fps),
+                    None => g as f64 / (fps * rate),
+                };
+                let (mut packet, mut bad) = (Vec::new(), 0u32);
+                let (mut base, mut first) = (0u64, true);
+                'passes: loop {
+                    let mut n: u64 = 0;
+                    let limit = if first { first_pass } else { per_pass };
+                    first = false;
+                    while limit.is_none_or(|p| n < p) {
+                        if limit.is_some_and(|p| n * 2 >= p) {
+                            feed.prefetch();
+                        }
+                        match hap::read_frame(feed.stdout(), &mut packet) {
+                            Ok(Some(())) => {}
+                            Ok(None) => break,
+                            Err(e) => {
+                                *error2.lock() = Some(format!("{e:#}"));
+                                break;
+                            }
+                        }
+                        let mut data = recycle_rx.try_recv().unwrap_or_default();
+                        let format = match hap::decode_frame(
+                            &packet,
+                            hap::texture_len_of(&packet, w, h),
+                            &mut data,
+                        ) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                // A damaged frame is skipped; a stream of them is the end.
+                                bad += 1;
+                                if bad > 5 {
+                                    *error2.lock() = Some(format!("{e:#}"));
+                                    break 'passes;
+                                }
+                                n += 1;
+                                continue;
+                            }
+                        };
+                        bad = 0;
+                        let frame = VideoFrame {
+                            pts: pts(base + n),
+                            hap: Some(format),
+                            data,
+                        };
+                        if tx.send(frame).is_err() {
+                            return; // player dropped
+                        }
+                        n += 1;
+                    }
+                    if n == 0 || !feed.advance() {
+                        break;
+                    }
+                    base += limit.unwrap_or(n);
+                }
+                eof2.store(true, Ordering::Release);
+            })?;
+        Ok(VideoPlayer {
+            width: w,
+            height: h,
+            rgba: false,
+            matrix: info.matrix,
+            rx,
+            recycle,
+            children,
+            eof,
+            error,
+            current: None,
+            pending: None,
+            serial: 0,
+            live: false,
+            reader_done,
+        })
     }
 
     /// Open a camera with the given ffmpeg input options (see
@@ -423,6 +588,7 @@ impl VideoPlayer {
                         }
                         let frame = VideoFrame {
                             pts: (base + n) as f64 / fps,
+                            hap: None,
                             data: buf,
                         };
                         if live {
@@ -503,6 +669,14 @@ impl VideoPlayer {
             }
             self.serial += 1;
         }
+    }
+
+    /// When the next frame is due, if it has arrived (for tests that put the
+    /// clock on each frame).
+    #[cfg(test)]
+    fn next_pts(&mut self) -> Option<f64> {
+        self.fill_pending();
+        self.pending.as_ref().map(|f| f.pts)
     }
 
     /// A camera, which has no end of its own.
@@ -845,6 +1019,129 @@ mod tests {
         }
         let secs = last_pts + 1.0 / vi.fps;
         assert!((secs - 2.0).abs() < 0.3, "{secs} s of picture");
+    }
+
+    /// A two-second Hap clip made with FFmpeg, 640 by 360 at the source's rate.
+    fn hap_clip(ff: &Ffmpeg, src: &Path, name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("newq_test_hap_player");
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join(format!("{name}.mov"));
+        let ok = ff
+            .command()
+            .args(["-y", "-i"])
+            .arg(src)
+            .args([
+                "-t",
+                "2",
+                "-vf",
+                "scale=640:360",
+                "-c:v",
+                "hap",
+                "-format",
+                name,
+                "-an",
+            ])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ffmpeg could not make the Hap clip");
+        clip
+    }
+
+    /// Every frame a player delivers, as (time, format), until it ends: the
+    /// clock is put on each frame as it comes, so none is passed over.
+    fn all_frames(p: &mut VideoPlayer) -> Vec<(f64, Option<HapFormat>)> {
+        let t0 = std::time::Instant::now();
+        let mut out = Vec::new();
+        loop {
+            assert!(t0.elapsed().as_secs() < 30, "never ended");
+            match p.next_pts() {
+                Some(t) => {
+                    p.update(t);
+                    let f = p.current().unwrap();
+                    out.push((f.pts, f.hap));
+                }
+                None if p.finished() => return out,
+                None => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+    }
+
+    #[test]
+    fn a_hap_file_is_played_as_the_frames_it_holds() {
+        use crate::show::Animated;
+        use crate::speed::SpeedMap;
+        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let clip = hap_clip(&ff, &src, "hap_alpha");
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        assert_eq!((vi.codec.as_str(), vi.coded), ("hap", (640, 360)));
+        // Only a card that reads block-compressed textures plays it this way.
+        set_bc_supported(false);
+        assert!(!plays_as_hap(vi));
+        set_bc_supported(true);
+        assert!(plays_as_hap(vi));
+        let plain = ff.probe(&src).unwrap().video.unwrap();
+        assert!(!plays_as_hap(&plain), "an ordinary file is not");
+        set_bc_supported(false);
+
+        let fps = vi.fps;
+        let once = Playback::Once { duration: None };
+        // At its own speed: a frame every 1/fps, each a Hap Alpha texture.
+        let mut p = VideoPlayer::spawn_hap(&ff, &clip, vi, 0.0, once, 1.0, None).unwrap();
+        assert_eq!((p.width, p.height), (640, 360));
+        let frames = all_frames(&mut p);
+        assert!(
+            (fps * 2.0 - frames.len() as f64).abs() <= 2.0,
+            "{} frames",
+            frames.len()
+        );
+        assert!(frames.iter().all(|f| f.1 == Some(HapFormat::Dxt5)));
+        assert!((frames[1].0 - 1.0 / fps).abs() < 1e-9);
+        // At double speed the same frames come twice as fast.
+        let mut p = VideoPlayer::spawn_hap(&ff, &clip, vi, 0.0, once, 2.0, None).unwrap();
+        let fast = all_frames(&mut p);
+        assert_eq!(fast.len(), frames.len());
+        assert!((fast[1].0 - 0.5 / fps).abs() < 1e-9);
+        // Along keyframes: the plan's times.
+        let mut a = Animated::new(2.0);
+        a.set_key(0.0, 2.0);
+        let plan = SpeedPlan {
+            map: std::sync::Arc::new(SpeedMap::new(&a)),
+            t0: 0.0,
+        };
+        let mut p = VideoPlayer::spawn_hap(&ff, &clip, vi, 0.0, once, 1.0, Some(plan)).unwrap();
+        let planned = all_frames(&mut p);
+        assert!((planned.last().unwrap().0 - fast.last().unwrap().0).abs() < 0.01);
+        // A loop of the first second, twice: the frames of both passes, one run of times.
+        let slice = Playback::Slice {
+            len: 1.0,
+            passes: Some(2),
+        };
+        let mut p = VideoPlayer::spawn_hap(&ff, &clip, vi, 0.0, slice, 1.0, None).unwrap();
+        let looped = all_frames(&mut p);
+        assert!(
+            (fps * 2.0 - looped.len() as f64).abs() <= 2.0,
+            "{} frames",
+            looped.len()
+        );
+        assert!(
+            looped.windows(2).all(|w| w[1].0 > w[0].0),
+            "times only go forward"
+        );
+        assert!((looped.last().unwrap().0 - 2.0).abs() < 0.1);
+        // Starting part way in.
+        let mut p = VideoPlayer::spawn_hap(&ff, &clip, vi, 1.0, once, 1.0, None).unwrap();
+        let later = all_frames(&mut p);
+        assert!(
+            (fps - later.len() as f64).abs() <= 2.0,
+            "{} frames",
+            later.len()
+        );
+        let _ = std::fs::remove_dir_all(clip.parent().unwrap());
     }
 
     #[test]

@@ -1157,25 +1157,29 @@ impl App {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
                         let new_texture = || {
-                            let tex = if p.rgba {
-                                LayerTexture::new_rgba(gpu, p.width, p.height)
-                            } else {
-                                LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix)
+                            let tex = match frame.hap {
+                                Some(f) => LayerTexture::new_bc(gpu, p.width, p.height, f),
+                                None if p.rgba => LayerTexture::new_rgba(gpu, p.width, p.height),
+                                None => LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix),
                             };
                             (Arc::new(tex), 0)
                         };
                         let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
                         // A seek can bring a player of another size (the output
-                        // was resized since the cue started): its frames need a
-                        // texture of their own, or they would not be shown.
-                        if (entry.0.width, entry.0.height) != (p.width, p.height) {
+                        // was resized since the cue started), or of another kind of
+                        // frame: they need a texture of their own, or would not be shown.
+                        let right_kind = match frame.hap {
+                            Some(f) => entry.0.is_bc(f),
+                            None => !entry.0.is_bc_any() && (p.rgba == entry.0.is_rgba()),
+                        };
+                        if (entry.0.width, entry.0.height) != (p.width, p.height) || !right_kind {
                             *entry = new_texture();
                         }
                         if entry.1 != p.serial {
-                            if p.rgba {
-                                entry.0.upload_rgba(&gpu.queue, &frame.data);
-                            } else {
-                                entry.0.upload_yuv(&gpu.queue, &frame.data);
+                            match frame.hap {
+                                Some(_) => entry.0.upload_bc(&gpu.queue, &frame.data),
+                                None if p.rgba => entry.0.upload_rgba(&gpu.queue, &frame.data),
+                                None => entry.0.upload_yuv(&gpu.queue, &frame.data),
                             }
                             entry.1 = p.serial;
                         }

@@ -1413,16 +1413,21 @@ impl Engine {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
                 let size = video::decode_size((vi.width, vi.height), sig.size, m.fit == Fit::Cover);
-                let player = VideoPlayer::spawn_at_rate(
-                    ff,
-                    &m.file,
-                    vi,
-                    m.start,
-                    playback,
-                    size,
-                    rate,
-                    speed.clone(),
-                )
+                // Hap goes to the graphics card as it is; anything else is decoded and scaled.
+                let player = if video::plays_as_hap(vi) {
+                    VideoPlayer::spawn_hap(ff, &m.file, vi, m.start, playback, rate, speed.clone())
+                } else {
+                    VideoPlayer::spawn_at_rate(
+                        ff,
+                        &m.file,
+                        vi,
+                        m.start,
+                        playback,
+                        size,
+                        rate,
+                        speed.clone(),
+                    )
+                }
                 .map_err(|e| format!("{e:#}"))?;
                 let voice = if info.has_audio && self.audio.available() {
                     match self.audio.spawn_voice_routed(
@@ -4213,6 +4218,57 @@ mod tests {
 
     fn m_speed_time(c: &Cue, file: f64) -> f64 {
         c.kind.media().unwrap().speed_map().unwrap().time_for(file)
+    }
+
+    #[test]
+    fn a_hap_cue_plays_as_hap_and_has_the_length_of_the_file() {
+        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("newq_test_hap_engine");
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mov");
+        let ok = ff
+            .command()
+            .args(["-y", "-i"])
+            .arg(&src)
+            .args(["-t", "2", "-vf", "scale=320:180", "-c:v", "hap", "-an"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        video::set_bc_supported(true);
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Video, Some(clip.clone()), 0);
+        c.kind.media_mut().unwrap().rate.value = 2.0;
+        let id = c.id;
+        show.cues.push(c.clone());
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the clip to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        // Two seconds of file at double speed.
+        let d = e.active[0].duration.expect("a known length");
+        assert!((d - 1.0).abs() < 0.1, "{d}");
+        match &e.active[0].kind {
+            ActiveKind::Video(v) => {
+                assert_eq!((v.player.width, v.player.height), (320, 180));
+                assert!(
+                    v.player.current().is_some_and(|f| f.hap.is_some()),
+                    "its frames are Hap's"
+                );
+            }
+            _ => panic!("a video cue"),
+        }
+        run_until(&mut e, &show, "the cue to end", |e| {
+            matches!(e.status(id), CueStatus::Idle)
+        });
+        video::set_bc_supported(false);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

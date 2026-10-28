@@ -150,6 +150,10 @@ pub struct VideoInfo {
     pub matrix: ColorMatrix,
     /// The picture has transparency (ProRes 4444, HAP Alpha, a PNG sequence).
     pub has_alpha: bool,
+    /// The video codec's name as FFmpeg says it (`h264`, `hap`, ...).
+    pub codec: String,
+    /// The picture's size as it is coded, before any sample aspect ratio or rotation.
+    pub coded: (u32, u32),
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +183,7 @@ struct ProbeFormat {
 #[derive(Deserialize)]
 struct ProbeStream {
     codec_type: Option<String>,
+    codec_name: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     avg_frame_rate: Option<String>,
@@ -285,6 +290,8 @@ fn parse_probe(json: &[u8]) -> Result<MediaInfo> {
                     fps,
                     matrix,
                     has_alpha: s.pix_fmt.as_deref().is_some_and(pix_fmt_has_alpha),
+                    codec: s.codec_name.clone().unwrap_or_default(),
+                    coded: (w, h),
                 });
             }
             _ => {}

@@ -7,6 +7,7 @@ use crate::dock::{self, Pane};
 use crate::engine::{ActiveCue, CueStatus, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
+use crate::media::convert::HapKind;
 use crate::media::waveform::WaveState;
 use crate::media::{ProbeState, audio, camera};
 use crate::mesh::Mesh;
@@ -243,6 +244,8 @@ pub struct UiState {
     pub show_about: bool,
     about_logo: Option<egui::TextureHandle>,
     sync_clip: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    /// Videos being converted to Hap, by the cue they are for.
+    conversions: Vec<(CueId, std::sync::mpsc::Receiver<Result<PathBuf, String>>)>,
     media_note: String,
     sync_note: String,
     /// Media being copied into one folder, in the background.
@@ -431,6 +434,8 @@ enum Action {
     AddCueFile(CueType, PathBuf),
     /// This cue now plays this file.
     SetCueFile(CueId, PathBuf),
+    /// Make a Hap copy of the cue's video, and play that instead.
+    ConvertToHap(CueId, HapKind),
     EditGeometry(Option<OutputId>),
     EditArea(Option<OutputId>),
     /// Move the selected handle by this many screen pixels.
@@ -507,6 +512,7 @@ impl Action {
                 | Action::SetPreWait(..)
                 | Action::AddCueFile(..)
                 | Action::SetCueFile(..)
+                | Action::ConvertToHap(..)
                 | Action::AddSubDisplay(_)
                 | Action::AddDisplay
                 | Action::AddBlendedPair
@@ -588,6 +594,25 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     });
     if !dropped.is_empty() {
         actions.push(Action::AddFiles(dropped));
+    }
+
+    // Conversions that have finished: the cue plays the copy.
+    st.conversions.retain(|(id, rx)| match rx.try_recv() {
+        Ok(Ok(path)) => {
+            engine.log(format!("Converted: now playing {}", path.display()));
+            actions.push(Action::SetCueFile(*id, path));
+            false
+        }
+        Ok(Err(e)) => {
+            engine.log(format!("Conversion failed: {e}"));
+            false
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => true,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+    });
+    if !st.conversions.is_empty() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
     }
 
     // Slides are timed from the slide show's settings, so anything that moves
@@ -5756,6 +5781,30 @@ fn media_inspector(
                 if ui.button("Browse…").clicked() {
                     actions.push(Action::AskFile(DialogFor::BrowseFile(cue_id, ty)));
                 }
+                // A video that isn't Hap can be made into a Hap copy, which plays with
+                // far less work for the computer.
+                let not_hap = ty == CueType::Video
+                    && !m.file.as_os_str().is_empty()
+                    && matches!(engine.probe_state(&m.file),
+                        ProbeState::Ready(i) if i.video.as_ref().is_some_and(|v| v.codec != "hap"));
+                if not_hap {
+                    ui.menu_button("Convert to Hap", |ui| {
+                        for k in HapKind::ALL {
+                            if ui.button(k.label()).clicked() {
+                                actions.push(Action::ConvertToHap(cue_id, k));
+                                ui.close();
+                            }
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Makes a copy beside the original and plays that. Hap files \
+                                 are large; the card does the rest of the work.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    });
+                }
             });
             ui.end_row();
             ui.label("");
@@ -7981,6 +8030,33 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 show.relay_slides();
             }
         }
+        Action::ConvertToHap(id, kind) => {
+            let file = show
+                .cue(id)
+                .and_then(|c| c.kind.media())
+                .map(|m| m.file.clone());
+            match (file, engine.ff.clone()) {
+                (Some(file), Some(ff)) if !st.conversions.iter().any(|(c, _)| *c == id) => {
+                    engine.log(format!("Converting {} to Hap…", file.display()));
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let started = std::thread::Builder::new()
+                        .name("hap-convert".into())
+                        .spawn(move || {
+                            let _ = tx.send(
+                                crate::media::convert::to_hap(&ff, &file, kind)
+                                    .map_err(|e| format!("{e:#}")),
+                            );
+                        });
+                    match started {
+                        Ok(_) => st.conversions.push((id, rx)),
+                        Err(e) => engine.log(format!("Couldn't start the conversion: {e}")),
+                    }
+                }
+                (Some(_), Some(_)) => engine.log("That video is already being converted"),
+                (_, None) => engine.log("ffmpeg wasn't found, so nothing can be converted"),
+                _ => {}
+            }
+        }
         Action::SetCueFile(id, file) => {
             if let Some(i) = show.cue_index(id)
                 && let Some(m) = show.cues[i].kind.media_mut()
@@ -9581,6 +9657,75 @@ mod tests {
         assert_ne!(e.active_list, 0);
         run_remote(Command::SelectList(1), &mut show, &mut e, &mut st);
         assert_eq!(e.active_list, 0);
+    }
+
+    #[test]
+    fn a_video_can_be_converted_to_hap_in_the_background() {
+        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("newq_test_ui_convert");
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("clip.mp4");
+        let ok = ff
+            .command()
+            .args(["-y", "-t", "1", "-i"])
+            .arg(&src)
+            .args(["-c", "copy"])
+            .arg(&input)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let mut show = Show::default();
+        let c = show.make_cue(CueType::Video, Some(input.clone()), 0);
+        let id = c.id;
+        show.cues.push(c);
+        let mut e = Engine::for_tests();
+        e.ff = Some(ff.clone());
+        let mut st = UiState {
+            show_mode: true,
+            ..Default::default()
+        };
+        // Show mode refuses it; edit mode starts it, once.
+        apply(
+            Action::ConvertToHap(id, HapKind::Hap),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(st.conversions.is_empty());
+        st.show_mode = false;
+        apply(
+            Action::ConvertToHap(id, HapKind::Hap),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        apply(
+            Action::ConvertToHap(id, HapKind::Hap),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(st.conversions.len(), 1);
+        assert!(e.messages.back().unwrap().1.contains("already"));
+        let (_, rx) = st.conversions.pop().unwrap();
+        let path = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        assert!(path.ends_with("clip_hap.mov"));
+        assert_eq!(ff.probe(&path).unwrap().video.unwrap().codec, "hap");
+        // The finished copy replaces the cue's file.
+        apply(
+            Action::SetCueFile(id, path.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(show.cue(id).unwrap().kind.media().unwrap().file, path);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
