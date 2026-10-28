@@ -295,7 +295,9 @@ includes FFmpeg, so there's nothing else to install.
   the end of the file.
 - **Group cues:** a group holds other cues and is fired with one GO. *Start all
   together* fires every child at once (a child's pre-wait is its offset from the
-  start, so a group is a small timeline); *Play in order* fires each child when
+  start, so a group is a small timeline, which the group's inspector draws: a bar for
+  each child, with a line for where the group has got to while it plays; drag a bar
+  to move that cue in time); *Play in order* fires each child when
   the one before it finishes. The group is running until all of its children
   have finished, so auto-follow after a group waits for the last child, and
   stopping or fading a group (or a Fade/Stop cue aimed at it) stops or fades its

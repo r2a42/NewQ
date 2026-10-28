@@ -408,6 +408,8 @@ enum Action {
     CaptureHotkey(Option<CueId>),
     SetHotkey(CueId, Option<String>),
     SetMidiNote(CueId, Option<u8>),
+    /// Move a cue within its group (the timeline editor).
+    SetPreWait(CueId, f64),
     StopSelected,
     FadeOutSelected,
     StopInstance(u64, f64),
@@ -486,6 +488,7 @@ impl Action {
                 | Action::RelinkMany(_)
                 | Action::SetHotkey(..)
                 | Action::SetMidiNote(..)
+                | Action::SetPreWait(..)
                 | Action::AddCueFile(..)
                 | Action::SetCueFile(..)
                 | Action::AddSubDisplay(_)
@@ -4652,6 +4655,197 @@ struct SlideRows {
     length: f64,
 }
 
+/// One child of a timeline group, for the timeline editor.
+struct TimelineRow {
+    id: CueId,
+    label: String,
+    pre_wait: f64,
+    /// How long it plays; None if it never ends or isn't known.
+    duration: Option<f64>,
+    armed: bool,
+    colour: Option<[u8; 3]>,
+}
+
+/// The children of the timeline group at `idx` (not a slide show), or None.
+fn timeline_rows(show: &Show, idx: usize, engine: &mut Engine) -> Option<Vec<TimelineRow>> {
+    let CueKind::Group(g) = &show.cues[idx].kind else {
+        return None;
+    };
+    if g.slides.is_some() || g.mode != GroupMode::Timeline {
+        return None;
+    }
+    let id = show.cues[idx].id;
+    let rows = show
+        .children(id)
+        .iter()
+        .filter(|c| c.parent == Some(id))
+        .map(|c| TimelineRow {
+            id: c.id,
+            label: format!("{} {}", c.kind.cue_type().icon(), c.name),
+            pre_wait: c.pre_wait,
+            duration: engine.cue_duration(show, c).flatten(),
+            armed: c.armed,
+            colour: c.color.map(|k| k.rgb()),
+        })
+        .collect();
+    Some(rows)
+}
+
+/// How many seconds the timeline editor covers: to the end of the last bar,
+/// with room for an open-ended one to show.
+fn timeline_span(rows: &[TimelineRow]) -> f64 {
+    let end = rows
+        .iter()
+        .map(|r| r.pre_wait + r.duration.unwrap_or(OPEN_BAR))
+        .fold(0.0, f64::max);
+    (end * 1.1).max(1.0)
+}
+
+/// How wide, in seconds, a bar with no known length is drawn.
+const OPEN_BAR: f64 = 3.0;
+
+/// A round step between ruler marks, so that about `marks` fit in `span`.
+fn timeline_step(span: f64, marks: f64) -> f64 {
+    let raw = span / marks.max(1.0);
+    let base = 10f64.powf(raw.max(1e-3).log10().floor());
+    for m in [1.0, 2.0, 5.0, 10.0] {
+        if base * m >= raw {
+            return base * m;
+        }
+    }
+    base * 10.0
+}
+
+/// Where a bar dragged by `dx` points from where it was is, in seconds
+/// within the group: to a hundredth, and never before the start.
+fn dragged_pre_wait(origin: f64, dx: f32, pixels_per_second: f32) -> f64 {
+    let t = origin + f64::from(dx) / f64::from(pixels_per_second.max(1e-3));
+    (t.max(0.0) * 100.0).round() / 100.0
+}
+
+/// A bar for each child of a timeline group, laid out in time. Drag a bar
+/// to move the cue (its pre-wait is its start); the line is where the group
+/// has got to while it plays.
+fn timeline_panel(ui: &mut Ui, rows: &[TimelineRow], at: Option<f64>, actions: &mut Vec<Action>) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("Timeline").strong());
+    if rows.is_empty() {
+        ui.label(RichText::new("Nothing in the group yet.").weak());
+        return;
+    }
+    let span = timeline_span(rows).max(at.unwrap_or(0.0));
+    let label_w = 130.0;
+    let row_h = 20.0;
+    let width = (ui.available_width() - label_w - 8.0).max(100.0);
+    let pps = width as f64 / span;
+    let ruler_h = 16.0;
+    let (area, _) = ui.allocate_exact_size(
+        Vec2::new(label_w + width, ruler_h + row_h * rows.len() as f32),
+        egui::Sense::hover(),
+    );
+    let x0 = area.left() + label_w;
+    let painter = ui.painter_at(area);
+    let weak = ui.visuals().weak_text_color();
+    let step = timeline_step(span, width as f64 / 70.0);
+    let mut t = 0.0;
+    while t <= span {
+        let x = x0 + (t * pps) as f32;
+        painter.line_segment(
+            [
+                egui::pos2(x, area.top() + ruler_h - 4.0),
+                egui::pos2(x, area.bottom()),
+            ],
+            egui::Stroke::new(0.5, weak.gamma_multiply(0.4)),
+        );
+        painter.text(
+            egui::pos2(x + 2.0, area.top()),
+            egui::Align2::LEFT_TOP,
+            fmt_time(t),
+            egui::FontId::proportional(10.0),
+            weak,
+        );
+        t += step;
+    }
+    for (i, r) in rows.iter().enumerate() {
+        let top = area.top() + ruler_h + row_h * i as f32;
+        painter.text(
+            egui::pos2(area.left(), top + row_h / 2.0),
+            egui::Align2::LEFT_CENTER,
+            &r.label,
+            egui::FontId::proportional(12.0),
+            if r.armed {
+                ui.visuals().text_color()
+            } else {
+                weak
+            },
+        );
+        let len = r.duration.unwrap_or(OPEN_BAR);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(x0 + (r.pre_wait * pps) as f32, top + 2.0),
+            Vec2::new(((len * pps) as f32).max(4.0), row_h - 4.0),
+        );
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("timeline_bar", r.id.0)),
+            egui::Sense::click_and_drag(),
+        );
+        let base = r
+            .colour
+            .map_or(GO_GREEN, |[a, b, c]| Color32::from_rgb(a, b, c));
+        let fill = if r.armed {
+            base
+        } else {
+            base.gamma_multiply(0.35)
+        };
+        painter.rect_filled(
+            rect,
+            3.0,
+            fill.gamma_multiply(if resp.hovered() || resp.dragged() {
+                1.0
+            } else {
+                0.8
+            }),
+        );
+        if r.duration.is_none() {
+            // Never ends, or isn't known: the bar fades out.
+            painter.text(
+                rect.right_center() - Vec2::new(4.0, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                "→",
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
+            );
+        }
+        let key = ui.id().with(("timeline_origin", r.id.0));
+        if resp.drag_started() {
+            ui.data_mut(|d| d.insert_temp(key, r.pre_wait));
+        }
+        if resp.dragged() {
+            let origin = ui.data(|d| d.get_temp::<f64>(key)).unwrap_or(r.pre_wait);
+            let (down, now) = ui.input(|i| (i.pointer.press_origin(), i.pointer.interact_pos()));
+            if let (Some(down), Some(now)) = (down, now) {
+                let t = dragged_pre_wait(origin, now.x - down.x, pps as f32);
+                if (t - r.pre_wait).abs() > 1e-9 {
+                    actions.push(Action::SetPreWait(r.id, t));
+                }
+            }
+        }
+        resp.on_hover_text(format!(
+            "Starts at {}{}. Drag to move.",
+            fmt_time(r.pre_wait),
+            r.duration
+                .map_or(String::new(), |d| format!(", lasts {}", fmt_time(d)))
+        ));
+    }
+    if let Some(e) = at {
+        let x = x0 + (e * pps) as f32;
+        painter.line_segment(
+            [egui::pos2(x, area.top()), egui::pos2(x, area.bottom())],
+            egui::Stroke::new(1.5, PLAYHEAD),
+        );
+    }
+}
+
 /// The slides of the slide show at `idx`, if that is one.
 fn slide_rows(show: &Show, idx: usize) -> Option<SlideRows> {
     let CueKind::Group(g) = &show.cues[idx].kind else {
@@ -4894,6 +5088,8 @@ fn inspector(
         .map(|o| (o.id, o.name.clone()))
         .collect();
     let slide_rows = slide_rows(show, idx);
+    let timeline = timeline_rows(show, idx, engine);
+    let selected_id = show.cues[idx].id;
     let in_slides = show.cues[idx]
         .parent
         .and_then(|p| show.cue(p))
@@ -5318,6 +5514,13 @@ fn inspector(
             cue.name = n;
         }
     });
+    if let Some(rows) = &timeline {
+        let at = match engine.status(selected_id) {
+            CueStatus::Playing { elapsed, .. } => Some(elapsed),
+            _ => None,
+        };
+        timeline_panel(ui, rows, at, actions);
+    }
 }
 
 fn curve_combo(ui: &mut Ui, id: &str, curve: &mut Curve) {
@@ -7714,6 +7917,11 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             st.capture_hotkey = None;
         }
         Action::SetMidiNote(id, note) => show.set_midi_note(id, note),
+        Action::SetPreWait(id, t) => {
+            if let Some(c) = show.cues.iter_mut().find(|c| c.id == id) {
+                c.pre_wait = if t.is_finite() { t.max(0.0) } else { 0.0 };
+            }
+        }
         Action::StopSelected => {
             if let Some(id) = st.selected {
                 engine.stop_cue(id, 0.0);
@@ -8905,6 +9113,69 @@ mod tests {
         for _ in 0..5 {
             e.tick(show, 0.01);
         }
+    }
+
+    #[test]
+    fn the_timeline_editor_moves_cues_and_lays_out_the_ruler() {
+        let (mut show, mut e, mut st) = running();
+        let id = show.cues[0].id;
+        apply(Action::SetPreWait(id, 2.5), &mut show, &mut e, &mut st);
+        assert_eq!(show.cues[0].pre_wait, 2.5);
+        for bad in [-3.0, f64::NAN] {
+            apply(Action::SetPreWait(id, bad), &mut show, &mut e, &mut st);
+            assert_eq!(show.cues[0].pre_wait, 0.0);
+        }
+        // Locked, it is refused like any edit.
+        apply(Action::ToggleLock, &mut show, &mut e, &mut st);
+        apply(Action::SetPreWait(id, 4.0), &mut show, &mut e, &mut st);
+        assert_eq!(show.cues[0].pre_wait, 0.0);
+
+        // A drag of 100 px at 50 px/s is two seconds; it never goes before the start.
+        assert_eq!(dragged_pre_wait(1.0, 100.0, 50.0), 3.0);
+        assert_eq!(dragged_pre_wait(1.0, -500.0, 50.0), 0.0);
+        assert_eq!(dragged_pre_wait(0.0, 1.0, 300.0), 0.0);
+        assert_eq!(dragged_pre_wait(0.0, 7.0, 300.0), 0.02);
+        // The ruler's marks are round numbers.
+        assert_eq!(timeline_step(10.0, 10.0), 1.0);
+        assert_eq!(timeline_step(60.0, 10.0), 10.0);
+        assert_eq!(timeline_step(25.0, 10.0), 5.0);
+        assert_eq!(timeline_step(0.0, 10.0), 0.001);
+        // It covers the last bar to its end, and shows an open one.
+        let row = |pre_wait, duration| TimelineRow {
+            id,
+            label: String::new(),
+            pre_wait,
+            duration,
+            armed: true,
+            colour: None,
+        };
+        assert!((timeline_span(&[row(2.0, Some(8.0))]) - 11.0).abs() < 1e-9);
+        assert!((timeline_span(&[row(1.0, None)]) - 4.4).abs() < 1e-9);
+        assert_eq!(timeline_span(&[]), 1.0);
+    }
+
+    #[test]
+    fn only_a_timeline_group_has_a_timeline() {
+        let (mut show, mut e, _st) = running();
+        let g = show.make_cue(CueType::Group, None, 0);
+        let gid = g.id;
+        show.cues.push(g);
+        let mut child = show.make_cue(CueType::Wait, None, 0);
+        child.parent = Some(gid);
+        child.pre_wait = 1.5;
+        let cid = child.id;
+        show.cues.push(child);
+        let gi = show.cue_index(gid).unwrap();
+        let rows = timeline_rows(&show, gi, &mut e).expect("a timeline group");
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].id, rows[0].pre_wait), (cid, 1.5));
+        assert!(rows[0].duration.is_some(), "a wait has its length");
+        // A playlist is in order, and a plain cue is no group.
+        if let CueKind::Group(g) = &mut show.cues[gi].kind {
+            g.mode = GroupMode::Playlist;
+        }
+        assert!(timeline_rows(&show, gi, &mut e).is_none());
+        assert!(timeline_rows(&show, 0, &mut e).is_none());
     }
 
     #[test]
