@@ -1897,6 +1897,12 @@ impl ApplicationHandler for App {
         let playing = self.engine.is_active();
         // One extra frame after the last layer stops, so outputs go to black.
         self.update_outputs(playing || removed_layer);
+        // The uploads just made are held until something is submitted, and the
+        // windows that submit may not be drawing (a Mac stops presenting a
+        // window that is in the background): a minute of video is gigabytes.
+        if let Some(gpu) = &self.gpu {
+            gpu.flush_uploads();
+        }
 
         self.reveal_windows(event_loop);
 
