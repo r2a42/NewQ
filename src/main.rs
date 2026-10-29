@@ -35,6 +35,7 @@ mod soak;
 mod speed;
 mod stats;
 mod stream;
+mod testmode;
 mod text;
 mod timecode;
 mod ui;
