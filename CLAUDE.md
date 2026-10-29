@@ -62,7 +62,8 @@ The README describes the features; this file is about working on the code.
   (`ActiveKind::Timecode`, dropped to stop). Send cues' `Program` target runs only
   when `Prefs::allow_scripts` (per computer; `output::set_scripts_allowed`).
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
-  self-running soak show (`--make-soak-show`; media from `scripts/make_soak_media.sh`). sysinfo
+  self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it
+  and writes the report; `--make-soak-show` writes just the show. sysinfo
   lists Linux threads as processes (`thread_kind()`), skip them when summing children.
 - `src/fx.rs`: cue effects. `show::Effect` (kind and up to four `Animated`
   numbers, each a value or keyframes) is on `MediaCue::effects`. `fx::VideoFx::at`

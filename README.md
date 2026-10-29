@@ -665,11 +665,19 @@ thousand starts. NewQ comes with a show built to find them and a log to read in 
 morning.
 
 ```sh
-scripts/make_soak_media.sh soak-media                       # about 50 MB of test clips
-newq --make-soak-show soak.newq --media soak-media --short  # a one-minute lap to try first
-newq --make-soak-show soak.newq --media soak-media          # the real thing: a lap of about 5 minutes
-NEWQ_STATS=soak-stats.csv NEWQ_AUTOSTART=1 NEWQ_LOG_FILE=1 newq soak.newq
+newq --soak --short     # a one-minute lap, to try it first
+newq --soak             # the real thing: laps of about 5 minutes
 ```
+
+That one command works the same on Windows, macOS and Linux (on Windows run
+`NewQ.exe --soak` from PowerShell or cmd; the Windows download has no console, so it
+prints nothing and the prompt comes back at once, but it is running, and the report
+is in the file). It makes the test clips it needs (about
+50 MB, once, with the FFmpeg NewQ already uses) in a `soak` folder inside the log
+folder (or `--dir FOLDER`), writes the show, opens NewQ on it with the stats log on and
+GO pressed after five seconds, and when you close the window writes the report (below)
+to the screen and to `stats.report.txt` beside the log.
+
 
 The show plays itself: every cue hands over to the next, and the last starts the first
 again, so it laps for as long as you leave it. Each lap starts and stops H.264 and Hap
@@ -679,13 +687,8 @@ and a wait. About two hundred laps in eight hours is a couple of thousand FFmpeg
 processes started and stopped.
 
 Before leaving: switch off sleep and the screen saver, set the displays and audio
-device in *Settings*, and watch the first lap. In the morning:
-
-```sh
-newq --stats-report soak-stats.csv
-```
-
-It prints how memory, open files and threads moved (with the trend per hour, after the
+device in *Settings*, and watch the first lap. In the morning close NewQ and read the
+report (or make it again from the log with `newq --stats-report FILE.csv`, which on Windows prints nothing: use the `.report.txt` file). It shows how memory, open files and threads moved (with the trend per hour, after the
 first tenth of the run), the most FFmpeg processes at once, the worst late-frame share
 and audio load, the longest stall of the main loop, and a list of anything that looks
 wrong (memory growing, a stall over a second, a gap in the samples that means the

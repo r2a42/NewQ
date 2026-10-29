@@ -1,16 +1,19 @@
-//! The overnight soak show: `newq --make-soak-show OUT.newq --media DIR [--short]`
-//! writes a show that plays itself round and round, using everything that
+//! The overnight soak show: `newq --soak [--short] [--dir DIR]` makes the media
+//! it needs (with the FFmpeg NewQ finds, so the same on every platform), writes
+//! the show, runs NewQ on it with the stats log and an automatic GO, and when
+//! NewQ is closed writes a report. `newq --make-soak-show OUT.newq --media DIR
+//! [--short]` writes just the show. The show plays itself round and round, using everything that
 //! can leak or drift (video decoders starting and stopping, looped and
 //! speed-changed clips, effects, fades, live text, a slide show, sound),
 //! without anyone pressing GO. Run it with `NEWQ_STATS` and `NEWQ_AUTOSTART`
-//! (see stats.rs, and the README's soak test section); `scripts/make_soak_media.sh`
-//! makes the files it needs.
+//! (see stats.rs, and the README's soak test section).
 //!
 //! Every cue of the main list but the last follows the one before it; the
 //! last starts the first again.
 
 use crate::show::*;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The files of the media folder the show plays.
 pub const FILES: [&str; 8] = [
@@ -270,8 +273,198 @@ pub fn build(media: &Path, short: bool) -> Show {
     show
 }
 
-/// `newq --make-soak-show OUT.newq --media DIR [--short]`.
+/// Make the files of `FILES` in `dir` that aren't there yet, with `ffmpeg`.
+pub fn make_media(ffmpeg: &Path, dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let music = "aevalsrc=0.3*sin(2*PI*(220+40*sin(2*PI*t/7))*t)|0.3*sin(2*PI*(330+30*sin(2*PI*t/5))*t):s=48000:d=60";
+    let jobs: Vec<(&str, Vec<String>)> = {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut jobs = vec![
+            (
+                FILES[0],
+                v(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=1920x1080:rate=30",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "30",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                ]),
+            ),
+            (
+                FILES[1],
+                v(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "smptehdbars=size=1920x1080:rate=30",
+                    "-t",
+                    "10",
+                    "-c:v",
+                    "hap",
+                    "-format",
+                    "hap",
+                ]),
+            ),
+            (
+                FILES[2],
+                v(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=1280x720:rate=30",
+                    "-t",
+                    "6",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]),
+            ),
+            (
+                FILES[3],
+                v(&["-f", "lavfi", "-i", music, "-c:a", "pcm_s16le"]),
+            ),
+            (
+                FILES[7],
+                v(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anoisesrc=color=pink:amplitude=0.05:sample_rate=48000:duration=10",
+                    "-ac",
+                    "2",
+                    "-c:a",
+                    "pcm_s16le",
+                ]),
+            ),
+        ];
+        for (n, name) in FILES[4..7].iter().enumerate() {
+            jobs.push((
+                name,
+                v(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!(
+                        "gradients=size=1920x1080:seed={}:duration=1:speed=0.00001",
+                        n + 1
+                    ),
+                    "-frames:v",
+                    "1",
+                ]),
+            ));
+        }
+        jobs
+    };
+    for (name, args) in jobs {
+        let out = dir.join(name);
+        if out.exists() {
+            continue;
+        }
+        // Written under another name and renamed, so a stopped run leaves no half file.
+        let tmp = dir.join(format!("partial_{name}"));
+        let result = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(&args)
+            .arg(&tmp)
+            .output()
+            .map_err(|e| format!("can't run {}: {e}", ffmpeg.display()))?;
+        if !result.status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "making {name} failed: {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            ));
+        }
+        std::fs::rename(&tmp, &out).map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// `newq --soak [--short] [--dir DIR]`: everything, in one command.
+fn soak(args: &[String]) -> Result<i32, String> {
+    let mut short = false;
+    let mut dir = crate::crash::log_dir().join("soak");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--short" => short = true,
+            "--dir" => dir = PathBuf::from(it.next().ok_or("--dir needs a folder")?),
+            other => return Err(format!("unknown option {other}")),
+        }
+    }
+    let ff = crate::media::ffmpeg::Ffmpeg::locate().ok_or("FFmpeg not found")?;
+    println!(
+        "Making the media in {} (a minute or two the first time)…",
+        dir.display()
+    );
+    make_media(&ff.ffmpeg, &dir)?;
+    let media = dir.canonicalize().map_err(|e| e.to_string())?;
+    let show_path = dir.join(if short {
+        "soak-short.newq"
+    } else {
+        "soak.newq"
+    });
+    build(&media, short)
+        .save(&show_path)
+        .map_err(|e| format!("{e:#}"))?;
+    let stats = dir.join(if short {
+        "stats-short.csv"
+    } else {
+        "stats.csv"
+    });
+    let _ = std::fs::remove_file(&stats);
+    println!(
+        "Running {}. Leave it; close the window to stop.\nLog: {}",
+        show_path.display(),
+        stats.display()
+    );
+    let status = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .arg(&show_path)
+        .env("NEWQ_STATS", &stats)
+        .env("NEWQ_AUTOSTART", "5")
+        .env("NEWQ_LOG_FILE", "1")
+        .status()
+        .map_err(|e| e.to_string())?;
+    // A release on Windows has no console, so the report is also a file.
+    let report = std::fs::read_to_string(&stats)
+        .map_err(|e| format!("no stats were written: {e}"))
+        .and_then(|t| crate::stats::report(&t));
+    let text = match report {
+        Ok(t) => t,
+        Err(e) => format!("No report: {e}\n"),
+    };
+    let report_path = stats.with_extension("report.txt");
+    let _ = std::fs::write(&report_path, &text);
+    print!("\n{text}");
+    println!("(saved in {})", report_path.display());
+    Ok(status.code().unwrap_or(1))
+}
+
+/// `newq --soak`, and `newq --make-soak-show`.
 pub fn run_if_asked(args: &[String]) -> Option<i32> {
+    if args.first().map(String::as_str) == Some("--soak") {
+        return Some(soak(&args[1..]).unwrap_or_else(|e| {
+            eprintln!("soak: {e}");
+            2
+        }));
+    }
     if args.first().map(String::as_str) != Some("--make-soak-show") {
         return None;
     }
@@ -402,5 +595,32 @@ mod tests {
             ])),
             Some(2)
         );
+    }
+
+    #[test]
+    fn the_media_is_made_with_the_ffmpeg_newq_finds_and_not_made_twice() {
+        let Some(ff) = crate::media::ffmpeg::Ffmpeg::locate() else {
+            assert!(
+                std::env::var_os("NEWQ_REQUIRE_MEDIA").is_none(),
+                "no ffmpeg"
+            );
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("newq_soak_media_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        make_media(&ff.ffmpeg, &dir).unwrap();
+        for n in FILES {
+            assert!(dir.join(n).metadata().unwrap().len() > 1000, "{n}");
+        }
+        let hap = ff.probe(&dir.join(FILES[1])).unwrap();
+        assert_eq!(hap.video.unwrap().codec, "hap");
+        let before = dir.join(FILES[0]).metadata().unwrap().modified().unwrap();
+        make_media(&ff.ffmpeg, &dir).unwrap();
+        assert_eq!(
+            dir.join(FILES[0]).metadata().unwrap().modified().unwrap(),
+            before
+        );
+        assert!(make_media(Path::new("/no/ffmpeg"), &dir.join("x")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
