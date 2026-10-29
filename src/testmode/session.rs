@@ -92,6 +92,54 @@ pub struct Run {
     wanted: Vec<&'static Asset>,
     last_analysis: Instant,
     log_path: PathBuf,
+    memory: MemoryWatch,
+}
+
+/// What a test may use of the computer's memory before it is stopped: half of
+/// it, and never less than 2 GB. A runaway that goes on to fill the memory and
+/// swap makes the whole computer unusable, which no test is worth.
+pub fn memory_limit_mb(ram_mb: u64) -> u64 {
+    (ram_mb / 2).max(2048)
+}
+
+/// Watches NewQ's own memory once a second, much more often than the log's
+/// rows: a runaway can fill the memory between two of those.
+struct MemoryWatch {
+    sys: sysinfo::System,
+    me: sysinfo::Pid,
+    limit_mb: u64,
+    ram_mb: u64,
+    last: Instant,
+    peak_mb: u64,
+}
+
+impl MemoryWatch {
+    fn new() -> MemoryWatch {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let ram_mb = sys.total_memory() >> 20;
+        MemoryWatch {
+            sys,
+            me: sysinfo::Pid::from_u32(std::process::id()),
+            limit_mb: memory_limit_mb(ram_mb),
+            ram_mb,
+            last: Instant::now(),
+            peak_mb: 0,
+        }
+    }
+
+    /// NewQ's memory in MB if it is over the limit (looks once a second).
+    fn over(&mut self, now: Instant) -> Option<u64> {
+        if now.duration_since(self.last) < Duration::from_secs(1) {
+            return None;
+        }
+        self.last = now;
+        self.sys
+            .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.me]), true);
+        let mb = self.sys.process(self.me)?.memory() >> 20;
+        self.peak_mb = self.peak_mb.max(mb);
+        (mb > self.limit_mb).then_some(mb)
+    }
 }
 
 impl Run {
@@ -406,6 +454,7 @@ fn launch(
         wanted: prep.wanted,
         last_analysis: Instant::now(),
         log_path,
+        memory: MemoryWatch::new(),
     })
 }
 
@@ -469,6 +518,25 @@ impl Run {
             );
         }
 
+        if let Some(mb) = self.memory.over(now) {
+            // What was playing, for working out which cue runs away.
+            let names: Vec<String> = engine
+                .active
+                .iter()
+                .filter_map(|a| show.cue(a.cue_id))
+                .map(|c| format!("{} {}", c.number, c.name))
+                .collect();
+            engine.log(format!(
+                "Test mode: memory at {mb} MB, over the limit of {} MB. Playing: {}",
+                self.memory.limit_mb,
+                names.join("; ")
+            ));
+            return Some(End::Failed(format!(
+                "NewQ was using {:.1} GB of this computer's {:.0} GB of memory, so the test was stopped before it made the computer unusable",
+                mb as f64 / 1024.0,
+                self.memory.ram_mb as f64 / 1024.0
+            )));
+        }
         if self.stop {
             return Some(End::Stopped);
         }
@@ -502,7 +570,6 @@ impl Run {
                 ));
             }
         }
-        let _ = show;
         None
     }
 }
@@ -571,6 +638,24 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
             text: "The test was stopped before its lap was done.".into(),
         }),
         End::Finished => {}
+    }
+    let peak = run
+        .history
+        .iter()
+        .map(|x| x.rss_mb)
+        .max()
+        .unwrap_or(0)
+        .max(run.memory.peak_mb);
+    if run.memory.ram_mb > 0 && peak * 4 > run.memory.ram_mb && !matches!(end, End::Failed(_)) {
+        findings.push(Finding {
+            severity: Severity::Problem,
+            text: format!(
+                "NewQ's memory reached {:.1} GB ({:.0}% of this computer's {:.0} GB). A show should stay far below that.",
+                peak as f64 / 1024.0,
+                peak as f64 * 100.0 / run.memory.ram_mb as f64,
+                run.memory.ram_mb as f64 / 1024.0
+            ),
+        });
     }
     let generated: Vec<String> = run
         .wanted
@@ -900,6 +985,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    #[test]
+    fn the_memory_limit_is_half_the_memory_but_never_under_two_gigabytes() {
+        assert_eq!(memory_limit_mb(24 * 1024), 12 * 1024);
+        assert_eq!(memory_limit_mb(2048), 2048);
+        assert_eq!(memory_limit_mb(0), 2048);
+    }
+
+    #[test]
+    fn a_memory_watch_looks_once_a_second_and_sees_its_own_process() {
+        let mut w = MemoryWatch::new();
+        let t = Instant::now();
+        assert_eq!(w.over(t), None, "too soon to look again");
+        assert!(w.over(t + Duration::from_secs(2)).is_none() || w.limit_mb < 2048);
+        assert!(w.peak_mb > 0, "the process was found");
+        w.limit_mb = 1;
+        assert!(w.over(t + Duration::from_secs(4)).is_some());
     }
 
     #[test]
