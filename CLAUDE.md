@@ -189,7 +189,8 @@ writes gigabytes in seconds.
   that only touch `*.md` or `LICENSE-*` skip CI; `scripts/check_main_ci.sh` (used by
   `Cut release`) accepts such commits on top of a commit CI passed on. Occasionally the macOS runner never starts and the job is cancelled
   after 15 minutes with no steps run; that's not a failure of the change. Re-run it.
-- **Releasing:** bump `version` in `Cargo.toml` (and `Cargo.lock`) in a PR, merge,
+- **Releasing:** follow `.claude/skills/release/SKILL.md` (the whole sequence, the traps,
+  and how to keep going without being poked). In short: bump `version` in `Cargo.toml` (and `Cargo.lock`) in a PR, merge,
   and wait for CI to pass on `main`. Then, as the repository owner, comment
   `/release vX.Y.Z dry-run` and then `/release vX.Y.Z` on any issue or PR. The
   `Cut release` workflow checks the tag against `Cargo.toml`, tags `main` and
