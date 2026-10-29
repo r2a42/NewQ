@@ -770,7 +770,12 @@ mod tests {
                 &paused2,
             );
         });
-        std::thread::sleep(Duration::from_millis(500));
+        // Until enough messages have been sent after the stall, not for a fixed
+        // time: a busy runner may give the thread very little.
+        let began = Instant::now();
+        while sent.lock().len() < 40 && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         stop.store(true, Ordering::Relaxed);
         thread.join().unwrap();
         let sent = sent.lock();
