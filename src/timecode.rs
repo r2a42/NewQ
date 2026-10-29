@@ -235,11 +235,6 @@ impl Generator {
         self.rate.frame_seconds() / 4.0
     }
 
-    /// Quarter frames made so far.
-    pub fn made(&self) -> u64 {
-        self.made
-    }
-
     /// The sysex that says the clock is at the start (sent before it runs).
     pub fn full_frame(&self) -> Vec<u8> {
         let t = self.start;

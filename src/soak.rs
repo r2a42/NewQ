@@ -275,16 +275,13 @@ pub fn build(media: &Path, short: bool) -> Show {
     show
 }
 
-/// The arguments that encode H.264, or the nearest thing, with what this FFmpeg
-/// has: the bundled LGPL builds have no x264, so the system's encoder is used
-/// (VideoToolbox on a Mac, Media Foundation on Windows), and as a last resort MPEG-4.
+/// The arguments that encode H.264, or the nearest thing every FFmpeg can do:
+/// the LGPL builds NewQ bundles (Windows and Mac) have no x264, and the system's
+/// own encoders depend on the machine, so those
+/// get MPEG-4 clips instead.
 fn h264_args(has: impl Fn(&str) -> bool) -> Vec<String> {
     let (encoder, options): (&str, &[&str]) = if has("libx264") {
         ("libx264", &["-preset", "veryfast"])
-    } else if has("h264_videotoolbox") {
-        ("h264_videotoolbox", &["-b:v", "8M"])
-    } else if has("h264_mf") {
-        ("h264_mf", &["-b:v", "8M"])
     } else {
         ("mpeg4", &["-q:v", "3"])
     };
@@ -659,17 +656,13 @@ mod tests {
     }
 
     #[test]
-    fn the_video_encoder_is_the_best_one_this_ffmpeg_has() {
-        let enc = |has: &[&str]| {
-            let a = h264_args(|n| has.contains(&n));
-            a[1].clone()
-        };
+    fn the_video_encoder_is_x264_or_else_mpeg4() {
+        let enc = |has: &[&str]| h264_args(|n| has.contains(&n))[1].clone();
         assert_eq!(enc(&["libx264", "h264_videotoolbox"]), "libx264");
-        assert_eq!(enc(&["h264_videotoolbox"]), "h264_videotoolbox");
-        assert_eq!(enc(&["h264_mf"]), "h264_mf");
+        assert_eq!(enc(&["h264_videotoolbox", "h264_mf"]), "mpeg4");
         assert_eq!(enc(&[]), "mpeg4");
         // x264's preset is only passed to x264.
-        assert!(!h264_args(|n| n == "h264_videotoolbox").contains(&"-preset".to_string()));
+        assert!(!h264_args(|_| false).contains(&"-preset".to_string()));
         assert!(h264_args(|_| true).contains(&"yuv420p".to_string()));
     }
 
