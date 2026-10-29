@@ -356,7 +356,8 @@ pub fn report(text: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// `newq --stats-report FILE`.
+/// `newq --stats-report FILE`: prints the report, and (a Windows release has no
+/// console) also saves it as `FILE.report.txt` beside the log.
 pub fn run_if_asked(args: &[String]) -> Option<i32> {
     if args.first().map(String::as_str) != Some("--stats-report") {
         return None;
@@ -364,11 +365,17 @@ pub fn run_if_asked(args: &[String]) -> Option<i32> {
     let result = args
         .get(1)
         .ok_or_else(|| "usage: newq --stats-report FILE".to_string())
-        .and_then(|f| std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}")))
-        .and_then(|t| report(&t));
+        .and_then(|f| {
+            let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+            let report = report(&text)?;
+            let saved = Path::new(f).with_extension("report.txt");
+            let _ = std::fs::write(&saved, &report);
+            Ok((report, saved))
+        });
     Some(match result {
-        Ok(text) => {
+        Ok((text, saved)) => {
             print!("{text}");
+            println!("(saved in {})", saved.display());
             0
         }
         Err(e) => {
@@ -472,6 +479,24 @@ mod tests {
         assert_eq!(text.matches("time_utc").count(), 1, "{text}");
         assert_eq!(text.lines().count(), 3, "{text}");
         assert!(text.lines().nth(1).unwrap().contains(",4,"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_report_command_also_saves_the_report_beside_the_log() {
+        let dir = std::env::temp_dir().join(format!("newq_stats_report_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("run.csv");
+        std::fs::write(&csv, sample_file(50, 0, |_| (20, 0))).unwrap();
+        let args = vec!["--stats-report".to_string(), csv.display().to_string()];
+        assert_eq!(run_if_asked(&args), Some(0));
+        let saved = std::fs::read_to_string(dir.join("run.report.txt")).unwrap();
+        assert!(saved.contains("samples over"), "{saved}");
+        assert_eq!(
+            run_if_asked(&["--stats-report".into(), "/no/such.csv".into()]),
+            Some(2)
+        );
+        assert_eq!(run_if_asked(&["--other".into()]), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

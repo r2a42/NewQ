@@ -686,9 +686,11 @@ picture, music through an echo, a live clock, a three-picture slide show, an OSC
 and a wait. About two hundred laps in eight hours is a couple of thousand FFmpeg
 processes started and stopped.
 
+To run any show unattended with the same log, set `NEWQ_STATS=1` (and `NEWQ_AUTOSTART=5` to press GO) in the environment before starting NewQ; `--soak` does this for you.
+
 Before leaving: switch off sleep and the screen saver, set the displays and audio
 device in *Settings*, and watch the first lap. In the morning close NewQ and read the
-report (or make it again from the log with `newq --stats-report FILE.csv`, which on Windows prints nothing: use the `.report.txt` file). It shows how memory, open files and threads moved (with the trend per hour, after the
+report (or make it again from the log with `newq --stats-report FILE.csv`, which also saves `FILE.report.txt` beside the log, the only place the report shows on Windows). It shows how memory, open files and threads moved (with the trend per hour, after the
 first tenth of the run), the most FFmpeg processes at once, the worst late-frame share
 and audio load, the longest stall of the main loop, and a list of anything that looks
 wrong (memory growing, a stall over a second, a gap in the samples that means the
