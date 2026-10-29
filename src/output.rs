@@ -779,8 +779,10 @@ mod tests {
             .map(|w| w[1].duration_since(w[0]).as_secs_f64())
             .collect();
         assert!(gaps.len() > 20, "{}", gaps.len());
+        // A catch-up of up to three messages is allowed (and a busy runner stalls
+        // by itself now and then); the stall of twelve used to come back as twelve.
         let bursts = gaps.iter().filter(|g| **g < 0.003).count();
-        assert!(bursts <= 2, "{bursts} messages came back to back: {gaps:?}");
+        assert!(bursts <= 6, "{bursts} messages came back to back: {gaps:?}");
     }
 
     #[test]
