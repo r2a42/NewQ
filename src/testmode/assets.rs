@@ -8,7 +8,7 @@
 //! failure of a run stops further attempts, so being offline costs seconds.
 
 use super::Level;
-use crate::media::ffmpeg::Ffmpeg;
+use crate::media::ffmpeg::{Ffmpeg, output_cancellable};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -461,9 +461,9 @@ fn run(
             return;
         }
         let resolved = if let Some(from) = a.from {
-            derive(ff, dir, a, from, status)
+            derive(ff, dir, a, from, status, cancel)
         } else {
-            fetch_one(ff, dir, a, &mut online, status, cancel)
+            fetch_one(ff, dir, a, &mut online, status, cancel, false)
         };
         match resolved {
             Some(r) => {
@@ -500,6 +500,7 @@ fn fetch_one(
     online: &mut bool,
     status: &Mutex<Status>,
     cancel: &AtomicBool,
+    again: bool,
 ) -> Option<Resolved> {
     let path = dir.join(a.file);
     let why;
@@ -526,6 +527,19 @@ fn fetch_one(
                 match check(ff, &path, a.kind) {
                     Ok(r) => {
                         let sum = sha256_of(&path).unwrap_or_default();
+                        if !a.sha256.is_empty() && sum != a.sha256 && !again {
+                            // A download that was resumed can join two versions of
+                            // the file, and the result still plays: once more, whole.
+                            note(
+                                status,
+                                format!(
+                                    "{}: the file doesn't match what was expected; getting it again from the start.",
+                                    a.title
+                                ),
+                            );
+                            let _ = std::fs::remove_file(&path);
+                            return fetch_one(ff, dir, a, online, status, cancel, true);
+                        }
                         if !a.sha256.is_empty() && sum != a.sha256 {
                             note(
                                 status,
@@ -562,7 +576,7 @@ fn fetch_one(
         return None;
     }
     set_state(status, a.id, State::Checking);
-    match generate(ff, dir, a) {
+    match generate(ff, dir, a, cancel) {
         Ok(p) => match check(ff, &p, a.kind) {
             Ok(r) => Some(with_source(r, p, Source::Generated(why))),
             Err(e) => {
@@ -596,6 +610,7 @@ fn derive(
     a: &'static Asset,
     from: &str,
     status: &Mutex<Status>,
+    cancel: &AtomicBool,
 ) -> Option<Resolved> {
     let path = dir.join(a.file);
     set_state(status, a.id, State::Checking);
@@ -608,13 +623,14 @@ fn derive(
     let result = match source {
         Some(r) if r.audio_channels > 0 && !matches!(r.source, Source::Generated(_)) => {
             let tmp = dir.join(format!("partial_{}", a.file));
-            let out = ff
-                .command()
-                .args(["-y", "-i"])
-                .arg(&r.path)
-                .args(["-vn", "-c:a", "pcm_s16le"])
-                .arg(&tmp)
-                .output();
+            let out = output_cancellable(
+                ff.command()
+                    .args(["-y", "-i"])
+                    .arg(&r.path)
+                    .args(["-vn", "-c:a", "pcm_s16le"])
+                    .arg(&tmp),
+                cancel,
+            );
             match out {
                 Ok(o) if o.status.success() => std::fs::rename(&tmp, &path)
                     .map_err(|e| e.to_string())
@@ -636,7 +652,7 @@ fn derive(
                 status,
                 format!("{}: made with FFmpeg instead ({why}).", a.title),
             );
-            match generate(ff, dir, a).and_then(|p| {
+            match generate(ff, dir, a, cancel).and_then(|p| {
                 check(ff, &p, Kind::Audio).map(|r| with_source(r, p, Source::Generated(why)))
             }) {
                 Ok(r) => Some(r),
@@ -803,7 +819,13 @@ pub fn download(
         "{}.part",
         dest.extension().and_then(|e| e.to_str()).unwrap_or("dl")
     ));
-    let have = std::fs::metadata(&part).map_or(0, |m| m.len());
+    let mut have = std::fs::metadata(&part).map_or(0, |m| m.len());
+    // A partial file as long as the whole (or longer) is not a start to resume
+    // from: it is from another version of the file, or its last step failed.
+    if have > 0 && expected > 0 && have >= expected {
+        let _ = std::fs::remove_file(&part);
+        have = 0;
+    }
     let agent = agent();
     let mut req = agent.get(url);
     if have > 0 {
@@ -811,6 +833,11 @@ pub fn download(
     }
     let resp = req.call().map_err(|e| match e {
         ureq::Error::StatusCode(code) => {
+            if have > 0 {
+                // Whatever the partial file was, the server won't continue
+                // it (416: it is longer than the file now): start again.
+                let _ = std::fs::remove_file(&part);
+            }
             DownloadError::Other(format!("the server answered {code}"))
         }
         // Anything else is the network: DNS, connect, TLS, timeout.
@@ -890,7 +917,7 @@ fn generated_name(a: &Asset) -> String {
     format!("generated_{stem}.{ext}")
 }
 
-fn generate(ff: &Ffmpeg, dir: &Path, a: &Asset) -> Result<PathBuf, String> {
+fn generate(ff: &Ffmpeg, dir: &Path, a: &Asset, cancel: &AtomicBool) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let out = dir.join(generated_name(a));
     if out.is_file() && check(ff, &out, a.kind).is_ok() {
@@ -963,12 +990,7 @@ fn generate(ff: &Ffmpeg, dir: &Path, a: &Asset) -> Result<PathBuf, String> {
             );
         }
     }
-    let result = ff
-        .command()
-        .args(["-y"])
-        .args(&args)
-        .arg(&tmp)
-        .output()
+    let result = output_cancellable(ff.command().args(["-y"]).args(&args).arg(&tmp), cancel)
         .map_err(|e| e.to_string())?;
     if !result.status.success() {
         let _ = std::fs::remove_file(&tmp);
@@ -992,6 +1014,8 @@ mod tests {
         /// Says it will send everything, sends half, and hangs up.
         Truncate,
         NotFound,
+        /// A Range is answered with 416: the file is shorter than what was asked for.
+        PastTheEnd,
     }
 
     /// A tiny HTTP server on loopback for the tests.
@@ -1055,6 +1079,9 @@ mod tests {
                     };
                     let out = match mode {
                         Mode::NotFound => reply("404 Not Found", b"no", 2),
+                        Mode::PastTheEnd if range.is_some() => {
+                            reply("416 Range Not Satisfiable", b"", 0)
+                        }
                         Mode::Truncate => {
                             let half = &body[..body.len() / 2];
                             reply("200 OK", half, body.len())
@@ -1181,6 +1208,51 @@ mod tests {
             server.hits.lock().last().unwrap().as_deref(),
             Some("bytes=150000-")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_partial_file_as_long_as_the_whole_is_thrown_away_not_resumed_from() {
+        let data = body(100_000);
+        let server = Server::start(data.clone());
+        let dir = scratch("stale_long");
+        let dest = dir.join("x.bin");
+        // From another version of the file, longer than this one.
+        std::fs::write(dir.join("x.bin.part"), vec![9u8; 150_000]).unwrap();
+        download(
+            &server.url,
+            &dest,
+            100_000,
+            &AtomicBool::new(false),
+            &|_, _| {},
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        assert_eq!(server.hits.lock().last().unwrap().as_deref(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_416_clears_the_partial_file_so_the_next_attempt_starts_whole() {
+        let data = body(100_000);
+        let server = Server::start(data.clone());
+        let dir = scratch("stale_416");
+        let dest = dir.join("x.bin");
+        let part = dir.join("x.bin.part");
+        // Size not known beforehand, so only the server can say it's too long.
+        std::fs::write(&part, vec![9u8; 40_000]).unwrap();
+        server.set(Mode::PastTheEnd);
+        let err = download(&server.url, &dest, 0, &AtomicBool::new(false), &|_, _| {}).unwrap_err();
+        assert!(
+            matches!(&err, DownloadError::Other(m) if m.contains("416")),
+            "{err:?}"
+        );
+        assert!(
+            !part.exists(),
+            "the stale partial file must not stay to fail again"
+        );
+        download(&server.url, &dest, 0, &AtomicBool::new(false), &|_, _| {}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
         let _ = std::fs::remove_dir_all(dir);
     }
 

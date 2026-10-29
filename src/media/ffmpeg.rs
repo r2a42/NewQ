@@ -137,6 +137,57 @@ impl Ffmpeg {
     }
 }
 
+/// Run `cmd` to its end and collect what it printed, like `Command::output`,
+/// but kill it if `cancel` is set (looked at every 50 ms): a long encode must
+/// not make Cancel or Quit wait for it.
+pub fn output_cancellable(
+    cmd: &mut Command,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::sync::atomic::Ordering;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let out = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
+}
+
 #[cfg(windows)]
 pub fn no_console(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -420,5 +471,41 @@ mod tests {
         let info = parse_probe(json).unwrap();
         assert!(info.is_still);
         assert_eq!(info.duration, None);
+    }
+
+    #[test]
+    fn a_cancelled_command_is_killed_not_waited_for() {
+        let Some(ff) = Ffmpeg::locate() else {
+            return;
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c2 = cancel.clone();
+        let t = std::time::Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            c2.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        // Ten minutes of 4K, if it were left alone.
+        let out = output_cancellable(
+            ff.command().args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=3840x2160:rate=30",
+                "-t",
+                "600",
+                "-f",
+                "null",
+                "-",
+            ]),
+            &cancel,
+        )
+        .unwrap();
+        assert!(!out.status.success(), "it was killed");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            t.elapsed()
+        );
     }
 }

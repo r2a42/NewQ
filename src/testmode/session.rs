@@ -108,14 +108,18 @@ pub fn memory_limit_mb(ram_mb: u64) -> u64 {
     (ram_mb / 2).max(2048)
 }
 
-/// Watches NewQ's own memory once a second, much more often than the log's
-/// rows: a runaway can fill the memory between two of those.
+/// Watches the memory of NewQ and of the FFmpeg processes it started: NewQ's
+/// own once a second, much more often than the log's rows (a runaway can fill
+/// the memory between two of those), and the children every few seconds (finding
+/// them means looking at every process, which costs more).
 pub(super) struct MemoryWatch {
     sys: sysinfo::System,
     me: sysinfo::Pid,
     limit_mb: u64,
-    ram_mb: u64,
+    pub(super) ram_mb: u64,
     last: Instant,
+    last_children: Instant,
+    children_mb: u64,
     peak_mb: u64,
 }
 
@@ -130,21 +134,37 @@ impl MemoryWatch {
             limit_mb: memory_limit_mb(ram_mb),
             ram_mb,
             last: Instant::now(),
+            last_children: Instant::now(),
+            children_mb: 0,
             peak_mb: 0,
         }
     }
 
-    /// NewQ's memory in MB if it is over the limit (looks once a second).
+    /// The memory of NewQ and its children in MB, if it is over the limit.
     pub(super) fn over(&mut self, now: Instant) -> Option<u64> {
         if now.duration_since(self.last) < Duration::from_secs(1) {
             return None;
         }
         self.last = now;
-        self.sys
-            .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.me]), true);
+        if now.duration_since(self.last_children) >= Duration::from_secs(3) {
+            self.last_children = now;
+            self.sys
+                .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            self.children_mb = self
+                .sys
+                .processes()
+                .values()
+                .filter(|p| p.thread_kind().is_none() && p.parent() == Some(self.me))
+                .map(|p| p.memory() >> 20)
+                .sum();
+        } else {
+            self.sys
+                .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.me]), true);
+        }
         let mb = self.sys.process(self.me)?.memory() >> 20;
         self.peak_mb = self.peak_mb.max(mb);
-        (mb > self.limit_mb).then_some(mb)
+        let total = mb + self.children_mb;
+        (total > self.limit_mb).then_some(total)
     }
 }
 
@@ -660,7 +680,7 @@ impl Run {
                 names.join("; ")
             ));
             return Some(End::Failed(format!(
-                "NewQ was using {:.1} GB of this computer's {:.0} GB of memory, so the test was stopped before it made the computer unusable",
+                "NewQ and its FFmpeg processes were using {:.1} GB of this computer's {:.0} GB of memory, so the test was stopped before it made the computer unusable",
                 mb as f64 / 1024.0,
                 self.memory.ram_mb as f64 / 1024.0
             )));
@@ -1039,7 +1059,9 @@ fn system_report(
         None => p("Sound: no output device".to_string()),
     }
     if let Some(ff) = &engine.ff {
-        let version = std::process::Command::new(&ff.ffmpeg)
+        let mut version_cmd = std::process::Command::new(&ff.ffmpeg);
+        crate::media::ffmpeg::no_console(&mut version_cmd);
+        let version = version_cmd
             .arg("-version")
             .output()
             .ok()
@@ -1121,6 +1143,39 @@ mod tests {
         assert_eq!(memory_limit_mb(24 * 1024), 12 * 1024);
         assert_eq!(memory_limit_mb(2048), 2048);
         assert_eq!(memory_limit_mb(0), 2048);
+    }
+
+    #[test]
+    fn the_memory_watch_counts_the_processes_it_started() {
+        let Some(ff) = Ffmpeg::locate() else { return };
+        // A process that is busy and of a size worth counting.
+        let mut child = ff
+            .command()
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=3840x2160:rate=30",
+                "-t",
+                "30",
+                "-f",
+                "null",
+                "-",
+            ])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let mut w = MemoryWatch::new();
+        let t = Instant::now();
+        w.limit_mb = u64::MAX;
+        let _ = w.over(t + Duration::from_secs(4));
+        let counted = w.children_mb;
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            counted > 5,
+            "the child's memory was not counted: {counted} MB"
+        );
     }
 
     #[test]
