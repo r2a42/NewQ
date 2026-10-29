@@ -50,9 +50,8 @@ workflow is meant to be started by `workflow_dispatch` (owner's token).
 ## Tool pitfalls (all hit before)
 
 - `actions_list list_workflow_runs` ignores `per_page` and returns ~100 runs, a huge
-  output. Prefer `actions_get get_workflow_run` with a run id. To find the id of a run
-  you just started, call `list_workflow_runs` once with `workflow_runs_filter`
-  `{"branch":"main"}` and read only the first entry; do not call it repeatedly.
+  output. Prefer `actions_get get_workflow_run` with a run id, and find the id of a run you
+  just started with `scripts/gh_wait.sh latest <workflow>.yml`.
 - `get_job_logs` needs `job_id` (not `run_id`) unless `failed_only` with `run_id`; use
   `tail_lines` (60 to 80).
 - Your own PR comments come back as `issue_comment.created` events from the same account:
