@@ -284,6 +284,99 @@ pub struct UiState {
     /// What can be undone and redone.
     pub history: History,
     scroll_to_selected: bool,
+    /// Test Mode (see `testmode`): its window and whatever it is doing.
+    pub test: crate::testmode::TestMode,
+    /// A test show is in place of the show: nothing may be saved, opened or edited.
+    pub test_locked: bool,
+}
+
+/// What a test show displaces, kept to put back exactly (see `begin_test`).
+pub struct TestStash {
+    show: Show,
+    selected: Option<CueId>,
+    show_path: Option<PathBuf>,
+    dirty: bool,
+    saved_json: Option<String>,
+    json: Option<String>,
+    history: History,
+    show_mode: bool,
+    cue_filter: String,
+    lists: crate::engine::ListState,
+}
+
+impl UiState {
+    /// Put `test_show` in the place of the show and lock it. Everything about
+    /// the show that the interface keeps (its file, unsaved-changes mark, undo
+    /// history, selection, show mode, search, the playheads) is put aside in
+    /// the returned stash, and `end_test` puts it all back. Nothing is written
+    /// to disk either way; refuse to start with `test_refusal` first.
+    pub fn begin_test(
+        &mut self,
+        show: &mut Show,
+        engine: &mut Engine,
+        test_show: Show,
+    ) -> TestStash {
+        engine.stop_all(0.0);
+        let stash = TestStash {
+            show: std::mem::replace(show, test_show),
+            selected: self.selected.take(),
+            show_path: self.show_path.take(),
+            dirty: self.dirty,
+            saved_json: self.saved_json.take(),
+            json: self.json.take(),
+            history: std::mem::take(&mut self.history),
+            show_mode: self.show_mode,
+            cue_filter: std::mem::take(&mut self.cue_filter),
+            lists: engine.take_list_state(),
+        };
+        engine.set_paused(false);
+        engine.playhead = show.cues.first().map(|c| c.id);
+        self.selected = engine.playhead;
+        self.saved_json = serde_json::to_string(show).ok();
+        if let Some(j) = &self.saved_json {
+            self.history.reset(j.clone());
+        }
+        self.dirty = false;
+        self.show_mode = true;
+        self.confirm_edit_mode = false;
+        self.capture_hotkey = None;
+        self.test_locked = true;
+        stash
+    }
+
+    /// Put the show back as `begin_test` found it.
+    pub fn end_test(&mut self, show: &mut Show, engine: &mut Engine, stash: TestStash) {
+        engine.stop_all(0.0);
+        *show = stash.show;
+        engine.restore_list_state(stash.lists);
+        self.selected = stash.selected;
+        self.show_path = stash.show_path;
+        self.dirty = stash.dirty;
+        self.saved_json = stash.saved_json;
+        self.json = stash.json;
+        self.history = stash.history;
+        self.show_mode = stash.show_mode;
+        self.cue_filter = stash.cue_filter;
+        self.confirm_edit_mode = false;
+        self.test_locked = false;
+        self.scrubs.clear();
+        self.json_stale = true;
+    }
+
+    /// Why a test can't start now, if it can't.
+    pub fn test_refusal(&self) -> Option<&'static str> {
+        if self.dirty {
+            Some(
+                "Save your show first: it has changes that aren't saved. (The test puts your show aside and brings it back, but a test is no time to risk unsaved work.)",
+            )
+        } else if self.saving.is_some() {
+            Some("Your show is being saved; try again in a moment.")
+        } else if self.dialog.is_some() || self.slide_dialog.is_some() {
+            Some("Close the open file dialog first.")
+        } else {
+            None
+        }
+    }
 }
 
 impl UiState {
@@ -8079,6 +8172,23 @@ fn set_show_mode(st: &mut UiState, engine: &mut Engine, on: bool) {
 }
 
 fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    // While a test show is in place of the show, nothing may change it, save
+    // it over the real one, or open another.
+    if st.test_locked
+        && (action.edits_the_show()
+            || matches!(
+                action,
+                Action::Save
+                    | Action::SaveAs
+                    | Action::SaveShowTo(_)
+                    | Action::ToggleShowMode
+                    | Action::SetShowMode(_)
+                    | Action::AskFile(..)
+            ))
+    {
+        engine.log("A test is running: stop it (Help ▸ Test mode) to work on your show");
+        return;
+    }
     if st.show_mode && action.edits_the_show() {
         engine.log("Show mode: switch to edit mode (Edit menu, or the button at the top right) to make changes");
         return;
@@ -9201,6 +9311,82 @@ mod tests {
 
     fn is_playing(e: &Engine, id: CueId) -> bool {
         matches!(e.status(id), CueStatus::Playing { .. })
+    }
+
+    #[test]
+    fn a_test_show_takes_the_place_of_the_show_and_gives_it_back_untouched() {
+        let (mut show, mut e, mut st) = running();
+        let before = serde_json::to_string(&show).unwrap();
+        // A show with a file, a history, a selection, a search and a place in a list.
+        let dir = std::env::temp_dir().join(format!("newq_test_stash_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.newq");
+        show.save(&path).unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        st.show_path = Some(path.clone());
+        st.saved_json = Some(before.clone());
+        st.history.reset(before.clone());
+        st.history.observe(&format!("{before} "), 1.0);
+        st.history.observe(&format!("{before} "), 3.0);
+        assert!(st.history.can_undo());
+        st.cue_filter = "x".into();
+        st.selected = Some(number(&show, "3"));
+        e.playhead = Some(number(&show, "3"));
+        e.set_paused(true);
+        let (sel, head) = (st.selected, e.playhead);
+        assert!(st.test_refusal().is_none());
+
+        let mut test = Show::default();
+        let c = test.make_cue(CueType::Wait, None, 0);
+        let first = c.id;
+        test.cues.push(c);
+        let stash = st.begin_test(&mut show, &mut e, test);
+        assert_eq!(show.cues.len(), 1);
+        assert!(st.test_locked && st.show_mode && !st.dirty && st.show_path.is_none());
+        assert_eq!(e.playhead, Some(first));
+        assert!(!e.paused);
+        // Nothing can edit it, save it over the real one, or open another.
+        for a in [
+            Action::Delete,
+            Action::AddCue(CueType::Wait),
+            Action::Save,
+            Action::SaveAs,
+            Action::SaveShowTo(path.clone()),
+            Action::New,
+            Action::Open,
+            Action::SetShowMode(false),
+            Action::ToggleShowMode,
+            Action::Undo,
+        ] {
+            apply(a, &mut show, &mut e, &mut st);
+        }
+        assert_eq!(show.cues.len(), 1);
+        assert!(st.show_mode && st.saving.is_none() && st.dialog.is_none());
+        assert!(
+            std::fs::read(&path).unwrap() == on_disk,
+            "the file was written"
+        );
+        // It still runs.
+        apply(Action::Go, &mut show, &mut e, &mut st);
+        assert!(e.is_active());
+
+        st.end_test(&mut show, &mut e, stash);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        assert!(!st.test_locked && !st.show_mode && !st.dirty);
+        assert_eq!(st.show_path.as_deref(), Some(path.as_path()));
+        assert_eq!((st.selected, e.playhead), (sel, head));
+        assert_eq!(st.cue_filter, "x");
+        assert!(st.history.can_undo(), "the undo history is back");
+        assert!(e.paused && !e.is_active());
+        assert!(std::fs::read(&path).unwrap() == on_disk);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_test_will_not_start_over_unsaved_work() {
+        let (_show, _e, mut st) = running();
+        st.dirty = true;
+        assert!(st.test_refusal().unwrap().contains("Save your show first"));
     }
 
     #[test]

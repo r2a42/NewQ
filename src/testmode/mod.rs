@@ -22,3 +22,9 @@ impl Level {
         }
     }
 }
+
+/// Everything Test Mode keeps (a field of the interface state).
+#[derive(Default)]
+pub struct TestMode {
+    pub open: bool,
+}

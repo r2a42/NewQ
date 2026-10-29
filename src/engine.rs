@@ -479,6 +479,14 @@ struct Prepared {
     warning: Option<String>,
 }
 
+/// Where the playheads were, put aside while a test show runs.
+pub struct ListState {
+    playhead: Option<CueId>,
+    active_list: u32,
+    list_playheads: HashMap<u32, Option<CueId>>,
+    paused: bool,
+}
+
 pub enum CueStatus {
     Idle,
     PreWait { remaining: f64, total: f64 },
@@ -518,6 +526,8 @@ pub struct Engine {
     list_playheads: HashMap<u32, Option<CueId>>,
     pub paused: bool,
     pub messages: VecDeque<(Instant, String)>,
+    /// A copy of the log for a test's file, while one is wanted.
+    log_tap: Option<Vec<(Instant, String)>>,
     /// Current size of each open output window, used to pick decode resolution.
     pub output_sizes: HashMap<OutputId, (u32, u32)>,
     pub probe: ProbeCache,
@@ -575,6 +585,7 @@ impl Engine {
             list_playheads: HashMap::new(),
             paused: false,
             messages: VecDeque::new(),
+            log_tap: None,
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
             waveforms: WaveformCache::default(),
@@ -611,6 +622,7 @@ impl Engine {
             list_playheads: HashMap::new(),
             paused: false,
             messages: VecDeque::new(),
+            log_tap: None,
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
             waveforms: WaveformCache::default(),
@@ -688,6 +700,9 @@ impl Engine {
     pub fn log(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         log::info!("{msg}");
+        if let Some(tap) = &mut self.log_tap {
+            tap.push((Instant::now(), msg.clone()));
+        }
         self.messages.push_back((Instant::now(), msg));
         while self.messages.len() > 50 {
             self.messages.pop_front();
@@ -860,6 +875,37 @@ impl Engine {
             self.active_list = 0;
             self.playhead = Self::first_in_list(show, 0);
         }
+    }
+
+    /// Take the playheads away, leaving none, to put back later (a test show
+    /// is run in place of the show; see `testmode`).
+    pub fn take_list_state(&mut self) -> ListState {
+        ListState {
+            playhead: self.playhead.take(),
+            active_list: std::mem::take(&mut self.active_list),
+            list_playheads: std::mem::take(&mut self.list_playheads),
+            paused: self.paused,
+        }
+    }
+
+    pub fn restore_list_state(&mut self, state: ListState) {
+        self.playhead = state.playhead;
+        self.active_list = state.active_list;
+        self.list_playheads = state.list_playheads;
+        self.set_paused(state.paused);
+    }
+
+    /// Start (or stop) keeping a copy of everything the engine logs, for a
+    /// test's log file. `take_log_tap` hands over what has come since.
+    pub fn set_log_tap(&mut self, on: bool) {
+        self.log_tap = on.then(Vec::new);
+    }
+
+    pub fn take_log_tap(&mut self) -> Vec<(Instant, String)> {
+        self.log_tap
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Forget where the playheads were (another show was opened).
