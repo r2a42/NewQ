@@ -6,6 +6,7 @@
 
 pub mod analysis;
 pub mod assets;
+pub mod decode;
 pub mod gui;
 pub mod plan;
 pub mod session;

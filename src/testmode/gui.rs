@@ -25,12 +25,13 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     let mut open = true;
     let mut test = std::mem::take(&mut st.test);
     let refusal = st.test_refusal();
+    let mut apply: Option<bool> = None;
     egui::Window::new("Test mode")
         .open(&mut open)
         .collapsible(false)
         .default_width(520.0)
         .show(ctx, |ui| {
-            body(ui, engine, &mut test, refusal);
+            body(ui, engine, &mut test, refusal, &mut apply);
         });
     if !open {
         if test.busy() {
@@ -43,6 +44,16 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
     test.open = open;
     st.test = test;
+    if let Some(on) = apply {
+        // The user asked for what the comparison advised.
+        st.prefs.hw_decode = on;
+        crate::media::video::set_hw_decode(on);
+        if let Some(dir) = &st.layout_dir
+            && let Err(e) = st.prefs.save(dir)
+        {
+            log::warn!("could not save the settings of this computer: {e}");
+        }
+    }
     if st.test.busy() {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
@@ -53,6 +64,7 @@ fn body(
     engine: &Engine,
     test: &mut super::TestMode,
     refusal: Option<&'static str>,
+    apply: &mut Option<bool>,
 ) {
     let log_dir = crate::crash::log_dir();
     let mut dismiss = false;
@@ -122,6 +134,13 @@ fn body(
                     .small(),
             );
         }
+        View::Comparing(c) => {
+            comparing(ui, c);
+            ui.separator();
+            if ui.button("Stop the comparison").clicked() {
+                test.stop();
+            }
+        }
         View::Running(r) => {
             running(ui, r);
             ui.separator();
@@ -135,16 +154,71 @@ fn body(
                 Verdict::PassedWithNotes => (AMBER, "Passed, with notes"),
                 Verdict::ProblemsFound => (RED, "Problems found"),
             };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(word).size(22.0).strong().color(colour));
-                ui.label(format!(
-                    "{} test, {}, {} lap{}",
-                    d.level.label(),
-                    clock(d.elapsed),
-                    d.laps,
-                    if d.laps == 1 { "" } else { "s" }
-                ));
-            });
+            if let Some(cmp) = &d.compare {
+                use super::decode::Advice;
+                let (c, w) = match cmp.advice {
+                    Advice::TurnOn => (GREEN, "Turn it on"),
+                    Advice::LeaveOff => (RED, "Leave it off"),
+                    Advice::NoDifference => (AMBER, "Little difference"),
+                    Advice::Inconclusive => (Color32::GRAY, "Inconclusive"),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(w).size(22.0).strong().color(c));
+                    ui.label(format!("Hardware decoding, {}", clock(d.elapsed)));
+                });
+                let change = match (cmp.advice, cmp.was_on) {
+                    (Advice::TurnOn, false) => Some((true, "Turn hardware decoding on")),
+                    (Advice::LeaveOff, true) => Some((false, "Turn hardware decoding off")),
+                    _ => None,
+                };
+                if let Some((to, label)) = change
+                    && ui.button(label).clicked()
+                {
+                    *apply = Some(to);
+                }
+                egui::Grid::new("decode-table")
+                    .num_columns(5)
+                    .show(ui, |ui| {
+                        for h in ["", "Processor", "Late frames", "Longest stall", "Memory"] {
+                            ui.label(RichText::new(h).weak().small());
+                        }
+                        ui.end_row();
+                        for (name, s) in [("Off", &cmp.off), ("On", &cmp.on)] {
+                            ui.label(name);
+                            match s {
+                                Some(s) => {
+                                    ui.label(format!("{:.0}% of a core", s.total_cpu()));
+                                    ui.label(format!("{:.1}%", s.late_permille / 10.0));
+                                    ui.label(format!("{} ms", s.stall_ms));
+                                    ui.label(format!("{} MB", s.rss_mb));
+                                }
+                                None => {
+                                    ui.label("not measured");
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.label(
+                    RichText::new(match &cmp.engaged {
+                        Some(how) => format!("FFmpeg said: {how}"),
+                        None => "FFmpeg did not say it used a hardware decoder.".to_string(),
+                    })
+                    .weak()
+                    .small(),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(word).size(22.0).strong().color(colour));
+                    ui.label(format!(
+                        "{} test, {}, {} lap{}",
+                        d.level.label(),
+                        clock(d.elapsed),
+                        d.laps,
+                        if d.laps == 1 { "" } else { "s" }
+                    ));
+                });
+            }
             ui.label(&d.headline);
             if matches!(d.ended, End::Stopped) {
                 ui.label(RichText::new("You stopped it early.").weak());
@@ -289,6 +363,23 @@ fn idle(
     {
         test.start(ff, log_dir);
     }
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(RichText::new("Does hardware decoding help here?").strong());
+    ui.label(
+        RichText::new(
+            "Plays a wall of four 4K clips twice, with it off and on, about two minutes, and says which to use. It makes a 4K clip from the downloaded film.",
+        )
+        .weak()
+        .small(),
+    );
+    if ui
+        .add_enabled(can, egui::Button::new("Compare hardware decoding"))
+        .clicked()
+        && let Some(ff) = engine.ff.clone()
+    {
+        test.start_compare(ff, log_dir);
+    }
     ui.label(
         RichText::new("Sound and pictures go to your show's outputs while it runs. Log files: ")
             .weak()
@@ -427,4 +518,49 @@ fn running(ui: &mut egui::Ui, r: &Run) {
             ui.ctx().copy_text(r.folder.display().to_string());
         }
     });
+}
+
+fn comparing(ui: &mut egui::Ui, c: &super::decode::Compare) {
+    use super::decode::Stage;
+    ui.label(RichText::new("Comparing hardware decoding").strong());
+    match &c.stage {
+        Stage::Making => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Making a 4K clip to test with (a few seconds to a minute)…");
+            });
+            ui.label(
+                RichText::new("Nothing about your show has changed.")
+                    .weak()
+                    .small(),
+            );
+        }
+        Stage::Trial { hw, began } => {
+            let (n, name) = if *hw { (2, "on") } else { (1, "off") };
+            let total = (super::decode::WARM_UP + c.secs) as f32;
+            let done = began.elapsed().as_secs_f32().min(total);
+            ui.label(format!("Trial {n} of 2: hardware decoding {name}"));
+            ui.add(
+                egui::ProgressBar::new(done / total)
+                    .text(format!("{:.0} s of {:.0} s", done, total)),
+            );
+            if let Some(s) = &c.live {
+                ui.label(format!(
+                    "Processor now: NewQ {:.0}%, FFmpeg {:.0}% (of one core)",
+                    s.cpu_pct, s.ffmpeg_cpu_pct
+                ));
+            }
+            if let Some(off) = &c.results[0] {
+                ui.label(
+                    RichText::new(format!(
+                        "With it off: {:.0}% of one core, {:.1}% late frames",
+                        off.total_cpu(),
+                        off.late_permille / 10.0
+                    ))
+                    .weak(),
+                );
+            }
+        }
+    }
+    ui.label(RichText::new(c.folder.display().to_string()).small().weak());
 }
