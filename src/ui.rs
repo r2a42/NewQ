@@ -7777,6 +7777,12 @@ fn show_dialog() -> rfd::FileDialog {
 
 /// Ask what to do with unsaved changes. Returns true if it is OK to continue.
 pub fn confirm_discard(show: &Show, st: &mut UiState) -> bool {
+    // During a test the show is the test's, which is put away unsaved and the
+    // user's own comes back: there is nothing here to ask about (and a Save
+    // would put the test show in a file of the user's).
+    if st.test_locked {
+        return true;
+    }
     if let Some(why) = finish_save(show, st) {
         tell_save_failed(&why, true);
     }
@@ -9387,6 +9393,15 @@ mod tests {
         assert!(e.paused && !e.is_active());
         assert!(std::fs::read(&path).unwrap() == on_disk);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quitting_during_a_test_does_not_ask_to_save_the_test_show() {
+        let (show, _e, mut st) = running();
+        st.dirty = true;
+        st.test_locked = true;
+        // No dialog (it would block this test): straight through.
+        assert!(confirm_discard(&show, &mut st));
     }
 
     #[test]

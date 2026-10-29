@@ -13,7 +13,7 @@ use super::analysis::{Finding, Severity};
 use super::assets::{self, Kind, Resolved};
 use super::session::{End, MemoryWatch, clock};
 use crate::engine::Engine;
-use crate::media::ffmpeg::Ffmpeg;
+use crate::media::ffmpeg::{Ffmpeg, no_console, output_cancellable};
 use crate::media::video;
 use crate::show::Show;
 use crate::stats::{Inputs, Sample, StatsLog};
@@ -189,7 +189,9 @@ fn make_clip(
     candidates: Vec<(&'static str, Vec<String>)>,
 ) -> Result<Made, String> {
     let engaged = |clip: &Path| {
-        let out = std::process::Command::new(&ff.ffmpeg)
+        let mut cmd = std::process::Command::new(&ff.ffmpeg);
+        no_console(&mut cmd);
+        let out = cmd
             .args([
                 "-hide_banner",
                 "-nostdin",
@@ -218,28 +220,40 @@ fn make_clip(
             what: four_k(),
         });
     }
-    let tmp = dest.with_extension("part.mp4");
+    // A name of this attempt's own: a stopped comparison's encoder may still be
+    // finishing, and must not share a file with the next one.
+    let tmp = dest.with_extension(format!(
+        "{}.part.mp4",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
     let mut last = String::new();
     for (name, args) in candidates {
         if cancel.load(Ordering::Relaxed) {
             return Err("Cancelled.".into());
         }
         let _ = std::fs::remove_file(&tmp);
-        let out = ff
-            .command()
-            .args(["-y", "-i"])
-            .arg(source)
-            .args([
-                "-t",
-                "10",
-                "-an",
-                "-vf",
-                "scale=3840:2160:flags=bicubic,fps=30",
-            ])
-            .args(&args)
-            .arg(&tmp)
-            .output()
-            .map_err(|e| e.to_string())?;
+        let out = output_cancellable(
+            ff.command()
+                .args(["-y", "-i"])
+                .arg(source)
+                .args([
+                    "-t",
+                    "10",
+                    "-an",
+                    "-vf",
+                    "scale=3840:2160:flags=bicubic,fps=30",
+                ])
+                .args(&args)
+                .arg(&tmp),
+            cancel,
+        )
+        .map_err(|e| e.to_string())?;
+        if cancel.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("Cancelled.".into());
+        }
         if out.status.success()
             && let Ok(r) = assets::check(ff, &tmp, Kind::Video)
             && good(&r)
