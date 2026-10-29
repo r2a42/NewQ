@@ -279,7 +279,7 @@ pub fn build(media: &Path, short: bool) -> Show {
 /// the LGPL builds NewQ bundles (Windows and Mac) have no x264, and the system's
 /// own encoders depend on the machine, so those
 /// get MPEG-4 clips instead.
-fn h264_args(has: impl Fn(&str) -> bool) -> Vec<String> {
+pub(crate) fn h264_args(has: impl Fn(&str) -> bool) -> Vec<String> {
     let (encoder, options): (&str, &[&str]) = if has("libx264") {
         ("libx264", &["-preset", "veryfast"])
     } else {

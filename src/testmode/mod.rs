@@ -1,0 +1,24 @@
+//! Test Mode: a self-running test of this computer's playback, started from the
+//! Help menu with no command line. See `assets` for the media, and the
+//! README for what the three levels do.
+
+pub mod assets;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Short,
+    Medium,
+    Long,
+}
+
+impl Level {
+    pub const ALL: [Level; 3] = [Level::Short, Level::Medium, Level::Long];
+
+    pub fn bit(self) -> u8 {
+        match self {
+            Level::Short => 1,
+            Level::Medium => 2,
+            Level::Long => 4,
+        }
+    }
+}
