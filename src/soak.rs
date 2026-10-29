@@ -64,7 +64,7 @@ pub fn build(media: &Path, short: bool) -> Show {
         &mut show,
         CueType::Video,
         Some(f(FILES[0])),
-        "H.264 1080p with sound",
+        "Video 1080p with sound",
         None,
         |c| {
             follow(c);
@@ -275,10 +275,32 @@ pub fn build(media: &Path, short: bool) -> Show {
     show
 }
 
+/// The arguments that encode H.264, or the nearest thing, with what this FFmpeg
+/// has: the bundled LGPL builds have no x264, so the system's encoder is used
+/// (VideoToolbox on a Mac, Media Foundation on Windows), and as a last resort MPEG-4.
+fn h264_args(has: impl Fn(&str) -> bool) -> Vec<String> {
+    let (encoder, options): (&str, &[&str]) = if has("libx264") {
+        ("libx264", &["-preset", "veryfast"])
+    } else if has("h264_videotoolbox") {
+        ("h264_videotoolbox", &["-b:v", "8M"])
+    } else if has("h264_mf") {
+        ("h264_mf", &["-b:v", "8M"])
+    } else {
+        ("mpeg4", &["-q:v", "3"])
+    };
+    ["-c:v", encoder]
+        .iter()
+        .chain(options)
+        .chain(&["-pix_fmt", "yuv420p"])
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Make the files of `FILES` in `dir` that aren't there yet, with `ffmpeg`.
 pub fn make_media(ff: &crate::media::ffmpeg::Ffmpeg, dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let music = "aevalsrc=0.3*sin(2*PI*(220+40*sin(2*PI*t/7))*t)|0.3*sin(2*PI*(330+30*sin(2*PI*t/5))*t):s=48000:d=60";
+    let h264 = h264_args(|name| ff.has_encoder(name));
     let jobs: Vec<(&str, Vec<String>)> = {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut jobs = vec![
@@ -295,16 +317,13 @@ pub fn make_media(ff: &crate::media::ffmpeg::Ffmpeg, dir: &Path) -> Result<(), S
                     "sine=frequency=440:sample_rate=48000",
                     "-t",
                     "30",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-pix_fmt",
-                    "yuv420p",
                     "-c:a",
                     "aac",
                     "-shortest",
-                ]),
+                ])
+                .into_iter()
+                .chain(h264.clone())
+                .collect(),
             ),
             (
                 FILES[1],
@@ -330,13 +349,10 @@ pub fn make_media(ff: &crate::media::ffmpeg::Ffmpeg, dir: &Path) -> Result<(), S
                     "testsrc2=size=1280x720:rate=30",
                     "-t",
                     "6",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-pix_fmt",
-                    "yuv420p",
-                ]),
+                ])
+                .into_iter()
+                .chain(h264.clone())
+                .collect(),
             ),
             (
                 FILES[3],
@@ -639,6 +655,51 @@ mod tests {
             ffprobe: PathBuf::from("/no/ffprobe"),
         };
         assert!(make_media(&nowhere, &dir.join("x")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_video_encoder_is_the_best_one_this_ffmpeg_has() {
+        let enc = |has: &[&str]| {
+            let a = h264_args(|n| has.contains(&n));
+            a[1].clone()
+        };
+        assert_eq!(enc(&["libx264", "h264_videotoolbox"]), "libx264");
+        assert_eq!(enc(&["h264_videotoolbox"]), "h264_videotoolbox");
+        assert_eq!(enc(&["h264_mf"]), "h264_mf");
+        assert_eq!(enc(&[]), "mpeg4");
+        // x264's preset is only passed to x264.
+        assert!(!h264_args(|n| n == "h264_videotoolbox").contains(&"-preset".to_string()));
+        assert!(h264_args(|_| true).contains(&"yuv420p".to_string()));
+    }
+
+    #[test]
+    fn the_media_is_made_even_with_only_the_fallback_encoder() {
+        // MPEG-4 is in every FFmpeg: make the clip the way an FFmpeg without x264 would.
+        let Some(ff) = crate::media::ffmpeg::Ffmpeg::locate() else {
+            return;
+        };
+        let args = h264_args(|_| false);
+        let dir = std::env::temp_dir().join(format!("newq_soak_mpeg4_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("x.mp4");
+        let status = ff
+            .command()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30",
+                "-t",
+                "1",
+            ])
+            .args(&args)
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(ff.probe(&out).unwrap().video.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
