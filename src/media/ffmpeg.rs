@@ -59,6 +59,19 @@ impl Ffmpeg {
         })
     }
 
+    /// Whether this FFmpeg has the encoder `name` (some builds lack `hap`, which
+    /// needs the snappy library).
+    pub fn has_encoder(&self, name: &str) -> bool {
+        let mut cmd = Command::new(&self.ffmpeg);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-encoders"]);
+        no_console(&mut cmd);
+        cmd.output().is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.split_whitespace().nth(1) == Some(name))
+        })
+    }
+
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.ffmpeg);
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);

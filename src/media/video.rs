@@ -1072,7 +1072,7 @@ mod tests {
     fn a_hap_file_is_played_as_the_frames_it_holds() {
         use crate::show::Animated;
         use crate::speed::SpeedMap;
-        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+        let Some((ff, src)) = crate::media::test_media_with_hap("testsrc_10s.mp4") else {
             return;
         };
         let clip = hap_clip(&ff, &src, "hap_alpha");

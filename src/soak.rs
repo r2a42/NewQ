@@ -76,21 +76,23 @@ pub fn build(media: &Path, short: bool) -> Show {
         },
     );
 
-    // 2. Hap, straight to the graphics card.
-    add(
-        &mut show,
-        CueType::Video,
-        Some(f(FILES[1])),
-        "Hap 1080p",
-        None,
-        |c| {
-            follow(c);
-            let m = playing(c);
-            m.end = Some(10.0 * k);
-            m.fade_in = 0.5;
-            m.fade_out = 0.5;
-        },
-    );
+    // 2. Hap, straight to the graphics card (left out where FFmpeg can't make the clip).
+    if media.join(FILES[1]).exists() {
+        add(
+            &mut show,
+            CueType::Video,
+            Some(f(FILES[1])),
+            "Hap 1080p",
+            None,
+            |c| {
+                follow(c);
+                let m = playing(c);
+                m.end = Some(10.0 * k);
+                m.fade_in = 0.5;
+                m.fade_out = 0.5;
+            },
+        );
+    }
 
     // 3. Layers at once: two looping clips (one with its speed and position
     //    moving, one blurred), music through an echo, a live clock, and a fade
@@ -274,7 +276,7 @@ pub fn build(media: &Path, short: bool) -> Show {
 }
 
 /// Make the files of `FILES` in `dir` that aren't there yet, with `ffmpeg`.
-pub fn make_media(ffmpeg: &Path, dir: &Path) -> Result<(), String> {
+pub fn make_media(ff: &crate::media::ffmpeg::Ffmpeg, dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let music = "aevalsrc=0.3*sin(2*PI*(220+40*sin(2*PI*t/7))*t)|0.3*sin(2*PI*(330+30*sin(2*PI*t/5))*t):s=48000:d=60";
     let jobs: Vec<(&str, Vec<String>)> = {
@@ -377,14 +379,19 @@ pub fn make_media(ffmpeg: &Path, dir: &Path) -> Result<(), String> {
         if out.exists() {
             continue;
         }
+        // Some FFmpeg builds (Homebrew's) can't make Hap: the show goes without it.
+        if name == FILES[1] && !ff.has_encoder("hap") {
+            eprintln!("This FFmpeg has no Hap encoder: the soak show will have no Hap cue.");
+            continue;
+        }
         // Written under another name and renamed, so a stopped run leaves no half file.
         let tmp = dir.join(format!("partial_{name}"));
-        let result = Command::new(ffmpeg)
+        let result = Command::new(&ff.ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-y"])
             .args(&args)
             .arg(&tmp)
             .output()
-            .map_err(|e| format!("can't run {}: {e}", ffmpeg.display()))?;
+            .map_err(|e| format!("can't run {}: {e}", ff.ffmpeg.display()))?;
         if !result.status.success() {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!(
@@ -414,7 +421,7 @@ fn soak(args: &[String]) -> Result<i32, String> {
         "Making the media in {} (a minute or two the first time)…",
         dir.display()
     );
-    make_media(&ff.ffmpeg, &dir)?;
+    make_media(&ff, &dir)?;
     let media = dir.canonicalize().map_err(|e| e.to_string())?;
     let show_path = dir.join(if short {
         "soak-short.newq"
@@ -489,7 +496,7 @@ pub fn run_if_asked(args: &[String]) -> Option<i32> {
         let missing: Vec<&str> = FILES
             .iter()
             .copied()
-            .filter(|n| !media.join(n).exists())
+            .filter(|n| *n != FILES[1] && !media.join(n).exists())
             .collect();
         if !missing.is_empty() {
             return Err(format!(
@@ -608,19 +615,30 @@ mod tests {
         };
         let dir = std::env::temp_dir().join(format!("newq_soak_media_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        make_media(&ff.ffmpeg, &dir).unwrap();
+        make_media(&ff, &dir).unwrap();
+        let hap = ff.has_encoder("hap");
         for n in FILES {
+            if n == FILES[1] && !hap {
+                assert!(!dir.join(n).exists());
+                continue;
+            }
             assert!(dir.join(n).metadata().unwrap().len() > 1000, "{n}");
         }
-        let hap = ff.probe(&dir.join(FILES[1])).unwrap();
-        assert_eq!(hap.video.unwrap().codec, "hap");
+        if hap {
+            let info = ff.probe(&dir.join(FILES[1])).unwrap();
+            assert_eq!(info.video.unwrap().codec, "hap");
+        }
         let before = dir.join(FILES[0]).metadata().unwrap().modified().unwrap();
-        make_media(&ff.ffmpeg, &dir).unwrap();
+        make_media(&ff, &dir).unwrap();
         assert_eq!(
             dir.join(FILES[0]).metadata().unwrap().modified().unwrap(),
             before
         );
-        assert!(make_media(Path::new("/no/ffmpeg"), &dir.join("x")).is_err());
+        let nowhere = crate::media::ffmpeg::Ffmpeg {
+            ffmpeg: PathBuf::from("/no/ffmpeg"),
+            ffprobe: PathBuf::from("/no/ffprobe"),
+        };
+        assert!(make_media(&nowhere, &dir.join("x")).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
