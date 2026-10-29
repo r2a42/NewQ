@@ -491,6 +491,7 @@ enum Action {
     CloseSettings,
     ToggleSettings,
     ToggleAbout,
+    ToggleTestMode,
     /// Make the clip for checking the sync (about a second of work).
     MakeSyncClip,
     /// A cue for the sync clip, looping.
@@ -723,6 +724,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     dock_area(ui, show, engine, st, &mut actions);
     media_window(ui.ctx(), show, st, &mut actions);
     about_window(ui.ctx(), st);
+    crate::testmode::gui::window(ui.ctx(), engine, st);
     if st.confirm_edit_mode {
         egui::Window::new("Leave show mode?")
             .collapsible(false)
@@ -1516,6 +1518,10 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
         ui.menu_button("Help", |ui| {
             if ui.button("About NewQ…").clicked() {
                 actions.push(Action::ToggleAbout);
+                ui.close();
+            }
+            if ui.button("Test mode…").clicked() {
+                actions.push(Action::ToggleTestMode);
                 ui.close();
             }
             ui.separator();
@@ -8501,6 +8507,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::ToggleAbout => st.show_about = !st.show_about,
+        Action::ToggleTestMode => st.test.open = !st.test.open,
         Action::MakeSyncClip => match engine.ff.clone() {
             None => st.sync_note = "ffmpeg wasn't found, so there's no clip to make.".into(),
             Some(ff) => {
@@ -11770,6 +11777,31 @@ mod tests {
         assert!(out.shapes.len() > 3 && st.show_about && st.about_logo.is_some());
         apply(Action::ToggleAbout, &mut show, &mut e, &mut st);
         assert!(!st.show_about);
+    }
+
+    #[test]
+    fn the_test_mode_window_opens_from_the_help_menu_and_draws() {
+        let mut show = Show::default();
+        let (mut e, mut st) = (Engine::for_tests(), UiState::default());
+        assert!(!st.test.open);
+        apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
+        assert!(st.test.open);
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            crate::testmode::gui::window(ui.ctx(), &e, &mut st)
+        });
+        out.textures_delta.clear();
+        assert!(out.shapes.len() > 5 && st.test.open);
+        // A show with unsaved changes can't be put aside for a test.
+        st.dirty = true;
+        assert!(st.test_refusal().is_some());
+        apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
+        assert!(!st.test.open);
     }
 
     #[test]

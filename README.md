@@ -657,6 +657,44 @@ If the displays are what stops NewQ starting, run it with `--main-window-only`
 and no output windows are opened, so you can open the app and set up the
 displays from the *Displays* page of the settings.
 
+## Test mode: try this computer before the show
+
+*Help ▸ Test mode…* plays a show of its own to find out how this computer copes, with
+nothing to type: no command line, no files to find. Choose a test and press Start.
+
+| Test | Length | What it does |
+|---|---|---|
+| Short | about a minute | One lap of everything: clips at 24, 30 and 60 fps, a slide show of large pictures, layers with effects and a moving picture, a 5.1 trailer with a downmix. |
+| Medium | 30 minutes to 2 hours (1 by default) | The same lap with a second trailer through sound effects, round and round: the run that finds a slow leak. |
+| Long | 4 to 12 hours (8 by default) | A longer lap with H.265, a 30 MB 10-second clip, six large pictures, more effects and a burst of twenty quick cues, for an overnight run. |
+
+**The media.** The first time, Test mode downloads free films and pictures (the
+Blender Foundation's *Big Buck Bunny* and *Sintel* and the *Jellyfish* clip, under
+CC-BY, from test-videos.co.uk and download.blender.org, and NASA pictures, which are
+public domain) into `test-mode/media` in the log folder. The window says how much
+first (about 20 MB for Short, about 100 MB for Long) and you can untick the box. Each file is checked
+against a known checksum and by decoding a few frames; a file that is missing, damaged
+or can't be fetched is made on this computer instead (colour bars, tones, test
+pictures), so with no internet the test still runs, just with plainer media. The
+window shows each file's progress, and a note when it fell back. The credits are saved
+in every report.
+
+**Your show is not touched.** It is put aside in memory while the test runs and put
+back exactly as it was, with its file, undo history, selection and playhead; nothing is
+saved over it, and its autosave copy is left alone. A show with unsaved changes can't
+start a test (save first), and the test show can't be edited or saved. If you close
+NewQ mid-test it ends properly first.
+
+**The log.** Each run has a folder `test-mode/runs/DATE_TIME_LEVEL` in the log folder
+holding `report.txt` (verdict, findings, laps, measurements, media and credits),
+`stats.csv` (a row every 2 to 15 seconds), `laps.csv`, `events.log` (what the engine
+said, with times), `system.txt` (OS, processor, graphics, displays, sound, FFmpeg) and
+an excerpt of `newq.log`. The window shows the path while it runs and at the end, with
+buttons to open the folder and copy the path. The verdict is *Passed*, *Passed, with
+notes* or *Problems found*: memory, FFmpeg processes, open files or threads that keep
+growing, main-loop stalls, late frames, heavy audio load, laps that run late or early,
+or cues that failed to start.
+
 ## Leaving a show running unattended: the soak test
 
 A show that has to run for hours can fail in ways a short rehearsal never shows: a

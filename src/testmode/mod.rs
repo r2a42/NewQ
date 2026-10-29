@@ -1,9 +1,16 @@
 //! Test Mode: a self-running test of this computer's playback, started from the
-//! Help menu with no command line. See `assets` for the media, and the
-//! README for what the three levels do.
+//! Help menu with no command line. `assets` makes the media ready (free
+//! downloads, or generated), `plan` builds the three test shows, `session`
+//! runs one while logging and puts the user's show back, `analysis` judges
+//! the numbers, and `gui` is the window.
 
+pub mod analysis;
 pub mod assets;
+pub mod gui;
 pub mod plan;
+pub mod session;
+
+pub use session::TestMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -30,10 +37,4 @@ impl Level {
             Level::Long => 4,
         }
     }
-}
-
-/// Everything Test Mode keeps (a field of the interface state).
-#[derive(Default)]
-pub struct TestMode {
-    pub open: bool,
 }

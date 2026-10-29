@@ -77,7 +77,7 @@ pub static CATALOG: &[Asset] = &[
         title: "Sintel, 1080p 24 fps, 10 s",
         credit: SINTEL,
         licence: CCBY,
-        levels: 6,
+        levels: 7,
     },
     Asset {
         id: "jelly_30",
@@ -90,7 +90,7 @@ pub static CATALOG: &[Asset] = &[
         title: "Jellyfish, 1080p 29.97 fps, 10 s",
         credit: JELLY,
         licence: "Free to use (test-videos.co.uk)",
-        levels: 6,
+        levels: 7,
     },
     Asset {
         id: "sintel_hi",
@@ -155,7 +155,7 @@ pub static CATALOG: &[Asset] = &[
         title: "Big Buck Bunny trailer, 480p with 5.1 sound, 33 s",
         credit: BBB,
         licence: CCBY,
-        levels: 6,
+        levels: 7,
     },
     Asset {
         id: "sintel_sound",
@@ -169,19 +169,6 @@ pub static CATALOG: &[Asset] = &[
         credit: SINTEL,
         licence: CCBY,
         levels: 7,
-    },
-    Asset {
-        id: "bbb_sound",
-        file: "bbb_trailer_5_1.wav",
-        kind: Kind::Audio,
-        url: "",
-        from: Some("bbb_trailer"),
-        bytes: 0,
-        sha256: "",
-        title: "Big Buck Bunny trailer sound, 5.1 channels",
-        credit: BBB,
-        licence: CCBY,
-        levels: 6,
     },
     Asset {
         id: "apollo11",
@@ -245,19 +232,6 @@ pub static CATALOG: &[Asset] = &[
         sha256: "076d0be8f7cf603f05e8b7281709400d9d39f21c6f615e8e385b8dfffc9bafdd",
         title: "Mars, global colour view (6787 x 6787)",
         credit: "NASA/JPL/USGS, PIA00407",
-        licence: NASA,
-        levels: 4,
-    },
-    Asset {
-        id: "dumbbell",
-        file: "dumbbell_PIA14417.jpg",
-        kind: Kind::Image,
-        url: "https://images-assets.nasa.gov/image/PIA14417/PIA14417~orig.jpg",
-        from: None,
-        bytes: 501_225,
-        sha256: "20c4fb5a46856d29e129568d2b4e26281eacf274b6444383e91d822c553cb77a",
-        title: "The Dumbbell Nebula (2800 x 1400)",
-        credit: "NASA/JPL-Caltech/Harvard-Smithsonian CfA, PIA14417",
         licence: NASA,
         levels: 4,
     },
@@ -982,12 +956,7 @@ fn generate(ff: &Ffmpeg, dir: &Path, a: &Asset) -> Result<PathBuf, String> {
             );
         }
         Kind::Audio => {
-            let six = a.id == "bbb_sound";
-            let music = if six {
-                "aevalsrc=0.25*sin(2*PI*220*t)|0.25*sin(2*PI*277*t)|0.25*sin(2*PI*330*t)|0.15*sin(2*PI*55*t)|0.2*sin(2*PI*440*t)|0.2*sin(2*PI*554*t):s=48000:d=33"
-            } else {
-                "aevalsrc=0.3*sin(2*PI*(220+40*sin(2*PI*t/7))*t)|0.3*sin(2*PI*(330+30*sin(2*PI*t/5))*t):s=48000:d=52"
-            };
+            let music = "aevalsrc=0.3*sin(2*PI*(220+40*sin(2*PI*t/7))*t)|0.3*sin(2*PI*(330+30*sin(2*PI*t/5))*t):s=48000:d=52";
             add(
                 &mut args,
                 &["-f", "lavfi", "-i", music, "-c:a", "pcm_s16le"],
