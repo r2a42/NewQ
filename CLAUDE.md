@@ -16,6 +16,10 @@ The README describes the features; this file is about working on the code.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
+  Texture uploads happen on the main thread (`app.rs::update_outputs`) and wgpu holds each
+  one's staging copy until the next `queue.submit`; a Mac stops presenting a background
+  window, so nothing else submits: `Gpu::flush_uploads` after each frame's uploads (this
+  was 81 GB in a Medium test run in the background).
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
   `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
   groups, with badges; it replaces the cue list while open). A setting goes on

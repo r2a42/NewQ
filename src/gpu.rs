@@ -115,6 +115,13 @@ impl Gpu {
         ))
     }
 
+    /// Let go of the memory of the texture uploads made so far. `write_texture`
+    /// keeps each upload's staging copy until the next `submit`, and nothing
+    /// else submits while no window is being drawn.
+    pub fn flush_uploads(&self) {
+        self.queue.submit(std::iter::empty());
+    }
+
     /// A GPU with no window (for the benchmark and the tests), if this machine has
     /// one, or a software one. Not tied to a surface.
     pub fn headless() -> Option<Gpu> {
@@ -1397,6 +1404,34 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rss_mb() -> u64 {
+        let mut sys = sysinfo::System::new();
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[me]), true);
+        sys.process(me).map_or(0, |p| p.memory() >> 20)
+    }
+
+    /// Uploads are held until the next submit, so with no window drawing (a
+    /// Mac's background window) a minute of video was gigabytes. `flush_uploads`
+    /// lets them go; without it 200 frames of 1080p held about 1.5 GB.
+    #[test]
+    fn flushing_uploads_keeps_memory_from_piling_up_when_nothing_is_drawn() {
+        let Some(gpu) = Gpu::headless() else { return };
+        let tex = LayerTexture::new_rgba(&gpu, 1920, 1080);
+        let frame = vec![7u8; 1920 * 1080 * 4];
+        let before = rss_mb();
+        for _ in 0..200 {
+            tex.upload_rgba(&gpu.queue, &frame);
+            gpu.flush_uploads();
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let grew = rss_mb().saturating_sub(before);
+        assert!(
+            grew < 400,
+            "memory grew by {grew} MB over 200 uploaded frames"
+        );
+    }
 
     #[test]
     fn fit_rect_letterboxes_and_crops() {
