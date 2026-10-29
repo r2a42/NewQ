@@ -39,6 +39,8 @@ build_arch() {
   # demuxers and filters cover everything NewQ uses. --disable-autodetect
   # stops it picking up Homebrew libraries that wouldn't exist on users' Macs.
   # AVFoundation is a system framework and is what camera cues capture from.
+  # VideoToolbox is the system's own H.264 and H.265 encoder (Test Mode makes a 4K
+  # clip with it, since there is no x264 here).
   if ! "$src/configure" \
     --arch="$arch" $cross \
     --cc="clang -arch $arch" \
@@ -47,7 +49,7 @@ build_arch() {
     --disable-autodetect --enable-zlib --enable-videotoolbox --enable-avfoundation \
     --enable-static --disable-shared \
     --disable-doc --disable-debug --disable-ffplay --disable-network \
-    --disable-encoders --enable-encoder=rawvideo,wrapped_avframe,pcm_f32le,pcm_s16le,png,mpeg4,aac \
+    --disable-encoders --enable-encoder=rawvideo,wrapped_avframe,pcm_f32le,pcm_s16le,png,mpeg4,aac,h264_videotoolbox,hevc_videotoolbox \
     --disable-muxers --enable-muxer=rawvideo,pcm_f32le,pcm_s16le,null,image2,mp4,mov,wav \
     > configure.log 2>&1; then
     tail -40 configure.log ffbuild/config.log

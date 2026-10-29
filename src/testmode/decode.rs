@@ -4,7 +4,10 @@
 //! exactly as for the other tests (see `session`).
 //!
 //! The 4K clip is made from the real film already downloaded for the other
-//! tests (scaled up and encoded here), because the downloads have no 4K.
+//! tests (scaled up and encoded here), because the downloads have no 4K. Where
+//! this FFmpeg has no H.264 encoder that works (the Mac download's had none
+//! before 0.14.1), the 1080p H.264 film itself is played, eight at a time: the
+//! same number of pixels a second, though not the same size of picture.
 
 use super::analysis::{Finding, Severity};
 use super::assets::{self, Kind, Resolved};
@@ -28,6 +31,8 @@ pub const WARM_UP: u64 = 8;
 pub const TRIAL_SECS: u64 = 40;
 /// How many 4K clips play at once.
 pub const TILES: usize = 4;
+/// How many 1080p clips, when there is no 4K clip to make: the same pixels a second.
+pub const TILES_1080: usize = 8;
 
 /// What one trial cost, averaged over its measured seconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -171,10 +176,18 @@ struct Made {
     clip: Resolved,
     encoder: String,
     engaged: Option<String>,
-    kept: bool,
+    /// How many play at once, and how they are described in the report.
+    tiles: usize,
+    what: String,
 }
 
-fn make_clip(ff: &Ffmpeg, source: &Path, dest: &Path, cancel: &AtomicBool) -> Result<Made, String> {
+fn make_clip(
+    ff: &Ffmpeg,
+    source: &Path,
+    dest: &Path,
+    cancel: &AtomicBool,
+    candidates: Vec<(&'static str, Vec<String>)>,
+) -> Result<Made, String> {
     let engaged = |clip: &Path| {
         let out = std::process::Command::new(&ff.ffmpeg)
             .args([
@@ -201,12 +214,9 @@ fn make_clip(ff: &Ffmpeg, source: &Path, dest: &Path, cancel: &AtomicBool) -> Re
             engaged: engaged(dest),
             clip: r,
             encoder: "kept from an earlier run".into(),
-            kept: true,
+            tiles: TILES,
+            what: four_k(),
         });
-    }
-    let candidates = encoders(|n| ff.has_encoder(n));
-    if candidates.is_empty() {
-        return Err("This copy of FFmpeg has no H.264 encoder, so a 4K H.264 clip can't be made here to test with.".into());
     }
     let tmp = dest.with_extension("part.mp4");
     let mut last = String::new();
@@ -240,15 +250,35 @@ fn make_clip(ff: &Ffmpeg, source: &Path, dest: &Path, cancel: &AtomicBool) -> Re
                 engaged: engaged(dest),
                 clip: r,
                 encoder: name.to_string(),
-                kept: false,
+                tiles: TILES,
+                what: four_k(),
             });
         }
         last = String::from_utf8_lossy(&out.stderr).trim().to_string();
     }
     let _ = std::fs::remove_file(&tmp);
-    Err(format!(
-        "None of this computer's H.264 encoders could make the 4K clip. The last said: {last}"
-    ))
+    // No 4K clip could be made: the film itself will do, if it is H.264.
+    match assets::check(ff, source, Kind::Video) {
+        Ok(r) if r.codec == "h264" => Ok(Made {
+            engaged: engaged(source),
+            clip: r,
+            encoder: if last.is_empty() {
+                "none: this FFmpeg has no H.264 encoder".to_string()
+            } else {
+                format!("none worked (the last said: {last})")
+            },
+            tiles: TILES_1080,
+            what: format!("{} 1080p H.264 clips at 60 fps (no 4K clip could be made here)", TILES_1080),
+        }),
+        _ => Err(
+            "No 4K H.264 clip could be made here (this FFmpeg has no working H.264 encoder) and the film to test with isn't H.264 either, so there is nothing for the graphics card to decode."
+                .into(),
+        ),
+    }
+}
+
+fn four_k() -> String {
+    format!("{TILES} 4K H.264 clips at 30 fps")
 }
 
 pub enum Stage {
@@ -278,6 +308,9 @@ pub struct Compare {
     pub(super) stop: bool,
     log_path: PathBuf,
     clip: Option<Resolved>,
+    /// What plays, for the window and the report.
+    pub what: String,
+    tiles: usize,
 }
 
 /// What a finished comparison found.
@@ -306,7 +339,8 @@ impl Compare {
         let _ = std::thread::Builder::new()
             .name("decode-clip".into())
             .spawn(move || {
-                let _ = tx.send(make_clip(&ff, &source, &dest, &c2));
+                let candidates = encoders(|n| ff.has_encoder(n));
+                let _ = tx.send(make_clip(&ff, &source, &dest, &c2, candidates));
             });
         Compare {
             stage: Stage::Making,
@@ -327,6 +361,8 @@ impl Compare {
             stop: false,
             log_path: log_dir.join("newq.log"),
             clip: None,
+            what: four_k(),
+            tiles: TILES,
         }
     }
 
@@ -398,8 +434,9 @@ impl Compare {
                 }
                 self.encoder = Some(made.encoder.clone());
                 self.engaged = made.engaged.clone();
-                let _ = made.kept;
-                let built = super::plan::build_decode(show, &made.clip.path, TILES);
+                self.what = made.what.clone();
+                self.tiles = made.tiles;
+                let built = super::plan::build_decode(show, &made.clip.path, made.tiles);
                 self.clip = Some(made.clip);
                 self.stash = Some(st.begin_test(show, engine, built.show));
                 engine.set_log_tap(true);
@@ -481,7 +518,7 @@ impl Compare {
         if let Some(e) = &self.encoder {
             findings.push(Finding {
                 severity: Severity::Note,
-                text: format!("The 4K test clip was made with {e}."),
+                text: format!("The test clip was made with: {e}."),
             });
         }
         let row = |name: &str, s: &Option<Summary>| match s {
@@ -500,14 +537,14 @@ impl Compare {
             "NewQ Test Mode: hardware decoding comparison\n\
              ===========================================\n\
              NewQ {}\n\
-             {} four-up wall of 4K H.264 clips at 30 fps, {} s measured per trial after {} s of warming up.\n\
+             A wall of {}, {} s measured per trial after {} s of warming up.\n\
              Ended: {} after {}. Your show was put aside and is back, unchanged; the setting is as it was (hardware decoding {}).\n\n\
              Result\n------\n  {}\n\n\
              Measurements (processor use is in percent of one core)\n-----------------------------------------------------\n{}\n{}\n\n\
              FFmpeg's own account of the hardware decoder: {}\n\
-             4K clip made with: {}\n",
+             The clip was made with: {}\n",
             env!("CARGO_PKG_VERSION"),
-            TILES,
+            self.what,
             self.secs,
             WARM_UP,
             match &end {
@@ -610,6 +647,30 @@ mod tests {
         let log = "Input #0, mov\n[h264 @ 0x1] Using auto hwaccel type videotoolbox with new default device.\nStream #0";
         assert!(engaged_from(log).unwrap().contains("videotoolbox"));
         assert_eq!(engaged_from("nothing about it\nStream #0:0"), None);
+    }
+
+    #[test]
+    fn without_an_encoder_the_h264_film_itself_is_played_eight_at_a_time() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let dest =
+            std::env::temp_dir().join(format!("newq_decode_none_{}.mp4", std::process::id()));
+        let _ = std::fs::remove_file(&dest);
+        let cancel = AtomicBool::new(false);
+        let made = make_clip(&ff, &clip, &dest, &cancel, Vec::new());
+        let is_h264 = assets::check(&ff, &clip, Kind::Video).is_ok_and(|r| r.codec == "h264");
+        if is_h264 {
+            let Ok(m) = made else {
+                panic!("the film itself should be used")
+            };
+            assert_eq!(m.tiles, TILES_1080);
+            assert!(m.what.contains("1080p") && m.encoder.contains("no H.264 encoder"));
+            assert!(!dest.exists());
+        } else {
+            // Nothing for hardware to decode: said plainly, not guessed around.
+            assert!(made.err().is_some_and(|e| e.contains("isn't H.264")));
+        }
     }
 
     #[test]

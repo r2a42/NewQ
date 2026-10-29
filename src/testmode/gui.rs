@@ -368,7 +368,7 @@ fn idle(
     ui.label(RichText::new("Does hardware decoding help here?").strong());
     ui.label(
         RichText::new(
-            "Plays a wall of four 4K clips twice, with it off and on, about two minutes, and says which to use. It makes a 4K clip from the downloaded film.",
+            "Plays a wall of 4K clips twice, with it off and on, about two minutes, and says which to use. It makes a 4K clip from the downloaded film (or, if this computer can't, plays the 1080p film several times).",
         )
         .weak()
         .small(),
@@ -540,6 +540,7 @@ fn comparing(ui: &mut egui::Ui, c: &super::decode::Compare) {
             let total = (super::decode::WARM_UP + c.secs) as f32;
             let done = began.elapsed().as_secs_f32().min(total);
             ui.label(format!("Trial {n} of 2: hardware decoding {name}"));
+            ui.label(RichText::new(&c.what).weak().small());
             ui.add(
                 egui::ProgressBar::new(done / total)
                     .text(format!("{:.0} s of {:.0} s", done, total)),
