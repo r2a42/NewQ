@@ -253,6 +253,10 @@ fn run(o: Options) -> Result<(), String> {
             sys.refresh_processes(ProcessesToUpdate::All, true);
             let (mut cpu, mut rss) = (0.0f32, 0u64);
             for (pid, p) in sys.processes() {
+                // On Linux threads are listed too, with the process's memory.
+                if p.thread_kind().is_some() {
+                    continue;
+                }
                 if *pid == me || p.parent() == Some(me) {
                     cpu += p.cpu_usage();
                     rss += p.memory();
