@@ -555,6 +555,59 @@ pub struct MtcRunner {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// When the next timecode message is due. Kept apart from the thread so it is
+/// tested with made-up times (a shared CI runner's scheduler is too erratic to
+/// test spacing against).
+struct Pacer {
+    anchor: Instant,
+    step: Duration,
+    sent: u64,
+    held_since: Option<Instant>,
+}
+
+/// Late by more than this many steps, a message is not made up for with a burst.
+const MAX_CATCH_UP: u32 = 4;
+
+impl Pacer {
+    fn new(now: Instant, step: Duration) -> Pacer {
+        Pacer {
+            anchor: now,
+            step,
+            sent: 0,
+            held_since: None,
+        }
+    }
+
+    fn due(&self) -> Instant {
+        self.anchor + self.step.mul_f64(self.sent as f64)
+    }
+
+    /// The clock is held from `now` (the show is paused).
+    fn hold(&mut self, now: Instant) {
+        self.held_since.get_or_insert(now);
+    }
+
+    /// The clock goes on at `now`: the time it was held does not count.
+    fn release(&mut self, now: Instant) {
+        if let Some(since) = self.held_since.take() {
+            self.anchor += now.saturating_duration_since(since);
+        }
+    }
+
+    /// A message is sent at `now` (at or after `due`). Late by more than a
+    /// frame (the thread was starved), the clock carries on at the right
+    /// spacing from here, rather than sending a burst to catch up, which a
+    /// receiver reads as a clock running wild; it then runs a little behind
+    /// real time by what was lost.
+    fn sent_at(&mut self, now: Instant) {
+        let late = now.saturating_duration_since(self.due());
+        if late > self.step * MAX_CATCH_UP {
+            self.anchor += late;
+        }
+        self.sent += 1;
+    }
+}
+
 /// Sends the generator's messages through `send` at the pace of its clock
 /// until `stop`. `send` returns false when the output has gone. Time that
 /// passes while `paused` is not counted, so the clock holds and goes on from there.
@@ -567,19 +620,18 @@ fn run_mtc(
     if !send(&generator.full_frame()) {
         return;
     }
-    let step = Duration::from_secs_f64(generator.interval());
-    let mut anchor = Instant::now();
-    let mut held_since: Option<Instant> = None;
+    let mut pacer = Pacer::new(
+        Instant::now(),
+        Duration::from_secs_f64(generator.interval()),
+    );
     while !stop.load(Ordering::Relaxed) {
         if paused.load(Ordering::Relaxed) {
-            held_since.get_or_insert_with(Instant::now);
+            pacer.hold(Instant::now());
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
-        if let Some(since) = held_since.take() {
-            anchor += since.elapsed();
-        }
-        let due = anchor + step.mul_f64(generator.made() as f64);
+        pacer.release(Instant::now());
+        let due = pacer.due();
         // Sleep most of the way and spin the last moment: an operating
         // system's sleep is too loose for ten milliseconds.
         loop {
@@ -597,14 +649,7 @@ fn run_mtc(
         if stop.load(Ordering::Relaxed) || paused.load(Ordering::Relaxed) {
             continue;
         }
-        // Late by more than a frame (the thread was starved): carry on at the
-        // right spacing from here, rather than send a burst to catch up, which
-        // a receiver reads as a clock running wild. The clock then runs a
-        // little behind real time by what was lost.
-        let late = Instant::now().saturating_duration_since(due);
-        if late > step * 4 {
-            anchor += late;
-        }
+        pacer.sent_at(Instant::now());
         if !send(&generator.next_quarter()) {
             return;
         }
@@ -746,54 +791,47 @@ impl SocketSet {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_stalled_timecode_clock_goes_on_at_its_spacing_and_does_not_burst() {
-        use crate::timecode::{Generator, Rate, Timecode};
-        let sent = Arc::new(parking_lot::Mutex::new(Vec::<Instant>::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
-        let (s2, stop2, paused2) = (sent.clone(), stop.clone(), paused.clone());
-        let thread = std::thread::spawn(move || {
-            let generator = Generator::new(Timecode::new(0, 0, 0, 0), Rate::Fps25);
-            run_mtc(
-                generator,
-                |_| {
-                    let mut v = s2.lock();
-                    v.push(Instant::now());
-                    // A stall of a dozen quarter frames, after the first few.
-                    if v.len() == 6 {
-                        drop(v);
-                        std::thread::sleep(Duration::from_millis(120));
-                    }
-                    true
-                },
-                &stop2,
-                &paused2,
-            );
-        });
-        // Until enough messages have been sent after the stall, not for a fixed
-        // time: a busy runner may give the thread very little.
-        let began = Instant::now();
-        while sent.lock().len() < 40 && began.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(20));
+    fn the_pacer_spaces_messages_evenly_and_does_not_burst_after_a_stall() {
+        let t0 = Instant::now();
+        let step = Duration::from_millis(10);
+        let mut p = Pacer::new(t0, step);
+        // On time: message n is due n steps in.
+        for n in 0..5u32 {
+            assert_eq!(p.due(), t0 + step * n);
+            p.sent_at(t0 + step * n);
         }
-        stop.store(true, Ordering::Relaxed);
-        thread.join().unwrap();
-        let sent = sent.lock();
-        let gaps: Vec<f64> = sent
-            .windows(2)
-            .map(|w| w[1].duration_since(w[0]).as_secs_f64())
-            .collect();
-        assert!(gaps.len() > 20, "{}", gaps.len());
-        // A catch-up of up to three messages is allowed (and a busy runner stalls
-        // by itself now and then); the stall of twelve used to come back as twelve.
-        let bursts = gaps.iter().filter(|g| **g < 0.003).count();
-        assert!(bursts <= 6, "{bursts} messages came back to back: {gaps:?}");
+        // A stall of twelve steps: the next is sent 120 ms late, and the one
+        // after it is a step on from there, not due at once.
+        let late = t0 + step * 5 + Duration::from_millis(120);
+        p.sent_at(late);
+        assert_eq!(p.due(), late + step);
+        // A little late (under the limit) is made up for: the clock stays on its beat.
+        let mut q = Pacer::new(t0, step);
+        q.sent_at(t0);
+        q.sent_at(t0 + step + Duration::from_millis(25));
+        assert_eq!(q.due(), t0 + step * 2, "two behind: still the same beat");
     }
 
     #[test]
-    fn the_timecode_clock_runs_at_its_rate_holds_when_paused_and_stops() {
+    fn the_pacer_does_not_count_the_time_it_is_held() {
+        let t0 = Instant::now();
+        let step = Duration::from_millis(10);
+        let mut p = Pacer::new(t0, step);
+        p.sent_at(t0);
+        p.sent_at(t0 + step);
+        // Held for a second from 15 ms, then released.
+        p.hold(t0 + Duration::from_millis(15));
+        p.hold(t0 + Duration::from_millis(500)); // a second hold changes nothing
+        p.release(t0 + Duration::from_millis(1015));
+        assert_eq!(p.due(), t0 + step * 2 + Duration::from_millis(1000));
+        p.release(t0 + Duration::from_secs(5)); // not held: nothing changes
+        assert_eq!(p.due(), t0 + step * 2 + Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn the_timecode_thread_starts_with_the_full_frame_holds_when_paused_and_stops() {
         use crate::timecode::{Generator, Rate, Timecode};
-        let sent = Arc::new(parking_lot::Mutex::new(Vec::<(Instant, Vec<u8>)>::new()));
+        let sent = Arc::new(parking_lot::Mutex::new(Vec::<Vec<u8>>::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let (s2, stop2, paused2) = (sent.clone(), stop.clone(), paused.clone());
@@ -802,39 +840,37 @@ mod tests {
             run_mtc(
                 generator,
                 |b| {
-                    s2.lock().push((Instant::now(), b.to_vec()));
+                    s2.lock().push(b.to_vec());
                     true
                 },
                 &stop2,
                 &paused2,
             );
         });
-        std::thread::sleep(Duration::from_millis(500));
+        let wait_for = |n: usize| {
+            let began = Instant::now();
+            while sent.lock().len() < n && began.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_for(10);
         paused.store(true, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
         let held = sent.lock().len();
+        assert!(held >= 10, "{held}");
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(sent.lock().len(), held, "nothing is sent while paused");
         paused.store(false, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(200));
+        wait_for(held + 5);
         stop.store(true, Ordering::Relaxed);
         thread.join().unwrap();
         let sent = sent.lock();
-        assert_eq!(sent[0].1[0], 0xF0, "the full frame comes first");
-        // About 100 quarter frames a second at 25 fps for the 0.7 s of running
-        // (a busy machine oversleeps, so only a floor is asserted).
-        let quarters = sent.len() - 1;
-        assert!(quarters >= 40, "{quarters}");
-        // Spaced by 10 ms, give or take the scheduler (not gaps of a pause's length
-        // after the pause is taken out).
-        let gaps: Vec<f64> = sent[1..]
-            .windows(2)
-            .map(|w| w[1].0.duration_since(w[0].0).as_secs_f64())
-            .collect();
-        let mut sorted = gaps.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = sorted[sorted.len() / 2];
-        assert!((0.008..=0.02).contains(&median), "{median}");
+        assert!(sent.len() > held, "it went on after the pause");
+        assert_eq!(sent[0][0], 0xF0, "the full frame comes first");
+        assert!(
+            sent[1..].iter().all(|m| m[0] == 0xF1),
+            "then quarter frames"
+        );
     }
 
     #[test]
