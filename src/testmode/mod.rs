@@ -3,6 +3,7 @@
 //! README for what the three levels do.
 
 pub mod assets;
+pub mod plan;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -13,6 +14,14 @@ pub enum Level {
 
 impl Level {
     pub const ALL: [Level; 3] = [Level::Short, Level::Medium, Level::Long];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Short => "Short",
+            Level::Medium => "Medium",
+            Level::Long => "Long",
+        }
+    }
 
     pub fn bit(self) -> u8 {
         match self {
