@@ -597,6 +597,14 @@ fn run_mtc(
         if stop.load(Ordering::Relaxed) || paused.load(Ordering::Relaxed) {
             continue;
         }
+        // Late by more than a frame (the thread was starved): carry on at the
+        // right spacing from here, rather than send a burst to catch up, which
+        // a receiver reads as a clock running wild. The clock then runs a
+        // little behind real time by what was lost.
+        let late = Instant::now().saturating_duration_since(due);
+        if late > step * 4 {
+            anchor += late;
+        }
         if !send(&generator.next_quarter()) {
             return;
         }
@@ -737,6 +745,44 @@ impl SocketSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stalled_timecode_clock_goes_on_at_its_spacing_and_does_not_burst() {
+        use crate::timecode::{Generator, Rate, Timecode};
+        let sent = Arc::new(parking_lot::Mutex::new(Vec::<Instant>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (s2, stop2, paused2) = (sent.clone(), stop.clone(), paused.clone());
+        let thread = std::thread::spawn(move || {
+            let generator = Generator::new(Timecode::new(0, 0, 0, 0), Rate::Fps25);
+            run_mtc(
+                generator,
+                |_| {
+                    let mut v = s2.lock();
+                    v.push(Instant::now());
+                    // A stall of a dozen quarter frames, after the first few.
+                    if v.len() == 6 {
+                        drop(v);
+                        std::thread::sleep(Duration::from_millis(120));
+                    }
+                    true
+                },
+                &stop2,
+                &paused2,
+            );
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        stop.store(true, Ordering::Relaxed);
+        thread.join().unwrap();
+        let sent = sent.lock();
+        let gaps: Vec<f64> = sent
+            .windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_secs_f64())
+            .collect();
+        assert!(gaps.len() > 20, "{}", gaps.len());
+        let bursts = gaps.iter().filter(|g| **g < 0.003).count();
+        assert!(bursts <= 2, "{bursts} messages came back to back: {gaps:?}");
+    }
+
     #[test]
     fn the_timecode_clock_runs_at_its_rate_holds_when_paused_and_stops() {
         use crate::timecode::{Generator, Rate, Timecode};
