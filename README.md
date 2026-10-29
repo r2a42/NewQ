@@ -84,7 +84,8 @@ includes FFmpeg, so there's nothing else to install.
   for 4K and for many layers; each picture is still copied back to be composited,
   so it is not the zero-copy decoding of a native player. A file or card it can't
   do falls back to the processor. It is off by default and only the machine you
-  will run on can say whether it helps.
+  will run on can say whether it helps: *Help ▸ Test mode ▸ Compare hardware decoding*
+  measures it on that machine.
 - **Cue lists.** *Cue ▸ New cue list* (or the **+** by the tabs) adds a list of
   cues with a playhead of its own; the lists are tabs above the cue list. GO, the
   playhead, the arrow keys and the web remote work on the list being shown; the
@@ -678,6 +679,15 @@ or can't be fetched is made on this computer instead (colour bars, tones, test
 pictures), so with no internet the test still runs, just with plainer media. The
 window shows each file's progress, and a note when it fell back. The credits are saved
 in every report.
+
+**Does hardware decoding help here?** *Compare hardware decoding* (below the Start
+button) plays a wall of four 4K H.264 clips twice, about two minutes in all, with
+hardware decoding off and then on. It makes the 4K clip from the downloaded film with
+an H.264 encoder this computer has (x264, else the system's), measures the processor
+use of NewQ and FFmpeg, late frames and the longest stall of each trial, and says
+*Turn it on*, *Leave it off* or *Little difference*, with a button to apply the advice.
+It also shows what FFmpeg said about the hardware decoder it chose. Your show and the
+setting are put back as they were, and the numbers are in `report.txt` of its folder.
 
 **Your show is not touched.** It is put aside in memory while the test runs and put
 back exactly as it was, with its file, undo history, selection and playhead; nothing is

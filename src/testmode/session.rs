@@ -9,6 +9,7 @@
 
 use super::analysis::{Finding, Severity, Verdict, analyse};
 use super::assets::{self, Asset, Fetch, Resolved, Source};
+use super::decode::{Compare, CompareResult};
 use super::{Level, plan};
 use crate::engine::{CueStatus, Engine};
 use crate::media::ffmpeg::Ffmpeg;
@@ -29,6 +30,8 @@ pub struct TestMode {
     pub minutes: u32,
     /// Download the real media (otherwise it is made on this computer).
     pub download: bool,
+    /// Seconds measured in each trial of the decoding comparison.
+    pub decode_secs: u64,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
     phase: Phase,
@@ -41,6 +44,7 @@ impl Default for TestMode {
             level: Level::Short,
             minutes: Level::Short.default_minutes(),
             download: true,
+            decode_secs: super::decode::TRIAL_SECS,
             notice: None,
             phase: Phase::Idle,
         }
@@ -51,12 +55,14 @@ enum Phase {
     Idle,
     Preparing(Box<Prep>),
     Running(Box<Run>),
+    Comparing(Box<Compare>),
     Done(Box<Done>),
 }
 
 /// The media being made ready.
 pub struct Prep {
     pub fetch: Fetch,
+    pub compare: bool,
     pub level: Level,
     pub minutes: u32,
     pub wanted: Vec<&'static Asset>,
@@ -104,7 +110,7 @@ pub fn memory_limit_mb(ram_mb: u64) -> u64 {
 
 /// Watches NewQ's own memory once a second, much more often than the log's
 /// rows: a runaway can fill the memory between two of those.
-struct MemoryWatch {
+pub(super) struct MemoryWatch {
     sys: sysinfo::System,
     me: sysinfo::Pid,
     limit_mb: u64,
@@ -114,7 +120,7 @@ struct MemoryWatch {
 }
 
 impl MemoryWatch {
-    fn new() -> MemoryWatch {
+    pub(super) fn new() -> MemoryWatch {
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
         let ram_mb = sys.total_memory() >> 20;
@@ -129,7 +135,7 @@ impl MemoryWatch {
     }
 
     /// NewQ's memory in MB if it is over the limit (looks once a second).
-    fn over(&mut self, now: Instant) -> Option<u64> {
+    pub(super) fn over(&mut self, now: Instant) -> Option<u64> {
         if now.duration_since(self.last) < Duration::from_secs(1) {
             return None;
         }
@@ -155,6 +161,7 @@ impl Run {
 
 /// A test that has ended and put the show back.
 pub struct Done {
+    pub compare: Option<CompareResult>,
     pub level: Level,
     pub verdict: Verdict,
     pub headline: String,
@@ -182,6 +189,7 @@ pub enum View<'a> {
     Idle,
     Preparing(&'a Prep),
     Running(&'a Run),
+    Comparing(&'a Compare),
     Done(&'a Done),
 }
 
@@ -242,13 +250,17 @@ impl TestMode {
             Phase::Idle => View::Idle,
             Phase::Preparing(p) => View::Preparing(p),
             Phase::Running(r) => View::Running(r),
+            Phase::Comparing(c) => View::Comparing(c),
             Phase::Done(d) => View::Done(d),
         }
     }
 
     /// Whether a test is being prepared or run (the window can't be changed).
     pub fn busy(&self) -> bool {
-        matches!(self.phase, Phase::Preparing(_) | Phase::Running(_))
+        matches!(
+            self.phase,
+            Phase::Preparing(_) | Phase::Running(_) | Phase::Comparing(_)
+        )
     }
 
     /// Back to choosing a test.
@@ -281,8 +293,33 @@ impl TestMode {
         self.notice = None;
         self.phase = Phase::Preparing(Box::new(Prep {
             fetch,
+            compare: false,
             level: self.level,
             minutes: self.minutes,
+            wanted,
+            log_dir: log_dir.to_path_buf(),
+        }));
+    }
+
+    /// Begin the decoding comparison: the film it makes its 4K clip from is
+    /// made ready first.
+    pub fn start_compare(&mut self, ff: Ffmpeg, log_dir: &Path) {
+        if self.busy() {
+            return;
+        }
+        let wanted: Vec<&'static Asset> = assets::find("bbb_60").into_iter().collect();
+        let fetch = assets::start(
+            ff,
+            assets::cache_dir(log_dir),
+            wanted.clone(),
+            self.download,
+        );
+        self.notice = None;
+        self.phase = Phase::Preparing(Box::new(Prep {
+            fetch,
+            compare: true,
+            level: self.level,
+            minutes: 0,
             wanted,
             log_dir: log_dir.to_path_buf(),
         }));
@@ -293,6 +330,7 @@ impl TestMode {
         match &mut self.phase {
             Phase::Preparing(p) => p.fetch.cancel(),
             Phase::Running(r) => r.stop = true,
+            Phase::Comparing(c) => c.request_stop(),
             _ => {}
         }
     }
@@ -313,12 +351,60 @@ impl TestMode {
                 let Phase::Preparing(p) = std::mem::replace(&mut self.phase, Phase::Idle) else {
                     return;
                 };
+                if p.compare {
+                    let resolved = p.fetch.status.lock().resolved.clone();
+                    let Some(source) = resolved.get("bbb_60").map(|r| r.path.clone()) else {
+                        self.notice =
+                            Some("The film the 4K clip is made from isn't available.".into());
+                        return;
+                    };
+                    let Some(ff) = engine.ff.clone() else {
+                        self.notice = Some("FFmpeg wasn't found.".into());
+                        return;
+                    };
+                    let folder = run_folder_named(&p.log_dir, "decode", unix_now());
+                    if let Err(e) = std::fs::create_dir_all(&folder) {
+                        self.notice = Some(format!(
+                            "Can't make the folder for the log files ({}): {e}. Nothing was changed.",
+                            folder.display()
+                        ));
+                        return;
+                    }
+                    let orig = st.prefs.hw_decode;
+                    let _ = std::fs::write(
+                        folder.join("system.txt"),
+                        system_report(engine, st, show, &p.wanted, &resolved),
+                    );
+                    self.phase = Phase::Comparing(Box::new(Compare::begin(
+                        ff,
+                        &p.log_dir,
+                        source,
+                        folder,
+                        self.decode_secs,
+                        orig,
+                    )));
+                    return;
+                }
                 match launch(*p, show, engine, st) {
                     Ok(run) => self.phase = Phase::Running(Box::new(run)),
                     Err(e) => {
                         log::error!("test mode: {e}");
                         self.notice = Some(e);
                     }
+                }
+            }
+            Phase::Comparing(c) => {
+                if let Some(end) = c.tick(show, engine, st, Instant::now()) {
+                    let Phase::Comparing(c) = std::mem::replace(&mut self.phase, Phase::Idle)
+                    else {
+                        return;
+                    };
+                    let elapsed = c.elapsed();
+                    let folder = c.folder.clone();
+                    let (result, findings, report, end) = c.finish(end, show, engine, st);
+                    self.phase = Phase::Done(Box::new(compare_done(
+                        result, findings, report, end, folder, elapsed,
+                    )));
                 }
             }
             Phase::Running(r) => {
@@ -338,6 +424,13 @@ impl TestMode {
         match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Running(r) => {
                 self.phase = Phase::Done(Box::new(finish(*r, End::Quit, show, engine, st)));
+            }
+            Phase::Comparing(c) => {
+                let (elapsed, folder) = (c.elapsed(), c.folder.clone());
+                let (result, findings, report, end) = c.finish(End::Quit, show, engine, st);
+                self.phase = Phase::Done(Box::new(compare_done(
+                    result, findings, report, end, folder, elapsed,
+                )));
             }
             Phase::Preparing(p) => p.fetch.cancel(),
             other => self.phase = other,
@@ -363,11 +456,46 @@ fn unix_now() -> i64 {
 
 /// The folder a run's files go in.
 pub fn run_folder(log_dir: &Path, level: Level, secs: i64) -> PathBuf {
-    log_dir.join("test-mode").join("runs").join(format!(
-        "{}_{}",
-        utc_stamp(secs),
-        level.label().to_lowercase()
-    ))
+    run_folder_named(log_dir, &level.label().to_lowercase(), secs)
+}
+
+fn run_folder_named(log_dir: &Path, name: &str, secs: i64) -> PathBuf {
+    log_dir
+        .join("test-mode")
+        .join("runs")
+        .join(format!("{}_{name}", utc_stamp(secs)))
+}
+
+fn compare_done(
+    result: CompareResult,
+    findings: Vec<Finding>,
+    report: String,
+    end: End,
+    folder: PathBuf,
+    elapsed: Duration,
+) -> Done {
+    use super::decode::Advice;
+    let verdict = Verdict::of(&findings);
+    Done {
+        level: Level::Short,
+        verdict,
+        headline: match &end {
+            End::Failed(why) => format!("The comparison could not go on: {why}"),
+            _ => match result.advice {
+                Advice::TurnOn => "Hardware decoding helps here.".into(),
+                Advice::LeaveOff => "Leave hardware decoding off.".into(),
+                Advice::NoDifference => "It makes little difference here.".into(),
+                Advice::Inconclusive => "Nothing could be concluded.".into(),
+            },
+        },
+        compare: Some(result),
+        findings,
+        folder,
+        report,
+        laps: 0,
+        elapsed,
+        ended: end,
+    }
 }
 
 fn launch(
@@ -697,6 +825,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
         (_, Verdict::ProblemsFound) => "Problems were found.".into(),
     };
     Done {
+        compare: None,
         level: run.level,
         verdict,
         headline,
@@ -1003,6 +1132,66 @@ mod tests {
         assert!(w.peak_mb > 0, "the process was found");
         w.limit_mb = 1;
         assert!(w.over(t + Duration::from_secs(4)).is_some());
+    }
+
+    /// The comparison, offline: makes its 4K clip, plays both trials briefly,
+    /// writes its report, and gives back the show and the setting.
+    #[test]
+    fn a_decoding_comparison_runs_reports_and_gives_everything_back() {
+        let Some(ff) = Ffmpeg::locate() else {
+            assert!(std::env::var("NEWQ_REQUIRE_MEDIA").is_err(), "no ffmpeg");
+            return;
+        };
+        if !ff.has_encoder("libx264") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("newq_tm_decode_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut show = Show::default();
+        let c = show.make_cue(crate::show::CueType::Wait, None, 0);
+        show.cues.push(c);
+        let before = serde_json::to_string(&show).unwrap();
+        let mut engine = Engine::for_tests();
+        engine.ff = Some(ff.clone());
+        let mut st = UiState::default();
+        st.prefs.hw_decode = false;
+        let mut test = TestMode {
+            download: false,
+            decode_secs: 3,
+            ..Default::default()
+        };
+        test.start_compare(ff, &dir);
+        let mut was_locked = false;
+        let mut last = Instant::now();
+        let ok = wait_for(
+            || {
+                let now = Instant::now();
+                engine.tick(&show, now.duration_since(last).as_secs_f64());
+                last = now;
+                test.update(&mut show, &mut engine, &mut st);
+                was_locked |= st.test_locked;
+                matches!(test.view(), View::Done(_))
+            },
+            400,
+        );
+        let View::Done(d) = test.view() else {
+            panic!("the comparison did not finish (ok={ok})");
+        };
+        let cmp = d.compare.as_ref().expect("a comparison's result");
+        assert!(was_locked && !st.test_locked);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        assert!(!st.prefs.hw_decode, "the setting is as it was");
+        assert!(cmp.off.is_some() && cmp.on.is_some(), "{}", d.report);
+        assert!(d.report.contains("Hardware decoding off"), "{}", d.report);
+        for f in [
+            "report.txt",
+            "stats-hardware-off.csv",
+            "stats-hardware-on.csv",
+            "system.txt",
+        ] {
+            assert!(d.folder.join(f).exists(), "{f} missing");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

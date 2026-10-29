@@ -186,6 +186,63 @@ fn downmix_5_1() -> Vec<Crosspoint> {
     ]
 }
 
+/// The show for the decoding comparison: `tiles` copies of one 4K clip playing
+/// at once, each in a corner of the picture (a video wall), looping.
+pub fn build_decode(original: &Show, clip: &std::path::Path, tiles: usize) -> Built {
+    let mut show = original.clone();
+    show.cues.clear();
+    show.lists.clear();
+    show.main_list_name = None;
+    show.name = "Test Mode: decoding".into();
+    let res = HashMap::new();
+    let mut b = Builder {
+        show,
+        res: &res,
+        audio: None,
+        notes: Vec::new(),
+        used: Vec::new(),
+    };
+    // Each tile starts the next straight away (a group would work out its own
+    // length from its children, which the loops make meaningless here).
+    let mut first = None;
+    for i in 0..tiles {
+        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+        let id = b.cue(
+            CueType::Video,
+            Some(clip.to_path_buf()),
+            &format!("4K tile {}", i + 1),
+            None,
+            |c| {
+                if i + 1 < tiles {
+                    c.continue_mode = ContinueMode::AutoContinue;
+                }
+                let m = media(c);
+                // A plain cut would take the place of the tile before it.
+                m.transition = Transition::FadeIn;
+                m.loop_media = true;
+                // Two minutes of passes: longer than a trial.
+                m.loop_count = 12;
+                m.layer = i as i32;
+                m.transform.scale_x = 0.5;
+                m.transform.scale_y = 0.5;
+                m.transform.x = col - 0.5 + 0.25;
+                m.transform.y = row - 0.5 + 0.25;
+            },
+        );
+        first.get_or_insert(id);
+    }
+    let cues = b.show.cues.len();
+    Built {
+        show: b.show,
+        first: first.expect("at least one tile"),
+        repeats: true,
+        lap_secs: 0.0,
+        cues,
+        notes: b.notes,
+        used: b.used,
+    }
+}
+
 /// The test show for `level`, built from `original`'s settings.
 pub fn build(original: &Show, level: Level, res: &HashMap<&'static str, Resolved>) -> Built {
     let mut show = original.clone();
@@ -585,6 +642,38 @@ pub fn build(original: &Show, level: Level, res: &HashMap<&'static str, Resolved
 mod tests {
     use super::*;
     use crate::testmode::assets::Source;
+
+    #[test]
+    fn the_decoding_wall_starts_all_its_tiles_at_once_and_keeps_them_playing() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let built = build_decode(&Show::default(), &clip, 4);
+        let mut show = built.show;
+        assert_eq!(show.cues.len(), 4);
+        assert_eq!(show.cues[0].id, built.first);
+        let mut e = crate::engine::Engine::for_tests();
+        e.ff = Some(ff);
+        e.playhead = Some(built.first);
+        e.go(&show);
+        let began = std::time::Instant::now();
+        let mut last = began;
+        let mut all = false;
+        while began.elapsed() < std::time::Duration::from_secs(5) {
+            let now = std::time::Instant::now();
+            e.tick(&show, now.duration_since(last).as_secs_f64());
+            last = now;
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            all |= show
+                .cues
+                .iter()
+                .all(|c| matches!(e.status(c.id), crate::engine::CueStatus::Playing { .. }));
+        }
+        assert!(all, "the four tiles never played together");
+        assert!(e.is_active(), "the wall must keep playing");
+        e.stop_all(0.0);
+        show.cues.clear();
+    }
 
     #[test]
     fn each_test_downloads_exactly_the_media_its_show_asks_for() {
