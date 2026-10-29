@@ -109,10 +109,15 @@ pub fn late_frames_permille() -> u32 {
 
 /// Judges whether a window's frames are late: a frame takes as long as the
 /// display's refresh (when presenting waits for it) or less, so one taking
-/// much longer than the quickest seen is late. Only runs of frames close
-/// together count; a still picture, drawn now and then, says nothing.
+/// much longer is late. The yardstick is the display's refresh interval when
+/// the system says what it is; otherwise the quickest frame seen, which an
+/// early frame that did not have to wait for the display can set too low (every
+/// later frame then reads as late). Only runs of frames close together
+/// count; a still picture, drawn now and then, says nothing.
 #[derive(Default)]
 struct FrameTimer {
+    /// The display's time between refreshes, if known.
+    refresh: Option<Duration>,
     quickest: Option<Duration>,
     last_start: Option<Instant>,
     frames: u32,
@@ -121,6 +126,13 @@ struct FrameTimer {
 
 impl FrameTimer {
     const WINDOW: u32 = 60;
+
+    fn with_refresh(refresh: Option<Duration>) -> FrameTimer {
+        FrameTimer {
+            refresh,
+            ..FrameTimer::default()
+        }
+    }
 
     /// A frame that began at `start` took `took`. Returns the share of late
     /// frames, in thousandths, each time a window of frames has been seen.
@@ -136,7 +148,8 @@ impl FrameTimer {
         let quickest = self.quickest.map_or(took, |q| q.min(took));
         self.quickest = Some(quickest);
         self.frames += 1;
-        if took > quickest.mul_f32(1.6) + Duration::from_millis(2) {
+        let yardstick = self.refresh.unwrap_or(quickest);
+        if took > yardstick.mul_f32(1.6) + Duration::from_millis(2) {
             self.late += 1;
         }
         if self.frames >= Self::WINDOW {
@@ -255,7 +268,13 @@ fn output_loop(
     let fade = BlendPass::new(&gpu.device, config.format);
     // NEWQ_TRACE_OUTPUT=1 logs every composited frame's layer opacities.
     let trace = std::env::var_os("NEWQ_TRACE_OUTPUT").is_some();
-    let mut timer = FrameTimer::default();
+    let refresh_of = |w: &Window| {
+        w.current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .filter(|mhz| *mhz > 0)
+            .map(|mhz| Duration::from_secs_f64(1000.0 / f64::from(mhz)))
+    };
+    let mut timer = FrameTimer::with_refresh(refresh_of(&window));
     let late = &LATE[slot_index(slot)];
     loop {
         let (size, groups, blend) = match mailbox.take() {
@@ -297,6 +316,8 @@ fn output_loop(
         gpu.queue.present(frame);
         if let Some(share) = timer.frame(started, started.elapsed()) {
             late.store(share, Ordering::Relaxed);
+            // The window may have been moved to another display.
+            timer.refresh = refresh_of(&window);
         }
     }
     late.store(0, Ordering::Relaxed);
@@ -799,5 +820,26 @@ mod late_tests {
         let rare: Vec<(u64, u64)> = vec![(2000, 30); 100];
         assert_eq!(run(&mut t, &rare), Some(0));
         assert_eq!(t.frames, 0);
+    }
+
+    #[test]
+    fn a_quick_first_frame_does_not_make_every_later_frame_late() {
+        // A frame of 1 ms that did not have to wait for the display (the very first
+        // frame is not counted), then
+        // 60 Hz frames of 16 ms for ever: with no refresh known this reads as
+        // late all the time; knowing the refresh, none is late.
+        let mut frames: Vec<(u64, u64)> = vec![(17, 16), (17, 1)];
+        frames.extend(vec![(17, 16); 200]);
+        assert_eq!(
+            run(&mut FrameTimer::default(), &frames),
+            Some(1000),
+            "the old yardstick"
+        );
+        let mut t = FrameTimer::with_refresh(Some(Duration::from_micros(16_667)));
+        assert_eq!(run(&mut t, &frames), Some(0));
+        // And a graphics card that really can't keep up is still caught.
+        let slow: Vec<(u64, u64)> = vec![(34, 33); 130];
+        let mut t = FrameTimer::with_refresh(Some(Duration::from_micros(16_667)));
+        assert_eq!(run(&mut t, &slow), Some(1000));
     }
 }
