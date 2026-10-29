@@ -20,6 +20,11 @@ The README describes the features; this file is about working on the code.
   one's staging copy until the next `queue.submit`; a Mac stops presenting a background
   window, so nothing else submits: `Gpu::flush_uploads` after each frame's uploads (this
   was 81 GB in a Medium test run in the background).
+- `src/splash.rs`: the startup splash window, drawn on the processor with `softbuffer` (`compose`
+  makes the picture and is tested; the window code is in `Splash`). `app.rs::resumed` opens it,
+  and the main window's set-up (`open_main_window`, the slow part) begins after the splash's first
+  redraw event so it is on screen first; `about_to_wait` closes it (`splash::due`).
+  `NEWQ_NO_SPLASH=1` skips it. Not tried on a real Mac or Windows desktop.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
   `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
   groups, with badges; it replaces the cue list while open). A setting goes on
