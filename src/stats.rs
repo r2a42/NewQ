@@ -146,12 +146,34 @@ fn unix_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// How many files and sockets the process has open (Linux; empty elsewhere).
+/// How many files and sockets the process has open: file descriptors on Linux
+/// and a Mac, handles on Windows.
+#[cfg(target_os = "linux")]
 fn open_files() -> Option<usize> {
     std::fs::read_dir("/proc/self/fd").ok().map(|d| d.count())
 }
 
-/// How many threads the process has (Linux; empty elsewhere).
+#[cfg(target_os = "macos")]
+fn open_files() -> Option<usize> {
+    std::fs::read_dir("/dev/fd").ok().map(|d| d.count())
+}
+
+#[cfg(windows)]
+fn open_files() -> Option<usize> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut handles = 0u32;
+    // SAFETY: the pseudo handle for this process is always valid, and `handles`
+    // is a u32 that lives through the call.
+    let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handles) };
+    (ok != 0).then_some(handles as usize)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn open_files() -> Option<usize> {
+    None
+}
+
+/// How many threads the process has (Linux only; empty elsewhere).
 fn threads() -> Option<usize> {
     std::fs::read_dir("/proc/self/task").ok().map(|d| d.count())
 }
@@ -314,13 +336,22 @@ pub fn report(text: &str) -> Result<String, String> {
         max(&r.col["playing"]),
         max(&r.col["started_total"])
     );
+    let drawn = |name: &str| -> Vec<f64> {
+        r.col[name]
+            .iter()
+            .zip(&r.col["layers"])
+            .filter(|(_, layers)| **layers > 0.0)
+            .map(|(v, _)| *v)
+            .collect()
+    };
     let (stall, late, audio) = (
         max(&r.col["stall_max_ms"]),
-        max(&r.col["late_permille"]),
+        // Late frames mean nothing while no picture is drawn.
+        max(&drawn("late_permille")),
         max(&r.col["audio_permille"]),
     );
     out += &format!(
-        "Longest stall of the main loop: {stall} ms; most late frames: {}%; audio load: up to {}%\n",
+        "Longest stall of the main loop: {stall} ms; most late frames while drawing: {}%; audio load: up to {}%\n",
         late / 10.0,
         audio / 10.0
     );
@@ -498,5 +529,39 @@ mod tests {
         );
         assert_eq!(run_if_asked(&["--other".into()]), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn late_frames_with_nothing_drawn_are_not_counted() {
+        // The gauge reads 100% all night; whether a picture is drawn decides if that counts.
+        let make = |layers: u32| {
+            let mut text = format!("{HEADER}\n");
+            for n in 0..200u64 {
+                let i = Inputs {
+                    playing: 1,
+                    started_total: n,
+                    layers,
+                    late_permille: 1000,
+                    audio_permille: 5,
+                };
+                text += &row(
+                    1_700_000_000 + n as i64 * 10,
+                    n * 10,
+                    [500 << 20, 0],
+                    [1.0, 0.0],
+                    0,
+                    [None, None],
+                    i,
+                    10,
+                    1,
+                );
+                text.push('\n');
+            }
+            text
+        };
+        let r = report(&make(0)).unwrap();
+        assert!(r.contains("Nothing looks wrong"), "{r}");
+        let r = report(&make(2)).unwrap();
+        assert!(r.contains("100% of frames were late"), "{r}");
     }
 }
