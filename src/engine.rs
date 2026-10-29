@@ -2602,6 +2602,11 @@ impl Engine {
     /// How many pictures are being drawn, and how many reads of them each
     /// pixel of those layers takes in all (a plain picture is one): when the
     /// second is well above the first, effects are costing the graphics card.
+    /// How many cues have been started since the program began.
+    pub fn started_total(&self) -> u64 {
+        self.next_instance - 1
+    }
+
     pub fn picture_layers(&self) -> u32 {
         self.active
             .iter()
@@ -4329,6 +4334,65 @@ mod tests {
         let end = x_at(&e);
         assert_eq!((end.x, end.scale_x), (1.0, 2.0));
         assert_eq!(end.y, 0.0, "what the fade did not name is left");
+    }
+
+    #[test]
+    fn a_fade_cue_reaches_a_looping_cue_whose_speed_and_position_are_keyframed() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let mut e = engine_without_media();
+        e.ff = Some(ff);
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let mut c = show.make_cue(CueType::Video, Some(clip), 0);
+        let m = c.kind.media_mut().unwrap();
+        m.end = Some(3.0);
+        m.loop_media = true;
+        m.loop_count = 3;
+        m.rate.set_key(0.0, 0.8);
+        m.rate.set_key(4.0, 1.25);
+        m.rate.set_key(8.0, 0.8);
+        let mut x = Animated::new(0.0);
+        x.set_key(0.0, -0.3);
+        x.set_key(8.0, 0.3);
+        m.motion.x = Some(x);
+        let id = c.id;
+        show.cues.push(c);
+        let mut fade = show.make_cue(CueType::Fade, None, 1);
+        if let CueKind::Fade(f) = &mut fade.kind {
+            f.target = Some(id);
+            f.duration = 2.0;
+            f.opacity = Some(0.4);
+            f.volume_db = None;
+            f.stop_target = false;
+            f.geometry.y = Some(0.3);
+        }
+        let fade_id = fade.id;
+        show.cues.push(fade);
+        e.playhead = Some(id);
+        e.go(&show);
+        run_until(&mut e, &show, "the loop to start", |e| {
+            e.active.first().is_some_and(|a| a.started)
+        });
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            e.tick(&show, 1.0 / 60.0);
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        assert!(playing(&e, id), "the loop is still playing after 2 s");
+        e.playhead = Some(fade_id);
+        e.go(&show);
+        e.tick(&show, 0.0);
+        assert!(
+            e.messages.iter().all(|m| !m.1.contains("is not playing")),
+            "{:?}",
+            e.messages
+        );
+        e.tick(&show, 2.1);
+        let l = &e.layers(out)[0];
+        assert!((l.transform.y - 0.3).abs() < 1e-4, "{:?}", l.transform);
+        assert!((l.opacity - 0.4).abs() < 1e-4, "{}", l.opacity);
     }
 
     #[test]

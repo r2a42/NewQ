@@ -260,6 +260,10 @@ pub struct App {
     /// When the web remote's page was last given the show's state.
     last_web_state: Instant,
     feedback: crate::feedback::Feedback,
+    /// The unattended-run log (`NEWQ_STATS`, see stats.rs).
+    stats: Option<crate::stats::StatsLog>,
+    /// `NEWQ_AUTOSTART`: press GO this long after starting, once.
+    autostart: Option<Instant>,
     /// A recovery file from a session that didn't end properly, to offer once.
     pending_recovery: Option<PathBuf>,
     /// Whether something was playing at the previous tick.
@@ -345,6 +349,15 @@ impl App {
             last_autosave: Instant::now(),
             last_web_state: Instant::now(),
             feedback: crate::feedback::Feedback::new(),
+            stats: crate::stats::StatsLog::from_env(&crate::crash::log_dir()),
+            autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
+                let secs = if v == "1" {
+                    5.0
+                } else {
+                    v.parse::<f64>().ok()?
+                };
+                Some(Instant::now() + Duration::from_secs_f64(secs.clamp(0.0, 3600.0)))
+            }),
             pending_recovery,
             was_active: false,
             main_window_only,
@@ -1837,6 +1850,24 @@ impl ApplicationHandler for App {
         self.last_clock_look = now;
         self.engine.on_clock(&self.show, crate::clock::now(), gap);
         self.engine.tick(&self.show, dt);
+        if self.autostart.is_some_and(|t| now >= t) {
+            self.autostart = None;
+            log::info!("autostart: GO");
+            self.engine.go(&self.show);
+        }
+        if let Some(stats) = &mut self.stats {
+            let engine = &self.engine;
+            stats.frame(now, || crate::stats::Inputs {
+                playing: engine.active.len(),
+                started_total: engine.started_total(),
+                layers: engine.picture_layers(),
+                late_permille: crate::render::late_frames_permille(),
+                audio_permille: engine
+                    .audio
+                    .device_status(None)
+                    .map_or(0, |d| d.load_permille),
+            });
+        }
         // What control cues asked of the show (arming, disarming).
         for edit in self.engine.take_show_edits() {
             match edit {

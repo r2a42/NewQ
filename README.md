@@ -657,6 +657,42 @@ If the displays are what stops NewQ starting, run it with `--main-window-only`
 and no output windows are opened, so you can open the app and set up the
 displays from the *Displays* page of the settings.
 
+## Leaving a show running unattended: the soak test
+
+A show that has to run for hours can fail in ways a short rehearsal never shows: a
+slow memory leak, FFmpeg processes that pile up, a decoder that stalls once in a
+thousand starts. NewQ comes with a show built to find them and a log to read in the
+morning.
+
+```sh
+scripts/make_soak_media.sh soak-media                       # about 50 MB of test clips
+newq --make-soak-show soak.newq --media soak-media --short  # a one-minute lap to try first
+newq --make-soak-show soak.newq --media soak-media          # the real thing: a lap of about 5 minutes
+NEWQ_STATS=soak-stats.csv NEWQ_AUTOSTART=1 NEWQ_LOG_FILE=1 newq soak.newq
+```
+
+The show plays itself: every cue hands over to the next, and the last starts the first
+again, so it laps for as long as you leave it. Each lap starts and stops H.264 and Hap
+video, loops with keyframed speed, position, blur and rotation, a fade cue that moves a
+picture, music through an echo, a live clock, a three-picture slide show, an OSC send
+and a wait. About two hundred laps in eight hours is a couple of thousand FFmpeg
+processes started and stopped.
+
+Before leaving: switch off sleep and the screen saver, set the displays and audio
+device in *Settings*, and watch the first lap. In the morning:
+
+```sh
+newq --stats-report soak-stats.csv
+```
+
+It prints how memory, open files and threads moved (with the trend per hour, after the
+first tenth of the run), the most FFmpeg processes at once, the worst late-frame share
+and audio load, the longest stall of the main loop, and a list of anything that looks
+wrong (memory growing, a stall over a second, a gap in the samples that means the
+program froze, slept or was restarted). `newq.log` and `newq-crash.log` in the log
+folder say what happened if it did stop. The CSV has a row every ten seconds, so a
+night is about 3,000 rows.
+
 ## Keyboard
 
 | Key                   | Action                                          |
@@ -757,6 +793,9 @@ release build.
 | `WGPU_POWER_PREF` | `low` prefers the integrated GPU, `high` the discrete GPU           |
 | `NEWQ_TRACE_OUTPUT` | Log the layer opacities of every frame each output composites     |
 | `RUST_LOG`        | Logging level, e.g. `RUST_LOG=debug`                                |
+| `NEWQ_STATS`      | Write a CSV of memory, CPU, FFmpeg processes, late frames, audio load and main-loop stalls (a file, or `1` for `newq-stats.csv` in the log folder) |
+| `NEWQ_STATS_SECS` | Seconds between rows of that file (default 10)                      |
+| `NEWQ_AUTOSTART`  | Press GO this many seconds after starting (`1` = 5), once, for shows that run unattended |
 
 ## How it works
 
