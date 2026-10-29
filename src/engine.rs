@@ -4506,7 +4506,7 @@ mod tests {
 
     #[test]
     fn a_hap_cue_plays_as_hap_and_has_the_length_of_the_file() {
-        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+        let Some((ff, src)) = crate::media::test_media_with_hap("testsrc_10s.mp4") else {
             return;
         };
         let dir = std::env::temp_dir().join("newq_test_hap_engine");

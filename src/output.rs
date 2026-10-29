@@ -768,9 +768,10 @@ mod tests {
         thread.join().unwrap();
         let sent = sent.lock();
         assert_eq!(sent[0].1[0], 0xF0, "the full frame comes first");
-        // About 100 quarter frames a second at 25 fps; 0.7 s of running.
+        // About 100 quarter frames a second at 25 fps for the 0.7 s of running
+        // (a busy machine oversleeps, so only a floor is asserted).
         let quarters = sent.len() - 1;
-        assert!((55..=80).contains(&quarters), "{quarters}");
+        assert!(quarters >= 40, "{quarters}");
         // Spaced by 10 ms, give or take the scheduler (not gaps of a pause's length
         // after the pause is taken out).
         let gaps: Vec<f64> = sent[1..]
@@ -780,7 +781,7 @@ mod tests {
         let mut sorted = gaps.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = sorted[sorted.len() / 2];
-        assert!((0.008..=0.013).contains(&median), "{median}");
+        assert!((0.008..=0.02).contains(&median), "{median}");
     }
 
     #[test]

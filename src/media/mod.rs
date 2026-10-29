@@ -252,6 +252,19 @@ pub fn test_media(file: &str) -> Option<(Ffmpeg, PathBuf)> {
     found
 }
 
+/// Like `test_media`, for tests that make a Hap file with FFmpeg: None (the
+/// test skips) when this FFmpeg has no `hap` encoder, as on Homebrew's build.
+#[cfg(test)]
+pub fn test_media_with_hap(file: &str) -> Option<(Ffmpeg, PathBuf)> {
+    let (ff, path) = test_media(file)?;
+    if ff.has_encoder("hap") {
+        Some((ff, path))
+    } else {
+        eprintln!("skipped: this FFmpeg has no hap encoder");
+        None
+    }
+}
+
 /// Read `r` to its end, keeping only the last `keep` bytes of it as text.
 pub(crate) fn read_tail(mut r: impl std::io::Read, keep: usize) -> String {
     let mut tail: Vec<u8> = Vec::new();

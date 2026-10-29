@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn frames_from_ffmpeg_decode_to_the_picture_ffmpeg_makes() {
-        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+        let Some((ff, src)) = crate::media::test_media_with_hap("testsrc_10s.mp4") else {
             return;
         };
         let dir = std::env::temp_dir().join("newq_test_hap");

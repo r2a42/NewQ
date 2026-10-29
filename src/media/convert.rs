@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn a_converted_file_is_hap_in_whole_blocks_and_plays_as_hap() {
-        let Some((ff, src)) = crate::media::test_media("smpte_8s.mp4") else {
+        let Some((ff, src)) = crate::media::test_media_with_hap("smpte_8s.mp4") else {
             return;
         };
         let dir = std::env::temp_dir().join("newq_test_convert");

@@ -9892,7 +9892,7 @@ mod tests {
 
     #[test]
     fn a_video_can_be_converted_to_hap_in_the_background() {
-        let Some((ff, src)) = crate::media::test_media("testsrc_10s.mp4") else {
+        let Some((ff, src)) = crate::media::test_media_with_hap("testsrc_10s.mp4") else {
             return;
         };
         let dir = std::env::temp_dir().join("newq_test_ui_convert");
