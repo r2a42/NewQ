@@ -63,14 +63,30 @@ workflow is meant to be started by `workflow_dispatch` (owner's token).
   string: it kills the shell. Use `pkill -x newq`.
 - Cloud sessions can't push tags; releases go only through the workflow.
 
-## Staying with it
+## Staying with it (use Monitor, not scheduled tasks)
 
-A session only acts when something wakes it. So after every step that has to wait
-(CI running, dry run, release build), schedule the next look with `send_later`
-(`delay_minutes` 2 for a dry run, 3 for a main CI run, 4 for CI on a PR, 9 for the
-`Release` workflow) **in the same turn**, with a message that says exactly what to
-check and what to do next. When it wakes you, do that step and schedule the next. Keep
-chaining until step 8 is done. If a check-in finds the same thing still running, re-arm
-it; do not stop. Stop only when the release is verified, or you are blocked (say what
-you need), or the user says stop. When blocked, tell the user in one line instead of going
-quiet.
+**Do not use `send_later` / `create_trigger` for waiting.** Since 2026-10-29 every one-shot
+trigger bound to this session fires and is refused within milliseconds
+(`ROUTINE_RUN_FAILURE_REASON_ACCESS_DENIED`; the docs don't cover this case). The trigger then
+stays `enabled`, retries the next day and sends the user a "routine isn't permitted to run"
+notification each time. If you did create one, `delete_trigger` it. (`list_triggers` shows
+`last_run.failure_reason`.)
+
+Instead use the Monitor tool with `scripts/gh_wait.sh`, which polls the public GitHub API
+once a minute with plain `curl` (no token, no routine). Monitor wakes the session when the
+script exits, and that works. Each wait is one Monitor call (`persistent: false`,
+`timeout_ms` up to its limit; if the monitor expires first, start another):
+
+```
+scripts/gh_wait.sh pr 34              # all checks on the PR head finished (exit 0 = all passed)
+scripts/gh_wait.sh latest ci.yml      # id/status/sha of the newest run (find the main CI run)
+scripts/gh_wait.sh run 40796485911    # a workflow run finished (exit 0 = success)
+scripts/gh_wait.sh latest cut-release.yml   # find the dry/real run you just dispatched
+scripts/gh_wait.sh latest release.yml       # the Release run it started
+scripts/gh_wait.sh release v0.12.0    # the release exists; prints its assets
+```
+
+So the loop is: do a step, start the Monitor for the next wait **in the same turn**, and when
+it reports, do the next step. Chain through step 8 without waiting to be prompted. Stop only
+when the release is verified, you are blocked (say what you need in one line), or the user says
+stop. The same script serves any "wait for CI" in other work.
