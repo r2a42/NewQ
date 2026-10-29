@@ -673,14 +673,14 @@ That one command works the same on Windows, macOS and Linux (on Windows run
 `NewQ.exe --soak` from PowerShell or cmd; the Windows download has no console, so it
 prints nothing and the prompt comes back at once, but it is running, and the report
 is in the file). It makes the test clips it needs (about
-50 MB, once, with the FFmpeg NewQ already uses; a build of FFmpeg without the Hap encoder, such as Homebrew's, gets a show without the Hap cue) in a `soak` folder inside the log
+50 MB, once, with the FFmpeg NewQ already uses; a build of FFmpeg without the Hap encoder, such as Homebrew's or the one in the Mac download, gets a show without the Hap cue, and one without x264, such as the Mac download's, gets MPEG-4 clips in place of H.264) in a `soak` folder inside the log
 folder (or `--dir FOLDER`), writes the show, opens NewQ on it with the stats log on and
 GO pressed after five seconds, and when you close the window writes the report (below)
 to the screen and to `stats.report.txt` beside the log.
 
 
 The show plays itself: every cue hands over to the next, and the last starts the first
-again, so it laps for as long as you leave it. Each lap starts and stops H.264 and Hap
+again, so it laps for as long as you leave it. Each lap starts and stops H.264 (MPEG-4 where FFmpeg has no x264) and Hap
 video, loops with keyframed speed, position, blur and rotation, a fade cue that moves a
 picture, music through an echo, a live clock, a three-picture slide show, an OSC send
 and a wait. About two hundred laps in eight hours is a couple of thousand FFmpeg
