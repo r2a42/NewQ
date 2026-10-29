@@ -186,8 +186,8 @@ fn downmix_5_1() -> Vec<Crosspoint> {
     ]
 }
 
-/// The show for the decoding comparison: `tiles` copies of one 4K clip playing
-/// at once, each in a corner of the picture (a video wall), looping.
+/// The show for the decoding comparison: `tiles` copies of one clip playing
+/// at once, each in its own part of the picture (a video wall), looping.
 pub fn build_decode(original: &Show, clip: &std::path::Path, tiles: usize) -> Built {
     let mut show = original.clone();
     show.cues.clear();
@@ -205,8 +205,11 @@ pub fn build_decode(original: &Show, clip: &std::path::Path, tiles: usize) -> Bu
     // Each tile starts the next straight away (a group would work out its own
     // length from its children, which the loops make meaningless here).
     let mut first = None;
+    // A grid as square as it can be: 2x2 for four, 3x3 for eight.
+    let cols = (tiles as f32).sqrt().ceil().max(1.0) as usize;
+    let rows = tiles.div_ceil(cols);
     for i in 0..tiles {
-        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+        let (col, row) = ((i % cols) as f32, (i / cols) as f32);
         let id = b.cue(
             CueType::Video,
             Some(clip.to_path_buf()),
@@ -223,10 +226,10 @@ pub fn build_decode(original: &Show, clip: &std::path::Path, tiles: usize) -> Bu
                 // Two minutes of passes: longer than a trial.
                 m.loop_count = 12;
                 m.layer = i as i32;
-                m.transform.scale_x = 0.5;
-                m.transform.scale_y = 0.5;
-                m.transform.x = col - 0.5 + 0.25;
-                m.transform.y = row - 0.5 + 0.25;
+                m.transform.scale_x = 1.0 / cols as f32;
+                m.transform.scale_y = 1.0 / rows as f32;
+                m.transform.x = (col + 0.5) / cols as f32 - 0.5;
+                m.transform.y = (row + 0.5) / rows as f32 - 0.5;
             },
         );
         first.get_or_insert(id);
@@ -648,31 +651,57 @@ mod tests {
         let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
             return;
         };
-        let built = build_decode(&Show::default(), &clip, 4);
-        let mut show = built.show;
-        assert_eq!(show.cues.len(), 4);
-        assert_eq!(show.cues[0].id, built.first);
-        let mut e = crate::engine::Engine::for_tests();
-        e.ff = Some(ff);
-        e.playhead = Some(built.first);
-        e.go(&show);
-        let began = std::time::Instant::now();
-        let mut last = began;
-        let mut all = false;
-        while began.elapsed() < std::time::Duration::from_secs(5) {
-            let now = std::time::Instant::now();
-            e.tick(&show, now.duration_since(last).as_secs_f64());
-            last = now;
-            std::thread::sleep(std::time::Duration::from_millis(16));
-            all |= show
-                .cues
-                .iter()
-                .all(|c| matches!(e.status(c.id), crate::engine::CueStatus::Playing { .. }));
+        for tiles in [4, 8] {
+            let built = build_decode(&Show::default(), &clip, tiles);
+            let mut show = built.show;
+            assert_eq!(show.cues.len(), tiles);
+            assert_eq!(show.cues[0].id, built.first);
+            let mut e = crate::engine::Engine::for_tests();
+            e.ff = Some(ff.clone());
+            e.playhead = Some(built.first);
+            e.go(&show);
+            let began = std::time::Instant::now();
+            let mut last = began;
+            let mut all = false;
+            while began.elapsed() < std::time::Duration::from_secs(5) {
+                let now = std::time::Instant::now();
+                e.tick(&show, now.duration_since(last).as_secs_f64());
+                last = now;
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                all |= show
+                    .cues
+                    .iter()
+                    .all(|c| matches!(e.status(c.id), crate::engine::CueStatus::Playing { .. }));
+            }
+            assert!(all, "{tiles} tiles never played together");
+            assert!(e.is_active(), "the wall must keep playing");
+            e.stop_all(0.0);
+            show.cues.clear();
         }
-        assert!(all, "the four tiles never played together");
-        assert!(e.is_active(), "the wall must keep playing");
-        e.stop_all(0.0);
-        show.cues.clear();
+    }
+
+    #[test]
+    fn the_wall_is_a_grid_that_fills_the_picture_for_four_and_for_eight_tiles() {
+        for (n, cols, rows) in [(4usize, 2.0f32, 2.0f32), (8, 3.0, 3.0), (1, 1.0, 1.0)] {
+            let built = build_decode(&Show::default(), std::path::Path::new("x.mp4"), n);
+            assert_eq!(built.show.cues.len(), n);
+            for c in &built.show.cues {
+                let m = match &c.kind {
+                    CueKind::Video(m) => m,
+                    _ => panic!("a video tile"),
+                };
+                assert_eq!(
+                    (m.transform.scale_x, m.transform.scale_y),
+                    (1.0 / cols, 1.0 / rows)
+                );
+                assert!(m.transform.x.abs() <= 0.5 && m.transform.y.abs() <= 0.5);
+            }
+            // The last tile starts nothing after it.
+            assert_eq!(
+                built.show.cues.last().unwrap().continue_mode,
+                ContinueMode::DoNotContinue
+            );
+        }
     }
 
     #[test]
