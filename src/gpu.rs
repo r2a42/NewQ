@@ -47,6 +47,9 @@ impl DeviceLost {
     }
 }
 
+/// The graphics adapter in use, for the Test Mode report.
+pub static GPU_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// Shared GPU context. Cheap to clone; render threads each hold a copy.
 #[derive(Clone)]
 pub struct Gpu {
@@ -78,6 +81,10 @@ impl Gpu {
             )
             .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
         log::info!("GPU: {:?}", adapter.get_info());
+        {
+            let i = adapter.get_info();
+            let _ = GPU_NAME.set(format!("{} ({:?}, {:?})", i.name, i.backend, i.device_type));
+        }
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("newq"),

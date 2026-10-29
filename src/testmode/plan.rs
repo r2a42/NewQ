@@ -12,7 +12,7 @@
 //! the Short test is a single lap.
 
 use super::Level;
-use super::assets::{Kind, Resolved, Source, find};
+use super::assets::{Kind, Resolved, find};
 use crate::show::*;
 use std::collections::HashMap;
 
@@ -28,6 +28,8 @@ pub struct Built {
     pub cues: usize,
     /// What was left out and why (an asset that could not be got).
     pub notes: Vec<String>,
+    /// The ids of the media the show asks for, found or not.
+    pub used: Vec<&'static str>,
 }
 
 struct Builder<'a> {
@@ -35,6 +37,7 @@ struct Builder<'a> {
     res: &'a HashMap<&'static str, Resolved>,
     audio: Option<AudioOutputId>,
     notes: Vec<String>,
+    used: Vec<&'static str>,
 }
 
 fn follow(c: &mut Cue) {
@@ -72,6 +75,9 @@ impl<'a> Builder<'a> {
     fn have(&mut self, id: &str, kind: Kind) -> Option<Resolved> {
         let a = find(id).expect("an asset of the catalog");
         debug_assert_eq!(a.kind, kind);
+        if !self.used.contains(&a.id) {
+            self.used.push(a.id);
+        }
         match self.res.get(id) {
             Some(r) => Some(r.clone()),
             None => {
@@ -193,6 +199,7 @@ pub fn build(original: &Show, level: Level, res: &HashMap<&'static str, Resolved
         res,
         audio,
         notes: Vec::new(),
+        used: Vec::new(),
     };
     let (short, long) = (level == Level::Short, level == Level::Long);
     // Seconds of picture from each 10 s clip in the frame-rate section, and
@@ -570,20 +577,44 @@ pub fn build(original: &Show, level: Level, res: &HashMap<&'static str, Resolved
         lap_secs: lap,
         cues,
         notes: b.notes,
+        used: b.used,
     }
-}
-
-/// Whether anything in the test is made rather than downloaded (the window
-/// says so, and the log).
-pub fn generated(res: &HashMap<&'static str, Resolved>) -> usize {
-    res.values()
-        .filter(|r| matches!(r.source, Source::Generated(_)))
-        .count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testmode::assets::Source;
+
+    #[test]
+    fn each_test_downloads_exactly_the_media_its_show_asks_for() {
+        for level in Level::ALL {
+            let built = build(&Show::default(), level, &HashMap::new());
+            let wanted: Vec<&str> = crate::testmode::assets::wanted(level)
+                .iter()
+                .map(|a| a.id)
+                .collect();
+            for id in &built.used {
+                assert!(
+                    wanted.contains(id),
+                    "{} asks for {id}, which it does not download",
+                    level.label()
+                );
+            }
+            for id in &wanted {
+                // A sound taken from a film needs the film too.
+                let source_of_used = built
+                    .used
+                    .iter()
+                    .any(|u| find(u).and_then(|a| a.from) == Some(*id));
+                assert!(
+                    built.used.contains(id) || source_of_used,
+                    "{} downloads {id}, which its show never uses",
+                    level.label()
+                );
+            }
+        }
+    }
     use crate::testmode::assets::{CATALOG, Kind};
     use std::path::PathBuf;
 
@@ -593,7 +624,6 @@ mod tests {
             (Kind::Video, "bbb_trailer") => (33.0, 853, 480, 25.0, 6),
             (Kind::Video, _) => (10.0, 1920, 1080, 30.0, 0),
             (Kind::Image, _) => (0.0, 3000, 3000, 0.0, 0),
-            (Kind::Audio, "bbb_sound") => (33.0, 0, 0, 0.0, 6),
             (Kind::Audio, _) => (52.0, 0, 0, 0.0, 2),
         };
         Resolved {

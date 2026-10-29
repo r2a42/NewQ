@@ -27,6 +27,20 @@ pub struct Inputs {
     pub audio_permille: u32,
 }
 
+/// One row of the log, as numbers (the Test Mode window shows the latest).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sample {
+    pub uptime_s: u64,
+    pub rss_mb: u64,
+    pub cpu_pct: f32,
+    pub ffmpeg: usize,
+    pub ffmpeg_rss_mb: u64,
+    pub fds: Option<usize>,
+    pub threads: Option<usize>,
+    pub inputs: Inputs,
+    pub stall_ms: u64,
+}
+
 pub struct StatsLog {
     file: std::io::BufWriter<std::fs::File>,
     sys: System,
@@ -69,7 +83,7 @@ impl StatsLog {
         }
     }
 
-    fn create(path: &Path, every: Duration, log_path: PathBuf) -> std::io::Result<StatsLog> {
+    pub fn create(path: &Path, every: Duration, log_path: PathBuf) -> std::io::Result<StatsLog> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
@@ -97,11 +111,12 @@ impl StatsLog {
     }
 
     /// Called each time round the main loop; writes a row when one is due.
-    pub fn frame(&mut self, now: Instant, inputs: impl FnOnce() -> Inputs) {
+    /// Returns the row, if one was written.
+    pub fn frame(&mut self, now: Instant, inputs: impl FnOnce() -> Inputs) -> Option<Sample> {
         self.stall = self.stall.max(now.duration_since(self.last_frame));
         self.last_frame = now;
         if now.duration_since(self.last_row) < self.every {
-            return;
+            return None;
         }
         self.last_row = now;
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -123,20 +138,35 @@ impl StatsLog {
             }
         }
         let log_kb = std::fs::metadata(&self.log_path).map_or(0, |m| m.len() / 1024);
+        let uptime = now.duration_since(self.started).as_secs();
+        let (open, thr) = (open_files(), threads());
+        let inputs = inputs();
+        let stall = self.stall.as_millis() as u64;
         let line = row(
             unix_now(),
-            now.duration_since(self.started).as_secs(),
+            uptime,
             [rss, f_rss],
             [cpu, f_cpu],
             n,
-            [open_files(), threads()],
-            inputs(),
-            self.stall.as_millis() as u64,
+            [open, thr],
+            inputs,
+            stall,
             log_kb,
         );
         self.stall = Duration::ZERO;
         let _ = writeln!(self.file, "{line}");
         let _ = self.file.flush();
+        Some(Sample {
+            uptime_s: uptime,
+            rss_mb: rss >> 20,
+            cpu_pct: cpu,
+            ffmpeg: n,
+            ffmpeg_rss_mb: f_rss >> 20,
+            fds: open,
+            threads: thr,
+            inputs,
+            stall_ms: stall,
+        })
     }
 }
 

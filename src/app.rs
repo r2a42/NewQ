@@ -1621,7 +1621,7 @@ impl App {
             .map(|v| Instant::now() + v.repaint_delay.min(Duration::from_secs(3600)));
 
         // Keep a copy of unsaved changes, so a crash doesn't lose them.
-        if self.last_autosave.elapsed() >= recovery::INTERVAL {
+        if !self.ui.test_locked && self.last_autosave.elapsed() >= recovery::INTERVAL {
             self.last_autosave = Instant::now();
             let path = self.ui.show_path.as_deref();
             if !self.ui.dirty {
@@ -1653,6 +1653,9 @@ impl App {
         if self.ui.quit_requested {
             self.ui.quit_requested = false;
             if ui::confirm_discard(&self.show, &mut self.ui) {
+                let mut test = std::mem::take(&mut self.ui.test);
+                test.shutdown(&mut self.show, &mut self.engine, &mut self.ui);
+                self.ui.test = test;
                 self.engine.stop_all(0.0);
                 event_loop.exit();
             }
@@ -1850,6 +1853,11 @@ impl ApplicationHandler for App {
         self.last_clock_look = now;
         self.engine.on_clock(&self.show, crate::clock::now(), gap);
         self.engine.tick(&self.show, dt);
+        {
+            let mut test = std::mem::take(&mut self.ui.test);
+            test.update(&mut self.show, &mut self.engine, &mut self.ui);
+            self.ui.test = test;
+        }
         if self.autostart.is_some_and(|t| now >= t) {
             self.autostart = None;
             log::info!("autostart: GO");

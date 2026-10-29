@@ -61,6 +61,16 @@ The README describes the features; this file is about working on the code.
 - `timecode::Generator` makes MTC messages; `output::MtcRunner` is its paced thread
   (`ActiveKind::Timecode`, dropped to stop). Send cues' `Program` target runs only
   when `Prefs::allow_scripts` (per computer; `output::set_scripts_allowed`).
+- `src/testmode/`: Test Mode (Help menu), no command line. `assets.rs` is the pinned
+  catalog of free media (hashes, `.part` resume downloads with `ureq`, checks by
+  decoding, generated fallbacks named `generated_*`; tested against a loopback HTTP
+  server, and an ignored live test `real_downloads_match_the_catalog`), `plan.rs` builds
+  the Short/Medium/Long shows from the user's show (keeping its outputs), `session.rs`
+  runs one (`TestMode::update` each frame from `app.rs`; always restores via
+  `UiState::begin_test/end_test`, writes the run folder, never lets autosave run while
+  `test_locked`), `analysis.rs` turns samples into findings (pure, tested), `gui.rs` is the
+  window. Cross-target clippy for Windows/Mac can't run in the cloud (`ring` needs the
+  target's C compiler); CI does it.
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
   self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it
   and writes the report; `--make-soak-show` writes just the show. sysinfo
