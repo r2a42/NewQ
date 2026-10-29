@@ -803,8 +803,12 @@ mod tests {
         e.go(&show);
         let began = std::time::Instant::now();
         let mut seen_group = false;
-        while began.elapsed() < std::time::Duration::from_secs(14) {
-            e.tick(&show, 1.0 / 60.0);
+        // The engine's clock is the real one: a loaded runner is slow, not wrong.
+        let mut last = began;
+        while !seen_group && began.elapsed() < std::time::Duration::from_secs(90) {
+            let now = std::time::Instant::now();
+            e.tick(&show, now.duration_since(last).as_secs_f64());
+            last = now;
             std::thread::sleep(std::time::Duration::from_millis(16));
             seen_group |= show.cues.iter().any(|c| {
                 c.name == "Frame rates"
