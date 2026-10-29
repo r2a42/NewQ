@@ -961,9 +961,13 @@ mod tests {
         };
         test.start(ff, &dir);
         let mut was_locked = false;
+        let mut last = Instant::now();
         let ok = wait_for(
             || {
-                engine.tick(&show, 0.02);
+                // The engine's clock is the real one: a loaded runner is slow, not wrong.
+                let now = Instant::now();
+                engine.tick(&show, now.duration_since(last).as_secs_f64());
+                last = now;
                 test.update(&mut show, &mut engine, &mut st);
                 was_locked |= st.test_locked;
                 matches!(test.view(), View::Done(_))
