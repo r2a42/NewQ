@@ -253,6 +253,10 @@ pub struct App {
     /// the system for them can stall for a while).
     device_scan: Option<std::sync::mpsc::Receiver<DeviceList>>,
     last_tick: Instant,
+    /// The splash screen while it is up, and when the main window's set-up is
+    /// to begin (a moment after the splash is drawn, so it is on screen first).
+    splash: Option<crate::splash::Splash>,
+    start_main_window: Option<Instant>,
     /// When the clock triggers were last looked at.
     last_clock_look: Instant,
     /// When the unsaved show was last copied to its recovery file.
@@ -345,6 +349,8 @@ impl App {
             last_monitor_scan: Instant::now(),
             device_scan: None,
             last_tick: Instant::now(),
+            splash: None,
+            start_main_window: None,
             last_clock_look: Instant::now(),
             last_autosave: Instant::now(),
             last_web_state: Instant::now(),
@@ -1678,14 +1684,9 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
-
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.control.is_some() {
-            return;
-        }
+impl App {
+    /// The main window and the graphics card behind it: the slow part of starting.
+    fn open_main_window(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -1737,8 +1738,64 @@ impl ApplicationHandler for App {
         self.scan_monitors(event_loop);
         self.reconcile_outputs(event_loop);
     }
+}
+
+impl ApplicationHandler for App {
+    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.control.is_some() || self.start_main_window.is_some() {
+            return;
+        }
+        // The splash goes up first, and the main window's set-up (the graphics
+        // card, which is the slow part) waits until it has been drawn.
+        if std::env::var_os("NEWQ_NO_SPLASH").is_none()
+            && let Some(splash) = crate::splash::Splash::open(event_loop)
+        {
+            splash.request_redraw();
+            self.splash = Some(splash);
+            self.start_main_window = Some(Instant::now());
+            return;
+        }
+        self.open_main_window(event_loop);
+    }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.splash.as_ref().is_some_and(|s| s.id() == id) {
+            match event {
+                WindowEvent::RedrawRequested => {
+                    if let Some(s) = &mut self.splash {
+                        s.paint();
+                    }
+                    // Drawn (twice by now): the slow part of starting can begin.
+                    if self.start_main_window.take().is_some() {
+                        self.open_main_window(event_loop);
+                    }
+                }
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    if let Some(s) = &mut self.splash {
+                        s.paint();
+                    }
+                }
+                // A click, a key or the close button sends it away early.
+                WindowEvent::CloseRequested
+                | WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                }
+                | WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            state: ElementState::Pressed,
+                            ..
+                        },
+                    ..
+                } => self.splash = None,
+                _ => {}
+            }
+            return;
+        }
         let is_control = self.control.as_ref().is_some_and(|c| c.window.id() == id);
         if is_control {
             let ctl = self.control.as_mut().unwrap();
@@ -1820,7 +1877,33 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Only the splash screen is up so far: the main window's set-up begins
+        // once the splash has been drawn, or after a moment whatever happens.
+        if self.control.is_none() {
+            if self
+                .start_main_window
+                .is_some_and(|t| t.elapsed() > Duration::from_millis(300))
+            {
+                self.start_main_window = None;
+                self.open_main_window(event_loop);
+            }
+            if self.control.is_none() {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    Instant::now() + Duration::from_millis(50),
+                ));
+                return;
+            }
+        }
         let now = Instant::now();
+        if let Some(s) = &self.splash
+            && crate::splash::due(
+                s.opened,
+                now,
+                self.control.as_ref().is_some_and(|c| c.shown),
+            )
+        {
+            self.splash = None;
+        }
         let mut dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
         // While nothing is playing the loop sleeps for up to 500 ms, so the
@@ -1945,6 +2028,10 @@ impl ApplicationHandler for App {
         }
         if playing {
             next = next.min(now + TICK_WHILE_PLAYING);
+        }
+        if let Some(s) = &self.splash {
+            // Look again when it is time for the splash to go.
+            next = next.min((s.opened + crate::splash::HOLD).max(now + Duration::from_millis(50)));
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }

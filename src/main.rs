@@ -33,6 +33,7 @@ mod render;
 mod show;
 mod soak;
 mod speed;
+mod splash;
 mod stats;
 mod stream;
 mod testmode;

@@ -653,6 +653,13 @@ NewQ crashes it writes what went wrong, where, and a backtrace to
 `newq-crash.log` in the same folder, and on Windows shows a message with that
 path. Please send that file (and `newq.log`) when you report a crash.
 
+**The splash screen.** While the main window is being made ready (the graphics card is
+set up first, which takes a moment) a small window with the logo and the version is
+shown in the middle of the main display. It stays about two and a half seconds, longer
+only if the main window is slow, and goes by itself; a click or a key sends it away
+sooner. It is drawn on the processor, so it doesn't wait for the graphics card. Set
+`NEWQ_NO_SPLASH=1` in the environment to start without it.
+
 If the displays are what stops NewQ starting, run it with `--main-window-only`
 (or set `NEWQ_MAIN_WINDOW_ONLY=1`): every output then stays in the main window
 and no output windows are opened, so you can open the app and set up the
