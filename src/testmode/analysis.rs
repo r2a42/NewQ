@@ -70,18 +70,41 @@ pub fn slope(x: &[f64], y: &[f64]) -> f64 {
     if den == 0.0 { 0.0 } else { num / den }
 }
 
-/// How a number moved over the run, per hour, ignoring the first fifth (caches filling).
-fn trend_per_hour(samples: &[Sample], value: impl Fn(&Sample) -> Option<f64>) -> Option<f64> {
-    let skip = samples.len() / 5;
-    let pairs: Vec<(f64, f64)> = samples[skip..]
-        .iter()
-        .filter_map(|s| value(s).map(|v| (s.uptime_s as f64 / 3600.0, v)))
-        .collect();
-    if pairs.len() < 6 {
+/// How the high points of a number moved over the run, per hour, and whether
+/// the later half of the run is really higher than the earlier. A show's memory
+/// goes up and down with each lap (clips start and stop), so single samples
+/// compared at different points of a lap say nothing: the peak of each window
+/// of a couple of laps is compared instead, ignoring the first fifth (caches
+/// filling). `None` if the run was too short for four windows.
+fn growth(
+    samples: &[Sample],
+    window_s: f64,
+    value: impl Fn(&Sample) -> Option<f64>,
+) -> Option<(f64, f64)> {
+    let mut peaks: Vec<f64> = Vec::new();
+    for s in samples {
+        let Some(v) = value(s) else { continue };
+        let w = (s.uptime_s as f64 / window_s) as usize;
+        if peaks.len() <= w {
+            peaks.resize(w + 1, f64::MIN);
+        }
+        peaks[w] = peaks[w].max(v);
+    }
+    // The last window is usually not finished.
+    peaks.pop();
+    let peaks: Vec<f64> = peaks.into_iter().filter(|p| *p > f64::MIN).collect();
+    let skip = peaks.len() / 5;
+    let peaks = &peaks[skip..];
+    if peaks.len() < 4 {
         return None;
     }
-    let (x, y): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
-    Some(slope(&x, &y))
+    let x: Vec<f64> = (0..peaks.len())
+        .map(|i| i as f64 * window_s / 3600.0)
+        .collect();
+    let half = peaks.len() / 2;
+    let mean = |p: &[f64]| p.iter().sum::<f64>() / p.len() as f64;
+    let (early, late) = (mean(&peaks[..half]), mean(&peaks[half..]));
+    Some((slope(&x, peaks), late / early.max(1.0)))
 }
 
 /// Messages from the engine that mean something failed.
@@ -132,8 +155,9 @@ pub fn analyse(
             }),
         ];
         for (what, limit, value) in checks {
-            if let Some(per_hour) = trend_per_hour(samples, value)
+            if let Some((per_hour, ratio)) = growth(samples, (nominal * 2.0).max(240.0), value)
                 && per_hour > limit
+                && ratio > 1.10
             {
                 out.push(problem(format!(
                     "{what} kept growing ({per_hour:+.1} an hour): something is not being let go."
@@ -293,6 +317,39 @@ mod tests {
 
     fn steady(n: u64) -> Vec<Sample> {
         (0..n).map(|i| sample(i, 400)).collect()
+    }
+
+    /// Clips start and stop every lap, so FFmpeg's memory is a sawtooth: the
+    /// phase of the lap at the first and last sample must not look like growth.
+    fn laps_of_ffmpeg(growth_per_lap_mb: f64) -> Vec<Sample> {
+        (0..180u64)
+            .map(|i| {
+                let t = i * 10;
+                let lap = (t / 155) as f64;
+                let phase = t % 155;
+                let base = if (50..80).contains(&phase) {
+                    900.0
+                } else if phase < 50 {
+                    400.0
+                } else {
+                    100.0
+                };
+                let mut s = sample(i, 250);
+                s.ffmpeg_rss_mb = (base + lap * growth_per_lap_mb) as u64;
+                s
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_sawtooth_of_clips_starting_and_stopping_is_not_a_leak_but_real_growth_is() {
+        let f = analyse(&laps_of_ffmpeg(0.0), &[155.0; 11], 155.0, &[], 0.5);
+        assert!(f.is_empty(), "{f:?}");
+        let f = analyse(&laps_of_ffmpeg(60.0), &[155.0; 11], 155.0, &[], 0.5);
+        assert!(
+            f.iter().any(|x| x.text.contains("FFmpeg's memory")),
+            "{f:?}"
+        );
     }
 
     #[test]
