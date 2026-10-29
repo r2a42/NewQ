@@ -140,25 +140,42 @@ impl Ffmpeg {
 /// Run `cmd` to its end and collect what it printed, like `Command::output`,
 /// but kill it if `cancel` is set (looked at every 50 ms): a long encode must
 /// not make Cancel or Quit wait for it.
+///
+/// Once the process has ended, what it printed is waited for only a few
+/// seconds more: on Windows another process started at the same moment can
+/// inherit the pipes and keep them open, and `Command::output` would then wait
+/// for that other process too.
 pub fn output_cancellable(
     cmd: &mut Command,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<std::process::Output> {
+    use parking_lot::Mutex;
     use std::io::Read;
-    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+    type Collected = (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>);
+    fn drain(pipe: Option<Box<dyn Read + Send>>) -> Collected {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let (b, d) = (bytes.clone(), done.clone());
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
             if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut bytes);
+                let mut chunk = [0u8; 16 * 1024];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    b.lock().extend_from_slice(&chunk[..n]);
+                }
             }
-            bytes
-        })
-    };
+            d.store(true, Ordering::Release);
+        });
+        (bytes, done)
+    }
     let out = drain(
         child
             .stdout
@@ -181,10 +198,17 @@ pub fn output_cancellable(
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let take = |(bytes, done): Collected| {
+        while !done.load(Ordering::Acquire) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::mem::take(&mut *bytes.lock())
+    };
     Ok(std::process::Output {
         status,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
+        stdout: take(out),
+        stderr: take(err),
     })
 }
 
