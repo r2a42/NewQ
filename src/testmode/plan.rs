@@ -186,13 +186,62 @@ fn downmix_5_1() -> Vec<Crosspoint> {
     ]
 }
 
+/// A monitor the user chose to show the test on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisplayChoice {
+    /// What the choice is remembered by (see `Prefs::test_displays`).
+    pub key: String,
+    /// What a display assigned to it keeps to find it again.
+    pub reference: crate::show::DisplayRef,
+    /// How many look-alike monitors there are (see `OutputConfig::twins`).
+    pub twins: u32,
+    /// What to call it on screen.
+    pub label: String,
+}
+
+/// Give the show the displays that were chosen, in place of its own: the first
+/// shows the picture, the others show the whole of the first's picture too
+/// (a display that is "part of" another with the whole area is a mirror of it).
+/// With none chosen the show keeps the displays it has. Done before the cues
+/// are made, since a new cue is sent to the show's first display.
+fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
+    let Some(first) = displays.first() else {
+        return;
+    };
+    show.outputs.clear();
+    let main = show.add_display();
+    let assign = |show: &mut Show, id: crate::show::OutputId, d: &DisplayChoice| {
+        if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
+            o.monitor = Some(d.reference.clone());
+            o.twins = d.twins;
+        }
+    };
+    assign(show, main, first);
+    for d in &displays[1..] {
+        let id = show.add_display();
+        assign(show, id, d);
+        if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
+            o.part_of = Some(crate::show::PartOf {
+                display: main,
+                area: [0.0, 0.0, 1.0, 1.0],
+            });
+        }
+    }
+}
+
 /// The show for the decoding comparison: `tiles` copies of one clip playing
 /// at once, each in its own part of the picture (a video wall), looping.
-pub fn build_decode(original: &Show, clip: &std::path::Path, tiles: usize) -> Built {
+pub fn build_decode(
+    original: &Show,
+    clip: &std::path::Path,
+    tiles: usize,
+    displays: &[DisplayChoice],
+) -> Built {
     let mut show = original.clone();
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
+    use_displays(&mut show, displays);
     show.name = "Test Mode: decoding".into();
     let res = HashMap::new();
     let mut b = Builder {
@@ -247,11 +296,17 @@ pub fn build_decode(original: &Show, clip: &std::path::Path, tiles: usize) -> Bu
 }
 
 /// The test show for `level`, built from `original`'s settings.
-pub fn build(original: &Show, level: Level, res: &HashMap<&'static str, Resolved>) -> Built {
+pub fn build(
+    original: &Show,
+    level: Level,
+    res: &HashMap<&'static str, Resolved>,
+    displays: &[DisplayChoice],
+) -> Built {
     let mut show = original.clone();
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
+    use_displays(&mut show, displays);
     show.name = format!("Test Mode: {}", level.label());
     let audio = show.audio_outputs.first().map(|a| a.id);
     let mut b = Builder {
@@ -652,7 +707,7 @@ mod tests {
             return;
         };
         for tiles in [4, 8] {
-            let built = build_decode(&Show::default(), &clip, tiles);
+            let built = build_decode(&Show::default(), &clip, tiles, &[]);
             let mut show = built.show;
             assert_eq!(show.cues.len(), tiles);
             assert_eq!(show.cues[0].id, built.first);
@@ -683,7 +738,7 @@ mod tests {
     #[test]
     fn the_wall_is_a_grid_that_fills_the_picture_for_four_and_for_eight_tiles() {
         for (n, cols, rows) in [(4usize, 2.0f32, 2.0f32), (8, 3.0, 3.0), (1, 1.0, 1.0)] {
-            let built = build_decode(&Show::default(), std::path::Path::new("x.mp4"), n);
+            let built = build_decode(&Show::default(), std::path::Path::new("x.mp4"), n, &[]);
             assert_eq!(built.show.cues.len(), n);
             for c in &built.show.cues {
                 let m = match &c.kind {
@@ -704,10 +759,62 @@ mod tests {
         }
     }
 
+    fn choice(name: &str, i: usize) -> DisplayChoice {
+        DisplayChoice {
+            key: name.into(),
+            reference: crate::show::DisplayRef {
+                name: name.into(),
+                index: i,
+                hardware: None,
+            },
+            twins: 1,
+            label: name.into(),
+        }
+    }
+
+    #[test]
+    fn the_chosen_displays_replace_the_shows_and_the_cues_go_to_the_first() {
+        let original = Show::default();
+        let a = [choice("Left", 1), choice("Right", 2)];
+        for built in [
+            build(&original, Level::Short, &HashMap::new(), &a),
+            build_decode(&original, std::path::Path::new("x.mp4"), 4, &a),
+        ] {
+            let outs = &built.show.outputs;
+            assert_eq!(outs.len(), 2, "the show's own display is not kept");
+            assert_eq!(outs[0].monitor.as_ref().unwrap().name, "Left");
+            assert!(outs[0].part_of.is_none());
+            // The second shows the whole of the first's picture.
+            assert_eq!(outs[1].monitor.as_ref().unwrap().name, "Right");
+            let part = outs[1].part_of.unwrap();
+            assert_eq!(
+                (part.display, part.area),
+                (outs[0].id, [0.0, 0.0, 1.0, 1.0])
+            );
+            // Every picture cue is sent to the first.
+            let sent: Vec<_> = built
+                .show
+                .cues
+                .iter()
+                .filter_map(|c| c.kind.media())
+                .filter(|m| m.output.is_some())
+                .map(|m| m.output)
+                .collect();
+            assert!(!sent.is_empty());
+            assert!(sent.iter().all(|o| *o == Some(outs[0].id)), "{sent:?}");
+        }
+        // The user's own show is not touched, and none chosen keeps its displays.
+        assert_eq!(original.outputs.len(), 1);
+        assert!(original.outputs[0].monitor.is_none());
+        let kept = build(&original, Level::Short, &HashMap::new(), &[]);
+        assert_eq!(kept.show.outputs.len(), 1);
+        assert_eq!(kept.show.outputs[0].id, original.outputs[0].id);
+    }
+
     #[test]
     fn each_test_downloads_exactly_the_media_its_show_asks_for() {
         for level in Level::ALL {
-            let built = build(&Show::default(), level, &HashMap::new());
+            let built = build(&Show::default(), level, &HashMap::new(), &[]);
             let wanted: Vec<&str> = crate::testmode::assets::wanted(level)
                 .iter()
                 .map(|a| a.id)
@@ -771,7 +878,7 @@ mod tests {
         let before = serde_json::to_string(&original).unwrap();
         let mut sizes = Vec::new();
         for level in Level::ALL {
-            let built = build(&original, level, &all());
+            let built = build(&original, level, &all(), &[]);
             let cues = top(&built.show);
             let (last, rest) = cues.split_last().unwrap();
             for c in rest {
@@ -836,7 +943,7 @@ mod tests {
         let mut res = all();
         res.remove("bbb_60");
         res.remove("sintel_sound");
-        let built = build(&original, Level::Medium, &res);
+        let built = build(&original, Level::Medium, &res, &[]);
         assert!(built.notes.len() >= 2, "{:?}", built.notes);
         for c in &built.show.cues {
             if matches!(c.kind, CueKind::Video(_) | CueKind::Audio(_)) {
@@ -859,13 +966,13 @@ mod tests {
             }
         }
         // Nothing at all to play: a title and a wait, and it still runs round.
-        let none = build(&Show::default(), Level::Short, &HashMap::new());
+        let none = build(&Show::default(), Level::Short, &HashMap::new(), &[]);
         assert!(none.cues >= 3 && !none.notes.is_empty());
     }
 
     #[test]
     fn the_trailers_sound_is_mixed_down_and_its_centre_faded() {
-        let built = build(&Show::default(), Level::Medium, &all());
+        let built = build(&Show::default(), Level::Medium, &all(), &[]);
         let trailer = built
             .show
             .cues
@@ -913,7 +1020,7 @@ mod tests {
             r.source = Source::Downloaded;
             res.insert(a.id, r);
         }
-        let built = build(&Show::default(), Level::Short, &res);
+        let built = build(&Show::default(), Level::Short, &res, &[]);
         let mut show = built.show;
         let mut e = crate::engine::Engine::for_tests();
         e.ff = Some(ff);

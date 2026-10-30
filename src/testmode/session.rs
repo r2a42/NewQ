@@ -10,6 +10,7 @@
 use super::analysis::{Finding, Severity, Verdict, analyse};
 use super::assets::{self, Asset, Fetch, Resolved, Source};
 use super::decode::{Compare, CompareResult};
+use super::plan::DisplayChoice;
 use super::{Level, plan};
 use crate::engine::{CueStatus, Engine};
 use crate::media::ffmpeg::Ffmpeg;
@@ -63,6 +64,8 @@ enum Phase {
 pub struct Prep {
     pub fetch: Fetch,
     pub compare: bool,
+    /// The displays the test is to be shown on (none: the show's own).
+    pub displays: Vec<DisplayChoice>,
     pub level: Level,
     pub minutes: u32,
     pub wanted: Vec<&'static Asset>,
@@ -299,7 +302,7 @@ impl TestMode {
     }
 
     /// Begin: make the media ready (downloading what is missing).
-    pub fn start(&mut self, ff: Ffmpeg, log_dir: &Path) {
+    pub fn start(&mut self, ff: Ffmpeg, log_dir: &Path, displays: Vec<DisplayChoice>) {
         if self.busy() {
             return;
         }
@@ -314,6 +317,7 @@ impl TestMode {
         self.phase = Phase::Preparing(Box::new(Prep {
             fetch,
             compare: false,
+            displays,
             level: self.level,
             minutes: self.minutes,
             wanted,
@@ -323,7 +327,7 @@ impl TestMode {
 
     /// Begin the decoding comparison: the film it makes its 4K clip from is
     /// made ready first.
-    pub fn start_compare(&mut self, ff: Ffmpeg, log_dir: &Path) {
+    pub fn start_compare(&mut self, ff: Ffmpeg, log_dir: &Path, displays: Vec<DisplayChoice>) {
         if self.busy() {
             return;
         }
@@ -338,6 +342,7 @@ impl TestMode {
         self.phase = Phase::Preparing(Box::new(Prep {
             fetch,
             compare: true,
+            displays,
             level: self.level,
             minutes: 0,
             wanted,
@@ -393,7 +398,7 @@ impl TestMode {
                     let orig = st.prefs.hw_decode;
                     let _ = std::fs::write(
                         folder.join("system.txt"),
-                        system_report(engine, st, show, &p.wanted, &resolved),
+                        system_report(engine, st, show, &p.wanted, &resolved, &p.displays),
                     );
                     self.phase = Phase::Comparing(Box::new(Compare::begin(
                         ff,
@@ -402,6 +407,7 @@ impl TestMode {
                         folder,
                         self.decode_secs,
                         orig,
+                        p.displays.clone(),
                     )));
                     return;
                 }
@@ -528,7 +534,7 @@ fn launch(
         return Err(why.to_string());
     }
     let resolved = prep.fetch.status.lock().resolved.clone();
-    let built = plan::build(show, prep.level, &resolved);
+    let built = plan::build(show, prep.level, &resolved, &prep.displays);
     let folder = run_folder(&prep.log_dir, prep.level, unix_now());
     std::fs::create_dir_all(&folder).map_err(|e| {
         format!(
@@ -562,7 +568,7 @@ fn launch(
         .then(|| Duration::from_secs(u64::from(prep.minutes) * 60));
     let _ = std::fs::write(
         folder.join("system.txt"),
-        system_report(engine, st, show, &prep.wanted, &resolved),
+        system_report(engine, st, show, &prep.wanted, &resolved, &prep.displays),
     );
     let media_notes = built.notes.clone();
     // The point of no return: the user's show is put aside.
@@ -1004,6 +1010,7 @@ fn system_report(
     show: &Show,
     wanted: &[&'static Asset],
     resolved: &HashMap<&'static str, Resolved>,
+    displays: &[DisplayChoice],
 ) -> String {
     use sysinfo::System;
     let mut sys = System::new();
@@ -1047,6 +1054,19 @@ fn system_report(
         show.outputs.len(),
         show.audio_outputs.len()
     ));
+    p(if displays.is_empty() {
+        "Test shown on: the displays of your show (the main window's preview if it has none)"
+            .to_string()
+    } else {
+        format!(
+            "Test shown on: {}",
+            displays
+                .iter()
+                .map(|d| d.label.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    });
     match engine.audio.device_status(None) {
         Some(d) => p(format!(
             "Sound: {} {} Hz, {} channels{}",
@@ -1215,7 +1235,7 @@ mod tests {
             decode_secs: 3,
             ..Default::default()
         };
-        test.start_compare(ff, &dir);
+        test.start_compare(ff, &dir, Vec::new());
         let mut was_locked = false;
         let mut last = Instant::now();
         let ok = wait_for(
@@ -1271,7 +1291,7 @@ mod tests {
         let (mut show, mut engine, mut st) =
             (Show::default(), Engine::for_tests(), UiState::default());
         let before = serde_json::to_string(&show).unwrap();
-        test.start(ff, &dir);
+        test.start(ff, &dir, Vec::new());
         test.stop();
         assert!(wait_for(
             || {
@@ -1306,7 +1326,7 @@ mod tests {
             download: false,
             ..Default::default()
         };
-        test.start(ff, &dir);
+        test.start(ff, &dir, Vec::new());
         let mut was_locked = false;
         let mut last = Instant::now();
         let ok = wait_for(

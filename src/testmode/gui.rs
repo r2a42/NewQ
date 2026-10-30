@@ -4,6 +4,7 @@
 use super::Level;
 use super::analysis::{Severity, Verdict};
 use super::assets::{self, State};
+use super::plan::DisplayChoice;
 use super::session::{End, Run, View, clock, open_folder};
 use crate::engine::Engine;
 use crate::ui::UiState;
@@ -26,12 +27,22 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     let mut test = std::mem::take(&mut st.test);
     let refusal = st.test_refusal();
     let mut apply: Option<bool> = None;
+    let screens = screens_of(st);
+    let mut selected = st.prefs.test_displays.clone();
     egui::Window::new("Test mode")
         .open(&mut open)
         .collapsible(false)
         .default_width(520.0)
         .show(ctx, |ui| {
-            body(ui, engine, &mut test, refusal, &mut apply);
+            body(
+                ui,
+                engine,
+                &mut test,
+                refusal,
+                &mut apply,
+                &screens,
+                &mut selected,
+            );
         });
     if !open {
         if test.busy() {
@@ -44,6 +55,14 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
     test.open = open;
     st.test = test;
+    if selected != st.prefs.test_displays {
+        st.prefs.test_displays = selected;
+        if let Some(dir) = &st.layout_dir
+            && let Err(e) = st.prefs.save(dir)
+        {
+            log::warn!("could not save the settings of this computer: {e}");
+        }
+    }
     if let Some(on) = apply {
         // The user asked for what the comparison advised.
         st.prefs.hw_decode = on;
@@ -65,13 +84,15 @@ fn body(
     test: &mut super::TestMode,
     refusal: Option<&'static str>,
     apply: &mut Option<bool>,
+    screens: &[Screen],
+    selected: &mut Vec<String>,
 ) {
     let log_dir = crate::crash::log_dir();
     let mut dismiss = false;
     let mut failed = None;
     match test.view() {
         View::Idle => {
-            idle(ui, engine, test, refusal, &log_dir);
+            idle(ui, engine, test, refusal, &log_dir, screens, selected);
         }
         View::Preparing(p) => {
             let st = p.fetch.status.lock();
@@ -291,6 +312,8 @@ fn idle(
     test: &mut super::TestMode,
     refusal: Option<&'static str>,
     log_dir: &std::path::Path,
+    screens: &[Screen],
+    selected: &mut Vec<String>,
 ) {
     ui.label("Plays a show of its own to see how this computer copes, then puts yours back exactly as it was.");
     ui.add_space(6.0);
@@ -343,6 +366,8 @@ fn idle(
         );
     }
     ui.separator();
+    displays_section(ui, screens, selected);
+    ui.separator();
     if let Some(why) = refusal {
         ui.colored_label(AMBER, why);
     }
@@ -361,7 +386,7 @@ fn idle(
         .clicked()
         && let Some(ff) = engine.ff.clone()
     {
-        test.start(ff, log_dir);
+        test.start(ff, log_dir, chosen(screens, selected));
     }
     ui.add_space(6.0);
     ui.separator();
@@ -378,7 +403,7 @@ fn idle(
         .clicked()
         && let Some(ff) = engine.ff.clone()
     {
-        test.start_compare(ff, log_dir);
+        test.start_compare(ff, log_dir, chosen(screens, selected));
     }
     ui.label(
         RichText::new("Sound and pictures go to your show's outputs while it runs. Log files: ")
@@ -440,21 +465,21 @@ fn spark(ui: &mut egui::Ui, label: &str, values: &[f32], now: String) {
     });
 }
 
+/// "12:34 of 1:00:00": the planned length as it is, and the time so far never
+/// past it.
+fn progress_text(elapsed: std::time::Duration, planned: std::time::Duration) -> String {
+    format!("{} of {}", clock(elapsed.min(planned)), clock(planned))
+}
+
 fn running(ui: &mut egui::Ui, r: &Run) {
     ui.label(RichText::new(format!("{} test running", r.level.label())).strong());
-    match r.progress() {
-        Some(p) => {
-            ui.add(egui::ProgressBar::new(p).text(format!(
-                    "{} of {}",
-                    clock(r.elapsed()),
-                    clock(
-                        r.elapsed()
-                            .mul_f32(1.0 / p.max(1e-4))
-                            .min(std::time::Duration::from_secs(3600 * 24))
-                    )
-                )));
+    match (r.progress(), r.planned) {
+        (Some(p), Some(planned)) => {
+            // The planned length itself, not worked back from the progress:
+            // that rounds, and the total flickered between 1:00:00 and 59:59.
+            ui.add(egui::ProgressBar::new(p).text(progress_text(r.elapsed(), planned)));
         }
-        None => {
+        _ => {
             ui.label(format!("{} elapsed", clock(r.elapsed())));
         }
     }
@@ -564,4 +589,133 @@ fn comparing(ui: &mut egui::Ui, c: &super::decode::Compare) {
         }
     }
     ui.label(RichText::new(c.folder.display().to_string()).small().weak());
+}
+
+/// A connected monitor, as the Test Mode window offers it.
+pub struct Screen {
+    pub choice: DisplayChoice,
+    /// The main window is on it: a test can't be shown there (outputs never
+    /// cover the main window's display), only in the main window's preview.
+    pub is_main: bool,
+}
+
+fn screens_of(st: &UiState) -> Vec<Screen> {
+    let keys = crate::ui::monitor_keys(&st.monitors);
+    (0..keys.len())
+        .map(|i| Screen {
+            choice: DisplayChoice {
+                key: keys[i]
+                    .hardware
+                    .clone()
+                    .unwrap_or_else(|| keys[i].identity.clone()),
+                reference: keys[i].reference(i),
+                twins: crate::show::twins_of(&keys, i),
+                label: crate::ui::monitor_label(st, i),
+            },
+            is_main: st.control_monitor == Some(i),
+        })
+        .collect()
+}
+
+/// The displays the test is to be shown on: the ticked ones that are connected.
+fn chosen(screens: &[Screen], selected: &[String]) -> Vec<DisplayChoice> {
+    screens
+        .iter()
+        .filter(|s| !s.is_main && selected.contains(&s.choice.key))
+        .map(|s| s.choice.clone())
+        .collect()
+}
+
+fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {
+    ui.label(RichText::new("Show the test on").strong());
+    let others: Vec<&Screen> = screens.iter().filter(|s| !s.is_main).collect();
+    if others.is_empty() {
+        ui.label(
+            RichText::new(if screens.len() <= 1 {
+                "Only one display is connected, and the main window is on it: the test shows in the main window's Preview pane."
+            } else {
+                "No other display is connected: the test shows in the main window's Preview pane."
+            })
+            .weak()
+            .small(),
+        );
+        return;
+    }
+    for s in &others {
+        let mut on = selected.contains(&s.choice.key);
+        if ui.checkbox(&mut on, &s.choice.label).changed() {
+            selected.retain(|k| k != &s.choice.key);
+            if on {
+                selected.push(s.choice.key.clone());
+            }
+        }
+    }
+    if let Some(m) = screens.iter().find(|s| s.is_main) {
+        ui.label(
+            RichText::new(format!("{} (the main window is here)", m.choice.label))
+                .weak()
+                .small(),
+        );
+    }
+    ui.label(
+        RichText::new(
+            "None ticked: the displays your show has, as they are (the main window's Preview pane if it has none). Ticked: these displays, all showing the same picture, in place of your show's own while the test runs; your show is not changed.",
+        )
+        .weak()
+        .small(),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_planned_length_in_the_progress_text_never_changes() {
+        // It flickered between 1:00:00 and 59:59 when worked back from the progress.
+        let planned = Duration::from_secs(3600);
+        for ms in (0..3_700_000u64).step_by(997) {
+            let t = progress_text(Duration::from_millis(ms), planned);
+            assert!(t.ends_with(" of 1:00:00"), "{t}");
+        }
+        assert_eq!(
+            progress_text(Duration::from_secs(65), planned),
+            "1:05 of 1:00:00"
+        );
+        assert_eq!(
+            progress_text(Duration::from_secs(4000), planned),
+            "1:00:00 of 1:00:00"
+        );
+    }
+
+    fn screen(key: &str, is_main: bool) -> Screen {
+        Screen {
+            choice: DisplayChoice {
+                key: key.into(),
+                reference: crate::show::DisplayRef {
+                    name: key.into(),
+                    index: 0,
+                    hardware: None,
+                },
+                twins: 1,
+                label: key.into(),
+            },
+            is_main,
+        }
+    }
+
+    #[test]
+    fn only_ticked_connected_displays_other_than_the_main_windows_are_used() {
+        let screens = [screen("A", true), screen("B", false), screen("C", false)];
+        let names = |v: Vec<DisplayChoice>| v.into_iter().map(|d| d.key).collect::<Vec<_>>();
+        assert!(
+            names(chosen(&screens, &[])).is_empty(),
+            "none ticked: the show's own"
+        );
+        let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(names(chosen(&screens, &sel(&["C", "B"]))), ["B", "C"]);
+        // The main window's own display is never used; one that isn't connected is ignored.
+        assert_eq!(names(chosen(&screens, &sel(&["A", "Z", "B"]))), ["B"]);
+    }
 }
