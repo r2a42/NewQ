@@ -323,6 +323,10 @@ pub struct Compare {
     log_path: PathBuf,
     clip: Option<Resolved>,
     displays: Vec<super::plan::DisplayChoice>,
+    /// Held for as long as the comparison lives (its `Drop` lets go).
+    _awake: crate::awake::KeepAwake,
+    sleep_watch: crate::awake::SleepWatch,
+    slept: f64,
     /// What plays, for the window and the report.
     pub what: String,
     tiles: usize,
@@ -378,6 +382,9 @@ impl Compare {
             log_path: log_dir.join("newq.log"),
             clip: None,
             displays,
+            _awake: crate::awake::KeepAwake::new("NewQ is comparing hardware decoding"),
+            sleep_watch: crate::awake::SleepWatch::new(),
+            slept: 0.0,
             what: four_k(),
             tiles: TILES,
         }
@@ -424,6 +431,9 @@ impl Compare {
         st: &mut UiState,
         now: Instant,
     ) -> Option<End> {
+        if let Some(gap) = self.sleep_watch.check(now, std::time::SystemTime::now()) {
+            self.slept += gap.as_secs_f64();
+        }
         if self.stop {
             return Some(End::Stopped);
         }
@@ -514,6 +524,15 @@ impl Compare {
             ),
         };
         let mut findings = Vec::new();
+        if self.slept > 0.0 {
+            findings.push(Finding {
+                severity: Severity::Problem,
+                text: format!(
+                    "The computer went to sleep for about {} during the comparison, so its numbers are not fair. Run it again with the computer set not to sleep.",
+                    clock(Duration::from_secs_f64(self.slept))
+                ),
+            });
+        }
         match &end {
             End::Failed(why) => findings.push(Finding {
                 severity: Severity::Problem,
