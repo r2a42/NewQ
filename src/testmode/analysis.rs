@@ -294,19 +294,31 @@ pub fn analyse(
             .collect();
         if !slow.is_empty() {
             let (i, l) = slow[0];
+            let twice = if l > nominal * 1.8 && l < nominal * 2.2 {
+                " That is about two laps' worth: a lap may have been held up for most of its length, or its start missed."
+            } else {
+                ""
+            };
             out.push(note(format!(
-                "{} of {} laps ran more than a quarter longer than the {nominal:.0} s they should take (the first was lap {i}, {l:.0} s): cues started late.",
+                "{} of {} laps ran more than a quarter longer than the {nominal:.0} s they should take (the first was lap {i}, {l:.0} s).{twice} What held it up isn't in the numbers; events.log says what was playing.",
                 slow.len(),
                 laps.len()
             )));
         }
         if laps.len() >= 6 {
             let k = (laps.len() / 3).clamp(2, 5);
-            let first = laps[..k].iter().sum::<f64>() / k as f64;
-            let last = laps[laps.len() - k..].iter().sum::<f64>() / k as f64;
+            // Medians, not averages: one long lap among the last few (a lap held
+            // up once) is not laps taking longer as the test goes on.
+            let median = |part: &[f64]| {
+                let mut v = part.to_vec();
+                v.sort_by(|a, b| a.total_cmp(b));
+                v[v.len() / 2]
+            };
+            let first = median(&laps[..k]);
+            let last = median(&laps[laps.len() - k..]);
             if last > first * 1.05 + 1.0 {
                 out.push(problem(format!(
-                    "Laps are taking longer as the test goes on ({first:.1} s at first, {last:.1} s lately): the program is slowing down."
+                    "Laps have been taking longer as the test goes on ({first:.1} s at first, {last:.1} s lately): the program may be slowing down."
                 )));
             }
         }
@@ -465,6 +477,33 @@ mod tests {
             p.text.contains("hasn't levelled off") && p.text.contains("may not"),
             "{}",
             p.text
+        );
+    }
+
+    #[test]
+    fn one_long_lap_is_not_laps_taking_longer_as_the_test_goes_on() {
+        // Ten laps, the ninth held up for a whole extra lap: the average of the
+        // last three is 205.7 s, which once read as "the program is slowing down".
+        let mut laps = vec![155.3; 10];
+        laps[8] = 307.0;
+        let f = analyse(&steady(400), &laps, 155.0, &[], 1.1);
+        assert!(f.iter().all(|x| x.severity != Severity::Problem), "{f:?}");
+        let long = f
+            .iter()
+            .find(|x| x.text.contains("quarter longer"))
+            .expect("noted");
+        assert!(
+            long.text.contains("lap 9") && long.text.contains("about two laps"),
+            "{}",
+            long.text
+        );
+        // A real creep is still found.
+        let creeping: Vec<f64> = (0..12).map(|i| 155.0 + i as f64 * 6.0).collect();
+        let f = analyse(&steady(400), &creeping, 155.0, &[], 1.1);
+        assert!(
+            f.iter()
+                .any(|x| x.severity == Severity::Problem && x.text.contains("taking longer")),
+            "{f:?}"
         );
     }
 
