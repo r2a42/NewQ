@@ -687,6 +687,13 @@ pictures), so with no internet the test still runs, just with plainer media. The
 window shows each file's progress, and a note when it fell back. The credits are saved
 in every report.
 
+**Which display.** *Show the test on* lists the connected displays (not the one the main
+window is on, which an output never covers). Tick one or more and the test plays on them,
+all showing the same picture, in place of your show's own displays while it runs; tick none
+and it uses the displays your show has, or the main window's Preview pane if it has none.
+The choice is remembered for this computer, the comparison below uses it too, and
+`system.txt` of each run says where the test was shown.
+
 **Does hardware decoding help here?** *Compare hardware decoding* (below the Start
 button) plays a wall of four 4K H.264 clips twice, about two minutes in all, with
 hardware decoding off and then on. It makes the 4K clip from the downloaded film with

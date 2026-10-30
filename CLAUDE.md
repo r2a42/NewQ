@@ -81,7 +81,10 @@ The README describes the features; this file is about working on the code.
   hardware decoding comparison (a 4K clip made from the downloaded film, four looping
   tiles played with `video::set_hw_decode` off then on; a cue with a plain cut
   transition takes the place of the layers before it, so tiles use `FadeIn`),
-  `gui.rs` is the window. Cross-target clippy for Windows/Mac can't run in the cloud (`ring` needs the
+  `gui.rs` is the window (its "Show the test on" ticks are `Prefs::test_displays`;
+  `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
+  display shows the picture and the others mirror it with a whole-area `part_of`; the
+  main window's own monitor is never offered). Cross-target clippy for Windows/Mac can't run in the cloud (`ring` needs the
   target's C compiler); CI does it.
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
   self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it

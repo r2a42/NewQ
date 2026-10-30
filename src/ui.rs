@@ -181,6 +181,8 @@ pub struct UiState {
     pub selected: Option<CueId>,
     pub show_path: Option<PathBuf>,
     pub monitors: Vec<MonitorInfo>,
+    /// Which of them the main window is on (set each frame by the app).
+    pub control_monitor: Option<usize>,
     /// Every enabled output, previewed in the main window (set each frame by the app).
     pub previews: Vec<PreviewOutput>,
     pub routes: HashMap<OutputId, OutputRoute>,
@@ -3761,7 +3763,7 @@ pub fn monitor_keys(monitors: &[MonitorInfo]) -> Vec<MonitorKey> {
         .collect()
 }
 
-fn monitor_label(st: &UiState, i: usize) -> String {
+pub(crate) fn monitor_label(st: &UiState, i: usize) -> String {
     let m = &st.monitors[i];
     format!(
         "{}: {} ({}×{}{}){}",

@@ -17,6 +17,10 @@ pub struct Prefs {
     /// since a show can come from anywhere.
     #[serde(default)]
     pub allow_scripts: bool,
+    /// The monitors Test Mode shows its tests on (each by its make and model, or
+    /// the name the system gives it); none = the displays of the show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_displays: Vec<String>,
 }
 
 const FILE: &str = "prefs.json";
@@ -54,6 +58,7 @@ mod tests {
             hw_decode: true,
             show_mode: true,
             allow_scripts: true,
+            test_displays: vec!["Dell U2720Q".into()],
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);

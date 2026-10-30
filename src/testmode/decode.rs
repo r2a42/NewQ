@@ -322,6 +322,7 @@ pub struct Compare {
     pub(super) stop: bool,
     log_path: PathBuf,
     clip: Option<Resolved>,
+    displays: Vec<super::plan::DisplayChoice>,
     /// What plays, for the window and the report.
     pub what: String,
     tiles: usize,
@@ -345,6 +346,7 @@ impl Compare {
         folder: PathBuf,
         secs: u64,
         orig_hw: bool,
+        displays: Vec<super::plan::DisplayChoice>,
     ) -> Compare {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -375,6 +377,7 @@ impl Compare {
             stop: false,
             log_path: log_dir.join("newq.log"),
             clip: None,
+            displays,
             what: four_k(),
             tiles: TILES,
         }
@@ -450,7 +453,8 @@ impl Compare {
                 self.engaged = made.engaged.clone();
                 self.what = made.what.clone();
                 self.tiles = made.tiles;
-                let built = super::plan::build_decode(show, &made.clip.path, made.tiles);
+                let built =
+                    super::plan::build_decode(show, &made.clip.path, made.tiles, &self.displays);
                 self.clip = Some(made.clip);
                 self.stash = Some(st.begin_test(show, engine, built.show));
                 engine.set_log_tap(true);

@@ -895,6 +895,7 @@ impl App {
         }
         let keys = self.monitor_keys();
         let control = self.control_monitor();
+        self.ui.control_monitor = control;
         self.ui.display_states = self
             .show
             .outputs
