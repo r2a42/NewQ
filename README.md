@@ -698,6 +698,15 @@ someone saw on screen is always in the files. `stats.csv` also records the memor
 asked the graphics card for (`gpu_mb`) and, on Windows, its committed memory
 (`commit_mb`), which a leak in the graphics driver moves when the usual memory figure doesn't.
 
+**It keeps the computer awake.** While a test runs NewQ asks the system not to sleep or
+switch the display off (`caffeinate` on a Mac, the system's execution-state call on Windows,
+`systemd-inhibit` on Linux), and says in `events.log` whether that worked. If the computer
+sleeps anyway (a lid closed, a forced sleep) the report says so as a problem, with when and for
+how long: the show stops while the computer sleeps, so the laps it fell in are left out of the
+lap checks and the figures around then aren't a fair measure. (On a Mac, an hour-long test took
+69 minutes by the wall clock because the Mac slept and woke briefly, and one lap took twice as
+long.)
+
 **Which display.** *Show the test on* lists the connected displays (not the one the main
 window is on, which an output never covers). Tick one or more and the test plays on them,
 all showing the same picture, in place of your show's own displays while it runs; tick none

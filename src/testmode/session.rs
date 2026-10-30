@@ -12,6 +12,7 @@ use super::assets::{self, Asset, Fetch, Resolved, Source};
 use super::decode::{Compare, CompareResult};
 use super::plan::DisplayChoice;
 use super::{Level, plan};
+use crate::awake::{KeepAwake, SleepWatch};
 use crate::engine::{CueStatus, Engine};
 use crate::media::ffmpeg::Ffmpeg;
 use crate::show::{CueId, Show};
@@ -83,6 +84,8 @@ pub struct Run {
     pub last: Option<Sample>,
     /// Seconds each finished lap took.
     pub laps: Vec<f64>,
+    /// When each of them began, in seconds into the test.
+    lap_starts: Vec<f64>,
     pub lap_secs: f64,
     pub findings: Vec<Finding>,
     pub media_notes: Vec<String>,
@@ -103,6 +106,11 @@ pub struct Run {
     wanted: Vec<&'static Asset>,
     last_analysis: Instant,
     finding_log: FindingLog,
+    /// Holds the computer awake while the test runs.
+    awake: KeepAwake,
+    sleep_watch: SleepWatch,
+    /// Each time the computer slept: when (seconds into the test) and for how long.
+    sleeps: Vec<(f64, f64)>,
     log_path: PathBuf,
     memory: MemoryWatch,
 }
@@ -282,6 +290,12 @@ impl Run {
             let _ = writeln!(f, "[{t:>9.3}] {text}");
             let _ = f.flush();
         }
+    }
+
+    /// The laps that no sleep of the computer fell in: the others say nothing
+    /// about how the show ran.
+    fn clean_laps(&self) -> Vec<f64> {
+        undisturbed(&self.lap_starts, &self.laps, &self.sleeps)
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -683,6 +697,7 @@ fn launch(
         system_report(engine, st, show, &prep.wanted, &resolved, &prep.displays),
     );
     let media_notes = built.notes.clone();
+    let awake = KeepAwake::new("NewQ is running a test");
     // The point of no return: the user's show is put aside.
     let stash = st.begin_test(show, engine, built.show);
     engine.set_log_tap(true);
@@ -693,6 +708,15 @@ fn launch(
         built.used.len(),
         built.lap_secs
     ));
+    engine.log(format!(
+        "Test mode: the computer is {} ({})",
+        if awake.held() {
+            "being kept awake"
+        } else {
+            "NOT being kept awake: it may sleep and spoil the test"
+        },
+        awake.how()
+    ));
     engine.go(show);
     Ok(Run {
         level: prep.level,
@@ -702,6 +726,7 @@ fn launch(
         history: Vec::new(),
         last: None,
         laps: Vec::new(),
+        lap_starts: Vec::new(),
         lap_secs: built.lap_secs,
         findings: Vec::new(),
         media_notes,
@@ -721,6 +746,9 @@ fn launch(
         wanted: prep.wanted,
         last_analysis: Instant::now(),
         finding_log: FindingLog::default(),
+        awake,
+        sleep_watch: SleepWatch::new(),
+        sleeps: Vec::new(),
         log_path,
         memory: MemoryWatch::new(),
     })
@@ -730,6 +758,17 @@ impl Run {
     /// One look at the test. Returns why it should end, if it should.
     fn tick(&mut self, show: &Show, engine: &mut Engine, now: Instant) -> Option<End> {
         let elapsed = now.duration_since(self.started);
+        // Did the computer sleep since the last look? The test's clock stops
+        // while it sleeps, so only the wall clock shows it.
+        if let Some(gap) = self.sleep_watch.check(now, std::time::SystemTime::now()) {
+            let t = elapsed.as_secs_f64();
+            self.sleeps.push((t, gap.as_secs_f64()));
+            let line = format!(
+                "The computer was asleep or suspended for about {} (the test's own clock does not count it; the show was stopped for that time)",
+                clock(gap)
+            );
+            self.log_at(t, &line);
+        }
         // A lap begins whenever the first cue starts.
         let playing = matches!(engine.status(self.first), CueStatus::Playing { .. });
         if playing && !self.first_playing {
@@ -756,6 +795,7 @@ impl Run {
                 }
             }
             self.lap_started_at = Some(t);
+            self.lap_starts.push(t);
             self.overrun_logged = false;
         }
         self.first_playing = playing;
@@ -815,7 +855,7 @@ impl Run {
             self.last_analysis = now;
             self.findings = analyse(
                 &self.history,
-                &self.laps,
+                &self.clean_laps(),
                 self.lap_secs,
                 &self.messages,
                 elapsed.as_secs_f64() / 3600.0,
@@ -921,7 +961,32 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
         }
     }
     let hours = elapsed.as_secs_f64() / 3600.0;
-    let mut findings = analyse(&run.history, &run.laps, run.lap_secs, &run.messages, hours);
+    let clean = run.clean_laps();
+    let mut findings = analyse(&run.history, &clean, run.lap_secs, &run.messages, hours);
+    if !run.sleeps.is_empty() {
+        let total: f64 = run.sleeps.iter().map(|(_, g)| g).sum();
+        findings.insert(
+            0,
+            Finding {
+                severity: Severity::Problem,
+                text: format!(
+                    "The computer went to sleep {} time{} during the test, for about {} in all (the first {} into the test){}. The show stops while it sleeps, so the {} lap{} it fell in {} left out of the lap checks, and the figures around those times are not a fair measure. Run the test again with the computer set not to sleep.",
+                    run.sleeps.len(),
+                    if run.sleeps.len() == 1 { "" } else { "s" },
+                    clock(Duration::from_secs_f64(total)),
+                    clock(Duration::from_secs_f64(run.sleeps[0].0)),
+                    if run.awake.held() {
+                        format!(", although NewQ asked the system to stay awake ({})", run.awake.how())
+                    } else {
+                        ", and NewQ could not keep it awake".to_string()
+                    },
+                    run.laps.len() - clean.len(),
+                    if run.laps.len() - clean.len() == 1 { "" } else { "s" },
+                    if run.laps.len() - clean.len() == 1 { "is" } else { "are" },
+                ),
+            },
+        );
+    }
     match &end {
         End::Failed(why) => findings.insert(
             0,
@@ -1034,6 +1099,21 @@ fn excerpt_of_log(log: &Path, to: &Path) {
     let keep = 2 * 1024 * 1024;
     let from = text.len().saturating_sub(keep);
     let _ = std::fs::write(to, &text[from..]);
+}
+
+/// Those of `laps` (each beginning at the same index of `starts`) that no
+/// sleep, noted as (when, how long), happened in.
+fn undisturbed(starts: &[f64], laps: &[f64], sleeps: &[(f64, f64)]) -> Vec<f64> {
+    laps.iter()
+        .enumerate()
+        .filter(|(i, took)| {
+            let from = starts.get(*i).copied().unwrap_or(0.0);
+            !sleeps
+                .iter()
+                .any(|(t, _)| *t >= from && *t <= from + **took)
+        })
+        .map(|(_, took)| *took)
+        .collect()
 }
 
 fn lap_summary(laps: &[f64], nominal: f64) -> String {
@@ -1378,6 +1458,24 @@ mod tests {
         log.update(1.0, std::slice::from_ref(&note));
         log.update(2.0, &[]);
         assert!(log.gone(&[]).is_empty());
+    }
+
+    #[test]
+    fn laps_a_sleep_fell_in_are_left_out() {
+        // Nine ordinary laps and the ninth held up by sleeps: its start 1242 s,
+        // 306 s long; sleeps noted at 1350 and 1400 s into the test.
+        let starts = [
+            0.0, 155.3, 310.5, 465.8, 621.0, 776.2, 931.5, 1086.8, 1242.0, 1548.6,
+        ];
+        let laps = [
+            155.3, 155.2, 155.2, 155.2, 155.3, 155.3, 155.2, 155.2, 306.6, 155.3,
+        ];
+        let sleeps = [(1350.0, 300.0), (1400.0, 140.0)];
+        let clean = undisturbed(&starts, &laps, &sleeps);
+        assert_eq!(clean.len(), 9);
+        assert!(clean.iter().all(|l| *l < 156.0), "{clean:?}");
+        // No sleeps: all of them.
+        assert_eq!(undisturbed(&starts, &laps, &[]).len(), 10);
     }
 
     #[test]

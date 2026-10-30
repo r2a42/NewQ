@@ -20,6 +20,10 @@ The README describes the features; this file is about working on the code.
   one's staging copy until the next `queue.submit`; a Mac stops presenting a background
   window, so nothing else submits: `Gpu::flush_uploads` after each frame's uploads (this
   was 81 GB in a Medium test run in the background).
+- `src/awake.rs`: `KeepAwake` holds the computer awake (caffeinate, `SetThreadExecutionState`,
+  systemd-inhibit) while a test runs; `SleepWatch` notices a sleep by the wall clock running ahead of
+  `Instant`, which stops in sleep on a Mac and Linux (Test Mode reports it and leaves the laps it
+  fell in out of the lap checks).
 - `src/splash.rs`: the startup splash window, drawn on the processor with `softbuffer` (`compose`
   makes the picture and is tested; the window code is in `Splash`). `app.rs::resumed` opens it,
   and the main window's set-up (`open_main_window`, the slow part) begins after the splash's first
