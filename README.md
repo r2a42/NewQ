@@ -687,6 +687,17 @@ pictures), so with no internet the test still runs, just with plainer media. The
 window shows each file's progress, and a note when it fell back. The credits are saved
 in every report.
 
+**Tracking, and what the window showed.** While a test runs the window shows what it has
+found so far. Something that moved but is usually harmless (memory stepping up while the
+show warms up) is shown as *Tracking*, in blue, with gentle words, and does not count
+against the result; only a rise that goes on for the last part of a long run, and doesn't
+level off, is called a problem. Everything the window shows is also written to
+`events.log` when it appears and when it goes, and the report lists what came and went
+(*From 31:00 to 51:00 the window was showing this, and it cleared by itself*), so what
+someone saw on screen is always in the files. `stats.csv` also records the memory NewQ has
+asked the graphics card for (`gpu_mb`) and, on Windows, its committed memory
+(`commit_mb`), which a leak in the graphics driver moves when the usual memory figure doesn't.
+
 **Which display.** *Show the test on* lists the connected displays (not the one the main
 window is on, which an output never covers). Tick one or more and the test plays on them,
 all showing the same picture, in place of your show's own displays while it runs; tick none
@@ -716,7 +727,7 @@ said, with times), `system.txt` (OS, processor, graphics, displays, sound, FFmpe
 an excerpt of `newq.log`. The window shows the path while it runs and at the end, with
 buttons to open the folder and copy the path. The verdict is *Passed*, *Passed, with
 notes* or *Problems found*: memory, FFmpeg processes, open files or threads that keep
-growing, main-loop stalls, late frames, heavy audio load, laps that run late or early,
+rising for hours, main-loop stalls, late frames, heavy audio load, laps that run late or early,
 or cues that failed to start.
 
 ## Leaving a show running unattended: the soak test

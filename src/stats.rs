@@ -15,7 +15,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 pub const HEADER: &str = "time_utc,uptime_s,rss_mb,cpu_pct,ffmpeg,ffmpeg_rss_mb,ffmpeg_cpu_pct,\
                           fds,threads,playing,started_total,layers,late_permille,audio_permille,\
-                          stall_max_ms,log_kb";
+                          stall_max_ms,log_kb,gpu_mb,commit_mb";
 
 /// What the app tells the log at each sample.
 #[derive(Clone, Copy, Debug, Default)]
@@ -40,6 +40,11 @@ pub struct Sample {
     pub threads: Option<usize>,
     pub inputs: Inputs,
     pub stall_ms: u64,
+    /// What NewQ has asked the graphics card for, if the backend says.
+    pub gpu_mb: Option<u64>,
+    /// Windows: the memory NewQ has committed (private bytes), which a leak in
+    /// the graphics driver can raise without the working set moving.
+    pub commit_mb: Option<u64>,
 }
 
 pub struct StatsLog {
@@ -122,6 +127,7 @@ impl StatsLog {
         self.last_row = now;
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
         let (mut rss, mut cpu) = (0u64, 0.0f32);
+        let mut commit: Option<u64> = None;
         let (mut n, mut f_rss, mut f_cpu) = (0usize, 0u64, 0.0f32);
         for (pid, p) in self.sys.processes() {
             // On Linux each thread is listed as a process, with the whole
@@ -132,6 +138,11 @@ impl StatsLog {
             if *pid == self.me {
                 rss = p.memory();
                 cpu = p.cpu_usage();
+                // Only Windows' figure means committed memory; elsewhere it is
+                // the whole address space, which says nothing.
+                if cfg!(windows) {
+                    commit = Some(p.virtual_memory());
+                }
             } else if p.parent() == Some(self.me) {
                 n += 1;
                 f_rss += p.memory();
@@ -142,6 +153,7 @@ impl StatsLog {
         let uptime = now.duration_since(self.started).as_secs();
         let (open, thr) = (open_files(), threads());
         let inputs = inputs();
+        let gpu_mb = crate::gpu::gpu_allocated_mb();
         let stall = self.stall.as_millis() as u64;
         let line = row(
             unix_now(),
@@ -153,6 +165,7 @@ impl StatsLog {
             inputs,
             stall,
             log_kb,
+            [gpu_mb, commit.map(|c| c >> 20)],
         );
         self.stall = Duration::ZERO;
         let _ = writeln!(self.file, "{line}");
@@ -168,6 +181,8 @@ impl StatsLog {
             threads: thr,
             inputs,
             stall_ms: stall,
+            gpu_mb,
+            commit_mb: commit.map(|c| c >> 20),
         })
     }
 }
@@ -229,9 +244,11 @@ fn row(
     i: Inputs,
     stall_ms: u64,
     log_kb: u64,
+    extra: [Option<u64>; 2],
 ) -> String {
+    let cell = |v: Option<u64>| v.map_or(String::new(), |v| v.to_string());
     format!(
-        "{},{uptime},{},{:.1},{ffmpeg},{},{:.1},{},{},{},{},{},{},{},{stall_ms},{log_kb}",
+        "{},{uptime},{},{:.1},{ffmpeg},{},{:.1},{},{},{},{},{},{},{},{stall_ms},{log_kb},{},{}",
         utc(when),
         rss[0] >> 20,
         cpu[0],
@@ -244,6 +261,8 @@ fn row(
         i.layers,
         i.late_permille,
         i.audio_permille,
+        cell(extra[0]),
+        cell(extra[1]),
     )
 }
 
@@ -265,6 +284,12 @@ fn read_rows(text: &str) -> Result<Rows, String> {
         return Err("not a NewQ stats file (no header row)".into());
     }
     let names: Vec<&'static str> = HEADER.split(',').map(str::trim).collect();
+    // Where each column is in this file: a file from an earlier version has
+    // fewer, and its missing columns read as blanks.
+    let at: Vec<Option<usize>> = names
+        .iter()
+        .map(|n| header.iter().position(|h| h.trim() == *n))
+        .collect();
     let mut rows = Rows {
         uptime: Vec::new(),
         col: names.iter().map(|n| (*n, Vec::new())).collect(),
@@ -275,15 +300,16 @@ fn read_rows(text: &str) -> Result<Rows, String> {
             continue;
         }
         let cells: Vec<&str> = line.split(',').collect();
-        if cells.len() != names.len() {
+        if cells.len() != header.len() {
             continue;
         }
         rows.uptime.push(cells[1].parse().unwrap_or(0.0));
-        for (n, c) in names.iter().zip(&cells) {
-            rows.col
-                .get_mut(n)
-                .expect("column")
-                .push(c.parse().unwrap_or(f64::NAN));
+        for (n, i) in names.iter().zip(&at) {
+            let value = i
+                .and_then(|i| cells.get(i))
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(f64::NAN);
+            rows.col.get_mut(n).expect("column").push(value);
         }
     }
     if rows.uptime.is_empty() {
@@ -341,6 +367,8 @@ pub fn report(text: &str) -> Result<String, String> {
         ("fds", "open files", 20.0),
         ("threads", "threads", 20.0),
         ("log_kb", "log size", 50_000.0),
+        ("gpu_mb", "graphics card memory asked for", 20.0),
+        ("commit_mb", "committed memory", 20.0),
     ] {
         let y = finite(&r.col[name]);
         if y.is_empty() {
@@ -354,7 +382,9 @@ pub fn report(text: &str) -> Result<String, String> {
             y.iter().copied().fold(0.0, f64::max)
         );
         if g > limit && hours >= 0.5 {
-            flags.push(format!("{label} keeps growing ({g:+.1} per hour)"));
+            flags.push(format!(
+                "{label} rose through the run ({g:+.1} per hour): worth tracking, and only a problem if it keeps on over a longer run"
+            ));
         }
     }
     let ff = &r.col["ffmpeg"];
@@ -473,10 +503,64 @@ mod tests {
                 i,
                 stall,
                 100,
+                [None, None],
             );
             text.push('\n');
         }
         text
+    }
+
+    /// A file from before the graphics and commit columns existed: those two
+    /// columns cut off its header and rows.
+    fn without_the_last_two_columns(text: &str) -> String {
+        text.lines()
+            .map(|l| l.rsplitn(3, ',').last().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_file_from_an_earlier_version_still_reports() {
+        let new = sample_file(100, 0, |_| (20, 0));
+        let old = without_the_last_two_columns(&new);
+        assert!(!old.lines().next().unwrap().contains("gpu_mb"));
+        let r = report(&old).expect("an older file");
+        assert!(r.contains("100 samples"), "{r}");
+        // And no line about columns it never had.
+        assert!(!r.contains("graphics card"), "{r}");
+    }
+
+    #[test]
+    fn growth_in_what_the_graphics_card_was_asked_for_is_reported() {
+        let mut text = format!("{HEADER}\n");
+        for n in 0..720u64 {
+            let i = Inputs {
+                playing: 2,
+                started_total: n,
+                layers: 1,
+                late_permille: 0,
+                audio_permille: 0,
+            };
+            // Working set flat; the card's side grows 100 MB an hour (a sample
+            // every 10 s over two hours).
+            text += &row(
+                1_700_000_000 + n as i64 * 10,
+                n * 10,
+                [300 << 20, 0],
+                [10.0, 0.0],
+                1,
+                [Some(100), None],
+                i,
+                10,
+                1,
+                [Some(500 + n * 100 / 360), Some(400)],
+            );
+            text.push('\n');
+        }
+        let r = report(&text).unwrap();
+        assert!(r.contains("graphics card memory asked for"), "{r}");
+        assert!(r.contains("rose through the run"), "{r}");
+        assert!(!r.contains("committed memory rose"), "{r}");
     }
 
     #[test]
@@ -500,7 +584,7 @@ mod tests {
         // 2000 rows 10 s apart is 5.5 hours; 1 MB a row is 360 MB an hour.
         let text = sample_file(2000, 1, |n| if n == 1500 { (4000, 400) } else { (20, 0) });
         let r = report(&text).unwrap();
-        assert!(r.contains("NewQ memory keeps growing"), "{r}");
+        assert!(r.contains("NewQ memory rose through the run"), "{r}");
         assert!(r.contains("main loop stalled for 4000"), "{r}");
         assert!(r.contains("40% of frames were late"), "{r}");
     }
@@ -586,6 +670,7 @@ mod tests {
                     i,
                     10,
                     1,
+                    [None, None],
                 );
                 text.push('\n');
             }

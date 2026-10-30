@@ -50,6 +50,19 @@ impl DeviceLost {
 /// The graphics adapter in use, for the Test Mode report.
 pub static GPU_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// What NewQ has asked the graphics card for, in MB (what wgpu has allocated:
+/// textures and buffers), as the main loop last looked; `u64::MAX` until it
+/// has, or where the graphics backend can't say. A leak on the card shows here
+/// and in no process's memory figure.
+static GPU_ALLOCATED_MB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+pub fn gpu_allocated_mb() -> Option<u64> {
+    match GPU_ALLOCATED_MB.load(std::sync::atomic::Ordering::Relaxed) {
+        u64::MAX => None,
+        mb => Some(mb),
+    }
+}
+
 /// Shared GPU context. Cheap to clone; render threads each hold a copy.
 #[derive(Clone)]
 pub struct Gpu {
@@ -113,6 +126,15 @@ impl Gpu {
             },
             surface,
         ))
+    }
+
+    /// Note how much the graphics card has been asked for (see `gpu_allocated_mb`).
+    pub fn note_allocated(&self) {
+        let mb = self
+            .device
+            .generate_allocator_report()
+            .map_or(u64::MAX, |r| r.total_allocated_bytes >> 20);
+        GPU_ALLOCATED_MB.store(mb, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Let go of the memory of the texture uploads made so far. `write_texture`

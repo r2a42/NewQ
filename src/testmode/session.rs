@@ -100,6 +100,7 @@ pub struct Run {
     resolved: HashMap<&'static str, Resolved>,
     wanted: Vec<&'static Asset>,
     last_analysis: Instant,
+    finding_log: FindingLog,
     log_path: PathBuf,
     memory: MemoryWatch,
 }
@@ -171,7 +172,116 @@ impl MemoryWatch {
     }
 }
 
+/// A finding the window showed during the run, kept so that it is in the log
+/// and the report even if it had gone by the end.
+struct Seen {
+    severity: Severity,
+    /// The finding's words without their numbers, which change as it is
+    /// recomputed: what tells one finding from another.
+    identity: String,
+    text: String,
+    first: f64,
+    ended: Option<f64>,
+}
+
+fn identity_of(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_ascii_digit() && !matches!(c, '.' | '+' | '-' | '\u{2192}'))
+        .collect()
+}
+
+/// What the window has shown during a run (see `Seen`).
+#[derive(Default)]
+struct FindingLog {
+    seen: Vec<Seen>,
+}
+
+impl FindingLog {
+    /// Take note of what the window is showing at `t` seconds. Returns the
+    /// lines for `events.log`: one for each finding that has appeared, and for
+    /// each that has gone (whether or not it lasted).
+    fn update(&mut self, t: f64, current: &[Finding]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for f in current {
+            let id = identity_of(&f.text);
+            match self
+                .seen
+                .iter_mut()
+                .find(|s| s.ended.is_none() && s.identity == id)
+            {
+                Some(s) => s.text = f.text.clone(),
+                None => {
+                    let label = match f.severity {
+                        Severity::Watch => "Showing in the window",
+                        Severity::Note => "Note in the window",
+                        Severity::Problem => "Problem in the window",
+                    };
+                    lines.push(format!("{label}: {}", f.text));
+                    self.seen.push(Seen {
+                        severity: f.severity,
+                        identity: id,
+                        text: f.text.clone(),
+                        first: t,
+                        ended: None,
+                    });
+                }
+            }
+        }
+        lines.extend(self.close(t, current));
+        lines
+    }
+
+    /// Mark what is no longer among `current` as gone; returns the log lines.
+    fn close(&mut self, t: f64, current: &[Finding]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for s in &mut self.seen {
+            if s.ended.is_none() && !current.iter().any(|f| identity_of(&f.text) == s.identity) {
+                s.ended = Some(t);
+                lines.push(format!(
+                    "No longer showing (it had been there {}): {}",
+                    clock(Duration::from_secs_f64((t - s.first).max(0.0))),
+                    s.text
+                ));
+            }
+        }
+        lines
+    }
+
+    /// Findings for the report from what was shown and has gone: those of
+    /// `Watch` and `Problem` kind that the final account doesn't have in
+    /// its own words.
+    fn gone(&self, final_findings: &[Finding]) -> Vec<Finding> {
+        self.seen
+            .iter()
+            .filter(|s| s.severity != Severity::Note)
+            .filter(|s| s.ended.is_some())
+            .filter(|s| {
+                !final_findings
+                    .iter()
+                    .any(|f| identity_of(&f.text) == s.identity)
+            })
+            .map(|s| Finding {
+                severity: Severity::Watch,
+                text: format!(
+                    "From {} to {} the window was showing this, and it cleared by itself: {}",
+                    clock(Duration::from_secs_f64(s.first)),
+                    clock(Duration::from_secs_f64(s.ended.unwrap_or(s.first))),
+                    s.text
+                ),
+            })
+            .collect()
+    }
+}
+
 impl Run {
+    /// Write a line to `events.log`, at `t` seconds into the run.
+    fn log_at(&mut self, t: f64, text: &str) {
+        if let Some(f) = &mut self.events {
+            let _ = writeln!(f, "[{t:>9.3}] {text}");
+            let _ = f.flush();
+        }
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
@@ -607,6 +717,7 @@ fn launch(
         resolved,
         wanted: prep.wanted,
         last_analysis: Instant::now(),
+        finding_log: FindingLog::default(),
         log_path,
         memory: MemoryWatch::new(),
     })
@@ -670,6 +781,10 @@ impl Run {
                 &self.messages,
                 elapsed.as_secs_f64() / 3600.0,
             );
+            let t = elapsed.as_secs_f64();
+            for line in self.finding_log.update(t, &self.findings) {
+                self.log_at(t, &line);
+            }
         }
 
         if let Some(mb) = self.memory.over(now) {
@@ -836,6 +951,14 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
             text: n.clone(),
         });
     }
+    // What the window showed along the way and is not in the final account:
+    // kept in the log and the report, since someone watching saw it.
+    let t_end = elapsed.as_secs_f64();
+    for line in run.finding_log.close(t_end, &findings) {
+        run.log_at(t_end, &line);
+    }
+    let gone = run.finding_log.gone(&findings);
+    findings.extend(gone);
     let verdict = Verdict::of(&findings);
     let report = compose(&run, &end, elapsed, verdict, &findings, show);
     let _ = std::fs::write(run.folder.join("report.txt"), &report);
@@ -936,6 +1059,7 @@ fn compose(
         let tag = match f.severity {
             Severity::Problem => "PROBLEM",
             Severity::Note => "note   ",
+            Severity::Watch => "tracked",
         };
         line(&mut out, &format!("  {tag}  {}", f.text));
     }
@@ -1156,6 +1280,65 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    fn watching(text: &str) -> Finding {
+        Finding {
+            severity: Severity::Watch,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_finding_is_the_same_one_when_only_its_numbers_change() {
+        assert_eq!(
+            identity_of("Tracking: memory is higher (903 \u{2192} 1128)."),
+            identity_of("Tracking: memory is higher (937 \u{2192} 1229).")
+        );
+        assert_ne!(
+            identity_of("Tracking: memory 1"),
+            identity_of("Tracking: handles 1")
+        );
+    }
+
+    #[test]
+    fn what_the_window_shows_is_logged_when_it_appears_and_when_it_goes_even_if_it_does() {
+        let mut log = FindingLog::default();
+        assert!(log.update(10.0, &[]).is_empty());
+        let a = watching("Tracking: FFmpeg's memory is higher (903 \u{2192} 1128).");
+        let lines = log.update(1800.0, std::slice::from_ref(&a));
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with("Showing in the window: Tracking: FFmpeg"),
+            "{lines:?}"
+        );
+        // Recomputed with other numbers: still the same finding, nothing new said.
+        let b = watching("Tracking: FFmpeg's memory is higher (937 \u{2192} 1229).");
+        assert!(log.update(1805.0, std::slice::from_ref(&b)).is_empty());
+        // It goes: said, with how long it was there.
+        let lines = log.update(3000.0, &[]);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with("No longer showing (it had been there 20:00)"),
+            "{lines:?}"
+        );
+        // And it is in the report though the final account is clean.
+        let gone = log.gone(&[]);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].severity, Severity::Watch);
+        assert!(gone[0].text.contains("30:00 to 50:00"), "{}", gone[0].text);
+        assert!(gone[0].text.contains("cleared by itself"));
+        // One the final account has in its own words is not repeated.
+        assert!(log.gone(&[b]).is_empty());
+        // Notes are not kept as history.
+        let mut log = FindingLog::default();
+        let note = Finding {
+            severity: Severity::Note,
+            text: "This test was too short".into(),
+        };
+        log.update(1.0, std::slice::from_ref(&note));
+        log.update(2.0, &[]);
+        assert!(log.gone(&[]).is_empty());
     }
 
     #[test]
