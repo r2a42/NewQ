@@ -93,6 +93,8 @@ pub struct Run {
     events: Option<std::io::BufWriter<std::fs::File>>,
     lap_file: Option<std::io::BufWriter<std::fs::File>>,
     lap_started_at: Option<f64>,
+    /// A lap that is running long has been written to the log (once a lap).
+    overrun_logged: bool,
     first_playing: bool,
     idle_since: Option<Instant>,
     messages: Vec<String>,
@@ -710,6 +712,7 @@ fn launch(
         events,
         lap_file,
         lap_started_at: None,
+        overrun_logged: false,
         first_playing: false,
         idle_since: None,
         messages: Vec::new(),
@@ -743,10 +746,46 @@ impl Run {
                     );
                     let _ = f.flush();
                 }
+                if self.lap_secs > 0.0 && took > self.lap_secs * 1.25 + 3.0 {
+                    let line = format!(
+                        "Lap {} took {took:.0} s; it should take {:.0} s",
+                        self.laps.len(),
+                        self.lap_secs
+                    );
+                    self.log_at(t, &line);
+                }
             }
             self.lap_started_at = Some(t);
+            self.overrun_logged = false;
         }
         self.first_playing = playing;
+        // A lap that is running long: what is playing now is what holds it up.
+        if let Some(began) = self.lap_started_at
+            && self.lap_secs > 0.0
+            && !self.overrun_logged
+            && elapsed.as_secs_f64() - began > self.lap_secs * 1.25 + 3.0
+        {
+            self.overrun_logged = true;
+            let names: Vec<String> = engine
+                .active
+                .iter()
+                .filter_map(|a| show.cue(a.cue_id))
+                .map(|c| format!("{} {}", c.number, c.name))
+                .collect();
+            let line = format!(
+                "Lap {} has been running {:.0} s of the {:.0} s it should take. Playing now: {}",
+                self.laps.len() + 1,
+                elapsed.as_secs_f64() - began,
+                self.lap_secs,
+                if names.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    names.join("; ")
+                }
+            );
+            let t = elapsed.as_secs_f64();
+            self.log_at(t, &line);
+        }
 
         // The engine's own account of what happens, into the events file.
         for (at, text) in engine.take_log_tap() {
