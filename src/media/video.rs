@@ -817,8 +817,10 @@ mod tests {
             // Let the decoder get ahead, so the frame queue is full and the
             // reader is blocked on it.
             let t0 = std::time::Instant::now();
+            // Starting FFmpeg can take a while on a loaded runner; what the test
+            // is about is what happens after.
             while !p.ready() {
-                assert!(t0.elapsed().as_secs() < 10, "no first frame");
+                assert!(t0.elapsed().as_secs() < 45, "no first frame");
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             std::thread::sleep(std::time::Duration::from_millis(400));
