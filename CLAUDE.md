@@ -77,7 +77,10 @@ The README describes the features; this file is about working on the code.
   the Short/Medium/Long shows from the user's show (keeping its outputs), `session.rs`
   runs one (`TestMode::update` each frame from `app.rs`; always restores via
   `UiState::begin_test/end_test`, writes the run folder, never lets autosave run while
-  `test_locked`), `analysis.rs` turns samples into findings (pure, tested), `decode.rs` is the
+  `test_locked`), `analysis.rs` turns samples into findings (pure, tested; growth is judged on per-window
+  peaks, middle third against last third by medians, so a warm-up step that levels off is only a
+  `Severity::Watch` "tracking", which doesn't count against the verdict; `session::FindingLog`
+  writes every finding the window shows, and when it goes, to `events.log` and the report), `decode.rs` is the
   hardware decoding comparison (a 4K clip made from the downloaded film, four looping
   tiles played with `video::set_hw_decode` off then on; a cue with a plain cut
   transition takes the place of the layers before it, so tiles use `FadeIn`),

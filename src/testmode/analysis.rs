@@ -5,6 +5,10 @@ use crate::stats::Sample;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
+    /// Being watched: something moved that is usually harmless (a rise while
+    /// the show warms up), and is only a problem if it keeps on. It does not
+    /// count against the result.
+    Watch,
     /// Worth knowing; nothing is wrong.
     Note,
     /// Something went wrong, or is going to.
@@ -20,6 +24,13 @@ pub struct Finding {
 fn problem(text: impl Into<String>) -> Finding {
     Finding {
         severity: Severity::Problem,
+        text: text.into(),
+    }
+}
+
+fn watch(text: impl Into<String>) -> Finding {
+    Finding {
+        severity: Severity::Watch,
         text: text.into(),
     }
 }
@@ -40,9 +51,10 @@ pub enum Verdict {
 
 impl Verdict {
     pub fn of(findings: &[Finding]) -> Verdict {
-        if findings.iter().any(|f| f.severity == Severity::Problem) {
+        let counted = findings.iter().filter(|f| f.severity != Severity::Watch);
+        if counted.clone().any(|f| f.severity == Severity::Problem) {
             Verdict::ProblemsFound
-        } else if findings.is_empty() {
+        } else if counted.count() == 0 {
             Verdict::Passed
         } else {
             Verdict::PassedWithNotes
@@ -58,29 +70,22 @@ impl Verdict {
     }
 }
 
-/// Least-squares slope of `y` against `x`.
-pub fn slope(x: &[f64], y: &[f64]) -> f64 {
-    let n = x.len() as f64;
-    if x.len() < 2 {
-        return 0.0;
-    }
-    let (mx, my) = (x.iter().sum::<f64>() / n, y.iter().sum::<f64>() / n);
-    let num: f64 = x.iter().zip(y).map(|(a, b)| (a - mx) * (b - my)).sum();
-    let den: f64 = x.iter().map(|a| (a - mx).powi(2)).sum();
-    if den == 0.0 { 0.0 } else { num / den }
-}
-
-/// How the high points of a number moved over the run, per hour, and whether
-/// the later half of the run is really higher than the earlier. A show's memory
-/// goes up and down with each lap (clips start and stop), so single samples
-/// compared at different points of a lap say nothing: the peak of each window
-/// of a couple of laps is compared instead, ignoring the first fifth (caches
-/// filling). `None` if the run was too short for four windows.
+/// Whether the high points of a number are still climbing late in the run.
+///
+/// A show's memory goes up and down with each lap (clips start and stop), and
+/// its high points are not even from lap to lap (how many FFmpeg processes
+/// overlap depends on timing), so single samples say nothing: the peak of each
+/// window of a couple of laps is taken, the first fifth of the run is ignored
+/// (caches filling), and the middle third of what is left is compared with the
+/// last, by their medians. A step up early in the run that then stays level
+/// (the usual warm-up) is therefore not growth: the middle and the last are
+/// alike. Returns the two medians and the hours between them, or `None` if the
+/// run was too short to tell (nine windows).
 fn growth(
     samples: &[Sample],
     window_s: f64,
     value: impl Fn(&Sample) -> Option<f64>,
-) -> Option<(f64, f64)> {
+) -> Option<(f64, f64, f64)> {
     let mut peaks: Vec<f64> = Vec::new();
     for s in samples {
         let Some(v) = value(s) else { continue };
@@ -94,17 +99,60 @@ fn growth(
     peaks.pop();
     let peaks: Vec<f64> = peaks.into_iter().filter(|p| *p > f64::MIN).collect();
     let skip = peaks.len() / 5;
-    let peaks = &peaks[skip..];
-    if peaks.len() < 4 {
+    let q = &peaks[skip..];
+    if q.len() < 9 {
         return None;
     }
-    let x: Vec<f64> = (0..peaks.len())
-        .map(|i| i as f64 * window_s / 3600.0)
-        .collect();
-    let half = peaks.len() / 2;
+    let third = q.len() / 3;
+    let median = |part: &[f64]| {
+        let mut v = part.to_vec();
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[v.len() / 2]
+    };
+    let middle = median(&q[third..q.len() - third]);
+    let last = median(&q[q.len() - third..]);
+    let centre = |from: usize, to: usize| (from + to - 1) as f64 / 2.0;
+    let span =
+        (centre(q.len() - third, q.len()) - centre(third, q.len() - third)) * window_s / 3600.0;
+    Some((middle, last, span))
+}
+
+/// Whether `growth`'s answer is a leak: the late high points are higher than the
+/// middle ones by more than `limit` an hour would make them and by more than a
+/// twentieth, which is more than the jitter of the peaks.
+fn is_leak(g: Option<(f64, f64, f64)>, limit: f64) -> Option<f64> {
+    let (middle, last, span) = g?;
+    let rise = last - middle;
+    (span > 0.0 && rise > (limit * span).max(0.05 * middle.max(1.0))).then(|| rise / span)
+}
+
+/// A rise worth keeping an eye on, short of what `is_leak` needs: the later
+/// half of the high points is higher than the earlier by more than their
+/// jitter. Returns the two halves' averages. Fewer windows are enough than
+/// for `is_leak`, so this speaks earlier and is only ever a "tracking".
+fn rising(
+    samples: &[Sample],
+    window_s: f64,
+    value: impl Fn(&Sample) -> Option<f64>,
+) -> Option<(f64, f64)> {
+    let mut peaks: Vec<f64> = Vec::new();
+    for s in samples {
+        let Some(v) = value(s) else { continue };
+        let w = (s.uptime_s as f64 / window_s) as usize;
+        if peaks.len() <= w {
+            peaks.resize(w + 1, f64::MIN);
+        }
+        peaks[w] = peaks[w].max(v);
+    }
+    peaks.pop();
+    let peaks: Vec<f64> = peaks.into_iter().filter(|p| *p > f64::MIN).collect();
+    let q = &peaks[peaks.len() / 5..];
+    if q.len() < 4 {
+        return None;
+    }
     let mean = |p: &[f64]| p.iter().sum::<f64>() / p.len() as f64;
-    let (early, late) = (mean(&peaks[..half]), mean(&peaks[half..]));
-    Some((slope(&x, peaks), late / early.max(1.0)))
+    let (early, late) = (mean(&q[..q.len() / 2]), mean(&q[q.len() / 2..]));
+    (late > early * 1.10 && late - early > 20.0).then_some((early, late))
 }
 
 /// Messages from the engine that mean something failed.
@@ -144,7 +192,13 @@ pub fn analyse(
     // Growth over time needs a run long enough to tell it from filling caches.
     if hours >= 0.4 && samples.len() >= 30 {
         type Measure = fn(&Sample) -> Option<f64>;
-        let checks: [(&str, f64, Measure); 4] = [
+        let checks: [(&str, f64, Measure); 6] = [
+            ("The graphics card memory NewQ has asked for", 20.0, |s| {
+                s.gpu_mb.map(|v| v as f64)
+            }),
+            ("NewQ's committed memory", 20.0, |s| {
+                s.commit_mb.map(|v| v as f64)
+            }),
             ("NewQ's memory", 5.0, |s| Some(s.rss_mb as f64)),
             ("FFmpeg's memory", 5.0, |s| Some(s.ffmpeg_rss_mb as f64)),
             ("The number of open files or handles", 20.0, |s| {
@@ -155,12 +209,14 @@ pub fn analyse(
             }),
         ];
         for (what, limit, value) in checks {
-            if let Some((per_hour, ratio)) = growth(samples, (nominal * 2.0).max(240.0), value)
-                && per_hour > limit
-                && ratio > 1.10
-            {
+            let window = (nominal * 2.0).max(240.0);
+            if let Some(per_hour) = is_leak(growth(samples, window, value), limit) {
                 out.push(problem(format!(
-                    "{what} kept growing ({per_hour:+.1} an hour): something is not being let go."
+                    "{what} has kept rising through the last part of the run and hasn't levelled off (about {per_hour:+.0} an hour): something may not be being released."
+                )));
+            } else if let Some((early, late)) = rising(samples, window, value) {
+                out.push(watch(format!(
+                    "Tracking: {what} is higher than earlier in the run ({early:.0} \u{2192} {late:.0}). A rise while the show warms up is normal and usually levels off; it only matters if it keeps rising."
                 )));
             }
         }
@@ -345,10 +401,70 @@ mod tests {
     fn the_sawtooth_of_clips_starting_and_stopping_is_not_a_leak_but_real_growth_is() {
         let f = analyse(&laps_of_ffmpeg(0.0), &[155.0; 11], 155.0, &[], 0.5);
         assert!(f.is_empty(), "{f:?}");
+        // Half an hour of growth is only tracked; it takes longer to call it.
         let f = analyse(&laps_of_ffmpeg(60.0), &[155.0; 11], 155.0, &[], 0.5);
+        assert!(f.iter().all(|x| x.severity != Severity::Problem), "{f:?}");
         assert!(
-            f.iter().any(|x| x.text.contains("FFmpeg's memory")),
+            f.iter()
+                .any(|x| x.severity == Severity::Watch && x.text.contains("FFmpeg's memory")),
             "{f:?}"
+        );
+    }
+
+    /// FFmpeg's memory, one sample in a window of two laps carrying that
+    /// window's peak (and a low reading in all the others).
+    fn windows_of_ffmpeg(peaks: &[f64]) -> Vec<Sample> {
+        let mut out = Vec::new();
+        for (w, p) in peaks.iter().enumerate() {
+            for k in 0..31u64 {
+                let t = w as u64 * 310 + k * 10;
+                let mut s = sample(t / 10, 250);
+                s.ffmpeg_rss_mb = if k == 10 { *p as u64 } else { 100 };
+                out.push(s);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_step_up_in_the_first_half_hour_that_then_stays_level_is_tracked_never_called_a_leak() {
+        // The shape of an hour on Windows: the peaks of the first windows are
+        // lower, then settle at about 1.2 GB. At every point of the run, the
+        // worst it may say is that it is tracking it, in gentle words.
+        let peaks = [
+            627.0, 1021.0, 903.0, 937.0, 1128.0, 1229.0, 1218.0, 1217.0, 1227.0, 1232.0, 1213.0,
+            1208.0, 1214.0,
+        ];
+        for upto in 6..=peaks.len() {
+            let samples = windows_of_ffmpeg(&peaks[..upto]);
+            let hours = samples.len() as f64 * 10.0 / 3600.0;
+            let f = analyse(&samples, &[155.0; 5], 155.0, &[], hours);
+            assert!(
+                f.iter().all(|x| x.severity != Severity::Problem),
+                "{upto} windows: {f:?}"
+            );
+            for x in &f {
+                assert!(!x.text.contains("not being let go"), "{}", x.text);
+            }
+            // Tracking alone does not change the result.
+            assert_eq!(Verdict::of(&f), Verdict::of(&[]), "{upto} windows: {f:?}");
+        }
+    }
+
+    #[test]
+    fn growth_that_goes_on_for_hours_is_a_problem_in_measured_words() {
+        let peaks: Vec<f64> = (0..26).map(|w| 1000.0 + 80.0 * w as f64).collect();
+        let samples = windows_of_ffmpeg(&peaks);
+        let hours = samples.len() as f64 * 10.0 / 3600.0;
+        let f = analyse(&samples, &[155.0; 5], 155.0, &[], hours);
+        let p = f
+            .iter()
+            .find(|x| x.severity == Severity::Problem)
+            .unwrap_or_else(|| panic!("{f:?}"));
+        assert!(
+            p.text.contains("hasn't levelled off") && p.text.contains("may not"),
+            "{}",
+            p.text
         );
     }
 
@@ -369,7 +485,7 @@ mod tests {
         let f = analyse(&leaking, &[], 0.0, &[], 1.1);
         assert!(
             f.iter()
-                .any(|f| f.severity == Severity::Problem && f.text.contains("memory kept growing")),
+                .any(|f| f.severity == Severity::Problem && f.text.contains("kept rising")),
             "{f:?}"
         );
         // Filling up at the start and then level: not a leak.

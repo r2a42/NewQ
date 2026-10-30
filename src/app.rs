@@ -253,6 +253,7 @@ pub struct App {
     /// the system for them can stall for a while).
     device_scan: Option<std::sync::mpsc::Receiver<DeviceList>>,
     last_tick: Instant,
+    last_gpu_note: Instant,
     /// The splash screen while it is up, and when the main window's set-up is
     /// to begin (a moment after the splash is drawn, so it is on screen first).
     splash: Option<crate::splash::Splash>,
@@ -349,6 +350,7 @@ impl App {
             last_monitor_scan: Instant::now(),
             device_scan: None,
             last_tick: Instant::now(),
+            last_gpu_note: Instant::now(),
             splash: None,
             start_main_window: None,
             last_clock_look: Instant::now(),
@@ -1986,6 +1988,11 @@ impl ApplicationHandler for App {
         // window that is in the background): a minute of video is gigabytes.
         if let Some(gpu) = &self.gpu {
             gpu.flush_uploads();
+            // For the stats log, every few seconds (the report is not free).
+            if self.last_gpu_note.elapsed() >= Duration::from_secs(2) {
+                self.last_gpu_note = Instant::now();
+                gpu.note_allocated();
+            }
         }
 
         self.reveal_windows(event_loop);

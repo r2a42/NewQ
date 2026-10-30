@@ -259,6 +259,7 @@ fn body(
                         let (c, t) = match f.severity {
                             Severity::Problem => (RED, "Problem"),
                             Severity::Note => (Color32::GRAY, "Note"),
+                            Severity::Watch => (Color32::LIGHT_BLUE, "Tracked"),
                         };
                         ui.horizontal_wrapped(|ui| {
                             ui.colored_label(c, t);
@@ -525,10 +526,10 @@ fn running(ui: &mut egui::Ui, r: &Run) {
         ui.colored_label(GREEN, "Nothing wrong so far.");
     }
     for f in r.findings.iter().take(6) {
-        let c = if f.severity == Severity::Problem {
-            RED
-        } else {
-            Color32::GRAY
+        let c = match f.severity {
+            Severity::Problem => RED,
+            Severity::Watch => Color32::LIGHT_BLUE,
+            Severity::Note => Color32::GRAY,
         };
         ui.colored_label(c, &f.text);
     }
