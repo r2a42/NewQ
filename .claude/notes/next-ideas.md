@@ -83,3 +83,33 @@ To settle:
   stalls) should be judged against what a heavy test is expected to cost.
 - A way to find the ceiling: step the load up until frames are late and report where the
   computer started to struggle, instead of pass/fail at one level.
+
+## 6. Drop the "too short to tell a slow leak" message; say memory is steady instead
+
+Remove this message from Test Mode, because it is confusing:
+
+> This test was too short to tell a slow leak from caches filling: run the Medium or Long test for that.
+
+Show a memory problem if there is one, or else say something like "Memory and cache usage
+stable".
+
+Where it comes from: `testmode/analysis.rs`, the `else if hours < 0.4` branch in `analyse`,
+as a `Note`. Because it is a Note:
+- Every Short test ends "Passed, with notes" (it is the one note a clean Short run has), and the
+  report lists it under "What was found".
+- It also shows in the window for the first 24 minutes of every Medium and Long test, and is
+  written to `events.log` as a note that appears and then "no longer shows".
+
+To settle:
+- Wording. A minute-long test cannot show that nothing leaks, so "stable" alone would claim more
+  than was measured. Something that describes this run is truer: "Memory and cache use steady
+  during this test", shown only when nothing is rising or being tracked, and left out when there
+  is a tracking or problem item.
+- Whether the line is a `Note` (which makes the verdict "Passed, with notes") or a plain good-news
+  line that doesn't change the verdict. Removing the old note means a clean Short run becomes
+  plain "Passed", which is probably what is wanted.
+- Short runs: does "steady" mean anything over about a minute? If not, show nothing there, and
+  only say it once a run is long enough to have judged the trend (the same nine windows the
+  leak check needs).
+- Update the report's measurement text and the tests that expect the old note
+  (`a_steady_run_passes_and_a_short_one_says_what_it_cannot_tell` in `analysis.rs`).
