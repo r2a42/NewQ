@@ -113,3 +113,34 @@ To settle:
   leak check needs).
 - Update the report's measurement text and the tests that expect the old note
   (`a_steady_run_passes_and_a_short_one_says_what_it_cannot_tell` in `analysis.rs`).
+
+## 7. (Bug) The Mac's top menu bar appears now and then during playback
+
+Reported 2026-10-31: during playback on a Mac, the top system menu appears intermittently. Not
+investigated yet; what is below is where to look, not a diagnosis.
+
+Where the code might be involved:
+- `app.rs::create_screen`: on macOS an output window covers its display with winit's
+  "simple fullscreen" (`WindowExtMacOS::set_simple_fullscreen`), not native fullscreen, so as not
+  to take the main window out of sight. Simple fullscreen hides the menu bar and Dock by
+  setting presentation options for the whole app, and the menu bar can come back when the app
+  stops being the active one, when the key window changes (the main control window and the output
+  window take turns), or when the pointer reaches the top edge of the display.
+- If simple fullscreen is refused, it falls back to native fullscreen, which gets its own Space and
+  shows the menu bar when the pointer is at the top.
+- `window.set_cursor_visible(false)` hides the pointer on the output window, so nothing seems to be
+  moving it to the top.
+
+To settle (ask when it is picked up):
+- One display or two? The Mac in the test reports has one built-in display, where there are no
+  output windows and the main window is an ordinary window, which always has the menu bar. So the
+  menu bar being hidden at all suggests the main window was in native fullscreen (the green
+  button) or that outputs were on an external display.
+- Does it appear when something happens (a cue starts, a notification, focus moving to another
+  app or to the control window, the pointer moving to the top), or at random?
+- Does it hide again by itself, and how quickly?
+- macOS version (Darwin 26.x, so Tahoe) and whether it is the same with Display / Spaces settings
+  such as "Displays have separate Spaces" off.
+- What a show wants: the output display never shows the menu bar or the Dock during a show. If
+  that can't be guaranteed through presentation options, a borderless window above the menu bar
+  level (`NSWindow` level) is the usual way, and a setting to turn it off.
