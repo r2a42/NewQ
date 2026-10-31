@@ -44,3 +44,42 @@ To settle:
   the downmix, and a device with fewer than 6 channels says so.
 - Remember the choice per computer (`Prefs`), like `test_displays`.
 - Say which device was used in `system.txt` and the report.
+
+## 4. Run a test muted
+
+A Test Mode option to run the test with no sound out of the speakers.
+
+To settle:
+- There is already `NEWQ_MUTE=1` (`media/audio.rs`, where the stream is built): it keeps the audio
+  clock running and the mixer working but outputs silence. A muted test should do the same, so
+  the decoding, effects and the audio clock still cost what they would (a test that simply
+  played nothing would measure less). That is read once, when the stream is built; a per-test
+  switch needs the master gain to be something the app can change while it runs (an atomic),
+  and to be put back as it was when the test ends.
+- Audio findings: with no sound out, the "no working audio output" note and the late-audio
+  figures need to say the test was muted on purpose, not that the device was missing.
+- Whether it is remembered per computer, and whether it shows in `system.txt` and the report.
+
+## 5. A harder test, for the processor and the graphics card
+
+A way to make the test more intense: more opacity and blending, more effects, and an option to
+download larger media.
+
+To settle:
+- What the tests do now: the Medium and Long shows already stack a few video layers (up to
+  four), one at 0.7 opacity, blur / pixelate / negative / vignette / sharpen on layers, echo /
+  EQ / reverb on the sound, and 1080p clips with H.265 and a 25 Mbit clip in Long. Each layer is
+  small on screen except the background one, so the graphics card is lightly loaded.
+- Ways to push harder: more full-screen layers at partial opacity (blending cost grows with
+  covered pixels), effects on every layer and more of them at once, mesh warp and edge blend
+  on the output, 4K layers (the decoding comparison already makes a 4K clip), more simultaneous
+  decodes, and faster motion/rotation so nothing is cached.
+- Larger media to download: the pinned catalog (`testmode/assets.rs`) has nothing above 1080p
+  and the biggest clip is about 30 MB. A larger-media option needs new entries with sizes,
+  hashes, credits and licences checked (as the others were), and a clear size warning before
+  the download. Not yet looked for: free 4K sources with a licence that allows this.
+- How it is chosen: a fourth level ("Heavy"), or an "intensity" setting on any level. It should
+  say how big the download is and how long a lap is, and the analysis thresholds (late frames,
+  stalls) should be judged against what a heavy test is expected to cost.
+- A way to find the ceiling: step the load up until frames are late and report where the
+  computer started to struggle, instead of pass/fail at one level.
