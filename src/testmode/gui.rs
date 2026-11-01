@@ -85,6 +85,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn body(
     ui: &mut egui::Ui,
     engine: &Engine,
@@ -321,6 +322,7 @@ fn body(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn idle(
     ui: &mut egui::Ui,
     engine: &Engine,

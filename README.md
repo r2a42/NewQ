@@ -192,6 +192,16 @@ includes FFmpeg, so there's nothing else to install.
   (or closing that window) puts it back. The *Window* menu shows and hides
   each pane and has *Reset layout*. The arrangement is remembered on this
   computer (not in the show file).
+- **Frame rate readout:** the top of the *Preview* pane says how many pictures a second
+  are being drawn, on the output's own display window if it has one (the number to
+  trust for what the audience sees) and otherwise in the main window. *Show on the
+  display* writes the same figure in the top left corner of the output's picture, only
+  while something is playing and never on an idle output; it is off by default and kept
+  per computer, so don't leave it on in a show.
+- **Stalls are explained in the log:** when the main loop stops for more than 100 ms,
+  `newq.log` says which parts of the loop took the time (*event loop stalled for 4815 ms:
+  drawing the control window 4790 ms…*) and how much of it was spent outside NewQ's own
+  code, and a cue that takes more than 100 ms to start says so.
 - **Settings:** every setting of the show is in one place, *Settings ▸ Open
   settings…* (**Ctrl+,** to open and close it). It takes the place of the cue
   list, so GO, Stop All and the live preview stay where they are and a setting
@@ -713,6 +723,15 @@ all showing the same picture, in place of your show's own displays while it runs
 and it uses the displays your show has, or the main window's Preview pane if it has none.
 The choice is remembered for this computer, the comparison below uses it too, and
 `system.txt` of each run says where the test was shown.
+
+**Which sound.** *Sound* chooses the audio device the test plays on (your show's own
+audio outputs while it runs are replaced by that one device; your show is not changed), and
+*Run muted* plays the whole test without a sound: everything is still decoded, mixed and put
+through its effects, so it costs what it would with sound, and only the device is sent
+silence (the meters stay flat). Both are remembered for this computer and written in
+`system.txt`. When the run is long enough to judge memory and nothing is rising, the window and
+the report say *Memory and cache use steady during this test*; a run too short to tell says
+nothing about leaks.
 
 **Does hardware decoding help here?** *Compare hardware decoding* (below the Start
 button) plays a wall of four 4K H.264 clips twice, about two minutes in all, with

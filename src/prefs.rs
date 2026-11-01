@@ -21,6 +21,9 @@ pub struct Prefs {
     /// the name the system gives it); none = the displays of the show.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_displays: Vec<String>,
+    /// Draw the output's frame rate on its picture (the Preview pane's checkbox).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fps_on_output: bool,
     /// The audio device Test Mode plays on; none = the show's own outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_sound: Option<String>,
@@ -71,6 +74,7 @@ mod tests {
             test_displays: vec!["Dell U2720Q".into()],
             test_sound: Some("USB Interface".into()),
             test_muted: true,
+            fps_on_output: true,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);

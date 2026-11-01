@@ -183,6 +183,10 @@ pub struct UiState {
     pub monitors: Vec<MonitorInfo>,
     /// Which of them the main window is on (set each frame by the app).
     pub control_monitor: Option<usize>,
+    /// How fast each output's display window is drawing (set each frame by the app).
+    pub output_fps: HashMap<OutputId, f32>,
+    /// How fast the main window itself is drawing, and when that was read.
+    pub preview_fps: Option<(f32, std::time::Instant)>,
     /// Every enabled output, previewed in the main window (set each frame by the app).
     pub previews: Vec<PreviewOutput>,
     pub routes: HashMap<OutputId, OutputRoute>,
@@ -3359,6 +3363,17 @@ fn preview_index(
 
 /// A live preview of one output. With several outputs, a menu picks which is shown. For an
 /// output with no display of its own, this is where it is shown.
+/// What the Preview pane says about how fast `id` is being drawn: the rate of
+/// the window on its display if it has one, else the main window's own.
+pub fn fps_reading(st: &UiState, id: OutputId) -> Option<String> {
+    if let Some(f) = st.output_fps.get(&id) {
+        return Some(format!("{} on the display", crate::fps::text(*f)));
+    }
+    st.preview_fps
+        .filter(|(_, at)| at.elapsed() < crate::fps::FRESH)
+        .map(|(f, _)| format!("{} in this window", crate::fps::text(f)))
+}
+
 fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     let Some(i) = preview_index(&st.previews, st.preview_output, st.geometry_edit) else {
         return;
@@ -3374,6 +3389,26 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     };
     let mut chosen = id;
     ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(fps_reading(st, id).unwrap_or_else(|| "not drawing".into()))
+                .monospace()
+                .strong(),
+        )
+        .on_hover_text(
+            "How many pictures a second are being drawn: on the display's own window while it has one, otherwise in this window.",
+        );
+        if ui
+            .checkbox(&mut st.prefs.fps_on_output, "Show on the display")
+            .on_hover_text(
+                "Writes the rate in the top left corner of the picture on the display, while something is playing. Off by default: don't leave it on in a show.",
+            )
+            .changed()
+            && let Some(dir) = &st.layout_dir
+            && let Err(e) = st.prefs.save(dir)
+        {
+            log::warn!("could not save the settings of this computer: {e}");
+        }
+        ui.separator();
         if st.previews.len() > 1 {
             ui.add_enabled_ui(!editing, |ui| {
                 egui::ComboBox::from_id_salt("preview_output")

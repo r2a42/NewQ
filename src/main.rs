@@ -16,6 +16,7 @@ mod edid;
 mod engine;
 mod export;
 mod feedback;
+mod fps;
 mod fx;
 mod gpu;
 mod history;

@@ -98,6 +98,25 @@ fn resize(
 /// behind).
 static LATE: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
+/// How fast each output window has been drawing, in tenths of a frame a
+/// second, and when it last said (milliseconds since the program began).
+static FPS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+static FPS_AT: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+fn now_ms() -> u32 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u32
+}
+
+/// The rate the window on display number `monitor` is drawing at, while it
+/// is drawing (None when nothing has been drawn there lately).
+pub fn output_fps(monitor: usize) -> Option<f32> {
+    let i = monitor % FPS.len();
+    let age = now_ms().wrapping_sub(FPS_AT[i].load(Ordering::Relaxed));
+    (FPS_AT[i].load(Ordering::Relaxed) != 0 && u128::from(age) < crate::fps::FRESH.as_millis())
+        .then(|| FPS[i].load(Ordering::Relaxed) as f32 / 10.0)
+}
+
 /// The worst of the outputs: how much of the time frames are late, in
 /// thousandths, while something is playing.
 pub fn late_frames_permille() -> u32 {
@@ -276,6 +295,7 @@ fn output_loop(
     };
     let mut timer = FrameTimer::with_refresh(refresh_of(&window));
     let late = &LATE[slot_index(slot)];
+    let mut fps = crate::fps::FpsMeter::default();
     loop {
         let (size, groups, blend) = match mailbox.take() {
             OutputJob::Quit => break,
@@ -314,6 +334,11 @@ fn output_loop(
         gpu.queue.submit([cmd]);
         window.pre_present_notify();
         gpu.queue.present(frame);
+        if let Some(rate) = fps.tick(Instant::now()) {
+            let i = slot_index(slot);
+            FPS[i].store((rate * 10.0).round() as u32, Ordering::Relaxed);
+            FPS_AT[i].store(now_ms().max(1), Ordering::Relaxed);
+        }
         if let Some(share) = timer.frame(started, started.elapsed()) {
             late.store(share, Ordering::Relaxed);
             // The window may have been moved to another display.

@@ -269,6 +269,11 @@ pub struct App {
     stats: Option<crate::stats::StatsLog>,
     /// Where the main loop's time went, named when it stalls.
     crumbs: crate::crumbs::Crumbs,
+    /// How fast the main window is drawing.
+    preview_meter: crate::fps::FpsMeter,
+    /// The frame-rate label drawn on an output's picture, by output: the words
+    /// it says and its texture.
+    fps_labels: HashMap<OutputId, (String, Arc<LayerTexture>)>,
     /// `NEWQ_AUTOSTART`: press GO this long after starting, once.
     autostart: Option<Instant>,
     /// A recovery file from a session that didn't end properly, to offer once.
@@ -361,6 +366,8 @@ impl App {
             feedback: crate::feedback::Feedback::new(),
             stats: crate::stats::StatsLog::from_env(&crate::crash::log_dir()),
             crumbs: crate::crumbs::Crumbs::new(),
+            preview_meter: Default::default(),
+            fps_labels: HashMap::new(),
             autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
                 let secs = if v == "1" {
                     5.0
@@ -1096,6 +1103,42 @@ impl App {
 
     /// Upload new frames and hand each output's current layer stack to the
     /// window of the display it is on, and to the UI for the live previews.
+    /// The layer that writes `text` in the top left corner of an output of
+    /// `canvas` pixels, drawn again only when the words change.
+    fn fps_label(
+        labels: &mut HashMap<OutputId, (String, Arc<LayerTexture>)>,
+        gpu: &Gpu,
+        id: OutputId,
+        text: &str,
+        canvas: (u32, u32),
+    ) -> OutputLayer {
+        let stale = labels.get(&id).is_none_or(|(t, _)| t != text);
+        if stale {
+            // At the canvas's shape, so the letters are not stretched.
+            let w = 1280u32;
+            let h = ((w as f32 * canvas.1 as f32 / canvas.0.max(1) as f32) as u32).clamp(2, 4096);
+            let mut cue = crate::show::TextCue::new(None);
+            cue.text = text.to_string();
+            cue.size = 0.06;
+            cue.width = 0.5;
+            cue.align = crate::show::TextAlign::Left;
+            cue.valign = crate::show::TextVAlign::Top;
+            cue.bold = true;
+            let img = crate::text::render(&cue, (w, h));
+            let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
+            tex.upload_rgba(&gpu.queue, &img.data);
+            labels.insert(id, (text.to_string(), Arc::new(tex)));
+        }
+        OutputLayer {
+            texture: labels[&id].1.clone(),
+            opacity: 1.0,
+            fit: Fit::Stretch,
+            transform: LayerTransform::default(),
+            color: ColorAdjust::default(),
+            fx: Default::default(),
+        }
+    }
+
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = &self.gpu else { return };
         self.ui.previews.clear();
@@ -1188,7 +1231,9 @@ impl App {
             };
 
             let mut layers = Vec::new();
-            for l in self.engine.layers(source) {
+            let engine_layers = self.engine.layers(source);
+            let has_picture = !engine_layers.is_empty();
+            for l in engine_layers {
                 let entry = match &l.source {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
@@ -1258,6 +1303,30 @@ impl App {
                 });
             }
 
+            // The frame rate, in the corner, if asked for and only over a
+            // picture: an idle output stays black.
+            if self.ui.prefs.fps_on_output && has_picture {
+                let reading = self
+                    .ui
+                    .output_fps
+                    .get(&source)
+                    .map(|f| crate::fps::text(*f))
+                    .or_else(|| {
+                        self.ui
+                            .preview_fps
+                            .filter(|(_, at)| at.elapsed() < crate::fps::FRESH)
+                            .map(|(f, _)| crate::fps::text(f))
+                    });
+                if let Some(text) = reading {
+                    layers.push(Self::fps_label(
+                        &mut self.fps_labels,
+                        gpu,
+                        source,
+                        &text,
+                        canvas,
+                    ));
+                }
+            }
             // The test pattern of the picture it shows part of, so projectors
             // can be lined up across their overlap.
             if source != id
@@ -1371,6 +1440,15 @@ impl App {
         }
 
         self.update_streams(&groups);
+
+        // What each display's window is managing, for the Preview pane.
+        self.ui.output_fps.clear();
+        for (id, target) in &self.targets {
+            if let Some(f) = crate::render::output_fps(target.monitor) {
+                self.ui.output_fps.insert(*id, f);
+            }
+        }
+        self.fps_labels.retain(|id, _| groups.contains_key(id));
 
         self.ui.screens.clear();
         for (m, screen) in &mut self.screens {
@@ -1614,6 +1692,9 @@ impl App {
     fn render_control(&mut self, event_loop: &ActiveEventLoop) {
         let Some(ctl) = &mut self.control else { return };
         ctl.last_paint = Instant::now();
+        if let Some(f) = self.preview_meter.tick(ctl.last_paint) {
+            self.ui.preview_fps = Some((f, ctl.last_paint));
+        }
 
         if let Some(rec) = self.pending_recovery.take() {
             offer_recovery(&rec, &mut self.show, &mut self.engine, &mut self.ui);

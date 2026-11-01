@@ -337,6 +337,7 @@ pub fn build_decode(
 }
 
 /// The test show for `level`, built from `original`'s settings.
+#[cfg(test)]
 pub fn build(
     original: &Show,
     level: Level,
