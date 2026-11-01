@@ -1,146 +1,17 @@
-# Notes for later (not started)
+# Notes for later
 
-Saved from the owner's list, 2026-10-31. Nothing here is built. The "to settle" lines are
-questions to answer before building, not decisions.
+The seven ideas saved on 2026-10-31 were built in 0.15.0. What is left from them:
 
-## 1. FPS in the preview, optionally on the main display
-
-The preview pane should show the FPS at the top, with a checkbox to show it on the main
-display too.
-
-To settle:
-- Whose FPS: the rate the output windows are being drawn at (`render.rs::FrameTimer` already
-  counts frames per window), the video's own frame rate, or the engine's tick rate? Probably
-  the drawn rate of that output, perhaps with the playing video's rate beside it.
-- "On the main display": an overlay burned into the output picture itself (so it shows on the
-  projector or monitor), or on the main window's preview only? An overlay on a real output
-  must be off by default and obvious, so nobody leaves it on in a show.
-- Where it is kept: per computer (`Prefs`), not in the show.
-
-## 2. An optional stats window, from Test Mode, usable in the main show
-
-The live figures Test Mode shows while it runs (memory, processor, FFmpeg processes, slowest
-frame, late frames, sparklines, the findings) as an optional window or pane that can be turned
-on in an ordinary show, not only during a test.
-
-To settle:
-- A dock pane (`dock.rs`, `Pane`) that can be popped out, or a floating window like Test Mode's?
-- Sampling cost and who owns it: `StatsLog::frame` refreshes every process each time. Outside a
-  test it would want its own light sampler, off when the pane is closed.
-- Whether the same "tracking" findings appear (`analysis.rs`) or only the numbers.
-- Whether it can log to a file (the `NEWQ_STATS` CSV) from the window.
-
-## 3. An audio output chosen for the test
-
-Test Mode should let the user pick which audio output the test plays on, as it now lets them
-pick displays.
-
-To settle:
-- The test show is built from the user's show, which often has no audio outputs (reports say
-  "0 audio output(s)"), so the sound goes to the default device. The choice would replace the
-  show's audio outputs while the test runs, the way `plan::use_displays` replaces displays.
-- Which devices to list (`audio.rs` device list), and how a Dante or multi-channel device is
-  shown. The 5.1 trailer section uses an 8-crosspoint matrix, so a stereo-only device needs
-  the downmix, and a device with fewer than 6 channels says so.
-- Remember the choice per computer (`Prefs`), like `test_displays`.
-- Say which device was used in `system.txt` and the report.
-
-## 4. Run a test muted
-
-A Test Mode option to run the test with no sound out of the speakers.
-
-To settle:
-- There is already `NEWQ_MUTE=1` (`media/audio.rs`, where the stream is built): it keeps the audio
-  clock running and the mixer working but outputs silence. A muted test should do the same, so
-  the decoding, effects and the audio clock still cost what they would (a test that simply
-  played nothing would measure less). That is read once, when the stream is built; a per-test
-  switch needs the master gain to be something the app can change while it runs (an atomic),
-  and to be put back as it was when the test ends.
-- Audio findings: with no sound out, the "no working audio output" note and the late-audio
-  figures need to say the test was muted on purpose, not that the device was missing.
-- Whether it is remembered per computer, and whether it shows in `system.txt` and the report.
-
-## 5. A harder test, for the processor and the graphics card
-
-A way to make the test more intense: more opacity and blending, more effects, and an option to
-download larger media.
-
-To settle:
-- What the tests do now: the Medium and Long shows already stack a few video layers (up to
-  four), one at 0.7 opacity, blur / pixelate / negative / vignette / sharpen on layers, echo /
-  EQ / reverb on the sound, and 1080p clips with H.265 and a 25 Mbit clip in Long. Each layer is
-  small on screen except the background one, so the graphics card is lightly loaded.
-- Ways to push harder: more full-screen layers at partial opacity (blending cost grows with
-  covered pixels), effects on every layer and more of them at once, mesh warp and edge blend
-  on the output, 4K layers (the decoding comparison already makes a 4K clip), more simultaneous
-  decodes, and faster motion/rotation so nothing is cached.
-- Larger media to download: the pinned catalog (`testmode/assets.rs`) has nothing above 1080p
-  and the biggest clip is about 30 MB. A larger-media option needs new entries with sizes,
-  hashes, credits and licences checked (as the others were), and a clear size warning before
-  the download. Not yet looked for: free 4K sources with a licence that allows this.
-- How it is chosen: a fourth level ("Heavy"), or an "intensity" setting on any level. It should
-  say how big the download is and how long a lap is, and the analysis thresholds (late frames,
-  stalls) should be judged against what a heavy test is expected to cost.
-- A way to find the ceiling: step the load up until frames are late and report where the
-  computer started to struggle, instead of pass/fail at one level.
-
-## 6. Drop the "too short to tell a slow leak" message; say memory is steady instead
-
-Remove this message from Test Mode, because it is confusing:
-
-> This test was too short to tell a slow leak from caches filling: run the Medium or Long test for that.
-
-Show a memory problem if there is one, or else say something like "Memory and cache usage
-stable".
-
-Where it comes from: `testmode/analysis.rs`, the `else if hours < 0.4` branch in `analyse`,
-as a `Note`. Because it is a Note:
-- Every Short test ends "Passed, with notes" (it is the one note a clean Short run has), and the
-  report lists it under "What was found".
-- It also shows in the window for the first 24 minutes of every Medium and Long test, and is
-  written to `events.log` as a note that appears and then "no longer shows".
-
-To settle:
-- Wording. A minute-long test cannot show that nothing leaks, so "stable" alone would claim more
-  than was measured. Something that describes this run is truer: "Memory and cache use steady
-  during this test", shown only when nothing is rising or being tracked, and left out when there
-  is a tracking or problem item.
-- Whether the line is a `Note` (which makes the verdict "Passed, with notes") or a plain good-news
-  line that doesn't change the verdict. Removing the old note means a clean Short run becomes
-  plain "Passed", which is probably what is wanted.
-- Short runs: does "steady" mean anything over about a minute? If not, show nothing there, and
-  only say it once a run is long enough to have judged the trend (the same nine windows the
-  leak check needs).
-- Update the report's measurement text and the tests that expect the old note
-  (`a_steady_run_passes_and_a_short_one_says_what_it_cannot_tell` in `analysis.rs`).
-
-## 7. (Bug) The Mac's top menu bar appears now and then during playback
-
-Reported 2026-10-31: during playback on a Mac, the top system menu appears intermittently. Not
-investigated yet; what is below is where to look, not a diagnosis.
-
-Where the code might be involved:
-- `app.rs::create_screen`: on macOS an output window covers its display with winit's
-  "simple fullscreen" (`WindowExtMacOS::set_simple_fullscreen`), not native fullscreen, so as not
-  to take the main window out of sight. Simple fullscreen hides the menu bar and Dock by
-  setting presentation options for the whole app, and the menu bar can come back when the app
-  stops being the active one, when the key window changes (the main control window and the output
-  window take turns), or when the pointer reaches the top edge of the display.
-- If simple fullscreen is refused, it falls back to native fullscreen, which gets its own Space and
-  shows the menu bar when the pointer is at the top.
-- `window.set_cursor_visible(false)` hides the pointer on the output window, so nothing seems to be
-  moving it to the top.
-
-To settle (ask when it is picked up):
-- One display or two? The Mac in the test reports has one built-in display, where there are no
-  output windows and the main window is an ordinary window, which always has the menu bar. So the
-  menu bar being hidden at all suggests the main window was in native fullscreen (the green
-  button) or that outputs were on an external display.
-- Does it appear when something happens (a cue starts, a notification, focus moving to another
-  app or to the control window, the pointer moving to the top), or at random?
-- Does it hide again by itself, and how quickly?
-- macOS version (Darwin 26.x, so Tahoe) and whether it is the same with Display / Spaces settings
-  such as "Displays have separate Spaces" off.
-- What a show wants: the output display never shows the menu bar or the Dock during a show. If
-  that can't be guaranteed through presentation options, a borderless window above the menu bar
-  level (`NSWindow` level) is the usual way, and a setting to turn it off.
+- **4K media for the heavy test.** Not added: the free 4K sources are big (Big Buck Bunny 4K is a
+  630 MB zip, Sintel 4K does not have a stable small download). The decoding comparison already
+  makes a 4K clip from the 1080p film; a heavy test could do the same.
+- **Find the ceiling.** A mode that steps the load up until frames are late and reports where the
+  computer struggled. Only the fixed "heavier load" exists.
+- **The Mac stall.** 0.14.4 on a Mac with a 4K second display: three main-loop stalls of 4 to 5.5 s,
+  each at lap offset ~49 s (the start of the Layers section), in 3 of 23 laps. 0.15.0 logs which part
+  of the loop took the time (`event loop stalled for N ms: …` in `newq.log`) and `starting cue … took N ms`.
+  Read those lines from the next Mac run before guessing.
+- **The Mac menu bar.** Output windows now use `set_borderless_game(true)`, so simple fullscreen
+  hides the menu bar and Dock instead of auto-hiding them. Not tried on a Mac. If the menu bar still
+  appears, look at the app being activated again (the control window taking focus).
+- **Windows: 5.4 s freeze when Start is pressed** (system report and FFmpeg probes on the main thread).
