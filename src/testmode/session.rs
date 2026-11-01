@@ -1343,6 +1343,7 @@ fn compose(
 
 // ----- About this computer -------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn system_report(
     engine: &Engine,
     st: &UiState,
