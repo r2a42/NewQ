@@ -100,6 +100,9 @@ struct ScreenWindow {
     thread: Option<OutputThread>,
     size: (u32, u32),
     monitor: MonitorHandle,
+    /// Its place among the window slots (see `gpu::Slot::Window`): its own for
+    /// as long as the window lives, whatever number its display is given.
+    slot: u8,
     /// Outputs drawn on it, bottom first.
     outputs: Vec<OutputId>,
     needs_redraw: bool,
@@ -132,7 +135,7 @@ impl Drop for ScreenWindow {
 fn start_output_thread(
     gpu: &Gpu,
     window: &Arc<Window>,
-    monitor: usize,
+    slot: u8,
 ) -> Result<(OutputThread, (u32, u32)), String> {
     let surface = gpu
         .instance
@@ -151,7 +154,7 @@ fn start_output_thread(
             window.clone(),
             surface,
             config,
-            gpu::Slot::Window(monitor.min(u8::MAX as usize) as u8),
+            gpu::Slot::Window(slot),
         ),
         size,
     ))
@@ -721,7 +724,10 @@ impl App {
             window.set_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         }
         window.set_cursor_visible(false);
-        let (thread, size) = match start_output_thread(gpu, &window, monitor) {
+        let slot = (0..=u8::MAX)
+            .find(|n| self.screens.values().all(|s| s.slot != *n))
+            .unwrap_or(0);
+        let (thread, size) = match start_output_thread(gpu, &window, slot) {
             Ok(started) => started,
             Err(e) => {
                 self.engine
@@ -748,6 +754,7 @@ impl App {
                 thread: Some(thread),
                 size,
                 monitor: m.clone(),
+                slot,
                 outputs: Vec::new(),
                 needs_redraw: true,
                 sent: Vec::new(),
@@ -858,7 +865,7 @@ impl App {
         );
         self.egui_ctx.set_fonts(fonts);
         for (monitor, screen) in &mut self.screens {
-            match start_output_thread(&gpu, &screen.window, *monitor) {
+            match start_output_thread(&gpu, &screen.window, screen.slot) {
                 Ok((thread, size)) => {
                     screen.thread = Some(thread);
                     screen.size = size;
@@ -903,6 +910,23 @@ impl App {
                 .or_default()
                 .push(((order, oi), o.id));
             self.targets.insert(o.id, *t);
+        }
+        // A display whose number changed because another went (a laptop's lid
+        // closing) keeps its window: closing it and opening another leaves the
+        // desktop showing and flashes.
+        let have: Vec<(usize, &MonitorHandle)> =
+            self.screens.iter().map(|(m, w)| (*m, &w.monitor)).collect();
+        let moves = renumbered(&have, &self.monitors);
+        if !moves.is_empty() {
+            let mut taken: Vec<(usize, ScreenWindow)> = Vec::new();
+            for (from, to) in &moves {
+                if let Some(w) = self.screens.remove(from) {
+                    taken.push((*to, w));
+                }
+            }
+            for (to, w) in taken {
+                self.screens.insert(to, w);
+            }
         }
         // Close windows on displays with nothing left to show, or that changed.
         let stale: Vec<usize> = self
@@ -1552,7 +1576,11 @@ impl App {
         // What each display's window is managing, for the Preview pane.
         self.ui.output_fps.clear();
         for (id, target) in &self.targets {
-            if let Some(f) = crate::render::output_fps(target.monitor) {
+            if let Some(f) = self
+                .screens
+                .get(&target.monitor)
+                .and_then(|s| crate::render::output_fps(usize::from(s.slot)))
+            {
                 self.ui.output_fps.insert(*id, f);
             }
         }
@@ -2312,6 +2340,18 @@ const HOME_GRACE: Duration = Duration::from_secs(5);
 /// Whether the main window should be put back on its display: only just
 /// after the displays changed, only if that display is still there, and only
 /// if it isn't on it.
+/// Windows that stand on a display that is still connected but has another
+/// number now: (old number, new number), from the number each window is kept
+/// under and the displays as listed now.
+fn renumbered<H: PartialEq>(have: &[(usize, &H)], now: &[H]) -> Vec<(usize, usize)> {
+    have.iter()
+        .filter_map(|(m, h)| {
+            let new = now.iter().position(|x| x == *h)?;
+            (new != *m).then_some((*m, new))
+        })
+        .collect()
+}
+
 /// Whether the main window's remembered display has been disconnected.
 fn control_displaced(home_known: bool, home_connected: bool) -> bool {
     home_known && !home_connected
@@ -2556,6 +2596,25 @@ mod tests {
         assert_eq!(h.home, Some("laptop"), "not yet");
         h.observe(Some(&"monitor"), at(311), true);
         assert_eq!(h.home, Some("monitor"));
+    }
+
+    #[test]
+    fn a_window_follows_its_display_when_the_displays_are_renumbered() {
+        // The lid closes: the laptop's display leaves the list and the monitor's number falls.
+        assert_eq!(renumbered(&[(1, &"monitor")], &["monitor"]), vec![(1, 0)]);
+        // The lid opens: it rises again.
+        assert_eq!(
+            renumbered(&[(0, &"monitor")], &["laptop", "monitor"]),
+            vec![(0, 1)]
+        );
+        // Nothing changed, or its display is gone: nothing to move.
+        assert!(renumbered(&[(1, &"monitor")], &["laptop", "monitor"]).is_empty());
+        assert!(renumbered(&[(1, &"monitor")], &["laptop"]).is_empty());
+        // Two swap places.
+        assert_eq!(
+            renumbered(&[(0, &"a"), (1, &"b")], &["b", "a"]),
+            vec![(0, 1), (1, 0)]
+        );
     }
 
     #[test]

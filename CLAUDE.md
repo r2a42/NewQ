@@ -44,6 +44,8 @@ The README describes the features; this file is about working on the code.
   even though the system moved the window there. `HomeTracker` (app.rs) makes a display the window's home
   only after it has stayed there 10 s and never while the home is disconnected: a closing lid moves the
   window to the other display a moment *before* the system reports the first gone.
+  An output window is kept when its display only changes number (`renumbered`; the lid closing makes the
+  external display 0): closing and recreating it showed the desktop. Its render slot is its own (`ScreenWindow::slot`).
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
   `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
   groups, with badges; it replaces the cue list while open). A setting goes on
