@@ -10,7 +10,7 @@
 use super::analysis::{Finding, Severity, Verdict, analyse};
 use super::assets::{self, Asset, Fetch, Resolved, Source};
 use super::decode::{Compare, CompareResult};
-use super::plan::DisplayChoice;
+use super::plan::{DisplayChoice, SoundChoice};
 use super::{Level, plan};
 use crate::awake::{KeepAwake, SleepWatch};
 use crate::engine::{CueStatus, Engine};
@@ -67,6 +67,8 @@ pub struct Prep {
     pub compare: bool,
     /// The displays the test is to be shown on (none: the show's own).
     pub displays: Vec<DisplayChoice>,
+    /// Where the sound goes, and whether it is off.
+    pub sound: SoundChoice,
     pub level: Level,
     pub minutes: u32,
     pub wanted: Vec<&'static Asset>,
@@ -460,7 +462,13 @@ impl TestMode {
     }
 
     /// Begin: make the media ready (downloading what is missing).
-    pub fn start(&mut self, ff: Ffmpeg, log_dir: &Path, displays: Vec<DisplayChoice>) {
+    pub fn start(
+        &mut self,
+        ff: Ffmpeg,
+        log_dir: &Path,
+        displays: Vec<DisplayChoice>,
+        sound: SoundChoice,
+    ) {
         if self.busy() {
             return;
         }
@@ -476,6 +484,7 @@ impl TestMode {
             fetch,
             compare: false,
             displays,
+            sound,
             level: self.level,
             minutes: self.minutes,
             wanted,
@@ -501,6 +510,7 @@ impl TestMode {
             fetch,
             compare: true,
             displays,
+            sound: SoundChoice::default(),
             level: self.level,
             minutes: 0,
             wanted,
@@ -556,7 +566,15 @@ impl TestMode {
                     let orig = st.prefs.hw_decode;
                     let _ = std::fs::write(
                         folder.join("system.txt"),
-                        system_report(engine, st, show, &p.wanted, &resolved, &p.displays),
+                        system_report(
+                            engine,
+                            st,
+                            show,
+                            &p.wanted,
+                            &resolved,
+                            &p.displays,
+                            &p.sound,
+                        ),
                     );
                     self.phase = Phase::Comparing(Box::new(Compare::begin(
                         ff,
@@ -693,7 +711,7 @@ fn launch(
         return Err(why.to_string());
     }
     let resolved = prep.fetch.status.lock().resolved.clone();
-    let built = plan::build(show, prep.level, &resolved, &prep.displays);
+    let built = plan::build_with(show, prep.level, &resolved, &prep.displays, &prep.sound);
     let folder = run_folder(&prep.log_dir, prep.level, unix_now());
     std::fs::create_dir_all(&folder).map_err(|e| {
         format!(
@@ -727,13 +745,23 @@ fn launch(
         .then(|| Duration::from_secs(u64::from(prep.minutes) * 60));
     let _ = std::fs::write(
         folder.join("system.txt"),
-        system_report(engine, st, show, &prep.wanted, &resolved, &prep.displays),
+        system_report(
+            engine,
+            st,
+            show,
+            &prep.wanted,
+            &resolved,
+            &prep.displays,
+            &prep.sound,
+        ),
     );
     let media_notes = built.notes.clone();
     let awake = KeepAwake::new("NewQ is running a test");
     // The point of no return: the user's show is put aside.
     let stash = st.begin_test(show, engine, built.show);
+    crate::media::audio::set_muted(prep.sound.muted);
     engine.set_log_tap(true);
+    engine.log(format!("Test mode: the sound {}", prep.sound.describe()));
     engine.log(format!(
         "Test mode: {} test begins ({} cues from {} media files, a lap should take {:.0} s)",
         prep.level.label(),
@@ -964,6 +992,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     if let Some(stash) = run.stash.take() {
         st.end_test(show, engine, stash);
     }
+    crate::media::audio::set_muted(false);
     for (at, text) in engine.take_log_tap() {
         let rel = at.saturating_duration_since(run.started);
         if let Some(f) = &mut run.events {
@@ -1295,6 +1324,7 @@ fn system_report(
     wanted: &[&'static Asset],
     resolved: &HashMap<&'static str, Resolved>,
     displays: &[DisplayChoice],
+    sound: &SoundChoice,
 ) -> String {
     use sysinfo::System;
     let mut sys = System::new();
@@ -1351,6 +1381,7 @@ fn system_report(
                 .join("; ")
         )
     });
+    p(format!("Test sound: {}", sound.describe()));
     match engine.audio.device_status(None) {
         Some(d) => p(format!(
             "Sound: {} {} Hz, {} channels{}",
@@ -1670,7 +1701,7 @@ mod tests {
         let (mut show, mut engine, mut st) =
             (Show::default(), Engine::for_tests(), UiState::default());
         let before = serde_json::to_string(&show).unwrap();
-        test.start(ff, &dir, Vec::new());
+        test.start(ff, &dir, Vec::new(), SoundChoice::default());
         test.stop();
         assert!(wait_for(
             || {
@@ -1705,7 +1736,13 @@ mod tests {
             download: false,
             ..Default::default()
         };
-        test.start(ff, &dir, Vec::new());
+        // Run muted, on a device the show names: the report says so, and the
+        // mute is put back when the test is over.
+        let sound = SoundChoice {
+            device: Some("Some Interface".into()),
+            muted: true,
+        };
+        test.start(ff, &dir, Vec::new(), sound);
         let mut was_locked = false;
         let mut last = Instant::now();
         let ok = wait_for(
@@ -1735,6 +1772,12 @@ mod tests {
             assert!(d.folder.join(f).exists(), "{f} missing");
         }
         assert!(d.report.contains("back, unchanged"));
+        assert!(!crate::media::audio::is_muted(), "the mute was left on");
+        let system = std::fs::read_to_string(d.folder.join("system.txt")).unwrap();
+        assert!(
+            system.contains("Test sound: muted on purpose") && system.contains("Some Interface"),
+            "{system}"
+        );
         // This test shares its process with all the others, so memory, open
         // files and a stall on a loaded machine mean nothing here: what it
         // checks is that the show ran without the engine reporting a failure.

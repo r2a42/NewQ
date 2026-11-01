@@ -4,7 +4,7 @@
 use super::Level;
 use super::analysis::{Severity, Verdict};
 use super::assets::{self, State};
-use super::plan::DisplayChoice;
+use super::plan::{DisplayChoice, SoundChoice};
 use super::session::{End, Run, View, clock, open_folder};
 use crate::engine::Engine;
 use crate::ui::UiState;
@@ -29,6 +29,8 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     let mut apply: Option<bool> = None;
     let screens = screens_of(st);
     let mut selected = st.prefs.test_displays.clone();
+    let mut sound = (st.prefs.test_sound.clone(), st.prefs.test_muted);
+    let devices = st.audio_devices.clone();
     egui::Window::new("Test mode")
         .open(&mut open)
         .collapsible(false)
@@ -42,6 +44,8 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
                 &mut apply,
                 &screens,
                 &mut selected,
+                &devices,
+                &mut sound,
             );
         });
     if !open {
@@ -55,8 +59,11 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
     test.open = open;
     st.test = test;
-    if selected != st.prefs.test_displays {
+    if selected != st.prefs.test_displays
+        || sound != (st.prefs.test_sound.clone(), st.prefs.test_muted)
+    {
         st.prefs.test_displays = selected;
+        (st.prefs.test_sound, st.prefs.test_muted) = sound;
         if let Some(dir) = &st.layout_dir
             && let Err(e) = st.prefs.save(dir)
         {
@@ -86,13 +93,17 @@ fn body(
     apply: &mut Option<bool>,
     screens: &[Screen],
     selected: &mut Vec<String>,
+    devices: &[String],
+    sound: &mut (Option<String>, bool),
 ) {
     let log_dir = crate::crash::log_dir();
     let mut dismiss = false;
     let mut failed = None;
     match test.view() {
         View::Idle => {
-            idle(ui, engine, test, refusal, &log_dir, screens, selected);
+            idle(
+                ui, engine, test, refusal, &log_dir, screens, selected, devices, sound,
+            );
         }
         View::Preparing(p) => {
             let st = p.fetch.status.lock();
@@ -318,6 +329,8 @@ fn idle(
     log_dir: &std::path::Path,
     screens: &[Screen],
     selected: &mut Vec<String>,
+    devices: &[String],
+    sound: &mut (Option<String>, bool),
 ) {
     ui.label("Plays a show of its own to see how this computer copes, then puts yours back exactly as it was.");
     ui.add_space(6.0);
@@ -372,6 +385,8 @@ fn idle(
     ui.separator();
     displays_section(ui, screens, selected);
     ui.separator();
+    sound_section(ui, devices, sound);
+    ui.separator();
     if let Some(why) = refusal {
         ui.colored_label(AMBER, why);
     }
@@ -390,7 +405,12 @@ fn idle(
         .clicked()
         && let Some(ff) = engine.ff.clone()
     {
-        test.start(ff, log_dir, chosen(screens, selected));
+        test.start(
+            ff,
+            log_dir,
+            chosen(screens, selected),
+            sound_of(devices, sound),
+        );
     }
     ui.add_space(6.0);
     ui.separator();
@@ -635,6 +655,49 @@ fn chosen(screens: &[Screen], selected: &[String]) -> Vec<DisplayChoice> {
         .filter(|s| !s.is_main && selected.contains(&s.choice.key))
         .map(|s| s.choice.clone())
         .collect()
+}
+
+/// The sound the test is to use: the chosen device if it is still there.
+fn sound_of(devices: &[String], sound: &(Option<String>, bool)) -> SoundChoice {
+    SoundChoice {
+        device: sound.0.clone().filter(|d| devices.iter().any(|x| x == d)),
+        muted: sound.1,
+    }
+}
+
+fn sound_section(ui: &mut egui::Ui, devices: &[String], sound: &mut (Option<String>, bool)) {
+    ui.label(RichText::new("Sound").strong());
+    let shown = match &sound.0 {
+        Some(d) if devices.iter().any(|x| x == d) => d.clone(),
+        Some(d) => format!("{d} (not connected: the default is used)"),
+        None => "Your show's audio outputs (the default device if it has none)".to_string(),
+    };
+    ui.horizontal(|ui| {
+        ui.label("Play on");
+        egui::ComboBox::from_id_salt("test-sound")
+            .selected_text(shown)
+            .width(320.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut sound.0,
+                    None,
+                    "Your show's audio outputs (the default device if it has none)",
+                );
+                for d in devices {
+                    ui.selectable_value(&mut sound.0, Some(d.clone()), d);
+                }
+            });
+    });
+    ui.checkbox(&mut sound.1, "Run muted");
+    ui.label(
+        RichText::new(if sound.1 {
+            "Nothing is heard, but the sound is still decoded, mixed and put through its effects, so the test costs what it would with sound. Meters stay flat."
+        } else {
+            "The test's sound plays on the device above, in place of your show's own audio outputs while it runs; your show is not changed. The 5.1 trailer is mixed down to a stereo pair."
+        })
+        .weak()
+        .small(),
+    );
 }
 
 fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {

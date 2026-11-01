@@ -199,6 +199,47 @@ pub struct DisplayChoice {
     pub label: String,
 }
 
+/// Where the test's sound goes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundChoice {
+    /// The name of the audio device to play on; None leaves the show's own audio
+    /// outputs (and, with none, the system's default device).
+    pub device: Option<String>,
+    /// Play with the sound off: everything is decoded, mixed and put through its
+    /// effects as usual, and the device is sent silence.
+    pub muted: bool,
+}
+
+impl SoundChoice {
+    /// For the system report and the log.
+    pub fn describe(&self) -> String {
+        let on = match &self.device {
+            Some(d) => format!("on {d}"),
+            None => {
+                "on the audio outputs of your show (the system's default device if it has none)"
+                    .into()
+            }
+        };
+        if self.muted {
+            format!("muted on purpose (the mixing still runs); it would play {on}")
+        } else {
+            format!("plays {on}")
+        }
+    }
+}
+
+/// Give the show the audio device that was chosen, in place of its own outputs.
+fn use_sound(show: &mut Show, sound: &SoundChoice) {
+    let Some(device) = &sound.device else {
+        return;
+    };
+    show.audio_outputs.clear();
+    let id = show.add_audio_output();
+    if let Some(o) = show.audio_outputs.iter_mut().find(|o| o.id == id) {
+        o.device = Some(device.clone());
+    }
+}
+
 /// Give the show the displays that were chosen, in place of its own: the first
 /// shows the picture, the others show the whole of the first's picture too
 /// (a display that is "part of" another with the whole area is a mirror of it).
@@ -302,11 +343,23 @@ pub fn build(
     res: &HashMap<&'static str, Resolved>,
     displays: &[DisplayChoice],
 ) -> Built {
+    build_with(original, level, res, displays, &SoundChoice::default())
+}
+
+/// `build`, with the sound going where `sound` says.
+pub fn build_with(
+    original: &Show,
+    level: Level,
+    res: &HashMap<&'static str, Resolved>,
+    displays: &[DisplayChoice],
+    sound: &SoundChoice,
+) -> Built {
     let mut show = original.clone();
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
     use_displays(&mut show, displays);
+    use_sound(&mut show, sound);
     show.name = format!("Test Mode: {}", level.label());
     let audio = show.audio_outputs.first().map(|a| a.id);
     let mut b = Builder {
@@ -700,6 +753,39 @@ pub fn build(
 mod tests {
     use super::*;
     use crate::testmode::assets::Source;
+
+    #[test]
+    fn the_chosen_audio_device_replaces_the_shows_audio_outputs() {
+        let mut original = Show::default();
+        original.add_audio_output();
+        original.add_audio_output();
+        let none = build_with(
+            &original,
+            Level::Short,
+            &HashMap::new(),
+            &[],
+            &SoundChoice::default(),
+        );
+        assert_eq!(none.show.audio_outputs.len(), 2);
+        let chosen = build_with(
+            &original,
+            Level::Short,
+            &HashMap::new(),
+            &[],
+            &SoundChoice {
+                device: Some("USB Interface".into()),
+                muted: false,
+            },
+        );
+        assert_eq!(chosen.show.audio_outputs.len(), 1);
+        assert_eq!(
+            chosen.show.audio_outputs[0].device.as_deref(),
+            Some("USB Interface")
+        );
+        // The user's own show is not touched.
+        assert_eq!(original.audio_outputs.len(), 2);
+        assert!(original.audio_outputs[0].device.is_none());
+    }
 
     #[test]
     fn the_decoding_wall_starts_all_its_tiles_at_once_and_keeps_them_playing() {

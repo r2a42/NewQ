@@ -1186,6 +1186,19 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
     })
 }
 
+/// Output silence from every device while set, without stopping the mixing
+/// (the decoding, effects and audio clock cost what they would): Test Mode's
+/// "run muted".
+static MUTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_muted(muted: bool) {
+    MUTED.store(muted, Ordering::Relaxed);
+}
+
+pub fn is_muted() -> bool {
+    MUTED.load(Ordering::Relaxed)
+}
+
 fn open_stream(
     name: Option<&str>,
     voices_rx: Receiver<MixVoice>,
@@ -1261,6 +1274,7 @@ where
                     let _ = dead_tx.send(voices.swap_remove(i));
                 }
             }
+            let master = if is_muted() { 0.0 } else { master };
             for (s, m) in out.iter_mut().zip(&mix) {
                 *s = T::from_sample((m * master).clamp(-1.0, 1.0));
             }

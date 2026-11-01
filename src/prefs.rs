@@ -21,6 +21,16 @@ pub struct Prefs {
     /// the name the system gives it); none = the displays of the show.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_displays: Vec<String>,
+    /// The audio device Test Mode plays on; none = the show's own outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_sound: Option<String>,
+    /// Test Mode runs with the sound off (everything still mixed).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub test_muted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 const FILE: &str = "prefs.json";
@@ -59,6 +69,8 @@ mod tests {
             show_mode: true,
             allow_scripts: true,
             test_displays: vec!["Dell U2720Q".into()],
+            test_sound: Some("USB Interface".into()),
+            test_muted: true,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
@@ -67,6 +79,9 @@ mod tests {
         // A file from before a setting existed.
         std::fs::write(dir.join(FILE), "{}").unwrap();
         assert!(!Prefs::load(&dir).hw_decode);
+        // Defaults are not written, so older versions read the file as before.
+        let json = serde_json::to_string(&Prefs::default()).unwrap();
+        assert!(!json.contains("test_"), "{json}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
