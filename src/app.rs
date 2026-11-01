@@ -650,6 +650,11 @@ impl App {
                 ));
             }
         }
+        // Simple fullscreen only *auto*-hides the menu bar and Dock, so they slide
+        // back whenever the pointer reaches the display's top or bottom edge or
+        // the app is activated again. "Borderless game" hides them outright.
+        #[cfg(target_os = "macos")]
+        winit::platform::macos::WindowExtMacOS::set_borderless_game(&*window, true);
         #[cfg(target_os = "macos")]
         if !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true) {
             log::warn!("simple fullscreen refused on display {monitor}; using native fullscreen");
