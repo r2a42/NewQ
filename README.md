@@ -213,7 +213,9 @@ includes FFmpeg, so there's nothing else to install.
 - **Output windows go back over their display (Mac):** NewQ checks every pass that each output
   window still exactly covers its display, and puts it back if the system has moved it, which is
   what happens when a laptop's lid closes and opens (the external display's place changes). The
-  system's own "displays rearranged" notice makes the check immediate. `newq.log` says when a window
+  system's own "displays rearranged" notice makes the check immediate, and a window the system moves is
+  put back the moment it moves (at most four times a second). Output windows are backed with black, so
+  the gap while the system brings a display back shows black, not the desktop. `newq.log` says when a window
   was put back, and when waiting for a frame on a display took over 100 ms (the system
   reconfiguring displays holds the picture for about half a second when a lid closes: that part
   is the system's).

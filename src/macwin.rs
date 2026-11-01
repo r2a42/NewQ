@@ -18,7 +18,7 @@
 
 use crate::monitor::Rect;
 use objc2_app_kit::{
-    NSApplicationDidChangeScreenParametersNotification, NSScreen, NSView,
+    NSApplicationDidChangeScreenParametersNotification, NSColor, NSScreen, NSView,
     NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSRect};
@@ -114,6 +114,12 @@ pub fn cover_display(window: &Window, monitor: &MonitorHandle) -> bool {
     ns_window.setLevel(ABOVE_THE_MENU_BAR);
     ns_window.setHasShadow(false);
     ns_window.setOpaque(true);
+    // Black behind the picture: whenever the window has nothing to show yet
+    // (the system is rearranging displays and holds back the next frame) the
+    // audience sees black, not the window's default colour or what is behind.
+    // SAFETY: a plain class method returning a shared colour.
+    let black = unsafe { NSColor::blackColor() };
+    ns_window.setBackgroundColor(Some(&black));
     // SAFETY: plain setters on a live window.
     unsafe {
         ns_window.setCollectionBehavior(

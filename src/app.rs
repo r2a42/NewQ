@@ -107,6 +107,9 @@ struct ScreenWindow {
     /// The screen frame a put-back didn't work for (see `monitor::should_pin`).
     #[cfg(target_os = "macos")]
     pin_failed: Option<crate::monitor::Rect>,
+    /// When it was last put back (see `monitor::pin_allowed`).
+    #[cfg(target_os = "macos")]
+    last_pin: Option<Instant>,
     /// Its place among the window slots (see `gpu::Slot::Window`): its own for
     /// as long as the window lives, whatever number its display is given.
     slot: u8,
@@ -791,6 +794,8 @@ impl App {
                 pinned,
                 #[cfg(target_os = "macos")]
                 pin_failed: None,
+                #[cfg(target_os = "macos")]
+                last_pin: None,
                 slot,
                 outputs: Vec::new(),
                 needs_redraw: true,
@@ -924,37 +929,55 @@ impl App {
     #[cfg(target_os = "macos")]
     fn pin_outputs(&mut self) {
         for (m, screen) in &mut self.screens {
-            if !screen.pinned {
-                continue;
-            }
-            let Some((window, display)) = crate::macwin::frames(&screen.window, &screen.monitor)
-            else {
-                continue;
-            };
-            if !crate::monitor::should_pin(window, display, screen.pin_failed) {
-                continue;
-            }
-            let done = crate::macwin::cover_display(&screen.window, &screen.monitor);
-            let after = crate::macwin::frames(&screen.window, &screen.monitor);
-            let covers = after
-                .and_then(|(w, d)| {
-                    d.map(|d| crate::monitor::rect_covers(w, d, crate::monitor::COVER_TOLERANCE))
-                })
-                .unwrap_or(false);
-            log::info!(
-                "output window {m} put back over its display: was {window:?}, now {:?} (display {display:?})",
-                after.map(|(w, _)| w)
-            );
-            screen.pin_failed = if done && covers { None } else { display };
-            if screen.pin_failed.is_some() {
-                log::warn!("output window {m} would not go back over its display; leaving it");
-            }
-            screen.needs_redraw = true;
+            Self::pin_screen(*m, screen, "found by the loop");
         }
+    }
+
+    /// The same for one window, at the moment the system moved or resized it.
+    #[cfg(target_os = "macos")]
+    fn pin_output(&mut self, m: usize) {
+        if let Some(screen) = self.screens.get_mut(&m) {
+            Self::pin_screen(m, screen, "moved by the system");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pin_screen(m: usize, screen: &mut ScreenWindow, why: &str) {
+        if !screen.pinned || !crate::monitor::pin_allowed(screen.last_pin.map(|t| t.elapsed())) {
+            return;
+        }
+        let Some((window, display)) = crate::macwin::frames(&screen.window, &screen.monitor) else {
+            return;
+        };
+        if !crate::monitor::should_pin(window, display, screen.pin_failed) {
+            return;
+        }
+        let began = Instant::now();
+        let done = crate::macwin::cover_display(&screen.window, &screen.monitor);
+        let after = crate::macwin::frames(&screen.window, &screen.monitor);
+        let covers = after
+            .and_then(|(w, d)| {
+                d.map(|d| crate::monitor::rect_covers(w, d, crate::monitor::COVER_TOLERANCE))
+            })
+            .unwrap_or(false);
+        log::info!(
+            "output window {m} {why}: was {window:?}, put back in {} ms, now {:?} (display {display:?})",
+            began.elapsed().as_millis(),
+            after.map(|(w, _)| w)
+        );
+        screen.last_pin = Some(Instant::now());
+        screen.pin_failed = if done && covers { None } else { display };
+        if screen.pin_failed.is_some() {
+            log::warn!("output window {m} would not go back over its display; leaving it");
+        }
+        screen.needs_redraw = true;
     }
 
     #[cfg(not(target_os = "macos"))]
     fn pin_outputs(&mut self) {}
+
+    #[cfg(not(target_os = "macos"))]
+    fn pin_output(&mut self, _m: usize) {}
 
     /// While a display is showing: hold the computer awake (unless turned off
     /// in the settings), say in the log if it slept anyway, and know whether
@@ -2229,7 +2252,11 @@ impl App {
                     s.size = (size.width.max(1), size.height.max(1));
                     s.needs_redraw = true;
                 }
+                self.pin_output(m);
             }
+            // The system moving an output window (a display rearranged under
+            // it) is put right at once, not at the next pass of the loop.
+            WindowEvent::Moved(_) => self.pin_output(m),
             WindowEvent::RedrawRequested => {
                 if let Some(s) = self.screens.get_mut(&m) {
                     s.needs_redraw = true;
@@ -2331,6 +2358,10 @@ impl ApplicationHandler for App {
         self.watch_gpu();
         self.collect_devices();
         self.crumbs.lap("graphics and device checks");
+        // Output windows go back over their displays first, ahead of the look
+        // at the displays, which the system can hold up for a long moment
+        // while it rearranges them.
+        self.pin_outputs();
         // The system's own word that the displays were rearranged makes the
         // look at them prompt; the poll every 2 s is the safety net.
         #[cfg(target_os = "macos")]
@@ -2343,9 +2374,7 @@ impl ApplicationHandler for App {
             }
             self.scan_monitors(event_loop);
         }
-        // Output windows go back over their displays when the system has moved
-        // them (before the main window is sent home, which would otherwise be
-        // hidden under a misplaced output).
+        // Once more, now the displays are known afresh.
         self.pin_outputs();
         self.crumbs.lap("looking at the displays");
         self.keep_main_window_home();

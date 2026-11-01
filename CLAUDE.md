@@ -48,8 +48,12 @@ The README describes the features; this file is about working on the code.
 - Output windows are kept over their display (`app.rs::pin_outputs`, each pass, Mac): `macwin::frames`
   compares the window's frame with its screen's (both global points) and `monitor::should_pin` decides;
   `macwin::watch_screens` (NSApplicationDidChangeScreenParametersNotification) sets a flag and wakes
-  the loop so the look at the displays is prompt; the 2 s poll is the safety net. Not tried on a Mac
-  (type-checked in the scratch crate, and by CI).
+  the loop so the look at the displays is prompt; the 2 s poll is the safety net. `pin_outputs` runs before
+  and after `scan_monitors` (which the system can block for 200 ms while rearranging), `pin_output(m)` runs
+  on the output window's `Moved`/`Resized`, at most once per `monitor::PIN_SPACING` per window. The window
+  is backed with black (`NSWindow::setBackgroundColor`). The 0.5 to 0.7 s freeze at a lid change is the
+  system holding the next drawable (`nextDrawable` blocks, wgpu has no timeout); nothing to do about it.
+  Not tried on a Mac (checked by `scripts/cross_clippy.sh` and CI).
 - `src/power.rs`: on battery or not (pmset, GetSystemPowerStatus, /sys/class/power_supply) on a thread of
   its own; `app.rs::keep_awake_for_outputs` holds `KeepAwake` while an output window is open
   (`Prefs::let_computer_sleep` turns it off), logs sleeps (`SleepWatch`) and the power source, and sets

@@ -241,9 +241,30 @@ pub fn should_pin(window: Rect, screen: Option<Rect>, failed_for: Option<Rect>) 
     }
 }
 
+/// Least time between two put-backs of one output window. If the system and
+/// NewQ disagreed about where it belongs they would otherwise move it back and
+/// forth as fast as events can be delivered.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const PIN_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether a window may be put back now, `since_last` after the last time.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn pin_allowed(since_last: Option<std::time::Duration>) -> bool {
+    since_last.is_none_or(|d| d >= PIN_SPACING)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_is_not_put_back_again_within_a_quarter_of_a_second() {
+        use std::time::Duration;
+        assert!(pin_allowed(None));
+        assert!(!pin_allowed(Some(Duration::from_millis(10))));
+        assert!(!pin_allowed(Some(Duration::from_millis(249))));
+        assert!(pin_allowed(Some(Duration::from_millis(250))));
+    }
 
     fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
         Rect { x, y, w, h }

@@ -6,7 +6,7 @@
 //! So NewQ can only say so: a warning while outputs are open on battery.
 //!
 //! The question is asked on a thread of its own (a Mac's is answered by a
-//! program that is run), once a minute, and the main loop reads the answer.
+//! program that is run), every 20 seconds, and the main loop reads the answer.
 
 use std::sync::Once;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -20,7 +20,7 @@ static STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
 static STARTED: Once = Once::new();
 
 /// How often the power source is looked at.
-const EVERY: Duration = Duration::from_secs(60);
+const EVERY: Duration = Duration::from_secs(20);
 
 /// Start looking at the power source (once; later calls do nothing).
 pub fn start_watching() {
