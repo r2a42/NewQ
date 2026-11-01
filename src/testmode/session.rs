@@ -192,6 +192,26 @@ struct Seen {
     text: String,
     first: f64,
     ended: Option<f64>,
+    /// The biggest number in the text when it was last written to the log, so
+    /// that a finding that gets clearly worse (a longer freeze) is logged again.
+    logged: f64,
+}
+
+/// The biggest number in some text.
+fn biggest_number(text: &str) -> f64 {
+    let mut best = 0.0_f64;
+    let mut cur = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() || (c == '.' && !cur.is_empty()) {
+            cur.push(c);
+        } else {
+            if let Ok(v) = cur.trim_end_matches('.').parse::<f64>() {
+                best = best.max(v);
+            }
+            cur.clear();
+        }
+    }
+    best
 }
 
 fn identity_of(text: &str) -> String {
@@ -219,7 +239,16 @@ impl FindingLog {
                 .iter_mut()
                 .find(|s| s.ended.is_none() && s.identity == id)
             {
-                Some(s) => s.text = f.text.clone(),
+                Some(s) => {
+                    s.text = f.text.clone();
+                    // A problem that gets clearly worse is written again; the
+                    // first line alone would hide the worst of a run.
+                    let now = biggest_number(&f.text);
+                    if f.severity == Severity::Problem && now > s.logged * 1.1 {
+                        s.logged = now;
+                        lines.push(format!("Problem in the window, now worse: {}", f.text));
+                    }
+                }
                 None => {
                     let label = match f.severity {
                         Severity::Watch => "Showing in the window",
@@ -233,6 +262,7 @@ impl FindingLog {
                         text: f.text.clone(),
                         first: t,
                         ended: None,
+                        logged: biggest_number(&f.text),
                     });
                 }
             }
@@ -315,6 +345,8 @@ pub struct Done {
     pub verdict: Verdict,
     pub headline: String,
     pub findings: Vec<Finding>,
+    /// Said when the run was long enough to judge memory and found nothing.
+    pub steady: Option<&'static str>,
     pub folder: PathBuf,
     pub report: String,
     pub laps: usize,
@@ -641,6 +673,7 @@ fn compare_done(
             },
         },
         compare: Some(result),
+        steady: None,
         findings,
         folder,
         report,
@@ -1082,6 +1115,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
         level: run.level,
         verdict,
         headline,
+        steady: super::analysis::steady_line(&findings, run.history.len(), hours),
         findings,
         folder: run.folder.clone(),
         report,
@@ -1181,6 +1215,13 @@ fn compose(
             Severity::Watch => "tracked",
         };
         line(&mut out, &format!("  {tag}  {}", f.text));
+    }
+    if let Some(t) = super::analysis::steady_line(
+        findings,
+        run.history.len(),
+        run.elapsed().as_secs_f64() / 3600.0,
+    ) {
+        line(&mut out, &format!("  ok       {t}"));
     }
     line(&mut out, "");
     line(&mut out, "Laps");
@@ -1458,6 +1499,24 @@ mod tests {
         log.update(1.0, std::slice::from_ref(&note));
         log.update(2.0, &[]);
         assert!(log.gone(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_problem_that_gets_worse_is_logged_again_but_not_every_time() {
+        let mut log = FindingLog::default();
+        let p = |ms: u32| Finding {
+            severity: Severity::Problem,
+            text: format!("The program froze for {ms} ms once."),
+        };
+        assert_eq!(log.update(680.0, &[p(4810)]).len(), 1);
+        // The same, or a hair more: nothing.
+        assert!(log.update(685.0, &[p(4810)]).is_empty());
+        assert!(log.update(690.0, &[p(4900)]).is_empty());
+        // 5535 ms is clearly worse than 4810.
+        let lines = log.update(2241.0, &[p(5535)]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("now worse") && lines[0].contains("5535"));
+        assert!(log.update(2250.0, &[p(5535)]).is_empty());
     }
 
     #[test]

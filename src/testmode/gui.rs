@@ -255,6 +255,9 @@ fn body(
                     if d.findings.is_empty() {
                         ui.label("Nothing to report.");
                     }
+                    if let Some(t) = d.steady {
+                        ui.colored_label(GREEN, t);
+                    }
                     for f in &d.findings {
                         let (c, t) = match f.severity {
                             Severity::Problem => (RED, "Problem"),
@@ -532,6 +535,13 @@ fn running(ui: &mut egui::Ui, r: &Run) {
             Severity::Note => Color32::GRAY,
         };
         ui.colored_label(c, &f.text);
+    }
+    if let Some(t) = super::analysis::steady_line(
+        &r.findings,
+        r.history.len(),
+        r.elapsed().as_secs_f64() / 3600.0,
+    ) {
+        ui.colored_label(GREEN, t);
     }
     ui.separator();
     ui.label(RichText::new("Log files").small().weak());

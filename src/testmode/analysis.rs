@@ -175,6 +175,23 @@ pub fn is_failure(message: &str) -> bool {
     .any(|w| m.contains(w))
 }
 
+/// Whether a run was long enough to judge memory by (the growth checks in
+/// `analyse` need it).
+pub fn judged_memory(samples: usize, hours: f64) -> bool {
+    hours >= 0.4 && samples >= 30
+}
+
+/// "Memory and cache use steady", when the run was long enough to say so and
+/// nothing about memory, handles or threads was found or is being tracked.
+pub fn steady_line(findings: &[Finding], samples: usize, hours: f64) -> Option<&'static str> {
+    let memory = |f: &Finding| {
+        let t = f.text.to_lowercase();
+        t.contains("memory") || t.contains("open files") || t.contains("threads")
+    };
+    (judged_memory(samples, hours) && !findings.iter().any(memory))
+        .then_some("Memory and cache use steady during this test.")
+}
+
 /// What a run found.
 ///
 /// `samples` are the log's rows; `laps` the seconds each finished lap took;
@@ -220,10 +237,6 @@ pub fn analyse(
                 )));
             }
         }
-    } else if hours < 0.4 {
-        out.push(note(
-            "This test was too short to tell a slow leak from caches filling: run the Medium or Long test for that.",
-        ));
     }
 
     // The main loop stopping, even for a moment, is a dropped frame on every output.
@@ -508,13 +521,22 @@ mod tests {
     }
 
     #[test]
-    fn a_steady_run_passes_and_a_short_one_says_what_it_cannot_tell() {
+    fn a_steady_run_passes_and_a_short_one_says_nothing_about_leaks() {
         let f = analyse(&steady(400), &[100.0; 20], 100.0, &[], 1.1);
         assert!(f.is_empty(), "{f:?}");
         assert_eq!(Verdict::of(&f), Verdict::Passed);
+        // A short run has nothing to say about slow leaks, and says nothing.
         let f = analyse(&steady(8), &[50.0], 50.0, &[], 0.02);
-        assert_eq!(Verdict::of(&f), Verdict::PassedWithNotes);
-        assert!(f[0].text.contains("too short"));
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(Verdict::of(&f), Verdict::Passed);
+        assert_eq!(steady_line(&f, 8, 0.02), None);
+        // A long one that found nothing says memory was steady...
+        let f = analyse(&steady(400), &[100.0; 20], 100.0, &[], 1.1);
+        assert!(steady_line(&f, 400, 1.1).is_some());
+        // ...and not when memory is being tracked or has a problem.
+        let leaking: Vec<Sample> = (0..400).map(|i| sample(i, 400 + i)).collect();
+        let f = analyse(&leaking, &[], 0.0, &[], 1.1);
+        assert_eq!(steady_line(&f, 400, 1.1), None);
     }
 
     #[test]
