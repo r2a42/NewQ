@@ -24,6 +24,9 @@ pub struct Prefs {
     /// Draw the output's frame rate on its picture (the Preview pane's checkbox).
     #[serde(default, skip_serializing_if = "is_false")]
     pub fps_on_output: bool,
+    /// Test Mode plays a heavier lap.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub test_heavy: bool,
     /// The audio device Test Mode plays on; none = the show's own outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_sound: Option<String>,
@@ -75,6 +78,7 @@ mod tests {
             test_sound: Some("USB Interface".into()),
             test_muted: true,
             fps_on_output: true,
+            test_heavy: true,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);

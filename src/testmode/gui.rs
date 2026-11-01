@@ -30,6 +30,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     let screens = screens_of(st);
     let mut selected = st.prefs.test_displays.clone();
     let mut sound = (st.prefs.test_sound.clone(), st.prefs.test_muted);
+    test.heavy = st.prefs.test_heavy;
     let devices = st.audio_devices.clone();
     egui::Window::new("Test mode")
         .open(&mut open)
@@ -58,10 +59,13 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
         }
     }
     test.open = open;
+    let heavy = test.heavy;
     st.test = test;
     if selected != st.prefs.test_displays
         || sound != (st.prefs.test_sound.clone(), st.prefs.test_muted)
+        || heavy != st.prefs.test_heavy
     {
+        st.prefs.test_heavy = heavy;
         st.prefs.test_displays = selected;
         (st.prefs.test_sound, st.prefs.test_muted) = sound;
         if let Some(dir) = &st.layout_dir
@@ -389,6 +393,16 @@ fn idle(
     ui.separator();
     sound_section(ui, devices, sound);
     ui.separator();
+    ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
+        .on_hover_text("Adds three whole-screen layers blended one over another, each with effects, to every lap.");
+    if test.heavy {
+        ui.label(
+            RichText::new("Three more full-screen films are blended over the others, with effects, and the lap is no longer. Late frames then show where this computer's limit is; they are reported as a note, not a fault. Same downloads.")
+                .weak()
+                .small(),
+        );
+    }
+    ui.separator();
     if let Some(why) = refusal {
         ui.colored_label(AMBER, why);
     }
@@ -412,6 +426,7 @@ fn idle(
             log_dir,
             chosen(screens, selected),
             sound_of(devices, sound),
+            test.heavy,
         );
     }
     ui.add_space(6.0);

@@ -733,6 +733,14 @@ silence (the meters stay flat). Both are remembered for this computer and writte
 the report say *Memory and cache use steady during this test*; a run too short to tell says
 nothing about leaks.
 
+**Heavier load.** *Heavier load for the graphics card* adds three more whole-screen films to
+the layered part of every lap, blended one over another at partial opacity, each with an effect
+(sharpen, vignette, negative, a blur) and a changing speed, so the graphics card draws many
+more covered pixels and the processor decodes up to seven films at once. The lap is no longer
+and nothing more is downloaded. Late frames in this test are where the computer's limit is, so
+the report lists them as a note, not a problem; run the ordinary test to see whether the
+computer copes with a normal show. (A 4K film was not added: the free ones are gigabytes.)
+
 **Does hardware decoding help here?** *Compare hardware decoding* (below the Start
 button) plays a wall of four 4K H.264 clips twice, about two minutes in all, with
 hardware decoding off and then on. It makes the 4K clip from the downloaded film with

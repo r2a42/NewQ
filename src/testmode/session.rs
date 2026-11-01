@@ -34,6 +34,8 @@ pub struct TestMode {
     pub download: bool,
     /// Seconds measured in each trial of the decoding comparison.
     pub decode_secs: u64,
+    /// The heavier lap for the graphics card (remembered by the window).
+    pub heavy: bool,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
     phase: Phase,
@@ -47,6 +49,7 @@ impl Default for TestMode {
             minutes: Level::Short.default_minutes(),
             download: true,
             decode_secs: super::decode::TRIAL_SECS,
+            heavy: false,
             notice: None,
             phase: Phase::Idle,
         }
@@ -69,6 +72,8 @@ pub struct Prep {
     pub displays: Vec<DisplayChoice>,
     /// Where the sound goes, and whether it is off.
     pub sound: SoundChoice,
+    /// A heavier lap for the graphics card (see `plan::build_with`).
+    pub heavy: bool,
     pub level: Level,
     pub minutes: u32,
     pub wanted: Vec<&'static Asset>,
@@ -78,6 +83,8 @@ pub struct Prep {
 /// A test under way.
 pub struct Run {
     pub level: Level,
+    /// The heavier lap: late frames are an answer, not a fault.
+    pub heavy: bool,
     pub started: Instant,
     /// How long it is meant to last (the Short test ends when its lap does).
     pub planned: Option<Duration>,
@@ -468,6 +475,7 @@ impl TestMode {
         log_dir: &Path,
         displays: Vec<DisplayChoice>,
         sound: SoundChoice,
+        heavy: bool,
     ) {
         if self.busy() {
             return;
@@ -485,6 +493,7 @@ impl TestMode {
             compare: false,
             displays,
             sound,
+            heavy,
             level: self.level,
             minutes: self.minutes,
             wanted,
@@ -511,6 +520,7 @@ impl TestMode {
             compare: true,
             displays,
             sound: SoundChoice::default(),
+            heavy: false,
             level: self.level,
             minutes: 0,
             wanted,
@@ -574,6 +584,7 @@ impl TestMode {
                             &resolved,
                             &p.displays,
                             &p.sound,
+                            false,
                         ),
                     );
                     self.phase = Phase::Comparing(Box::new(Compare::begin(
@@ -711,7 +722,14 @@ fn launch(
         return Err(why.to_string());
     }
     let resolved = prep.fetch.status.lock().resolved.clone();
-    let built = plan::build_with(show, prep.level, &resolved, &prep.displays, &prep.sound);
+    let built = plan::build_with(
+        show,
+        prep.level,
+        &resolved,
+        &prep.displays,
+        &prep.sound,
+        prep.heavy,
+    );
     let folder = run_folder(&prep.log_dir, prep.level, unix_now());
     std::fs::create_dir_all(&folder).map_err(|e| {
         format!(
@@ -753,6 +771,7 @@ fn launch(
             &resolved,
             &prep.displays,
             &prep.sound,
+            prep.heavy,
         ),
     );
     let media_notes = built.notes.clone();
@@ -781,6 +800,7 @@ fn launch(
     engine.go(show);
     Ok(Run {
         level: prep.level,
+        heavy: prep.heavy,
         started: Instant::now(),
         planned,
         folder,
@@ -914,12 +934,15 @@ impl Run {
         // What has been found so far, for the window.
         if now.duration_since(self.last_analysis) > Duration::from_secs(5) {
             self.last_analysis = now;
-            self.findings = analyse(
-                &self.history,
-                &self.clean_laps(),
-                self.lap_secs,
-                &self.messages,
-                elapsed.as_secs_f64() / 3600.0,
+            self.findings = super::analysis::for_load(
+                analyse(
+                    &self.history,
+                    &self.clean_laps(),
+                    self.lap_secs,
+                    &self.messages,
+                    elapsed.as_secs_f64() / 3600.0,
+                ),
+                self.heavy,
             );
             let t = elapsed.as_secs_f64();
             for line in self.finding_log.update(t, &self.findings) {
@@ -1024,7 +1047,10 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     }
     let hours = elapsed.as_secs_f64() / 3600.0;
     let clean = run.clean_laps();
-    let mut findings = analyse(&run.history, &clean, run.lap_secs, &run.messages, hours);
+    let mut findings = super::analysis::for_load(
+        analyse(&run.history, &clean, run.lap_secs, &run.messages, hours),
+        run.heavy,
+    );
     if !run.sleeps.is_empty() {
         let total: f64 = run.sleeps.iter().map(|(_, g)| g).sum();
         findings.insert(
@@ -1325,6 +1351,7 @@ fn system_report(
     resolved: &HashMap<&'static str, Resolved>,
     displays: &[DisplayChoice],
     sound: &SoundChoice,
+    heavy: bool,
 ) -> String {
     use sysinfo::System;
     let mut sys = System::new();
@@ -1382,6 +1409,14 @@ fn system_report(
         )
     });
     p(format!("Test sound: {}", sound.describe()));
+    p(format!(
+        "Test load: {}",
+        if heavy {
+            "heavier (three more full-screen blended layers with effects)"
+        } else {
+            "ordinary"
+        }
+    ));
     match engine.audio.device_status(None) {
         Some(d) => p(format!(
             "Sound: {} {} Hz, {} channels{}",
@@ -1701,7 +1736,7 @@ mod tests {
         let (mut show, mut engine, mut st) =
             (Show::default(), Engine::for_tests(), UiState::default());
         let before = serde_json::to_string(&show).unwrap();
-        test.start(ff, &dir, Vec::new(), SoundChoice::default());
+        test.start(ff, &dir, Vec::new(), SoundChoice::default(), false);
         test.stop();
         assert!(wait_for(
             || {
@@ -1742,7 +1777,7 @@ mod tests {
             device: Some("Some Interface".into()),
             muted: true,
         };
-        test.start(ff, &dir, Vec::new(), sound);
+        test.start(ff, &dir, Vec::new(), sound, true);
         let mut was_locked = false;
         let mut last = Instant::now();
         let ok = wait_for(

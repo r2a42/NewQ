@@ -344,7 +344,14 @@ pub fn build(
     res: &HashMap<&'static str, Resolved>,
     displays: &[DisplayChoice],
 ) -> Built {
-    build_with(original, level, res, displays, &SoundChoice::default())
+    build_with(
+        original,
+        level,
+        res,
+        displays,
+        &SoundChoice::default(),
+        false,
+    )
 }
 
 /// `build`, with the sound going where `sound` says.
@@ -354,6 +361,7 @@ pub fn build_with(
     res: &HashMap<&'static str, Resolved>,
     displays: &[DisplayChoice],
     sound: &SoundChoice,
+    heavy: bool,
 ) -> Built {
     let mut show = original.clone();
     show.cues.clear();
@@ -589,6 +597,48 @@ pub fn build_with(
             },
         );
     }
+    if heavy {
+        // More for the graphics card: whole pictures blended one over another
+        // (the cost grows with the pixels covered), each with effects and a
+        // changing speed. The lap is no longer.
+        for (id, name, layer, opacity, kind) in [
+            (
+                "bbb_60",
+                "Heavy: full screen 0.50, sharpened",
+                5i32,
+                0.5f32,
+                EffectKind::Sharpen,
+            ),
+            (
+                "jelly_30",
+                "Heavy: full screen 0.40, vignette",
+                6,
+                0.4,
+                EffectKind::Vignette,
+            ),
+            (
+                "sintel_24",
+                "Heavy: full screen 0.35, negative",
+                7,
+                0.35,
+                EffectKind::Negative,
+            ),
+        ] {
+            b.video(id, name, Some(d), |c, r| {
+                let m = media(c);
+                m.transition = Transition::FadeIn;
+                m.loop_media = true;
+                m.loop_count = passes(r);
+                m.layer = layer;
+                m.opacity = opacity;
+                m.effects.push(Effect::new(kind));
+                m.effects.push(blur_ramp(6.0, layers_secs));
+                m.rate.set_key(0.0, 1.0);
+                m.rate.set_key(layers_secs / 2.0, 1.4);
+                m.rate.set_key(layers_secs, 1.0);
+            });
+        }
+    }
     lap += layers_secs;
 
     // E. The trailer with 5.1 sound, mixed down to a stereo pair through a
@@ -756,6 +806,43 @@ mod tests {
     use crate::testmode::assets::Source;
 
     #[test]
+    fn a_heavy_lap_adds_blended_full_screen_layers_and_takes_no_longer() {
+        let res = all();
+        let light = build_with(
+            &Show::default(),
+            Level::Medium,
+            &res,
+            &[],
+            &SoundChoice::default(),
+            false,
+        );
+        let heavy = build_with(
+            &Show::default(),
+            Level::Medium,
+            &res,
+            &[],
+            &SoundChoice::default(),
+            true,
+        );
+        assert_eq!(heavy.cues, light.cues + 3);
+        assert_eq!(heavy.lap_secs, light.lap_secs);
+        let blended = heavy
+            .show
+            .cues
+            .iter()
+            .filter(|c| c.name.starts_with("Heavy:"))
+            .count();
+        assert_eq!(blended, 3);
+        assert!(
+            light
+                .show
+                .cues
+                .iter()
+                .all(|c| !c.name.starts_with("Heavy:"))
+        );
+    }
+
+    #[test]
     fn the_chosen_audio_device_replaces_the_shows_audio_outputs() {
         let mut original = Show::default();
         original.add_audio_output();
@@ -766,6 +853,7 @@ mod tests {
             &HashMap::new(),
             &[],
             &SoundChoice::default(),
+            false,
         );
         assert_eq!(none.show.audio_outputs.len(), 2);
         let chosen = build_with(
@@ -777,6 +865,7 @@ mod tests {
                 device: Some("USB Interface".into()),
                 muted: false,
             },
+            false,
         );
         assert_eq!(chosen.show.audio_outputs.len(), 1);
         assert_eq!(

@@ -175,6 +175,28 @@ pub fn is_failure(message: &str) -> bool {
     .any(|w| m.contains(w))
 }
 
+/// What a heavier lap makes of the findings: it is meant to push the graphics
+/// card, so a card that fell behind is where its limit is, not a fault.
+pub fn for_load(findings: Vec<Finding>, heavy: bool) -> Vec<Finding> {
+    if !heavy {
+        return findings;
+    }
+    findings
+        .into_iter()
+        .map(|f| {
+            if f.severity == Severity::Problem && f.text.starts_with("The graphics card was behind")
+            {
+                note(format!(
+                    "This is the heavier test, which is meant to push the graphics card until it falls behind. {} That is where this computer's limit is under this load; run the ordinary test to see whether it copes with a normal show.",
+                    f.text.split(" Fewer or smaller").next().unwrap_or(&f.text).trim_end()
+                ))
+            } else {
+                f
+            }
+        })
+        .collect()
+}
+
 /// Whether a run was long enough to judge memory by (the growth checks in
 /// `analyse` need it).
 pub fn judged_memory(samples: usize, hours: f64) -> bool {
@@ -537,6 +559,29 @@ mod tests {
         let leaking: Vec<Sample> = (0..400).map(|i| sample(i, 400 + i)).collect();
         let f = analyse(&leaking, &[], 0.0, &[], 1.1);
         assert_eq!(steady_line(&f, 400, 1.1), None);
+    }
+
+    #[test]
+    fn a_graphics_card_falling_behind_is_only_a_note_in_the_heavy_test() {
+        let mut s = steady(100);
+        for x in &mut s {
+            x.inputs.layers = 3;
+            x.inputs.late_permille = 400;
+        }
+        let f = analyse(&s, &[], 0.0, &[], 1.0);
+        assert!(f.iter().any(|f| f.severity == Severity::Problem));
+        let heavy = for_load(f.clone(), true);
+        assert!(
+            !heavy.iter().any(|f| f.severity == Severity::Problem),
+            "{heavy:?}"
+        );
+        assert!(heavy.iter().any(|f| f.text.contains("heavier test")));
+        assert!(
+            heavy
+                .iter()
+                .any(|f| f.text.contains("40% of frames were late"))
+        );
+        assert_eq!(for_load(f.clone(), false), f);
     }
 
     #[test]
