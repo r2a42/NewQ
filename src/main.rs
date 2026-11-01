@@ -21,6 +21,8 @@ mod fx;
 mod gpu;
 mod history;
 mod live_text;
+#[cfg(target_os = "macos")]
+mod macwin;
 mod media;
 mod mesh;
 mod monitor;

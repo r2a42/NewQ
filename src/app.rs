@@ -630,10 +630,17 @@ impl App {
             // Native fullscreen gets a Space of its own on that display, which
             // can take the main window out of sight. Cover the display
             // instead (below); the window just has to start on it.
-            attrs = attrs.with_position(crate::monitor::window_origin(
-                m.position(),
-                m.scale_factor(),
-            ));
+            attrs = attrs
+                .with_position(crate::monitor::window_origin(
+                    m.position(),
+                    m.scale_factor(),
+                ))
+                .with_decorations(false);
+            #[cfg(target_os = "macos")]
+            {
+                attrs =
+                    winit::platform::macos::WindowAttributesExtMacOS::with_has_shadow(attrs, false);
+            }
         } else {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         }
@@ -661,13 +668,13 @@ impl App {
                 ));
             }
         }
-        // Simple fullscreen only *auto*-hides the menu bar and Dock, so they slide
-        // back whenever the pointer reaches the display's top or bottom edge or
-        // the app is activated again. "Borderless game" hides them outright.
+        // The window covers its display above the menu bar (see `macwin`), which
+        // keeps the menu bar and Dock off this display and no other. Simple
+        // fullscreen, which does it for the whole app, is the fallback.
         #[cfg(target_os = "macos")]
-        winit::platform::macos::WindowExtMacOS::set_borderless_game(&*window, true);
-        #[cfg(target_os = "macos")]
-        if !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true) {
+        if !crate::macwin::cover_display(&window, m)
+            && !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true)
+        {
             log::warn!("simple fullscreen refused on display {monitor}; using native fullscreen");
             window.set_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
         }

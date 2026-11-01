@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 
 /// Cues from the playhead onward (along a continue chain) that get preloaded.
 const MAX_PRELOAD: usize = 4;
+/// Children of a group about to start that are preloaded with it, over and
+/// above `MAX_PRELOAD`: a group of layers starts all of them at once.
+const MAX_PRELOAD_CHILDREN: usize = 12;
 /// Start a video even if its audio has not arrived after this long.
 const AUDIO_START_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -435,6 +438,14 @@ pub struct Reading {
 /// How long a cue whose preparation failed is left alone before another try.
 const PREP_RETRY: Duration = Duration::from_secs(5);
 const PROBE_LIMIT: Duration = Duration::from_secs(30);
+
+/// How many of the cues wanted are children of a group.
+fn group_children_wanted(wanted: &[CueId], show: &Show) -> usize {
+    wanted
+        .iter()
+        .filter(|id| show.cue(**id).is_some_and(|c| c.parent.is_some()))
+        .count()
+}
 
 /// What a preload was made for. It is reused only if the cue still asks for
 /// the same decoding (see `MediaCue::decodes_like`), so dragging a volume or
@@ -2540,9 +2551,27 @@ impl Engine {
                 && show.cues[i].parent.is_none()
                 && show.cues[i].continue_mode == ContinueMode::AutoFollow
                 && let Some(next) = show.next_armed_top(i)
-                && show.cues[next].kind.preloads()
             {
-                wanted.push(show.cues[next].id);
+                if show.cues[next].kind.preloads() {
+                    wanted.push(show.cues[next].id);
+                }
+                // A group that follows starts its children with it: have them
+                // decoded and ready too, or all of them start cold at once.
+                if let CueKind::Group(g) = &show.cues[next].kind {
+                    let room =
+                        MAX_PRELOAD_CHILDREN.saturating_sub(group_children_wanted(&wanted, show));
+                    for child in show.armed_children(show.cues[next].id).into_iter().take(
+                        if g.mode == GroupMode::Playlist {
+                            1
+                        } else {
+                            room
+                        },
+                    ) {
+                        if child.kind.preloads() && !wanted.contains(&child.id) {
+                            wanted.push(child.id);
+                        }
+                    }
+                }
             }
             // The child a playlist will play next.
             if let ActiveKind::Group(g) = &a.kind
@@ -2570,7 +2599,9 @@ impl Engine {
                         if mode == GroupMode::Playlist && n > 0 {
                             break;
                         }
-                        if child.kind.preloads() && wanted.len() < MAX_PRELOAD {
+                        if child.kind.preloads()
+                            && group_children_wanted(&wanted, show) < MAX_PRELOAD_CHILDREN
+                        {
                             wanted.push(child.id);
                         }
                     }
@@ -2579,7 +2610,8 @@ impl Engine {
                 match next {
                     Some(n)
                         if cue.continue_mode != ContinueMode::DoNotContinue
-                            && wanted.len() < MAX_PRELOAD =>
+                            && wanted.len() - group_children_wanted(&wanted, show)
+                                < MAX_PRELOAD =>
                     {
                         idx = n
                     }
@@ -3841,6 +3873,35 @@ mod tests {
         e.go(&show);
         run_for(&mut e, &show, 0.3);
         assert!(e.is_prepared(b), "pre-wait cue must stay preloaded");
+    }
+
+    #[test]
+    fn the_children_of_the_group_that_follows_are_preloaded_with_it() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        // A cue that hands over to a group of six pictures that start together.
+        let first = image_cue(&mut show, &img, Transition::Cut, 0.0);
+        show.cues[0].continue_mode = ContinueMode::AutoFollow;
+        let mut g = show.make_cue(CueType::Group, None, show.cues.len());
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        let gid = g.id;
+        show.cues.push(g);
+        let mut kids = Vec::new();
+        for _ in 0..6 {
+            let k = image_cue(&mut show, &img, Transition::FadeIn, 0.5);
+            let i = show.cue_index(k).unwrap();
+            show.cues[i].parent = Some(gid);
+            kids.push(k);
+        }
+        e.playhead = Some(first);
+        e.go(&show);
+        run_until(&mut e, &show, "the group's children preloaded", |e| {
+            kids.iter().all(|k| e.is_prepared(*k))
+        });
     }
 
     // ----- Camera cues, using the built-in test picture as the "camera" ------------

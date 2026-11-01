@@ -203,6 +203,9 @@ includes FFmpeg, so there's nothing else to install.
   frame, late frames, audio load, cues and layers playing, and the frame rate of each display.
   It measures every 2 seconds while it is open and not at all when it is closed, and can also
   write a log file (`newq-stats.csv` in the log folder, the same file `NEWQ_STATS` makes).
+- **Output windows on a Mac** are borderless windows above the menu bar, on every Space, so the
+  menu bar and Dock are hidden on the output display and not on the display with the controls,
+  and opening Finder or a swipe up for Mission Control does not bring them back over a show.
 - **Stalls are explained in the log:** when the main loop stops for more than 100 ms,
   `newq.log` says which parts of the loop took the time (*event loop stalled for 4815 ms:
   drawing the control window 4790 ms…*) and how much of it was spent outside NewQ's own

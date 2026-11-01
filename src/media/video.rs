@@ -334,7 +334,9 @@ impl VideoPlayer {
         };
         let children = Children::new();
         let error = Arc::new(Mutex::new(None));
-        let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
+        // Started by the reader thread (see `start`).
+        let children2 = children.clone();
+        let passes = playback.passes();
         let frames = |l: f64| (l * fps).round().max(1.0) as u64;
         let per_pass = playback.pass_len().map(frames);
         let first_pass = playback.first_pass_len().map(frames);
@@ -349,6 +351,14 @@ impl VideoPlayer {
             .name("hap-reader".into())
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
+                let mut feed = match PassFeed::start(&children2, passes, &error2, make) {
+                    Ok(feed) => feed,
+                    Err(e) => {
+                        *error2.lock() = Some(format!("{e:#}"));
+                        eof2.store(true, Ordering::Release);
+                        return;
+                    }
+                };
                 let pts = |g: u64| match &speed {
                     Some(p) => p.time_after(g as f64 / fps),
                     None => g as f64 / (fps * rate),
@@ -530,7 +540,10 @@ impl VideoPlayer {
         let (w, h) = size;
         let children = Children::new();
         let error = Arc::new(Mutex::new(None));
-        let mut feed = PassFeed::start(&children, passes, &error, make)?;
+        // FFmpeg is started by the reader thread, not here: starting a process
+        // can take seconds on a busy Mac, and this runs on the main loop, where
+        // that is a freeze of every output.
+        let (children2, error2) = (children.clone(), error.clone());
 
         let frame_len = if rgba {
             (w * h * 4) as usize
@@ -554,6 +567,14 @@ impl VideoPlayer {
             .name("video-reader".into())
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
+                let mut feed = match PassFeed::start(&children2, passes, &error2, make) {
+                    Ok(feed) => feed,
+                    Err(e) => {
+                        *error2.lock() = Some(format!("{e:#}"));
+                        eof2.store(true, Ordering::Release);
+                        return;
+                    }
+                };
                 if let Some(plan) = speed {
                     read_at_speed(
                         &plan,
@@ -828,6 +849,38 @@ mod tests {
             drop(p);
         }
         assert!(all_set(&flags, 5), "a reader thread outlived its player");
+    }
+
+    #[test]
+    fn ffmpeg_that_will_not_start_is_an_error_on_the_player_not_a_wait_in_spawn() {
+        let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+            return;
+        };
+        let info = ff.probe(&clip).expect("probe");
+        let vi = info.video.as_ref().expect("a video stream");
+        let broken = Ffmpeg {
+            ffmpeg: std::path::PathBuf::from("/no/such/ffmpeg"),
+            ffprobe: ff.ffprobe.clone(),
+        };
+        // The process is started by the reader thread, so this returns at once...
+        let mut p = VideoPlayer::spawn(
+            &broken,
+            &clip,
+            vi,
+            0.0,
+            Playback::Once { duration: None },
+            (64, 36),
+        )
+        .expect("spawn returns without starting the process");
+        // ...and the failure is what the player then says.
+        let t0 = std::time::Instant::now();
+        while !p.finished() {
+            assert!(t0.elapsed().as_secs() < 10, "it never said it had failed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!p.ready());
+        let why = p.error().expect("an error");
+        assert!(why.contains("starting ffmpeg"), "{why}");
     }
 
     #[test]

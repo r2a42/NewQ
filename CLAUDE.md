@@ -29,6 +29,16 @@ The README describes the features; this file is about working on the code.
   and the main window's set-up (`open_main_window`, the slow part) begins after the splash's first
   redraw event so it is on screen first; `about_to_wait` closes it (`splash::due`).
   `NEWQ_NO_SPLASH=1` skips it. Not tried on a real Mac or Windows desktop.
+- `src/macwin.rs` (Mac only): an output window covers its display as a borderless window above the
+  menu bar's level, on all Spaces, stationary, no shadow (winit's simple fullscreen hid the menu bar
+  for the whole app, only auto-hid it, and left the window to Mission Control; it stays the fallback).
+  Type-checked for the Mac target in a scratch crate (the real crate can't be cross-checked here),
+  not tried on a Mac.
+- Starting video and audio: FFmpeg is spawned by the reader thread (`video.rs::start`, `spawn_hap`,
+  `audio.rs`), not the main loop: a process start took 3 to 4 s now and then on a Mac. A start that
+  fails shows as `error()` and no frames. `Engine::update_preload` also preloads the children of
+  the group that an auto-follow leads to (`MAX_PRELOAD_CHILDREN`), so a group of layers starts warm.
+  `crumbs.rs` leaves a note after each part of the main loop; a stall over 100 ms is logged with them.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
   `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
   groups, with badges; it replaces the cue list while open). A setting goes on

@@ -543,20 +543,31 @@ impl AudioOut {
         let children = Children::new();
         let error = Arc::new(Mutex::new(None));
         let release = play_on.map(|_| Arc::new(AtomicBool::new(false)));
-        let mut feed = PassFeed::start(&children, playback.passes(), &error, make)?;
-        if let (Some(PlayOn { from, .. }), Some(release)) = (play_on, &release) {
-            // Released, the loop plays on past its out point to the end of the file.
+        // FFmpeg is started by the reader thread, not here: starting a process
+        // can take seconds on a busy Mac, and this runs on the main loop.
+        let build_feed = {
+            let (children, error) = (children.clone(), error.clone());
+            let passes = playback.passes();
+            let release = release.clone();
             let command = command.clone();
-            feed = feed.with_tail(
-                move || {
-                    command(
-                        Playback::Once { duration: None }.input_args(from),
-                        Vec::new(),
-                    )
-                },
-                release.clone(),
-            );
-        }
+            move || -> Result<PassFeed> {
+                let mut feed = PassFeed::start(&children, passes, &error, make)?;
+                if let (Some(PlayOn { from, .. }), Some(release)) = (play_on, &release) {
+                    // Released, the loop plays on past its out point to the end of the file.
+                    feed = feed.with_tail(
+                        move || {
+                            command(
+                                Playback::Once { duration: None }.input_args(from),
+                                Vec::new(),
+                            )
+                        },
+                        release.clone(),
+                    );
+                }
+                Ok(feed)
+            }
+        };
+        let error_t = error.clone();
         // A loop that can be released is not read far ahead, so that a release
         // takes effect near the end of the pass that is playing.
         let throttle = play_on.is_some();
@@ -582,6 +593,14 @@ impl AudioOut {
         std::thread::Builder::new()
             .name("audio-reader".into())
             .spawn(move || {
+                let mut feed = match build_feed() {
+                    Ok(feed) => feed,
+                    Err(e) => {
+                        *error_t.lock() = Some(format!("{e:#}"));
+                        shared2.eof.store(true, Ordering::Release);
+                        return;
+                    }
+                };
                 // Queue one frame; false if the voice was stopped meanwhile.
                 let mut push = |frame: &[f32]| -> bool {
                     if throttle {

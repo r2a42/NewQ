@@ -511,7 +511,10 @@ mod tests {
                 _ => false,
             }
         };
-        assert!(active(&l, Pane::Settings), "the test needs Settings in front");
+        assert!(
+            active(&l, Pane::Settings),
+            "the test needs Settings in front"
+        );
         assert!(active(&back, Pane::Cues));
         assert!(!active(&back, Pane::Settings));
         let _ = std::fs::remove_dir_all(dir);
