@@ -243,7 +243,7 @@ pub struct App {
     started: Instant,
     /// The display the main window lives on, remembered while the displays
     /// are steady, so one being plugged in can't take the window away.
-    control_home: Option<MonitorHandle>,
+    home: HomeTracker<MonitorHandle>,
     /// The main window's own display is disconnected (see `control_for_outputs`).
     control_displaced: bool,
     /// When the set of displays last changed (not counting the first look).
@@ -356,7 +356,7 @@ impl App {
             primary: None,
             control_logged: None,
             started: Instant::now(),
-            control_home: None,
+            home: HomeTracker::default(),
             control_displaced: false,
             monitors_changed: None,
             last_homing: Instant::now(),
@@ -524,10 +524,15 @@ impl App {
     /// The display the main window is on; while the displays are changing,
     /// the one it lives on, wherever the system has put it for now.
     fn control_monitor(&self) -> Option<usize> {
+        // Its own display (home) counts while the displays are changing and
+        // until the window has been somewhere else for a while: a lid closing
+        // moves the window to the other display a moment before the system
+        // says the first has gone.
         let home = self
-            .control_home
+            .home
+            .home
             .clone()
-            .filter(|_| self.displays_settling());
+            .filter(|_| self.displays_settling() || !self.home.settled_here(Instant::now()));
         home.or_else(|| {
             self.control
                 .as_ref()
@@ -542,23 +547,17 @@ impl App {
     fn keep_main_window_home(&mut self) {
         let Some(ctl) = &self.control else { return };
         let here = ctl.window.current_monitor();
+        let home_connected = self
+            .home
+            .home
+            .as_ref()
+            .is_some_and(|h| self.monitors.contains(h));
+        self.home
+            .observe(here.as_ref(), Instant::now(), home_connected);
         if !self.displays_settling() {
-            // Where it lives now, unless its display has gone (a laptop's lid
-            // closed) and the system has put it on the one showing the output:
-            // that isn't its home, and the lid opening brings it back.
-            if here.is_some()
-                && adopts_home(
-                    self.control_home.is_some(),
-                    self.control_home
-                        .as_ref()
-                        .is_some_and(|h| self.monitors.contains(h)),
-                )
-            {
-                self.control_home = here;
-            }
             return;
         }
-        let Some(home) = self.control_home.clone() else {
+        let Some(home) = self.home.home.clone() else {
             return;
         };
         let at_home = here.as_ref() == Some(&home);
@@ -609,8 +608,9 @@ impl App {
     /// the right to stay. The window comes home when its display does.
     fn control_for_outputs(&mut self, found: Option<usize>) -> Option<Option<usize>> {
         let displaced = control_displaced(
-            self.control_home.is_some(),
-            self.control_home
+            self.home.home.is_some(),
+            self.home
+                .home
                 .as_ref()
                 .is_some_and(|h| self.monitors.contains(h)),
         );
@@ -2317,10 +2317,47 @@ fn control_displaced(home_known: bool, home_connected: bool) -> bool {
     home_known && !home_connected
 }
 
-/// Whether where the main window is now becomes its remembered display: not
-/// when its display is gone and the system has just put it somewhere else.
-fn adopts_home(home_known: bool, home_connected: bool) -> bool {
-    !control_displaced(home_known, home_connected)
+/// How long the main window has to stay on a display before that is its home.
+const HOME_DWELL: Duration = Duration::from_secs(10);
+
+/// Where the main window lives. The display it is on becomes its home only
+/// after it has stayed there for `HOME_DWELL`, and never while its home is
+/// disconnected: closing a laptop's lid moves the window to the other display
+/// before the system says the first is gone, and that move is not a choice.
+struct HomeTracker<H> {
+    home: Option<H>,
+    /// The display it is on now and since when.
+    here: Option<(H, Instant)>,
+}
+
+impl<H> Default for HomeTracker<H> {
+    fn default() -> Self {
+        HomeTracker {
+            home: None,
+            here: None,
+        }
+    }
+}
+
+impl<H: PartialEq + Clone> HomeTracker<H> {
+    fn observe(&mut self, here: Option<&H>, now: Instant, home_connected: bool) {
+        let Some(h) = here else { return };
+        if self.here.as_ref().is_none_or(|(c, _)| c != h) {
+            self.here = Some((h.clone(), now));
+        }
+        let since = self.here.as_ref().map_or(now, |(_, t)| *t);
+        let settled = now.duration_since(since) >= HOME_DWELL;
+        if self.home.is_none() || (home_connected && settled) {
+            self.home = Some(h.clone());
+        }
+    }
+
+    /// The window has been on the display it is on for long enough.
+    fn settled_here(&self, now: Instant) -> bool {
+        self.here
+            .as_ref()
+            .is_some_and(|(_, t)| now.duration_since(*t) >= HOME_DWELL)
+    }
 }
 
 fn should_return_home(settling: bool, home_connected: bool, at_home: bool) -> bool {
@@ -2487,8 +2524,38 @@ mod tests {
         // remembered as home while it is gone.
         assert!(!control_displaced(true, true));
         assert!(!control_displaced(false, false), "nothing remembered yet");
-        assert!(!adopts_home(true, false));
-        assert!(adopts_home(true, true) && adopts_home(false, false));
+    }
+
+    #[test]
+    fn the_lid_moving_the_window_first_does_not_change_its_home() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut h: HomeTracker<&str> = HomeTracker::default();
+        // It starts on the laptop's own display, which becomes home at once.
+        h.observe(Some(&"laptop"), at(0), false);
+        assert_eq!(h.home, Some("laptop"));
+        h.observe(Some(&"laptop"), at(60), true);
+        // The lid closes: the window is moved to the monitor before the system
+        // says the laptop's display is gone.
+        h.observe(Some(&"monitor"), at(100), true);
+        assert_eq!(h.home, Some("laptop"));
+        assert!(
+            !h.settled_here(at(101)),
+            "still counted as on its own display"
+        );
+        // The display goes; however long the window is on the monitor it is
+        // not its home while the laptop's display is gone.
+        h.observe(Some(&"monitor"), at(103), false);
+        h.observe(Some(&"monitor"), at(200), false);
+        assert_eq!(h.home, Some("laptop"));
+        // The lid opens: the window goes back, and nothing changed.
+        h.observe(Some(&"laptop"), at(210), true);
+        assert_eq!(h.home, Some("laptop"));
+        // A window dragged to another display stays there long enough: home.
+        h.observe(Some(&"monitor"), at(300), true);
+        assert_eq!(h.home, Some("laptop"), "not yet");
+        h.observe(Some(&"monitor"), at(311), true);
+        assert_eq!(h.home, Some("monitor"));
     }
 
     #[test]
