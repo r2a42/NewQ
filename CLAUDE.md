@@ -39,6 +39,9 @@ The README describes the features; this file is about working on the code.
   fails shows as `error()` and no frames. `Engine::update_preload` also preloads the children of
   the group that an auto-follow leads to (`MAX_PRELOAD_CHILDREN`), so a group of layers starts warm.
   `crumbs.rs` leaves a note after each part of the main loop; a stall over 100 ms is logged with them.
+- Display loss: `app.rs::control_for_outputs` treats the main window as being on no display while its
+  remembered display (`control_home`) is disconnected (a lid closed), so an output stays on its display
+  even though the system moved the window there; `adopts_home` keeps that place from becoming home.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
   `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
   groups, with badges; it replaces the cue list while open). A setting goes on

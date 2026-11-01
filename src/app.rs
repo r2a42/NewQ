@@ -244,6 +244,8 @@ pub struct App {
     /// The display the main window lives on, remembered while the displays
     /// are steady, so one being plugged in can't take the window away.
     control_home: Option<MonitorHandle>,
+    /// The main window's own display is disconnected (see `control_for_outputs`).
+    control_displaced: bool,
     /// When the set of displays last changed (not counting the first look).
     monitors_changed: Option<Instant>,
     /// When the main window was last put back on its display.
@@ -355,6 +357,7 @@ impl App {
             control_logged: None,
             started: Instant::now(),
             control_home: None,
+            control_displaced: false,
             monitors_changed: None,
             last_homing: Instant::now(),
             last_monitor_scan: Instant::now(),
@@ -540,7 +543,17 @@ impl App {
         let Some(ctl) = &self.control else { return };
         let here = ctl.window.current_monitor();
         if !self.displays_settling() {
-            if here.is_some() {
+            // Where it lives now, unless its display has gone (a laptop's lid
+            // closed) and the system has put it on the one showing the output:
+            // that isn't its home, and the lid opening brings it back.
+            if here.is_some()
+                && adopts_home(
+                    self.control_home.is_some(),
+                    self.control_home
+                        .as_ref()
+                        .is_some_and(|h| self.monitors.contains(h)),
+                )
+            {
                 self.control_home = here;
             }
             return;
@@ -581,12 +594,41 @@ impl App {
             );
             self.control_logged = Some(found);
         }
-        let Some(control) = control_for_routing(found, self.primary, self.started.elapsed()) else {
+        let Some(control) = self.control_for_outputs(found) else {
             // Not placed yet: no output windows until it is, so none lands on
             // top of it.
             return self.show.outputs.iter().map(|o| (o.id, None)).collect();
         };
         route_outputs(&self.show.outputs, &keys, control)
+    }
+
+    /// The display outputs must keep clear of, as `control_for_routing` says
+    /// it, except when the main window's own display has been disconnected
+    /// (a laptop's lid closed): the system then puts the window on another
+    /// display, which may be the one showing the output, and the output has
+    /// the right to stay. The window comes home when its display does.
+    fn control_for_outputs(&mut self, found: Option<usize>) -> Option<Option<usize>> {
+        let displaced = control_displaced(
+            self.control_home.is_some(),
+            self.control_home
+                .as_ref()
+                .is_some_and(|h| self.monitors.contains(h)),
+        );
+        if self.control_displaced != displaced {
+            self.control_displaced = displaced;
+            log::info!(
+                "{}",
+                if displaced {
+                    "the main window's display is gone: outputs stay where they are"
+                } else {
+                    "the main window's display is back"
+                }
+            );
+        }
+        if displaced {
+            return Some(None);
+        }
+        control_for_routing(found, self.primary, self.started.elapsed())
     }
 
     /// The connected monitors as shows recognise them.
@@ -604,7 +646,7 @@ impl App {
             return;
         }
         let found = self.control_monitor();
-        let Some(control) = control_for_routing(found, self.primary, self.started.elapsed()) else {
+        let Some(control) = self.control_for_outputs(found) else {
             return;
         };
         let keys = self.monitor_keys();
@@ -2270,6 +2312,17 @@ const HOME_GRACE: Duration = Duration::from_secs(5);
 /// Whether the main window should be put back on its display: only just
 /// after the displays changed, only if that display is still there, and only
 /// if it isn't on it.
+/// Whether the main window's remembered display has been disconnected.
+fn control_displaced(home_known: bool, home_connected: bool) -> bool {
+    home_known && !home_connected
+}
+
+/// Whether where the main window is now becomes its remembered display: not
+/// when its display is gone and the system has just put it somewhere else.
+fn adopts_home(home_known: bool, home_connected: bool) -> bool {
+    !control_displaced(home_known, home_connected)
+}
+
 fn should_return_home(settling: bool, home_connected: bool, at_home: bool) -> bool {
     settling && home_connected && !at_home
 }
@@ -2414,6 +2467,28 @@ mod tests {
             "home was unplugged"
         );
         assert!(!should_return_home(true, true, true), "already there");
+    }
+
+    #[test]
+    fn closing_the_lid_does_not_take_the_output_off_the_display_the_window_is_moved_to() {
+        // Laptop and a projector: the output is assigned to the projector.
+        let outs = [display(1, Some(("Projector", 1)))];
+        let both = ["Laptop", "Projector"];
+        assert_eq!(route(&outs, &both, Some(0))[&OutputId(1)], Some(1));
+        // Lid closed: only the projector is left, and the system has put the
+        // main window on it. Treated as the main window's display, the output
+        // would be dropped...
+        assert_eq!(route(&outs, &["Projector"], Some(0))[&OutputId(1)], None);
+        // ...but with its own display gone the window is nowhere an output
+        // needs to avoid, and the output stays.
+        assert!(control_displaced(true, false));
+        assert_eq!(route(&outs, &["Projector"], None)[&OutputId(1)], Some(0));
+        // The display coming back ends it, and the window's new place is not
+        // remembered as home while it is gone.
+        assert!(!control_displaced(true, true));
+        assert!(!control_displaced(false, false), "nothing remembered yet");
+        assert!(!adopts_home(true, false));
+        assert!(adopts_home(true, true) && adopts_home(false, false));
     }
 
     #[test]

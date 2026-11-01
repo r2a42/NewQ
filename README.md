@@ -206,6 +206,10 @@ includes FFmpeg, so there's nothing else to install.
 - **Output windows on a Mac** are borderless windows above the menu bar, on every Space, so the
   menu bar and Dock are hidden on the output display and not on the display with the controls,
   and opening Finder or a swipe up for Mission Control does not bring them back over a show.
+- **Closing a laptop's lid mid-show** (the built-in display goes away) leaves the output where it
+  is. The system moves the main window onto the remaining display, which used to make NewQ treat
+  that display as the main window's and drop the output from it; now the output stays, the main
+  window stays behind it, and the window goes back to its own display when the lid opens.
 - **Stalls are explained in the log:** when the main loop stops for more than 100 ms,
   `newq.log` says which parts of the loop took the time (*event loop stalled for 4815 ms:
   drawing the control window 4790 ms…*) and how much of it was spent outside NewQ's own
