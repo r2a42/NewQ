@@ -202,9 +202,95 @@ pub fn window_origin(position: PhysicalPosition<i32>, scale: f64) -> LogicalPosi
     position.to_logical(scale)
 }
 
+/// A rectangle in a Mac's global screen coordinates (points, origin at the
+/// bottom left of the main display), which is how both a window's frame and a
+/// screen's are given: they can be compared directly, whatever the scale of
+/// the display the window is on.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// How far a window's frame may be from its screen's before it is not
+/// covering it (points).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const COVER_TOLERANCE: f64 = 0.5;
+
+/// Whether `window` covers `screen`: the same place and size, within `tol`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn rect_covers(window: Rect, screen: Rect, tol: f64) -> bool {
+    (window.x - screen.x).abs() <= tol
+        && (window.y - screen.y).abs() <= tol
+        && (window.w - screen.w).abs() <= tol
+        && (window.h - screen.h).abs() <= tol
+}
+
+/// Whether an output window must be put back over its display: when it does
+/// not cover it. Nothing is done when the display is not there (a lid
+/// closed), or when the last attempt for this very screen frame didn't work
+/// (`failed_for`): fighting the system over a window would only flicker.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn should_pin(window: Rect, screen: Option<Rect>, failed_for: Option<Rect>) -> bool {
+    match screen {
+        None => false,
+        Some(s) => !rect_covers(window, s, COVER_TOLERANCE) && failed_for != Some(s),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn a_window_covers_its_screen_only_when_it_is_the_same_place_and_size() {
+        let screen = r(1512.0, 0.0, 1920.0, 1080.0);
+        assert!(rect_covers(screen, screen, COVER_TOLERANCE));
+        assert!(rect_covers(
+            r(1512.3, -0.2, 1920.0, 1080.4),
+            screen,
+            COVER_TOLERANCE
+        ));
+        // On the laptop's display instead, as after a lid opened.
+        assert!(!rect_covers(
+            r(0.0, 0.0, 1920.0, 1080.0),
+            screen,
+            COVER_TOLERANCE
+        ));
+        // The right place but not the size.
+        assert!(!rect_covers(
+            r(1512.0, 0.0, 1512.0, 982.0),
+            screen,
+            COVER_TOLERANCE
+        ));
+    }
+
+    #[test]
+    fn a_window_is_put_back_only_when_there_is_a_screen_and_it_has_not_failed_before() {
+        let screen = r(1512.0, 0.0, 1920.0, 1080.0);
+        let away = r(0.0, 0.0, 1920.0, 1080.0);
+        assert!(should_pin(away, Some(screen), None));
+        assert!(!should_pin(screen, Some(screen), None), "already there");
+        assert!(!should_pin(away, None, None), "its display is gone");
+        assert!(
+            !should_pin(away, Some(screen), Some(screen)),
+            "it didn't work for this screen: leave it"
+        );
+        // The screen moved again: worth another try.
+        let moved = r(0.0, 0.0, 1920.0, 1080.0);
+        assert!(should_pin(
+            away,
+            Some(r(1512.0, 0.0, 1920.0, 1080.0)),
+            Some(moved)
+        ));
+    }
 
     #[test]
     fn a_connector_is_the_same_under_the_kernels_and_xs_names() {

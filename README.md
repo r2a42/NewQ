@@ -210,6 +210,20 @@ includes FFmpeg, so there's nothing else to install.
   is. The system moves the main window onto the remaining display, which used to make NewQ treat
   that display as the main window's and drop the output from it; now the output stays, the main
   window stays behind it, and the window goes back to its own display when the lid opens.
+- **Output windows go back over their display (Mac):** NewQ checks every pass that each output
+  window still exactly covers its display, and puts it back if the system has moved it, which is
+  what happens when a laptop's lid closes and opens (the external display's place changes). The
+  system's own "displays rearranged" notice makes the check immediate. `newq.log` says when a window
+  was put back, and when waiting for a frame on a display took over 100 ms (the system
+  reconfiguring displays holds the picture for about half a second when a lid closes: that part
+  is the system's).
+- **Awake while showing:** while any output window is open NewQ holds the computer and its displays
+  awake (screen saver, dimming and sleep can't interrupt a long black hold), shown as "☀ awake" in
+  the status bar and turned off in *Settings ▸ General ▸ Power (this computer)*. Editing a show with
+  only the preview doesn't hold it. If the computer sleeps anyway, `newq.log` says so.
+- **On battery:** a laptop with its lid closed keeps showing on an external display only while
+  plugged in; on battery it sleeps, and nothing can prevent that. While outputs are open on battery
+  the status bar and the Settings sidebar warn, and the log says when the power source changes.
 - **Stalls are explained in the log:** when the main loop stops for more than 100 ms,
   `newq.log` says which parts of the loop took the time (*event loop stalled for 4815 ms:
   drawing the control window 4790 ms…*) and how much of it was spent outside NewQ's own

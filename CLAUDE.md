@@ -46,6 +46,15 @@ The README describes the features; this file is about working on the code.
   window to the other display a moment *before* the system reports the first gone.
   An output window is kept when its display only changes number (`renumbered`; the lid closing makes the
   external display 0): closing and recreating it showed the desktop. Its render slot is its own (`ScreenWindow::slot`).
+- Output windows are kept over their display (`app.rs::pin_outputs`, each pass, Mac): `macwin::frames`
+  compares the window's frame with its screen's (both global points) and `monitor::should_pin` decides;
+  `macwin::watch_screens` (NSApplicationDidChangeScreenParametersNotification) sets a flag and wakes
+  the loop so the look at the displays is prompt; the 2 s poll is the safety net. Not tried on a Mac
+  (type-checked in the scratch crate, and by CI).
+- `src/power.rs`: on battery or not (pmset, GetSystemPowerStatus, /sys/class/power_supply) on a thread of
+  its own; `app.rs::keep_awake_for_outputs` holds `KeepAwake` while an output window is open
+  (`Prefs::let_computer_sleep` turns it off), logs sleeps (`SleepWatch`) and the power source, and sets
+  `UiState::keeping_awake/on_battery` for the status bar and the General page's badge.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
   `src/ui/settings.rs`: the settings page (a sidebar of `SettingsPage`s in
   groups, with badges; it replaces the cue list while open). A setting goes on

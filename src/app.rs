@@ -100,6 +100,13 @@ struct ScreenWindow {
     thread: Option<OutputThread>,
     size: (u32, u32),
     monitor: MonitorHandle,
+    /// It covers its display by `macwin` (not by simple fullscreen), so it is
+    /// put back when the display is rearranged under it.
+    #[cfg(target_os = "macos")]
+    pinned: bool,
+    /// The screen frame a put-back didn't work for (see `monitor::should_pin`).
+    #[cfg(target_os = "macos")]
+    pin_failed: Option<crate::monitor::Rect>,
     /// Its place among the window slots (see `gpu::Slot::Window`): its own for
     /// as long as the window lives, whatever number its display is given.
     slot: u8,
@@ -274,6 +281,20 @@ pub struct App {
     stats: Option<crate::stats::StatsLog>,
     /// Where the main loop's time went, named when it stalls.
     crumbs: crate::crumbs::Crumbs,
+    /// Rouses the event loop (the remote-control threads and the system's
+    /// screen-change notification use it).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// The system's screen-change notification observer (Mac only).
+    #[cfg(target_os = "macos")]
+    screen_watch: Option<objc2::rc::Retained<objc2_foundation::NSObject>>,
+    /// Holding the computer awake while outputs are open.
+    show_awake: Option<crate::awake::KeepAwake>,
+    awake_refreshed: Instant,
+    /// Notices the computer sleeping (and says so in the log).
+    sleep_watch: crate::awake::SleepWatch,
+    /// The power source last said in the log.
+    battery_logged: Option<Option<bool>>,
     /// How fast the main window is drawing.
     preview_meter: crate::fps::FpsMeter,
     /// Measures for the statistics window while it is open, and whether it
@@ -326,8 +347,19 @@ impl App {
         ui.selected = engine.playhead;
         let pending_recovery = recovery::pending(ui.show_path.as_deref());
         ui.check_media(&show);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         App {
-            remote: Remote::new(wake),
+            remote: Remote::new({
+                let wake = wake.clone();
+                move || wake()
+            }),
+            wake,
+            #[cfg(target_os = "macos")]
+            screen_watch: None,
+            show_awake: None,
+            awake_refreshed: Instant::now(),
+            sleep_watch: crate::awake::SleepWatch::new(),
+            battery_logged: None,
             remote_seen: (RemoteSettings::default(), Instant::now()),
             show,
             engine,
@@ -717,8 +749,9 @@ impl App {
         // keeps the menu bar and Dock off this display and no other. Simple
         // fullscreen, which does it for the whole app, is the fallback.
         #[cfg(target_os = "macos")]
-        if !crate::macwin::cover_display(&window, m)
-            && !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true)
+        let pinned = crate::macwin::cover_display(&window, m);
+        #[cfg(target_os = "macos")]
+        if !pinned && !winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, true)
         {
             log::warn!("simple fullscreen refused on display {monitor}; using native fullscreen");
             window.set_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
@@ -754,6 +787,10 @@ impl App {
                 thread: Some(thread),
                 size,
                 monitor: m.clone(),
+                #[cfg(target_os = "macos")]
+                pinned,
+                #[cfg(target_os = "macos")]
+                pin_failed: None,
                 slot,
                 outputs: Vec::new(),
                 needs_redraw: true,
@@ -878,6 +915,114 @@ impl App {
         self.gpu = Some(gpu);
         self.recovery = None;
         self.engine.log("The graphics device was restarted");
+    }
+
+    /// Put each output window back over its display if the system has
+    /// moved it. A lid closing and opening rearranges the displays, and an
+    /// output window left where it was ends up on the wrong one. Costs two
+    /// system calls per window; a window is only touched when it is wrong.
+    #[cfg(target_os = "macos")]
+    fn pin_outputs(&mut self) {
+        for (m, screen) in &mut self.screens {
+            if !screen.pinned {
+                continue;
+            }
+            let Some((window, display)) = crate::macwin::frames(&screen.window, &screen.monitor)
+            else {
+                continue;
+            };
+            if !crate::monitor::should_pin(window, display, screen.pin_failed) {
+                continue;
+            }
+            let done = crate::macwin::cover_display(&screen.window, &screen.monitor);
+            let after = crate::macwin::frames(&screen.window, &screen.monitor);
+            let covers = after
+                .and_then(|(w, d)| {
+                    d.map(|d| crate::monitor::rect_covers(w, d, crate::monitor::COVER_TOLERANCE))
+                })
+                .unwrap_or(false);
+            log::info!(
+                "output window {m} put back over its display: was {window:?}, now {:?} (display {display:?})",
+                after.map(|(w, _)| w)
+            );
+            screen.pin_failed = if done && covers { None } else { display };
+            if screen.pin_failed.is_some() {
+                log::warn!("output window {m} would not go back over its display; leaving it");
+            }
+            screen.needs_redraw = true;
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn pin_outputs(&mut self) {}
+
+    /// While a display is showing: hold the computer awake (unless turned off
+    /// in the settings), say in the log if it slept anyway, and know whether
+    /// it is on battery, which a closed lid can't survive.
+    fn keep_awake_for_outputs(&mut self) {
+        let open = !self.screens.is_empty();
+        let slept = self
+            .sleep_watch
+            .check(Instant::now(), std::time::SystemTime::now());
+        if let (true, Some(gap)) = (open, slept) {
+            let secs = gap.as_secs();
+            log::warn!("the computer slept for about {secs} s while outputs were open");
+            self.engine.log(format!(
+                "The computer slept for about {secs} s while a display was showing"
+            ));
+        }
+        let want = open && !self.ui.prefs.let_computer_sleep;
+        match (want, self.show_awake.is_some()) {
+            (true, false) => {
+                let hold = crate::awake::KeepAwake::new("NewQ is showing on a display");
+                log::info!(
+                    "holding the computer awake while outputs are open ({})",
+                    hold.how()
+                );
+                self.show_awake = Some(hold);
+                self.awake_refreshed = Instant::now();
+            }
+            (false, true) => {
+                self.show_awake = None;
+                log::info!("let the computer sleep again");
+            }
+            (true, true) if self.awake_refreshed.elapsed() > Duration::from_secs(5) => {
+                if let Some(hold) = &self.show_awake {
+                    hold.refresh();
+                }
+                self.awake_refreshed = Instant::now();
+            }
+            _ => {}
+        }
+        self.ui.keeping_awake = self.show_awake.as_ref().is_some_and(|h| h.held());
+
+        if open {
+            crate::power::start_watching();
+        }
+        let battery = if open {
+            crate::power::on_battery()
+        } else {
+            None
+        };
+        if open && battery.is_some() && self.battery_logged != Some(battery) {
+            log::info!(
+                "{}: {}",
+                if self.battery_logged.is_none() {
+                    "outputs opened"
+                } else {
+                    "the power source changed"
+                },
+                match battery {
+                    Some(true) => "on battery power",
+                    _ => "on mains power",
+                }
+            );
+            self.battery_logged = Some(battery);
+        }
+        if !open {
+            self.battery_logged = None;
+        }
+        self.ui.on_battery = battery == Some(true);
     }
 
     fn close_screen(&mut self, monitor: usize) {
@@ -1915,6 +2060,12 @@ impl App {
 impl App {
     /// The main window and the graphics card behind it: the slow part of starting.
     fn open_main_window(&mut self, event_loop: &ActiveEventLoop) {
+        // Be told the moment the displays are rearranged (Mac).
+        #[cfg(target_os = "macos")]
+        if self.screen_watch.is_none() {
+            let wake = self.wake.clone();
+            self.screen_watch = Some(crate::macwin::watch_screens(move || wake()));
+        }
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -2180,13 +2331,27 @@ impl ApplicationHandler for App {
         self.watch_gpu();
         self.collect_devices();
         self.crumbs.lap("graphics and device checks");
-        if now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
+        // The system's own word that the displays were rearranged makes the
+        // look at them prompt; the poll every 2 s is the safety net.
+        #[cfg(target_os = "macos")]
+        let poked = crate::macwin::take_screens_changed();
+        #[cfg(not(target_os = "macos"))]
+        let poked = false;
+        if poked || now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
+            if poked {
+                log::info!("the system says the displays were rearranged");
+            }
             self.scan_monitors(event_loop);
         }
+        // Output windows go back over their displays when the system has moved
+        // them (before the main window is sent home, which would otherwise be
+        // hidden under a misplaced output).
+        self.pin_outputs();
         self.crumbs.lap("looking at the displays");
         self.keep_main_window_home();
         self.settle_displays();
         self.reconcile_outputs(event_loop);
+        self.keep_awake_for_outputs();
         self.reconcile_popouts(event_loop);
         self.popout_stopping.retain(|h| !h.is_finished());
         self.crumbs.lap("opening and closing windows");

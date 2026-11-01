@@ -183,6 +183,10 @@ pub struct UiState {
     pub monitors: Vec<MonitorInfo>,
     /// Which of them the main window is on (set each frame by the app).
     pub control_monitor: Option<usize>,
+    /// NewQ is holding the computer awake because outputs are open (set by the app).
+    pub keeping_awake: bool,
+    /// Outputs are open and the computer is on its battery (set by the app).
+    pub on_battery: bool,
     /// The statistics window (Window menu) is showing, and what it has measured.
     pub stats_open: bool,
     pub live_stats: Vec<crate::stats::Sample>,
@@ -1689,6 +1693,22 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
                      on your PATH, or set NEWQ_FFMPEG_DIR.",
                 ),
         };
+        if st.on_battery {
+            ui.label(
+                RichText::new("⚠ on battery: closing the lid will stop the show").color(STOP_RED),
+            )
+            .on_hover_text(
+                "A laptop with its lid closed keeps showing on an external display only \
+                     while it is plugged in. On battery it goes to sleep. Plug it in, or keep \
+                     the lid open.",
+            );
+        }
+        if st.keeping_awake {
+            ui.label(RichText::new("☀ awake").weak()).on_hover_text(
+                "NewQ is keeping this computer and its displays awake while a display is \
+                 showing. Settings ▸ General ▸ Power turns this off.",
+            );
+        }
         match engine.audio.summary() {
             Ok(text) => ui.label(format!("🔊 {text}")),
             Err(e) => ui.label(RichText::new(format!("🔇 {e}")).color(STOP_RED)),

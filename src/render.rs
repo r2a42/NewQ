@@ -307,9 +307,19 @@ fn output_loop(
         };
         let started = Instant::now();
         resize(&gpu, &surface, &mut config, size);
+        let asked = Instant::now();
         let Some(frame) = acquire(&gpu, &surface, &config) else {
             continue;
         };
+        // The system holds this up while it rearranges displays; saying so
+        // explains a freeze that no part of NewQ's own work accounts for.
+        if asked.elapsed() > Duration::from_millis(100) {
+            log::warn!(
+                "waiting for a frame to draw on {:?} took {} ms",
+                slot,
+                asked.elapsed().as_millis()
+            );
+        }
         let view = frame.texture.create_view(&Default::default());
         let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
         if trace {

@@ -104,6 +104,22 @@ impl KeepAwake {
         self.held
     }
 
+    /// Ask again for what is already held. Windows' request is one per thread
+    /// and not counted, so another hold on the same thread being let go (Test
+    /// Mode ending while outputs stay open) cancels this one too; a call now
+    /// and then puts it back. Nothing to do elsewhere.
+    pub fn refresh(&self) {
+        #[cfg(windows)]
+        if self.held {
+            use windows_sys::Win32::System::Power::{
+                ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+            };
+            unsafe {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+            }
+        }
+    }
+
     pub fn how(&self) -> &str {
         &self.how
     }

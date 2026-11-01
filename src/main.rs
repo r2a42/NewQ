@@ -29,6 +29,7 @@ mod monitor;
 mod ndi;
 mod output;
 mod pattern;
+mod power;
 mod prefs;
 mod projector;
 mod recovery;

@@ -122,7 +122,10 @@ fn badge(text: impl Into<String>, color: Color32) -> Option<Badge> {
 pub fn page_badge(page: SettingsPage, show: &Show, st: &UiState) -> Option<Badge> {
     let weak = Color32::from_gray(140);
     match page {
-        SettingsPage::General => None,
+        SettingsPage::General => st.on_battery.then(|| Badge {
+            text: "⚠ battery".into(),
+            color: STOP_RED,
+        }),
         SettingsPage::Media => {
             let missing = relink::missing_among(show, &st.missing).len();
             (missing > 0).then(|| Badge {
@@ -436,6 +439,36 @@ fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Acti
             "A show can come from anywhere and a program can do anything you can. Leave this off \
              unless you have read the send cues of the show.",
         );
+    });
+    section(ui, "Power (this computer)", |ui| {
+        let mut keep = !st.prefs.let_computer_sleep;
+        if ui
+            .checkbox(
+                &mut keep,
+                "Keep this computer and its displays awake while a display is showing",
+            )
+            .changed()
+        {
+            st.prefs.let_computer_sleep = !keep;
+            if let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
+        hint(
+            ui,
+            "Stops the screen saver, dimming and sleep from interrupting a show during a long \
+             hold. Only while an output window is open: editing a show doesn't hold it. A \
+             laptop whose lid is closed keeps showing on an external display only when it is \
+             plugged in; on battery it sleeps, and nothing can prevent that.",
+        );
+        if st.on_battery {
+            warning(
+                ui,
+                "This computer is on battery. Closing the lid would put it to sleep and stop the show.",
+            );
+        }
     });
     section(ui, "Decoding (this computer)", |ui| {
         let mut on = st.prefs.hw_decode;

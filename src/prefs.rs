@@ -21,6 +21,10 @@ pub struct Prefs {
     /// the name the system gives it); none = the displays of the show.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_displays: Vec<String>,
+    /// Let the computer sleep and the display switch off while outputs are
+    /// open (NewQ holds it awake by default; see `awake.rs`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub let_computer_sleep: bool,
     /// Draw the output's frame rate on its picture (the Preview pane's checkbox).
     #[serde(default, skip_serializing_if = "is_false")]
     pub fps_on_output: bool,
@@ -78,6 +82,7 @@ mod tests {
             test_sound: Some("USB Interface".into()),
             test_muted: true,
             fps_on_output: true,
+            let_computer_sleep: true,
             test_heavy: true,
         };
         p.save(&dir).unwrap();
@@ -90,6 +95,10 @@ mod tests {
         // Defaults are not written, so older versions read the file as before.
         let json = serde_json::to_string(&Prefs::default()).unwrap();
         assert!(!json.contains("test_"), "{json}");
+        assert!(
+            !json.contains("let_computer_sleep") && !json.contains("fps_on_output"),
+            "{json}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

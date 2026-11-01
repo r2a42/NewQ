@@ -1957,6 +1957,7 @@ version = "0.15.4"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "block2 0.5.1",
  "bytemuck",
  "cpal",
  "crossbeam-channel",
@@ -1970,6 +1971,7 @@ dependencies = [
  "log",
  "md-5",
  "midir",
+ "objc2 0.5.3",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
  "parking_lot",
