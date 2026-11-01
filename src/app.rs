@@ -267,6 +267,8 @@ pub struct App {
     feedback: crate::feedback::Feedback,
     /// The unattended-run log (`NEWQ_STATS`, see stats.rs).
     stats: Option<crate::stats::StatsLog>,
+    /// Where the main loop's time went, named when it stalls.
+    crumbs: crate::crumbs::Crumbs,
     /// `NEWQ_AUTOSTART`: press GO this long after starting, once.
     autostart: Option<Instant>,
     /// A recovery file from a session that didn't end properly, to offer once.
@@ -358,6 +360,7 @@ impl App {
             last_web_state: Instant::now(),
             feedback: crate::feedback::Feedback::new(),
             stats: crate::stats::StatsLog::from_env(&crate::crash::log_dir()),
+            crumbs: crate::crumbs::Crumbs::new(),
             autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
                 let secs = if v == "1" {
                     5.0
@@ -1743,28 +1746,13 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
-
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.control.is_some() || self.start_main_window.is_some() {
-            return;
-        }
-        // The splash goes up first, and the main window's set-up (the graphics
-        // card, which is the slow part) waits until it has been drawn.
-        if std::env::var_os("NEWQ_NO_SPLASH").is_none()
-            && let Some(splash) = crate::splash::Splash::open(event_loop)
-        {
-            splash.request_redraw();
-            self.splash = Some(splash);
-            self.start_main_window = Some(Instant::now());
-            return;
-        }
-        self.open_main_window(event_loop);
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+impl App {
+    fn handle_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        event: WindowEvent,
+    ) {
         if self.splash.as_ref().is_some_and(|s| s.id() == id) {
             match event {
                 WindowEvent::RedrawRequested => {
@@ -1878,6 +1866,46 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+}
+
+impl ApplicationHandler for App {
+    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.control.is_some() || self.start_main_window.is_some() {
+            return;
+        }
+        // The splash goes up first, and the main window's set-up (the graphics
+        // card, which is the slow part) waits until it has been drawn.
+        if std::env::var_os("NEWQ_NO_SPLASH").is_none()
+            && let Some(splash) = crate::splash::Splash::open(event_loop)
+        {
+            splash.request_redraw();
+            self.splash = Some(splash);
+            self.start_main_window = Some(Instant::now());
+            return;
+        }
+        self.open_main_window(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let redraw = matches!(event, WindowEvent::RedrawRequested);
+        let name = if self.control.as_ref().is_some_and(|c| c.window.id() == id) {
+            if redraw {
+                "drawing the control window"
+            } else {
+                "control window events"
+            }
+        } else if self.popouts.iter().any(|p| p.window.id() == id) {
+            "pop-out window events"
+        } else {
+            "output window events"
+        };
+        self.crumbs.skip();
+        self.handle_window_event(event_loop, id, event);
+        self.crumbs.lap(name);
+    }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Only the splash screen is up so far: the main window's set-up begins
@@ -1917,33 +1945,46 @@ impl ApplicationHandler for App {
         }
         self.was_active = self.engine.is_active();
         if dt > 0.1 && self.was_active {
-            log::warn!("event loop stalled for {:.0} ms", dt * 1000.0);
+            log::warn!(
+                "event loop stalled for {:.0} ms: {}",
+                dt * 1000.0,
+                self.crumbs.report(Duration::from_secs_f64(dt))
+            );
+        } else {
+            self.crumbs.next_cycle();
         }
 
+        self.crumbs.skip();
         self.watch_gpu();
         self.collect_devices();
+        self.crumbs.lap("graphics and device checks");
         if now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
             self.scan_monitors(event_loop);
         }
+        self.crumbs.lap("looking at the displays");
         self.keep_main_window_home();
         self.settle_displays();
         self.reconcile_outputs(event_loop);
         self.reconcile_popouts(event_loop);
         self.popout_stopping.retain(|h| !h.is_finished());
+        self.crumbs.lap("opening and closing windows");
         self.save_layout(false);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
+        self.crumbs.lap("layout, audio outputs and remote control");
         // However long it has been since the last look, by a steady clock: a
         // dialog or a stall is time that passed, a sleep is not.
         let gap = now.duration_since(self.last_clock_look).as_secs_f64();
         self.last_clock_look = now;
         self.engine.on_clock(&self.show, crate::clock::now(), gap);
         self.engine.tick(&self.show, dt);
+        self.crumbs.lap("the show engine");
         {
             let mut test = std::mem::take(&mut self.ui.test);
             test.update(&mut self.show, &mut self.engine, &mut self.ui);
             self.ui.test = test;
         }
+        self.crumbs.lap("test mode");
         if self.autostart.is_some_and(|t| now >= t) {
             self.autostart = None;
             log::info!("autostart: GO");
@@ -1962,6 +2003,7 @@ impl ApplicationHandler for App {
                     .map_or(0, |d| d.load_permille),
             });
         }
+        self.crumbs.lap("the statistics log");
         // What control cues asked of the show (arming, disarming).
         for edit in self.engine.take_show_edits() {
             match edit {
@@ -1979,23 +2021,29 @@ impl ApplicationHandler for App {
         let before = self.textures.len();
         self.textures.retain(|k, _| live.contains(k));
         let removed_layer = self.textures.len() != before;
+        self.crumbs.lap("dropping textures");
 
         let playing = self.engine.is_active();
         // One extra frame after the last layer stops, so outputs go to black.
         self.update_outputs(playing || removed_layer);
+        self.crumbs
+            .lap("making the pictures (textures and uploads)");
         // The uploads just made are held until something is submitted, and the
         // windows that submit may not be drawing (a Mac stops presenting a
         // window that is in the background): a minute of video is gigabytes.
         if let Some(gpu) = &self.gpu {
             gpu.flush_uploads();
+            self.crumbs.lap("handing the uploads to the graphics card");
             // For the stats log, every few seconds (the report is not free).
             if self.last_gpu_note.elapsed() >= Duration::from_secs(2) {
                 self.last_gpu_note = Instant::now();
                 gpu.note_allocated();
             }
         }
+        self.crumbs.lap("asking the graphics card what it holds");
 
         self.reveal_windows(event_loop);
+        self.crumbs.lap("showing windows");
 
         let mut next = now + Duration::from_millis(500);
         if let Some(ctl) = &mut self.control {

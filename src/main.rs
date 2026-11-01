@@ -10,6 +10,7 @@ mod branding;
 mod clock;
 mod color;
 mod crash;
+mod crumbs;
 mod dock;
 mod edid;
 mod engine;

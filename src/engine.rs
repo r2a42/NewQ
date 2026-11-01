@@ -1641,7 +1641,19 @@ impl Engine {
     }
 
     fn start(&mut self, show: &Show, id: CueId) {
+        let began = Instant::now();
         self.start_with(show, id, None);
+        // Starting a cue runs on the main loop: one that takes long shows up
+        // as a stall, and this says which.
+        let took = began.elapsed();
+        if took >= Duration::from_millis(100) {
+            let name = show
+                .cues
+                .iter()
+                .find(|c| c.id == id)
+                .map_or_else(String::new, |c| c.name.clone());
+            log::warn!("starting cue '{name}' took {} ms", took.as_millis());
+        }
     }
 
     /// Begin a dip: fade a colour matte up over the output. The cue itself is
