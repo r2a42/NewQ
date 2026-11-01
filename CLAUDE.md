@@ -32,8 +32,7 @@ The README describes the features; this file is about working on the code.
 - `src/macwin.rs` (Mac only): an output window covers its display as a borderless window above the
   menu bar's level, on all Spaces, stationary, no shadow (winit's simple fullscreen hid the menu bar
   for the whole app, only auto-hid it, and left the window to Mission Control; it stays the fallback).
-  Type-checked for the Mac target in a scratch crate (the real crate can't be cross-checked here),
-  not tried on a Mac.
+  Checked for the Mac target with `scripts/cross_clippy.sh mac`, not tried on a Mac.
 - Starting video and audio: FFmpeg is spawned by the reader thread (`video.rs::start`, `spawn_hap`,
   `audio.rs`), not the main loop: a process start took 3 to 4 s now and then on a Mac. A start that
   fails shows as `error()` and no frames. `Engine::update_preload` also preloads the children of
@@ -117,8 +116,9 @@ The README describes the features; this file is about working on the code.
   `gui.rs` is the window (its "Show the test on" ticks are `Prefs::test_displays`;
   `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
   display shows the picture and the others mirror it with a whole-area `part_of`; the
-  main window's own monitor is never offered). Cross-target clippy for Windows/Mac can't run in the cloud (`ring` needs the
-  target's C compiler); CI does it.
+  main window's own monitor is never offered). Cross-target clippy for Windows and Mac runs from Linux with
+  `scripts/cross_clippy.sh` (a stand-in C compiler for `ring`, since nothing is linked); CI still builds and
+  tests them.
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
   self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it
   and writes the report; `--make-soak-show` writes just the show. sysinfo
