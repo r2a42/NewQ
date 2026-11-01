@@ -211,6 +211,11 @@ impl Layout {
             .filter(|l| Pane::ALL.iter().any(|p| l.is_open(*p)))
             .unwrap_or_default();
         layout.forget_impossible_places();
+        // Whatever tab was in front when it was saved (the settings page, say),
+        // the cue list is what a show opens to.
+        if let Some(path) = layout.docked_path(Pane::Cues) {
+            let _ = layout.dock.set_active_tab(path);
+        }
         layout
     }
 
@@ -487,5 +492,28 @@ mod tests {
             (None, None)
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_saved_layout_opens_to_the_cue_list_not_the_tab_that_was_in_front() {
+        let dir = std::env::temp_dir().join(format!("newq_dock_front_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut l = Layout::default();
+        l.open(Pane::Settings);
+        // The settings page is in front when it is saved.
+        l.save(&dir).unwrap();
+        let back = Layout::load(&dir);
+        assert!(back.is_docked(Pane::Settings) && back.is_docked(Pane::Cues));
+        let active = |l: &Layout, pane: Pane| -> bool {
+            let path = l.docked_path(pane).unwrap();
+            match &l.dock[path.surface][path.node] {
+                egui_dock::Node::Leaf(leaf) => leaf.tabs.get(leaf.active.0) == Some(&pane),
+                _ => false,
+            }
+        };
+        assert!(active(&l, Pane::Settings), "the test needs Settings in front");
+        assert!(active(&back, Pane::Cues));
+        assert!(!active(&back, Pane::Settings));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
