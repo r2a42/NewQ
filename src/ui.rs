@@ -183,6 +183,11 @@ pub struct UiState {
     pub monitors: Vec<MonitorInfo>,
     /// Which of them the main window is on (set each frame by the app).
     pub control_monitor: Option<usize>,
+    /// The statistics window (Window menu) is showing, and what it has measured.
+    pub stats_open: bool,
+    pub live_stats: Vec<crate::stats::Sample>,
+    /// Also write what it measures to `newq-stats.csv` in the log folder.
+    pub stats_to_file: bool,
     /// How fast each output's display window is drawing (set each frame by the app).
     pub output_fps: HashMap<OutputId, f32>,
     /// How fast the main window itself is drawing, and when that was read.
@@ -498,6 +503,7 @@ enum Action {
     ToggleSettings,
     ToggleAbout,
     ToggleTestMode,
+    ToggleStats,
     /// Make the clip for checking the sync (about a second of work).
     MakeSyncClip,
     /// A cue for the sync clip, looping.
@@ -731,6 +737,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     media_window(ui.ctx(), show, st, &mut actions);
     about_window(ui.ctx(), st);
     crate::testmode::gui::window(ui.ctx(), engine, st);
+    crate::testmode::gui::stats_window(ui.ctx(), st);
     if st.confirm_edit_mode {
         egui::Window::new("Leave show mode?")
             .collapsible(false)
@@ -1202,6 +1209,16 @@ fn end_preview_edits(st: &mut UiState) {
 /// The Window menu: which panes are showing, and which are in a window of
 /// their own.
 fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    let mut stats = st.stats_open;
+    if ui
+        .checkbox(&mut stats, "Statistics")
+        .on_hover_text("A window of live figures: memory, processor, frame rate, slowest frame")
+        .changed()
+    {
+        actions.push(Action::ToggleStats);
+        ui.close();
+    }
+    ui.separator();
     for pane in Pane::ALL {
         let open = st.layout.is_open(pane);
         let popped = st.layout.is_popped_out(pane);
@@ -8551,6 +8568,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::ToggleAbout => st.show_about = !st.show_about,
         Action::ToggleTestMode => st.test.open = !st.test.open,
+        Action::ToggleStats => st.stats_open = !st.stats_open,
         Action::MakeSyncClip => match engine.ff.clone() {
             None => st.sync_note = "ffmpeg wasn't found, so there's no clip to make.".into(),
             Some(ff) => {

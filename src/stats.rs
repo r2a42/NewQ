@@ -48,7 +48,8 @@ pub struct Sample {
 }
 
 pub struct StatsLog {
-    file: std::io::BufWriter<std::fs::File>,
+    /// Where the rows are written; none for a sampler that only keeps the numbers.
+    file: Option<std::io::BufWriter<std::fs::File>>,
     sys: System,
     me: Pid,
     every: Duration,
@@ -89,6 +90,22 @@ impl StatsLog {
         }
     }
 
+    /// A sampler that writes nothing: the statistics window's.
+    pub fn in_memory(every: Duration, log_path: PathBuf) -> StatsLog {
+        let now = Instant::now();
+        StatsLog {
+            file: None,
+            sys: System::new(),
+            me: Pid::from_u32(std::process::id()),
+            every,
+            started: now,
+            last_row: now,
+            last_frame: now,
+            stall: Duration::ZERO,
+            log_path,
+        }
+    }
+
     pub fn create(path: &Path, every: Duration, log_path: PathBuf) -> std::io::Result<StatsLog> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
@@ -104,7 +121,7 @@ impl StatsLog {
         }
         let now = Instant::now();
         Ok(StatsLog {
-            file,
+            file: Some(file),
             sys: System::new(),
             me: Pid::from_u32(std::process::id()),
             every,
@@ -155,21 +172,25 @@ impl StatsLog {
         let inputs = inputs();
         let gpu_mb = crate::gpu::gpu_allocated_mb();
         let stall = self.stall.as_millis() as u64;
-        let line = row(
-            unix_now(),
-            uptime,
-            [rss, f_rss],
-            [cpu, f_cpu],
-            n,
-            [open, thr],
-            inputs,
-            stall,
-            log_kb,
-            [gpu_mb, commit.map(|c| c >> 20)],
-        );
+        let line = self.file.is_some().then(|| {
+            row(
+                unix_now(),
+                uptime,
+                [rss, f_rss],
+                [cpu, f_cpu],
+                n,
+                [open, thr],
+                inputs,
+                stall,
+                log_kb,
+                [gpu_mb, commit.map(|c| c >> 20)],
+            )
+        });
         self.stall = Duration::ZERO;
-        let _ = writeln!(self.file, "{line}");
-        let _ = self.file.flush();
+        if let (Some(file), Some(line)) = (&mut self.file, line) {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
         Some(Sample {
             uptime_s: uptime,
             rss_mb: rss >> 20,
@@ -577,6 +598,18 @@ mod tests {
         let r = report(&text).unwrap();
         assert!(r.contains("Nothing looks wrong"), "{r}");
         assert!(r.contains("NewQ memory: 500 → 500"), "{r}");
+    }
+
+    #[test]
+    fn a_sampler_without_a_file_still_measures() {
+        let mut log = StatsLog::in_memory(Duration::from_millis(50), PathBuf::from("none.log"));
+        let t = Instant::now();
+        assert!(log.frame(t, Inputs::default).is_none());
+        let s = log
+            .frame(t + Duration::from_millis(80), Inputs::default)
+            .expect("a sample once the interval has passed");
+        assert!(s.rss_mb > 0);
+        assert!(s.stall_ms >= 80);
     }
 
     #[test]

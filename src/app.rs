@@ -271,6 +271,9 @@ pub struct App {
     crumbs: crate::crumbs::Crumbs,
     /// How fast the main window is drawing.
     preview_meter: crate::fps::FpsMeter,
+    /// Measures for the statistics window while it is open, and whether it
+    /// is writing a file.
+    live_sampler: Option<(crate::stats::StatsLog, bool)>,
     /// The frame-rate label drawn on an output's picture, by output: the words
     /// it says and its texture.
     fps_labels: HashMap<OutputId, (String, Arc<LayerTexture>)>,
@@ -367,6 +370,7 @@ impl App {
             stats: crate::stats::StatsLog::from_env(&crate::crash::log_dir()),
             crumbs: crate::crumbs::Crumbs::new(),
             preview_meter: Default::default(),
+            live_sampler: None,
             fps_labels: HashMap::new(),
             autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
                 let secs = if v == "1" {
@@ -1136,6 +1140,61 @@ impl App {
             transform: LayerTransform::default(),
             color: ColorAdjust::default(),
             fx: Default::default(),
+        }
+    }
+
+    /// The statistics window's own measurements: taken only while it is open.
+    fn sample_for_window(&mut self, now: Instant) {
+        if !self.ui.stats_open {
+            self.live_sampler = None;
+            self.ui.live_stats.clear();
+            return;
+        }
+        if self
+            .live_sampler
+            .as_ref()
+            .is_none_or(|(_, file)| *file != self.ui.stats_to_file)
+        {
+            let log_dir = crate::crash::log_dir();
+            let every = Duration::from_secs(2);
+            let log = if self.ui.stats_to_file {
+                crate::stats::StatsLog::create(
+                    &log_dir.join("newq-stats.csv"),
+                    every,
+                    log_dir.join("newq.log"),
+                )
+                .map_err(|e| log::warn!("stats: can't write the log file: {e}"))
+                .ok()
+            } else {
+                None
+            };
+            let wrote = log.is_some();
+            self.live_sampler = Some((
+                log.unwrap_or_else(|| {
+                    crate::stats::StatsLog::in_memory(every, log_dir.join("newq.log"))
+                }),
+                wrote,
+            ));
+            self.ui.stats_to_file = wrote;
+        }
+        let engine = &self.engine;
+        if let Some((log, _)) = &mut self.live_sampler
+            && let Some(sample) = log.frame(now, || crate::stats::Inputs {
+                playing: engine.active.len(),
+                started_total: engine.started_total(),
+                layers: engine.picture_layers(),
+                late_permille: crate::render::late_frames_permille(),
+                audio_permille: engine
+                    .audio
+                    .device_status(None)
+                    .map_or(0, |d| d.load_permille),
+            })
+        {
+            let h = &mut self.ui.live_stats;
+            h.push(sample);
+            if h.len() > 240 {
+                h.remove(0);
+            }
         }
     }
 
@@ -2090,6 +2149,7 @@ impl ApplicationHandler for App {
             });
         }
         self.crumbs.lap("the statistics log");
+        self.sample_for_window(now);
         // What control cues asked of the show (arming, disarming).
         for edit in self.engine.take_show_edits() {
             match edit {

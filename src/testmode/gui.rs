@@ -89,6 +89,106 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
 }
 
+/// The statistics window (Window ▸ Statistics): the figures Test Mode shows
+/// while it runs, for an ordinary show. The app samples while it is open.
+pub fn stats_window(ctx: &egui::Context, st: &mut UiState) {
+    if !st.stats_open {
+        return;
+    }
+    let mut open = true;
+    let mut to_file = st.stats_to_file;
+    egui::Window::new("Statistics")
+        .open(&mut open)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            let h = &st.live_stats;
+            let tail = |f: &dyn Fn(&crate::stats::Sample) -> f32| -> Vec<f32> {
+                h[h.len().saturating_sub(120)..].iter().map(f).collect()
+            };
+            match h.last() {
+                None => {
+                    ui.label(RichText::new("Measuring…").weak());
+                }
+                Some(s) => {
+                    spark(
+                        ui,
+                        "Memory",
+                        &tail(&|s| s.rss_mb as f32),
+                        format!("{} MB", s.rss_mb),
+                    );
+                    spark(
+                        ui,
+                        "Processor",
+                        &tail(&|s| s.cpu_pct),
+                        format!("{:.0}%", s.cpu_pct),
+                    );
+                    spark(
+                        ui,
+                        "FFmpeg processes",
+                        &tail(&|s| s.ffmpeg as f32),
+                        format!("{}", s.ffmpeg),
+                    );
+                    spark(
+                        ui,
+                        "FFmpeg processor",
+                        &tail(&|s| s.ffmpeg_cpu_pct),
+                        format!("{:.0}%", s.ffmpeg_cpu_pct),
+                    );
+                    spark(
+                        ui,
+                        "Slowest frame",
+                        &tail(&|s| s.stall_ms as f32),
+                        format!("{} ms", s.stall_ms),
+                    );
+                    spark(
+                        ui,
+                        "Late frames",
+                        &tail(&|s| s.inputs.late_permille as f32 / 10.0),
+                        format!("{:.1}%", s.inputs.late_permille as f32 / 10.0),
+                    );
+                    spark(
+                        ui,
+                        "Audio load",
+                        &tail(&|s| s.inputs.audio_permille as f32 / 10.0),
+                        format!("{:.1}%", s.inputs.audio_permille as f32 / 10.0),
+                    );
+                    ui.label(format!(
+                        "{} cue{} playing, {} picture layer{}",
+                        s.inputs.playing,
+                        if s.inputs.playing == 1 { "" } else { "s" },
+                        s.inputs.layers,
+                        if s.inputs.layers == 1 { "" } else { "s" },
+                    ));
+                }
+            }
+            let mut rates: Vec<_> = st.output_fps.iter().collect();
+            rates.sort_by_key(|(id, _)| id.0);
+            for (id, f) in rates {
+                let name = st
+                    .previews
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map_or("An output", |p| p.name.as_str());
+                ui.label(format!("{name}: {} on its display", crate::fps::text(*f)));
+            }
+            ui.separator();
+            ui.checkbox(&mut to_file, "Also write a log file")
+                .on_hover_text("Appends a row every few seconds to newq-stats.csv in the log folder (the same file the NEWQ_STATS setting makes).");
+            ui.label(
+                RichText::new(
+                    "Measured every 2 seconds while this window is open, and not at all when it is closed. Test mode has its own, fuller log.",
+                )
+                .weak()
+                .small(),
+            );
+        });
+    st.stats_to_file = to_file;
+    st.stats_open = open;
+    if st.stats_open {
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn body(
     ui: &mut egui::Ui,
