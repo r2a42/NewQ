@@ -45,6 +45,10 @@ impl Crumbs {
         let now = Instant::now();
         let took = now.duration_since(self.mark);
         self.mark = now;
+        self.add(name, took);
+    }
+
+    fn add(&mut self, name: &'static str, took: Duration) {
         match self.parts.iter_mut().find(|(n, _)| *n == name) {
             Some((_, d)) => *d += took,
             None => self.parts.push((name, took)),
@@ -88,34 +92,38 @@ impl Crumbs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
 
+    // Times are put in by hand: a runner that oversleeps would otherwise
+    // make the sums wrong.
     #[test]
     fn a_slow_part_is_named_and_the_rest_is_counted_as_outside() {
         let mut c = Crumbs::new();
-        c.skip();
-        sleep(Duration::from_millis(60));
-        c.lap("slow part");
-        c.lap("quick part");
+        c.add("slow part", Duration::from_millis(60));
+        c.add("quick part", Duration::from_millis(2));
         let r = c.report(Duration::from_millis(200));
-        assert!(
-            r.starts_with("slow part 6") || r.starts_with("slow part 7"),
-            "{r}"
-        );
+        assert!(r.starts_with("slow part 60 ms"), "{r}");
         assert!(!r.contains("quick part"), "{r}");
-        assert!(r.contains("of 200 ms was outside"), "{r}");
+        assert!(r.contains("138 ms of 200 ms was outside"), "{r}");
         // A new cycle starts empty.
         assert!(c.report(Duration::from_millis(5)).contains("no part"));
     }
 
     #[test]
-    fn the_same_part_twice_adds_up() {
+    fn the_same_part_twice_adds_up_and_the_worst_comes_first() {
         let mut c = Crumbs::new();
-        for _ in 0..2 {
-            sleep(Duration::from_millis(20));
-            c.lap("events");
-        }
+        c.add("events", Duration::from_millis(20));
+        c.add("engine", Duration::from_millis(30));
+        c.add("events", Duration::from_millis(20));
         let r = c.report(Duration::from_millis(100));
-        assert!(r.starts_with("events 4"), "{r}");
+        assert!(r.starts_with("events 40 ms, engine 30 ms"), "{r}");
+    }
+
+    #[test]
+    fn a_lap_charges_the_time_since_the_last_one() {
+        let mut c = Crumbs::new();
+        c.lap("first");
+        // Whatever the clock did, the names are there once and in order.
+        c.lap("second");
+        assert_eq!(c.parts.len(), 2);
     }
 }
