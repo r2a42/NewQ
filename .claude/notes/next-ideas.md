@@ -23,3 +23,14 @@ The seven ideas saved on 2026-10-31 were built in 0.15.0. What is left from them
 3. A faint 1 pixel white/grey border on the fullscreen output display, always there in Test Mode. Not looked at. Candidates: the simple-fullscreen window frame/shadow, a window border or `has_shadow`, the surface being 1 px smaller than the screen, or a layer in the test picture itself (check with a test pattern).
 4. A 3-finger swipe up (Mission Control) interrupts the fullscreen output on the fullscreen display. Related to note 2: simple fullscreen is an ordinary window the system can still manage. A window above the menu bar level, on all Spaces (`NSWindowCollectionBehavior` canJoinAllSpaces / fullScreenAuxiliary / stationary / ignoresCycle), and not activating the app would resist this; Mission Control itself cannot be disabled from an app, so say so if it still shows.
 5. A 2782 ms main-loop freeze on the same Mac with a different, 1080p display (so it is not only the second 4K display). Waiting for the new `event loop stalled for N ms: …` line from `newq-log-excerpt.txt` to say which part of the loop took the time.
+
+## The Mac stall, from the 0.15.0 run (heavy + muted, 1080p display, 2026-11-01)
+
+The breadcrumbs name it: `starting cue 'Layer: sliding, speed ramp' took 2771 ms` / `'Layer: turning' took 3779 ms` / `'Layer: sliding…' took 4326 ms`,
+and "0 ms outside the loop's own parts": the whole stall is inside `Engine::start` of a video cue (the show engine part),
+on the main loop. Not the display, the GPU or the window server. Each fell ~49 s into the lap (the start of Layers), in laps 10, 14, 18
+(every 4 laps, ~625 s apart); the 0.14.4 run's stalls at 680/1610/2241 s have the same ~630 s gap. That points at something periodic in macOS
+making process creation slow (a security scan of each exec of an app-translocated ffmpeg is a guess), and starting a video cue spawns ffmpeg
+(`Children::spawn` -> `Command::spawn` in `media/playback.rs`) on the main thread, 7 to 10 times in a row at the start of Layers.
+Not proven. Proposed: log how long `Command::spawn` itself takes; then spawn the players off the main loop (the engine already has a
+pending-cue path for ffprobe: `PendingCue`/`Reading`).
