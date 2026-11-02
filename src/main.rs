@@ -7,6 +7,7 @@ mod bench;
 #[cfg(test)]
 mod blend;
 mod branding;
+mod clicker;
 mod clock;
 mod color;
 mod crash;

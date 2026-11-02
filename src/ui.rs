@@ -183,6 +183,15 @@ pub struct UiState {
     pub monitors: Vec<MonitorInfo>,
     /// Which of them the main window is on (set each frame by the app).
     pub control_monitor: Option<usize>,
+    /// Presenter remote: the button to learn the key of (asked by the settings
+    /// page, passed on by the app), the one being learned, where the keys are
+    /// noticed and when Back last paused (see `clicker`).
+    pub clicker_learn_request: Option<crate::clicker::Button>,
+    pub clicker_cancel_learning: bool,
+    pub clicker_learning: Option<crate::clicker::Button>,
+    pub clicker_global: bool,
+    pub clicker_status: String,
+    pub clicker_paused_at: Option<std::time::Instant>,
     /// NewQ is holding the computer awake because outputs are open (set by the app).
     pub keeping_awake: bool,
     /// Outputs are open and the computer is on its battery (set by the app).
@@ -8048,6 +8057,32 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
         Command::SelectList(n) => {
             if let Some(&l) = show.list_ids().get((n as usize).saturating_sub(1)) {
                 apply(Action::SelectList(l), show, engine, st);
+            }
+        }
+        Command::Clicker(button) => {
+            let playing = !engine.active.is_empty();
+            let since = st.clicker_paused_at.map(|t| t.elapsed());
+            match crate::clicker::decide(
+                button,
+                engine.paused,
+                playing,
+                since,
+                crate::clicker::BACK_GUARD,
+            ) {
+                crate::clicker::Do::Go => apply(Action::Go, show, engine, st),
+                crate::clicker::Do::Pause => {
+                    engine.set_paused(true);
+                    st.clicker_paused_at = Some(std::time::Instant::now());
+                    engine.log("Paused (Back); Back again fades out and stops, GO resumes");
+                }
+                crate::clicker::Do::Resume => {
+                    engine.set_paused(false);
+                    engine.log("Resumed (GO)");
+                }
+                // Esc's way: it lets go of the pause, fades everything out and
+                // stops, and a second press stops at once.
+                crate::clicker::Do::FadeOut => engine.panic(show),
+                crate::clicker::Do::Nothing => {}
             }
         }
         Command::Panic => apply(Action::Panic, show, engine, st),

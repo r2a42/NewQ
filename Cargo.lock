@@ -1959,6 +1959,8 @@ dependencies = [
  "anyhow",
  "block2 0.5.1",
  "bytemuck",
+ "core-foundation 0.9.4",
+ "core-graphics",
  "cpal",
  "crossbeam-channel",
  "egui",

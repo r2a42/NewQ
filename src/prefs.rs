@@ -28,6 +28,14 @@ pub struct Prefs {
     /// Draw the output's frame rate on its picture (the Preview pane's checkbox).
     #[serde(default, skip_serializing_if = "is_false")]
     pub fps_on_output: bool,
+    /// A presenter-style remote's buttons are acted on (see `clicker`), and the
+    /// keys learned for its GO and Back buttons.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clicker_on: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clicker_go: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clicker_back: Option<u32>,
     /// Test Mode plays a heavier lap.
     #[serde(default, skip_serializing_if = "is_false")]
     pub test_heavy: bool,
@@ -84,6 +92,9 @@ mod tests {
             fps_on_output: true,
             let_computer_sleep: true,
             test_heavy: true,
+            clicker_on: true,
+            clicker_go: Some(0x51),
+            clicker_back: Some(0x49),
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
@@ -99,6 +110,7 @@ mod tests {
             !json.contains("let_computer_sleep") && !json.contains("fps_on_output"),
             "{json}"
         );
+        assert!(!json.contains("clicker"), "{json}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

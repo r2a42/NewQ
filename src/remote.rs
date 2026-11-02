@@ -19,6 +19,8 @@ use std::time::Duration;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Go,
+    /// A button of a presenter-style remote (see `clicker`).
+    Clicker(crate::clicker::Button),
     /// Fade everything out (the Esc key); asked again, stop at once.
     Panic,
     /// Stop everything at once.
@@ -523,6 +525,11 @@ impl Remote {
     /// Give the web remote's page the show's current state.
     pub fn set_web_state(&self, json: String) {
         *self.web_state.lock() = json;
+    }
+
+    /// A way for another thread to send commands, and to wake the loop for them.
+    pub fn sender(&self) -> (Sender<Command>, Arc<dyn Fn() + Send + Sync>) {
+        (self.tx.clone(), self.wake.clone())
     }
 
     /// Commands that have arrived since the last call.

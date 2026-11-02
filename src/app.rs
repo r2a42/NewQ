@@ -284,6 +284,8 @@ pub struct App {
     stats: Option<crate::stats::StatsLog>,
     /// Where the main loop's time went, named when it stalls.
     crumbs: crate::crumbs::Crumbs,
+    /// A presenter-style remote's keys (see `clicker`).
+    clicker: Arc<crate::clicker::Shared>,
     /// Rouses the event loop (the remote-control threads and the system's
     /// screen-change notification use it).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -351,11 +353,17 @@ impl App {
         let pending_recovery = recovery::pending(ui.show_path.as_deref());
         ui.check_media(&show);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let remote = Remote::new({
+            let wake = wake.clone();
+            move || wake()
+        });
+        // A presenter-style remote's buttons come in as remote commands too.
+        let (commands, wake_for_keys) = remote.sender();
+        let clicker = crate::clicker::Shared::new(commands, wake_for_keys);
+        crate::clicker::start_global(clicker.clone());
         App {
-            remote: Remote::new({
-                let wake = wake.clone();
-                move || wake()
-            }),
+            remote,
+            clicker,
             wake,
             #[cfg(target_os = "macos")]
             screen_watch: None,
@@ -997,6 +1005,60 @@ impl App {
 
     #[cfg(not(target_os = "macos"))]
     fn pin_output(&mut self, _m: usize) {}
+
+    /// Tell the key watcher what the settings say, take what it learned, and
+    /// pass the settings page's requests to it.
+    fn sync_clicker(&mut self) {
+        let p = &self.ui.prefs;
+        self.clicker.set(p.clicker_on, p.clicker_go, p.clicker_back);
+        if let Some(button) = self.ui.clicker_learn_request.take() {
+            self.clicker.learn(button);
+        }
+        if std::mem::take(&mut self.ui.clicker_cancel_learning) {
+            self.clicker.cancel_learning();
+        }
+        if let Some((button, code)) = self.clicker.take_learned() {
+            match button {
+                crate::clicker::Button::Go => self.ui.prefs.clicker_go = Some(code),
+                crate::clicker::Button::Back => self.ui.prefs.clicker_back = Some(code),
+            }
+            if let Some(dir) = &self.ui.layout_dir
+                && let Err(e) = self.ui.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+            self.engine.log(format!(
+                "Remote button learned for {}: key code {code:#x}",
+                match button {
+                    crate::clicker::Button::Go => "GO",
+                    crate::clicker::Button::Back => "Back",
+                }
+            ));
+            if let Some(ctl) = &mut self.control {
+                ctl.next_repaint = Some(Instant::now());
+            }
+        }
+        self.ui.clicker_learning = self.clicker.learning();
+        self.ui.clicker_global = self.clicker.global_ok();
+        self.ui.clicker_status = self.clicker.status();
+    }
+
+    /// The keys of a presenter remote, where nothing can watch them from
+    /// outside: only while one of NewQ's windows has the focus.
+    fn clicker_in_window(&self, key: &KeyEvent) {
+        if self.clicker.global_ok() {
+            return;
+        }
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+        {
+            use winit::platform::scancode::PhysicalKeyExtScancode;
+            if let Some(code) = key.physical_key.to_scancode() {
+                self.clicker.key(code, key.state == ElementState::Pressed);
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        let _ = key;
+    }
 
     /// While a display is showing: hold the computer awake (unless turned off
     /// in the settings), say in the log if it slept anyway, and know whether
@@ -2326,6 +2388,9 @@ impl ApplicationHandler for App {
             "output window events"
         };
         self.crumbs.skip();
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            self.clicker_in_window(key);
+        }
         self.handle_window_event(event_loop, id, event);
         self.crumbs.lap(name);
     }
@@ -2413,6 +2478,7 @@ impl ApplicationHandler for App {
         self.save_layout(false);
         self.engine.audio.sync(&self.show.audio_outputs);
         self.run_remote(now);
+        self.sync_clicker();
         self.crumbs.lap("layout, audio outputs and remote control");
         // However long it has been since the last look, by a steady clock: a
         // dialog or a stall is time that passed, a sleep is not.
