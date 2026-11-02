@@ -18,7 +18,7 @@
 
 use crate::monitor::Rect;
 use objc2_app_kit::{
-    NSApplicationDidChangeScreenParametersNotification, NSColor, NSScreen, NSView,
+    NSApplicationDidChangeScreenParametersNotification, NSColor, NSCursor, NSScreen, NSView,
     NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSRect};
@@ -59,6 +59,14 @@ pub fn frames(window: &Window, monitor: &MonitorHandle) -> Option<(Rect, Option<
         rect_of(screen.frame())
     });
     Some((rect_of(ns_window.frame()), screen))
+}
+
+/// Hide the pointer until the mouse is moved. The system shows it again when
+/// it rearranges displays and windows (a lid closing puts it on the output),
+/// and winit's own hiding doesn't survive that.
+pub fn hide_pointer() {
+    // SAFETY: a plain class method.
+    unsafe { NSCursor::setHiddenUntilMouseMoves(true) };
 }
 
 /// Set when the system says the displays changed (see `watch_screens`).

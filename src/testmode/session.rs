@@ -121,6 +121,8 @@ pub struct Run {
     /// Each time the computer slept: when (seconds into the test) and for how long.
     sleeps: Vec<(f64, f64)>,
     log_path: PathBuf,
+    /// Samples of the frozen program copied into the folder (see `freeze`).
+    freeze_files: Vec<String>,
     memory: MemoryWatch,
 }
 
@@ -831,6 +833,7 @@ fn launch(
         sleep_watch: SleepWatch::new(),
         sleeps: Vec::new(),
         log_path,
+        freeze_files: Vec::new(),
         memory: MemoryWatch::new(),
     })
 }
@@ -1149,6 +1152,20 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     for line in run.finding_log.close(t_end, &findings) {
         run.log_at(t_end, &line);
     }
+    // What the program was doing while it froze, if it was looked at (Mac).
+    let since = std::time::SystemTime::now()
+        .checked_sub(elapsed + Duration::from_secs(5))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    run.freeze_files = crate::freeze::copy_samples(&crate::crash::log_dir(), &run.folder, since);
+    if !run.freeze_files.is_empty() {
+        findings.push(Finding {
+            severity: Severity::Note,
+            text: format!(
+                "While the program was frozen it was looked at to see what it was waiting for: {} in the test's folder.",
+                run.freeze_files.join(", ")
+            ),
+        });
+    }
     let gone = run.finding_log.gone(&findings);
     findings.extend(gone);
     let verdict = Verdict::of(&findings);
@@ -1336,6 +1353,12 @@ fn compose(
         ("media-credits.txt", "where the media came from"),
     ] {
         line(&mut out, &format!("  {f:22} {what}"));
+    }
+    for f in &run.freeze_files {
+        line(
+            &mut out,
+            &format!("  {f:22} what the program was doing while it was frozen"),
+        );
     }
     let _ = show;
     out

@@ -966,12 +966,31 @@ impl App {
             after.map(|(w, _)| w)
         );
         screen.last_pin = Some(Instant::now());
+        // The pointer shows again when the system moves windows about.
+        screen.window.set_cursor_visible(false);
+        crate::macwin::hide_pointer();
         screen.pin_failed = if done && covers { None } else { display };
         if screen.pin_failed.is_some() {
             log::warn!("output window {m} would not go back over its display; leaving it");
         }
         screen.needs_redraw = true;
     }
+
+    /// Hide the pointer on every output window again, and until the mouse
+    /// moves: the system shows it when the displays are rearranged.
+    #[cfg(target_os = "macos")]
+    fn hide_output_pointers(&mut self) {
+        if self.screens.is_empty() {
+            return;
+        }
+        for screen in self.screens.values() {
+            screen.window.set_cursor_visible(false);
+        }
+        crate::macwin::hide_pointer();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn hide_output_pointers(&mut self) {}
 
     #[cfg(not(target_os = "macos"))]
     fn pin_outputs(&mut self) {}
@@ -984,6 +1003,8 @@ impl App {
     /// it is on battery, which a closed lid can't survive.
     fn keep_awake_for_outputs(&mut self) {
         let open = !self.screens.is_empty();
+        #[cfg(target_os = "macos")]
+        crate::freeze::watch(open);
         let slept = self
             .sleep_watch
             .check(Instant::now(), std::time::SystemTime::now());
@@ -2083,11 +2104,13 @@ impl App {
 impl App {
     /// The main window and the graphics card behind it: the slow part of starting.
     fn open_main_window(&mut self, event_loop: &ActiveEventLoop) {
-        // Be told the moment the displays are rearranged (Mac).
+        // Be told the moment the displays are rearranged (Mac), and have the
+        // program looked at if the main loop ever freezes.
         #[cfg(target_os = "macos")]
         if self.screen_watch.is_none() {
             let wake = self.wake.clone();
             self.screen_watch = Some(crate::macwin::watch_screens(move || wake()));
+            crate::freeze::start_watching(crate::crash::log_dir());
         }
         let window = Arc::new(
             event_loop
@@ -2308,6 +2331,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        crate::freeze::beat();
         // Only the splash screen is up so far: the main window's set-up begins
         // once the splash has been drawn, or after a moment whatever happens.
         if self.control.is_none() {
@@ -2371,6 +2396,7 @@ impl ApplicationHandler for App {
         if poked || now.duration_since(self.last_monitor_scan) > Duration::from_secs(2) {
             if poked {
                 log::info!("the system says the displays were rearranged");
+                self.hide_output_pointers();
             }
             self.scan_monitors(event_loop);
         }

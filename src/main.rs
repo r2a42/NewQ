@@ -17,6 +17,7 @@ mod engine;
 mod export;
 mod feedback;
 mod fps;
+mod freeze;
 mod fx;
 mod gpu;
 mod history;

@@ -54,6 +54,11 @@ The README describes the features; this file is about working on the code.
   is backed with black (`NSWindow::setBackgroundColor`). The 0.5 to 0.7 s freeze at a lid change is the
   system holding the next drawable (`nextDrawable` blocks, wgpu has no timeout); nothing to do about it.
   Not tried on a Mac (checked by `scripts/cross_clippy.sh` and CI).
+- `src/freeze.rs` (Mac): `about_to_wait` beats; a watchdog thread runs `/usr/bin/sample <pid> 2 -file
+  newq-freeze-<time>.txt` in the log folder when the beat stops for 1.5 s while outputs are open (at most 5
+  a run); Test Mode copies them into its run folder (`copy_samples`). `macwin::hide_pointer`
+  (`NSCursor::setHiddenUntilMouseMoves`) is called when the system says the displays were rearranged and
+  after each put-back, since the pointer shows on the output when a lid closes.
 - `src/power.rs`: on battery or not (pmset, GetSystemPowerStatus, /sys/class/power_supply) on a thread of
   its own; `app.rs::keep_awake_for_outputs` holds `KeepAwake` while an output window is open
   (`Prefs::let_computer_sleep` turns it off), logs sleeps (`SleepWatch`) and the power source, and sets

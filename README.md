@@ -226,6 +226,13 @@ includes FFmpeg, so there's nothing else to install.
 - **On battery:** a laptop with its lid closed keeps showing on an external display only while
   plugged in; on battery it sleeps, and nothing can prevent that. While outputs are open on battery
   the status bar and the Settings sidebar warn, and the log says when the power source changes.
+- **A frozen program is looked at (Mac):** if the main loop is silent for 1.5 seconds while a display
+  is showing, NewQ runs macOS's `sample` on itself and saves what every thread was doing as
+  `newq-freeze-<time>.txt` in the log folder (at most five a run); Test Mode copies the ones made
+  during a test into its folder and lists them in the report. Send them with the log when a show
+  freezes: they say which call the program was stuck in.
+- **The pointer stays hidden on a display** when a lid is closed or opened: it is hidden again each
+  time the system says the displays were rearranged.
 - **Stalls are explained in the log:** when the main loop stops for more than 100 ms,
   `newq.log` says which parts of the loop took the time (*event loop stalled for 4815 ms:
   drawing the control window 4790 ms…*) and how much of it was spent outside NewQ's own
