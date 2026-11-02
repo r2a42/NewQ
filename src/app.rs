@@ -2153,9 +2153,27 @@ impl App {
         if event.state != ElementState::Pressed || event.repeat {
             return;
         }
+        let show_mode = self.ui.show_mode;
         match &event.logical_key {
             Key::Named(NamedKey::Space) => self.engine.go(&self.show),
             Key::Named(NamedKey::Escape) => self.engine.panic(&self.show),
+            // Show mode: the arrows are a presenter remote's forward and back.
+            Key::Named(NamedKey::ArrowRight | NamedKey::PageDown) if show_mode => {
+                ui::remote_button(
+                    crate::clicker::Button::Go,
+                    &mut self.show,
+                    &mut self.engine,
+                    &mut self.ui,
+                );
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp) if show_mode => {
+                ui::remote_button(
+                    crate::clicker::Button::Back,
+                    &mut self.show,
+                    &mut self.engine,
+                    &mut self.ui,
+                );
+            }
             _ => return,
         }
         self.ui.selected = self.engine.playhead;

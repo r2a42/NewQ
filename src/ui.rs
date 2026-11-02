@@ -2,9 +2,10 @@
 
 mod settings;
 
+use crate::clicker::{BACK_GUARD, Button, Do};
 use crate::clock::{self, TimeOfDay};
 use crate::dock::{self, Pane};
-use crate::engine::{ActiveCue, CueStatus, Engine};
+use crate::engine::{ActiveCue, CueStatus, DeckStep, Engine};
 use crate::gpu::{Geometry, Homography, Slot};
 use crate::history::History;
 use crate::media::convert::HapKind;
@@ -183,6 +184,8 @@ struct DeckDialog {
 struct Imported {
     name: String,
     slides: Vec<(PathBuf, Option<f64>, Option<f64>)>,
+    /// A deck with no advance times in it is a speaker's: stepped with GO.
+    advance: Advance,
     how: String,
     /// Said to the operator after: the timings weren't used, or the like.
     note: Option<String>,
@@ -526,6 +529,8 @@ enum Action {
     AskSlides(Option<CueId>),
     /// Choose a presentation to take the slides of a slide show from.
     AskDeck(Option<CueId>),
+    /// A forward or back button (the arrow keys in show mode).
+    Remote(Button),
     /// Pictures of a presentation's slides with their timing, into `group`
     /// or a new slide show.
     ImportSlides(
@@ -533,6 +538,7 @@ enum Action {
         (Option<CueId>, u32),
         String,
         Vec<(PathBuf, Option<f64>, Option<f64>)>,
+        Advance,
     ),
     /// Images chosen for a slide show (a new one when no group).
     AddSlides(Option<CueId>, Vec<PathBuf>),
@@ -1056,6 +1062,21 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
         }
         if fresh_key(i, egui::Modifiers::NONE, Key::Space) {
             actions.push(Action::Go);
+        }
+        // Show mode leaves the arrows free: Right and Page Down are what a
+        // presenter's remote sends for forward, Left and Page Up for back.
+        // (Not while a corner is being nudged, and a text box took them above.)
+        if st.show_mode && !nudging {
+            for key in [Key::ArrowRight, Key::PageDown] {
+                if fresh_key(i, egui::Modifiers::NONE, key) {
+                    actions.push(Action::Remote(Button::Go));
+                }
+            }
+            for key in [Key::ArrowLeft, Key::PageUp] {
+                if fresh_key(i, egui::Modifiers::NONE, key) {
+                    actions.push(Action::Remote(Button::Back));
+                }
+            }
         }
         if fresh_key(i, egui::Modifiers::NONE, Key::P) {
             actions.push(Action::TogglePause);
@@ -1969,11 +1990,12 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
                 .iter()
                 .filter(|c| matches!(c.kind, CueKind::Image(_)))
                 .count();
-            format!(
-                "{n} slide{} · {}",
-                if n == 1 { "" } else { "s" },
-                fmt_time(show.slides_length(c.id))
-            )
+            let plural = if n == 1 { "" } else { "s" };
+            if g.slides.is_some_and(|s| s.advance == Advance::OnGo) {
+                format!("{n} slide{plural} · on GO")
+            } else {
+                format!("{n} slide{plural} · {}", fmt_time(show.slides_length(c.id)))
+            }
         }
         CueKind::Group(g) => {
             let n = show.children(c.id).len();
@@ -2722,9 +2744,15 @@ fn start_deck_import(
                         None,
                     ),
                 };
+                let advance = if slides.iter().any(|s| s.1.is_some()) {
+                    Advance::Automatic
+                } else {
+                    Advance::OnGo
+                };
                 Imported {
                     name: name2,
                     slides,
+                    advance,
                     how: made.how,
                     note,
                 }
@@ -2780,6 +2808,7 @@ fn poll_deck(ctx: &egui::Context, st: &mut UiState, actions: &mut Vec<Action>) {
                 (anchor, list),
                 done.name,
                 done.slides,
+                done.advance,
             ));
         }
         Ok(Err(e)) => {
@@ -5565,16 +5594,34 @@ fn slides_panel(
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
+            ui.label("Advance");
+            egui::ComboBox::from_id_salt("slide_advance")
+                .selected_text(match d.advance {
+                    Advance::Automatic => "Automatically",
+                    Advance::OnGo => "On GO",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d.advance, Advance::Automatic, "Automatically")
+                        .on_hover_text("Each slide is shown for its duration, then the next fades in");
+                    ui.selectable_value(&mut d.advance, Advance::OnGo, "On GO")
+                        .on_hover_text(
+                            "A speaker steps through it: GO or the remote's forward button shows the next slide, back shows the one before",
+                        );
+                });
+            ui.end_row();
             ui.label("Fade");
             secs(ui, &mut d.fade)
                 .on_hover_text("How long each slide takes to fade in over the last");
             ui.end_row();
-            ui.label("Duration");
-            secs(ui, &mut d.duration).on_hover_text(
-                "How long each slide is shown in full before the next starts to fade in",
-            );
-            ui.end_row();
+            if d.advance == Advance::Automatic {
+                ui.label("Duration");
+                secs(ui, &mut d.duration).on_hover_text(
+                    "How long each slide is shown in full before the next starts to fade in",
+                );
+                ui.end_row();
+            }
         });
+    let on_go = d.advance == Advance::OnGo;
     ui.horizontal(|ui| {
         if ui.button("Add images…").clicked() {
             actions.push(Action::AskSlides(Some(group)));
@@ -5587,19 +5634,27 @@ fn slides_panel(
             actions.push(Action::AskDeck(Some(group)));
         }
         ui.label(
-            RichText::new(format!(
-                "{} slides, {} in all",
-                list.rows.len(),
-                fmt_time(list.length)
-            ))
+            RichText::new(if on_go {
+                format!("{} slides, stepped with GO", list.rows.len())
+            } else {
+                format!(
+                    "{} slides, {} in all",
+                    list.rows.len(),
+                    fmt_time(list.length)
+                )
+            })
             .weak(),
         );
     });
     ui.label(
-        RichText::new(
+        RichText::new(if on_go {
+            "GO (or the remote's forward button, or the Right arrow in show mode) shows the next \
+             slide; Back or the Left arrow shows the one before. After the last slide, GO goes \
+             on to the next cue. Change a slide's fade to give it its own (shown in yellow)."
+        } else {
             "Change a slide's fade or duration to give it its own (shown in yellow); \
-             Reset puts it back to the show's.",
-        )
+             Reset puts it back to the show's."
+        })
         .weak()
         .small(),
     );
@@ -5611,7 +5666,11 @@ fn slides_panel(
             ui.label(RichText::new("Slide").weak());
             ui.label(RichText::new("Fade").weak());
             ui.label("");
-            ui.label(RichText::new("Duration").weak());
+            ui.label(if on_go {
+                RichText::new("")
+            } else {
+                RichText::new("Duration").weak()
+            });
             ui.label("");
             ui.label("");
             ui.end_row();
@@ -5628,6 +5687,11 @@ fn slides_panel(
                     (SlideField::Fade, r.fade, r.own_fade),
                     (SlideField::Duration, r.duration, r.own_duration),
                 ] {
+                    if on_go && field == SlideField::Duration {
+                        ui.label("");
+                        ui.label("");
+                        continue;
+                    }
                     let mut v = value;
                     let mut edit = egui::DragValue::new(&mut v)
                         .speed(0.05)
@@ -8337,6 +8401,37 @@ fn load_into(
 }
 
 /// Do what a remote message asks for, as if the operator had done it.
+/// A forward or back button: a presenter's remote, or the arrow keys in show
+/// mode. GO fires the next cue (or, in a slide show that advances on GO, shows
+/// the next slide), or resumes after a pause. Back shows the slide before in
+/// such a slide show; otherwise it pauses everything, and Back again fades
+/// everything out and stops.
+pub fn remote_button(button: Button, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    // A pause is let go of or ended the same way whatever is on.
+    if !engine.paused && button == Button::Back && engine.deck_step(show, false) != DeckStep::NoDeck
+    {
+        return;
+    }
+    let playing = !engine.active.is_empty();
+    let since = st.clicker_paused_at.map(|t| t.elapsed());
+    match crate::clicker::decide(button, engine.paused, playing, since, BACK_GUARD) {
+        Do::Go => apply(Action::Go, show, engine, st),
+        Do::Pause => {
+            engine.set_paused(true);
+            st.clicker_paused_at = Some(std::time::Instant::now());
+            engine.log("Paused (Back); Back again fades out and stops, GO resumes");
+        }
+        Do::Resume => {
+            engine.set_paused(false);
+            engine.log("Resumed (GO)");
+        }
+        // Esc's way: it lets go of the pause, fades everything out and
+        // stops, and a second press stops at once.
+        Do::FadeOut => engine.panic(show),
+        Do::Nothing => {}
+    }
+}
+
 pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     // It may change the show; look at it again soon.
     st.json_stale = true;
@@ -8354,32 +8449,7 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
                 apply(Action::SelectList(l), show, engine, st);
             }
         }
-        Command::Clicker(button) => {
-            let playing = !engine.active.is_empty();
-            let since = st.clicker_paused_at.map(|t| t.elapsed());
-            match crate::clicker::decide(
-                button,
-                engine.paused,
-                playing,
-                since,
-                crate::clicker::BACK_GUARD,
-            ) {
-                crate::clicker::Do::Go => apply(Action::Go, show, engine, st),
-                crate::clicker::Do::Pause => {
-                    engine.set_paused(true);
-                    st.clicker_paused_at = Some(std::time::Instant::now());
-                    engine.log("Paused (Back); Back again fades out and stops, GO resumes");
-                }
-                crate::clicker::Do::Resume => {
-                    engine.set_paused(false);
-                    engine.log("Resumed (GO)");
-                }
-                // Esc's way: it lets go of the pause, fades everything out and
-                // stops, and a second press stops at once.
-                crate::clicker::Do::FadeOut => engine.panic(show),
-                crate::clicker::Do::Nothing => {}
-            }
-        }
+        Command::Clicker(button) => remote_button(button, show, engine, st),
         Command::Panic => apply(Action::Panic, show, engine, st),
         Command::StopAll => engine.stop_all(0.0),
         Command::Pause => engine.set_paused(true),
@@ -8616,6 +8686,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             st.selected = engine.playhead;
             st.scroll_to_selected = true;
         }
+        Action::Remote(button) => remote_button(button, show, engine, st),
         Action::Panic => engine.panic(show),
         Action::TogglePause => {
             let p = !engine.paused;
@@ -8711,7 +8782,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AskFile(purpose) => start_dialog(st, show, purpose),
         Action::AskSlides(group) => start_slide_dialog(st, group),
         Action::AskDeck(group) => start_deck_dialog(st, engine.active_list, group),
-        Action::ImportSlides(group, (anchor, list), name, slides) => {
+        Action::ImportSlides(group, (anchor, list), name, slides, advance) => {
             let gid = match group {
                 Some(g) => g,
                 None => {
@@ -8719,7 +8790,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     let mut cue = show.make_cue(CueType::Group, None, slot.at);
                     cue.name = name;
                     if let CueKind::Group(g) = &mut cue.kind {
-                        g.slides = Some(SlideShow::default());
+                        g.slides = Some(SlideShow {
+                            advance,
+                            ..SlideShow::default()
+                        });
                     }
                     let gid = cue.id;
                     show.insert_cue(slot, cue);
@@ -9531,6 +9605,27 @@ mod tests {
         let mut out = ctx.run_ui(input, |ui| keyboard(ui.ctx(), show, st, &mut actions));
         out.textures_delta.clear();
         actions
+    }
+
+    #[test]
+    fn in_show_mode_right_and_left_are_the_remotes_forward_and_back() {
+        use egui::Modifiers as M;
+        let show = Show::default();
+        let mut st = UiState::default();
+        // Editing: the arrows are for the cue list and the corners, not the remote.
+        assert!(keys_with(&show, &st, &[(Key::ArrowRight, M::NONE)]).is_empty());
+        assert!(keys_with(&show, &st, &[(Key::ArrowLeft, M::NONE)]).is_empty());
+        st.show_mode = true;
+        let a = keys_with(&show, &st, &[(Key::ArrowRight, M::NONE)]);
+        assert!(matches!(a.as_slice(), [Action::Remote(Button::Go)]));
+        let a = keys_with(&show, &st, &[(Key::PageDown, M::NONE)]);
+        assert!(matches!(a.as_slice(), [Action::Remote(Button::Go)]));
+        let a = keys_with(&show, &st, &[(Key::ArrowLeft, M::NONE)]);
+        assert!(matches!(a.as_slice(), [Action::Remote(Button::Back)]));
+        let a = keys_with(&show, &st, &[(Key::PageUp, M::NONE)]);
+        assert!(matches!(a.as_slice(), [Action::Remote(Button::Back)]));
+        // With a modifier it is something else (Shift+arrows select, say).
+        assert!(keys_with(&show, &st, &[(Key::ArrowRight, M::COMMAND)]).is_empty());
     }
 
     #[test]

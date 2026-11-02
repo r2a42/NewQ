@@ -455,6 +455,7 @@ pub fn build_with(
                 g.slides = Some(SlideShow {
                     fade: 1.0,
                     duration: hold,
+                    ..SlideShow::default()
                 });
             }
         });

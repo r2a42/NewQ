@@ -2530,6 +2530,23 @@ pub struct GroupCue {
     pub slides: Option<SlideShow>,
 }
 
+/// What starts the next slide of a slide show.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Advance {
+    /// By itself, after each slide's duration.
+    #[default]
+    Automatic,
+    /// When GO (or the remote's forward button) is pressed; back goes to the
+    /// slide before. A speaker's presentation.
+    OnGo,
+}
+
+impl Advance {
+    fn is_automatic(&self) -> bool {
+        *self == Advance::Automatic
+    }
+}
+
 /// What every slide in a slide show gets unless it has its own.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SlideShow {
@@ -2537,6 +2554,9 @@ pub struct SlideShow {
     pub fade: f64,
     /// Seconds each slide is shown in full, between its fade and the next.
     pub duration: f64,
+    /// What starts the next slide. (With `OnGo` the durations aren't used.)
+    #[serde(default, skip_serializing_if = "Advance::is_automatic")]
+    pub advance: Advance,
 }
 
 impl Default for SlideShow {
@@ -2544,6 +2564,7 @@ impl Default for SlideShow {
         SlideShow {
             fade: 1.0,
             duration: 5.0,
+            advance: Advance::Automatic,
         }
     }
 }
@@ -3680,6 +3701,7 @@ impl Show {
             let slides: Vec<usize> = (g + 1..end)
                 .filter(|&i| self.cues[i].armed && matches!(self.cues[i].kind, CueKind::Image(_)))
                 .collect();
+            let on_go = defaults.advance == Advance::OnGo;
             let mut t = 0.0;
             for (n, &i) in slides.iter().enumerate() {
                 let last = n + 1 == slides.len();
@@ -3689,7 +3711,13 @@ impl Show {
                 };
                 let fade = m.slide_fade.unwrap_or(defaults.fade).max(0.0);
                 let hold = m.slide_duration.unwrap_or(defaults.duration).max(0.0);
-                let finish = last.then_some(fade + hold + fade);
+                // On GO, a slide stays until the next one has faded in over it, and
+                // the last stays until something else takes its place.
+                let finish = if on_go {
+                    None
+                } else {
+                    last.then_some(fade + hold + fade)
+                };
                 if cue.pre_wait != t
                     || m.transition != Transition::Crossfade
                     || m.fade_in != fade
@@ -3705,7 +3733,9 @@ impl Show {
                     m.loop_media = false;
                     changed = true;
                 }
-                t += fade + hold;
+                if !on_go {
+                    t += fade + hold;
+                }
             }
         }
         changed
@@ -5422,6 +5452,7 @@ mod tests {
             gc.slides = Some(SlideShow {
                 fade: 2.0,
                 duration: 4.0,
+                ..SlideShow::default()
             });
         }
         let id = g.id;
@@ -5441,6 +5472,43 @@ mod tests {
                 (c.pre_wait, m.fade_in, m.end)
             })
             .collect()
+    }
+
+    #[test]
+    fn slides_that_advance_on_go_all_start_together_with_no_end_and_are_saved_so() {
+        let mut show = Show::default();
+        let g = slide_show(&mut show, 3);
+        if let Some(i) = show.cue_index(g)
+            && let CueKind::Group(gc) = &mut show.cues[i].kind
+            && let Some(s) = &mut gc.slides
+        {
+            s.advance = Advance::OnGo;
+        }
+        assert!(show.relay_slides());
+        // Nothing times them: each is up until the next has faded in over it,
+        // and the last stays.
+        assert_eq!(
+            slide_times(&show, g),
+            vec![(0.0, 2.0, None), (0.0, 2.0, None), (0.0, 2.0, None)]
+        );
+        assert!(!show.relay_slides());
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(json.contains("OnGo"));
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            &back.cue(g).unwrap().kind,
+            CueKind::Group(g) if g.slides.is_some_and(|s| s.advance == Advance::OnGo)
+        ));
+        // Back to automatic: timed again, and the file says nothing of it.
+        if let Some(i) = show.cue_index(g)
+            && let CueKind::Group(gc) = &mut show.cues[i].kind
+            && let Some(s) = &mut gc.slides
+        {
+            s.advance = Advance::Automatic;
+        }
+        assert!(show.relay_slides());
+        assert_eq!(slide_times(&show, g)[1].0, 6.0);
+        assert!(!serde_json::to_string(&show).unwrap().contains("advance"));
     }
 
     #[test]
@@ -5522,6 +5590,7 @@ mod tests {
             gc.slides = Some(SlideShow {
                 fade: 1.0,
                 duration: 3.0,
+                ..SlideShow::default()
             });
         }
         show.relay_slides();

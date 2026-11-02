@@ -214,6 +214,7 @@ pub fn build(media: &Path, short: bool) -> Show {
             g.slides = Some(SlideShow {
                 fade: 1.0,
                 duration: (4.0 * k).max(1.0),
+                ..SlideShow::default()
             });
         }
     });

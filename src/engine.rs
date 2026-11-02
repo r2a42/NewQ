@@ -218,8 +218,22 @@ pub struct MatteState {
 pub struct GroupState {
     mode: GroupMode,
     children: Vec<CueId>,
-    /// Playlist: index of the next child to fire.
+    /// Playlist: index of the next child to fire. A slide show that advances
+    /// on GO: the slide after the one being shown.
     next: usize,
+    /// A slide show that advances on GO: GO and the remote step through it.
+    deck: bool,
+}
+
+/// What stepping through a slide show that advances on GO came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeckStep {
+    /// Another slide is on its way in.
+    Moved,
+    /// Already on the last slide (going forward) or the first (going back).
+    AtEnd,
+    /// No such slide show is on.
+    NoDeck,
 }
 
 pub enum ActiveKind {
@@ -785,6 +799,7 @@ impl Engine {
             CueKind::Timecode(t) => Some((t.duration > 0.0).then_some(t.duration)),
             CueKind::Stop(_) | CueKind::Send(_) | CueKind::Control(_) => Some(Some(0.0)),
             // Slide show: the slides are timed to end together with the last.
+            CueKind::Group(g) if g.slides.is_some_and(|s| s.advance == Advance::OnGo) => Some(None),
             CueKind::Group(g) if g.slides.is_some() => Some(Some(show.slides_length(cue.id))),
             CueKind::Group(g) => {
                 // Timeline: until the last child ends. Playlist: all of them in turn.
@@ -826,8 +841,52 @@ impl Engine {
 
     // ----- Transport -------------------------------------------------------
 
+    /// Step the slide show that advances on GO and is on (the latest one),
+    /// forward (`forward`) or back. Another slide fades in over the one shown;
+    /// the slide before or after is loaded ahead (`update_preload`).
+    pub fn deck_step(&mut self, show: &Show, forward: bool) -> DeckStep {
+        let Some(a) = self
+            .active
+            .iter_mut()
+            .rev()
+            .find(|a| !a.stopping && matches!(&a.kind, ActiveKind::Group(g) if g.deck))
+        else {
+            return DeckStep::NoDeck;
+        };
+        let ActiveKind::Group(g) = &mut a.kind else {
+            return DeckStep::NoDeck;
+        };
+        // `next` is the slide after the one shown.
+        let target = if forward {
+            (g.next < g.children.len()).then_some(g.next)
+        } else {
+            g.next.checked_sub(2)
+        };
+        let Some(n) = target else {
+            // Past the last slide the show lets go: GO goes on to the next cue.
+            if forward {
+                g.deck = false;
+            }
+            return DeckStep::AtEnd;
+        };
+        let child = g.children[n];
+        g.next = n + 1;
+        log::info!(
+            "slide {} of {}",
+            n + 1,
+            show.cue(a.cue_id).map_or(0, |c| show.children(c.id).len())
+        );
+        self.fire(show, child);
+        DeckStep::Moved
+    }
+
     /// Fire the cue at the playhead and move the playhead past its continue chain.
+    /// While a slide show that advances on GO has slides left, GO shows the
+    /// next one instead.
     pub fn go(&mut self, show: &Show) {
+        if self.deck_step(show, true) == DeckStep::Moved {
+            return;
+        }
         let Some(here) = self
             .playhead
             .and_then(|id| show.cue_index(id))
@@ -2037,7 +2096,10 @@ impl Engine {
                     ok = false; // nothing to wait for
                 } else {
                     active.duration = self.cue_duration(show, &cue).flatten();
+                    // A slide show that advances on GO starts with its first slide.
+                    let deck = g.slides.is_some_and(|s| s.advance == Advance::OnGo);
                     let first = match g.mode {
+                        _ if deck => 1,
                         GroupMode::Timeline => children.len(),
                         GroupMode::Playlist => 1,
                     };
@@ -2048,6 +2110,7 @@ impl Engine {
                         mode: g.mode,
                         children,
                         next: first,
+                        deck,
                     });
                 }
             }
@@ -2085,7 +2148,9 @@ impl Engine {
                 .retain(|o| o.instance == instance || !(o.is_layer() && o.output() == output)),
             EntryAction::Crossfade { time, curve } => {
                 for o in &mut self.active {
-                    if o.instance != instance && o.is_layer() && o.output() == output && !o.stopping
+                    // What was there before it: a slide started after this one (a
+                    // quick second GO) is not for this one to fade away.
+                    if o.instance < instance && o.is_layer() && o.output() == output && !o.stopping
                     {
                         o.fade_out_and_stop(time, curve);
                     }
@@ -2573,6 +2638,19 @@ impl Engine {
                     }
                 }
             }
+            // The slides on either side of the one a slide show is on.
+            if let ActiveKind::Group(g) = &a.kind
+                && g.deck
+            {
+                for n in [Some(g.next), g.next.checked_sub(2)].into_iter().flatten() {
+                    if let Some(&c) = g.children.get(n)
+                        && show.cue(c).is_some_and(|c| c.kind.preloads())
+                        && !wanted.contains(&c)
+                    {
+                        wanted.push(c);
+                    }
+                }
+            }
             // The child a playlist will play next.
             if let ActiveKind::Group(g) = &a.kind
                 && g.mode == GroupMode::Playlist
@@ -2595,8 +2673,9 @@ impl Engine {
                 // A group at the playhead: the children that start with it.
                 if let CueKind::Group(g) = &cue.kind {
                     let mode = g.mode;
+                    let deck = g.slides.is_some_and(|s| s.advance == Advance::OnGo);
                     for (n, child) in show.armed_children(cue.id).into_iter().enumerate() {
-                        if mode == GroupMode::Playlist && n > 0 {
+                        if (mode == GroupMode::Playlist && n > 0) || (deck && n > 1) {
                             break;
                         }
                         if child.kind.preloads()
@@ -5169,6 +5248,7 @@ mod tests {
             gc.slides = Some(SlideShow {
                 fade: 0.2,
                 duration: 0.3,
+                ..SlideShow::default()
             });
         }
         let gid = g.id;
@@ -5195,6 +5275,59 @@ mod tests {
         run_until(&mut e, &show, "the slide show to end", |e| {
             stack(e, out).is_empty() && !e.is_active()
         });
+    }
+
+    #[test]
+    fn a_slide_show_that_advances_on_go_steps_forward_and_back_and_then_lets_go() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let slot = show.insert_slot(None, true, 0);
+        let mut g = show.make_cue(CueType::Group, None, slot.at);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.slides = Some(SlideShow {
+                fade: 0.1,
+                duration: 0.1,
+                advance: Advance::OnGo,
+            });
+        }
+        let gid = g.id;
+        show.insert_cue(slot, g);
+        show.add_slides(gid, vec![img.clone(), img.clone(), img]);
+        let slides: Vec<CueId> = show.children(gid).iter().map(|c| c.id).collect();
+        let only = |e: &Engine, n: usize| {
+            let l = stack(e, out);
+            l.iter().any(|l| l.0 == Some(slides[n]))
+                && slides
+                    .iter()
+                    .enumerate()
+                    .all(|(i, s)| i == n || l.iter().all(|l| l.0 != Some(*s)))
+        };
+        e.playhead = Some(gid);
+        e.go(&show);
+        // The first slide is up, and waits: nothing advances by itself.
+        run_until(&mut e, &show, "slide 1 alone", |e| only(e, 0));
+        for _ in 0..40 {
+            e.tick(&show, 0.1);
+        }
+        assert!(only(&e, 0) && e.is_active(), "still on slide 1 after 4 s");
+        // GO is the next slide; the one before is gone once it has faded in.
+        e.go(&show);
+        run_until(&mut e, &show, "slide 2 alone", |e| only(e, 1));
+        // Back is the slide before.
+        assert_eq!(e.deck_step(&show, false), DeckStep::Moved);
+        run_until(&mut e, &show, "slide 1 alone again", |e| only(e, 0));
+        // Back on the first slide stays there.
+        assert_eq!(e.deck_step(&show, false), DeckStep::AtEnd);
+        e.go(&show);
+        e.go(&show);
+        run_until(&mut e, &show, "slide 3 alone", |e| only(e, 2));
+        // On the last slide, forward lets go (GO is for the next cue) and the
+        // deck no longer takes the buttons.
+        assert_eq!(e.deck_step(&show, true), DeckStep::AtEnd);
+        assert_eq!(e.deck_step(&show, false), DeckStep::NoDeck);
     }
 
     #[test]

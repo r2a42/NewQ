@@ -182,6 +182,14 @@ includes FFmpeg, so there's nothing else to install.
   fades are worked out from those settings, so each slide is still an
   ordinary image cue to give a position, size or colour (its timing is the
   slide show's). It plays once and the last slide fades out.
+  *Advance* chooses what starts the next slide: **Automatically** (the above)
+  or **On GO**, for a speaker stepping through a presentation: the first GO
+  shows slide 1, each GO after it shows the next slide (crossfading as set),
+  Back (the Left arrow, or a remote's back button) shows the one before, and
+  after the last slide GO goes on to the next cue. Nothing advances by itself,
+  and the durations aren't used. While such a slide show is on, GO and the
+  remote step through its slides instead of firing the next cue; Esc, as ever,
+  fades everything out.
 - **Slides from a PowerPoint (or Keynote, OpenDocument, PDF) file:** *Cue ▸ Add
   Slide show from PowerPoint…* (or *From PowerPoint…* in a slide show's
   inspector) turns the file's slides into pictures with the program on this
@@ -189,7 +197,9 @@ includes FFmpeg, so there's nothing else to install.
   (with `pdftoppm` for the pictures); a PDF needs only `pdftoppm`. The pictures
   go in a folder beside the file and become a slide show named after it. For a
   `.pptx` the file's own timing is used: a slide's *advance after* time becomes
-  its duration, its transition time its fade, and hidden slides are left out.
+  its duration, its transition time its fade, and hidden slides are left out;
+  a deck with no *advance after* times in it (a speaker's deck) comes in
+  with *Advance* set to **On GO**, one with times comes in **Automatically**.
   Animations, video and sound inside a slide are not kept, only the picture.
   Set `NEWQ_SLIDE_EXPORTER` to a program of your own (it is given the file and
   the folder) to use another. The office program may flash a window while it
@@ -872,6 +882,8 @@ night is about 3,000 rows.
 | A                     | Arm / disarm the selected cue                   |
 | any cue's hotkey      | Fire that cue (letters, digits and F1–F12)      |
 | ↑ / ↓                 | Move selection and playhead                     |
+| → / Page Down         | Show mode: GO (the next slide of a slide show that advances on GO) |
+| ← / Page Up           | Show mode: the slide before in such a slide show; otherwise pause everything, and again to fade it out |
 | Ctrl+↑ / Ctrl+↓       | Reorder the selected cue                        |
 | ← ↑ → ↓ / Shift+arrow | Move the selected corner 1 px / 5 px (while editing) |
 | Ctrl+D / Del          | Duplicate / delete cue                          |
