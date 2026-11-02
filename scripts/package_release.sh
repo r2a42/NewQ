@@ -158,13 +158,47 @@ EOF
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSCameraUsageDescription</key><string>NewQ shows live camera pictures in camera cues.</string>
+  <key>NSMicrophoneUsageDescription</key><string>NewQ plays live audio inputs in audio input cues.</string>
 </dict>
 </plist>
 EOF
-    # Apple Silicon only runs signed code: ad-hoc sign the helpers and the app.
-    codesign --force --sign - "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
-    codesign --force --sign - "$app"
-    codesign --verify --deep --strict "$app"
+    if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+      # A Developer ID signature with the hardened runtime and a secure
+      # timestamp, which is what notarisation asks for. Inside out: the helpers
+      # first, then the app (never --deep).
+      ent="$root/assets/macos/entitlements.plist"
+      sign=(codesign --force --timestamp --options runtime --entitlements "$ent" --sign "$MACOS_SIGN_IDENTITY")
+      "${sign[@]}" "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
+      "${sign[@]}" "$app"
+      codesign --verify --deep --strict --verbose=2 "$app"
+      if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+        # Notarise (Apple scans it and records it), then staple the ticket so the
+        # app opens even offline.
+        (cd dist/stage && ditto -c -k --keepParent "$name" "${root}/dist/notarize.zip")
+        out="$(xcrun notarytool submit "dist/notarize.zip" --key "$APPLE_API_KEY_PATH" \
+          --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait --timeout 40m 2>&1)" || true
+        echo "$out"
+        id="$(sed -nE 's/^ *id: ([0-9a-f-]{36}).*/\1/p' <<< "$out" | head -1)"
+        if ! grep -q "status: Accepted" <<< "$out"; then
+          if [ -n "$id" ]; then
+            xcrun notarytool log "$id" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" || true
+          fi
+          echo "notarisation did not succeed" >&2
+          exit 1
+        fi
+        rm -f dist/notarize.zip
+        xcrun stapler staple "$app"
+        xcrun stapler validate "$app"
+        spctl --assess --type execute --verbose=2 "$app"
+      else
+        echo "signed, not notarised (no App Store Connect API key given)"
+      fi
+    else
+      # Apple Silicon only runs signed code: ad-hoc sign the helpers and the app.
+      codesign --force --sign - "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe"
+      codesign --force --sign - "$app"
+      codesign --verify --deep --strict "$app"
+    fi
     (cd dist/stage && ditto -c -k --keepParent "$name" "${root}/dist/${name}.zip")
     ;;
   *)

@@ -139,6 +139,12 @@ The README describes the features; this file is about working on the code.
   or LibreOffice + `pdftoppm`, or `NEWQ_SLIDE_EXPORTER`; `match_timings` pairs pictures with slides.
   `ui.rs` (`start_deck_dialog`, `start_deck_import`, `poll_deck`) runs it on a thread with Cancel and
   `Action::ImportSlides` -> `Show::add_slides_timed`. Not tried against a real office program.
+- Mac signing: `release.yml` imports a Developer ID certificate into a temporary keychain when the
+  secrets `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD` (and, to notarise, `APPLE_API_KEY_P8`,
+  `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`) exist; `package_release.sh` then signs ffmpeg, ffprobe
+  and the app (hardened runtime, `assets/macos/entitlements.plist`), notarises with `notarytool`,
+  staples and zips. Without the secrets it ad-hoc signs as before. A step's own `env` can't be used in
+  its `if`, hence the `signing` step's outputs. Untested: needs the secrets and a dry run.
 - Windows signing: the `Sign newq.exe` step in `release.yml` runs only with the secrets
   `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD`. Untested.
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
