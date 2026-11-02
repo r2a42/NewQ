@@ -214,11 +214,22 @@ impl Children {
         cmd: &mut Command,
         error: &Arc<Mutex<Option<String>>>,
     ) -> Result<(u64, ChildStdout)> {
-        let mut st = self.0.lock();
-        anyhow::ensure!(!st.closed, "player closed");
+        anyhow::ensure!(!self.0.lock().closed, "player closed");
+        // Starting a process can take seconds (a Mac, now and then): the lock
+        // is not held meanwhile, or closing the player from the main thread
+        // (Stop, a cue ending) would wait for it.
         let mut child = cmd.spawn().context("starting ffmpeg")?;
-        let stdout = child.stdout.take().context("ffmpeg stdout")?;
+        let Some(stdout) = child.stdout.take() else {
+            reap(child);
+            anyhow::bail!("ffmpeg stdout");
+        };
         super::video::spawn_stderr_drain(child.stderr.take(), error.clone());
+        let mut st = self.0.lock();
+        if st.closed {
+            drop(st);
+            reap(child);
+            anyhow::bail!("player closed");
+        }
         let id = st.next_id;
         st.next_id += 1;
         st.live.push((id, child));

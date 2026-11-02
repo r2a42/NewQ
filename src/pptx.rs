@@ -25,15 +25,23 @@ const PRESENTATION_NS: &str = "http://schemas.openxmlformats.org/presentationml/
 const RELATIONSHIP_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const P14_NS: &str = "http://schemas.microsoft.com/office/powerpoint/2010/main";
 
+/// The most read from one part of a deck (a slide's XML is some kilobytes).
+const MAX_PART: u64 = 32 << 20;
+
 /// The slides of the `.pptx` at `path`, in order.
 pub fn read(path: &Path) -> Result<Vec<Slide>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("can't open it: {e}"))?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| format!("it isn't a PowerPoint file: {e}"))?;
     let mut text = |name: &str| -> Option<String> {
-        let mut entry = zip.by_name(name).ok()?;
+        let entry = zip.by_name(name).ok()?;
+        // The sizes in a file are only claims: a crafted one could ask for
+        // gigabytes, and running out of memory ends the whole program.
+        if entry.size() > MAX_PART {
+            return None;
+        }
         let mut s = String::new();
-        entry.read_to_string(&mut s).ok()?;
+        entry.take(MAX_PART).read_to_string(&mut s).ok()?;
         Some(s)
     };
     let presentation = text("ppt/presentation.xml").ok_or("no presentation in it")?;

@@ -81,25 +81,30 @@ fn tools_for(ext: &str, custom: Option<PathBuf>) -> Vec<Tool> {
 /// Pictures (png, jpg) under `dir`, in the order the slides come: by the
 /// numbers in their names ("Slide2" before "Slide10").
 fn pictures_in(dir: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    // Two levels deep at most, and links are not followed (a loop of them
+    // would never end).
+    fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p
-                .extension()
-                .and_then(|x| x.to_str())
-                .is_some_and(|x| ["png", "jpg", "jpeg"].contains(&x.to_lowercase().as_str()))
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
+                if depth < 2 {
+                    walk(&p, depth + 1, out);
+                }
+            } else if kind.is_file()
+                && p.extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| ["png", "jpg", "jpeg"].contains(&x.to_lowercase().as_str()))
             {
                 out.push(p);
             }
         }
     }
     let mut found = Vec::new();
-    walk(dir, &mut found);
+    walk(dir, 0, &mut found);
     found.sort_by_key(|p| natural_key(p));
     found
 }
@@ -174,7 +179,10 @@ fn run(cmd: &mut Command, cancel: &Arc<AtomicBool>) -> Result<std::process::Outp
         return Err("cancelled".into());
     }
     if stop.load(Ordering::Relaxed) {
-        return Err(format!("it took longer than {} s", LIMIT.as_secs()));
+        return Err(format!(
+            "it took longer than {} s (if PowerPoint or Keynote is still open with the file, close it before trying again)",
+            LIMIT.as_secs()
+        ));
     }
     out.map_err(|e| format!("couldn't be started: {e}"))
 }
@@ -415,6 +423,18 @@ mod tests {
             advance,
             fade,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_loop_of_links_in_the_folder_is_not_followed() {
+        let dir = std::env::temp_dir().join(format!("newq_loop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Slide1.png"), "x").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("again")).unwrap();
+        assert_eq!(pictures_in(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

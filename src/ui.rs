@@ -171,6 +171,10 @@ struct SlideDialog {
 /// The dialog that picks a presentation to take slides from.
 struct DeckDialog {
     group: Option<CueId>,
+    /// Where a new slide show goes: after this cue, in this list, as it was
+    /// when the file was asked for (the import can take minutes).
+    anchor: Option<CueId>,
+    list: u32,
     answer: std::sync::mpsc::Receiver<Option<PathBuf>>,
 }
 
@@ -187,6 +191,8 @@ struct Imported {
 /// A presentation being turned into pictures by the office program, on a thread.
 struct DeckImport {
     group: Option<CueId>,
+    anchor: Option<CueId>,
+    list: u32,
     name: String,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     answer: std::sync::mpsc::Receiver<Result<Imported, String>>,
@@ -524,6 +530,7 @@ enum Action {
     /// or a new slide show.
     ImportSlides(
         Option<CueId>,
+        (Option<CueId>, u32),
         String,
         Vec<(PathBuf, Option<f64>, Option<f64>)>,
     ),
@@ -2611,7 +2618,7 @@ fn start_slide_dialog(st: &mut UiState, group: Option<CueId>) {
 }
 
 /// Open the picker for a presentation on a thread of its own.
-fn start_deck_dialog(st: &mut UiState, group: Option<CueId>) {
+fn start_deck_dialog(st: &mut UiState, list: u32, group: Option<CueId>) {
     if st.deck_dialog.is_some()
         || st.deck_import.is_some()
         || st.slide_dialog.is_some()
@@ -2636,25 +2643,55 @@ fn start_deck_dialog(st: &mut UiState, group: Option<CueId>) {
             let _ = tx.send(file);
         });
     if spawned.is_ok() {
-        st.deck_dialog = Some(DeckDialog { group, answer });
+        let anchor = st.selected;
+        st.deck_dialog = Some(DeckDialog {
+            group,
+            anchor,
+            list,
+            answer,
+        });
     }
 }
 
-/// Where the pictures of `deck` go: a folder beside it, else the log folder.
+/// Where the pictures of `deck` go: a new folder for each import, beside the
+/// deck (else in the log folder), so that nothing already there is touched and
+/// an earlier import's pictures stay where its cues expect them.
 fn deck_pictures_folder(deck: &std::path::Path) -> PathBuf {
     let stem = deck.file_stem().map_or_else(
         || "slides".to_string(),
         |s| s.to_string_lossy().into_owned(),
     );
-    let beside = deck.parent().map(|d| d.join(format!("{stem} slides")));
-    match beside {
-        Some(dir) if std::fs::create_dir_all(&dir).is_ok() => dir,
-        _ => crate::crash::log_dir().join("slides").join(stem),
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let bases = [
+        deck.parent().map(|d| d.join(format!("{stem} slides"))),
+        Some(crate::crash::log_dir().join("slides").join(&stem)),
+    ];
+    for base in bases.into_iter().flatten() {
+        for n in 0..100 {
+            let dir = base.join(if n == 0 {
+                format!("import-{at}")
+            } else {
+                format!("import-{at}-{n}")
+            });
+            // `create_dir` fails if it is there already: only a folder made now is used.
+            if std::fs::create_dir_all(&base).is_ok() && std::fs::create_dir(&dir).is_ok() {
+                return dir;
+            }
+        }
     }
+    crate::crash::log_dir()
+        .join("slides")
+        .join(format!("{stem}-{at}"))
 }
 
 /// Start turning `deck` into pictures.
-fn start_deck_import(st: &mut UiState, group: Option<CueId>, deck: PathBuf) {
+fn start_deck_import(
+    st: &mut UiState,
+    (group, anchor, list): (Option<CueId>, Option<CueId>, u32),
+    deck: PathBuf,
+) {
     let name = deck.file_stem().map_or_else(
         || "Slide show".to_string(),
         |s| s.to_string_lossy().into_owned(),
@@ -2697,6 +2734,8 @@ fn start_deck_import(st: &mut UiState, group: Option<CueId>, deck: PathBuf) {
     if spawned.is_ok() {
         st.deck_import = Some(DeckImport {
             group,
+            anchor,
+            list,
             name,
             cancel,
             answer,
@@ -2710,10 +2749,10 @@ fn poll_deck(ctx: &egui::Context, st: &mut UiState, actions: &mut Vec<Action>) {
     if let Some(d) = &st.deck_dialog {
         match d.answer.try_recv() {
             Ok(file) => {
-                let group = d.group;
+                let target = (d.group, d.anchor, d.list);
                 st.deck_dialog = None;
                 if let Some(deck) = file {
-                    start_deck_import(st, group, deck);
+                    start_deck_import(st, target, deck);
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -2725,7 +2764,7 @@ fn poll_deck(ctx: &egui::Context, st: &mut UiState, actions: &mut Vec<Action>) {
     let Some(job) = &st.deck_import else { return };
     match job.answer.try_recv() {
         Ok(Ok(done)) => {
-            let group = job.group;
+            let (group, anchor, list) = (job.group, job.anchor, job.list);
             st.deck_import = None;
             log::info!(
                 "slides: {} pictures from {} made by {}",
@@ -2736,7 +2775,12 @@ fn poll_deck(ctx: &egui::Context, st: &mut UiState, actions: &mut Vec<Action>) {
             if let Some(note) = done.note {
                 st.deck_error = Some(note);
             }
-            actions.push(Action::ImportSlides(group, done.name, done.slides));
+            actions.push(Action::ImportSlides(
+                group,
+                (anchor, list),
+                done.name,
+                done.slides,
+            ));
         }
         Ok(Err(e)) => {
             st.deck_import = None;
@@ -8666,12 +8710,12 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddCueFile(ty, file) => add_cue(show, st, engine, ty, Some(file)),
         Action::AskFile(purpose) => start_dialog(st, show, purpose),
         Action::AskSlides(group) => start_slide_dialog(st, group),
-        Action::AskDeck(group) => start_deck_dialog(st, group),
-        Action::ImportSlides(group, name, slides) => {
+        Action::AskDeck(group) => start_deck_dialog(st, engine.active_list, group),
+        Action::ImportSlides(group, (anchor, list), name, slides) => {
             let gid = match group {
                 Some(g) => g,
                 None => {
-                    let slot = show.insert_slot(st.selected, true, engine.active_list);
+                    let slot = show.insert_slot(anchor, true, list);
                     let mut cue = show.make_cue(CueType::Group, None, slot.at);
                     cue.name = name;
                     if let CueKind::Group(g) = &mut cue.kind {
@@ -9237,6 +9281,28 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_import_of_a_deck_gets_a_folder_of_its_own_and_touches_nothing_there() {
+        let dir = std::env::temp_dir().join(format!("newq_deck_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Somebody's own pictures in the folder a name like "Act1 slides" would make.
+        let theirs = dir.join("Act1 slides");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("mine.png"), "x").unwrap();
+        let deck = dir.join("Act1.pptx");
+        let a = deck_pictures_folder(&deck);
+        let b = deck_pictures_folder(&deck);
+        assert_ne!(
+            a, b,
+            "a second import must not share the first one's folder"
+        );
+        assert!(a.is_dir() && b.is_dir());
+        assert!(a.starts_with(&theirs));
+        assert!(theirs.join("mine.png").exists());
+        assert_eq!(std::fs::read_dir(&a).unwrap().count(), 0, "new and empty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
 

@@ -195,15 +195,6 @@ includes FFmpeg, so there's nothing else to install.
   the folder) to use another. The office program may flash a window while it
   works. The XML reading and the timing are tested; the Windows, Mac and
   LibreOffice conversions have not been tried on those machines.
-- **Presenter remote (clicker / PerfectCue):** *Settings ▸ General ▸ Presenter
-  remote*. Choose *Learn* for GO and for Back and press the buttons on the
-  remote (most clickers are a keyboard that sends Page Down and Page Up, which
-  PerfectCue also does). GO fires the next cue, or resumes if paused. Back pauses
-  everything; Back again fades everything out and stops; GO resumes. It works with
-  NewQ in the background: on Windows through a keyboard hook, on a Mac through
-  an event tap (macOS asks for *Input Monitoring* permission once). Where that
-  isn't available it works when NewQ's window has focus. Not tried with real
-  hardware or on a Mac or Windows machine.
 - **Windows "protected your PC" warning:** the Windows download isn't signed
   yet, so SmartScreen says *Unknown publisher* the first time. Right-click the
   downloaded zip ▸ *Properties* ▸ tick *Unblock* ▸ OK, then unzip, or choose

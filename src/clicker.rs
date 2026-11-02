@@ -195,6 +195,12 @@ pub fn describe(code: Option<u32>) -> String {
     }
 }
 
+/// Whether the presenter remote is offered at all. Off until it knows which
+/// keyboard a key comes from (so that Right Arrow on the laptop doesn't fire
+/// cues) and doesn't ask a Mac for the Input Monitoring permission at every
+/// launch; the code stays so the work isn't lost.
+pub const AVAILABLE: bool = false;
+
 /// Start noticing keys system-wide, where that can be done (Windows, a Mac).
 pub fn start_global(shared: Arc<Shared>) {
     #[cfg(windows)]

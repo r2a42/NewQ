@@ -360,7 +360,9 @@ impl App {
         // A presenter-style remote's buttons come in as remote commands too.
         let (commands, wake_for_keys) = remote.sender();
         let clicker = crate::clicker::Shared::new(commands, wake_for_keys);
-        crate::clicker::start_global(clicker.clone());
+        if crate::clicker::AVAILABLE {
+            crate::clicker::start_global(clicker.clone());
+        }
         App {
             remote,
             clicker,

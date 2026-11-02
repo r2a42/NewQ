@@ -470,74 +470,78 @@ fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Acti
             );
         }
     });
-    section(ui, "Presenter remote (this computer)", |ui| {
-        let mut changed = false;
-        let mut on = st.prefs.clicker_on;
-        if ui
-            .checkbox(
-                &mut on,
-                "Use a presenter remote (a PerfectCue, a slide clicker) as GO and Back",
-            )
-            .changed()
-        {
-            st.prefs.clicker_on = on;
-            changed = true;
-        }
-        let rows = [
-            (crate::clicker::Button::Go, "GO button", st.prefs.clicker_go),
-            (
-                crate::clicker::Button::Back,
-                "Back button",
-                st.prefs.clicker_back,
-            ),
-        ];
-        for (button, label, code) in rows {
-            ui.horizontal(|ui| {
-                ui.label(format!("{label}:"));
-                if st.clicker_learning == Some(button) {
-                    ui.label(RichText::new("press the button on the remote now…").color(PLAYHEAD));
-                    if ui.button("Cancel").clicked() {
-                        st.clicker_cancel_learning = true;
-                    }
-                } else {
-                    ui.label(crate::clicker::describe(code));
-                    if ui.button("Learn").clicked() {
-                        st.clicker_learn_request = Some(button);
-                    }
-                    if code.is_some() && ui.button("Clear").clicked() {
-                        match button {
-                            crate::clicker::Button::Go => st.prefs.clicker_go = None,
-                            crate::clicker::Button::Back => st.prefs.clicker_back = None,
-                        }
-                        changed = true;
-                    }
-                }
-            });
-        }
-        if changed
-            && let Some(dir) = &st.layout_dir
-            && let Err(e) = st.prefs.save(dir)
-        {
-            log::warn!("could not save the settings of this computer: {e}");
-        }
-        if st.prefs.clicker_on && !st.clicker_status.is_empty() {
-            if st.clicker_global {
-                ui.label(RichText::new(&st.clicker_status).color(GO_GREEN));
-            } else {
-                warning(ui, &st.clicker_status);
+    if crate::clicker::AVAILABLE {
+        section(ui, "Presenter remote (this computer)", |ui| {
+            let mut changed = false;
+            let mut on = st.prefs.clicker_on;
+            if ui
+                .checkbox(
+                    &mut on,
+                    "Use a presenter remote (a PerfectCue, a slide clicker) as GO and Back",
+                )
+                .changed()
+            {
+                st.prefs.clicker_on = on;
+                changed = true;
             }
-        }
-        hint(
-            ui,
-            "GO fires the next cue; while everything is paused it resumes instead. Back pauses \
+            let rows = [
+                (crate::clicker::Button::Go, "GO button", st.prefs.clicker_go),
+                (
+                    crate::clicker::Button::Back,
+                    "Back button",
+                    st.prefs.clicker_back,
+                ),
+            ];
+            for (button, label, code) in rows {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{label}:"));
+                    if st.clicker_learning == Some(button) {
+                        ui.label(
+                            RichText::new("press the button on the remote now…").color(PLAYHEAD),
+                        );
+                        if ui.button("Cancel").clicked() {
+                            st.clicker_cancel_learning = true;
+                        }
+                    } else {
+                        ui.label(crate::clicker::describe(code));
+                        if ui.button("Learn").clicked() {
+                            st.clicker_learn_request = Some(button);
+                        }
+                        if code.is_some() && ui.button("Clear").clicked() {
+                            match button {
+                                crate::clicker::Button::Go => st.prefs.clicker_go = None,
+                                crate::clicker::Button::Back => st.prefs.clicker_back = None,
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            if changed
+                && let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+            if st.prefs.clicker_on && !st.clicker_status.is_empty() {
+                if st.clicker_global {
+                    ui.label(RichText::new(&st.clicker_status).color(GO_GREEN));
+                } else {
+                    warning(ui, &st.clicker_status);
+                }
+            }
+            hint(
+                ui,
+                "GO fires the next cue; while everything is paused it resumes instead. Back pauses \
              everything; Back again fades everything out and stops (a second press within a \
              second is ignored, so a double tap can't end the show). The remote is a keyboard to \
              the computer: press Learn, then its button. Only the two learned keys are looked at; \
              nothing typed is kept, and the keys still reach other programs. Learned keys work \
              when NewQ isn't in front on Windows and on a Mac (which asks for the Input \
              Monitoring permission); elsewhere only while a NewQ window has the focus.",
-        );
-    });
+            );
+        });
+    }
     section(ui, "Decoding (this computer)", |ui| {
         let mut on = st.prefs.hw_decode;
         if ui

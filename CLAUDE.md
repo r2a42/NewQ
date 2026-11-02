@@ -132,7 +132,9 @@ The README describes the features; this file is about working on the code.
   fades out and stops, GO resumes; `BACK_GUARD` ignores a double press); `Shared` is the learned keys
   and learning flow; a Windows low-level keyboard hook and a Mac `CGEventTap` (Input Monitoring) feed
   it with `Command::Clicker`, the in-window `KeyboardInput` is the fallback. Keys are per computer in
-  `Prefs`. Not tried on a real Mac or Windows machine.
+  `Prefs`. Not tried on a real Mac or Windows machine. **Switched off** (`clicker::AVAILABLE`): it
+  started the global capture at every launch (a Mac would ask for Input Monitoring) and can't tell the
+  remote from the laptop keyboard; see `.claude/notes/next-ideas.md` for the device-aware plan.
 - `src/pptx.rs` and `src/slides_export.rs`: slides from a presentation. `pptx.rs` reads the slide
   order, hidden slides and first transition (advance and fade) from the XML (pure, tested);
   `slides_export.rs` makes pictures with PowerPoint (PowerShell COM), PowerPoint/Keynote (AppleScript)
