@@ -3756,6 +3756,31 @@ impl Show {
         self.relay_slides();
     }
 
+    /// Add `slides` to the slide show `group`, each with its own hold time and
+    /// fade where it has them (a slide's own timing is kept apart from the
+    /// show's, which the rest follow).
+    pub fn add_slides_timed(
+        &mut self,
+        group: CueId,
+        slides: Vec<(PathBuf, Option<f64>, Option<f64>)>,
+    ) {
+        let n = slides.len();
+        let files: Vec<PathBuf> = slides.iter().map(|s| s.0.clone()).collect();
+        let timings = slides.iter().map(|s| (s.1, s.2));
+        self.add_slides(group, files);
+        let kids: Vec<CueId> = self.children(group).iter().map(|c| c.id).collect();
+        let new = &kids[kids.len().saturating_sub(n)..];
+        for (id, (hold, fade)) in new.iter().zip(timings) {
+            if let Some(i) = self.cue_index(*id)
+                && let CueKind::Image(m) = &mut self.cues[i].kind
+            {
+                m.slide_duration = hold;
+                m.slide_fade = fade;
+            }
+        }
+        self.relay_slides();
+    }
+
     /// Total seconds a slide show runs, with the slides as timed now.
     pub fn slides_length(&self, group: CueId) -> f64 {
         let Some(CueKind::Group(g)) = self.cue(group).map(|c| &c.kind) else {
@@ -5416,6 +5441,35 @@ mod tests {
                 (c.pre_wait, m.fade_in, m.end)
             })
             .collect()
+    }
+
+    #[test]
+    fn slides_from_a_presentation_keep_their_own_timing() {
+        let mut show = Show::default();
+        let g = slide_show(&mut show, 1);
+        show.add_slides_timed(
+            g,
+            vec![
+                (PathBuf::from("a.png"), Some(10.0), Some(1.0)),
+                (PathBuf::from("b.png"), None, None),
+            ],
+        );
+        let kids: Vec<_> = show
+            .children(g)
+            .iter()
+            .map(|c| c.kind.media().unwrap().clone())
+            .collect();
+        assert_eq!(kids.len(), 3);
+        assert_eq!((kids[0].slide_duration, kids[0].slide_fade), (None, None));
+        assert_eq!(
+            (kids[1].slide_duration, kids[1].slide_fade),
+            (Some(10.0), Some(1.0))
+        );
+        assert_eq!((kids[2].slide_duration, kids[2].slide_fade), (None, None));
+        // The second slide fades in over 1 s, so the third starts 1 + 10 s after it.
+        let times = slide_times(&show, g);
+        assert_eq!(times[1], (6.0, 1.0, None));
+        assert_eq!(times[2].0, 17.0);
     }
 
     #[test]

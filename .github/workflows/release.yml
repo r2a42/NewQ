@@ -139,6 +139,28 @@ jobs:
             cargo build --release --locked
           fi
 
+      # Windows: sign newq.exe when a code-signing certificate is set up as
+      # repository secrets (WINDOWS_CERT_PFX: the .pfx file in base64;
+      # WINDOWS_CERT_PASSWORD). Without them the build is unsigned and Windows
+      # SmartScreen warns on the first run (see the README). Not tried yet.
+      - name: Sign newq.exe (Windows)
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 /d "NewQ" target/release/newq.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+          & $signtool.FullName verify /pa target/release/newq.exe
+          if ($LASTEXITCODE -ne 0) { throw "signature did not verify" }
+          Remove-Item $pfx
+
       - name: Package
         shell: bash
         run: |

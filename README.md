@@ -182,6 +182,35 @@ includes FFmpeg, so there's nothing else to install.
   fades are worked out from those settings, so each slide is still an
   ordinary image cue to give a position, size or colour (its timing is the
   slide show's). It plays once and the last slide fades out.
+- **Slides from a PowerPoint (or Keynote, OpenDocument, PDF) file:** *Cue ▸ Add
+  Slide show from PowerPoint…* (or *From PowerPoint…* in a slide show's
+  inspector) turns the file's slides into pictures with the program on this
+  computer: PowerPoint on Windows, PowerPoint or Keynote on a Mac, else LibreOffice
+  (with `pdftoppm` for the pictures); a PDF needs only `pdftoppm`. The pictures
+  go in a folder beside the file and become a slide show named after it. For a
+  `.pptx` the file's own timing is used: a slide's *advance after* time becomes
+  its duration, its transition time its fade, and hidden slides are left out.
+  Animations, video and sound inside a slide are not kept, only the picture.
+  Set `NEWQ_SLIDE_EXPORTER` to a program of your own (it is given the file and
+  the folder) to use another. The office program may flash a window while it
+  works. The XML reading and the timing are tested; the Windows, Mac and
+  LibreOffice conversions have not been tried on those machines.
+- **Presenter remote (clicker / PerfectCue):** *Settings ▸ General ▸ Presenter
+  remote*. Choose *Learn* for GO and for Back and press the buttons on the
+  remote (most clickers are a keyboard that sends Page Down and Page Up, which
+  PerfectCue also does). GO fires the next cue, or resumes if paused. Back pauses
+  everything; Back again fades everything out and stops; GO resumes. It works with
+  NewQ in the background: on Windows through a keyboard hook, on a Mac through
+  an event tap (macOS asks for *Input Monitoring* permission once). Where that
+  isn't available it works when NewQ's window has focus. Not tried with real
+  hardware or on a Mac or Windows machine.
+- **Windows "protected your PC" warning:** the Windows download isn't signed
+  yet, so SmartScreen says *Unknown publisher* the first time. Right-click the
+  downloaded zip ▸ *Properties* ▸ tick *Unblock* ▸ OK, then unzip, or choose
+  *More info ▸ Run anyway*. The release workflow signs `newq.exe` when the
+  repository has the secrets `WINDOWS_CERT_PFX` (the certificate as base64) and
+  `WINDOWS_CERT_PASSWORD`; a new certificate still shows the warning until
+  it builds reputation, unless it is an EV certificate.
 - **Panes you can rearrange and pop out:** the main window is a set of panes
   (*Cue list*, *Inspector*, *Preview*, *Active*, the *Cart* and the *Settings*)
   that tile it: drag a pane's tab onto another to move it, beside or above or

@@ -168,6 +168,31 @@ struct SlideDialog {
     answer: std::sync::mpsc::Receiver<Vec<PathBuf>>,
 }
 
+/// The dialog that picks a presentation to take slides from.
+struct DeckDialog {
+    group: Option<CueId>,
+    answer: std::sync::mpsc::Receiver<Option<PathBuf>>,
+}
+
+/// What a presentation gave: the pictures with their timing (see
+/// `slides_export::match_timings`).
+struct Imported {
+    name: String,
+    slides: Vec<(PathBuf, Option<f64>, Option<f64>)>,
+    how: String,
+    /// Said to the operator after: the timings weren't used, or the like.
+    note: Option<String>,
+}
+
+/// A presentation being turned into pictures by the office program, on a thread.
+struct DeckImport {
+    group: Option<CueId>,
+    name: String,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    answer: std::sync::mpsc::Receiver<Result<Imported, String>>,
+    started: std::time::Instant,
+}
+
 /// Copying a show's media into a folder, on its own thread.
 struct CollectJob {
     done: std::sync::mpsc::Receiver<relink::Collected>,
@@ -284,6 +309,11 @@ pub struct UiState {
     dialog: Option<OpenDialog>,
     /// The dialog for picking slides, if open.
     slide_dialog: Option<SlideDialog>,
+    /// The dialog for picking a presentation, the one being turned into
+    /// pictures, and why one failed.
+    deck_dialog: Option<DeckDialog>,
+    deck_import: Option<DeckImport>,
+    deck_error: Option<String>,
     /// A save being written, if any.
     saving: Option<SaveJob>,
     /// The show as last serialised, for the unsaved-changes mark and the undo
@@ -395,7 +425,11 @@ impl UiState {
             )
         } else if self.saving.is_some() {
             Some("Your show is being saved; try again in a moment.")
-        } else if self.dialog.is_some() || self.slide_dialog.is_some() {
+        } else if self.dialog.is_some()
+            || self.slide_dialog.is_some()
+            || self.deck_dialog.is_some()
+            || self.deck_import.is_some()
+        {
             Some("Close the open file dialog first.")
         } else {
             None
@@ -484,6 +518,15 @@ enum Action {
     AddFiles(Vec<PathBuf>),
     /// Pick images for a new slide show, or for the slide show `Some(group)`.
     AskSlides(Option<CueId>),
+    /// Choose a presentation to take the slides of a slide show from.
+    AskDeck(Option<CueId>),
+    /// Pictures of a presentation's slides with their timing, into `group`
+    /// or a new slide show.
+    ImportSlides(
+        Option<CueId>,
+        String,
+        Vec<(PathBuf, Option<f64>, Option<f64>)>,
+    ),
     /// Images chosen for a slide show (a new one when no group).
     AddSlides(Option<CueId>, Vec<PathBuf>),
     /// Change a slide's own fade or duration (None = the show's).
@@ -616,6 +659,8 @@ impl Action {
             Action::AddCue(_)
                 | Action::AddFiles(_)
                 | Action::AskSlides(_)
+                | Action::AskDeck(_)
+                | Action::ImportSlides(..)
                 | Action::AddSlides(..)
                 | Action::SetSlide(..)
                 | Action::MoveSlide(..)
@@ -701,6 +746,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     poll_folder_search(ui.ctx(), show, st);
     poll_dialog(ui.ctx(), show, st, &mut actions);
     poll_slide_dialog(ui.ctx(), st, &mut actions);
+    poll_deck(ui.ctx(), st, &mut actions);
+    deck_window(ui.ctx(), st);
     poll_save(ui.ctx(), engine, st);
     refresh_missing(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
@@ -1432,6 +1479,15 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             }
             if ui.button("🖼 Add Slide show…").clicked() {
                 actions.push(Action::AskSlides(None));
+            }
+            if ui
+                .button("📊 Add Slide show from PowerPoint…")
+                .on_hover_text(
+                    "Takes the slides of a PowerPoint, Keynote, OpenDocument or PDF file as pictures, using the program on this computer, with the file's own timing.",
+                )
+                .clicked()
+            {
+                actions.push(Action::AskDeck(None));
             }
             ui.separator();
             for ty in [
@@ -2551,6 +2607,194 @@ fn start_slide_dialog(st: &mut UiState, group: Option<CueId>) {
         });
     if spawned.is_ok() {
         st.slide_dialog = Some(SlideDialog { group, answer });
+    }
+}
+
+/// Open the picker for a presentation on a thread of its own.
+fn start_deck_dialog(st: &mut UiState, group: Option<CueId>) {
+    if st.deck_dialog.is_some()
+        || st.deck_import.is_some()
+        || st.slide_dialog.is_some()
+        || st.dialog.is_some()
+    {
+        return;
+    }
+    st.deck_error = None;
+    let (tx, answer) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("file-dialog".into())
+        .spawn(move || {
+            let file = rfd::FileDialog::new()
+                .set_title("Choose the presentation")
+                .add_filter(
+                    "Presentation",
+                    &[
+                        "pptx", "ppt", "pps", "ppsx", "pptm", "potx", "odp", "key", "pdf",
+                    ],
+                )
+                .pick_file();
+            let _ = tx.send(file);
+        });
+    if spawned.is_ok() {
+        st.deck_dialog = Some(DeckDialog { group, answer });
+    }
+}
+
+/// Where the pictures of `deck` go: a folder beside it, else the log folder.
+fn deck_pictures_folder(deck: &std::path::Path) -> PathBuf {
+    let stem = deck.file_stem().map_or_else(
+        || "slides".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let beside = deck.parent().map(|d| d.join(format!("{stem} slides")));
+    match beside {
+        Some(dir) if std::fs::create_dir_all(&dir).is_ok() => dir,
+        _ => crate::crash::log_dir().join("slides").join(stem),
+    }
+}
+
+/// Start turning `deck` into pictures.
+fn start_deck_import(st: &mut UiState, group: Option<CueId>, deck: PathBuf) {
+    let name = deck.file_stem().map_or_else(
+        || "Slide show".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, answer) = std::sync::mpsc::channel();
+    let (cancel2, name2) = (cancel.clone(), name.clone());
+    let spawned = std::thread::Builder::new()
+        .name("slides-export".into())
+        .spawn(move || {
+            let out = deck_pictures_folder(&deck);
+            let result = crate::slides_export::export(&deck, &out, &cancel2).map(|made| {
+                // The file's own timing, where it is a PowerPoint file we can read.
+                let read = crate::pptx::read(&deck);
+                let (slides, note) = match &read {
+                    Ok(described) => {
+                        let slides =
+                            crate::slides_export::match_timings(made.files.clone(), described);
+                        let used = slides.len() != made.files.len()
+                            || slides.iter().any(|(_, a, f)| a.is_some() || f.is_some());
+                        let note = (!used && made.files.len() != described.len()).then(|| {
+                            "The number of pictures didn't match the slides in the file, so its timings were not used.".to_string()
+                        });
+                        (slides, note)
+                    }
+                    Err(_) => (
+                        made.files.iter().map(|f| (f.clone(), None, None)).collect(),
+                        None,
+                    ),
+                };
+                Imported {
+                    name: name2,
+                    slides,
+                    how: made.how,
+                    note,
+                }
+            });
+            let _ = tx.send(result);
+        });
+    if spawned.is_ok() {
+        st.deck_import = Some(DeckImport {
+            group,
+            name,
+            cancel,
+            answer,
+            started: std::time::Instant::now(),
+        });
+    }
+}
+
+/// Take what the presentation dialog and the picture-making have answered.
+fn poll_deck(ctx: &egui::Context, st: &mut UiState, actions: &mut Vec<Action>) {
+    if let Some(d) = &st.deck_dialog {
+        match d.answer.try_recv() {
+            Ok(file) => {
+                let group = d.group;
+                st.deck_dialog = None;
+                if let Some(deck) = file {
+                    start_deck_import(st, group, deck);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.deck_dialog = None,
+        }
+    }
+    let Some(job) = &st.deck_import else { return };
+    match job.answer.try_recv() {
+        Ok(Ok(done)) => {
+            let group = job.group;
+            st.deck_import = None;
+            log::info!(
+                "slides: {} pictures from {} made by {}",
+                done.slides.len(),
+                done.name,
+                done.how
+            );
+            if let Some(note) = done.note {
+                st.deck_error = Some(note);
+            }
+            actions.push(Action::ImportSlides(group, done.name, done.slides));
+        }
+        Ok(Err(e)) => {
+            st.deck_import = None;
+            if e != "cancelled" {
+                st.deck_error = Some(e);
+            }
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => st.deck_import = None,
+    }
+}
+
+/// The window that says a presentation is being turned into pictures, or why
+/// it couldn't be.
+fn deck_window(ctx: &egui::Context, st: &mut UiState) {
+    if let Some(job) = &st.deck_import {
+        egui::Window::new("Slides from a presentation")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!(
+                        "Getting the slides of {}… ({} s)",
+                        job.name,
+                        job.started.elapsed().as_secs()
+                    ));
+                });
+                ui.label(
+                    RichText::new(
+                        "The presentation is opened by the program on this computer (PowerPoint, Keynote or LibreOffice), which may flash on screen.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                if ui.button("Cancel").clicked() {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+    } else if let Some(text) = st.deck_error.clone() {
+        let mut close = false;
+        egui::Window::new("Slides from a presentation")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(text);
+                if ui.button("OK").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            st.deck_error = None;
+        }
     }
 }
 
@@ -5290,6 +5534,13 @@ fn slides_panel(
     ui.horizontal(|ui| {
         if ui.button("Add images…").clicked() {
             actions.push(Action::AskSlides(Some(group)));
+        }
+        if ui
+            .button("From PowerPoint…")
+            .on_hover_text("Add the slides of a presentation, with the file's own timing")
+            .clicked()
+        {
+            actions.push(Action::AskDeck(Some(group)));
         }
         ui.label(
             RichText::new(format!(
@@ -8415,6 +8666,25 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddCueFile(ty, file) => add_cue(show, st, engine, ty, Some(file)),
         Action::AskFile(purpose) => start_dialog(st, show, purpose),
         Action::AskSlides(group) => start_slide_dialog(st, group),
+        Action::AskDeck(group) => start_deck_dialog(st, group),
+        Action::ImportSlides(group, name, slides) => {
+            let gid = match group {
+                Some(g) => g,
+                None => {
+                    let slot = show.insert_slot(st.selected, true, engine.active_list);
+                    let mut cue = show.make_cue(CueType::Group, None, slot.at);
+                    cue.name = name;
+                    if let CueKind::Group(g) = &mut cue.kind {
+                        g.slides = Some(SlideShow::default());
+                    }
+                    let gid = cue.id;
+                    show.insert_cue(slot, cue);
+                    gid
+                }
+            };
+            show.add_slides_timed(gid, slides);
+            select_new(show, st, engine, None, gid);
+        }
         Action::AddSlides(Some(group), files) => show.add_slides(group, files),
         Action::AddSlides(None, mut files) => {
             files.sort();

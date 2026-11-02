@@ -37,6 +37,8 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 ureq = "3"
 wgpu = "30.0.1"
 winit = "0.30.13"
+zip = { version = "9.2.2", default-features = false, features = ["deflate"] }
+roxmltree = "0.21.2"
 
 # Same versions as winit's, to ask a Mac for each display's name.
 [target.'cfg(target_os = "macos")'.dependencies]

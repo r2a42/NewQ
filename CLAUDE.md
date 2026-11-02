@@ -128,6 +128,19 @@ The README describes the features; this file is about working on the code.
   main window's own monitor is never offered). Cross-target clippy for Windows and Mac runs from Linux with
   `scripts/cross_clippy.sh` (a stand-in C compiler for `ring`, since nothing is linked); CI still builds and
   tests them.
+- `src/clicker.rs`: presenter remote. `decide` is the pure GO/Back logic (Back pauses, Back again
+  fades out and stops, GO resumes; `BACK_GUARD` ignores a double press); `Shared` is the learned keys
+  and learning flow; a Windows low-level keyboard hook and a Mac `CGEventTap` (Input Monitoring) feed
+  it with `Command::Clicker`, the in-window `KeyboardInput` is the fallback. Keys are per computer in
+  `Prefs`. Not tried on a real Mac or Windows machine.
+- `src/pptx.rs` and `src/slides_export.rs`: slides from a presentation. `pptx.rs` reads the slide
+  order, hidden slides and first transition (advance and fade) from the XML (pure, tested);
+  `slides_export.rs` makes pictures with PowerPoint (PowerShell COM), PowerPoint/Keynote (AppleScript)
+  or LibreOffice + `pdftoppm`, or `NEWQ_SLIDE_EXPORTER`; `match_timings` pairs pictures with slides.
+  `ui.rs` (`start_deck_dialog`, `start_deck_import`, `poll_deck`) runs it on a thread with Cancel and
+  `Action::ImportSlides` -> `Show::add_slides_timed`. Not tried against a real office program.
+- Windows signing: the `Sign newq.exe` step in `release.yml` runs only with the secrets
+  `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD`. Untested.
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
   self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it
   and writes the report; `--make-soak-show` writes just the show. sysinfo
