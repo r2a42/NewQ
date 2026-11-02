@@ -215,6 +215,8 @@ jobs:
             fi
             if ! head -1 "$RUNNER_TEMP/AuthKey.p8" | grep -q -- '-----BEGIN PRIVATE KEY-----'; then
               echo "APPLE_API_KEY_P8 is not an Apple .p8 key (after decoding it should start with -----BEGIN PRIVATE KEY-----)" >&2
+              # Sizes only, never the contents: a real key is about 250 bytes, or about 340 characters in base64.
+              echo "the secret is $(printf '%s' "$APPLE_API_KEY_P8" | wc -c | tr -d ' ') characters; decoded it is $(wc -c < "$RUNNER_TEMP/AuthKey.p8" | tr -d ' ') bytes" >&2
               exit 1
             fi
             echo "the notarisation key looks right ($(wc -l < "$RUNNER_TEMP/AuthKey.p8") lines)"
