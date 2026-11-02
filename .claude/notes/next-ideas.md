@@ -20,8 +20,9 @@ Still open:
 
 1. Slide shows that advance on GO, and the show-mode arrow keys (Right/Page Down forward, Left/Page Up back;
    a deck steps, otherwise Back pauses and again fades out): built on the session branch.
-2. PDF import with no external program (today `pdftoppm` isn't shipped, so PDF import fails on a stock
-   machine). Needs a PDF renderer crate or PDFium bundled: check licences (not AGPL) and quality first.
+2. PDF import with no external program: done with `hayro` (`src/pdf.rs`); licences of its tree are all
+   permissive (MIT/Apache/BSD/Zlib/Unicode). Not done: encrypted PDFs, and a deck's fonts that aren't
+   embedded get a standard substitute.
 3. The presenter remote working with NewQ in the background: a PerfectCue is a plain USB keyboard (defaults
    Right, Left, B; `docs` from DSan in the session scratchpad), and a global hook can't tell which keyboard a key
    came from, so it needs Raw Input (Windows) / IOHIDManager (Mac). Needs a `newq --list-keyboards` run on the

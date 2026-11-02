@@ -192,10 +192,13 @@ includes FFmpeg, so there's nothing else to install.
   fades everything out.
 - **Slides from a PowerPoint (or Keynote, OpenDocument, PDF) file:** *Cue ▸ Add
   Slide show from PowerPoint…* (or *From PowerPoint…* in a slide show's
-  inspector) turns the file's slides into pictures with the program on this
-  computer: PowerPoint on Windows, PowerPoint or Keynote on a Mac, else LibreOffice
-  (with `pdftoppm` for the pictures); a PDF needs only `pdftoppm`. The pictures
-  go in a folder beside the file and become a slide show named after it. For a
+  inspector) turns the file's slides into pictures. **A PDF needs nothing
+  else:** NewQ draws its pages itself, so on a computer with no office program
+  save the presentation as a PDF (every presentation program can) and choose
+  that. A `.pptx` is drawn by the program on this computer: PowerPoint on
+  Windows, PowerPoint or Keynote on a Mac, else LibreOffice (whose PDF NewQ
+  draws). The pictures go in a new folder beside the file for each import
+  (`<name> slides/import-…`) and become a slide show named after it. For a
   `.pptx` the file's own timing is used: a slide's *advance after* time becomes
   its duration, its transition time its fade, and hidden slides are left out;
   a deck with no *advance after* times in it (a speaker's deck) comes in
@@ -203,8 +206,10 @@ includes FFmpeg, so there's nothing else to install.
   Animations, video and sound inside a slide are not kept, only the picture.
   Set `NEWQ_SLIDE_EXPORTER` to a program of your own (it is given the file and
   the folder) to use another. The office program may flash a window while it
-  works. The XML reading and the timing are tested; the Windows, Mac and
-  LibreOffice conversions have not been tried on those machines.
+  works. PDF drawing and the LibreOffice route are tested (and compared with
+  poppler's pictures: the same); the PowerPoint and Keynote routes have not
+  been tried on Windows or a Mac. A PDF has no timing, so it comes in as a
+  slide show that advances on GO.
 - **Windows "protected your PC" warning:** the Windows download isn't signed
   yet, so SmartScreen says *Unknown publisher* the first time. Right-click the
   downloaded zip ▸ *Properties* ▸ tick *Unblock* ▸ OK, then unzip, or choose

@@ -31,6 +31,7 @@ mod monitor;
 mod ndi;
 mod output;
 mod pattern;
+mod pdf;
 mod power;
 mod pptx;
 mod prefs;

@@ -135,10 +135,14 @@ The README describes the features; this file is about working on the code.
   `Prefs`. Not tried on a real Mac or Windows machine. **Switched off** (`clicker::AVAILABLE`): it
   started the global capture at every launch (a Mac would ask for Input Monitoring) and can't tell the
   remote from the laptop keyboard; see `.claude/notes/next-ideas.md` for the device-aware plan.
+- `src/pdf.rs`: draws a PDF's pages as 1920-pixel PNGs with `hayro` (pure Rust, no unsafe, MIT/Apache; the
+  PDF's own fonts, Foxit substitutes for the standard 14; no encrypted PDFs). A page that panics is an error
+  naming it, not an abort. Compared against poppler on a LibreOffice-made deck: the same pictures.
 - `src/pptx.rs` and `src/slides_export.rs`: slides from a presentation. `pptx.rs` reads the slide
   order, hidden slides and first transition (advance and fade) from the XML (pure, tested);
-  `slides_export.rs` makes pictures with PowerPoint (PowerShell COM), PowerPoint/Keynote (AppleScript)
-  or LibreOffice + `pdftoppm`, or `NEWQ_SLIDE_EXPORTER`; `match_timings` pairs pictures with slides.
+  `slides_export.rs` makes pictures: a PDF through `pdf.rs` (no program needed), PowerPoint (PowerShell
+  COM), PowerPoint/Keynote (AppleScript), LibreOffice (makes a PDF that `pdf.rs` draws), or
+  `NEWQ_SLIDE_EXPORTER`; `match_timings` pairs pictures with slides.
   `ui.rs` (`start_deck_dialog`, `start_deck_import`, `poll_deck`) runs it on a thread with Cancel and
   `Action::ImportSlides` -> `Show::add_slides_timed`. Not tried against a real office program.
   A deck with no advance times imports with `SlideShow::advance = Advance::OnGo`: the group fires only

@@ -1511,7 +1511,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             if ui
                 .button("📊 Add Slide show from PowerPoint…")
                 .on_hover_text(
-                    "Takes the slides of a PowerPoint, Keynote, OpenDocument or PDF file as pictures, using the program on this computer, with the file's own timing.",
+                    "Takes the slides of a PowerPoint, Keynote, OpenDocument or PDF file as pictures, with the file's own timing. A PDF (Save as PDF in any presentation program) needs no other program.",
                 )
                 .clicked()
             {

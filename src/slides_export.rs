@@ -6,7 +6,9 @@
 //!
 //! - **Windows:** PowerPoint, through its COM interface (PowerShell).
 //! - **Mac:** PowerPoint, or Keynote, through AppleScript.
-//! - **Any:** LibreOffice makes a PDF and `pdftoppm` (poppler) makes the pictures.
+//! - **A PDF:** NewQ draws its pages itself (`pdf.rs`), with no program at all:
+//!   the way that always works. Every presentation program can Save as PDF.
+//! - **Any:** LibreOffice makes a PDF, and NewQ draws that.
 //! - **Your own:** a program named by `NEWQ_SLIDE_EXPORTER` is run as
 //!   `program <presentation> <folder>` and must leave the pictures in the folder.
 //!
@@ -36,6 +38,8 @@ pub struct Exported {
 #[derive(Clone, Debug, PartialEq)]
 enum Tool {
     Custom(PathBuf),
+    /// NewQ's own PDF drawing (`pdf.rs`).
+    BuiltInPdf,
     PowerPointWindows,
     PowerPointMac,
     Keynote,
@@ -46,6 +50,7 @@ impl Tool {
     fn name(&self) -> &'static str {
         match self {
             Tool::Custom(_) => "the program named by NEWQ_SLIDE_EXPORTER",
+            Tool::BuiltInPdf => "NewQ's own PDF reader",
             Tool::PowerPointWindows | Tool::PowerPointMac => "PowerPoint",
             Tool::Keynote => "Keynote",
             Tool::LibreOffice => "LibreOffice",
@@ -60,6 +65,11 @@ fn tools_for(ext: &str, custom: Option<PathBuf>) -> Vec<Tool> {
     if let Some(c) = custom {
         tools.push(Tool::Custom(c));
     }
+    // A PDF needs nothing else.
+    if ext == "pdf" {
+        tools.push(Tool::BuiltInPdf);
+        return tools;
+    }
     let office = ["pptx", "ppt", "pps", "ppsx", "pptm", "potx", "odp"].contains(&ext.as_str());
     if cfg!(windows) && office && ext != "odp" {
         tools.push(Tool::PowerPointWindows);
@@ -72,7 +82,7 @@ fn tools_for(ext: &str, custom: Option<PathBuf>) -> Vec<Tool> {
             tools.push(Tool::Keynote);
         }
     }
-    if office || ext == "pdf" {
+    if office {
         tools.push(Tool::LibreOffice);
     }
     tools
@@ -281,44 +291,29 @@ fn export_with(
                 cancel,
             )?)
         }
+        Tool::BuiltInPdf => crate::pdf::render_pages(input, out_dir, cancel).map(|_| ()),
         Tool::LibreOffice => {
             let pdf_dir = out_dir.join(".pdf");
             std::fs::create_dir_all(&pdf_dir).map_err(|e| e.to_string())?;
-            let is_pdf = input
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-            let pdf = if is_pdf {
-                input.to_path_buf()
-            } else {
-                let soffice = find_program(
-                    &["soffice", "soffice.exe", "libreoffice"],
-                    &[
-                        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-                        r"C:\Program Files\LibreOffice\program\soffice.exe",
-                        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
-                    ],
-                )
-                .ok_or("LibreOffice isn't installed")?;
-                let mut cmd = Command::new(soffice);
-                cmd.args(["--headless", "--convert-to", "pdf", "--outdir"])
-                    .arg(&pdf_dir)
-                    .arg(input);
-                crate::media::ffmpeg::no_console(&mut cmd);
-                ok(run(&mut cmd, cancel)?)?;
-                let stem = input.file_stem().unwrap_or_default();
-                pdf_dir.join(stem).with_extension("pdf")
-            };
-            let pdftoppm = find_program(
-                &["pdftoppm", "pdftoppm.exe"],
-                &["/opt/homebrew/bin/pdftoppm", "/usr/local/bin/pdftoppm"],
+            let soffice = find_program(
+                &["soffice", "soffice.exe", "libreoffice"],
+                &[
+                    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    r"C:\Program Files\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+                ],
             )
-            .ok_or("pdftoppm (part of poppler) isn't installed, so a PDF can't be turned into pictures")?;
-            let mut cmd = Command::new(pdftoppm);
-            cmd.args(["-png", "-r", "110"])
-                .arg(&pdf)
-                .arg(out_dir.join("slide"));
+            .ok_or("LibreOffice isn't installed")?;
+            let mut cmd = Command::new(soffice);
+            cmd.args(["--headless", "--convert-to", "pdf", "--outdir"])
+                .arg(&pdf_dir)
+                .arg(input);
             crate::media::ffmpeg::no_console(&mut cmd);
-            let result = ok(run(&mut cmd, cancel)?);
+            ok(run(&mut cmd, cancel)?)?;
+            let stem = input.file_stem().unwrap_or_default();
+            let pdf = pdf_dir.join(stem).with_extension("pdf");
+            // NewQ draws the PDF itself: nothing else has to be installed.
+            let result = crate::pdf::render_pages(&pdf, out_dir, cancel).map(|_| ());
             let _ = std::fs::remove_dir_all(&pdf_dir);
             result
         }
@@ -368,8 +363,8 @@ pub fn export(input: &Path, out_dir: &Path, cancel: &Arc<AtomicBool>) -> Result<
     }
     Err(format!(
         "No program on this computer could turn the slides into pictures. {} \
-         Install PowerPoint, Keynote, or LibreOffice with poppler's pdftoppm; or in your \
-         presentation program use Export ▸ PNG and add those pictures to a slide show.",
+         Save the presentation as a PDF in your presentation program (File ▸ Save as or \
+         Export) and choose that file here; or install PowerPoint, Keynote or LibreOffice.",
         tried.join("; ")
     ))
 }
@@ -460,13 +455,61 @@ mod tests {
 
     #[test]
     fn the_programs_tried_depend_on_the_file_and_a_custom_one_comes_first() {
+        // A PDF needs no other program.
         let t = tools_for("pdf", None);
-        assert_eq!(t, vec![Tool::LibreOffice]);
+        assert_eq!(t, vec![Tool::BuiltInPdf]);
         let t = tools_for("PPTX", Some(PathBuf::from("/x/mine")));
         assert_eq!(t[0], Tool::Custom(PathBuf::from("/x/mine")));
         assert_eq!(*t.last().unwrap(), Tool::LibreOffice);
         assert!(tools_for("docx", None).is_empty());
         assert!(!tools_for("key", None).contains(&Tool::LibreOffice));
+    }
+
+    #[test]
+    fn a_pdf_comes_in_with_no_program_but_newq() {
+        let dir = std::env::temp_dir().join(format!("newq_pdfx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("Talk.pdf");
+        std::fs::write(&pdf, crate::pdf::tests::tiny_pdf(4)).unwrap();
+        let got = export(&pdf, &dir.join("out"), &Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(got.files.len(), 4);
+        assert_eq!(got.how, "NewQ's own PDF reader");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn libreoffice_decks_are_drawn_by_the_built_in_pdf_reader() {
+        // Only where LibreOffice is installed.
+        if find_program(&["soffice", "libreoffice"], &[]).is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("newq_lo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = |name: &str, text: &str| {
+            format!(
+                "<draw:page draw:name=\"{name}\"><draw:frame svg:x=\"2cm\" svg:y=\"2cm\" svg:width=\"12cm\" svg:height=\"3cm\"><draw:text-box><text:p>{text}</text:p></draw:text-box></draw:frame></draw:page>"
+            )
+        };
+        let deck = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<office:document xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:draw=\"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:svg=\"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0\" office:version=\"1.3\" office:mimetype=\"application/vnd.oasis.opendocument.presentation\"><office:body><office:presentation>{}{}</office:presentation></office:body></office:document>",
+            page("one", "First"),
+            page("two", "Second")
+        );
+        let input = dir.join("deck.fodp");
+        std::fs::write(&input, deck).unwrap();
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        export_with(
+            &Tool::LibreOffice,
+            &input,
+            &out,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(pictures_in(&out).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
