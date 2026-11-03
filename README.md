@@ -17,6 +17,33 @@ Pre-built binaries for Windows, Linux and macOS are on the
 [Releases page](https://github.com/r2a42/NewQ/releases). Every download
 includes FFmpeg, so there's nothing else to install.
 
+## Code signing policy
+
+- **macOS:** the app is signed with an Apple Developer ID and notarised by Apple.
+- **Windows:** the download is not code-signed yet, so SmartScreen warns the
+  first time (see *Windows "protected your PC" warning* below). We have applied
+  to [SignPath Foundation](https://signpath.org) for free code signing for
+  open source projects; this section will name them once a certificate is issued.
+- **What is signed:** only `newq.exe` and the Mac app, which are built from this
+  repository's source. Third-party programs bundled in the download (FFmpeg) are
+  separate open source programs and are not signed by us.
+- **How:** every release is built by the GitHub Actions workflow in
+  [`.github/workflows/release.yml`](.github/workflows/release.yml) from a tagged
+  commit; nothing is signed on anyone's own computer, and a Windows signature
+  will need a manual approval for each release.
+- **Team roles:** NewQ has one maintainer, Sean McNally
+  ([@r2a42](https://github.com/r2a42)), who is its author, reviewer (of any
+  change from someone else) and approver of signing requests. The accounts used
+  for signing and for the repository use multi-factor authentication.
+
+## Privacy
+
+This program will not transfer any information to other networked systems
+unless specifically requested by the user. NewQ has no telemetry and no update
+check. It uses the network only for what you set up: OSC, MIDI-over-network,
+the web remote, NDI, PJLink and TCP sends, and streams go to the addresses you
+enter, and *Test Mode* downloads its free test media when you start it.
+
 ## Features
 
 - **NDI video in and out:** with the NDI Runtime (from ndi.video; NewQ can't
