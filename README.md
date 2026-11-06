@@ -208,7 +208,8 @@ enter, and *Test Mode* downloads its free test media when you start it.
   show runs. A slide show is a group of image cues whose start times and
   fades are worked out from those settings, so each slide is still an
   ordinary image cue to give a position, size or colour (its timing is the
-  slide show's). It plays once and the last slide fades out.
+  slide show's). It plays once and the last slide fades out (in a slide show
+  that advances on GO, below, the last slide stays until something else replaces it).
   *Advance* chooses what starts the next slide: **Automatically** (the above)
   or **On GO**, for a speaker stepping through a presentation: the first GO
   shows slide 1, each GO after it shows the next slide (crossfading as set),

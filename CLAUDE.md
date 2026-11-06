@@ -156,9 +156,11 @@ The README describes the features; this file is about working on the code.
   `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`) exist; `package_release.sh` then signs ffmpeg, ffprobe
   and the app (hardened runtime, `assets/macos/entitlements.plist`), notarises with `notarytool`,
   staples and zips. Without the secrets it ad-hoc signs as before. A step's own `env` can't be used in
-  its `if`, hence the `signing` step's outputs. Untested: needs the secrets and a dry run.
+  its `if`, hence the `signing` step's outputs. Works: used for every release since 0.16.0 (the
+  notarisation wait is about 30 minutes).
 - Windows signing: the `Sign newq.exe` step in `release.yml` runs only with the secrets
-  `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD`. Untested.
+  `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD`. Untested, and a placeholder: new certificates
+  are hardware-backed and can't be exported as a .pfx (SignPath or a cloud service is the way).
 - `src/stats.rs`: the `NEWQ_STATS` CSV log and `--stats-report`. `src/soak.rs`: builds the
   self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it
   and writes the report; `--make-soak-show` writes just the show. sysinfo
@@ -233,7 +235,7 @@ The README describes the features; this file is about working on the code.
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings      # CI fails on any warning
-NEWQ_REQUIRE_MEDIA=1 cargo test                 # ~130 tests, ~5 s once built
+NEWQ_REQUIRE_MEDIA=1 cargo test                 # over 700 tests, about 3 minutes once built
 ```
 
 - The tests decode real media with FFmpeg: `scripts/make_test_media.sh` makes

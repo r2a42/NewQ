@@ -24,6 +24,11 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Nothing here writes to the repository: the builds get a read-only token (the
+# gate job asks for what it needs itself).
+permissions:
+  contents: read
+
 jobs:
   gate:
     runs-on: ubuntu-latest
