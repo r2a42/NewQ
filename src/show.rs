@@ -3709,8 +3709,13 @@ impl Show {
                 let CueKind::Image(m) = &mut cue.kind else {
                     continue;
                 };
-                let fade = m.slide_fade.unwrap_or(defaults.fade).max(0.0);
-                let hold = m.slide_duration.unwrap_or(defaults.duration).max(0.0);
+                // Within what the inspector allows, so that no value from outside
+                // can make a start time infinite (which a saved show can't hold).
+                let fade = m.slide_fade.unwrap_or(defaults.fade).clamp(0.0, 36_000.0);
+                let hold = m
+                    .slide_duration
+                    .unwrap_or(defaults.duration)
+                    .clamp(0.0, 36_000.0);
                 // On GO, a slide stays until the next one has faded in over it, and
                 // the last stays until something else takes its place.
                 let finish = if on_go {

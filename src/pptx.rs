@@ -25,6 +25,18 @@ const PRESENTATION_NS: &str = "http://schemas.openxmlformats.org/presentationml/
 const RELATIONSHIP_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const P14_NS: &str = "http://schemas.microsoft.com/office/powerpoint/2010/main";
 
+/// The longest time taken from a deck, in seconds (the inspector's own limit).
+const MAX_SECONDS: f64 = 36_000.0;
+
+/// A time in milliseconds as written in a deck, in seconds; nothing for text
+/// that isn't a finite number ("inf", "1e999", "NaN": a saved show can't hold
+/// those), and kept within 0 to `MAX_SECONDS`.
+fn seconds_from_ms(text: &str) -> Option<f64> {
+    let ms: f64 = text.trim().parse().ok()?;
+    ms.is_finite()
+        .then(|| (ms / 1000.0).clamp(0.0, MAX_SECONDS))
+}
+
 /// The most read from one part of a deck (a slide's XML is some kilobytes).
 const MAX_PART: u64 = 32 << 20;
 
@@ -94,20 +106,15 @@ fn read_slide(xml: &str) -> Result<Slide, String> {
     let (advance, fade) = match transition {
         None => (None, None),
         Some(t) => {
-            let advance = t
-                .attribute("advTm")
-                .and_then(|v| v.parse::<f64>().ok())
-                .map(|ms| ms / 1000.0);
-            let fade = t
-                .attribute((P14_NS, "dur"))
-                .and_then(|v| v.parse::<f64>().ok())
-                .map(|ms| ms / 1000.0)
-                .or(match t.attribute("spd") {
+            let advance = t.attribute("advTm").and_then(seconds_from_ms);
+            let fade = t.attribute((P14_NS, "dur")).and_then(seconds_from_ms).or(
+                match t.attribute("spd") {
                     Some("slow") => Some(1.0),
                     Some("fast") => Some(0.5),
                     // Medium, and none said: PowerPoint's own default.
                     _ => Some(0.75),
-                });
+                },
+            );
             (advance, fade)
         }
     };
@@ -192,6 +199,30 @@ mod tests {
                 fade: Some(1.5)
             }
         );
+    }
+
+    #[test]
+    fn times_that_are_not_finite_numbers_are_dropped_and_huge_ones_capped() {
+        // A saved show can't hold infinity (it is written as null and then
+        // won't load), so a deck's "inf" or "1e999" must never get that far.
+        for bad in ["inf", "-inf", "NaN", "1e999", "", "soon"] {
+            assert_eq!(seconds_from_ms(bad), None, "{bad:?}");
+        }
+        assert_eq!(seconds_from_ms("2500"), Some(2.5));
+        assert_eq!(seconds_from_ms(" 4000 "), Some(4.0));
+        assert_eq!(seconds_from_ms("-300"), Some(0.0));
+        assert_eq!(seconds_from_ms("1e15"), Some(MAX_SECONDS));
+        let slides = deck(|name| match name {
+            "slides/slide1.xml" => Some(slide_xml(
+                r#"<p:transition advTm="1e999" p14:dur="inf"/>"#,
+                "",
+            )),
+            _ => Some(slide_xml("", "")),
+        })
+        .unwrap();
+        // (The list puts slide2 first: slide1, with the bad numbers, is second.)
+        assert_eq!(slides[1].advance, None);
+        assert!(slides[1].fade.is_some_and(f64::is_finite));
     }
 
     #[test]
