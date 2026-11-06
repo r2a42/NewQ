@@ -518,6 +518,10 @@ pub fn collect(dest: &Path, files: &[PathBuf], progress: &Arc<AtomicUsize>) -> C
         }
         if !src.is_file() {
             out.failed.push((src, "the file is missing".into()));
+        } else if same_file(&src, &target) {
+            // The folder's own name for it is a link to the file itself:
+            // copying onto it would open the file for writing and empty it.
+            out.already_there += 1;
         } else {
             match std::fs::copy(&src, &target) {
                 Ok(_) => {
@@ -536,6 +540,28 @@ pub fn collect(dest: &Path, files: &[PathBuf], progress: &Arc<AtomicUsize>) -> C
 mod tests {
     use super::*;
     use crate::show::{CueKind, CueType};
+
+    #[cfg(unix)]
+    #[test]
+    fn collecting_never_copies_a_file_onto_itself_through_a_link() {
+        let root = dir("selfcopy");
+        let media = root.join("media");
+        let dest = root.join("collected");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let clip = media.join("clip.mp4");
+        std::fs::write(&clip, b"precious media").unwrap();
+        // The folder already has a link to the original under the name it would get.
+        std::os::unix::fs::symlink(&clip, dest.join("clip.mp4")).unwrap();
+        let progress = Arc::new(AtomicUsize::new(0));
+        let got = collect(&dest, std::slice::from_ref(&clip), &progress);
+        assert_eq!(std::fs::read(&clip).unwrap(), b"precious media");
+        assert!(got.failed.is_empty(), "{:?}", got.failed);
+        assert_eq!(got.copied, 0);
+        assert_eq!(got.already_there, 1);
+        assert_eq!(progress.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("newq_relink_{name}"));
