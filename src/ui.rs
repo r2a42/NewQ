@@ -8513,8 +8513,11 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
             for id in targets {
                 match &cmd {
                     Command::GoCue(_) => {
+                        // That cue, not the next slide of a slide show that is on.
                         select(show, st, engine, Some(id));
-                        apply(Action::Go, show, engine, st);
+                        engine.go_playhead(show);
+                        st.selected = engine.playhead;
+                        st.scroll_to_selected = true;
                     }
                     Command::Select(_) => {
                         select(show, st, engine, Some(id));

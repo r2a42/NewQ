@@ -887,6 +887,13 @@ impl Engine {
         if self.deck_step(show, true) == DeckStep::Moved {
             return;
         }
+        self.go_playhead(show);
+    }
+
+    /// Fire the cue at the playhead, whatever slide show is on: for "go to
+    /// cue 12" and a cue list's own GO, which ask for a particular cue and must
+    /// not be taken for a step through the slides.
+    pub fn go_playhead(&mut self, show: &Show) {
         let Some(here) = self
             .playhead
             .and_then(|id| show.cue_index(id))
@@ -992,7 +999,7 @@ impl Engine {
         }
         let was = self.active_list;
         self.switch_list(show, list);
-        self.go(show);
+        self.go_playhead(show);
         self.switch_list(show, was);
     }
 
@@ -5328,6 +5335,45 @@ mod tests {
         // deck no longer takes the buttons.
         assert_eq!(e.deck_step(&show, true), DeckStep::AtEnd);
         assert_eq!(e.deck_step(&show, false), DeckStep::NoDeck);
+    }
+
+    #[test]
+    fn go_to_a_cue_and_a_lists_own_go_fire_that_cue_not_the_next_slide_of_a_deck() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let slot = show.insert_slot(None, true, 0);
+        let mut g = show.make_cue(CueType::Group, None, slot.at);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.slides = Some(SlideShow {
+                fade: 0.1,
+                duration: 0.1,
+                advance: Advance::OnGo,
+            });
+        }
+        let gid = g.id;
+        show.insert_cue(slot, g);
+        show.add_slides(gid, vec![img.clone(), img.clone(), img.clone()]);
+        let slides: Vec<CueId> = show.children(gid).iter().map(|c| c.id).collect();
+        let other = image_cue(&mut show, &img, Transition::Crossfade, 0.1);
+        e.playhead = Some(gid);
+        e.go(&show);
+        run_until(&mut e, &show, "slide 1 on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(slides[0]))
+        });
+        // The playhead is on `other` now. A plain GO would show slide 2; a GO
+        // that asks for this cue (OSC "go cue", MSC, the list's own GO) fires it.
+        assert_eq!(e.playhead, Some(other));
+        e.go_playhead(&show);
+        run_until(&mut e, &show, "the asked-for cue on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(other))
+        });
+        assert!(
+            stack(&e, out).iter().all(|l| l.0 != Some(slides[1])),
+            "the deck must not have stepped"
+        );
     }
 
     #[test]
