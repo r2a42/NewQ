@@ -60,8 +60,16 @@ pub fn render_pages(
         if !(w > 0.0 && h > 0.0) {
             return Err(format!("page {} has no size", n + 1));
         }
+        // The picture is `LONG_EDGE` along its longer side, whatever the page's
+        // size (a lower limit on the scale let a page declaring millions of
+        // points ask for a picture of 100000 pixels, a bitmap of gigabytes: that
+        // is an abort, which nothing here can catch). A page too thin to have a
+        // pixel on its short side is no slide.
+        let scale = (LONG_EDGE / w.max(h)).min(16.0);
+        if w * scale < 1.0 || h * scale < 1.0 {
+            return Err(format!("page {} has a shape that can't be drawn", n + 1));
+        }
         // A bad page must not take the show down with it.
-        let scale = (LONG_EDGE / w.max(h)).clamp(0.05, 16.0);
         let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let pixmap = render(
                 page,
@@ -93,6 +101,11 @@ pub(crate) mod tests {
 
     /// A PDF by hand: `pages` landscape pages, each a red square on white.
     pub(crate) fn tiny_pdf(pages: usize) -> Vec<u8> {
+        sized_pdf(pages, 400, 225)
+    }
+
+    /// The same, with pages `width` x `height` points.
+    fn sized_pdf(pages: usize, width: u64, height: u64) -> Vec<u8> {
         let mut objects: Vec<String> = Vec::new();
         objects.push("<< /Type /Catalog /Pages 2 0 R >>".into());
         let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
@@ -104,7 +117,7 @@ pub(crate) mod tests {
         for i in 0..pages {
             let content = 4 + 2 * i;
             objects.push(format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 225] /Contents {content} 0 R /Resources << >> >>"
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents {content} 0 R /Resources << >> >>"
             ));
             let stream = "1 0 0 rg 100 50 200 125 re f";
             objects.push(format!(
@@ -151,6 +164,32 @@ pub(crate) mod tests {
         let mid = img.get_pixel(960, 540).0;
         assert!(mid[0] > 240 && mid[1] < 20 && mid[2] < 20, "{mid:?}");
         assert_eq!(img.get_pixel(5, 5).0, [255, 255, 255, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_of_any_declared_size_is_drawn_no_bigger_than_a_slide() {
+        let dir = std::env::temp_dir().join(format!("newq_pdf_big_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let go = Arc::new(AtomicBool::new(false));
+        // A page declaring two million points a side would have been a bitmap of
+        // gigabytes (an abort, not an error): it is drawn at slide size.
+        let huge = dir.join("huge.pdf");
+        std::fs::write(&huge, sized_pdf(1, 2_000_000, 2_000_000)).unwrap();
+        let files = render_pages(&huge, &dir.join("a"), &go).unwrap();
+        let img = image::open(&files[0]).unwrap();
+        assert!(
+            img.width() <= 1920 && img.height() <= 1920,
+            "{}x{}",
+            img.width(),
+            img.height()
+        );
+        // A page too thin for a pixel on its short side is an error, not a crash.
+        let thin = dir.join("thin.pdf");
+        std::fs::write(&thin, sized_pdf(1, 2_000_000, 10)).unwrap();
+        let err = render_pages(&thin, &dir.join("b"), &go).unwrap_err();
+        assert!(err.contains("shape"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
