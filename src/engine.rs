@@ -5377,6 +5377,47 @@ mod tests {
     }
 
     #[test]
+    fn a_cue_lists_own_go_fires_its_cue_while_a_deck_in_another_list_is_on() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let slot = show.insert_slot(None, true, 0);
+        let mut g = show.make_cue(CueType::Group, None, slot.at);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.slides = Some(SlideShow {
+                fade: 0.1,
+                duration: 0.1,
+                advance: Advance::OnGo,
+            });
+        }
+        let gid = g.id;
+        show.insert_cue(slot, g);
+        show.add_slides(gid, vec![img.clone(), img.clone()]);
+        let slides: Vec<CueId> = show.children(gid).iter().map(|c| c.id).collect();
+        // A cue of its own in a second list.
+        let second = show.add_list("Second");
+        let other = image_cue(&mut show, &img, Transition::Crossfade, 0.1);
+        show.cues.iter_mut().find(|c| c.id == other).unwrap().list = second;
+        show.normalize_lists();
+        e.playhead = Some(gid);
+        e.go(&show);
+        run_until(&mut e, &show, "slide 1 on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(slides[0]))
+        });
+        e.go_list(&show, second);
+        run_until(&mut e, &show, "the second list's cue on screen", |e| {
+            stack(e, out).iter().any(|l| l.0 == Some(other))
+        });
+        assert!(
+            stack(&e, out).iter().all(|l| l.0 != Some(slides[1])),
+            "the deck must not have stepped"
+        );
+        assert_eq!(e.active_list, 0, "the list being worked is left as it was");
+    }
+
+    #[test]
     fn a_live_audio_cue_with_no_input_says_so_and_ends() {
         let mut show = Show::default();
         let mut cue = show.make_cue(CueType::LiveAudio, None, 0);
