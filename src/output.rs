@@ -227,16 +227,32 @@ fn run_script(command: &str, args: &[String]) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Script “{command}”: {e}"))?;
+    // The program's messages are read as it goes: a pipe nobody reads fills at
+    // about 64 KB and then stops the program, which would be taken for a hang.
+    // Only the start of them is kept, to say why it failed.
+    let said = Arc::new(parking_lot::Mutex::new(String::new()));
+    let drain = child.stderr.take().map(|mut pipe| {
+        let said = said.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut head = Vec::new();
+            let _ = (&mut pipe).take(400).read_to_end(&mut head);
+            *said.lock() = String::from_utf8_lossy(&head).into_owned();
+            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        })
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
-                let mut err = String::new();
-                if let Some(mut e) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = e.by_ref().take(400).read_to_string(&mut err);
+                // It has ended, so its messages are all in; the reader only
+                // needs a moment (unless something else still holds the pipe).
+                let until = Instant::now() + Duration::from_millis(500);
+                while drain.as_ref().is_some_and(|d| !d.is_finished()) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(5));
                 }
+                let err = said.lock().clone();
                 let err = err.trim();
                 return Err(format!(
                     "Script “{command}” ended with {status}{}{err}",
@@ -897,6 +913,19 @@ mod tests {
             run_script(sh, &["-c".into(), "exit 0".into()]).unwrap();
             let e = run_script(sh, &["-c".into(), "echo boom >&2; exit 3".into()]).unwrap_err();
             assert!(e.contains("boom") && e.contains('3'), "{e}");
+            // A program that says a lot is not stopped by nobody listening (a
+            // full pipe would have held it until the 60 s limit), and a failure
+            // still reports the start of what it said.
+            let chatter = "i=0; while [ $i -lt 4000 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&2; i=$((i+1)); done";
+            let began = Instant::now();
+            run_script(sh, &["-c".into(), format!("{chatter}; exit 0")]).unwrap();
+            let e = run_script(sh, &["-c".into(), format!("{chatter}; exit 4")]).unwrap_err();
+            assert!(e.contains("xxxx") && e.contains('4'), "{e}");
+            assert!(
+                began.elapsed() < Duration::from_secs(20),
+                "{:?}",
+                began.elapsed()
+            );
         }
         let e = run_script("/no/such/program", &[]).unwrap_err();
         assert!(e.contains("/no/such/program"), "{e}");
