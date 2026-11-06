@@ -70,7 +70,7 @@ pub fn render_pages(
             return Err(format!("page {} has a shape that can't be drawn", n + 1));
         }
         // A bad page must not take the show down with it.
-        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let drawn = crate::crash::catch_expected(|| {
             let pixmap = render(
                 page,
                 &cache,
@@ -83,7 +83,7 @@ pub fn render_pages(
                 },
             );
             pixmap.into_png()
-        }));
+        });
         let png = match drawn {
             Ok(Ok(png)) => png,
             _ => return Err(format!("page {} couldn't be drawn", n + 1)),

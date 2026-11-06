@@ -105,6 +105,22 @@ fn utc_now() -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02} UTC")
 }
 
+thread_local! {
+    /// Set while this thread runs code whose panics are caught and dealt with.
+    static EXPECTED_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f`, and turn a panic in it into `Err`. For code that handles its own
+/// failure (a PDF page that can't be drawn is an error message): the panic is
+/// only noted in the log, with no crash report and no "NewQ has stopped"
+/// message, which on Windows would tell an operator the show was over.
+pub fn catch_expected<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
+    EXPECTED_PANIC.with(|c| c.set(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    EXPECTED_PANIC.with(|c| c.set(false));
+    result.map_err(|_| ())
+}
+
 /// Make a panic leave a report: in the log folder, in the log, and (on
 /// Windows) in a message that says where it is. The usual message still
 /// goes to stderr after it.
@@ -118,6 +134,10 @@ fn install_in(dir: PathBuf, dialog: bool) {
     // One message box is enough if several threads fall over together.
     let told = AtomicBool::new(false);
     std::panic::set_hook(Box::new(move |info| {
+        if EXPECTED_PANIC.with(std::cell::Cell::get) {
+            log::warn!("a panic that was caught and handled: {info}");
+            return;
+        }
         let thread = std::thread::current();
         let what = format!(
             "{}:\n{}",
@@ -286,7 +306,14 @@ mod tests {
             .unwrap()
             .join();
         assert!(crashed.is_err());
+        // A panic the code catches and handles is no crash: no report for it.
+        assert!(
+            catch_expected(|| -> u8 { panic!("handled-quietly-marker") }).is_err(),
+            "the panic comes back as an error"
+        );
+        assert_eq!(catch_expected(|| 7), Ok(7));
         let text = std::fs::read_to_string(dir.join("newq-crash.log")).expect("a report");
+        assert!(!text.contains("handled-quietly-marker"), "{text}");
         for needle in [
             concat!("NewQ ", env!("CARGO_PKG_VERSION")),
             // The path has `\` on Windows, so only its parts are checked.
