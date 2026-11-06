@@ -330,7 +330,8 @@ pub fn snapshot_json(show: &Show, engine: &Engine) -> String {
         }
         let _ = write!(
             cues,
-            r#"{{"number":{},"name":{},"type":{},"armed":{},"child":{},"playhead":{},"status":"{status}","progress":{}}}"#,
+            r#"{{"id":{},"number":{},"name":{},"type":{},"armed":{},"child":{},"playhead":{},"status":"{status}","progress":{}}}"#,
+            c.id.0,
             json_string(&c.number),
             json_string(&c.name),
             json_string(c.kind.cue_type().label()),
@@ -610,6 +611,8 @@ mod tests {
         assert_eq!(c("/api/cue/7/fade"), Some(Command::FadeOut("7".into())));
         // Escapes in the number are undone; a bad one is kept as it is.
         assert_eq!(c("/api/cue/1%20a/fire"), Some(Command::Fire("1 a".into())));
+        // A cue by its own id, as the page asks (the # is %23 in a URL).
+        assert_eq!(c("/api/cue/%2342/fire"), Some(Command::Fire("#42".into())));
         assert_eq!(c("/api/cue/a%2Fb/fire"), Some(Command::Fire("a/b".into())));
         assert_eq!(c("/api/cue/100%/fire"), Some(Command::Fire("100%".into())));
         for none in [
@@ -1065,6 +1068,32 @@ mod tests {
             "GET /api/state HTTP/1.1\r\nX-Pin: 4821\r\n\r\n",
         );
         assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    }
+
+    #[test]
+    fn the_snapshot_gives_each_cue_its_id_so_numbers_shared_between_lists_cannot_clash() {
+        let mut show = Show::default();
+        let second = show.add_list("Second");
+        let a = show.make_cue(CueType::Wait, None, 0);
+        let a_id = a.id;
+        show.cues.push(a);
+        let mut b = show.make_cue(CueType::Wait, None, show.cues.len());
+        b.list = second;
+        let b_id = b.id;
+        show.cues.push(b);
+        // Each list is numbered from 1, so both cues are "1".
+        show.renumber();
+        assert_eq!(
+            show.cue(a_id).unwrap().number,
+            show.cue(b_id).unwrap().number
+        );
+        let mut engine = Engine::for_tests();
+        engine.active_list = second;
+        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        // The page shows the second list, and its button must name that cue.
+        assert_eq!(v["cues"].as_array().map(Vec::len), Some(1));
+        assert_eq!(v["cues"][0]["id"], b_id.0);
+        assert_ne!(v["cues"][0]["id"], a_id.0);
     }
 
     #[test]

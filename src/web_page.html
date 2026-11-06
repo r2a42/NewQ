@@ -89,7 +89,8 @@ function render(s) {
     const name = document.createElement('span'); name.className = 'name'; name.textContent = c.name;
     const kind = document.createElement('span'); kind.className = 'kind'; kind.textContent = c.type;
     const fire = document.createElement('button'); fire.textContent = c.status === 'idle' ? 'Fire' : 'Stop';
-    fire.onclick = () => send('/api/cue/' + encodeURIComponent(c.number) + (c.status === 'idle' ? '/fire' : '/stop'));
+    // By the cue's own id: numbers can repeat between cue lists.
+    fire.onclick = () => send('/api/cue/' + encodeURIComponent('#' + c.id) + (c.status === 'idle' ? '/fire' : '/stop'));
     li.append(bar, num, name, kind, fire);
     ul.append(li);
   }
