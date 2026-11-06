@@ -79,7 +79,10 @@ impl KeepAwake {
                     "--who=NewQ",
                     &format!("--why={why}"),
                     "sleep",
-                    "86400",
+                    // A year: it is a hold for as long as the show runs, and a
+                    // day (as it was) let go after 24 hours of an installation
+                    // while the status bar went on saying it was held.
+                    "31536000",
                 ])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
