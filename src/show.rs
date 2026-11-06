@@ -2599,6 +2599,9 @@ impl Show {
             .cues
             .iter()
             .filter_map(|c| c.number.trim().parse::<f64>().ok())
+            // "inf" and "1e30" parse, and `as i64` would saturate and then
+            // overflow on the + 1.
+            .filter(|v| v.is_finite() && *v < 1e15)
             .fold(0.0_f64, f64::max);
         format!("{}", max.floor() as i64 + 1)
     }
@@ -4542,6 +4545,20 @@ mod tests {
         }
         let nums: Vec<_> = show.cues.iter().map(|c| c.number.clone()).collect();
         assert_eq!(nums, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn a_huge_or_infinite_cue_number_does_not_break_numbering_the_next() {
+        let mut show = Show::default();
+        for n in ["7", "inf", "1e30", "NaN", "-inf", "2.5"] {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.number = n.into();
+            show.cues.push(c);
+        }
+        // Only numbers that mean something count: after 7 comes 8, not an overflow.
+        assert_eq!(show.next_cue_number(), "8");
+        let c = show.make_cue(CueType::Wait, None, show.cues.len());
+        assert_eq!(c.number, "8");
     }
 
     #[test]
