@@ -196,6 +196,21 @@ struct RunningStream {
     config: StreamOut,
     size: (u32, u32),
     slot: u8,
+    started: Instant,
+}
+
+/// A display's stream as asked for: its settings and the picture size.
+type StreamWant = (StreamOut, (u32, u32));
+
+/// A server stream that stopped and is to be started again (see
+/// `stream::retry_delay`): a streaming server restarts or the network drops
+/// during a show, and the stream should come back by itself.
+struct StreamRetry {
+    config: StreamOut,
+    size: (u32, u32),
+    /// Stops in a row, without a long run between.
+    failures: u32,
+    next: Instant,
 }
 
 /// What a device scan found; `audio` is None when it didn't look.
@@ -245,6 +260,12 @@ pub struct App {
     /// Streams that failed to start or stopped, by display, so they are not
     /// tried again until their settings change.
     stream_failed: HashMap<OutputId, (StreamOut, (u32, u32))>,
+    /// What each stream was last asked to be and since when: a change is only
+    /// acted on once it has stayed for `stream::SETTLE`, so typing an address
+    /// doesn't start a stream at every letter.
+    stream_seen: HashMap<OutputId, (StreamWant, Instant)>,
+    /// Server streams waiting to be started again after they stopped.
+    stream_retry: HashMap<OutputId, StreamRetry>,
     monitors: Vec<MonitorHandle>,
     /// What the system says each of `monitors` is.
     identities: Vec<crate::monitor::Identity>,
@@ -399,6 +420,8 @@ impl App {
             patterns: HashMap::new(),
             streams: HashMap::new(),
             stream_failed: HashMap::new(),
+            stream_seen: HashMap::new(),
+            stream_retry: HashMap::new(),
             monitors: Vec::new(),
             identities: Vec::new(),
             primary: None,
@@ -1332,8 +1355,19 @@ impl App {
                 Some((o.id, (s, size)))
             })
             .collect();
+        // Hold a change back until it has stopped changing.
+        let mut wanted = wanted;
+        let running: HashMap<OutputId, (StreamOut, (u32, u32))> = self
+            .streams
+            .iter()
+            .map(|(id, r)| (*id, (r.config.clone(), r.size)))
+            .collect();
+        let now = Instant::now();
+        crate::stream::settle(&mut self.stream_seen, &mut wanted, &running, now);
         self.stream_failed
             .retain(|id, failed| wanted.get(id) == Some(&(failed.0.clone(), failed.1)));
+        self.stream_retry
+            .retain(|id, r| wanted.get(id) == Some(&(r.config.clone(), r.size)));
         // Stop what is no longer wanted, or is wanted differently.
         let stale: Vec<OutputId> = self
             .streams
@@ -1347,8 +1381,30 @@ impl App {
             if let Some(r) = self.streams.remove(&id) {
                 let name = self.show.output(id).map_or("?", |o| o.name.as_str());
                 if let Some(why) = r.thread.failure() {
-                    self.engine.log(format!("Stream from {name}: {why}"));
-                    self.stream_failed.insert(id, (r.config.clone(), r.size));
+                    if matches!(r.config.kind, crate::show::StreamKind::Server { .. }) {
+                        let ran = r.started.elapsed();
+                        let failures = match self.stream_retry.get(&id) {
+                            Some(prev) if ran < crate::stream::STEADY => prev.failures + 1,
+                            _ => 1,
+                        };
+                        let wait = crate::stream::retry_delay(failures);
+                        self.engine.log(format!(
+                            "Stream from {name}: {why}. Trying again in {} s",
+                            wait.as_secs()
+                        ));
+                        self.stream_retry.insert(
+                            id,
+                            StreamRetry {
+                                config: r.config.clone(),
+                                size: r.size,
+                                failures,
+                                next: Instant::now() + wait,
+                            },
+                        );
+                    } else {
+                        self.engine.log(format!("Stream from {name}: {why}"));
+                        self.stream_failed.insert(id, (r.config.clone(), r.size));
+                    }
                 }
                 let _ = std::thread::Builder::new()
                     .name("stream-stop".into())
@@ -1357,6 +1413,9 @@ impl App {
         }
         for (id, (config, size)) in &wanted {
             if self.streams.contains_key(id) || self.stream_failed.contains_key(id) {
+                continue;
+            }
+            if self.stream_retry.get(id).is_some_and(|r| now < r.next) {
                 continue;
             }
             let name = self
@@ -1402,6 +1461,7 @@ impl App {
                     config: config.clone(),
                     size: *size,
                     slot,
+                    started: Instant::now(),
                 },
             );
         }

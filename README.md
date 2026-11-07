@@ -495,9 +495,13 @@ enter, and *Test Mode* downloads its free test media when you start it.
   - *Custom FFmpeg output*: the arguments that follow the input (the picture
     arrives as raw RGBA), for anything else FFmpeg can send to: a streaming
     service, a file.
-  Up to two displays can be sent out at once. A stream that can't start or
-  that stops (the device is busy, the address can't be reached) is reported in
-  the status bar and is not retried until its settings are changed.
+  Up to two displays can be sent out at once. A change to a *Send out* setting
+  (typing an address, say) takes effect once you have stopped changing it for a
+  second. A stream that can't start or that stops (the device is busy, the
+  address can't be reached) is reported in the status bar and is not retried
+  until its settings are changed, except a *Streaming server* one: it starts
+  again by itself after 2, 4, 8, 15 and then every 30 seconds, so a server that
+  restarts or a network that drops during a show comes back without you.
 - **Sub displays:** split a display into areas that each work like a display
   of their own, e.g. one projector covering two set pieces, or one LED
   processor input feeding several screens. Add one under *Sub displays* (or

@@ -76,6 +76,59 @@ pub fn input_args(size: (u32, u32), fps: u32) -> Vec<String> {
     .to_vec()
 }
 
+/// How long a stream's settings must stay as they are before they are acted
+/// on, so typing an address doesn't start a stream for each letter.
+pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// Hold back what has changed lately. `seen` is what each key last wanted and
+/// since when; a `wanted` entry that hasn't stayed the same for `SETTLE` is put
+/// back to what `running` has (so it goes on as it was) or, with nothing
+/// running, dropped (so it isn't started yet).
+pub fn settle<K, V>(
+    seen: &mut std::collections::HashMap<K, (V, std::time::Instant)>,
+    wanted: &mut std::collections::HashMap<K, V>,
+    running: &std::collections::HashMap<K, V>,
+    now: std::time::Instant,
+) where
+    K: std::hash::Hash + Eq + Copy,
+    V: Clone + PartialEq,
+{
+    seen.retain(|k, _| wanted.contains_key(k));
+    let keys: Vec<K> = wanted.keys().copied().collect();
+    for k in keys {
+        let value = wanted[&k].clone();
+        let entry = seen.entry(k).or_insert_with(|| (value.clone(), now));
+        if entry.0 != value {
+            *entry = (value, now);
+        }
+        if now.duration_since(entry.1) < SETTLE {
+            match running.get(&k) {
+                Some(r) => {
+                    wanted.insert(k, r.clone());
+                }
+                None => {
+                    wanted.remove(&k);
+                }
+            }
+        }
+    }
+}
+
+/// A server stream that ran this long without stopping starts its retries over.
+pub const STEADY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long to wait before starting a server stream again after it stopped
+/// `failures` times in a row: 2 s, then longer, to 30 s.
+pub fn retry_delay(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(match failures {
+        0 | 1 => 2,
+        2 => 4,
+        3 => 8,
+        4 => 15,
+        _ => 30,
+    })
+}
+
 /// H.264 encoders to try, best first: the software one, then each platform's
 /// hardware encoder (VideoToolbox on a Mac, then NVIDIA, Intel and AMD).
 const H264_ENCODERS: [&str; 6] = [
@@ -369,6 +422,29 @@ fn keep_tail(text: &mut Vec<u8>) {
     }
 }
 
+/// The line of what FFmpeg said that tells why it stopped: its last line is
+/// often only the consequence ("Nothing was written") of an earlier one
+/// ("Connection refused").
+fn reason(said: &str) -> String {
+    const CAUSES: [&str; 8] = [
+        "refused",
+        "timed out",
+        "No route",
+        "Could not",
+        "Unable to",
+        "unauthorized",
+        "Unauthorized",
+        "Connection",
+    ];
+    let lines: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines
+        .iter()
+        .rev()
+        .find(|l| CAUSES.iter().any(|c| l.contains(c)))
+        .or(lines.last())
+        .map_or_else(|| "FFmpeg stopped".to_string(), |l| l.trim().to_string())
+}
+
 /// A running FFmpeg taking frames on its standard input.
 pub struct Sink {
     child: Child,
@@ -448,11 +524,10 @@ impl Sink {
                 // Give the process a moment to say why it stopped.
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 let said = self.said.lock().trim().to_string();
-                let last = said.lines().last().unwrap_or("").to_string();
-                Err(if last.is_empty() {
+                Err(if said.is_empty() {
                     format!("FFmpeg stopped: {e}")
                 } else {
-                    format!("FFmpeg stopped: {last}")
+                    format!("FFmpeg stopped: {}", reason(&said))
                 })
             }
         }
@@ -463,7 +538,7 @@ impl Sink {
         match self.child.try_wait() {
             Ok(Some(status)) if !status.success() => {
                 let said = self.said.lock().trim().to_string();
-                Some(said.lines().last().unwrap_or("FFmpeg stopped").to_string())
+                Some(reason(&said))
             }
             _ => None,
         }
@@ -584,6 +659,68 @@ mod tests {
         } else {
             assert!(output_args(&cam, None, 30).unwrap_err().contains("OBS"));
         }
+    }
+
+    #[test]
+    fn a_stopped_server_stream_is_retried_at_growing_then_steady_intervals() {
+        let secs: Vec<u64> = (1..8).map(|n| retry_delay(n).as_secs()).collect();
+        assert_eq!(secs, [2, 4, 8, 15, 30, 30, 30]);
+        assert_eq!(retry_delay(0).as_secs(), 2);
+        assert!(SETTLE < STEADY);
+    }
+
+    #[test]
+    fn a_change_waits_until_it_has_stopped_changing() {
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut seen = HashMap::new();
+        let mut running: HashMap<u8, String> = HashMap::new();
+        let ask = |v: &str| HashMap::from([(1u8, v.to_string())]);
+
+        // A new stream waits for the settings to settle, then starts.
+        let mut w = ask("a");
+        settle(&mut seen, &mut w, &running, t0);
+        assert!(w.is_empty());
+        let mut w = ask("a");
+        settle(
+            &mut seen,
+            &mut w,
+            &running,
+            t0 + SETTLE + Duration::from_millis(1),
+        );
+        assert_eq!(w, ask("a"));
+        running.insert(1, "a".into());
+
+        // Typing: each letter restarts the wait, and the running stream stays as it was.
+        let mut at = t0 + SETTLE * 2;
+        for text in ["ab", "abc", "abcd"] {
+            let mut w = ask(text);
+            settle(&mut seen, &mut w, &running, at);
+            assert_eq!(w, ask("a"), "{text}");
+            at += SETTLE / 2;
+        }
+        // Left alone, the last text is taken.
+        let mut w = ask("abcd");
+        settle(&mut seen, &mut w, &running, at + SETTLE);
+        assert_eq!(w, ask("abcd"));
+        // Turned off: forgotten at once, so turning it on waits again.
+        let mut w = HashMap::new();
+        settle(&mut seen, &mut w, &running, at + SETTLE);
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn the_reason_a_stream_stopped_is_the_cause_not_the_last_line() {
+        let said = "[tcp @ 0x1] Connection to tcp://127.0.0.1:8554 failed: Connection refused\n\
+                    [out#0/rtsp @ 0x2] Nothing was written into output file\n";
+        assert!(
+            reason(said).contains("Connection refused"),
+            "{}",
+            reason(said)
+        );
+        assert_eq!(reason("one\ntwo"), "two");
+        assert_eq!(reason(""), "FFmpeg stopped");
     }
 
     #[test]
