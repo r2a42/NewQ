@@ -902,22 +902,26 @@ mod tests {
         };
         let size = (320u32, 180u32);
         let frame = [40u8, 120, 200, 255].repeat((size.0 * size.1) as usize);
-        // The receiver takes a while to listen on a cold machine: try until it does.
-        let mut sink = None;
-        for _ in 0..15 {
-            let mut s = Sink::start(&ff, size, 25, &kind).expect("start the sink");
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            if s.failed().is_none() && s.write(&frame).is_ok() {
-                sink = Some(s);
+        // The receiver takes a while to listen on a cold machine, and a write into
+        // FFmpeg's pipe succeeds before it has tried to connect: so the whole
+        // publish is tried again until every frame of it has gone out.
+        let mut published = false;
+        for _ in 0..12 {
+            let mut sink = Sink::start(&ff, size, 25, &kind).expect("start the sink");
+            let sent = (0..50).all(|_| {
+                let ok = sink.write(&frame).is_ok();
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                ok
+            });
+            if sent && sink.failed().is_none() {
+                sink.finish();
+                published = true;
                 break;
             }
+            drop(sink);
+            std::thread::sleep(std::time::Duration::from_millis(700));
         }
-        let mut sink = sink.expect("the receiver never took the stream");
-        for _ in 0..50 {
-            sink.write(&frame).expect("a frame goes out");
-            std::thread::sleep(std::time::Duration::from_millis(40));
-        }
-        sink.finish();
+        assert!(published, "the receiver never took the stream");
         // Let it finish what it has, but not for ever.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while rx.0.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
