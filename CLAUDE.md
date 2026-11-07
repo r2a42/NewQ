@@ -226,7 +226,11 @@ The README describes the features; this file is about working on the code.
   window starting on it goes. winit's Mac `name()` is "Monitor #" and a number,
   and its `position()` is in that display's own pixels, so convert to points.
   `src/recovery.rs`: autosave copies. `src/media/camera.rs`: camera cues'
-  device lists and ffmpeg input. `src/media/waveform.rs`: peaks for the
+  device lists and ffmpeg input: `CaptureFormat` (asked for as `-pixel_format`, `-vcodec` or `-input_format`
+  per system), the device's modes (`list_modes`, run on a thread by `Engine::query_camera_modes`; parsers for
+  dshow, v4l2, avfoundation and decklink output, tested on sample text only) and Blackmagic `decklink:` devices
+  (listed only when the FFmpeg in use has the `decklink` input: NewQ's bundled one can't, the SDK terms stop us
+  shipping one; `CameraCue::mode_code` is the `-format_code`). None of it has met a real capture card. `src/media/waveform.rs`: peaks for the
   inspector's waveform.
   The `NewQ test pattern` device stands in for a camera in tests.
 

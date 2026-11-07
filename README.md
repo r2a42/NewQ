@@ -580,6 +580,20 @@ enter, and *Test Mode* downloads its free test media when you start it.
   a laptop may manage). On a Mac only the raw formats can be asked for. The
   Elgato Game Capture 4K S is a standard (UVC) capture device, and the Neo and
   4K X should be too; none of these has been tried with the cards themselves.
+  **Blackmagic UltraStudio and DeckLink cards** aren't standard cameras: they
+  are reached through Blackmagic's DeckLink interface, which FFmpeg reads with
+  its `decklink` input. NewQ's own FFmpeg doesn't have it (Blackmagic's SDK
+  terms don't let it be shipped), so these cards only appear in the camera
+  list, as *Blackmagic · name*, when the FFmpeg in use was built with
+  `--enable-decklink` (you need Blackmagic's SDK to build one) and Blackmagic's
+  Desktop Video is installed. Put that FFmpeg and its `ffprobe` in a folder and
+  set `NEWQ_FFMPEG_DIR` to it before starting NewQ. A DeckLink card is asked
+  for its mode by name (*Modes…* lists them, and the size and rate follow the
+  one you pick) or left to detect what it is sent; the format setting doesn't
+  apply. The picture isn't deinterlaced, so an interlaced signal will show
+  combing, and there's no sound from a camera cue (add an audio cue). All of
+  this is written from FFmpeg's documented output and has not been tried with a
+  card.
 - **Web remote:** tick *Serve the web remote* on the *Web remote* page of the settings and a phone or
   tablet on the same network can open the address shown (`http://<this
   computer>:8080`) to run the show from a browser: a big GO, Stop All, Pause,

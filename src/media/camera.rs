@@ -29,6 +29,31 @@ impl Platform {
     }
 }
 
+/// A camera cue's device that is a Blackmagic (DeckLink) card, such as an
+/// UltraStudio: `decklink:` and the card's name. FFmpeg reaches them through
+/// its `decklink` input, which only some builds have.
+pub const DECKLINK_PREFIX: &str = "decklink:";
+
+/// The card's name, if `device` is a DeckLink one.
+pub fn decklink_name(device: &str) -> Option<&str> {
+    device.strip_prefix(DECKLINK_PREFIX)
+}
+
+/// Whether the FFmpeg NewQ is using can read DeckLink cards, found when the
+/// cameras were last looked for. Blackmagic's SDK terms stop NewQ shipping an
+/// FFmpeg that can, so it is only there when the person has their own build.
+static DECKLINK_SUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn decklink_supported() -> bool {
+    DECKLINK_SUPPORTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What to tell someone whose FFmpeg can't read a DeckLink card.
+pub const DECKLINK_UNSUPPORTED: &str = "This FFmpeg can't read Blackmagic (DeckLink) cards. NewQ's own FFmpeg can't, because \
+     Blackmagic's SDK terms don't let it be shipped. Use an FFmpeg built with --enable-decklink \
+     (and Blackmagic's Desktop Video installed) by putting it in the folder named by NEWQ_FFMPEG_DIR.";
+
 /// A camera cue's device that is a picture of the screen, so that what
 /// another program shows (a Spout or Syphon sender's window, a media
 /// server's output) can be taken in: `screen:` and what to capture.
@@ -92,10 +117,21 @@ pub fn input_args(
     h: u32,
     fps: u32,
     format: CaptureFormat,
+    code: &str,
 ) -> Vec<String> {
     let s = |v: &str| v.to_string();
     if device.is_empty() {
         return Vec::new();
+    }
+    if let Some(name) = decklink_name(device) {
+        // A Blackmagic card is asked for its mode by name (`-list_formats`
+        // lists them); with none given it detects what it is sent.
+        let mut a = vec![s("-f"), s("decklink")];
+        if !code.trim().is_empty() {
+            a.extend([s("-format_code"), code.trim().to_string()]);
+        }
+        a.extend([s("-i"), name.to_string()]);
+        return a;
     }
     if let Some(target) = screen_target(device) {
         let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
@@ -166,6 +202,9 @@ pub struct DeviceMode {
     pub fps: u32,
     /// FFmpeg's name for the format (`nv12`, `mjpeg`), if the system says.
     pub format_name: String,
+    /// The mode's name, for a device that is asked for one (a DeckLink card's
+    /// `Hp60`); empty otherwise.
+    pub code: String,
 }
 
 impl DeviceMode {
@@ -184,6 +223,9 @@ impl DeviceMode {
         }
         if !self.format_name.is_empty() {
             text += &format!(" · {}", self.format_name);
+        }
+        if !self.code.is_empty() {
+            text += &format!(" · {}", self.code);
         }
         text
     }
@@ -242,6 +284,7 @@ pub fn parse_dshow_modes(text: &str) -> Vec<DeviceMode> {
             height,
             fps,
             format_name: name,
+            code: String::new(),
         });
     }
     tidy(modes)
@@ -279,6 +322,7 @@ pub fn parse_v4l2_modes(text: &str) -> Vec<DeviceMode> {
                     height,
                     fps: 0,
                     format_name: name.to_string(),
+                    code: String::new(),
                 });
             }
         }
@@ -309,9 +353,100 @@ pub fn parse_avfoundation_modes(text: &str) -> Vec<DeviceMode> {
             height: size.1,
             fps: fps.round() as u32,
             format_name: String::new(),
+            code: String::new(),
         });
     }
     tidy(modes)
+}
+
+/// The cards FFmpeg's `decklink` input lists for `-list_devices 1`, which
+/// prints them quoted, like `[decklink @ 0x1] \t'UltraStudio HD Mini'`, under
+/// "Blackmagic DeckLink input devices:".
+pub fn parse_decklink_devices(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut in_input = false;
+    for line in text.lines() {
+        if line.contains("DeckLink input devices") {
+            in_input = true;
+            continue;
+        }
+        if line.contains("DeckLink output devices") {
+            in_input = false;
+            continue;
+        }
+        if !in_input {
+            continue;
+        }
+        let Some(start) = line.find('\'') else {
+            continue;
+        };
+        let Some(len) = line[start + 1..].rfind('\'') else {
+            continue;
+        };
+        let name = line[start + 1..start + 1 + len].trim();
+        if !name.is_empty() && !found.iter().any(|f| f == name) {
+            found.push(name.to_string());
+        }
+    }
+    found
+}
+
+/// The modes a DeckLink card offers, from `-list_formats 1`: tab-separated
+/// lines such as `\tHp60\t1920 x 1080 at 60/1 fps (progressive)`. The code
+/// (`Hp60`) is what `-format_code` takes.
+pub fn parse_decklink_formats(text: &str) -> Vec<DeviceMode> {
+    let mut modes = Vec::new();
+    for line in text.lines() {
+        let body = line.rsplit_once("] ").map_or(line, |(_, b)| b);
+        let mut cols = body
+            .trim_matches(|c: char| c == '\t' || c == ' ')
+            .split('\t');
+        let (Some(code), Some(description)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        let code = code.trim();
+        if code.is_empty() || code == "format_code" || code.contains(' ') {
+            continue;
+        }
+        // "1920 x 1080 at 60/1 fps (progressive)"
+        let mut words = description.split_whitespace();
+        let (Some(w), Some("x"), Some(h), Some("at"), Some(rate)) = (
+            words.next(),
+            words.next(),
+            words.next(),
+            words.next(),
+            words.next(),
+        ) else {
+            continue;
+        };
+        let (Ok(width), Ok(height)) = (w.parse::<u32>(), h.parse::<u32>()) else {
+            continue;
+        };
+        let fps =
+            rate.split_once('/')
+                .map_or(0, |(n, d)| match (n.parse::<f64>(), d.parse::<f64>()) {
+                    (Ok(n), Ok(d)) if d > 0.0 => (n / d).round() as u32,
+                    _ => 0,
+                });
+        modes.push(DeviceMode {
+            width,
+            height,
+            fps,
+            format_name: String::new(),
+            code: code.to_string(),
+        });
+    }
+    tidy(modes)
+}
+
+/// Whether this FFmpeg lists `decklink` among its input devices (`-devices`
+/// lines like ` D  decklink  Blackmagic DeckLink input`).
+pub fn parse_has_decklink(devices_text: &str) -> bool {
+    devices_text.lines().any(|l| {
+        let mut w = l.split_whitespace();
+        let flags = w.next().unwrap_or("");
+        flags.contains('D') && w.next() == Some("decklink")
+    })
 }
 
 /// Ask `ff` what modes `device` offers: each system's own listing, which
@@ -325,6 +460,15 @@ pub fn list_modes(
 ) -> Result<Vec<DeviceMode>, String> {
     if device.is_empty() {
         return Err("no camera chosen".into());
+    }
+    if let Some(name) = decklink_name(device) {
+        let text = list_output(ff, &["-f", "decklink", "-list_formats", "1", "-i", name]);
+        let modes = parse_decklink_formats(&text);
+        return if modes.is_empty() {
+            Err("the card didn't list any modes (is a signal connected, and is it in use?)".into())
+        } else {
+            Ok(modes)
+        };
     }
     let (text, parse): (String, fn(&str) -> Vec<DeviceMode>) = match platform {
         Platform::Windows => (
@@ -403,6 +547,22 @@ pub fn list_devices(ff: &Ffmpeg) -> Vec<String> {
                     .map(|n| format!("{SCREEN_PREFIX}{n}")),
             );
         }
+    }
+    // Blackmagic cards, if this FFmpeg can read them.
+    let mut cmd = ff.command();
+    cmd.args(["-hide_banner", "-devices"]);
+    let has = cmd
+        .output()
+        .map(|o| parse_has_decklink(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false);
+    DECKLINK_SUPPORTED.store(has, std::sync::atomic::Ordering::Relaxed);
+    if has {
+        let text = list_output(ff, &["-f", "decklink", "-list_devices", "1", "-i", "dummy"]);
+        devices.extend(
+            parse_decklink_devices(&text)
+                .into_iter()
+                .map(|n| format!("{DECKLINK_PREFIX}{n}")),
+        );
     }
     // NDI sources on the network, if NDI's runtime is installed (asked of a
     // helper, which takes a couple of seconds). Not in tests: the test program
@@ -534,7 +694,7 @@ mod tests {
 
     #[test]
     fn a_format_is_asked_for_the_way_each_platform_takes_it() {
-        let a = |p, d: &str, f| input_args(p, d, 3840, 2160, 60, f).join(" ");
+        let a = |p, d: &str, f| input_args(p, d, 3840, 2160, 60, f, "").join(" ");
         // DirectShow: a raw pixel format, or a codec.
         assert_eq!(
             a(Platform::Windows, "Game Capture 4K X", CaptureFormat::Nv12),
@@ -574,7 +734,8 @@ mod tests {
                 640,
                 360,
                 30,
-                CaptureFormat::Nv12
+                CaptureFormat::Nv12,
+                ""
             )
             .join(" ")
             .contains("nv12")
@@ -586,7 +747,8 @@ mod tests {
                 640,
                 360,
                 30,
-                CaptureFormat::Nv12
+                CaptureFormat::Nv12,
+                ""
             )
             .join(" ")
             .contains("nv12")
@@ -681,6 +843,112 @@ Game Capture 4K S:none: Immediate exit requested
     }
 
     #[test]
+    fn a_blackmagic_card_is_asked_for_its_mode_by_name_or_left_to_detect() {
+        let a = |code: &str| {
+            input_args(
+                Platform::Windows,
+                "decklink:UltraStudio HD Mini",
+                1920,
+                1080,
+                60,
+                CaptureFormat::Nv12,
+                code,
+            )
+            .join(" ")
+        };
+        // The format and the size don't apply: the card's mode is named.
+        assert_eq!(
+            a("Hp60"),
+            "-f decklink -format_code Hp60 -i UltraStudio HD Mini"
+        );
+        assert_eq!(
+            a(" Hp5994 "),
+            "-f decklink -format_code Hp5994 -i UltraStudio HD Mini"
+        );
+        assert_eq!(a(""), "-f decklink -i UltraStudio HD Mini");
+        // The same on every system.
+        assert_eq!(
+            input_args(
+                Platform::MacOs,
+                "decklink:X",
+                640,
+                360,
+                30,
+                CaptureFormat::Auto,
+                "pal"
+            )
+            .join(" "),
+            "-f decklink -format_code pal -i X"
+        );
+        assert_eq!(
+            decklink_name("decklink:UltraStudio 4K"),
+            Some("UltraStudio 4K")
+        );
+        assert_eq!(decklink_name("Integrated Camera"), None);
+    }
+
+    #[test]
+    fn reads_the_decklink_cards_an_ffmpeg_lists() {
+        let text = "\
+[decklink @ 0x600003c10000] Blackmagic DeckLink output devices:
+[decklink @ 0x600003c10000] \t'UltraStudio HD Mini'
+[decklink @ 0x600003c10000] Blackmagic DeckLink input devices:
+[decklink @ 0x600003c10000] \t'UltraStudio 4K Mini'
+[decklink @ 0x600003c10000] \t'DeckLink Duo (1)'
+dummy: Immediate exit requested
+";
+        // Only the input devices count, with their names as quoted.
+        assert_eq!(
+            parse_decklink_devices(text),
+            vec!["UltraStudio 4K Mini", "DeckLink Duo (1)"]
+        );
+        assert!(parse_decklink_devices("Unknown input format: 'decklink'\n").is_empty());
+    }
+
+    #[test]
+    fn reads_the_modes_a_decklink_card_lists() {
+        let text = "\
+[decklink @ 0x6000] Supported formats for 'UltraStudio 4K Mini':
+\tformat_code\tdescription
+\tntsc\t720 x 486 at 30000/1001 fps (interlaced, lower field first)
+\tHp60\t1920 x 1080 at 60/1 fps (progressive)
+\tHp5994\t1920 x 1080 at 60000/1001 fps (progressive)
+\t4k30\t3840 x 2160 at 30/1 fps (progressive)
+\t4k60\t3840 x 2160 at 60/1 fps (progressive)
+dummy: Immediate exit requested
+";
+        let modes = parse_decklink_formats(text);
+        let got: Vec<(u32, u32, u32, &str)> = modes
+            .iter()
+            .map(|m| (m.width, m.height, m.fps, m.code.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (3840, 2160, 60, "4k60"),
+                (3840, 2160, 30, "4k30"),
+                (1920, 1080, 60, "Hp60"),
+                (1920, 1080, 60, "Hp5994"),
+                (720, 486, 30, "ntsc"),
+            ]
+        );
+        assert_eq!(modes[2].label(), "1920 × 1080 · up to 60 fps · Hp60");
+        assert!(parse_decklink_formats("Could not enumerate formats\n").is_empty());
+    }
+
+    #[test]
+    fn an_ffmpeg_that_can_read_decklink_says_so_in_its_device_list() {
+        let with = " D  decklink        Blackmagic DeckLink input\n  E decklink        Blackmagic DeckLink output\n D  video4linux2,v4l2 Video4Linux2 device grab\n";
+        let without = " D  video4linux2,v4l2 Video4Linux2 device grab\n DE x11grab       X11 screen capture\n";
+        assert!(parse_has_decklink(with));
+        assert!(!parse_has_decklink(without));
+        // An output-only listing doesn't count.
+        assert!(!parse_has_decklink(
+            "  E decklink        Blackmagic DeckLink output\n"
+        ));
+    }
+
+    #[test]
     fn a_size_token_is_read_only_when_it_is_a_size() {
         assert_eq!(parse_size("1920x1080"), Some((1920, 1080)));
         assert_eq!(parse_size("(1920x1080),"), Some((1920, 1080)));
@@ -691,7 +959,7 @@ Game Capture 4K S:none: Immediate exit requested
 
     #[test]
     fn builds_the_input_for_each_platform() {
-        let a = |p, d: &str| input_args(p, d, 1280, 720, 30, CaptureFormat::Auto).join(" ");
+        let a = |p, d: &str| input_args(p, d, 1280, 720, 30, CaptureFormat::Auto, "").join(" ");
         assert_eq!(
             a(Platform::Linux, "/dev/video0"),
             "-f v4l2 -framerate 30 -video_size 1280x720 -i /dev/video0"
@@ -709,7 +977,7 @@ Game Capture 4K S:none: Immediate exit requested
             a(Platform::Windows, TEST_PATTERN_DEVICE),
             "-re -f lavfi -i testsrc2=size=1280x720:rate=30"
         );
-        assert!(input_args(Platform::Linux, "", 1280, 720, 30, CaptureFormat::Auto).is_empty());
+        assert!(input_args(Platform::Linux, "", 1280, 720, 30, CaptureFormat::Auto, "").is_empty());
     }
 
     #[test]
@@ -744,6 +1012,7 @@ Game Capture 4K S:none: Immediate exit requested
             720,
             25,
             CaptureFormat::Auto,
+            "",
         )
         .join(" ");
         assert_eq!(via, "-f gdigrab -framerate 25 -draw_mouse 0 -i title=OBS");

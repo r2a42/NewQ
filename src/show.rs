@@ -2502,6 +2502,11 @@ pub struct CameraCue {
     /// particular one). Older shows have none: automatic.
     #[serde(default, skip_serializing_if = "CaptureFormat::is_auto")]
     pub format: CaptureFormat,
+    /// A device that is asked for its mode by name rather than by size and
+    /// rate (a Blackmagic card's `Hp60`, 1080p60) is asked with this code;
+    /// empty lets the device detect what it is given.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode_code: String,
     /// Where, when and how it shows. `end` is how long it runs (None = until stopped).
     pub media: MediaCue,
 }
@@ -2542,6 +2547,7 @@ impl CameraCue {
             height: 720,
             fps: 30,
             format: CaptureFormat::Auto,
+            mode_code: String::new(),
             media,
         }
     }
@@ -5716,6 +5722,14 @@ mod tests {
             &back.cues[0].kind,
             CueKind::Camera(c) if c.format == CaptureFormat::Mjpeg
         ));
+        // A mode code (a Blackmagic card's) is saved only when set.
+        let mut with_code = back.clone();
+        if let CueKind::Camera(c) = &mut with_code.cues[0].kind {
+            c.mode_code = "Hp60".into();
+        }
+        let coded = serde_json::to_string(&with_code).unwrap();
+        assert!(coded.contains("\"mode_code\":\"Hp60\""), "{coded}");
+        assert!(!json.contains("mode_code"), "{json}");
         // A show saved before there was a format loads as automatic.
         let old = json.replace(",\"format\":\"Mjpeg\"", "");
         assert!(!old.contains("format"), "the edit must remove it: {old}");

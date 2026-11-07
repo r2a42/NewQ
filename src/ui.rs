@@ -7497,6 +7497,9 @@ fn device_label(device: &str) -> String {
     if let Some(name) = crate::ndi::source_of(device) {
         return format!("NDI · {name}");
     }
+    if let Some(name) = camera::decklink_name(device) {
+        return format!("Blackmagic · {name}");
+    }
     if let Some(target) = camera::screen_target(device) {
         return match target {
             "desktop" => "Screen · the whole desktop".to_string(),
@@ -7559,6 +7562,7 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
             if c.device != TEST_PATTERN_DEVICE
                 && camera::screen_target(&c.device).is_none()
                 && crate::ndi::source_of(&c.device).is_none()
+                && camera::decklink_name(&c.device).is_none()
             {
                 ui.label("Format");
                 egui::ComboBox::from_id_salt("camera_format")
@@ -7625,6 +7629,9 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
                             if !m.format_name.is_empty() {
                                 c.format = format;
                             }
+                            if !m.code.is_empty() {
+                                c.mode_code = m.code.clone();
+                            }
                         }
                     }
                 });
@@ -7643,6 +7650,23 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
             RichText::new("A moving test picture, for trying a camera cue without a camera.")
                 .weak(),
         );
+    }
+    if camera::decklink_name(&c.device).is_some() {
+        if camera::decklink_supported() {
+            ui.label(
+                RichText::new(
+                    "A Blackmagic card is asked for its mode by name: press Modes… and pick one \
+                     (the size and rate above follow it), or leave it to detect what it is sent.",
+                )
+                .weak(),
+            );
+        } else {
+            ui.label(
+                RichText::new(camera::DECKLINK_UNSUPPORTED)
+                    .small()
+                    .color(PREWAIT),
+            );
+        }
     }
     if camera::screen_target(&c.device).is_some() {
         ui.label(

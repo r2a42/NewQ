@@ -464,12 +464,15 @@ fn group_children_wanted(wanted: &[CueId], show: &Show) -> usize {
 /// What a preload was made for. It is reused only if the cue still asks for
 /// the same decoding (see `MediaCue::decodes_like`), so dragging a volume or
 /// opacity slider doesn't restart the decoders on every frame.
+/// A camera's device and mode (the size, the rate, the format, the mode code).
+type CameraSig = (String, u32, u32, u32, CaptureFormat, String);
+
 #[derive(Clone)]
 struct PrepSig {
     media: MediaCue,
     size: (u32, u32),
     /// A camera's device and mode, which a file cue doesn't have.
-    camera: Option<(String, u32, u32, u32, CaptureFormat)>,
+    camera: Option<CameraSig>,
 }
 
 impl PartialEq for PrepSig {
@@ -1438,7 +1441,14 @@ impl Engine {
             return Some(PrepSig {
                 media: c.media.clone(),
                 size: self.output_size(c.media.output),
-                camera: Some((c.device.clone(), c.width, c.height, c.fps, c.format)),
+                camera: Some((
+                    c.device.clone(),
+                    c.width,
+                    c.height,
+                    c.fps,
+                    c.format,
+                    c.mode_code.clone(),
+                )),
             });
         }
         let m = cue.kind.file_media()?;
@@ -1479,6 +1489,9 @@ impl Engine {
             });
         }
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
+        if camera::decklink_name(&c.device).is_some() && !camera::decklink_supported() {
+            return Err(camera::DECKLINK_UNSUPPORTED.into());
+        }
         let input = camera::input_args(
             camera::Platform::current(),
             &c.device,
@@ -1486,6 +1499,7 @@ impl Engine {
             c.height,
             c.fps,
             c.format,
+            &c.mode_code,
         );
         let matrix = if c.height >= 720 {
             ColorMatrix::Bt709
