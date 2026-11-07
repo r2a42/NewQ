@@ -960,7 +960,9 @@ mod tests {
     fn rtsp_frames_reach_a_server() {
         publish_to_a_listener(
             ServerProtocol::Rtsp,
-            &["-rtsp_flags", "listen", "-i", "rtsp://127.0.0.1:18554/newq"],
+            // An explicit listen timeout: newer FFmpegs (Homebrew's) refuse the
+            // endless default of `-rtsp_flags listen` as "-1000 out of range".
+            &["-listen_timeout", "30", "-i", "rtsp://127.0.0.1:18554/newq"],
             18554,
         );
     }
