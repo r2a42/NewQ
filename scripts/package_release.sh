@@ -50,6 +50,15 @@ verify_ffmpeg() {
     echo "bundled ffmpeg cannot capture from ${indev} (camera cues need it)" >&2
     exit 1
   fi
+  # A display's Send out writes MPEG-TS, RTSP and FLV (RTMP).
+  local muxers
+  muxers="$("$ff" -hide_banner -muxers)"
+  for m in mpegts rtsp flv; do
+    if ! grep -qE "^ [D ]?E ${m} " <<< "$muxers"; then
+      echo "bundled ffmpeg is missing the ${m} muxer (Send out needs it)" >&2
+      exit 1
+    fi
+  done
   # Run the same kinds of commands NewQ does (see src/media/*.rs).
   local q=(-hide_banner -loglevel error -nostdin)
   "$ff" "${q[@]}" -f lavfi -i testsrc2=size=320x240:rate=25 -t 1 -map 0:v:0 -an     -vf "scale=160:120:flags=bicubic:out_range=tv,format=yuv420p" -fps_mode cfr -r 25     -f rawvideo -pix_fmt yuv420p pipe:1 > /dev/null
