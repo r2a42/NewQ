@@ -54,7 +54,8 @@ verify_ffmpeg() {
   local muxers
   muxers="$("$ff" -hide_banner -muxers)"
   for m in mpegts rtsp flv; do
-    if ! grep -qE "^ [D ]?E ${m} " <<< "$muxers"; then
+    # The flags column varies between FFmpeg versions: match the name as a word after an E.
+    if ! awk -v m="$m" '$1 ~ /E/ && $2 == m { f = 1 } END { exit !f }' <<< "$muxers"; then
       echo "bundled ffmpeg is missing the ${m} muxer (Send out needs it)" >&2
       exit 1
     fi

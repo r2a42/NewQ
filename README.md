@@ -481,11 +481,15 @@ enter, and *Test Mode* downloads its free test media when you start it.
     WebRTC, a media player). Choose *RTSP*, *RTMP* or *SRT*, the server's
     address (the port follows the protocol: 8554, 1935, 8890) and a stream
     name; viewers then open, for RTSP, `rtsp://server:8554/name`. It encodes
-    with libx264 if your FFmpeg has it, otherwise the computer's own hardware
-    encoder (VideoToolbox on a Mac, then NVENC, Quick Sync, AMF), found by
-    trying each; if none works the status bar says so. NewQ's Mac FFmpeg can
-    do RTSP and RTMP but not SRT (that needs libsrt, which isn't in it); the
-    Windows and Linux ones can do all three. Checked here by publishing to
+    with libx264 if your FFmpeg has it (NewQ's bundled Windows and Linux ones
+    don't: libx264 is GPL), otherwise the computer's own hardware encoder
+    (VideoToolbox on a Mac, then NVENC, Quick Sync, AMF) or OpenH264, found by
+    trying each; if none works the status bar says so, and a computer with
+    none of them needs a Custom output or an FFmpeg with libx264 (`NEWQ_FFMPEG_DIR`).
+    NewQ's Mac FFmpeg can do RTSP and RTMP but not SRT (that needs libsrt);
+    whether the Windows and Linux ones have libsrt isn't checked here. A very
+    wide picture is sent at most 4096 wide. No password for the server (use a
+    Custom output for one). Checked here by publishing to
     FFmpeg's own RTSP and RTMP listeners and decoding what arrived; **not
     tried against a real MediaMTX, nor on a Mac, nor with a hardware encoder**.
   - *Custom FFmpeg output*: the arguments that follow the input (the picture

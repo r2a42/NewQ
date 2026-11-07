@@ -17,9 +17,15 @@ use std::sync::OnceLock;
 /// The size to send a picture of `canvas` at, `height` tall, with the same
 /// shape and even sides (video wants that).
 pub fn size_for(canvas: (u32, u32), height: u32) -> (u32, u32) {
-    let height = height.clamp(16, 4320) & !1;
-    let width = (canvas.0.max(1) as f64 * height as f64 / canvas.1.max(1) as f64).round() as u32;
-    (width.clamp(16, 16_384) & !1, height)
+    let mut height = height.clamp(16, 4320) & !1;
+    let mut width =
+        (canvas.0.max(1) as f64 * height as f64 / canvas.1.max(1) as f64).round() as u32;
+    // Hardware H.264 encoders stop at 4096 wide: a very wide canvas is sent smaller.
+    if width > 4096 {
+        height = ((height as f64 * 4096.0 / width as f64) as u32).max(16) & !1;
+        width = 4096;
+    }
+    (width.clamp(16, 4096) & !1, height)
 }
 
 /// Split a line of arguments the way a shell would, to the extent that
@@ -72,12 +78,14 @@ pub fn input_args(size: (u32, u32), fps: u32) -> Vec<String> {
 
 /// H.264 encoders to try, best first: the software one, then each platform's
 /// hardware encoder (VideoToolbox on a Mac, then NVIDIA, Intel and AMD).
-const H264_ENCODERS: [&str; 5] = [
+const H264_ENCODERS: [&str; 6] = [
     "libx264",
     "h264_videotoolbox",
     "h264_nvenc",
     "h264_qsv",
     "h264_amf",
+    // Cisco's, which an LGPL build (NewQ's Windows and Linux ones have no libx264) can have.
+    "libopenh264",
 ];
 
 /// The arguments that make H.264 with `encoder` at about `kbps`, with a
@@ -109,6 +117,7 @@ pub fn h264_args(encoder: &str, kbps: u32, fps: u32) -> Vec<String> {
         "h264_nvenc" => add(&["-preset", "p4", "-tune", "ll", "-pix_fmt", "yuv420p"]),
         "h264_qsv" => add(&["-preset", "veryfast", "-pix_fmt", "nv12"]),
         "h264_amf" => add(&["-usage", "lowlatency", "-pix_fmt", "yuv420p"]),
+        "libopenh264" => add(&["-allow_skip_frames", "0", "-pix_fmt", "yuv420p"]),
         _ => add(&["-pix_fmt", "yuv420p"]),
     }
     add(&[
@@ -132,11 +141,19 @@ pub fn server_url(
     if path.is_empty() {
         return Err("no stream name (the path on the server)".into());
     }
-    if path.chars().any(|c| c.is_whitespace() || "?#&".contains(c)) {
-        return Err("the stream name can't have spaces, ? # or &".into());
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || "?#&:@".contains(c))
+    {
+        return Err("the stream name can't have spaces or any of ? # & : @".into());
     }
-    let host = if host.contains(':') && !host.starts_with('[') {
+    let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
         format!("[{host}]")
+    } else if host
+        .chars()
+        .any(|c| c.is_whitespace() || ":/@?#[]".contains(c))
+    {
+        return Err("the server address is a name or number only: the port has its own box".into());
     } else {
         host.to_string()
     };
@@ -228,10 +245,9 @@ const NO_H264: &str = "This computer's FFmpeg has no H.264 encoder that works he
 
 /// What this FFmpeg can do, asked once: its encoders, muxers and protocols.
 struct Caps {
+    encoders: String,
     muxers: String,
     protocols: String,
-    /// The first H.264 encoder that is there and works.
-    h264: Option<&'static str>,
 }
 
 /// Whether a listing from `ffmpeg -encoders|-muxers|-protocols` has `name`
@@ -267,29 +283,51 @@ fn ask(ff: &Ffmpeg, flag: &str) -> String {
 /// not the computer has the hardware, so try a few frames.
 fn encoder_works(ff: &Ffmpeg, encoder: &str) -> bool {
     let mut cmd = ff.command();
-    cmd.args(["-f", "lavfi", "-i", "color=c=black:s=320x240:r=30"])
+    cmd.args(["-f", "lavfi", "-i", "color=c=black:s=640x360:r=30"])
         .args(["-frames:v", "8"])
         .args(h264_args(encoder, 1000, 30))
         .args(["-f", "null", "-"]);
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    // Nothing is read from it, and a driver that hangs must not hang a stream.
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn caps(ff: &Ffmpeg) -> &'static Caps {
     static CACHE: OnceLock<Caps> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        let encoders = ask(ff, "-encoders");
-        let h264 = pick_encoder(|e| lists(&encoders, e), |e| encoder_works(ff, e));
-        Caps {
-            muxers: ask(ff, "-muxers"),
-            protocols: ask(ff, "-protocols"),
-            h264,
-        }
+    CACHE.get_or_init(|| Caps {
+        encoders: ask(ff, "-encoders"),
+        muxers: ask(ff, "-muxers"),
+        protocols: ask(ff, "-protocols"),
     })
 }
 
-/// The H.264 encoder to use with `ff`, if there is one that works.
+/// The H.264 encoder to use with `ff`, if there is one that works. A working
+/// one is remembered; no answer is tried again at the next start (a busy
+/// graphics card or a driver resetting can pass later).
 pub fn encoder(ff: &Ffmpeg) -> Option<&'static str> {
-    caps(ff).h264
+    static FOUND: OnceLock<&'static str> = OnceLock::new();
+    if let Some(e) = FOUND.get() {
+        return Some(e);
+    }
+    let c = caps(ff);
+    let e = pick_encoder(|e| lists(&c.encoders, e), |e| encoder_works(ff, e))?;
+    Some(FOUND.get_or_init(|| e))
 }
 
 /// Why `ff` can't publish `protocol`, if it can't.
@@ -455,6 +493,9 @@ mod tests {
         assert_eq!(size_for((1920, 1080), 720), (1280, 720));
         assert_eq!(size_for((3552, 1080), 720), (2368, 720));
         assert_eq!(size_for((1000, 777), 333), (426, 332));
+        // Hardware encoders stop at 4096 wide, so a very wide canvas is sent smaller.
+        let (w, h) = size_for((5760, 1080), 1080);
+        assert!(w == 4096 && h == 768 && h % 2 == 0, "{w}x{h}");
         // Nonsense is kept in range.
         let (w, h) = size_for((0, 0), 0);
         assert!(w >= 16 && h >= 16 && w % 2 == 0 && h % 2 == 0);
@@ -635,6 +676,10 @@ mod tests {
         assert!(server_url(Rtsp, "h", 1, " / ").is_err());
         assert!(server_url(Rtsp, "h", 1, "a b").is_err());
         assert!(server_url(Srt, "h", 1, "a&streamid=x").is_err());
+        // Credentials and ports typed into the wrong box are refused, not mangled.
+        assert!(server_url(Rtsp, "host:8554", 1, "a").is_err());
+        assert!(server_url(Rtsp, "user:pw@host", 1, "a").is_err());
+        assert!(server_url(Srt, "h", 1, "a:user:pw").is_err());
     }
 
     #[test]
@@ -686,17 +731,31 @@ mod tests {
             eprintln!("this ffmpeg can't publish {}; skipping", protocol.label());
             return;
         }
-        let dir = std::env::temp_dir().join(format!("newq_test_server_{}", protocol.label()));
+        let dir = std::env::temp_dir().join(format!(
+            "newq_test_server_{}_{}",
+            protocol.label(),
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
-        let out = dir.join("received.mkv");
+        // MPEG-TS: every FFmpeg build has that muxer, the Mac bundle's included.
+        let out = dir.join("received.ts");
         let _ = std::fs::remove_file(&out);
+        /// Kills the receiver however the test ends, so a failure leaves no
+        /// listener holding the port.
+        struct Receiver(std::process::Child);
+        impl Drop for Receiver {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         let mut rx = ff.command();
         rx.args(receiver_args)
             .args(["-t", "20", "-c", "copy", "-y"])
-            .arg(&out);
-        let mut rx = rx.spawn().expect("start the receiver");
-        // Give it a moment to listen.
-        std::thread::sleep(std::time::Duration::from_millis(800));
+            .arg(&out)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut rx = Receiver(rx.spawn().expect("start the receiver"));
         let kind = StreamKind::Server {
             protocol,
             host: "127.0.0.1".into(),
@@ -705,14 +764,28 @@ mod tests {
             kbps: 1000,
         };
         let size = (320u32, 180u32);
-        let mut sink = Sink::start(&ff, size, 25, &kind).expect("start the sink");
         let frame = [40u8, 120, 200, 255].repeat((size.0 * size.1) as usize);
+        // The receiver takes a while to listen on a cold machine: try until it does.
+        let mut sink = None;
+        for _ in 0..15 {
+            let mut s = Sink::start(&ff, size, 25, &kind).expect("start the sink");
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            if s.failed().is_none() && s.write(&frame).is_ok() {
+                sink = Some(s);
+                break;
+            }
+        }
+        let mut sink = sink.expect("the receiver never took the stream");
         for _ in 0..50 {
             sink.write(&frame).expect("a frame goes out");
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
         sink.finish();
-        let _ = rx.wait();
+        // Let it finish what it has, but not for ever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while rx.0.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let probe = ff
             .command()
             .args(["-i"])
