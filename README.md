@@ -571,7 +571,9 @@ enter, and *Test Mode* downloads its free test media when you start it.
   built-in test pattern; please report any device that doesn't work.
   **Capture cards:** a card's top modes (4K, or 60 frames a second) are often
   offered in only some formats, so a camera cue has a *Format* (Automatic,
-  NV12, YUY2, UYVY, Motion-JPEG, H.264): if a mode won't open, try another.
+  NV12, YUY2, UYVY, Motion-JPEG, H.264): if a mode won't open, try another, or
+  press *Modes…* to ask the device what it offers (sizes, frame rates and
+  formats; Video4Linux gives no frame rates) and click one to set the cue to it.
   Pictures are scaled down to the size of the output they go to, so a 4K card
   on a 1080p display doesn't send 4K frames to the screen (FFmpeg still has
   to take in and scale the 4K picture, which is heavy: 4K at 60 is more than

@@ -156,6 +156,224 @@ fn format_args(platform: Platform, format: CaptureFormat) -> Vec<String> {
     }
 }
 
+/// One mode a device says it offers: a size, a frame rate (0 when the system
+/// doesn't say) and a format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceMode {
+    pub width: u32,
+    pub height: u32,
+    /// The most frames a second it offers at this size; 0 if not said.
+    pub fps: u32,
+    /// FFmpeg's name for the format (`nv12`, `mjpeg`), if the system says.
+    pub format_name: String,
+}
+
+impl DeviceMode {
+    /// The `CaptureFormat` that asks for this mode's format, when there is one.
+    pub fn format(&self) -> Option<CaptureFormat> {
+        CaptureFormat::ALL.into_iter().find(|f| {
+            f.pixel_format() == Some(self.format_name.as_str())
+                || f.codec() == Some(self.format_name.as_str())
+        })
+    }
+
+    pub fn label(&self) -> String {
+        let mut text = format!("{} × {}", self.width, self.height);
+        if self.fps > 0 {
+            text += &format!(" · up to {} fps", self.fps);
+        }
+        if !self.format_name.is_empty() {
+            text += &format!(" · {}", self.format_name);
+        }
+        text
+    }
+}
+
+/// `1920x1080` as (1920, 1080).
+fn parse_size(token: &str) -> Option<(u32, u32)> {
+    let (w, h) = token
+        .trim_matches(|c: char| !c.is_ascii_digit() && c != 'x')
+        .split_once('x')?;
+    let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+    (w > 0 && h > 0 && w <= 16384 && h <= 16384).then_some((w, h))
+}
+
+/// The modes a device offers, most pixels first, then most frames; the same
+/// mode twice is one.
+fn tidy(mut modes: Vec<DeviceMode>) -> Vec<DeviceMode> {
+    modes.sort_by(|a, b| {
+        (b.width * b.height, b.fps, &b.format_name).cmp(&(
+            a.width * a.height,
+            a.fps,
+            &a.format_name,
+        ))
+    });
+    modes.dedup();
+    modes
+}
+
+/// DirectShow's `-list_options` lines, like
+/// `[dshow @ 1]   pixel_format=nv12  min s=1920x1080 fps=30 max s=3840x2160 fps=60`
+/// (`vcodec=mjpeg` for a compressed one). The most the line says is taken.
+pub fn parse_dshow_modes(text: &str) -> Vec<DeviceMode> {
+    let mut modes = Vec::new();
+    for line in text.lines() {
+        let Some(at) = line.find("pixel_format=").or_else(|| line.find("vcodec=")) else {
+            continue;
+        };
+        let rest = &line[at..];
+        let (key, rest) = rest.split_once('=').unwrap_or(("", rest));
+        let _ = key;
+        let name = rest.split_whitespace().next().unwrap_or("").to_string();
+        let Some(max) = line.find("max s=") else {
+            continue;
+        };
+        let mut words = line[max + "max s=".len()..].split_whitespace();
+        let Some((width, height)) = words.next().and_then(parse_size) else {
+            continue;
+        };
+        let fps = words
+            .next()
+            .and_then(|w| w.strip_prefix("fps="))
+            .and_then(|v| v.parse::<f64>().ok())
+            .map_or(0, |v| v.round() as u32);
+        modes.push(DeviceMode {
+            width,
+            height,
+            fps,
+            format_name: name,
+        });
+    }
+    tidy(modes)
+}
+
+/// Video4Linux's `-list_formats all` lines, like
+/// `[video4linux2,v4l2 @ 1] Raw       :     yuyv422 :           YUYV 4:2:2 : 640x480 1280x720`
+/// and `Compressed:       mjpeg :          Motion-JPEG : 1920x1080`. They give
+/// sizes but no frame rates.
+pub fn parse_v4l2_modes(text: &str) -> Vec<DeviceMode> {
+    let mut modes = Vec::new();
+    for line in text.lines() {
+        let Some(at) = line.find("] ") else { continue };
+        let body = line[at + 2..].trim_start();
+        if !(body.starts_with("Raw") || body.starts_with("Compressed")) {
+            continue;
+        }
+        let Some((_, rest)) = body.split_once(':') else {
+            continue;
+        };
+        let mut parts = rest.trim_start().splitn(3, " : ");
+        let (Some(name), Some(_description), Some(sizes)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || name.contains('?') {
+            continue;
+        }
+        for token in sizes.split_whitespace() {
+            if let Some((width, height)) = parse_size(token) {
+                modes.push(DeviceMode {
+                    width,
+                    height,
+                    fps: 0,
+                    format_name: name.to_string(),
+                });
+            }
+        }
+    }
+    tidy(modes)
+}
+
+/// What AVFoundation prints when asked for a size it doesn't have: lines like
+/// `[avfoundation @ 1]   3840x2160@[24.000000 60.000000]fps`. It names no formats.
+pub fn parse_avfoundation_modes(text: &str) -> Vec<DeviceMode> {
+    let mut modes = Vec::new();
+    for line in text.lines() {
+        let Some((before, after)) = line.split_once("@[") else {
+            continue;
+        };
+        let Some(size) = before.split_whitespace().last().and_then(parse_size) else {
+            continue;
+        };
+        let Some((range, _)) = after.split_once(']') else {
+            continue;
+        };
+        let fps = range
+            .split_whitespace()
+            .filter_map(|v| v.parse::<f64>().ok())
+            .fold(0.0_f64, f64::max);
+        modes.push(DeviceMode {
+            width: size.0,
+            height: size.1,
+            fps: fps.round() as u32,
+            format_name: String::new(),
+        });
+    }
+    tidy(modes)
+}
+
+/// Ask `ff` what modes `device` offers: each system's own listing, which
+/// FFmpeg prints as a side effect (AVFoundation only when asked for a mode it
+/// hasn't got, so a size of 1 x 1 is asked for). A device that is in use may
+/// not answer.
+pub fn list_modes(
+    ff: &Ffmpeg,
+    platform: Platform,
+    device: &str,
+) -> Result<Vec<DeviceMode>, String> {
+    if device.is_empty() {
+        return Err("no camera chosen".into());
+    }
+    let (text, parse): (String, fn(&str) -> Vec<DeviceMode>) = match platform {
+        Platform::Windows => (
+            list_output(
+                ff,
+                &[
+                    "-list_options",
+                    "true",
+                    "-f",
+                    "dshow",
+                    "-i",
+                    &format!("video={device}"),
+                ],
+            ),
+            parse_dshow_modes,
+        ),
+        Platform::Linux => (
+            list_output(ff, &["-f", "v4l2", "-list_formats", "all", "-i", device]),
+            parse_v4l2_modes,
+        ),
+        Platform::MacOs => (
+            list_output(
+                ff,
+                &[
+                    "-f",
+                    "avfoundation",
+                    "-video_size",
+                    "1x1",
+                    "-framerate",
+                    "30",
+                    "-i",
+                    &format!("{device}:none"),
+                ],
+            ),
+            parse_avfoundation_modes,
+        ),
+    };
+    let modes = parse(&text);
+    if modes.is_empty() {
+        Err(
+            "the device didn't list any modes (it may be in use by another program or cue, \
+             or not be one this FFmpeg can ask)"
+                .into(),
+        )
+    } else {
+        Ok(modes)
+    }
+}
+
 /// The devices ffmpeg can open on this machine, by the name `input_args`
 /// wants. The test picture is always first.
 pub fn list_devices(ff: &Ffmpeg) -> Vec<String> {
@@ -373,6 +591,102 @@ mod tests {
             .join(" ")
             .contains("nv12")
         );
+    }
+
+    #[test]
+    fn reads_the_modes_dshow_lists_taking_the_most_each_line_says() {
+        let text = r#"[dshow @ 000001e5e4c4d0c0] DirectShow video device options (from video devices)
+[dshow @ 000001e5e4c4d0c0]  Pin "Capture" (alternative pin name "Capture")
+[dshow @ 000001e5e4c4d0c0]   pixel_format=nv12  min s=3840x2160 fps=24 max s=3840x2160 fps=60
+[dshow @ 000001e5e4c4d0c0]   pixel_format=yuyv422  min s=1920x1080 fps=5 max s=1920x1080 fps=30
+[dshow @ 000001e5e4c4d0c0]   pixel_format=nv12  min s=1920x1080 fps=5 max s=1920x1080 fps=119.88
+[dshow @ 000001e5e4c4d0c0]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=60
+[dshow @ 000001e5e4c4d0c0]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=60
+Could not set video options
+"#;
+        let modes = parse_dshow_modes(text);
+        // Most pixels first, then most frames; a repeated line is one mode.
+        let got: Vec<(u32, u32, u32, &str)> = modes
+            .iter()
+            .map(|m| (m.width, m.height, m.fps, m.format_name.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (3840, 2160, 60, "nv12"),
+                (1920, 1080, 120, "nv12"),
+                (1920, 1080, 30, "yuyv422"),
+                (1280, 720, 60, "mjpeg"),
+            ]
+        );
+        assert_eq!(modes[0].format(), Some(CaptureFormat::Nv12));
+        assert_eq!(modes[3].format(), Some(CaptureFormat::Mjpeg));
+        assert_eq!(modes[0].label(), "3840 × 2160 · up to 60 fps · nv12");
+        assert!(parse_dshow_modes("nothing to see\n").is_empty());
+    }
+
+    #[test]
+    fn reads_the_formats_and_sizes_video4linux_lists() {
+        let text = "\
+[video4linux2,v4l2 @ 0x55d0c8e3d2c0] Compressed:       mjpeg :          Motion-JPEG : 3840x2160 1920x1080 1280x720
+[video4linux2,v4l2 @ 0x55d0c8e3d2c0] Raw       :     yuyv422 :           YUYV 4:2:2 : 1920x1080 1280x720
+[video4linux2,v4l2 @ 0x55d0c8e3d2c0] Raw       :        nv12 :         Y/UV 4:2:0 : 3840x2160
+[video4linux2,v4l2 @ 0x55d0c8e3d2c0] Raw       :  Unsupported? :        Some other : 640x480
+/dev/video2: Immediate exit requested
+";
+        let modes = parse_v4l2_modes(text);
+        // Largest first (4K is offered in two formats), then the rest.
+        assert_eq!((modes[0].width, modes[1].width), (3840, 3840));
+        assert!(
+            modes
+                .iter()
+                .any(|m| m.width == 3840 && m.format_name == "mjpeg")
+        );
+        assert!(modes.iter().all(|m| m.fps == 0), "it gives no frame rates");
+        assert!(modes.iter().any(|m| m.width == 3840
+            && m.height == 2160
+            && m.format_name == "nv12"
+            && m.format() == Some(CaptureFormat::Nv12)));
+        assert!(
+            modes
+                .iter()
+                .any(|m| m.format_name == "yuyv422" && m.width == 1280)
+        );
+        // An unsupported format is not offered.
+        assert!(!modes.iter().any(|m| m.width == 640));
+        assert_eq!(modes.len(), 6);
+    }
+
+    #[test]
+    fn reads_the_modes_avfoundation_lists_when_asked_for_one_it_lacks() {
+        let text = "\
+[avfoundation @ 0x7f8a4b004a00] Selected video size (1x1) is not supported by the device.
+[avfoundation @ 0x7f8a4b004a00] Supported modes:
+[avfoundation @ 0x7f8a4b004a00]   3840x2160@[24.000000 60.000000]fps
+[avfoundation @ 0x7f8a4b004a00]   1920x1080@[29.970000 59.940000]fps
+[avfoundation @ 0x7f8a4b004a00]   1280x720@[1.000000 30.000000]fps
+Game Capture 4K S:none: Immediate exit requested
+";
+        let modes = parse_avfoundation_modes(text);
+        let got: Vec<(u32, u32, u32)> = modes.iter().map(|m| (m.width, m.height, m.fps)).collect();
+        assert_eq!(
+            got,
+            vec![(3840, 2160, 60), (1920, 1080, 60), (1280, 720, 30)]
+        );
+        assert!(
+            modes
+                .iter()
+                .all(|m| m.format_name.is_empty() && m.format().is_none())
+        );
+    }
+
+    #[test]
+    fn a_size_token_is_read_only_when_it_is_a_size() {
+        assert_eq!(parse_size("1920x1080"), Some((1920, 1080)));
+        assert_eq!(parse_size("(1920x1080),"), Some((1920, 1080)));
+        for bad in ["", "x", "0x0", "1920x", "axb", "99999x99999", "1920"] {
+            assert_eq!(parse_size(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

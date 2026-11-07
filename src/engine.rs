@@ -535,6 +535,9 @@ pub enum LayerSource<'a> {
     Solid([u8; 4]),
 }
 
+/// What asking a camera for its modes came to.
+pub type ModesAnswer = Result<Vec<camera::DeviceMode>, String>;
+
 pub struct Engine {
     pub ff: Option<Ffmpeg>,
     pub audio: AudioOut,
@@ -567,6 +570,10 @@ pub struct Engine {
     cameras: Vec<String>,
     camera_scan: Option<Receiver<Vec<String>>>,
     scanned: bool,
+    /// The modes asked of a camera (which device, and the answer when it
+    /// comes: a person is choosing one).
+    mode_query: Option<(String, Receiver<ModesAnswer>)>,
+    modes: Option<(String, ModesAnswer)>,
     /// Follows incoming MIDI Time Code and says which cues it reaches.
     pub timecode: Follower,
     /// Follows the time of day for cues with a clock time.
@@ -620,6 +627,8 @@ impl Engine {
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
             scanned: false,
+            mode_query: None,
+            modes: None,
             timecode: Follower::default(),
             clock: ClockFollower::default(),
             outbox: Outbox::recording(),
@@ -657,6 +666,8 @@ impl Engine {
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
             scanned: false,
+            mode_query: None,
+            modes: None,
             timecode: Follower::default(),
             clock: ClockFollower::default(),
             outbox: Outbox::new(),
@@ -681,6 +692,46 @@ impl Engine {
             self.refresh_cameras();
         }
         &self.cameras
+    }
+
+    /// Ask `device` what modes it offers, on a background thread (it takes a
+    /// second or two). The answer is `camera_modes`.
+    pub fn query_camera_modes(&mut self, device: &str) {
+        let Some(ff) = self.ff.clone() else {
+            self.modes = Some((device.to_string(), Err("ffmpeg not found".into())));
+            return;
+        };
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.mode_query = Some((device.to_string(), rx));
+        self.modes = None;
+        let device = device.to_string();
+        let _ = std::thread::Builder::new()
+            .name("camera-modes".into())
+            .spawn(move || {
+                let _ = tx.send(camera::list_modes(
+                    &ff,
+                    camera::Platform::current(),
+                    &device,
+                ));
+            });
+    }
+
+    /// What asking `device` for its modes came to: `None` if not asked (or
+    /// asked of another device), `Some(None)` while the answer is awaited.
+    pub fn camera_modes(&mut self, device: &str) -> Option<Option<&ModesAnswer>> {
+        if let Some((asked, rx)) = &self.mode_query
+            && let Ok(answer) = rx.try_recv()
+        {
+            self.modes = Some((asked.clone(), answer));
+            self.mode_query = None;
+        }
+        if self.mode_query.as_ref().is_some_and(|(d, _)| d == device) {
+            return Some(None);
+        }
+        self.modes
+            .as_ref()
+            .filter(|(d, _)| d == device)
+            .map(|(_, answer)| Some(answer))
     }
 
     /// Look for cameras again, e.g. after plugging one in.

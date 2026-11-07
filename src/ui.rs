@@ -7577,6 +7577,59 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
                 ui.end_row();
             }
         });
+    // Ask the device what it offers, for a real camera or capture card.
+    if c.device != TEST_PATTERN_DEVICE
+        && !c.device.is_empty()
+        && camera::screen_target(&c.device).is_none()
+        && crate::ndi::source_of(&c.device).is_none()
+    {
+        let device = c.device.clone();
+        ui.horizontal(|ui| {
+            if ui
+                .button("Modes…")
+                .on_hover_text(
+                    "Ask the device which sizes, frame rates and formats it offers, then pick one",
+                )
+                .clicked()
+            {
+                engine.query_camera_modes(&device);
+            }
+            match engine.camera_modes(&device).map(|m| m.cloned()) {
+                Some(None) => {
+                    ui.spinner();
+                    ui.label("Asking the device…");
+                }
+                Some(Some(Err(e))) => {
+                    ui.label(RichText::new(e).small().color(PREWAIT));
+                }
+                _ => {}
+            }
+        });
+        if let Some(Some(Ok(modes))) = engine.camera_modes(&device).map(|m| m.cloned()) {
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .id_salt("camera_modes")
+                .show(ui, |ui| {
+                    for m in &modes {
+                        let format = m.format().unwrap_or(CaptureFormat::Auto);
+                        let current = c.width == m.width
+                            && c.height == m.height
+                            && (m.fps == 0 || c.fps == m.fps)
+                            && (m.format_name.is_empty() || c.format == format);
+                        if ui.selectable_label(current, m.label()).clicked() {
+                            c.width = m.width;
+                            c.height = m.height;
+                            if m.fps > 0 {
+                                c.fps = m.fps;
+                            }
+                            if !m.format_name.is_empty() {
+                                c.format = format;
+                            }
+                        }
+                    }
+                });
+        }
+    }
     ui.label(
         RichText::new(
             "The mode must be one the camera supports. The camera opens when the cue is next \
