@@ -4630,7 +4630,7 @@ fn shared_picture_editor(
 /// Sending a display's picture out as video: to a virtual camera (Linux), to
 /// OBS over the network, or anywhere FFmpeg can send it.
 fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
-    use crate::show::{StreamKind, StreamOut};
+    use crate::show::{ServerProtocol, StreamKind, StreamOut};
     let on = d.stream.as_ref().is_some_and(|s| s.enabled);
     egui::CollapsingHeader::new(if on { "Send out ●" } else { "Send out" })
         .id_salt(("stream", d.id.0))
@@ -4643,6 +4643,7 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                 StreamKind::Udp { .. } => "Network stream (for OBS)",
                 StreamKind::Custom { .. } => "Custom FFmpeg output",
                 StreamKind::Ndi { .. } => "NDI source",
+                StreamKind::Server { .. } => "Streaming server (MediaMTX)",
             };
             egui::Grid::new(("stream_grid", d.id.0))
                 .num_columns(2)
@@ -4663,6 +4664,7 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                                 StreamKind::Ndi {
                                     name: "NewQ".into(),
                                 },
+                                StreamKind::server(ServerProtocol::Rtsp),
                                 StreamKind::Custom {
                                     args: String::new(),
                                 },
@@ -4715,6 +4717,47 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                             ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
                             ui.end_row();
                         }
+                        StreamKind::Server {
+                            protocol,
+                            host,
+                            port,
+                            path,
+                            kbps,
+                        } => {
+                            ui.label("Protocol");
+                            ui.horizontal(|ui| {
+                                for p in ServerProtocol::ALL {
+                                    if ui.selectable_label(*protocol == p, p.label()).clicked()
+                                        && *protocol != p
+                                    {
+                                        // Keep a port the user typed; swap a default one.
+                                        if *port == protocol.default_port() {
+                                            *port = p.default_port();
+                                        }
+                                        *protocol = p;
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("Server");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(host).desired_width(120.0));
+                                ui.label(":");
+                                ui.add(egui::DragValue::new(port).range(1..=65535).speed(1.0));
+                            });
+                            ui.end_row();
+                            ui.label("Stream name");
+                            ui.add(egui::TextEdit::singleline(path).desired_width(120.0));
+                            ui.end_row();
+                            ui.label("Bitrate");
+                            ui.add(
+                                egui::DragValue::new(kbps)
+                                    .range(200..=100_000)
+                                    .speed(50.0)
+                                    .suffix(" kbps"),
+                            );
+                            ui.end_row();
+                        }
                         StreamKind::Custom { args } => {
                             ui.label("FFmpeg output");
                             ui.add(
@@ -4761,6 +4804,13 @@ fn stream_editor(ui: &mut Ui, d: &mut OutputConfig, engine: &mut Engine) {
                             "⚠ The NDI runtime isn't installed on this computer: get the NDI \
                              Runtime or NDI Tools from ndi.video, then restart NewQ."
                         }
+                    }
+                    StreamKind::Server { .. } => {
+                        "Publishes H.264 (picture only) to a streaming server such as MediaMTX, \
+                         which hands it to any number of viewers. The server must be running: \
+                         viewers open, for RTSP, rtsp://server:8554/name. Uses libx264 if this \
+                         FFmpeg has it, else the computer's hardware encoder. SRT needs an \
+                         FFmpeg with libsrt (not NewQ's Mac one)."
                     }
                     StreamKind::Custom { .. } => {
                         "The arguments that follow the input: the picture arrives as raw RGBA, \

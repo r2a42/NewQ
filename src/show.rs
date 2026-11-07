@@ -603,6 +603,61 @@ pub enum StreamKind {
     Custom { args: String },
     /// An NDI source of this name on the network (needs NDI's runtime).
     Ndi { name: String },
+    /// Publishing to a streaming server such as MediaMTX, which then serves the
+    /// picture to any number of viewers (RTSP, RTMP or SRT). H.264, picture only.
+    Server {
+        protocol: ServerProtocol,
+        host: String,
+        /// 0 means the protocol's usual port.
+        port: u16,
+        /// The stream's name on the server (`newq` in `rtsp://host:8554/newq`).
+        path: String,
+        /// The video bitrate, in kilobits a second.
+        kbps: u32,
+    },
+}
+
+/// How a picture is published to a streaming server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerProtocol {
+    Rtsp,
+    Rtmp,
+    /// Needs an FFmpeg with libsrt (NewQ's bundled Mac one hasn't).
+    Srt,
+}
+
+impl ServerProtocol {
+    pub const ALL: [ServerProtocol; 3] = [Self::Rtsp, Self::Rtmp, Self::Srt];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rtsp => "RTSP",
+            Self::Rtmp => "RTMP",
+            Self::Srt => "SRT",
+        }
+    }
+
+    /// The port MediaMTX listens on for this protocol by default.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Rtsp => 8554,
+            Self::Rtmp => 1935,
+            Self::Srt => 8890,
+        }
+    }
+}
+
+impl StreamKind {
+    /// A server stream with MediaMTX's defaults.
+    pub fn server(protocol: ServerProtocol) -> StreamKind {
+        StreamKind::Server {
+            protocol,
+            host: "127.0.0.1".into(),
+            port: protocol.default_port(),
+            path: "newq".into(),
+            kbps: 6000,
+        }
+    }
 }
 
 impl Default for StreamKind {
@@ -4249,6 +4304,30 @@ mod tests {
             .unwrap();
         assert_eq!((s.fps, s.height), (60, 16));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_streaming_server_output_round_trips() {
+        let mut show = Show::default();
+        show.outputs[0].stream = Some(StreamOut {
+            enabled: true,
+            kind: StreamKind::Server {
+                protocol: ServerProtocol::Rtmp,
+                host: "media.local".into(),
+                port: 0,
+                path: "live/show".into(),
+                kbps: 4500,
+            },
+            fps: 30,
+            height: 1080,
+        });
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(json.contains("Server") && json.contains("Rtmp"), "{json}");
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.outputs[0].stream, show.outputs[0].stream);
+        assert_eq!(ServerProtocol::Rtsp.default_port(), 8554);
+        assert_eq!(ServerProtocol::Rtmp.default_port(), 1935);
+        assert_eq!(ServerProtocol::Srt.default_port(), 8890);
     }
 
     #[test]

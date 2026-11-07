@@ -8,7 +8,7 @@
 //! virtual camera Zoom and Teams can use.
 
 use crate::media::ffmpeg::Ffmpeg;
-use crate::show::StreamKind;
+use crate::show::{ServerProtocol, StreamKind};
 use std::io::Write;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Arc;
@@ -70,9 +70,95 @@ pub fn input_args(size: (u32, u32), fps: u32) -> Vec<String> {
     .to_vec()
 }
 
-/// FFmpeg's output arguments for `kind`. `x264` says whether this FFmpeg can
-/// encode H.264, which is what the network stream prefers.
-pub fn output_args(kind: &StreamKind, x264: bool) -> Result<Vec<String>, String> {
+/// H.264 encoders to try, best first: the software one, then each platform's
+/// hardware encoder (VideoToolbox on a Mac, then NVIDIA, Intel and AMD).
+const H264_ENCODERS: [&str; 5] = [
+    "libx264",
+    "h264_videotoolbox",
+    "h264_nvenc",
+    "h264_qsv",
+    "h264_amf",
+];
+
+/// The arguments that make H.264 with `encoder` at about `kbps`, with a
+/// keyframe every two seconds so a viewer joining late waits no longer.
+pub fn h264_args(encoder: &str, kbps: u32, fps: u32) -> Vec<String> {
+    let kbps = kbps.clamp(200, 100_000);
+    let rate = format!("{kbps}k");
+    let buf = format!("{}k", kbps * 2);
+    let gop = (fps.max(1) * 2).to_string();
+    let mut a: Vec<String> = ["-c:v", encoder].map(String::from).to_vec();
+    let mut add = |more: &[&str]| a.extend(more.iter().map(|s| s.to_string()));
+    match encoder {
+        "libx264" => add(&[
+            "-preset",
+            "veryfast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+        ]),
+        "h264_videotoolbox" => add(&[
+            "-realtime",
+            "1",
+            "-profile:v",
+            "main",
+            "-pix_fmt",
+            "yuv420p",
+        ]),
+        "h264_nvenc" => add(&["-preset", "p4", "-tune", "ll", "-pix_fmt", "yuv420p"]),
+        "h264_qsv" => add(&["-preset", "veryfast", "-pix_fmt", "nv12"]),
+        "h264_amf" => add(&["-usage", "lowlatency", "-pix_fmt", "yuv420p"]),
+        _ => add(&["-pix_fmt", "yuv420p"]),
+    }
+    add(&[
+        "-b:v", &rate, "-maxrate", &rate, "-bufsize", &buf, "-g", &gop,
+    ]);
+    a
+}
+
+/// Where a server stream goes, as the URL FFmpeg publishes to.
+pub fn server_url(
+    protocol: ServerProtocol,
+    host: &str,
+    port: u16,
+    path: &str,
+) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("no address for the streaming server".into());
+    }
+    let path = path.trim().trim_matches('/');
+    if path.is_empty() {
+        return Err("no stream name (the path on the server)".into());
+    }
+    if path.chars().any(|c| c.is_whitespace() || "?#&".contains(c)) {
+        return Err("the stream name can't have spaces, ? # or &".into());
+    }
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = if port == 0 {
+        protocol.default_port()
+    } else {
+        port
+    };
+    Ok(match protocol {
+        ServerProtocol::Rtsp => format!("rtsp://{host}:{port}/{path}"),
+        ServerProtocol::Rtmp => format!("rtmp://{host}:{port}/{path}"),
+        // MediaMTX takes the path from the stream id.
+        ServerProtocol::Srt => {
+            format!("srt://{host}:{port}?streamid=publish:{path}&pkt_size=1316")
+        }
+    })
+}
+
+/// FFmpeg's output arguments for `kind`, for a picture at `fps`. `h264` is the
+/// H.264 encoder this FFmpeg has and that works on this computer (`encoder`),
+/// which the network and server streams use.
+pub fn output_args(kind: &StreamKind, h264: Option<&str>, fps: u32) -> Result<Vec<String>, String> {
     let list = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     match kind {
         StreamKind::VirtualCamera { device } => {
@@ -96,24 +182,32 @@ pub fn output_args(kind: &StreamKind, x264: bool) -> Result<Vec<String>, String>
             if host.is_empty() {
                 return Err("no address to send to".into());
             }
-            let mut a = if x264 {
-                list(&[
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-tune",
-                    "zerolatency",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-g",
-                    "30",
-                ])
-            } else {
-                list(&["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"])
+            let mut a = match h264 {
+                Some(enc) => h264_args(enc, 4000, fps),
+                None => list(&["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]),
             };
             a.extend(list(&["-f", "mpegts"]));
             a.push(format!("udp://{host}:{port}?pkt_size=1316"));
+            Ok(a)
+        }
+        StreamKind::Server {
+            protocol,
+            host,
+            port,
+            path,
+            kbps,
+        } => {
+            let url = server_url(*protocol, host, *port, path)?;
+            let Some(enc) = h264 else {
+                return Err(NO_H264.into());
+            };
+            let mut a = h264_args(enc, *kbps, fps);
+            match protocol {
+                ServerProtocol::Rtsp => a.extend(list(&["-f", "rtsp", "-rtsp_transport", "tcp"])),
+                ServerProtocol::Rtmp => a.extend(list(&["-f", "flv"])),
+                ServerProtocol::Srt => a.extend(list(&["-f", "mpegts"])),
+            }
+            a.push(url);
             Ok(a)
         }
         StreamKind::Ndi { .. } => Err("an NDI source is sent by NewQ itself, not FFmpeg".into()),
@@ -128,16 +222,104 @@ pub fn output_args(kind: &StreamKind, x264: bool) -> Result<Vec<String>, String>
     }
 }
 
-/// Whether `ff` can encode H.264 (asked once).
-pub fn has_x264(ff: &Ffmpeg) -> bool {
-    static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        let mut cmd = ff.command();
-        cmd.args(["-encoders"]);
-        cmd.output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("libx264"))
-            .unwrap_or(false)
+const NO_H264: &str = "This computer's FFmpeg has no H.264 encoder that works here (libx264, or \
+    VideoToolbox, NVENC, Quick Sync or AMF with its hardware): use a Custom FFmpeg output or \
+    install an FFmpeg with libx264 and point NEWQ_FFMPEG_DIR at it";
+
+/// What this FFmpeg can do, asked once: its encoders, muxers and protocols.
+struct Caps {
+    muxers: String,
+    protocols: String,
+    /// The first H.264 encoder that is there and works.
+    h264: Option<&'static str>,
+}
+
+/// Whether a listing from `ffmpeg -encoders|-muxers|-protocols` has `name`
+/// (the second word of a line, or a line of that word alone).
+fn lists(listing: &str, name: &str) -> bool {
+    listing.lines().any(|l| {
+        let mut w = l.split_whitespace();
+        match (w.next(), w.next()) {
+            (Some(only), None) => only == name,
+            (Some(_), Some(second)) => second == name,
+            _ => false,
+        }
     })
+}
+
+/// The first of `H264_ENCODERS` that `listed` and `works` both allow.
+fn pick_encoder(
+    listed: impl Fn(&str) -> bool,
+    works: impl Fn(&str) -> bool,
+) -> Option<&'static str> {
+    H264_ENCODERS.into_iter().find(|e| listed(e) && works(e))
+}
+
+fn ask(ff: &Ffmpeg, flag: &str) -> String {
+    let mut cmd = ff.command();
+    cmd.arg(flag);
+    cmd.output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `encoder` really encodes here: a hardware one is listed whether or
+/// not the computer has the hardware, so try a few frames.
+fn encoder_works(ff: &Ffmpeg, encoder: &str) -> bool {
+    let mut cmd = ff.command();
+    cmd.args(["-f", "lavfi", "-i", "color=c=black:s=320x240:r=30"])
+        .args(["-frames:v", "8"])
+        .args(h264_args(encoder, 1000, 30))
+        .args(["-f", "null", "-"]);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn caps(ff: &Ffmpeg) -> &'static Caps {
+    static CACHE: OnceLock<Caps> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let encoders = ask(ff, "-encoders");
+        let h264 = pick_encoder(|e| lists(&encoders, e), |e| encoder_works(ff, e));
+        Caps {
+            muxers: ask(ff, "-muxers"),
+            protocols: ask(ff, "-protocols"),
+            h264,
+        }
+    })
+}
+
+/// The H.264 encoder to use with `ff`, if there is one that works.
+pub fn encoder(ff: &Ffmpeg) -> Option<&'static str> {
+    caps(ff).h264
+}
+
+/// Why `ff` can't publish `protocol`, if it can't.
+fn missing_for(ff: &Ffmpeg, protocol: ServerProtocol) -> Option<String> {
+    let c = caps(ff);
+    let (muxer, protocol_name) = match protocol {
+        ServerProtocol::Rtsp => ("rtsp", None),
+        ServerProtocol::Rtmp => ("flv", Some("rtmp")),
+        ServerProtocol::Srt => ("mpegts", Some("srt")),
+    };
+    if !lists(&c.muxers, muxer) {
+        return Some(format!(
+            "This FFmpeg can't write {}: use a build with the {muxer} muxer",
+            protocol.label()
+        ));
+    }
+    if let Some(p) = protocol_name
+        && !lists(&c.protocols, p)
+    {
+        return Some(format!(
+            "This FFmpeg has no {} support{}: send RTSP or RTMP instead",
+            protocol.label(),
+            if protocol == ServerProtocol::Srt {
+                " (it needs libsrt)"
+            } else {
+                ""
+            }
+        ));
+    }
+    None
 }
 
 /// Keep only the end of what FFmpeg has said, once it has said a lot. Cut as
@@ -180,7 +362,12 @@ impl Sink {
                 fps.to_string(),
             ])?
         } else {
-            let output = output_args(kind, has_x264(ff))?;
+            if let StreamKind::Server { protocol, .. } = kind
+                && let Some(why) = missing_for(ff, *protocol)
+            {
+                return Err(why);
+            }
+            let output = output_args(kind, encoder(ff), fps)?;
             let mut cmd = ff.command();
             cmd.args(input_args(size, fps)).args(output);
             cmd
@@ -314,12 +501,12 @@ mod tests {
             host: " 127.0.0.1 ".into(),
             port: 5000,
         };
-        let a = output_args(&udp, true).unwrap().join(" ");
+        let a = output_args(&udp, Some("libx264"), 30).unwrap().join(" ");
         assert!(
             a.contains("libx264") && a.ends_with("udp://127.0.0.1:5000?pkt_size=1316"),
             "{a}"
         );
-        let b = output_args(&udp, false).unwrap().join(" ");
+        let b = output_args(&udp, None, 30).unwrap().join(" ");
         assert!(b.contains("mpeg4") && !b.contains("libx264"), "{b}");
         assert!(
             output_args(
@@ -327,7 +514,8 @@ mod tests {
                     host: " ".into(),
                     port: 1
                 },
-                true
+                Some("libx264"),
+                30
             )
             .is_err()
         );
@@ -336,22 +524,226 @@ mod tests {
             args: "-f flv rtmp://x/y".into(),
         };
         assert_eq!(
-            output_args(&custom, true).unwrap(),
+            output_args(&custom, None, 30).unwrap(),
             ["-f", "flv", "rtmp://x/y"]
         );
-        assert!(output_args(&StreamKind::Custom { args: "".into() }, true).is_err());
+        assert!(output_args(&StreamKind::Custom { args: "".into() }, None, 30).is_err());
 
         let cam = StreamKind::VirtualCamera {
             device: "/dev/video10".into(),
         };
         if cfg!(target_os = "linux") {
             assert_eq!(
-                output_args(&cam, true).unwrap().join(" "),
+                output_args(&cam, None, 30).unwrap().join(" "),
                 "-pix_fmt yuyv422 -f v4l2 /dev/video10"
             );
-            assert!(output_args(&StreamKind::VirtualCamera { device: "".into() }, true).is_err());
+            assert!(
+                output_args(&StreamKind::VirtualCamera { device: "".into() }, None, 30).is_err()
+            );
         } else {
-            assert!(output_args(&cam, true).unwrap_err().contains("OBS"));
+            assert!(output_args(&cam, None, 30).unwrap_err().contains("OBS"));
         }
+    }
+
+    #[test]
+    fn listings_are_read_by_name() {
+        let encoders = " V....D libx264              libx264 H.264\n V....D h264_nvenc   NVIDIA\n";
+        assert!(lists(encoders, "libx264") && lists(encoders, "h264_nvenc"));
+        assert!(!lists(encoders, "h264_qsv") && !lists(encoders, "H.264"));
+        let muxers = "  E flv             FLV\n DE rtsp   RTSP output\n";
+        assert!(lists(muxers, "flv") && lists(muxers, "rtsp") && !lists(muxers, "mpegts"));
+        let protocols = "Input:\n  rtmp\n  srt\nOutput:\n  tcp\n";
+        assert!(lists(protocols, "srt") && lists(protocols, "tcp") && !lists(protocols, "rtp"));
+    }
+
+    #[test]
+    fn the_best_encoder_that_is_there_and_works_is_picked() {
+        let has = |names: &'static [&'static str]| move |e: &str| names.contains(&e);
+        assert_eq!(
+            pick_encoder(has(&["libx264", "h264_nvenc"]), |_| true),
+            Some("libx264")
+        );
+        // A Mac's bundle has VideoToolbox only.
+        assert_eq!(
+            pick_encoder(has(&["h264_videotoolbox"]), |_| true),
+            Some("h264_videotoolbox")
+        );
+        // Listed but no hardware for it: the next one.
+        assert_eq!(
+            pick_encoder(has(&["h264_nvenc", "h264_qsv"]), |e| e == "h264_qsv"),
+            Some("h264_qsv")
+        );
+        assert_eq!(pick_encoder(has(&["mpeg4"]), |_| true), None);
+        assert_eq!(pick_encoder(has(&["h264_nvenc"]), |_| false), None);
+    }
+
+    #[test]
+    fn each_encoder_gets_its_own_arguments_and_a_two_second_keyframe_interval() {
+        for enc in H264_ENCODERS {
+            let a = h264_args(enc, 6000, 25).join(" ");
+            assert!(a.starts_with(&format!("-c:v {enc} ")), "{a}");
+            assert!(
+                a.contains("-b:v 6000k -maxrate 6000k -bufsize 12000k -g 50"),
+                "{a}"
+            );
+        }
+        assert!(
+            h264_args("libx264", 6000, 30)
+                .join(" ")
+                .contains("-tune zerolatency")
+        );
+        assert!(
+            h264_args("h264_videotoolbox", 6000, 30)
+                .join(" ")
+                .contains("-realtime 1")
+        );
+        assert!(
+            h264_args("h264_qsv", 6000, 30)
+                .join(" ")
+                .contains("-pix_fmt nv12")
+        );
+        // A silly bitrate is held to a range.
+        assert!(h264_args("libx264", 1, 30).join(" ").contains("-b:v 200k"));
+        assert!(
+            h264_args("libx264", 9_999_999, 30)
+                .join(" ")
+                .contains("-b:v 100000k")
+        );
+    }
+
+    #[test]
+    fn server_addresses_are_built_for_each_protocol() {
+        use ServerProtocol::*;
+        assert_eq!(
+            server_url(Rtsp, " 10.0.0.5 ", 8554, "/newq/").unwrap(),
+            "rtsp://10.0.0.5:8554/newq"
+        );
+        assert_eq!(
+            server_url(Rtmp, "media.local", 1935, "live/show").unwrap(),
+            "rtmp://media.local:1935/live/show"
+        );
+        assert_eq!(
+            server_url(Srt, "media.local", 8890, "newq").unwrap(),
+            "srt://media.local:8890?streamid=publish:newq&pkt_size=1316"
+        );
+        // Port 0 is the protocol's own; an IPv6 address is bracketed.
+        assert_eq!(
+            server_url(Rtsp, "::1", 0, "a").unwrap(),
+            "rtsp://[::1]:8554/a"
+        );
+        assert!(server_url(Rtsp, "", 1, "a").is_err());
+        assert!(server_url(Rtsp, "h", 1, " / ").is_err());
+        assert!(server_url(Rtsp, "h", 1, "a b").is_err());
+        assert!(server_url(Srt, "h", 1, "a&streamid=x").is_err());
+    }
+
+    #[test]
+    fn a_server_stream_needs_an_h264_encoder_and_ends_with_its_address() {
+        let kind = StreamKind::server(ServerProtocol::Rtsp);
+        let a = output_args(&kind, Some("h264_videotoolbox"), 30).unwrap();
+        let line = a.join(" ");
+        assert!(
+            line.starts_with("-c:v h264_videotoolbox ")
+                && line.ends_with("-f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/newq"),
+            "{line}"
+        );
+        let rtmp = output_args(
+            &StreamKind::server(ServerProtocol::Rtmp),
+            Some("libx264"),
+            30,
+        )
+        .unwrap()
+        .join(" ");
+        assert!(
+            rtmp.ends_with("-f flv rtmp://127.0.0.1:1935/newq"),
+            "{rtmp}"
+        );
+        let srt = output_args(
+            &StreamKind::server(ServerProtocol::Srt),
+            Some("libx264"),
+            30,
+        )
+        .unwrap()
+        .join(" ");
+        assert!(
+            srt.contains("-f mpegts srt://127.0.0.1:8890?streamid=publish:newq"),
+            "{srt}"
+        );
+        assert!(output_args(&kind, None, 30).unwrap_err().contains("H.264"));
+    }
+
+    /// Publish a few frames to a receiver that FFmpeg itself runs, the way
+    /// MediaMTX would take them, and count what arrives. (Not MediaMTX: that
+    /// isn't here; this checks the framing, encoder and arguments.)
+    fn publish_to_a_listener(protocol: ServerProtocol, receiver_args: &[&str], port: u16) {
+        let Some(ff) = Ffmpeg::locate() else {
+            if std::env::var_os("NEWQ_REQUIRE_MEDIA").is_some() {
+                panic!("NEWQ_REQUIRE_MEDIA is set but ffmpeg was not found");
+            }
+            return;
+        };
+        if encoder(&ff).is_none() || missing_for(&ff, protocol).is_some() {
+            eprintln!("this ffmpeg can't publish {}; skipping", protocol.label());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("newq_test_server_{}", protocol.label()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("received.mkv");
+        let _ = std::fs::remove_file(&out);
+        let mut rx = ff.command();
+        rx.args(receiver_args)
+            .args(["-t", "20", "-c", "copy", "-y"])
+            .arg(&out);
+        let mut rx = rx.spawn().expect("start the receiver");
+        // Give it a moment to listen.
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let kind = StreamKind::Server {
+            protocol,
+            host: "127.0.0.1".into(),
+            port,
+            path: "newq".into(),
+            kbps: 1000,
+        };
+        let size = (320u32, 180u32);
+        let mut sink = Sink::start(&ff, size, 25, &kind).expect("start the sink");
+        let frame = [40u8, 120, 200, 255].repeat((size.0 * size.1) as usize);
+        for _ in 0..50 {
+            sink.write(&frame).expect("a frame goes out");
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        sink.finish();
+        let _ = rx.wait();
+        let probe = ff
+            .command()
+            .args(["-i"])
+            .arg(&out)
+            .args(["-map", "0:v:0", "-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            probe.status.success() && out.metadata().map(|m| m.len() > 1000).unwrap_or(false),
+            "{}: {}",
+            protocol.label(),
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rtsp_frames_reach_a_server() {
+        publish_to_a_listener(
+            ServerProtocol::Rtsp,
+            &["-rtsp_flags", "listen", "-i", "rtsp://127.0.0.1:18554/newq"],
+            18554,
+        );
+    }
+
+    #[test]
+    fn rtmp_frames_reach_a_server() {
+        publish_to_a_listener(
+            ServerProtocol::Rtmp,
+            &["-listen", "1", "-i", "rtmp://127.0.0.1:11935/newq"],
+            11935,
+        );
     }
 }

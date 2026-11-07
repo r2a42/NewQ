@@ -211,6 +211,12 @@ The README describes the features; this file is about working on the code.
   (argument building, `Sink`); `render.rs::CaptureThread` draws the picture off
   screen at the stream's rate and feeds it. A test streams to a file through
   real FFmpeg; the Linux virtual camera itself can't be tested here.
+  `StreamKind::Server` (RTSP/RTMP/SRT to MediaMTX and the like) takes its H.264 encoder from
+  `stream::encoder` (libx264, then VideoToolbox, NVENC, QSV, AMF: listed *and* proven by a short
+  test encode, once per run), and `missing_for` checks the muxer and protocol (the Mac bundle has
+  no libsrt, so no SRT). The Mac FFmpeg is built with network on and the `mpegts,rtsp,rtp,flv`
+  muxers for this; `package_release.sh::verify_ffmpeg` checks them. Tests publish to FFmpeg's own
+  RTSP/RTMP listeners; a real MediaMTX wasn't available here.
   `src/pattern.rs`: the twelve test patterns (`show::PatternKind`), drawn on the
   CPU; `app.rs` caches one per display by kind, number and size.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the

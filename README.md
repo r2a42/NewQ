@@ -462,7 +462,7 @@ enter, and *Test Mode* downloads its free test media when you start it.
   corner pin or blend) to a video call, OBS or a stream, as an FFmpeg output
   at the height and frame rate you choose (720 px tall at 30 fps to start with;
   a wide picture keeps its shape). It works for a display that has no monitor
-  too, so a picture can go out without taking a screen. Three destinations:
+  too, so a picture can go out without taking a screen. Destinations:
   - *Virtual camera* (**Linux only**): a v4l2loopback device, which Zoom, Teams,
     OBS and browsers then list as a camera. Make the device once with `sudo
     modprobe v4l2loopback video_nr=10 card_label=NewQ exclusive_caps=1` (the
@@ -475,9 +475,22 @@ enter, and *Test Mode* downloads its free test media when you start it.
     then makes it a camera for Zoom or Teams. This is the way on **Windows and
     macOS**, where a virtual camera needs a signed driver or system extension
     that NewQ doesn't have. It runs about half a second behind.
+  - *Streaming server (MediaMTX)*: publishes the picture, as H.264 with no
+    sound, to a streaming server such as [MediaMTX](https://github.com/bluenviron/mediamtx),
+    which then serves any number of viewers (VLC, OBS, a browser through
+    WebRTC, a media player). Choose *RTSP*, *RTMP* or *SRT*, the server's
+    address (the port follows the protocol: 8554, 1935, 8890) and a stream
+    name; viewers then open, for RTSP, `rtsp://server:8554/name`. It encodes
+    with libx264 if your FFmpeg has it, otherwise the computer's own hardware
+    encoder (VideoToolbox on a Mac, then NVENC, Quick Sync, AMF), found by
+    trying each; if none works the status bar says so. NewQ's Mac FFmpeg can
+    do RTSP and RTMP but not SRT (that needs libsrt, which isn't in it); the
+    Windows and Linux ones can do all three. Checked here by publishing to
+    FFmpeg's own RTSP and RTMP listeners and decoding what arrived; **not
+    tried against a real MediaMTX, nor on a Mac, nor with a hardware encoder**.
   - *Custom FFmpeg output*: the arguments that follow the input (the picture
-    arrives as raw RGBA), for anything else FFmpeg can send to: RTMP to a
-    streaming service, SRT, a file.
+    arrives as raw RGBA), for anything else FFmpeg can send to: a streaming
+    service, a file.
   Up to two displays can be sent out at once. A stream that can't start or
   that stops (the device is busy, the address can't be reached) is reported in
   the status bar and is not retried until its settings are changed.
