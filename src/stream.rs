@@ -891,7 +891,7 @@ mod tests {
             .args(["-t", "20", "-c", "copy", "-y"])
             .arg(&out)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(std::fs::File::create(dir.join("receiver.log")).unwrap());
         let mut rx = Receiver(rx.spawn().expect("start the receiver"));
         let kind = StreamKind::Server {
             protocol,
@@ -906,14 +906,23 @@ mod tests {
         // FFmpeg's pipe succeeds before it has tried to connect: so the whole
         // publish is tried again until every frame of it has gone out.
         let mut published = false;
+        let mut why = String::new();
         for _ in 0..12 {
             let mut sink = Sink::start(&ff, size, 25, &kind).expect("start the sink");
-            let sent = (0..50).all(|_| {
-                let ok = sink.write(&frame).is_ok();
+            let mut sent = true;
+            for _ in 0..50 {
+                if let Err(e) = sink.write(&frame) {
+                    why = e;
+                    sent = false;
+                    break;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(40));
-                ok
-            });
-            if sent && sink.failed().is_none() {
+            }
+            if sent && let Some(e) = sink.failed() {
+                why = e;
+                sent = false;
+            }
+            if sent {
                 sink.finish();
                 published = true;
                 break;
@@ -921,7 +930,11 @@ mod tests {
             drop(sink);
             std::thread::sleep(std::time::Duration::from_millis(700));
         }
-        assert!(published, "the receiver never took the stream");
+        assert!(
+            published,
+            "the receiver never took the stream: {why}\nreceiver said: {}",
+            std::fs::read_to_string(dir.join("receiver.log")).unwrap_or_default()
+        );
         // Let it finish what it has, but not for ever.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while rx.0.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
