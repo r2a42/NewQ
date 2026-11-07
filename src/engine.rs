@@ -469,7 +469,7 @@ struct PrepSig {
     media: MediaCue,
     size: (u32, u32),
     /// A camera's device and mode, which a file cue doesn't have.
-    camera: Option<(String, u32, u32, u32)>,
+    camera: Option<(String, u32, u32, u32, CaptureFormat)>,
 }
 
 impl PartialEq for PrepSig {
@@ -1387,7 +1387,7 @@ impl Engine {
             return Some(PrepSig {
                 media: c.media.clone(),
                 size: self.output_size(c.media.output),
-                camera: Some((c.device.clone(), c.width, c.height, c.fps)),
+                camera: Some((c.device.clone(), c.width, c.height, c.fps, c.format)),
             });
         }
         let m = cue.kind.file_media()?;
@@ -1434,6 +1434,7 @@ impl Engine {
             c.width,
             c.height,
             c.fps,
+            c.format,
         );
         let matrix = if c.height >= 720 {
             ColorMatrix::Bt709

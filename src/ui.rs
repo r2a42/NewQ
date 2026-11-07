@@ -7555,11 +7555,33 @@ fn camera_inspector(ui: &mut Ui, c: &mut CameraCue, engine: &mut Engine) {
                 );
             });
             ui.end_row();
+            // Only a real camera or capture card has formats to choose between.
+            if c.device != TEST_PATTERN_DEVICE
+                && camera::screen_target(&c.device).is_none()
+                && crate::ndi::source_of(&c.device).is_none()
+            {
+                ui.label("Format");
+                egui::ComboBox::from_id_salt("camera_format")
+                    .selected_text(c.format.label())
+                    .show_ui(ui, |ui| {
+                        for f in CaptureFormat::ALL {
+                            ui.selectable_value(&mut c.format, f, f.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "What to ask the device for. Automatic leaves it to the system; a \
+                         capture card's 4K or 60 fps modes are often offered in only some \
+                         formats (try NV12 or Motion-JPEG if a mode won't open).",
+                    );
+                ui.end_row();
+            }
         });
     ui.label(
         RichText::new(
             "The mode must be one the camera supports. The camera opens when the cue is next \
-             in line, so GO is instant; one cue at a time can use a given camera.",
+             in line, so GO is instant; one cue at a time can use a given camera. On a Mac only \
+             the raw formats can be asked for.",
         )
         .weak(),
     );

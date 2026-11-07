@@ -2428,6 +2428,65 @@ impl Default for MidiOut {
 /// camera cue can be tried without a camera.
 pub const TEST_PATTERN_DEVICE: &str = "NewQ test pattern";
 
+/// How a camera or capture card is asked to send its picture. Many capture
+/// cards offer their top modes (4K at 60 frames a second, say) in only some
+/// formats, so the one to ask for can matter; `Auto` leaves it to the system.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureFormat {
+    #[default]
+    Auto,
+    Nv12,
+    Yuy2,
+    Uyvy,
+    Mjpeg,
+    H264,
+}
+
+impl CaptureFormat {
+    pub const ALL: [CaptureFormat; 6] = [
+        CaptureFormat::Auto,
+        CaptureFormat::Nv12,
+        CaptureFormat::Yuy2,
+        CaptureFormat::Uyvy,
+        CaptureFormat::Mjpeg,
+        CaptureFormat::H264,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CaptureFormat::Auto => "Automatic",
+            CaptureFormat::Nv12 => "NV12",
+            CaptureFormat::Yuy2 => "YUY2 (YUYV)",
+            CaptureFormat::Uyvy => "UYVY",
+            CaptureFormat::Mjpeg => "Motion-JPEG",
+            CaptureFormat::H264 => "H.264",
+        }
+    }
+
+    /// FFmpeg's name for a raw pixel format, for the formats that are one.
+    pub fn pixel_format(self) -> Option<&'static str> {
+        match self {
+            CaptureFormat::Nv12 => Some("nv12"),
+            CaptureFormat::Yuy2 => Some("yuyv422"),
+            CaptureFormat::Uyvy => Some("uyvy422"),
+            _ => None,
+        }
+    }
+
+    /// FFmpeg's name for a compressed format, for the formats that are one.
+    pub fn codec(self) -> Option<&'static str> {
+        match self {
+            CaptureFormat::Mjpeg => Some("mjpeg"),
+            CaptureFormat::H264 => Some("h264"),
+            _ => None,
+        }
+    }
+
+    fn is_auto(&self) -> bool {
+        *self == CaptureFormat::Auto
+    }
+}
+
 /// A live picture from a camera or capture card, shown as a layer. It has the
 /// same output, layer, geometry and transition settings as a video cue.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2439,6 +2498,10 @@ pub struct CameraCue {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// The format asked of the device (a capture card's 4K modes may need a
+    /// particular one). Older shows have none: automatic.
+    #[serde(default, skip_serializing_if = "CaptureFormat::is_auto")]
+    pub format: CaptureFormat,
     /// Where, when and how it shows. `end` is how long it runs (None = until stopped).
     pub media: MediaCue,
 }
@@ -2478,6 +2541,7 @@ impl CameraCue {
             width: 1280,
             height: 720,
             fps: 30,
+            format: CaptureFormat::Auto,
             media,
         }
     }
@@ -5633,6 +5697,39 @@ mod tests {
         let t = slide_times(&show, g);
         assert_eq!((t[0].0, t[2].0), (0.0, 6.0));
         assert_eq!(t[2].2, Some(8.0));
+    }
+
+    #[test]
+    fn a_cameras_capture_format_is_saved_only_when_chosen_and_old_shows_load() {
+        let mut show = Show::default();
+        let mut cue = show.make_cue(CueType::Camera, None, 0);
+        // Automatic is the default, and the file says nothing of it.
+        let json = serde_json::to_string(&show_with(&mut show, cue.clone())).unwrap();
+        assert!(!json.contains("\"format\""), "{json}");
+        if let CueKind::Camera(c) = &mut cue.kind {
+            c.format = CaptureFormat::Mjpeg;
+        }
+        let json = serde_json::to_string(&show_with(&mut show, cue)).unwrap();
+        assert!(json.contains("\"format\":\"Mjpeg\""), "{json}");
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            &back.cues[0].kind,
+            CueKind::Camera(c) if c.format == CaptureFormat::Mjpeg
+        ));
+        // A show saved before there was a format loads as automatic.
+        let old = json.replace(",\"format\":\"Mjpeg\"", "");
+        assert!(!old.contains("format"), "the edit must remove it: {old}");
+        let back: Show = serde_json::from_str(&old).unwrap();
+        assert!(matches!(
+            &back.cues[0].kind,
+            CueKind::Camera(c) if c.format == CaptureFormat::Auto
+        ));
+    }
+
+    fn show_with(show: &mut Show, cue: Cue) -> Show {
+        let mut s = show.clone();
+        s.cues = vec![cue];
+        s
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! so the built-in test picture stands in for a camera in the tests.
 
 use super::ffmpeg::Ffmpeg;
-use crate::show::TEST_PATTERN_DEVICE;
+use crate::show::{CaptureFormat, TEST_PATTERN_DEVICE};
 use std::process::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,7 +85,14 @@ fn macos_screen_index(target: &str) -> String {
 
 /// The ffmpeg input options (everything up to and including `-i <input>`)
 /// that open `device` in the given mode. Empty if no device is chosen.
-pub fn input_args(platform: Platform, device: &str, w: u32, h: u32, fps: u32) -> Vec<String> {
+pub fn input_args(
+    platform: Platform,
+    device: &str,
+    w: u32,
+    h: u32,
+    fps: u32,
+    format: CaptureFormat,
+) -> Vec<String> {
     let s = |v: &str| v.to_string();
     if device.is_empty() {
         return Vec::new();
@@ -109,7 +116,10 @@ pub fn input_args(platform: Platform, device: &str, w: u32, h: u32, fps: u32) ->
         fps.to_string(),
         s("-video_size"),
         format!("{w}x{h}"),
-    ];
+    ]
+    .into_iter()
+    .chain(format_args(platform, format))
+    .collect::<Vec<_>>();
     match platform {
         Platform::Linux => [s("-f"), s("v4l2")]
             .into_iter()
@@ -126,6 +136,23 @@ pub fn input_args(platform: Platform, device: &str, w: u32, h: u32, fps: u32) ->
             .chain(mode)
             .chain([s("-i"), format!("{device}:none")])
             .collect(),
+    }
+}
+
+/// The options that ask a device for `format`. DirectShow takes a raw pixel
+/// format or a codec, Video4Linux one name for either, and AVFoundation only a
+/// raw pixel format (it hands over decoded pictures, so a compressed format is
+/// not something it can be asked for).
+fn format_args(platform: Platform, format: CaptureFormat) -> Vec<String> {
+    let s = |v: &str| v.to_string();
+    match (platform, format.pixel_format(), format.codec()) {
+        (_, None, None) => Vec::new(),
+        (Platform::Windows, Some(p), _) => vec![s("-pixel_format"), s(p)],
+        (Platform::Windows, None, Some(c)) => vec![s("-vcodec"), s(c)],
+        (Platform::Linux, Some(p), _) => vec![s("-input_format"), s(p)],
+        (Platform::Linux, None, Some(c)) => vec![s("-input_format"), s(c)],
+        (Platform::MacOs, Some(p), _) => vec![s("-pixel_format"), s(p)],
+        (Platform::MacOs, None, Some(_)) => Vec::new(),
     }
 }
 
@@ -288,8 +315,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_format_is_asked_for_the_way_each_platform_takes_it() {
+        let a = |p, d: &str, f| input_args(p, d, 3840, 2160, 60, f).join(" ");
+        // DirectShow: a raw pixel format, or a codec.
+        assert_eq!(
+            a(Platform::Windows, "Game Capture 4K X", CaptureFormat::Nv12),
+            "-f dshow -rtbufsize 64M -framerate 60 -video_size 3840x2160 -pixel_format nv12 -i video=Game Capture 4K X"
+        );
+        assert_eq!(
+            a(Platform::Windows, "Cam", CaptureFormat::Mjpeg),
+            "-f dshow -rtbufsize 64M -framerate 60 -video_size 3840x2160 -vcodec mjpeg -i video=Cam"
+        );
+        assert!(a(Platform::Windows, "Cam", CaptureFormat::H264).contains("-vcodec h264"));
+        assert!(a(Platform::Windows, "Cam", CaptureFormat::Yuy2).contains("-pixel_format yuyv422"));
+        assert!(a(Platform::Windows, "Cam", CaptureFormat::Uyvy).contains("-pixel_format uyvy422"));
+        // Video4Linux: one option for either.
+        assert_eq!(
+            a(Platform::Linux, "/dev/video2", CaptureFormat::Mjpeg),
+            "-f v4l2 -framerate 60 -video_size 3840x2160 -input_format mjpeg -i /dev/video2"
+        );
+        assert!(
+            a(Platform::Linux, "/dev/video2", CaptureFormat::Yuy2)
+                .contains("-input_format yuyv422")
+        );
+        // AVFoundation: raw formats only; a compressed one can't be asked for.
+        assert_eq!(
+            a(Platform::MacOs, "Game Capture 4K S", CaptureFormat::Uyvy),
+            "-f avfoundation -framerate 60 -video_size 3840x2160 -pixel_format uyvy422 -i Game Capture 4K S:none"
+        );
+        assert_eq!(
+            a(Platform::MacOs, "Cam", CaptureFormat::Mjpeg),
+            a(Platform::MacOs, "Cam", CaptureFormat::Auto)
+        );
+        // Automatic adds nothing, and the test picture and screens take no format.
+        assert!(!a(Platform::Windows, "Cam", CaptureFormat::Auto).contains("pixel_format"));
+        assert!(
+            !input_args(
+                Platform::Linux,
+                "NewQ test pattern",
+                640,
+                360,
+                30,
+                CaptureFormat::Nv12
+            )
+            .join(" ")
+            .contains("nv12")
+        );
+        assert!(
+            !input_args(
+                Platform::Windows,
+                "screen:desktop",
+                640,
+                360,
+                30,
+                CaptureFormat::Nv12
+            )
+            .join(" ")
+            .contains("nv12")
+        );
+    }
+
+    #[test]
     fn builds_the_input_for_each_platform() {
-        let a = |p, d: &str| input_args(p, d, 1280, 720, 30).join(" ");
+        let a = |p, d: &str| input_args(p, d, 1280, 720, 30, CaptureFormat::Auto).join(" ");
         assert_eq!(
             a(Platform::Linux, "/dev/video0"),
             "-f v4l2 -framerate 30 -video_size 1280x720 -i /dev/video0"
@@ -307,7 +395,7 @@ mod tests {
             a(Platform::Windows, TEST_PATTERN_DEVICE),
             "-re -f lavfi -i testsrc2=size=1280x720:rate=30"
         );
-        assert!(input_args(Platform::Linux, "", 1280, 720, 30).is_empty());
+        assert!(input_args(Platform::Linux, "", 1280, 720, 30, CaptureFormat::Auto).is_empty());
     }
 
     #[test]
@@ -335,7 +423,15 @@ mod tests {
             "-f avfoundation -framerate 30 -capture_cursor 0 -i Capture screen 1:none"
         );
         // A screen device goes through `input_args` to those.
-        let via = input_args(Platform::Windows, "screen:title=OBS", 1280, 720, 25).join(" ");
+        let via = input_args(
+            Platform::Windows,
+            "screen:title=OBS",
+            1280,
+            720,
+            25,
+            CaptureFormat::Auto,
+        )
+        .join(" ");
         assert_eq!(via, "-f gdigrab -framerate 25 -draw_mouse 0 -i title=OBS");
         assert_eq!(screen_target(SCREEN_DESKTOP), Some("desktop"));
         assert_eq!(screen_target("/dev/video0"), None);

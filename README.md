@@ -569,6 +569,15 @@ enter, and *Test Mode* downloads its free test media when you start it.
   Windows, AVFoundation on macOS, where the first use asks for camera
   permission). Cameras can't be tested in NewQ's automated tests, only the
   built-in test pattern; please report any device that doesn't work.
+  **Capture cards:** a card's top modes (4K, or 60 frames a second) are often
+  offered in only some formats, so a camera cue has a *Format* (Automatic,
+  NV12, YUY2, UYVY, Motion-JPEG, H.264): if a mode won't open, try another.
+  Pictures are scaled down to the size of the output they go to, so a 4K card
+  on a 1080p display doesn't send 4K frames to the screen (FFmpeg still has
+  to take in and scale the 4K picture, which is heavy: 4K at 60 is more than
+  a laptop may manage). On a Mac only the raw formats can be asked for. The
+  Elgato Game Capture 4K S is a standard (UVC) capture device, and the Neo and
+  4K X should be too; none of these has been tried with the cards themselves.
 - **Web remote:** tick *Serve the web remote* on the *Web remote* page of the settings and a phone or
   tablet on the same network can open the address shown (`http://<this
   computer>:8080`) to run the show from a browser: a big GO, Stop All, Pause,
