@@ -1537,6 +1537,23 @@ impl Engine {
             .unwrap_or(DEFAULT_OUTPUT_SIZE)
     }
 
+    /// The format a camera is opened with: its own, or for Automatic the one the
+    /// device was found to offer (never waited for: see `camera::resolve_format`).
+    fn camera_format(&self, c: &CameraCue) -> CaptureFormat {
+        match &self.ff {
+            Some(ff) => camera::resolve_format(
+                ff,
+                camera::Platform::current(),
+                &c.device,
+                c.width,
+                c.height,
+                c.fps,
+                c.format,
+            ),
+            None => c.format,
+        }
+    }
+
     fn signature(&self, cue: &Cue) -> Option<PrepSig> {
         if let CueKind::Camera(c) = &cue.kind {
             return Some(PrepSig {
@@ -1547,7 +1564,9 @@ impl Engine {
                     c.width,
                     c.height,
                     c.fps,
-                    c.format,
+                    // The format found for Automatic: once the device has said, a
+                    // camera preloaded before that is opened again with it.
+                    self.camera_format(c),
                     c.mode_code.clone(),
                 )),
             });
@@ -1594,8 +1613,7 @@ impl Engine {
             return Err(camera::DECKLINK_UNSUPPORTED.into());
         }
         let platform = camera::Platform::current();
-        let format =
-            camera::resolve_format(ff, platform, &c.device, c.width, c.height, c.fps, c.format);
+        let format = self.camera_format(c);
         let input = camera::input_args(
             platform,
             &c.device,

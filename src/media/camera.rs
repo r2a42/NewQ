@@ -620,7 +620,9 @@ pub fn auto_format(modes: &[DeviceMode], w: u32, h: u32, fps: u32) -> Option<Cap
 /// (a Magewell USB one, say) refuse to open unless the format is named, so the
 /// device is asked what it offers and the matching format is named. Anything
 /// else (a format already chosen, a device that isn't a DirectShow or
-/// Video4Linux camera, one that won't list its modes) is left as it was.
+/// Video4Linux camera, one that won't list its modes) is left as it was. It
+/// never waits for the device: until it has answered (see `modes_of`) the
+/// cue's own format is used.
 pub fn resolve_format(
     ff: &Ffmpeg,
     platform: Platform,
@@ -653,45 +655,64 @@ type ModeCache = std::sync::Mutex<
 /// (a device in use by another program answers later).
 const MODES_KEPT: std::time::Duration = std::time::Duration::from_secs(300);
 const MODES_FAILED_KEPT: std::time::Duration = std::time::Duration::from_secs(15);
-/// The longest GO waits to be told: asking a device runs FFmpeg, and a driver
-/// that hangs must not hang the show. The answer is kept for the next GO.
-const MODES_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The modes `device` offers, asked once and kept (see `MODES_WAIT`).
+/// The modes `device` offers, as far as is known now. This is called while a
+/// cue is prepared, on the main loop, so it never waits: asking a device runs
+/// FFmpeg (seconds on some drivers), so the asking is done on a thread of its
+/// own and its answer is used from the next time on. The first preload of a
+/// camera cue starts it, well before its GO; until then the cue opens as it
+/// did before formats were named, and a failed open is tried again (with the
+/// answer) a few seconds later.
 fn modes_of(ff: &Ffmpeg, platform: Platform, device: &str) -> Option<Vec<DeviceMode>> {
     static CACHE: std::sync::OnceLock<ModeCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    {
+    let ff = ff.clone();
+    let key = device.to_string();
+    modes_known(cache, device, move || list_modes(&ff, platform, &key).ok())
+}
+
+/// `modes_of` with the cache and the asking given: what `cache` knows of
+/// `device` now, and if that is missing or old, `ask` run on a thread to
+/// replace it. An old list is used while it is asked again.
+fn modes_known(
+    cache: &'static ModeCache,
+    device: &str,
+    ask: impl FnOnce() -> Option<Vec<DeviceMode>> + Send + 'static,
+) -> Option<Vec<DeviceMode>> {
+    let known = {
         let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, modes)) = c.get(device) {
-            let kept = if modes.is_some() {
-                MODES_KEPT
-            } else {
-                MODES_FAILED_KEPT
-            };
-            if at.elapsed() < kept {
-                return modes.clone();
+        let (fresh, known) = match c.get(device) {
+            Some((at, modes)) => {
+                let kept = if modes.is_some() {
+                    MODES_KEPT
+                } else {
+                    MODES_FAILED_KEPT
+                };
+                (at.elapsed() < kept, modes.clone())
             }
+            None => (false, None),
+        };
+        if fresh {
+            return known;
         }
         // Marked as asked at once, so a slow answer is not asked for again.
-        c.insert(device.to_string(), (std::time::Instant::now(), None));
-    }
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    let (ff, key) = (ff.clone(), device.to_string());
-    let started = std::thread::Builder::new()
+        c.insert(
+            device.to_string(),
+            (std::time::Instant::now(), known.clone()),
+        );
+        known
+    };
+    let key = device.to_string();
+    let _ = std::thread::Builder::new()
         .name("camera-format".into())
         .spawn(move || {
-            let modes = list_modes(&ff, platform, &key).ok();
-            cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key, (std::time::Instant::now(), modes.clone()));
-            let _ = tx.send(modes);
+            let modes = ask();
+            let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            // A device that wouldn't answer this time keeps what it said before.
+            let modes = modes.or_else(|| c.get(&key).and_then(|(_, m)| m.clone()));
+            c.insert(key, (std::time::Instant::now(), modes));
         });
-    if started.is_err() {
-        return None;
-    }
-    rx.recv_timeout(MODES_WAIT).ok().flatten()
+    known
 }
 
 /// The devices ffmpeg can open on this machine, by the name `input_args`
@@ -866,6 +887,54 @@ pub fn parse_avfoundation_screens(text: &str) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn asking_a_device_for_its_modes_never_holds_up_the_caller() {
+        use std::time::{Duration, Instant};
+        static CACHE: std::sync::OnceLock<ModeCache> = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(Default::default);
+        let mode = DeviceMode {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            format_name: "yuyv422".into(),
+            code: String::new(),
+        };
+        let answer = vec![mode];
+        // A driver that takes two seconds to answer.
+        let slow = {
+            let answer = answer.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                Some(answer)
+            }
+        };
+        let t = Instant::now();
+        assert_eq!(modes_known(cache, "Slow card", slow), None);
+        assert!(
+            t.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            t.elapsed()
+        );
+        // While it is being asked, it is not asked again (and still nothing waits).
+        let t = Instant::now();
+        assert_eq!(
+            modes_known(cache, "Slow card", || panic!("asked twice")),
+            None
+        );
+        assert!(t.elapsed() < Duration::from_millis(200));
+        // Once it has answered, the answer is what the next cue gets.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let got = modes_known(cache, "Slow card", || panic!("asked again"));
+            if let Some(got) = got {
+                assert_eq!(got, answer);
+                break;
+            }
+            assert!(Instant::now() < deadline, "the answer never arrived");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     use super::*;
 
     #[test]
