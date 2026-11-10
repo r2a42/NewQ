@@ -6865,7 +6865,25 @@ fn inspector(
         );
     }
     inspector_one(ui, show, engine, st, actions);
-    if let Some(before) = primary {
+    // Only what the user did is made in the others: on a frame with no pointer
+    // press, key, typing, paste or scroll, a change the inspector made by
+    // itself (a value tidied as it is drawn) stays in the one cue.
+    let touched = ui.ctx().input(|i| {
+        i.pointer.any_down()
+            || i.pointer.any_released()
+            || i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key { .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::MouseWheel { .. }
+                )
+            })
+    });
+    if let Some(before) = primary
+        && touched
+    {
         spread_edit(show, &before, &picked);
     }
 }

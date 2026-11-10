@@ -35,7 +35,14 @@ const OWN: &[&str] = &[
 ];
 
 /// Fields inside a cue's kind that belong to that one cue (its file, its text).
-const OWN_IN_KIND: &[&str] = &["file", "text"];
+/// (A fade, stop or control cue's target and a camera's or sound input's device
+/// are as much its own: copying them would aim every picked cue at one thing.)
+const OWN_IN_KIND: &[&str] = &["file", "text", "target", "device"];
+
+/// Playback settings that mean something different in each sort of cue (a
+/// picture's hold time is a video's out point): made only in cues of the same
+/// sort, so holding a picture for 5 s doesn't trim the videos picked with it.
+const SAME_KIND_ONLY: &[&str] = &["start", "end"];
 
 /// The kinds that are a `MediaCue` themselves; the others hold one as `media`.
 const MEDIA_KINDS: &[&str] = &["Video", "Image", "Audio"];
@@ -91,6 +98,11 @@ fn changes(before: &Value, after: &Value, path: &mut Path, out: &mut Vec<(Path, 
                     Some(old) => changes(old, new, path, out),
                     None => match default_object(k).filter(|_| new.is_object()) {
                         Some(default) => changes(&default, new, path, out),
+                        // A list left out of the file is an empty one: one that
+                        // appears has grown, which is not spread (below).
+                        None if new.is_array() => {
+                            changes(&Value::Array(Vec::new()), new, path, out)
+                        }
                         None => out.push((path.clone(), Some(new.clone()))),
                     },
                 }
@@ -100,6 +112,8 @@ fn changes(before: &Value, after: &Value, path: &mut Path, out: &mut Vec<(Path, 
                 path.push(k.clone());
                 match default_object(k).filter(|_| old.is_object()) {
                     Some(default) => changes(old, &default, path, out),
+                    // A list that became empty has shrunk: not spread either.
+                    None if old.is_array() => changes(old, &Value::Array(Vec::new()), path, out),
                     None => out.push((path.clone(), None)),
                 }
                 path.pop();
@@ -110,7 +124,13 @@ fn changes(before: &Value, after: &Value, path: &mut Path, out: &mut Vec<(Path, 
         (Value::Array(a), Value::Array(b)) => {
             if a.len() == b.len() {
                 for (i, (old, new)) in a.iter().zip(b).enumerate() {
-                    path.push(i.to_string());
+                    // An item with a kind (an effect) is changed only where the
+                    // other cue has the same kind there: a blur's radius is not a
+                    // sharpen's amount.
+                    path.push(match old.get("kind") {
+                        Some(kind) => format!("{i}{KIND_MARK}{kind}"),
+                        None => i.to_string(),
+                    });
                     changes(old, new, path, out);
                     path.pop();
                 }
@@ -124,18 +144,44 @@ fn changes(before: &Value, after: &Value, path: &mut Path, out: &mut Vec<(Path, 
     }
 }
 
+/// Between a list item's place and its kind in a path ("0#\"Blur\"").
+const KIND_MARK: char = '#';
+
+/// The item of `items` that path part `k` names: by its place, and when the part
+/// gives a kind, only if the item there is of that kind.
+fn item<'a>(items: &'a mut [Value], k: &str) -> Option<&'a mut Value> {
+    let (at, kind) = match k.split_once(KIND_MARK) {
+        Some((at, kind)) => (at, Some(serde_json::from_str::<Value>(kind).ok()?)),
+        None => (k, None),
+    };
+    let slot = items.get_mut(at.parse::<usize>().ok()?)?;
+    match kind {
+        Some(kind) if slot.get("kind") != Some(&kind) => None,
+        _ => Some(slot),
+    }
+}
+
+/// Whether a path part names a list item rather than a field.
+fn is_item(k: &str) -> bool {
+    k.split(KIND_MARK)
+        .next()
+        .is_some_and(|at| at.parse::<usize>().is_ok())
+}
+
 /// Make the change at `path` (relative to `root`) if `root` has a place for it.
 fn set(root: &mut Value, path: &[String], value: Option<&Value>) -> bool {
     let Some((last, parents)) = path.split_last() else {
         return false;
     };
     let mut at = root;
-    for k in parents {
+    for (n, k) in parents.iter().enumerate() {
+        let next = path.get(n + 1).map(String::as_str).unwrap_or("");
         at = match at {
             Value::Object(o) => {
                 if !o.contains_key(k) {
-                    // A field left out of the file is the default one: make it, to change a part of.
-                    if value.is_none() {
+                    // A field left out of the file is the default one: make it, to
+                    // change a part of. Not a list (it is empty: no item to change).
+                    if value.is_none() || is_item(next) {
                         return false;
                     }
                     o.insert(k.clone(), Value::Object(Default::default()));
@@ -145,7 +191,7 @@ fn set(root: &mut Value, path: &[String], value: Option<&Value>) -> bool {
                     None => return false,
                 }
             }
-            Value::Array(a) => match k.parse::<usize>().ok().and_then(|i| a.get_mut(i)) {
+            Value::Array(a) => match item(a, k) {
                 Some(next) => next,
                 None => return false,
             },
@@ -171,10 +217,7 @@ fn set(root: &mut Value, path: &[String], value: Option<&Value>) -> bool {
             }
         },
         Value::Array(items) => {
-            let (Some(slot), Some(v)) = (
-                last.parse::<usize>().ok().and_then(|i| items.get_mut(i)),
-                value,
-            ) else {
+            let (Some(slot), Some(v)) = (item(items, last), value) else {
                 return false;
             };
             if !fits(slot, v) {
@@ -259,8 +302,20 @@ impl Change {
                     let Some((name, inner)) = kind_of(&mut value) else {
                         continue;
                     };
-                    if item.scope == Scope::Kind {
-                        name == self.variant && set(inner, &item.path, item.value.as_ref())
+                    let same_kind_only = item
+                        .path
+                        .first()
+                        .is_some_and(|f| SAME_KIND_ONLY.contains(&f.as_str()));
+                    if item.scope == Scope::Kind || same_kind_only {
+                        name == self.variant
+                            && if item.scope == Scope::Kind || MEDIA_KINDS.contains(&name.as_str())
+                            {
+                                set(inner, &item.path, item.value.as_ref())
+                            } else {
+                                inner
+                                    .get_mut("media")
+                                    .is_some_and(|m| set(m, &item.path, item.value.as_ref()))
+                            }
                     } else if MEDIA_KINDS.contains(&name.as_str()) {
                         set(inner, &item.path, item.value.as_ref())
                     } else {
@@ -459,15 +514,21 @@ mod tests {
         a.kind.media_mut().unwrap().effects = vec![fx(EffectKind::Blur)];
         let mut b = all[4].clone();
         b.kind.media_mut().unwrap().effects = vec![fx(EffectKind::Sharpen)];
+        let mut c = all[2].clone();
+        c.kind.media_mut().unwrap().effects = vec![fx(EffectKind::Blur)];
         let mut tweaked = a.clone();
         tweaked.kind.media_mut().unwrap().effects[0].p[0] = Animated::new(7.0);
-        let moved = spread(&a, &tweaked, &b).unwrap();
+        // A blur's setting is not a sharpen's: that cue is left as it is...
+        assert!(
+            spread(&a, &tweaked, &b).is_none(),
+            "a sharpen took a blur's setting"
+        );
+        // ...and reaches the cue with a blur there.
+        let moved = spread(&a, &tweaked, &c).unwrap();
         let e = &moved.kind.media().unwrap().effects;
         assert_eq!(e.len(), 1, "no effect is added or replaced");
-        assert!(
-            matches!(e[0].kind, EffectKind::Sharpen),
-            "it is still its own effect"
-        );
+        assert!(matches!(e[0].kind, EffectKind::Blur));
+        assert_eq!(e[0].p[0], Animated::new(7.0));
         // A list that grew is not copied.
         let mut more = a.clone();
         more.kind
@@ -476,5 +537,84 @@ mod tests {
             .effects
             .push(fx(EffectKind::Blur));
         assert!(spread(&a, &more, &b).is_none());
+    }
+
+    #[test]
+    fn the_first_effect_added_or_the_last_taken_away_leaves_the_others_lists_alone() {
+        let all = cues();
+        let fx = |kind: EffectKind| Effect::new(kind);
+        // The cue edited has no effects (none in its file); the other has two.
+        let a = all[3].clone();
+        let mut b = all[2].clone();
+        b.kind.media_mut().unwrap().effects =
+            vec![fx(EffectKind::Sharpen), fx(EffectKind::Vignette)];
+        let mut added = a.clone();
+        added.kind.media_mut().unwrap().effects = vec![fx(EffectKind::Blur)];
+        assert!(
+            spread(&a, &added, &b).is_none(),
+            "the other's effects were replaced"
+        );
+        // And taking the edited cue's only effect away doesn't strip the other's.
+        assert!(
+            spread(&added, &a, &b).is_none(),
+            "the other's effects were deleted"
+        );
+        // The same for the sound's routing.
+        let mut routed = a.clone();
+        routed.kind.media_mut().unwrap().matrix = vec![Crosspoint {
+            from: 0,
+            to: 1,
+            db: -6.0,
+        }];
+        assert!(spread(&a, &routed, &b).is_none());
+        // A change elsewhere in the same edit still gets through.
+        let mut both = added.clone();
+        both.pre_wait = 2.0;
+        assert_eq!(spread(&a, &both, &b).unwrap().pre_wait, 2.0);
+    }
+
+    #[test]
+    fn a_cues_target_device_and_hold_time_stay_its_own() {
+        let mut show = Show::default();
+        let fade = show.make_cue(CueType::Fade, None, 0);
+        let other_fade = show.make_cue(CueType::Fade, None, 0);
+        let mut aimed = fade.clone();
+        if let CueKind::Fade(f) = &mut aimed.kind {
+            f.target = Some(CueId(99));
+        }
+        assert!(
+            spread(&fade, &aimed, &other_fade).is_none(),
+            "a fade was re-aimed"
+        );
+        let cam = show.make_cue(CueType::Camera, None, 0);
+        let other_cam = show.make_cue(CueType::Camera, None, 0);
+        let mut moved = cam.clone();
+        if let CueKind::Camera(c) = &mut moved.kind {
+            c.device = "Another camera".into();
+        }
+        assert!(
+            spread(&cam, &moved, &other_cam).is_none(),
+            "a camera was moved"
+        );
+        // A picture held for 5 s doesn't trim a video to 5 s, but another picture
+        // is held for 5 s too.
+        let picture = show.make_cue(CueType::Image, None, 0);
+        let video = show.make_cue(CueType::Video, None, 0);
+        let other_picture = show.make_cue(CueType::Image, None, 0);
+        let mut held = picture.clone();
+        held.kind.media_mut().unwrap().end = Some(5.0);
+        assert!(
+            spread(&picture, &held, &video).is_none(),
+            "the video was trimmed"
+        );
+        assert_eq!(
+            spread(&picture, &held, &other_picture)
+                .unwrap()
+                .kind
+                .media()
+                .unwrap()
+                .end,
+            Some(5.0)
+        );
     }
 }
