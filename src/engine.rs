@@ -360,6 +360,8 @@ pub struct ActiveCue {
     /// it was started that long before the one ahead of it in a "play in order"
     /// group ended, to crossfade over it, and still ends when it would have.
     extra_hold: f64,
+    /// Whether this cue replaces only its own layer (`Show::own_layers`).
+    own_layer: bool,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -671,8 +673,11 @@ pub struct Engine {
     /// settings for a few seconds, so a bad file isn't retried every tick.
     failed_preps: HashMap<CueId, (PrepSig, Instant)>,
     next_instance: u64,
-    /// The group (and its instance) whose children are being started together right now.
-    group_start: Option<(CueId, u64)>,
+    /// The children a "start all together" group has fired and not yet started,
+    /// and the group's instance: they share the display without replacing each
+    /// other. (Fired children start after the group's own start, from the fire
+    /// queue, so this is kept until each one starts.)
+    together_for: HashMap<CueId, u64>,
     /// Cues started early to crossfade over the child ahead of them in a "play
     /// in order" group, and by how much (see `ActiveCue::extra_hold`).
     started_early: HashMap<CueId, f64>,
@@ -734,7 +739,7 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
-            group_start: None,
+            together_for: HashMap::new(),
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -775,7 +780,7 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
-            group_start: None,
+            together_for: HashMap::new(),
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -1406,6 +1411,7 @@ impl Engine {
     pub fn stop_all(&mut self, fade: f64) {
         self.pending.clear();
         self.started_early.clear();
+        self.together_for.clear();
         if fade <= 0.0 {
             self.active.clear();
             return;
@@ -1959,27 +1965,12 @@ impl Engine {
 
     /// The instance of the group, started to play all its children together, that
     /// `cue` is a child of (those children share a display without replacing each other).
-    fn together_with(&self, show: &Show, cue: &Cue) -> Option<u64> {
-        let group = cue.parent?;
-        if let Some((g, instance)) = self.group_start
-            && g == group
-        {
-            return Some(instance);
-        }
-        let timeline = show
-            .cue(group)
-            .is_some_and(|c| matches!(&c.kind, CueKind::Group(g) if g.mode == GroupMode::Timeline && g.slides.is_none()));
-        // The newest run of the group (it may be fired again while the last still plays).
-        self.active
-            .iter()
-            .filter(|a| {
-                a.cue_id == group
-                    && !a.stopping
-                    && matches!(&a.kind, ActiveKind::Group(g) if !g.deck)
-            })
-            .filter(|_| timeline)
-            .map(|a| a.instance)
-            .max()
+    fn together_with(&self, cue: &Cue) -> Option<u64> {
+        // Only the children the group itself started: one fired on its own (a
+        // hotkey, OSC, GO on it) while the group plays replaces as any cue does.
+        // (Kept until the cue is on: a start can wait for its file to be read
+        // and come back, see `start_with`.)
+        self.together_for.get(&cue.id).copied()
     }
 
     fn alloc_instance(&mut self) -> u64 {
@@ -2057,6 +2048,7 @@ impl Engine {
             entry: None,
             together: None,
             extra_hold: 0.0,
+            own_layer: false,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2113,14 +2105,18 @@ impl Engine {
             entry: None,
             together: None,
             extra_hold: 0.0,
+            own_layer: false,
         };
         active.extra_hold = self.started_early.remove(&cue.id).unwrap_or(0.0);
         let mut ok = true;
+        active.own_layer = show.own_layers;
         // A child with a pre-wait comes in by itself, later, and replaces what was there.
-        active.together = if cue.pre_wait > 0.0 {
+        // (A show from before layers were kept apart: they all replace each other.)
+        let together = self.together_with(&cue);
+        active.together = if cue.pre_wait > 0.0 || !show.own_layers {
             None
         } else {
-            self.together_with(show, &cue)
+            together
         };
         match &cue.kind {
             CueKind::Video(_)
@@ -2398,13 +2394,13 @@ impl Engine {
                         GroupMode::Timeline => children.len(),
                         GroupMode::Playlist => 1,
                     };
-                    self.group_start =
-                        (g.mode == GroupMode::Timeline && !deck && g.slides.is_none())
-                            .then_some((id, instance));
+                    let together = g.mode == GroupMode::Timeline && !deck && g.slides.is_none();
                     for &child in &children[..first] {
+                        if together {
+                            self.together_for.insert(child, instance);
+                        }
                         self.fire(show, child);
                     }
-                    self.group_start = None;
                     active.kind = ActiveKind::Group(GroupState {
                         mode: g.mode,
                         children,
@@ -2414,6 +2410,8 @@ impl Engine {
                 }
             }
         }
+        // Whatever came of it, the group's start of this cue is over.
+        self.together_for.remove(&cue.id);
         if ok {
             self.active.push(active);
         } else {
@@ -2450,13 +2448,14 @@ impl Engine {
         let brother = |o: &ActiveCue| together.is_some() && o.together == together;
         // A picture replaces only what is on its own layer of the display (and a
         // dip's matte, which covers every layer): the other layers stay.
-        let layer = self
-            .active
-            .iter()
-            .find(|a| a.instance == instance)
-            .and_then(|a| a.layer_no());
+        let entering = self.active.iter().find(|a| a.instance == instance);
+        let layer = entering.and_then(|a| a.layer_no());
+        // A show from before layers were kept apart: everything on the display.
+        let own_layer = entering.is_some_and(|a| a.own_layer);
         let replaced = |o: &ActiveCue| {
-            o.is_layer() && o.output() == output && (o.is_matte() || o.layer_no() == layer)
+            o.is_layer()
+                && o.output() == output
+                && (!own_layer || o.is_matte() || o.layer_no() == layer)
         };
         match e {
             EntryAction::Cut => self
@@ -4497,6 +4496,67 @@ mod tests {
                 "{transition:?}: the other layers stay and the order holds"
             );
         }
+    }
+
+    #[test]
+    fn a_show_from_before_layers_were_kept_apart_replaces_everything_as_it_did() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        for transition in [Transition::Cut, Transition::Crossfade] {
+            // As a 0.18.0 file loads: no `own_layers`.
+            let mut show = Show {
+                own_layers: false,
+                ..Show::default()
+            };
+            let out = show.outputs[0].id;
+            // A title on layer 1, then a picture on layer 0 that cuts or crossfades in.
+            let title = image_cue(&mut show, &img, Transition::FadeIn, 0.1);
+            let i = show.cue_index(title).unwrap();
+            show.cues[i].kind.media_mut().unwrap().layer = 1;
+            let picture = image_cue(&mut show, &img, transition, 0.1);
+            e.fire(&show, title);
+            run_until(&mut e, &show, "the title", |e| {
+                stack(e, out).iter().any(|l| l.0 == Some(title))
+            });
+            e.fire(&show, picture);
+            run_until(&mut e, &show, "the title to go", |e| {
+                let s = stack(e, out);
+                s.iter().any(|l| l.0 == Some(picture)) && !s.iter().any(|l| l.0 == Some(title))
+            });
+            e.stop_all(0.0);
+        }
+        // The children of a "start all together" group replace each other too.
+        let mut show = Show {
+            own_layers: false,
+            ..Show::default()
+        };
+        let out = show.outputs[0].id;
+        let (gid, _) = picture_group(&mut show, &img, GroupMode::Timeline, Transition::Cut, 2);
+        e.fire(&show, gid);
+        run_until(&mut e, &show, "one child left", |e| {
+            stack(e, out).len() == 1
+        });
+        run_for(&mut e, &show, 0.4);
+        assert_eq!(stack(&e, out).len(), 1, "they replaced each other");
+    }
+
+    #[test]
+    fn a_child_fired_on_its_own_while_its_group_plays_replaces_its_earlier_run() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let (gid, kids) = picture_group(&mut show, &img, GroupMode::Timeline, Transition::Cut, 2);
+        e.fire(&show, gid);
+        run_until(&mut e, &show, "both", |e| stack(e, out).len() == 2);
+        // GO on one child again (a hotkey, OSC): it takes the place of what is on
+        // its layer, its own earlier run included, rather than piling a copy on.
+        e.fire(&show, kids[0]);
+        run_until(&mut e, &show, "one left", |e| {
+            e.active.iter().filter(|a| a.cue_id == kids[0]).count() == 1 && stack(e, out).len() == 1
+        });
     }
 
     #[test]

@@ -367,6 +367,20 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
              twice stops everything at once.",
         );
     });
+    section(ui, "Layers", |ui| {
+        ui.checkbox(
+            &mut show.own_layers,
+            "A picture replaces only what is on its own layer",
+        );
+        hint(
+            ui,
+            "On: a cue that cuts or crossfades in replaces only the cues on its own layer of \
+             its display (a title on layer 1 stays over a new picture on layer 0), and the \
+             cues a \"start all together\" group starts share the display. Off: it replaces \
+             everything on the display, as shows made before this setting did. New shows \
+             have it on; a show opened from an older NewQ has it off until you turn it on.",
+        );
+    });
     section(ui, "Recovery and logs", |ui| {
         ui.label(format!(
             "Unsaved changes are copied to a recovery file every {} seconds, and offered \

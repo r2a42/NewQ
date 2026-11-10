@@ -658,7 +658,9 @@ enter, and *Test Mode* downloads its free test media when you start it.
   much shorter (the length the cue list shows counts it). In a *Start
   all together* group, the cues that start with it share the display without
   replacing each other; one with a pre-wait comes in later by itself and replaces
-  what is on its layer, as any cue does.
+  what is on its layer, as any cue does, and so does a child you fire on its own
+  while the group plays. (In a show from before layers were kept apart, see
+  *Layers* below, they replace each other as they used to.)
 - **Selecting and dragging cues:** Ctrl-click (Cmd on a Mac) adds a cue to the
   selection or takes it out, and Shift-click takes every row from the selected one
   to the one clicked. Delete, Duplicate, Ctrl+↑/↓ and arm/disarm then work on all
@@ -872,9 +874,9 @@ enter, and *Test Mode* downloads its free test media when you start it.
   that comes in with a cut or a crossfade replaces only what is on its own layer
   of that display; cues on the other layers keep playing (a dip to black or white
   still covers, and clears, the whole display). On the same layer the newest is on
-  top. (A show made before layers did this, with cues on layers other than 0,
-  now keeps them on screen when a cue on layer 0 cuts or crossfades in; before, it
-  cleared them.)
+  top. A show made before this (opened from an older NewQ) keeps its old way:
+  a cut or crossfade there replaces everything on the display, as it did, until
+  *Settings ▸ General ▸ Layers* is turned on. New shows have it on.
 - **Changes apply while a cue plays:** edit a cue in the inspector while it is
   on screen and it follows, with nothing to stop and fire again: layer, position,
   scale, rotation and crop, colour correction, effects, opacity, volume, fit, the

@@ -61,6 +61,14 @@ pub struct Show {
     /// Fade time used by the Panic / Stop All button.
     #[serde(default = "default_panic_fade")]
     pub panic_fade: f64,
+    /// A picture that cuts or crossfades in replaces only what is on its own
+    /// layer of its display, and the cues a "start all together" group starts
+    /// share the display. Off for shows from before this was so (a file without
+    /// it): there a cut or crossfade replaced everything on the display and the
+    /// children of such a group replaced each other, and they still do. New
+    /// shows have it on; Settings turns it on or off.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub own_layers: bool,
     /// Lining sound up with picture. Nothing is held back unless set.
     #[serde(default, skip_serializing_if = "SyncSettings::is_default")]
     pub sync: SyncSettings,
@@ -177,6 +185,7 @@ impl Default for Show {
             cues: Vec::new(),
             next_id: 1,
             panic_fade: default_panic_fade(),
+            own_layers: true,
             sync: SyncSettings::default(),
             remote: RemoteSettings::default(),
         };
@@ -1101,9 +1110,13 @@ impl Transition {
             Transition::FadeIn => {
                 "Fades in on top of whatever is already showing and leaves it running."
             }
-            Transition::Cut => "Replaces whatever is on this output instantly.",
+            Transition::Cut => {
+                "Replaces what is on this output instantly (on its own layer, if the show's \
+                 layers are kept apart)."
+            }
             Transition::Crossfade => {
-                "Fades in while everything else on this output fades out and stops."
+                "Fades in while what else is on this output (on its own layer, if the show's \
+                 layers are kept apart) fades out and stops."
             }
             Transition::DipToBlack => {
                 "Fades the output to black (first half), then fades this cue up (second half)."
@@ -4855,6 +4868,28 @@ mod tests {
             .unwrap();
         assert_eq!((s.fps, s.height), (60, 16));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_show_from_before_layers_were_kept_apart_keeps_the_old_replacing() {
+        // A new show keeps its layers apart, and says so in its file.
+        let show = Show::default();
+        assert!(show.own_layers);
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(json.contains("\"own_layers\":true"), "{json}");
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert!(back.own_layers);
+        // A file without it (0.18.0 and before) replaces everything, as it did.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("own_layers");
+        let old: Show = serde_json::from_value(v).unwrap();
+        assert!(!old.own_layers);
+        // Turned off, it isn't written, so an older NewQ reads the file as before.
+        let off = Show {
+            own_layers: false,
+            ..Show::default()
+        };
+        assert!(!serde_json::to_string(&off).unwrap().contains("own_layers"));
     }
 
     #[test]
