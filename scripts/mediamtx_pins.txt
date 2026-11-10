@@ -1,13 +1,18 @@
 # The MediaMTX streaming server bundled with every release (MIT licence).
 #
 # NewQ runs it for "Run the server in NewQ" in a display's Send out section.
-# A release downloads these files from MediaMTX's own GitHub releases
-# (https://github.com/bluenviron/mediamtx/releases) and fails if one doesn't
-# match the SHA-256 below, so only the build that was looked at is shipped.
+# These files are MediaMTX's own release builds
+# (https://github.com/bluenviron/mediamtx/releases), copied into a release of
+# this repository (`release` below, not a NewQ release) by the "Mirror MediaMTX"
+# workflow (scripts/mirror_mediamtx.sh), so the build NewQ ships can't change or
+# disappear upstream. A release downloads them from that copy and fails if one
+# doesn't match the SHA-256 below.
 #
-# To move to a newer MediaMTX: change the version, download the four files,
-# put their `sha256sum` here, and run a release dry run.
+# To move to a newer MediaMTX: change `version` and `release`, put the new
+# files' SHA-256s here (each must match MediaMTX's own checksums.sha256), commit,
+# merge, run the Mirror MediaMTX workflow (owner only), then a release dry run.
 version v1.20.1
+release mediamtx-v1.20.1
 81b143f55a5d23d4a8c028d52869c14ea4a59919900528698fcc97a747fd69c6  mediamtx_v1.20.1_linux_amd64.tar.gz
 dc970f8e1f3ad58edafcf536bcd1ffe0adcb4390e7ace9377694a9ea2c1ebe53  mediamtx_v1.20.1_windows_amd64.zip
 77b3434dea1ce7dbb3af937cccd66b7cebff234158f5af2eb6b30892c0326bb3  mediamtx_v1.20.1_darwin_amd64.tar.gz

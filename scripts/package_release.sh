@@ -9,7 +9,8 @@
 # in $FFMPEG_MACOS_DIR. FFMPEG_BASE_URL overrides where the pinned files are
 # fetched from (for trying a build before it is mirrored).
 # Every package also bundles the MediaMTX streaming server (scripts/mediamtx_pins.txt),
-# downloaded from its own GitHub releases and checked against its SHA-256.
+# downloaded from this repository's mirror of it (the Mirror MediaMTX workflow) and
+# checked against its SHA-256. MEDIAMTX_BASE_URL overrides where it is fetched from.
 set -euo pipefail
 # A failure inside $(...) must stop the script too.
 shopt -s inherit_errexit 2>/dev/null || true
@@ -28,7 +29,8 @@ ff_base="${FFMPEG_BASE_URL:-https://github.com/${GITHUB_REPOSITORY:-r2a42/NewQ}/
 pinned_asset() { awk -v k="$1" 'NF == 2 && $1 ~ /^[0-9a-f]{64}$/ && index($2, k) { print $2 }' "$pins"; }
 mtx_pins="$root/scripts/mediamtx_pins.txt"
 mtx_version="$(awk '$1 == "version" { print $2 }' "$mtx_pins")"
-mtx_base="${MEDIAMTX_BASE_URL:-https://github.com/bluenviron/mediamtx/releases/download/${mtx_version}}"
+mtx_release="$(awk '$1 == "release" { print $2 }' "$mtx_pins")"
+mtx_base="${MEDIAMTX_BASE_URL:-https://github.com/${GITHUB_REPOSITORY:-r2a42/NewQ}/releases/download/${mtx_release}}"
 rm -rf dist
 stage="dist/stage/${name}"
 mkdir -p "$stage"
@@ -127,7 +129,10 @@ fetch_mediamtx() {
   [ -n "$asset" ] || { echo "no pinned MediaMTX for ${os_arch}" >&2; exit 1; }
   sum="$(awk -v a="$asset" '$2 == a { print $1 }' "$mtx_pins")"
   tmp="$(mktemp -d)"
-  curl -fsSL -o "${tmp}/${asset}" "${mtx_base}/${asset}" || { echo "Could not download ${asset}" >&2; exit 1; }
+  if ! curl -fsSL -o "${tmp}/${asset}" "${mtx_base}/${asset}"; then
+    echo "Could not download ${asset}. If the pins were just changed, run the Mirror MediaMTX workflow first." >&2
+    exit 1
+  fi
   if [ "$(openssl dgst -sha256 "${tmp}/${asset}" | awk '{print $NF}')" != "$sum" ]; then
     echo "${asset} does not match its pinned SHA-256" >&2
     exit 1

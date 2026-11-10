@@ -248,8 +248,8 @@ The README describes the features; this file is about working on the code.
   An adapter can't make FFmpeg bind its outgoing socket (RTSP/RTMP/SRT have no such option), so it picks the
   listen address, the publish address for a local server, and the address in the links. Tests: the real
   server and a real publish/play-back run when `NEWQ_MEDIAMTX_DIR` (or PATH) has `mediamtx`, else skip.
-  `scripts/mediamtx_pins.txt` pins the bundled version and SHA-256s; `package_release.sh::bundle_mediamtx`
-  fetches it from MediaMTX's GitHub releases (a universal `lipo` binary on the Mac, signed with the others).
+  `scripts/mediamtx_pins.txt` pins the bundled version, its mirror release and SHA-256s; `package_release.sh::bundle_mediamtx`
+  fetches it from this repository's mirror (a universal `lipo` binary on the Mac, signed with the others).
   `src/pattern.rs`: the twelve test patterns (`show::PatternKind`), drawn on the
   CPU; `app.rs` caches one per display by kind, number and size.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
@@ -346,6 +346,12 @@ writes gigabytes in seconds.
   its SHA-256 while packaging. Nothing moves it but a deliberate change: to get a
   newer FFmpeg, run `scripts/update_ffmpeg_pins.sh <BtbN autobuild tag>`, commit,
   merge, run the **Mirror FFmpeg** workflow (owner only), then a release dry run.
+- **MediaMTX is mirrored the same way** (`scripts/mediamtx_pins.txt`): MediaMTX's own release builds,
+  copied into a release of this repo (`mediamtx-<version>`) by the **Mirror MediaMTX** workflow
+  (`scripts/mirror_mediamtx.sh`, owner only), which checks each file against the pins and the pins
+  against MediaMTX's `checksums.sha256`; packaging downloads from the mirror. To move to a newer one:
+  change `version`, `release` and the SHA-256s, commit, merge, run Mirror MediaMTX, then a release dry
+  run. `scripts/mirror_mediamtx.sh --check` verifies without uploading.
 - Cloud sessions can't push tags (the git proxy only accepts branches), which
   is why releases go through that comment.
 - **Claude can't post the comment, but can run the workflow.** The GitHub
