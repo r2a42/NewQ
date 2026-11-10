@@ -356,6 +356,10 @@ pub struct ActiveCue {
     /// The instance of the group (all together) whose child this is: its brothers
     /// are not replaced or faded by its entry, since they were meant to play with it.
     together: Option<u64>,
+    /// Seconds added to a held cue's time (a picture's hold, a camera's run):
+    /// it was started that long before the one ahead of it in a "play in order"
+    /// group ended, to crossfade over it, and still ends when it would have.
+    extra_hold: f64,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -509,6 +513,12 @@ const PROBE_LIMIT: Duration = Duration::from_secs(30);
 /// crossfades in, how long that crossfade takes: the next child starts that
 /// long before this one ends and the two fade across, instead of this one
 /// fading out to black first (a slide show times its own slides).
+///
+/// A held next cue (a picture, text, a shape, a camera: see `holds`) is held
+/// that much longer, so every child still ends when it did without the overlap
+/// and the group's length is unchanged. A video can't play past its end, so a
+/// group gets shorter by each crossfade into a video (`Engine::cue_duration`
+/// counts it).
 fn crossfade_into_next(show: &Show, cue: &Cue) -> Option<(CueId, f64)> {
     let group = show.cue(cue.parent?)?;
     match &group.kind {
@@ -518,6 +528,10 @@ fn crossfade_into_next(show: &Show, cue: &Cue) -> Option<(CueId, f64)> {
     let kids = show.armed_children(group.id);
     let at = kids.iter().position(|c| c.id == cue.id)?;
     let next = kids.get(at + 1)?;
+    // A child with a wait of its own comes in by itself, after it.
+    if next.pre_wait > 0.0 {
+        return None;
+    }
     let m = next.kind.media()?;
     // Only a picture is faded by the next picture's crossfade, and only one on the
     // same display and layer: anything else has to fade itself out.
@@ -530,6 +544,15 @@ fn crossfade_into_next(show: &Show, cue: &Cue) -> Option<(CueId, f64)> {
         && m.transition == Transition::Crossfade
         && m.fade_in > 0.0)
         .then_some((next.id, m.fade_in))
+}
+
+/// Whether a cue's length is a time it is held for (`MediaCue::end`), which
+/// can be made longer, rather than the length of a file.
+fn holds(kind: &CueKind) -> bool {
+    matches!(
+        kind,
+        CueKind::Image(_) | CueKind::Text(_) | CueKind::Shape(_) | CueKind::Camera(_)
+    )
 }
 
 /// How many of the cues wanted are children of a group.
@@ -650,6 +673,9 @@ pub struct Engine {
     next_instance: u64,
     /// The group (and its instance) whose children are being started together right now.
     group_start: Option<(CueId, u64)>,
+    /// Cues started early to crossfade over the child ahead of them in a "play
+    /// in order" group, and by how much (see `ActiveCue::extra_hold`).
+    started_early: HashMap<CueId, f64>,
     /// Cameras found on this machine (the test picture first), and a scan under way.
     cameras: Vec<String>,
     camera_scan: Option<Receiver<Vec<String>>>,
@@ -709,6 +735,7 @@ impl Engine {
             failed_preps: HashMap::new(),
             next_instance: 1,
             group_start: None,
+            started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
             scanned: false,
@@ -749,6 +776,7 @@ impl Engine {
             failed_preps: HashMap::new(),
             next_instance: 1,
             group_start: None,
+            started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
             scanned: false,
@@ -959,7 +987,8 @@ impl Engine {
             CueKind::Group(g) => {
                 // Timeline: until the last child ends. Playlist: all of them in turn.
                 let mut total = 0.0_f64;
-                for child in show.armed_children(cue.id) {
+                let children = show.armed_children(cue.id);
+                for (i, child) in children.iter().enumerate() {
                     let Some(d) = self.cue_duration(show, child)? else {
                         return Some(None);
                     };
@@ -968,6 +997,16 @@ impl Engine {
                         GroupMode::Timeline => total.max(t),
                         GroupMode::Playlist => total + t,
                     };
+                    // A video that crossfades over the one before it starts that
+                    // much early and can't be held longer to make up for it.
+                    if g.mode == GroupMode::Playlist
+                        && !holds(&child.kind)
+                        && let Some(before) = i.checked_sub(1).and_then(|b| children.get(b))
+                        && let Some((next, overlap)) = crossfade_into_next(show, before)
+                        && next == child.id
+                    {
+                        total -= overlap;
+                    }
                 }
                 Some(Some(total))
             }
@@ -1366,6 +1405,7 @@ impl Engine {
     /// Stop everything with the given fade time.
     pub fn stop_all(&mut self, fade: f64) {
         self.pending.clear();
+        self.started_early.clear();
         if fade <= 0.0 {
             self.active.clear();
             return;
@@ -2016,6 +2056,7 @@ impl Engine {
             panic: false,
             entry: None,
             together: None,
+            extra_hold: 0.0,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2071,7 +2112,9 @@ impl Engine {
             panic: false,
             entry: None,
             together: None,
+            extra_hold: 0.0,
         };
+        active.extra_hold = self.started_early.remove(&cue.id).unwrap_or(0.0);
         let mut ok = true;
         // A child with a pre-wait comes in by itself, later, and replaces what was there.
         active.together = if cue.pre_wait > 0.0 {
@@ -2789,7 +2832,7 @@ impl Engine {
                         v.fit = m.fit;
                         // A camera runs for the time set, which can be changed while it is up.
                         if v.player.is_live() && !a.stopping {
-                            a.duration = m.end.filter(|d| *d > 0.0);
+                            a.duration = m.end.filter(|d| *d > 0.0).map(|d| d + a.extra_hold);
                         }
                         v.transform = geometry;
                         v.color = m.color;
@@ -2806,7 +2849,7 @@ impl Engine {
                         }
                         // The time a picture is held, changed while it is up.
                         if !a.stopping {
-                            a.duration = m.end.filter(|d| *d > 0.0);
+                            a.duration = m.end.filter(|d| *d > 0.0).map(|d| d + a.extra_hold);
                         }
                         i.transform = geometry;
                         i.color = m.color;
@@ -2913,6 +2956,7 @@ impl Engine {
     fn advance_groups(&mut self, show: &Show) -> Vec<u64> {
         let mut done = Vec::new();
         let mut to_fire = Vec::new();
+        let mut early = Vec::new();
         for a in &self.active {
             let ActiveKind::Group(g) = &a.kind else {
                 continue;
@@ -2933,6 +2977,7 @@ impl Engine {
                         && c.duration.is_some_and(|d| d - c.elapsed <= t)
                 })
             {
+                early.push((next, t));
                 to_fire.push((a.instance, next));
                 continue;
             }
@@ -2942,6 +2987,14 @@ impl Engine {
             match g.children.get(g.next) {
                 Some(&child) if g.mode == GroupMode::Playlist => to_fire.push((a.instance, child)),
                 _ => done.push(a.instance),
+            }
+        }
+        // A held cue started early is held that much longer, so it ends when it
+        // would have and the group keeps its timing (a video can't be: see
+        // `crossfade_into_next`).
+        for (cue, t) in early {
+            if show.cue(cue).is_some_and(|c| holds(&c.kind)) {
+                self.started_early.insert(cue, t);
             }
         }
         for (instance, child) in to_fire {
@@ -4732,6 +4785,92 @@ mod tests {
         // A hold time set while it is up ends it.
         show.cues[i].kind.media_mut().unwrap().end = Some(0.3);
         run_until(&mut e, &show, "it to end", |e| e.layers(second).is_empty());
+    }
+
+    #[test]
+    fn crossfades_in_a_play_in_order_group_overlap_and_the_group_keeps_its_length() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        // Three pictures held 1.2 s each, each crossfading in over 0.4 s.
+        let (gid, kids) = picture_group(
+            &mut show,
+            &img,
+            GroupMode::Playlist,
+            Transition::Crossfade,
+            3,
+        );
+        for &k in &kids {
+            let i = show.cue_index(k).unwrap();
+            let m = show.cues[i].kind.media_mut().unwrap();
+            m.end = Some(1.2);
+            m.fade_in = 0.4;
+            m.fade_out = 0.4;
+        }
+        let gcue = show.cue(gid).unwrap().clone();
+        let shown = e.cue_duration(&show, &gcue).flatten().unwrap();
+        assert!((shown - 3.6).abs() < 1e-9, "the length shown: {shown}");
+        e.fire(&show, gid);
+        let t0 = Instant::now();
+        let mut starts = [None::<f64>; 3];
+        let mut overlapped = false;
+        run_until_within(&mut e, &show, "the group to end", 15, |e| {
+            let now = t0.elapsed().as_secs_f64();
+            let s = stack(e, out);
+            for (n, &k) in kids.iter().enumerate() {
+                if starts[n].is_none() && s.iter().any(|l| l.0 == Some(k)) {
+                    starts[n] = Some(now);
+                }
+            }
+            overlapped |= s.len() >= 2;
+            !e.active.iter().any(|a| a.cue_id == gid)
+        });
+        let ended = t0.elapsed().as_secs_f64();
+        assert!(overlapped, "the pictures crossfade over each other");
+        let starts = starts.map(|s| s.expect("every picture was shown"));
+        // Each starts one crossfade before the one ahead of it ends (1.2 s in,
+        // less 0.4 s), and is held 0.4 s longer, so the group still lasts 3.6 s
+        // and not 2.8 s. (Generous margins: the ticks are real time.)
+        assert!((starts[1] - starts[0] - 0.8).abs() < 0.25, "{starts:?}");
+        assert!((starts[2] - starts[1] - 1.2).abs() < 0.25, "{starts:?}");
+        assert!((ended - 3.6).abs() < 0.5, "the group ended at {ended:.2} s");
+    }
+
+    #[test]
+    fn a_crossfade_into_a_video_shortens_its_group_and_a_waiting_child_does_not_crossfade() {
+        let mut e = engine_without_media();
+        let mut show = Show::default();
+        let mut g = show.make_cue(CueType::Group, None, 0);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Playlist;
+        }
+        let gid = g.id;
+        show.cues.push(g);
+        let mut kids = Vec::new();
+        for ty in [CueType::Video, CueType::Video, CueType::Image] {
+            let mut c = show.make_cue(ty, None, show.cues.len());
+            c.parent = Some(gid);
+            let m = c.kind.media_mut().unwrap();
+            m.end = Some(3.0);
+            m.transition = Transition::Crossfade;
+            m.fade_in = 1.0;
+            kids.push(c.id);
+            show.cues.push(c);
+        }
+        let length = |e: &mut Engine, show: &Show| {
+            let g = show.cue(gid).unwrap().clone();
+            e.cue_duration(show, &g)
+        };
+        // 3 + 3 + 3, less the crossfade into the second video (the picture is
+        // held longer to make up for its own).
+        assert_eq!(length(&mut e, &show), Some(Some(8.0)));
+        // A child with its own wait comes in after it: nothing overlaps there.
+        let i = show.cue_index(kids[1]).unwrap();
+        show.cues[i].pre_wait = 0.5;
+        assert_eq!(crossfade_into_next(&show, show.cue(kids[0]).unwrap()), None);
+        assert_eq!(length(&mut e, &show), Some(Some(9.5)));
     }
 
     #[test]

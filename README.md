@@ -650,7 +650,12 @@ enter, and *Test Mode* downloads its free test media when you start it.
   and the two fade across each other (the earlier one doesn't fade to black
   first); with a cut, a fade-in or a dip it follows the old way, after the one
   before it. This is for pictures and videos on the same display and layer; a
-  sound, or a picture on another layer, still fades out by itself. In a *Start
+  sound, or a picture on another layer, still fades out by itself, and a child
+  with a pre-wait of its own comes in after the one before it. The group keeps
+  its timing: a picture (or text, a shape, a camera) that starts early to
+  crossfade is held that much longer, so it ends when it would have. A video
+  can't play past its end, so each crossfade into a video makes the group that
+  much shorter (the length the cue list shows counts it). In a *Start
   all together* group, the cues that start with it share the display without
   replacing each other; one with a pre-wait comes in later by itself and replaces
   what is on its layer, as any cue does.
