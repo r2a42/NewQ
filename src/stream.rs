@@ -1528,6 +1528,10 @@ mod tests {
             sink.write(&frame).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(33));
         }
+        // The picture is stamped by the clock, so the file lasts as long as the
+        // frames took to send: about two seconds, longer on a slow machine (a
+        // macOS runner oversleeps and waits on its encoder).
+        let sent = began.elapsed().as_secs_f64();
         sink.finish();
         let file = std::fs::read_dir(&dir)
             .unwrap()
@@ -1547,8 +1551,12 @@ mod tests {
             .and_then(|r| r.get(..5))
             .and_then(|r| r.parse::<f64>().ok())
             .unwrap_or(0.0);
-        // About two seconds went by; without the fix the file is one.
-        assert!((1.7..3.0).contains(&secs), "{secs} s: {text}");
+        // Without the fix the file is one second (its 30 frames), whatever the time.
+        assert!(secs >= 1.7, "{secs} s for {sent:.2} s sent: {text}");
+        assert!(
+            (secs - sent).abs() < 0.7,
+            "{secs} s for {sent:.2} s sent: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

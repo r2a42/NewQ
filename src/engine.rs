@@ -2439,6 +2439,14 @@ impl Engine {
 
     /// Run a cue's entry action once its first frame is on screen.
     fn apply_entry(&mut self, instance: u64, output: Option<OutputId>, e: EntryAction) {
+        // A cut or crossfade whose cue has already gone (another cue's entry on the
+        // same tick replaced it) replaces nothing: with no cue of its own left on
+        // the display, it would clear the display.
+        if matches!(e, EntryAction::Cut | EntryAction::Crossfade { .. })
+            && !self.active.iter().any(|a| a.instance == instance)
+        {
+            return;
+        }
         // Cues started together by one group don't replace each other.
         let together = self
             .active
@@ -4539,6 +4547,37 @@ mod tests {
         });
         run_for(&mut e, &show, 0.4);
         assert_eq!(stack(&e, out).len(), 1, "they replaced each other");
+    }
+
+    #[test]
+    fn a_cut_whose_cue_has_already_gone_does_not_clear_the_display() {
+        let Some((mut e, img)) = engine_with_image() else {
+            return;
+        };
+        let show = {
+            let mut show = Show {
+                own_layers: false,
+                ..Show::default()
+            };
+            image_cue(&mut show, &img, Transition::Cut, 0.0);
+            show
+        };
+        let out = show.outputs[0].id;
+        e.fire(&show, show.cues[0].id);
+        run_until(&mut e, &show, "the picture", |e| stack(e, out).len() == 1);
+        // Two cuts on one tick: the first replaced the second's cue, and then the
+        // second's entry runs with its cue gone.
+        let gone = e.next_instance + 100;
+        e.apply_entry(gone, Some(out), EntryAction::Cut);
+        e.apply_entry(
+            gone,
+            Some(out),
+            EntryAction::Crossfade {
+                time: 0.5,
+                curve: Curve::default(),
+            },
+        );
+        assert_eq!(stack(&e, out).len(), 1, "the display was cleared");
     }
 
     #[test]
