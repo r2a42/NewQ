@@ -263,8 +263,10 @@ impl TapSlot {
             return;
         };
         let Some(tap) = guard.as_mut() else { return };
+        // A recording that has gone: stop copying, but leave the ring to be
+        // freed off this thread (the tap's own drop clears the slot), since
+        // freeing memory here can hold the sound up.
         if tap.producer.is_abandoned() {
-            *guard = None;
             return;
         }
         for frame in mix.chunks_exact(channels.max(1)) {
@@ -1658,7 +1660,8 @@ mod tests {
         let got: Vec<f32> = std::iter::from_fn(|| consumer.pop().ok()).collect();
         assert_eq!(got, vec![0.25, 0.25]);
         // A full ring drops sound rather than wait, and a recording that has
-        // gone takes the tap with it.
+        // gone is no longer copied to (its ring is freed by its own drop, off
+        // the audio thread, not here).
         let (producer, consumer) = rtrb::RingBuffer::new(2);
         *slot.0.lock() = Some(TapIn {
             producer,
@@ -1669,7 +1672,13 @@ mod tests {
         slot.push(&[0.1, 0.1, 0.1, 0.1], 2, 1.0);
         drop(consumer);
         slot.push(&[0.1, 0.1], 2, 1.0);
-        assert!(slot.0.lock().is_none());
+        assert!(
+            slot.0
+                .lock()
+                .as_ref()
+                .is_some_and(|t| t.producer.is_abandoned()),
+            "left for the tap's drop to clear"
+        );
     }
 
     #[test]

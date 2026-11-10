@@ -1423,8 +1423,9 @@ impl App {
 
     /// Stop every stream, without waiting for them.
     fn stop_streams(&mut self) {
-        self.hosting_runner = None;
-        self.hosting_sent = None;
+        // (Not the streaming server NewQ runs: it doesn't use the graphics
+        // device, and dropping its runner here would wait on this thread for
+        // its worker. `update_hosting` keeps it as the show wants.)
         for (_, running) in self.streams.drain() {
             let _ = std::thread::Builder::new()
                 .name("stream-stop".into())

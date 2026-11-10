@@ -756,13 +756,18 @@ impl Default for RecordArea {
 impl RecordArea {
     /// The same kept inside the picture and at least 1% across.
     pub fn clamped(self) -> RecordArea {
-        let x = self.x.clamp(0.0, 0.99);
-        let y = self.y.clamp(0.0, 0.99);
+        // A number that isn't one (NaN) is the whole picture's, not a panic in
+        // `clamp` (which refuses a NaN bound, and `1.0 - x` would be one).
+        let sane = |v: f32, whole: f32| if v.is_finite() { v } else { whole };
+        let (x, y) = (sane(self.x, 0.0), sane(self.y, 0.0));
+        let (w, h) = (sane(self.w, 1.0), sane(self.h, 1.0));
+        let x = x.clamp(0.0, 0.99);
+        let y = y.clamp(0.0, 0.99);
         RecordArea {
             x,
             y,
-            w: self.w.clamp(0.01, 1.0 - x),
-            h: self.h.clamp(0.01, 1.0 - y),
+            w: w.clamp(0.01, 1.0 - x),
+            h: h.clamp(0.01, 1.0 - y),
         }
     }
 }
@@ -4868,6 +4873,18 @@ mod tests {
             .unwrap();
         assert_eq!((s.fps, s.height), (60, 16));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_recording_area_that_is_not_a_number_is_the_whole_picture_not_a_panic() {
+        let a = RecordArea {
+            x: f32::NAN,
+            y: 0.5,
+            w: f32::INFINITY,
+            h: f32::NAN,
+        }
+        .clamped();
+        assert_eq!((a.x, a.y, a.w, a.h), (0.0, 0.5, 1.0, 0.5));
     }
 
     #[test]
