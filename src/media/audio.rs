@@ -183,18 +183,21 @@ impl Device {
         let stats = Arc::new(Stats::default());
         let tap = TapSlot::default();
         match open_stream(name, voices_rx, lost.clone(), stats.clone(), tap.clone()) {
-            Ok((stream, sample_rate, channels, device)) => Device {
-                _stream: Some(stream),
-                open: true,
-                sample_rate,
-                channels,
-                name: device,
-                error: None,
-                voices_tx,
-                lost,
-                stats,
-                tap,
-            },
+            Ok((stream, sample_rate, channels, device)) => {
+                log::info!("audio output opened: {device}, {sample_rate} Hz, {channels} channels");
+                Device {
+                    _stream: Some(stream),
+                    open: true,
+                    sample_rate,
+                    channels,
+                    name: device,
+                    error: None,
+                    voices_tx,
+                    lost,
+                    stats,
+                    tap,
+                }
+            }
             Err(e) => {
                 if earlier != Some(format!("{e:#}").as_str()) {
                     log::error!("audio output unavailable: {e:#}");

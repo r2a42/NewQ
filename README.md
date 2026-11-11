@@ -986,14 +986,38 @@ enter, and *Test Mode* downloads its free test media when you start it.
 
 ## If NewQ crashes or won't start
 
-The Windows and Mac downloads have no console, so NewQ keeps a log instead. It is in
-`%LOCALAPPDATA%\NewQ\newq.log` on Windows (`~/Library/Logs/NewQ` on a Mac,
-`~/.local/state/newq` on Linux, where the log goes to the terminal unless
-`NEWQ_LOG_FILE=1` is set); the log of the run before is kept as
+NewQ keeps a log. It is in `%LOCALAPPDATA%\NewQ\newq.log` on Windows
+(`~/Library/Logs/NewQ` on a Mac, `~/.local/state/newq` on Linux, where it also
+goes to the terminal); the log of the run before is kept as
 `newq.previous.log`. It records the displays and graphics card it found. If
 NewQ crashes it writes what went wrong, where, and a backtrace to
 `newq-crash.log` in the same folder, and on Windows shows a message with that
 path. Please send that file (and `newq.log`) when you report a crash.
+
+**How much the log says.** *Settings ▸ General ▸ Recovery and logs ▸ Log detail* chooses
+it for this computer (it is not part of the show), and the change is used at once, with
+no restart:
+
+| Level | What is written |
+|---|---|
+| Errors only | what went wrong |
+| Warnings | and what looked wrong: a stall of the main loop, a cue that failed, a late start, a device or stream lost |
+| Normal (the default) | and what the show did: each GO, remote commands, output windows opening and closing, devices plugged in and pulled out, streams and the streaming server starting and stopping |
+| Detailed | and each cue starting, playing, fading and ending, every FFmpeg started (with its whole command line and how long it took to start) |
+| Everything | and the small steps: each cue being got ready and let go, each FFmpeg gone, running timecode |
+
+Every line has the time to the millisecond (this computer's own time), the level, the
+thread and the part of NewQ it came from:
+`2026-11-11 19:14:03.250 WARN  [output-render] render: waiting for a frame took 140 ms`.
+Use *Detailed* when you are looking for a fault and put it back afterwards: it writes a
+great deal during a show. For a single run, `NEWQ_LOG=debug` in the environment does the
+same without touching the setting (`error`, `warn`, `info`, `debug`, `trace`; parts can
+be given their own, as in `NEWQ_LOG=info,newq::engine=trace,wgpu=debug`). The graphics
+and window libraries NewQ is built on are kept a step quieter than NewQ itself. The log
+can't grow without limit: at 20 MB it is put aside as `newq.previous.log` and begun
+again, so a show that runs for a week uses at most 40 MB. It is written by a thread of
+its own, so a slow disk never holds the show up; if lines ever come faster than the disk
+takes them they are dropped and the log says how many.
 
 **A fault in one part does not end the show.** If a part of NewQ meets
 something it did not expect while a show is running (a panic, in the
@@ -1257,7 +1281,7 @@ release build.
 | `WGPU_POWER_PREF` | `low` prefers the integrated GPU, `high` the discrete GPU           |
 | `NEWQ_TRACE_OUTPUT` | Log the layer opacities of every frame each output composites     |
 | `NEWQ_TEST_PANIC` | For trying the above: `engine@10` makes that part fail once, 10 s after starting (`engine`, `ui`, `outputs`, `render`, `audio`) |
-| `RUST_LOG`        | Logging level, e.g. `RUST_LOG=debug`                                |
+| `NEWQ_LOG`        | How much the log says for this run, whatever the setting: `error`, `warn`, `info`, `debug` or `trace`, and parts by name (`NEWQ_LOG=debug,wgpu=info`). `RUST_LOG` is read if this isn't set |
 | `NEWQ_STATS`      | Write a CSV of memory, CPU, FFmpeg processes, late frames, audio load and main-loop stalls (a file, or `1` for `newq-stats.csv` in the log folder) |
 | `NEWQ_STATS_SECS` | Seconds between rows of that file (default 10)                      |
 | `NEWQ_AUTOSTART`  | Press GO this many seconds after starting (`1` = 5), once, for shows that run unattended |

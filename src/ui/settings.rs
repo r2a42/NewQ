@@ -335,7 +335,7 @@ fn warning(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).small().color(PREWAIT));
 }
 
-fn general_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
+fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     section(ui, "Show", |ui| {
         egui::Grid::new("settings_show")
             .num_columns(2)
@@ -391,12 +391,63 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
         ui.horizontal(|ui| {
             ui.label("Log folder");
             ui.label(RichText::new(crate::crash::log_dir().display().to_string()).small());
+            if ui.small_button("Open").clicked()
+                && let Err(e) = crate::testmode::session::open_folder(&crate::crash::log_dir())
+            {
+                log::warn!("{e}");
+            }
         });
         hint(
             ui,
-            "newq.log and newq-crash.log are here: send them if NewQ misbehaves.",
+            "newq.log and newq-crash.log are here: send them if NewQ misbehaves. The log is \
+             begun again when it reaches 20 MB (the part before is kept as newq.previous.log), \
+             so it can't fill the disk.",
         );
+        ui.add_space(4.0);
+        log_detail(ui, st);
     });
+}
+
+/// How much the log says: a setting of this computer, used at once.
+fn log_detail(ui: &mut Ui, st: &mut UiState) {
+    use crate::logging::LogLevel;
+    let forced = crate::logging::forced();
+    let mut level = forced.unwrap_or(st.prefs.log_level);
+    ui.horizontal(|ui| {
+        ui.label("Log detail (this computer)");
+        ui.add_enabled_ui(forced.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("log-detail")
+                .selected_text(level.label())
+                .show_ui(ui, |ui| {
+                    for l in LogLevel::ALL {
+                        ui.selectable_value(&mut level, l, l.label())
+                            .on_hover_text(l.summary());
+                    }
+                });
+        });
+    });
+    if forced.is_none() && level != st.prefs.log_level {
+        st.prefs.log_level = level;
+        crate::logging::set_level(level);
+        if let Some(dir) = &st.layout_dir
+            && let Err(e) = st.prefs.save(dir)
+        {
+            log::warn!("could not save the settings of this computer: {e}");
+        }
+    }
+    hint(ui, level.summary());
+    if forced.is_some() {
+        warning(
+            ui,
+            "Set by NEWQ_LOG in the environment for this run; the choice here is used without it.",
+        );
+    } else if level >= LogLevel::Debug {
+        hint(
+            ui,
+            "Used from now on, with no restart. Put it back to Normal once the fault is found: \
+             the fuller levels write a great deal during a show.",
+        );
+    }
 }
 
 fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {

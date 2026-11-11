@@ -276,6 +276,22 @@ pub enum DeckStep {
     NoDeck,
 }
 
+impl ActiveKind {
+    /// What it is, for the log.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ActiveKind::Video(_) => "video",
+            ActiveKind::Image(_) => "picture",
+            ActiveKind::Audio(_) => "sound",
+            ActiveKind::Matte(_) => "matte",
+            ActiveKind::Fade => "fade",
+            ActiveKind::Wait => "wait",
+            ActiveKind::Timecode(_) => "timecode",
+            ActiveKind::Group(_) => "group",
+        }
+    }
+}
+
 pub enum ActiveKind {
     Video(Box<VideoState>),
     Image(ImageState),
@@ -663,6 +679,9 @@ pub struct Engine {
     pub messages: VecDeque<(Instant, String)>,
     /// A copy of the log for a test's file, while one is wanted.
     log_tap: Option<Vec<(Instant, String)>>,
+    /// What the log has said of each cue playing, by instance: its name, and
+    /// whether it has been said to be playing and to be on its way out.
+    logged: HashMap<u64, (String, bool, bool)>,
     /// Current size of each open output window, used to pick decode resolution.
     pub output_sizes: HashMap<OutputId, (u32, u32)>,
     pub probe: ProbeCache,
@@ -733,6 +752,7 @@ impl Engine {
             paused: false,
             messages: VecDeque::new(),
             log_tap: None,
+            logged: HashMap::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
             waveforms: WaveformCache::default(),
@@ -774,6 +794,7 @@ impl Engine {
             paused: false,
             messages: VecDeque::new(),
             log_tap: None,
+            logged: HashMap::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
             waveforms: WaveformCache::default(),
@@ -910,8 +931,17 @@ impl Engine {
     }
 
     pub fn log(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
-        log::info!("{msg}");
+        self.say(log::Level::Info, msg.into());
+    }
+
+    /// `log`, for something that went wrong (a cue that failed, a device
+    /// lost): the same line in the status bar, a warning in the log file.
+    pub fn problem(&mut self, msg: impl Into<String>) {
+        self.say(log::Level::Warn, msg.into());
+    }
+
+    fn say(&mut self, level: log::Level, msg: String) {
+        log::log!(level, "{msg}");
         if let Some(tap) = &mut self.log_tap {
             tap.push((Instant::now(), msg.clone()));
         }
@@ -1344,7 +1374,7 @@ impl Engine {
         }
         let name = format!("{} ({})", cue.number, cue.name);
         let Some(target) = c.target.filter(|t| show.cue(*t).is_some()) else {
-            self.log(format!("Cue {name}: it has no cue to act on"));
+            self.problem(format!("Cue {name}: it has no cue to act on"));
             return;
         };
         self.control_target(show, c.action, target, &name);
@@ -2162,12 +2192,12 @@ impl Engine {
                 };
                 match prepared {
                     Err(e) => {
-                        self.log(format!("Cue {} ({}): {e}", cue.number, cue.name));
+                        self.problem(format!("Cue {} ({}): {e}", cue.number, cue.name));
                         ok = false;
                     }
                     Ok(p) => {
                         if let Some(w) = &p.warning {
-                            self.log(format!("Cue {} ({}): {w}", cue.number, cue.name));
+                            self.problem(format!("Cue {} ({}): {w}", cue.number, cue.name));
                         }
                         active.duration = p.duration;
                         active.pass_len = p.pass_len;
@@ -2505,7 +2535,7 @@ impl Engine {
         self.waveforms.poll();
         self.timecode.tick(dt);
         for problem in self.outbox.errors() {
-            self.log(problem);
+            self.problem(problem);
         }
         // A layer changed in the inspector moves a cue that is already on screen.
         for a in &mut self.active {
@@ -2556,7 +2586,7 @@ impl Engine {
                     .cue(id)
                     .map(|c| format!("{} ({})", c.number, c.name))
                     .unwrap_or_default();
-                self.log(format!("Cue {name}: reading its file took too long"));
+                self.problem(format!("Cue {name}: reading its file took too long"));
             }
             for (id, reveal) in due {
                 self.start_with(show, id, reveal);
@@ -2936,7 +2966,7 @@ impl Engine {
             true
         });
         for m in messages {
-            self.log(m);
+            self.problem(m);
         }
         for (instance, output, e) in entries {
             self.apply_entry(instance, output, e);
@@ -2949,6 +2979,60 @@ impl Engine {
         }
 
         self.update_preload(show);
+        self.log_cue_changes(show);
+    }
+
+    /// At the Detailed level, say in the log when each cue is started, when
+    /// its first picture or sound is there, when it begins to go and when it
+    /// is gone: the story of a show, for finding what went wrong in one.
+    fn log_cue_changes(&mut self, show: &Show) {
+        if !log::log_enabled!(log::Level::Debug) {
+            self.logged.clear();
+            return;
+        }
+        for a in &self.active {
+            let said = self.logged.entry(a.instance).or_insert_with(|| {
+                let label = match show.cue(a.cue_id) {
+                    Some(c) => format!("cue {} ({})", c.number, c.name),
+                    None => "a cue that is no longer in the show".to_string(),
+                };
+                log::debug!(
+                    "{label} started: {}, instance {}",
+                    a.kind.label(),
+                    a.instance
+                );
+                (label, false, false)
+            });
+            if a.started && !said.1 {
+                said.1 = true;
+                log::debug!(
+                    "{} is playing (ready after {:.0} ms)",
+                    said.0,
+                    a.age * 1000.0
+                );
+            }
+            if a.stopping && !said.2 {
+                said.2 = true;
+                log::debug!("{} is on its way out at {:.2} s", said.0, a.elapsed);
+            }
+        }
+        if self.logged.len() != self.active.len() {
+            let live: HashSet<u64> = self.active.iter().map(|a| a.instance).collect();
+            self.logged.retain(|instance, (label, started, _)| {
+                let there = live.contains(instance);
+                if !there {
+                    log::debug!(
+                        "{label} ended{}",
+                        if *started {
+                            ""
+                        } else {
+                            " without ever playing"
+                        }
+                    );
+                }
+                there
+            });
+        }
     }
 
     /// A cue that is waiting out a pre-wait or still playing. A video that is
@@ -3126,8 +3210,13 @@ impl Engine {
             .map(|id| (*id, show.cue(*id).and_then(|c| self.signature(c))))
             .collect();
         self.prepared.retain(|p| {
-            sigs.iter()
-                .any(|(id, sig)| *id == p.cue_id && sig.as_ref() == Some(&p.sig))
+            let keep = sigs
+                .iter()
+                .any(|(id, sig)| *id == p.cue_id && sig.as_ref() == Some(&p.sig));
+            if !keep {
+                log::trace!("what was got ready for cue {:?} is let go", p.cue_id);
+            }
+            keep
         });
         if self.ff.is_none() {
             return;
@@ -3169,7 +3258,10 @@ impl Engine {
                 _ => continue,
             };
             match self.prepare(cue, &info) {
-                Ok(p) => self.prepared.push(p),
+                Ok(p) => {
+                    log::trace!("cue {} ({}) is being got ready", cue.number, cue.name);
+                    self.prepared.push(p)
+                }
                 Err(e) => {
                     log::debug!("preload of cue {} failed: {e}", cue.number);
                     if let Some(sig) = sig {

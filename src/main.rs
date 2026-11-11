@@ -24,6 +24,7 @@ mod fx;
 mod gpu;
 mod history;
 mod live_text;
+mod logging;
 #[cfg(target_os = "macos")]
 mod macwin;
 mod media;
@@ -95,25 +96,23 @@ fn main() -> anyhow::Result<()> {
     if let Some(code) = soak::run_if_asked(&args) {
         std::process::exit(code);
     }
-    let mut logger = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,wgpu=warn,naga=warn"),
-    );
-    logger.format_timestamp_millis();
-    // With no console to read (a Windows release), the log goes to a file.
-    let asked = std::env::var_os("NEWQ_LOG_FILE").is_some();
-    if crash::log_to_file(crash::Os::current(), cfg!(debug_assertions), asked)
-        && let Some(file) = crash::open_log(&crash::log_dir())
-    {
-        logger.target(env_logger::Target::Pipe(Box::new(file)));
-    }
-    logger.init();
+    // The log goes to a file in the log folder (and to the console where
+    // there is one), at the level of `NEWQ_LOG` or, once the settings of
+    // this computer are read, the one chosen there.
+    let has_file = logging::init(&crash::log_dir());
     crash::install();
     log::info!(
-        "NewQ {} on {} ({}), logs in {}",
+        "NewQ {} on {} ({}), logs in {}{}, log detail: {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
-        crash::log_dir().display()
+        crash::log_dir().display(),
+        if has_file {
+            ""
+        } else {
+            " (which can't be written to: no log file)"
+        },
+        logging::level().name()
     );
     let (show_path, main_window_only) = startup_options(
         std::env::args_os().skip(1),
@@ -128,7 +127,10 @@ fn main() -> anyhow::Result<()> {
     let mut app = app::App::new(show_path, main_window_only, move || {
         let _ = proxy.send_event(());
     });
-    event_loop.run_app(&mut app)?;
+    let ran = event_loop.run_app(&mut app);
+    log::info!("NewQ is closing");
+    logging::flush();
+    ran?;
     if let Some(why) = app.start_failed() {
         anyhow::bail!("{why}");
     }

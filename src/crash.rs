@@ -64,12 +64,6 @@ pub fn open_log(dir: &Path) -> Option<std::fs::File> {
     std::fs::File::create(log).ok()
 }
 
-/// Whether the log should go to a file: always when asked (`NEWQ_LOG_FILE`),
-/// and by default where there is no console to see it on.
-pub fn log_to_file(os: Os, debug_build: bool, asked: bool) -> bool {
-    asked || (matches!(os, Os::Windows | Os::Mac) && !debug_build)
-}
-
 /// The text of a crash report.
 pub fn report(
     version: &str,
@@ -298,6 +292,8 @@ fn install_in(dir: PathBuf, dialog: bool) {
         );
         let saved = write_report(&dir, &text);
         log::error!("{text}");
+        // In the file before anything else happens: the program may be ending.
+        log::logger().flush();
         // The main thread outside its guarded loop (starting up) is the one
         // panic that ends the program; any other is lived through, and a
         // message box that says NewQ has to close would be wrong, and on the
@@ -356,25 +352,6 @@ mod tests {
             let d = log_dir_for(Os::Other, e);
             assert!(d.starts_with(std::env::temp_dir()), "{d:?}");
         }
-    }
-
-    #[test]
-    fn the_log_goes_to_a_file_where_there_is_no_console() {
-        assert!(
-            log_to_file(Os::Windows, false, false),
-            "a Windows release has no console"
-        );
-        assert!(!log_to_file(Os::Windows, true, false), "a debug build does");
-        assert!(!log_to_file(Os::Other, false, false));
-        assert!(
-            log_to_file(Os::Mac, false, false),
-            "so does an app opened from the Finder"
-        );
-        assert!(!log_to_file(Os::Mac, true, false));
-        assert!(
-            log_to_file(Os::Other, true, true),
-            "NEWQ_LOG_FILE asks for it anywhere"
-        );
     }
 
     fn temp(name: &str) -> PathBuf {

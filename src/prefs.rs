@@ -53,6 +53,13 @@ pub struct Prefs {
     /// The new interface (editor, operator and patch views) in place of the panes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub new_layout: bool,
+    /// How much the log says (see `logging`).
+    #[serde(default, skip_serializing_if = "is_default_level")]
+    pub log_level: crate::logging::LogLevel,
+}
+
+fn is_default_level(l: &crate::logging::LogLevel) -> bool {
+    *l == crate::logging::LogLevel::default()
 }
 
 fn is_false(b: &bool) -> bool {
@@ -105,6 +112,7 @@ mod tests {
             clicker_go: Some(0x51),
             clicker_back: Some(0x49),
             new_layout: true,
+            log_level: crate::logging::LogLevel::Debug,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
@@ -122,6 +130,22 @@ mod tests {
             "{json}"
         );
         assert!(!json.contains("clicker"), "{json}");
+        assert!(!json.contains("log_level"), "{json}");
+        // The level is a word in the file, and one this version doesn't know
+        // (from a newer one) gives the defaults, not a failure to start.
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"log_level\":\"debug\"")
+        );
+        std::fs::write(
+            dir.join(FILE),
+            "{\"log_level\":\"trace\",\"hw_decode\":true}",
+        )
+        .unwrap();
+        assert_eq!(Prefs::load(&dir).log_level, crate::logging::LogLevel::Trace);
+        std::fs::write(dir.join(FILE), "{\"log_level\":\"chatty\"}").unwrap();
+        assert_eq!(Prefs::load(&dir), Prefs::default());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

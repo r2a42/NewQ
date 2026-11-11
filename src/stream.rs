@@ -986,6 +986,10 @@ impl Sink {
                 return Err(format!("could not start FFmpeg: {e}"));
             }
         };
+        if log::log_enabled!(log::Level::Debug) {
+            let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+            log::debug!("stream ffmpeg {} started: {}", child.id(), args.join(" "));
+        }
         let stdin = child.stdin.take();
         let said = Arc::new(parking_lot::Mutex::new(String::new()));
         if let Some(mut err) = child.stderr.take() {
@@ -1083,7 +1087,10 @@ impl Sink {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let _ = self.child.wait();
+        match self.child.wait() {
+            Ok(status) => log::debug!("stream ffmpeg {} finished ({status})", self.child.id()),
+            Err(e) => log::debug!("stream ffmpeg could not be waited for: {e}"),
+        }
         drop_empty(self.record_file.as_deref());
     }
 }

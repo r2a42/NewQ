@@ -218,7 +218,17 @@ impl Children {
         // Starting a process can take seconds (a Mac, now and then): the lock
         // is not held meanwhile, or closing the player from the main thread
         // (Stop, a cue ending) would wait for it.
+        let began = std::time::Instant::now();
         let mut child = cmd.spawn().context("starting ffmpeg")?;
+        if log::log_enabled!(log::Level::Debug) {
+            let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+            log::debug!(
+                "ffmpeg {} started in {} ms: {}",
+                child.id(),
+                began.elapsed().as_millis(),
+                args.join(" ")
+            );
+        }
         let Some(stdout) = child.stdout.take() else {
             reap(child);
             anyhow::bail!("ffmpeg stdout");
@@ -269,7 +279,13 @@ fn reap(mut child: Child) {
     let _ = std::thread::Builder::new()
         .name("ffmpeg-reaper".into())
         .spawn(move || {
-            let _ = child.wait();
+            let pid = child.id();
+            match child.wait() {
+                // (Killed is how every one of them ends: a pass that is over,
+                // a cue that stopped.)
+                Ok(status) => log::trace!("ffmpeg {pid} is gone ({status})"),
+                Err(e) => log::debug!("ffmpeg {pid} could not be waited for: {e}"),
+            }
         });
 }
 

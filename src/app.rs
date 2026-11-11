@@ -365,6 +365,7 @@ impl App {
         let layout_dir = crate::crash::log_dir();
         ui.layout = crate::dock::Layout::load(&layout_dir);
         ui.prefs = crate::prefs::Prefs::load(&layout_dir);
+        crate::logging::set_level(ui.prefs.log_level);
         crate::media::video::set_hw_decode(ui.prefs.hw_decode);
         crate::output::set_scripts_allowed(ui.prefs.allow_scripts);
         ui.show_mode = ui.prefs.show_mode;
@@ -376,7 +377,7 @@ impl App {
                     show
                 }
                 Err(e) => {
-                    engine.log(format!("Could not open {}: {e:#}", path.display()));
+                    engine.problem(format!("Could not open {}: {e:#}", path.display()));
                     Show::default()
                 }
             },
@@ -532,13 +533,17 @@ impl App {
             match rx.try_recv() {
                 Ok(found) => {
                     self.device_scan = None;
+                    log_device_change("MIDI input", &self.ui.midi_ports, &found.midi_in);
+                    log_device_change("MIDI output", &self.ui.midi_out_ports, &found.midi_out);
                     self.ui.midi_ports = found.midi_in;
                     self.ui.midi_out_ports = found.midi_out;
                     if let Some(devices) = found.audio {
+                        log_device_change("audio output", &self.ui.audio_devices, &devices);
                         self.engine.audio.retry_failed(&devices);
                         self.ui.audio_devices = devices;
                     }
                     if let Some(devices) = found.audio_in {
+                        log_device_change("audio input", &self.ui.audio_input_devices, &devices);
                         self.ui.audio_input_devices = devices;
                     }
                 }
@@ -598,7 +603,12 @@ impl App {
             return;
         }
         for c in commands {
-            log::info!("remote: {c:?}");
+            // (Running timecode is thirty of these a second.)
+            if matches!(c, crate::remote::Command::Timecode(..)) {
+                log::trace!("remote: {c:?}");
+            } else {
+                log::info!("remote: {c:?}");
+            }
             ui::run_remote(c, &mut self.show, &mut self.engine, &mut self.ui);
         }
         if let Some(ctl) = &mut self.control {
@@ -782,7 +792,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 self.engine
-                    .log(format!("Could not open an output window: {e}"));
+                    .problem(format!("Could not open an output window: {e}"));
                 return;
             }
         };
@@ -821,7 +831,7 @@ impl App {
             Ok(started) => started,
             Err(e) => {
                 self.engine
-                    .log(e.replace("{display}", &(monitor + 1).to_string()));
+                    .problem(e.replace("{display}", &(monitor + 1).to_string()));
                 return;
             }
         };
@@ -878,7 +888,7 @@ impl App {
             && let Some(gpu) = &self.gpu
             && let Some(why) = gpu.lost.why()
         {
-            self.engine.log(format!(
+            self.engine.problem(format!(
                 "The graphics device was lost ({why}); restarting the displays"
             ));
             let mut stopping = Vec::new();
@@ -1182,6 +1192,7 @@ impl App {
         if let Some(screen) = self.screens.remove(&monitor)
             && let (window, Some(handle)) = screen.close()
         {
+            log::info!("output window on display {monitor} closed");
             // Give the menu bar and Dock back before the window goes.
             #[cfg(target_os = "macos")]
             winit::platform::macos::WindowExtMacOS::set_simple_fullscreen(&*window, false);
@@ -1515,7 +1526,7 @@ impl App {
                             _ => 1,
                         };
                         let wait = crate::stream::retry_delay(failures);
-                        self.engine.log(format!(
+                        self.engine.problem(format!(
                             "Stream from {name}: {why}. Trying again in {} s",
                             wait.as_secs()
                         ));
@@ -1529,7 +1540,7 @@ impl App {
                             },
                         );
                     } else {
-                        self.engine.log(format!("Stream from {name}: {why}"));
+                        self.engine.problem(format!("Stream from {name}: {why}"));
                         self.stream_failed.insert(id, (r.config.clone(), r.size));
                     }
                 }
@@ -1551,7 +1562,7 @@ impl App {
                 .map(|o| o.name.clone())
                 .unwrap_or_default();
             let fail = |app: &mut App, why: String| {
-                app.engine.log(format!("Stream from {name}: {why}"));
+                app.engine.problem(format!("Stream from {name}: {why}"));
                 app.stream_failed.insert(*id, (config.clone(), *size));
             };
             let Some(slot) = (0..gpu::CAPTURE_SLOTS as u8)
@@ -2774,7 +2785,7 @@ impl App {
 
         // What went wrong on any thread since the last pass, for the operator.
         for told in crate::crash::take_notices() {
-            self.engine.log(told);
+            self.engine.problem(told);
         }
         self.crumbs.skip();
         self.part("Checking the graphics and devices", |app| {
@@ -3065,6 +3076,29 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Say in the log which devices of a kind have come and gone since the last
+/// look (what was plugged in or pulled out during a show).
+fn log_device_change(kind: &str, before: &[String], now: &[String]) {
+    for (verb, names) in device_changes(before, now) {
+        log::info!("{kind} {verb}: {}", names.join(", "));
+    }
+}
+
+/// What is in `now` and not in `before` ("connected") and the other way
+/// round ("disconnected"), leaving out whichever is empty.
+fn device_changes(before: &[String], now: &[String]) -> Vec<(&'static str, Vec<String>)> {
+    let only = |a: &[String], b: &[String]| -> Vec<String> {
+        a.iter().filter(|n| !b.contains(n)).cloned().collect()
+    };
+    [
+        ("connected", only(now, before)),
+        ("disconnected", only(before, now)),
+    ]
+    .into_iter()
+    .filter(|(_, names)| !names.is_empty())
+    .collect()
+}
+
 /// Resolve a saved display to a monitor index: by name first, then by position
 /// (so a show moved to a venue with differently named projectors still works),
 /// but never by position onto the main window's own display.
@@ -3216,7 +3250,7 @@ fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, u
                 ui.selected = engine.playhead;
                 return;
             }
-            Err(e) => engine.log(format!("Could not read the recovery file: {e:#}")),
+            Err(e) => engine.problem(format!("Could not read the recovery file: {e:#}")),
         }
     }
     // Declined, or the question couldn't be asked: keep the copy, out of the way.
@@ -3268,6 +3302,20 @@ mod tests {
             .into_iter()
             .map(|(id, t)| (id, t.map(|t| t.monitor)))
             .collect()
+    }
+
+    #[test]
+    fn devices_that_come_and_go_are_named_for_the_log() {
+        let s = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert!(device_changes(&s(&["A", "B"]), &s(&["B", "A"])).is_empty());
+        assert_eq!(
+            device_changes(&s(&["A", "B"]), &s(&["B", "C", "D"])),
+            vec![("connected", s(&["C", "D"])), ("disconnected", s(&["A"]))]
+        );
+        assert_eq!(
+            device_changes(&[], &s(&["USB Interface"])),
+            vec![("connected", s(&["USB Interface"]))]
+        );
     }
 
     #[test]
