@@ -72,6 +72,12 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub compositor: Arc<Compositor>,
+    /// Submits share it; a surface's configure has it alone. Configuring waits
+    /// for the device to go idle and fails if any thread submits meanwhile
+    /// (wgpu's "Failed to wait for GPU to come idle"): on a Mac whose external
+    /// display went off, the control window was left undrawn for 34 s by the
+    /// main thread's and the output threads' submits.
+    pub gate: Arc<parking_lot::RwLock<()>>,
 }
 
 impl Gpu {
@@ -123,6 +129,7 @@ impl Gpu {
                 device,
                 queue,
                 compositor,
+                gate: Arc::default(),
             },
             surface,
         ))
@@ -141,7 +148,23 @@ impl Gpu {
     /// keeps each upload's staging copy until the next `submit`, and nothing
     /// else submits while no window is being drawn.
     pub fn flush_uploads(&self) {
-        self.queue.submit(std::iter::empty());
+        self.submit(std::iter::empty());
+    }
+
+    /// `queue.submit`, never while a surface is being configured.
+    pub fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
+        &self,
+        cmds: I,
+    ) -> wgpu::SubmissionIndex {
+        let _shared = self.gate.read();
+        self.queue.submit(cmds)
+    }
+
+    /// `surface.configure`, with no submit from another thread in the middle
+    /// of its wait for the device to go idle.
+    pub fn configure(&self, surface: &wgpu::Surface, config: &wgpu::SurfaceConfiguration) {
+        let _alone = self.gate.write();
+        surface.configure(&self.device, config);
     }
 
     /// A GPU with no window (for the benchmark and the tests), if this machine has
@@ -175,6 +198,7 @@ impl Gpu {
             device,
             queue,
             compositor,
+            gate: Arc::default(),
         })
     }
 
@@ -199,7 +223,7 @@ impl Gpu {
     ) -> bool {
         for attempt in 0..40 {
             let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-            surface.configure(&self.device, config);
+            self.configure(surface, config);
             if pollster::block_on(scope.pop()).is_none() {
                 return true;
             }
@@ -1675,6 +1699,7 @@ mod tests {
                 device,
                 queue,
                 compositor,
+                gate: Arc::default(),
             })
         };
         let gpu = try_make();
@@ -1834,7 +1859,7 @@ mod tests {
                 depth_or_array_layers: 1,
             },
         );
-        gpu.queue.submit([draw, encoder.finish()]);
+        gpu.submit([draw, encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
         gpu.device
@@ -2005,7 +2030,7 @@ mod tests {
                 depth_or_array_layers: 1,
             },
         );
-        gpu.queue.submit([draw, encoder.finish()]);
+        gpu.submit([draw, encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
         gpu.device

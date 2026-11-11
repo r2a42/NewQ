@@ -66,7 +66,7 @@ fn acquire(
             Some(f)
         }
         wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-            surface.configure(&gpu.device, config);
+            gpu.configure(surface, config);
             match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(f)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(f) => Some(f),
@@ -87,7 +87,7 @@ fn resize(
     if (config.width, config.height) != size {
         config.width = size.0;
         config.height = size.1;
-        surface.configure(&gpu.device, config);
+        gpu.configure(surface, config);
     }
 }
 
@@ -347,7 +347,7 @@ fn output_loop(
             &fade
         });
         let cmd = gpu.composite(&pipeline, slot, &view, &draw, faded);
-        gpu.queue.submit([cmd]);
+        gpu.submit([cmd]);
         window.pre_present_notify();
         gpu.queue.present(frame);
         if let Some(rate) = fps.tick(Instant::now()) {
@@ -624,7 +624,7 @@ fn capture_loop(
                 depth_or_array_layers: 1,
             },
         );
-        gpu.queue.submit([cmd, encoder.finish()]);
+        gpu.submit([cmd, encoder.finish()]);
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -817,7 +817,7 @@ fn control_loop(
                 renderer.render(&mut pass, &f.jobs, &screen);
             }
             cmds.push(encoder.finish());
-            gpu.queue.submit(cmds);
+            gpu.submit(cmds);
             window.pre_present_notify();
             gpu.queue.present(frame);
             presented.store(true, std::sync::atomic::Ordering::Release);

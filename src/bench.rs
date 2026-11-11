@@ -243,7 +243,7 @@ fn run(o: Options) -> Result<(), String> {
                 let began = Instant::now();
                 let view = target.create_view(&Default::default());
                 let cmd = g.composite(pipeline, Slot::Window(0), &view, &groups, None);
-                g.queue.submit([cmd]);
+                g.submit([cmd]);
                 let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
                 gpu_ms.push(began.elapsed().as_secs_f64() * 1000.0);
             }

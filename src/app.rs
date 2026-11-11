@@ -157,7 +157,7 @@ fn start_output_thread(
         "This graphics card can't draw to display {display}: outputs on it are not shown"
             .to_string()
     })?;
-    surface.configure(&gpu.device, &config);
+    gpu.configure(&surface, &config);
     let thread = OutputThread::spawn(
         gpu.clone(),
         window.clone(),
@@ -951,7 +951,7 @@ impl App {
             log::warn!("the new graphics device can't draw to the main window");
             return;
         };
-        surface.configure(&gpu.device, &config);
+        gpu.configure(&surface, &config);
         ctl.thread = match ControlThread::spawn(gpu.clone(), ctl.window.clone(), surface, config) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -2467,7 +2467,7 @@ impl App {
         let config = gpu
             .surface_config(&surface, (size.width, size.height))
             .ok_or("The graphics card can't draw to the main window")?;
-        surface.configure(&gpu.device, &config);
+        gpu.configure(&surface, &config);
         ui::setup_style(&self.egui_ctx);
         let state = egui_winit::State::new(
             self.egui_ctx.clone(),
@@ -2556,7 +2556,7 @@ impl App {
                     let config = gpu
                         .surface_config(&surface, (size.width, size.height))
                         .ok_or("the graphics card can't draw to it")?;
-                    surface.configure(&gpu.device, &config);
+                    gpu.configure(&surface, &config);
                     ControlThread::spawn(gpu.clone(), ctl.window.clone(), surface, config)
                         .map_err(|e| e.to_string())
                 });
