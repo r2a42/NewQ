@@ -42,7 +42,11 @@ verified, or you are blocked on something only they can do.** Never end a turn w
 8. **Verify.** The `Release` run must be `success`, then `get_release_by_tag vX.Y.Z`
    must exist with the Windows, macOS and Linux downloads. Report the link and what is
    in it. A `Release` failure: `get_job_logs`, fix or report, do not stop silently.
-9. After the merge, `git fetch origin main && git checkout -B <session-branch> origin/main`.
+9. After the merge, delete the session branch on GitHub (`git push origin --delete <session-branch>`;
+   the repository's "Automatically delete head branches" setting does it by itself), then
+   `git fetch origin main && git checkout -B <session-branch> origin/main`. A rebase merge
+   gives the commits new ids on `main`, so a branch left on GitHub still holds the old copies
+   and the next push would need a force-push; with it deleted, the next push makes it afresh.
 
 Do not post `/release` as a comment: the comment tool mangles slash commands, and the
 workflow is meant to be started by `workflow_dispatch` (owner's token).
