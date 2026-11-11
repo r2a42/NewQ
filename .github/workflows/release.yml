@@ -118,6 +118,18 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          # See ci.yml: use public DNS when the runner's can't find Ubuntu's archive.
+          if ! timeout 15 getent ahostsv4 azure.archive.ubuntu.com > /dev/null; then
+            echo "::warning::azure.archive.ubuntu.com does not resolve with the runner's DNS"
+            resolvectl status || true
+            for ns in 127.0.0.53 168.63.129.16 8.8.8.8 1.1.1.1; do
+              echo "== $ns"; timeout 10 dig +short +time=3 +tries=1 @"$ns" azure.archive.ubuntu.com A || true
+            done
+            sudo mkdir -p /etc/systemd/resolved.conf.d
+            printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/public.conf
+            sudo systemctl restart systemd-resolved
+            timeout 15 getent ahostsv4 azure.archive.ubuntu.com || echo "::warning::still not resolving"
+          fi
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
 
