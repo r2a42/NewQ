@@ -158,7 +158,8 @@ The README describes the features; this file is about working on the code.
   display shows the picture and the others mirror it with a whole-area `part_of`; the
   main window's own monitor is never offered). The full check (`feature.rs`, chosen as "Debug test" beside
   Short/Medium/Long, `TestMode::debug`, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
-  clip in the run folder; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
+  clip in the run folder, cut from the catalog's Sintel trailer and NASA pictures (`feature::Sources`,
+  fetched by `full.rs::real_media` when downloads are allowed, else only from the cache) or plain ones; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
   `Check`s); `Runner` plays them one at a time, its clock starting when the part's `lead` cue is started,
   noting `Obs` every 20 ms (what a part fires later is got ready first, `Engine::load_ahead`, so FFmpeg's start
   time isn't in the part's timings); `judge` (pure, tested on made-up notes) gives each check's `Verdict`. A problem
@@ -348,7 +349,9 @@ NEWQ_REQUIRE_MEDIA=1 cargo test                 # over 700 tests, about 3 minute
 - New features get tests, a README entry (and a keyboard-table row if they have
   a key), and are checked by running the app where the UI changed.
 - Commits are one feature each. PRs are merged with a **rebase merge** to keep
-  `main` linear. After a merge, restart the session branch from `main`.
+  `main` linear. After a merge, delete the session branch on GitHub (or let the repository's
+  "Automatically delete head branches" do it) and restart it from `main`: a rebase merge gives the
+  commits new ids, so a branch left behind holds old copies and the next push needs a force-push.
 
 ## Running the app headless (cloud sessions)
 

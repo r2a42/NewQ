@@ -218,7 +218,12 @@ pub fn run(folder: &Path) -> i32 {
         bundle::settings_text(&crate::prefs::Prefs::default(), &env),
     );
     let cancel = AtomicBool::new(false);
-    let media = match feature::make_media(&ff, &folder.join("media"), &cancel) {
+    let media = match feature::make_media(
+        &ff,
+        &folder.join("media"),
+        &cancel,
+        &feature::Sources::default(),
+    ) {
         Ok(m) => m,
         Err(e) => return fail(format!("the test's media could not be made: {e}")),
     };

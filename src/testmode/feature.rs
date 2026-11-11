@@ -3,8 +3,9 @@
 //! had a picture or took its sound, faded, ended), not only that nothing fell
 //! over.
 //!
-//! Its media is made on this computer by FFmpeg into the run's own folder
-//! (`make_media`), so nothing is downloaded. `build` makes the show and its
+//! Its media is made by FFmpeg into the run's own folder (`make_media`), cut
+//! from the catalog's film and pictures when there are some (`Sources`), else
+//! plain. `build` makes the show and its
 //! parts from a copy of the user's show with the cues taken out; `Runner`
 //! plays the parts through an `Engine`, noting what it sees every few
 //! milliseconds (`Obs`), and `judge` turns what was seen into a result for
@@ -66,28 +67,81 @@ fn run_ffmpeg(ff: &Ffmpeg, args: &[&str], out: &Path, cancel: &AtomicBool) -> Re
         .to_string())
 }
 
+/// Real pictures to make the check's media from, when there are some: the
+/// same free films and NASA pictures the longer tests use. Without them the
+/// check makes plain ones.
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    /// A film with sound (the Sintel trailer).
+    pub film: Option<PathBuf>,
+    /// Pictures for the stills (three are used; fewer means plain ones).
+    pub stills: Vec<PathBuf>,
+}
+
+/// The catalog's ids of what `Sources` is made from.
+pub const SOURCE_FILM: &str = "sintel_trailer";
+pub const SOURCE_STILLS: [&str; 3] = ["apollo11", "bluemarble", "earthrise"];
+
 /// Make the media in `dir`. An error is something the check can't run
 /// without (the clip, the tone, a picture); the Hap clip is only noted.
-pub fn make_media(ff: &Ffmpeg, dir: &Path, cancel: &AtomicBool) -> Result<Media, String> {
+pub fn make_media(
+    ff: &Ffmpeg,
+    dir: &Path,
+    cancel: &AtomicBool,
+    from: &Sources,
+) -> Result<Media, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut notes = Vec::new();
     let clip = dir.join("clip.mp4");
     let h264 = crate::soak::h264_args(|n| ff.has_encoder(n));
-    let mut args: Vec<&str> = vec![
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=640x360:rate=30",
-        "-f",
-        "lavfi",
-        "-i",
-        "aevalsrc=0.25*sin(2*PI*440*t)|0.25*sin(2*PI*660*t):s=48000",
-        "-t",
-        "4",
-    ];
-    args.extend(h264.iter().map(String::as_str));
-    args.extend(["-g", "15", "-c:a", "aac", "-shortest"]);
-    run_ffmpeg(ff, &args, &clip, cancel).map_err(|e| format!("the test clip: {e}"))?;
+    // Four seconds of the film with its own sound, at 1280x720.
+    let from_film = from.film.as_ref().and_then(|film| {
+        let film = film.to_string_lossy().into_owned();
+        let mut args: Vec<&str> = vec![
+            "-ss",
+            "20",
+            "-i",
+            &film,
+            "-t",
+            "4",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-vf",
+            "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+        ];
+        args.extend(h264.iter().map(String::as_str));
+        args.extend(["-g", "15", "-c:a", "aac"]);
+        match run_ffmpeg(ff, &args, &clip, cancel) {
+            Ok(()) => Some(()),
+            Err(e) => {
+                notes.push(format!("The film could not be cut ({e}): a test pattern is used"));
+                None
+            }
+        }
+    });
+    if from_film.is_none() {
+        let mut args: Vec<&str> = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.25*sin(2*PI*440*t)|0.25*sin(2*PI*660*t):s=48000",
+            "-t",
+            "4",
+        ];
+        args.extend(h264.iter().map(String::as_str));
+        args.extend(["-g", "15", "-c:a", "aac", "-shortest"]);
+        run_ffmpeg(ff, &args, &clip, cancel).map_err(|e| format!("the test clip: {e}"))?;
+    }
 
     let tone = dir.join("tone.wav");
     run_ffmpeg(
@@ -106,7 +160,39 @@ pub fn make_media(ff: &Ffmpeg, dir: &Path, cancel: &AtomicBool) -> Result<Media,
     .map_err(|e| format!("the test tone: {e}"))?;
 
     let mut stills = Vec::new();
-    for (n, colour) in ["0x993333", "0x339966", "0x334499"].iter().enumerate() {
+    if from.stills.len() >= 3 {
+        for (n, picture) in from.stills.iter().take(3).enumerate() {
+            let path = dir.join(format!("still_{}.png", n + 1));
+            let picture = picture.to_string_lossy().into_owned();
+            match run_ffmpeg(
+                ff,
+                &[
+                    "-i",
+                    &picture,
+                    "-vf",
+                    "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                    "-frames:v",
+                    "1",
+                ],
+                &path,
+                cancel,
+            ) {
+                Ok(()) => stills.push(path),
+                Err(e) => {
+                    notes.push(format!(
+                        "A picture could not be used ({e}): plain ones are made"
+                    ));
+                    stills.clear();
+                    break;
+                }
+            }
+        }
+    }
+    for (n, colour) in ["0x993333", "0x339966", "0x334499"]
+        .iter()
+        .enumerate()
+        .skip(stills.len())
+    {
         let path = dir.join(format!("still_{}.png", n + 1));
         let source = format!("color=c={colour}:s=640x360:d=1");
         run_ffmpeg(
@@ -119,20 +205,12 @@ pub fn make_media(ff: &Ffmpeg, dir: &Path, cancel: &AtomicBool) -> Result<Media,
         stills.push(path);
     }
 
+    let clip_text = clip.to_string_lossy().into_owned();
     let hap = if ff.has_encoder("hap") {
         let path = dir.join("clip_hap.mov");
         match run_ffmpeg(
             ff,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=640x360:rate=30",
-                "-t",
-                "2",
-                "-c:v",
-                "hap",
-            ],
+            &["-i", &clip_text, "-t", "2", "-an", "-c:v", "hap"],
             &path,
             cancel,
         ) {
@@ -3259,6 +3337,87 @@ mod tests {
         );
     }
 
+    /// The check's media cut from a real film and pictures, and plain ones in
+    /// the place of a film with no sound.
+    #[test]
+    fn the_media_is_made_from_a_film_and_pictures_when_there_are_some() {
+        let Some((ff, picture)) = crate::media::test_media("color_red.png") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("newq_sources_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel = AtomicBool::new(false);
+        // A 26 s "film" with sound, as the trailer is (the cut starts at 20 s).
+        let film = dir.join("film.mp4");
+        let h264 = crate::soak::h264_args(|n| ff.has_encoder(n));
+        let mut args: Vec<&str> = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=480x200:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=500:sample_rate=44100",
+            "-t",
+            "26",
+        ];
+        args.extend(h264.iter().map(String::as_str));
+        args.extend(["-c:a", "aac", "-shortest"]);
+        run_ffmpeg(&ff, &args, &film, &cancel).expect("the film is made");
+        let from = Sources {
+            film: Some(film.clone()),
+            stills: vec![picture.clone(); 3],
+        };
+        let media = make_media(&ff, &dir.join("real"), &cancel, &from).expect("made");
+        assert!(
+            media.notes.iter().all(|n| !n.contains("film")),
+            "{:?}",
+            media.notes
+        );
+        let clip = ff.probe(&media.clip).unwrap();
+        let v = clip.video.as_ref().expect("a picture");
+        assert_eq!((v.width, v.height), (1280, 720));
+        assert!(clip.has_audio && clip.audio_channels == 2);
+        let length = clip.duration.unwrap_or(0.0);
+        assert!((length - 4.0).abs() < 0.3, "{length}");
+        assert_eq!(media.stills.len(), 3);
+        for still in &media.stills {
+            let p = ff.probe(still).unwrap();
+            let v = p.video.as_ref().expect("a picture");
+            assert_eq!((v.width, v.height), (1280, 720));
+        }
+        // A film with no sound can't stand in for a clip with sound.
+        let silent = dir.join("silent.mp4");
+        let mut args: Vec<&str> = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=480x200:rate=24",
+            "-t",
+            "26",
+        ];
+        args.extend(h264.iter().map(String::as_str));
+        run_ffmpeg(&ff, &args, &silent, &cancel).expect("the silent film is made");
+        let from = Sources {
+            film: Some(silent),
+            stills: vec![picture; 2],
+        };
+        let media = make_media(&ff, &dir.join("plain"), &cancel, &from).expect("made");
+        assert!(
+            media.notes.iter().any(|n| n.contains("film")),
+            "{:?}",
+            media.notes
+        );
+        let clip = ff.probe(&media.clip).unwrap();
+        let v = clip.video.as_ref().expect("a picture");
+        assert_eq!((v.width, v.height), (640, 360), "the test pattern");
+        assert!(clip.has_audio);
+        assert_eq!(media.stills.len(), 3, "plain pictures for want of three");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The whole check, played for real through an engine with the silent mixer.
     /// Ignored in `cargo test`: CI runs the same check as its own step
     /// (`newq --self-test`), and playing it twice per job doubles 90 s of timing
@@ -3272,7 +3431,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("newq_fullcheck_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cancel = AtomicBool::new(false);
-        let media = make_media(&ff, &dir, &cancel).expect("the media is made");
+        let media = make_media(&ff, &dir, &cancel, &Sources::default()).expect("the media is made");
         // A show from before layers were kept apart: the check plays the same.
         let original = Show {
             own_layers: false,

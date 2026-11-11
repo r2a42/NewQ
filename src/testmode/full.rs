@@ -43,6 +43,7 @@ impl FullPrep {
         log_dir: &Path,
         displays: Vec<DisplayChoice>,
         sound: SoundChoice,
+        online: bool,
     ) -> Result<FullPrep, String> {
         let folder = super::session::run_folder_named(log_dir, "full", super::session::unix_now());
         std::fs::create_dir_all(&folder).map_err(|e| {
@@ -54,10 +55,12 @@ impl FullPrep {
         let (tx, media) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let (dir, stop) = (folder.join("media"), cancel.clone());
+        let cache = super::assets::cache_dir(log_dir);
         std::thread::Builder::new()
             .name("test-media".into())
             .spawn(move || {
-                let _ = tx.send(feature::make_media(&ff, &dir, &stop));
+                let from = real_media(&ff, cache, online, &stop);
+                let _ = tx.send(feature::make_media(&ff, &dir, &stop, &from));
             })
             .map_err(|e| {
                 format!("Can't start making the test's media: {e}. Nothing was changed.")
@@ -94,6 +97,56 @@ impl FullPrep {
                 Some(Err("making the media stopped unexpectedly".into()))
             }
         }
+    }
+}
+
+/// The film and pictures the longer tests use, to make the check's media from:
+/// fetched when downloads are allowed (from the cache when they are there
+/// already), otherwise only what is in the cache. A file that can't be had is
+/// left out, and the check makes a plain one in its place.
+fn real_media(ff: &Ffmpeg, cache: PathBuf, online: bool, stop: &AtomicBool) -> feature::Sources {
+    use super::assets;
+    let ids: Vec<&str> = std::iter::once(feature::SOURCE_FILM)
+        .chain(feature::SOURCE_STILLS)
+        .collect();
+    let wanted: Vec<&'static assets::Asset> =
+        ids.iter().filter_map(|id| assets::find(id)).collect();
+    if !online {
+        let cached = |id: &str| {
+            assets::find(id)
+                .filter(|a| assets::is_cached(&cache, a))
+                .map(|a| cache.join(a.file))
+        };
+        return feature::Sources {
+            film: cached(feature::SOURCE_FILM),
+            stills: feature::SOURCE_STILLS
+                .iter()
+                .filter_map(|id| cached(id))
+                .collect(),
+        };
+    }
+    let fetch = assets::start(ff.clone(), cache, wanted, true);
+    while !fetch.finished() {
+        if stop.load(Ordering::Relaxed) {
+            fetch.cancel();
+            return feature::Sources::default();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let status = fetch.status.lock();
+    let real = |id: &str| {
+        status
+            .resolved
+            .get(id)
+            .filter(|r| !matches!(r.source, assets::Source::Generated(_)))
+            .map(|r| r.path.clone())
+    };
+    feature::Sources {
+        film: real(feature::SOURCE_FILM),
+        stills: feature::SOURCE_STILLS
+            .iter()
+            .filter_map(|id| real(id))
+            .collect(),
     }
 }
 

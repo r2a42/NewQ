@@ -290,7 +290,7 @@ fn body(
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(format!(
-                    "Making its clips, tone and pictures on this computer ({} s)…",
+                    "Getting its film and pictures ready and cutting its clips ({} s)…",
                     p.since.elapsed().as_secs()
                 ));
             });
@@ -298,7 +298,7 @@ fn body(
                 test.stop();
             }
             ui.label(
-                RichText::new("Nothing is downloaded. Nothing about your show has changed.")
+                RichText::new("Nothing about your show has changed.")
                     .weak()
                     .small(),
             );
@@ -521,9 +521,31 @@ fn idle(
     if test.debug {
         ui.label(
             RichText::new(
-                "About two minutes. Plays every kind of cue once (video, pictures, sound, text, shapes, camera, slides, groups, fades, control, stop, wait, send, timecode, effects, a recording) and checks that each did what it should. Nothing is downloaded and nothing leaves this computer. Use this one when something seems wrong: send the zip it makes.",
+                "About two minutes. Plays every kind of cue once (video, pictures, sound, text, shapes, camera, slides, groups, fades, control, stop, wait, send, timecode, effects, a recording) and checks that each did what it should. Use this one when something seems wrong: send the zip it makes. Nothing leaves this computer.",
             )
             .weak(),
+        );
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut test.download,
+            "Use a real film and pictures (free to use)",
+        );
+        let ids: Vec<&str> = std::iter::once(super::feature::SOURCE_FILM)
+            .chain(super::feature::SOURCE_STILLS)
+            .collect();
+        let wanted: Vec<_> = ids.iter().filter_map(|id| assets::find(id)).collect();
+        let need = assets::download_size(&assets::cache_dir(log_dir), &wanted);
+        ui.label(
+            RichText::new(match (test.download, need) {
+                (true, 0) => "Everything is already on this computer.".to_string(),
+                (true, n) => format!(
+                    "About {} will be downloaded once (the Sintel trailer and three NASA pictures) and kept for the other tests.",
+                    megabytes(n)
+                ),
+                (false, _) => "Plain test pictures and tones will be made on this computer, unless the film and pictures are here already.".to_string(),
+            })
+            .weak()
+            .small(),
         );
         ui.separator();
         displays_section(ui, screens, selected);

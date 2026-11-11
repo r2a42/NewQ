@@ -45,8 +45,7 @@ This program will not transfer any information to other networked systems
 unless specifically requested by the user. NewQ has no telemetry and no update
 check. It uses the network only for what you set up: OSC, MIDI-over-network,
 the web remote, NDI, PJLink and TCP sends, and streams go to the addresses you
-enter, and *Test Mode* downloads its free test media when you start one of its longer
-tests with that box ticked (its *full check* downloads nothing). The zip a test makes
+enter, and *Test Mode* downloads its free test media when you start a test with that box ticked. The zip a test makes
 stays on the computer until you send it yourself.
 
 ## Features
@@ -1056,8 +1055,10 @@ nothing to type: no command line, no files to find. Choose *Short*, *Medium*, *L
 
 ### The debug test: every kind of cue, and one file to send
 
-No questions, about two minutes. It makes its own clips, tone and pictures
-on this computer with FFmpeg (nothing is downloaded), plays a show that uses every kind
+About two minutes. It cuts its clips and pictures from the same free film and NASA
+pictures the longer tests use (the Sintel trailer and three Apollo photographs, about 12 MB,
+downloaded once if *Use a real film and pictures* is ticked; otherwise it makes plain ones
+on this computer with FFmpeg), plays a show that uses every kind
 of cue, one part at a time, and checks that each part *did what it should*: not only
 that NewQ didn't fall over.
 

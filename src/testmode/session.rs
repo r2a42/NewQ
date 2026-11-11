@@ -534,7 +534,7 @@ impl TestMode {
             return;
         }
         self.notice = None;
-        match super::full::FullPrep::start(ff, log_dir, displays, sound) {
+        match super::full::FullPrep::start(ff, log_dir, displays, sound, self.download) {
             Ok(prep) => self.phase = Phase::FullPrep(Box::new(prep)),
             Err(e) => self.notice = Some(e),
         }
