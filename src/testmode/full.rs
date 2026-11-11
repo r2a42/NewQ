@@ -77,6 +77,10 @@ impl FullPrep {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
+    }
+
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
@@ -654,6 +658,39 @@ impl FullRun {
     }
 }
 
+/// The check could not begin (its media could not be made, its files not
+/// written): nothing was changed, and what there is to send says why.
+pub fn could_not_start(folder: &Path, log_dir: &Path, why: &str) -> Done {
+    let findings = vec![Finding {
+        severity: Severity::Problem,
+        text: format!(
+            "The full check could not start: {why}. Nothing about your show was changed."
+        ),
+    }];
+    let report = format!(
+        "NewQ Test Mode report: the full check\n=====================================\nResult: {}\nIt could not start: {why}\nNewQ {}\nNothing about your show was changed.\n",
+        Verdict::ProblemsFound.label(),
+        env!("CARGO_PKG_VERSION")
+    );
+    let _ = std::fs::create_dir_all(folder);
+    let _ = std::fs::write(folder.join("report.txt"), &report);
+    Done {
+        compare: None,
+        level: super::Level::Short,
+        full: Some(Vec::new()),
+        verdict: Verdict::ProblemsFound,
+        headline: format!("The full check could not start: {why}"),
+        steady: None,
+        findings,
+        folder: folder.to_path_buf(),
+        report,
+        laps: 0,
+        elapsed: Duration::ZERO,
+        ended: End::Failed(why.to_string()),
+        bundle: Bundle::start(folder.to_path_buf(), log_dir.to_path_buf(), false),
+    }
+}
+
 /// What the server part came to, when its stream is switched off.
 fn served_verdict(s: &Serve, said: &[String]) -> feature::Verdict {
     use feature::Verdict::{Failed, NotChecked, Ok as Fine};
@@ -1117,6 +1154,33 @@ mod tests {
         ] {
             assert!(archive.by_name(name).is_ok(), "{name} is not in the zip");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_check_that_cannot_start_still_leaves_a_zip_that_says_why() {
+        let dir = std::env::temp_dir().join(format!("newq_tm_nostart_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = dir.join("test-mode").join("runs").join("now_full");
+        let d = could_not_start(&folder, &dir, "the test clip: Unknown encoder");
+        assert_eq!(d.verdict, Verdict::ProblemsFound);
+        assert!(matches!(&d.ended, End::Failed(why) if why.contains("Unknown encoder")));
+        let began = Instant::now();
+        let zip = loop {
+            match d.bundle.get() {
+                Some(made) => break made.expect("a zip"),
+                None if began.elapsed() > Duration::from_secs(20) => panic!("no zip"),
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("report.txt").unwrap(), &mut text)
+            .unwrap();
+        assert!(
+            text.contains("It could not start: the test clip: Unknown encoder"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

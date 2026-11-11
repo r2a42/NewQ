@@ -677,15 +677,23 @@ impl TestMode {
                     self.notice = Some("Cancelled. Nothing was changed.".into());
                     return;
                 }
+                // A show that has changed meanwhile is a reason to wait, not a failure.
+                if let Some(why) = st.test_refusal() {
+                    self.notice = Some(why.to_string());
+                    return;
+                }
+                let (folder, log_dir) = (p.folder.clone(), p.log_dir().to_path_buf());
                 let launched =
                     made.and_then(|media| super::full::launch(*p, media, show, engine, st));
                 match launched {
                     Ok(run) => self.phase = Phase::Full(Box::new(run)),
                     Err(e) => {
-                        log::error!("test mode: {e}");
-                        self.notice = Some(format!(
-                            "The full check could not start: {e}. Nothing was changed."
-                        ));
+                        // It could not even begin: that is a finding too, and
+                        // the zip (the reason, the log) is made all the same.
+                        log::error!("test mode: the full check could not start: {e}");
+                        self.phase = Phase::Done(Box::new(super::full::could_not_start(
+                            &folder, &log_dir, &e,
+                        )));
                     }
                 }
             }
