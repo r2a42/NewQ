@@ -426,6 +426,17 @@ pub fn midi_outputs() -> Vec<String> {
         .collect()
 }
 
+/// Send a message, and say what went wrong if anything did. A panic while
+/// sending (a MIDI driver, a socket) is one message lost, with a report, and
+/// not the end of the thread that every later send cue depends on.
+fn lived_through(send: impl FnOnce() -> Result<(), String>) -> Option<String> {
+    match crate::crash::survive("Sending a cue's message", send) {
+        Some(Ok(())) => None,
+        Some(Err(e)) => Some(e),
+        None => Some("A message could not be sent (a report was saved)".into()),
+    }
+}
+
 /// Where messages go. A real one sends from a worker thread; a recording one
 /// (for tests) keeps what it was asked to send.
 pub struct Outbox {
@@ -461,7 +472,7 @@ impl Outbox {
                             let errors = err_tx.clone();
                             let _ = std::thread::Builder::new().name(key).spawn(move || {
                                 for job in jobs {
-                                    if let Err(e) = send_network(&job) {
+                                    if let Some(e) = lived_through(|| send_network(&job)) {
                                         let _ = errors.send(e);
                                     }
                                 }
@@ -469,7 +480,7 @@ impl Outbox {
                             tx
                         });
                         let _ = tx.send(job);
-                    } else if let Err(e) = sender.send(&job) {
+                    } else if let Some(e) = lived_through(|| sender.send(&job)) {
                         let _ = err_tx.send(e);
                     }
                 }
@@ -806,6 +817,24 @@ impl SocketSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_panic_while_sending_is_one_message_lost_not_the_end_of_the_sender() {
+        assert_eq!(lived_through(|| Ok(())), None);
+        assert_eq!(
+            lived_through(|| Err("UDP: no route".into())),
+            Some("UDP: no route".into())
+        );
+        // (Told to the panic hook as expected, so the test leaves no report.)
+        let said =
+            crate::crash::catch_expected(|| lived_through(|| panic!("the MIDI driver fell over")));
+        assert_eq!(
+            said,
+            Ok(Some(
+                "A message could not be sent (a report was saved)".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn the_pacer_spaces_messages_evenly_and_does_not_burst_after_a_stall() {
         let t0 = Instant::now();

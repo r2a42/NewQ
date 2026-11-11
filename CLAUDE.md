@@ -73,7 +73,8 @@ The README describes the features; this file is about working on the code.
   threads say they died with `crash::OnPanic` (the video/audio readers set their cue's error, a stream
   reports a failure and is retried); `watch_render_threads` restarts an output or control render thread
   that ended (at most one restart every 2 s); `mix_each` drops a voice that panics in the audio callback
-  (a panic leaving a CoreAudio callback aborts); `update_hosting` replaces a dead MediaMTX runner.
+  (a panic leaving a CoreAudio callback aborts; the MIDI input callback catches its own for the same reason);
+  `output.rs::lived_through` keeps the send-cues threads alive; `update_hosting` replaces a dead MediaMTX runner.
   `NEWQ_TEST_PANIC=<engine|ui|outputs|render|audio>@<seconds>` makes one happen. Never take time from an
   `Instant` (`Instant::now() - d` panics soon after boot): use `Option<Instant>` or `checked_sub`.
   A `clamp` whose bounds come from a show or a file panics when they are inverted or NaN (`ui.rs::within`).
@@ -156,7 +157,8 @@ The README describes the features; this file is about working on the code.
   button, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
   clip in the run folder; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
   `Check`s); `Runner` plays them one at a time, its clock starting when the part's `lead` cue is started,
-  noting `Obs` every 20 ms; `judge` (pure, tested on made-up notes) gives each check's `Verdict`. A problem
+  noting `Obs` every 20 ms (what a part fires later is got ready first, `Engine::load_ahead`, so FFmpeg's start
+  time isn't in the part's timings); `judge` (pure, tested on made-up notes) gives each check's `Verdict`. A problem
   the engine reports in a part (`Engine::take_problems`) fails it unless the part expects it. The copy has
   `own_layers` on (an old show's off makes cues in a together group replace each other: that is tested
   behaviour, not a fault), no streams, no OSC feedback. `full.rs` does what needs the app: `Ask::RecordOn`

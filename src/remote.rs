@@ -504,7 +504,13 @@ impl Remote {
                 &port,
                 "newq-in",
                 move |_, msg, _| {
-                    let commands = midi_commands(msg, channel, device, mtc, &mut quarter_frames);
+                    // The system's MIDI code calls this: a panic must not
+                    // leave it (it would end the program on a Mac and on
+                    // Windows), so a message that can't be read is dropped.
+                    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        midi_commands(msg, channel, device, mtc, &mut quarter_frames)
+                    }));
+                    let Ok(commands) = read else { return };
                     if !commands.is_empty() {
                         for c in commands {
                             let _ = tx.send(c);
