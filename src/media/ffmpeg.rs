@@ -126,7 +126,18 @@ impl Ffmpeg {
         .arg(path)
         .stdin(Stdio::null());
         no_console(&mut cmd);
-        let out = cmd.output().context("running ffprobe")?;
+        // Never waited for without a limit: a file on a network share that
+        // has gone away can hold ffprobe for ever, and each one that hangs
+        // takes a probe thread with it until no cue can be looked at.
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let limit = std::time::Instant::now() + PROBE_LIMIT;
+        let out = output_until(&mut cmd, &never, Some(limit)).context("running ffprobe")?;
+        if !out.status.success() && std::time::Instant::now() >= limit {
+            return Err(anyhow!(
+                "ffprobe did not answer in {} s",
+                PROBE_LIMIT.as_secs()
+            ));
+        }
         if !out.status.success() {
             return Err(anyhow!(
                 "ffprobe failed: {}",
@@ -148,6 +159,20 @@ impl Ffmpeg {
 pub fn output_cancellable(
     cmd: &mut Command,
     cancel: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<std::process::Output> {
+    output_until(cmd, cancel, None)
+}
+
+/// How long a look at a media file may take before it is given up.
+const PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `output_cancellable`, also killing the process at `deadline` if it is
+/// still running then. The first looks come quickly (a process that takes a
+/// few milliseconds is not made to wait 50), then every 50 ms.
+pub fn output_until(
+    cmd: &mut Command,
+    cancel: &std::sync::atomic::AtomicBool,
+    deadline: Option<std::time::Instant>,
 ) -> std::io::Result<std::process::Output> {
     use parking_lot::Mutex;
     use std::io::Read;
@@ -188,15 +213,19 @@ pub fn output_cancellable(
             .take()
             .map(|p| Box::new(p) as Box<dyn Read + Send>),
     );
+    let mut nap = std::time::Duration::from_millis(1);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed)
+            || deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        {
             let _ = child.kill();
             break child.wait()?;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(std::time::Duration::from_millis(50));
     };
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let take = |(bytes, done): Collected| {
@@ -411,6 +440,41 @@ pub fn pix_fmt_has_alpha(pix_fmt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_that_does_not_end_is_killed_at_its_deadline() {
+        // A program that reads its input for ever, if this system has one.
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "pause"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let began = std::time::Instant::now();
+        let limit = began + std::time::Duration::from_millis(300);
+        let Ok(out) = output_until(&mut cmd, &never, Some(limit)) else {
+            return; // no such program here
+        };
+        assert!(began.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!out.status.success(), "it was killed, not finished");
+        // One that ends by itself is not held up by the looks at it.
+        let mut quick = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo hello"]);
+            c
+        } else {
+            let mut c = Command::new("echo");
+            c.arg("hello");
+            c
+        };
+        let out = output_until(&mut quick, &never, Some(limit + PROBE_LIMIT)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+    }
 
     #[test]
     fn the_sync_clip_has_picture_and_sound() {

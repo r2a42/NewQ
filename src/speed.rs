@@ -205,7 +205,8 @@ impl Stretcher {
         // What the last window leads on into, to join to.
         let lead = last + HOP;
         let lo = wanted.saturating_sub(SEARCH).max(self.base);
-        let hi = wanted + SEARCH;
+        // (Never below `lo`, which `clamp` would refuse.)
+        let hi = (wanted + SEARCH).max(lo);
         let overlap = WINDOW - HOP;
         let at = |i: usize| self.mono.get(i - self.base).copied().unwrap_or(0.0);
         let score = |c: usize| -> f32 {

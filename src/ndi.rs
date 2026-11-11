@@ -550,6 +550,11 @@ fn i420_from_rgb(
 /// Append `src` (`sw`×`sh`) scaled to `dw`×`dh` (bilinear) to `out`.
 fn scale_plane(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut Vec<u8>) {
     let (dw, dh) = (dw.max(1), dh.max(1));
+    // A source with no size (or less data than it says) has nothing to scale.
+    if sw == 0 || sh == 0 || src.len() < sw * sh {
+        out.resize(out.len() + dw * dh, 0);
+        return;
+    }
     out.reserve(dw * dh);
     for dy in 0..dh {
         let fy = ((dy as f32 + 0.5) * sh as f32 / dh as f32 - 0.5).clamp(0.0, (sh - 1) as f32);
