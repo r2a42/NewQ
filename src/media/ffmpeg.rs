@@ -443,10 +443,11 @@ mod tests {
 
     #[test]
     fn a_process_that_does_not_end_is_killed_at_its_deadline() {
-        // A program that reads its input for ever, if this system has one.
+        // A program that runs for 30 s, if this system has one. (Not `cmd /C
+        // pause`: its input is closed here, so it ends at once.)
         let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "pause"]);
+            let mut c = Command::new("ping");
+            c.args(["-n", "30", "127.0.0.1"]);
             c
         } else {
             let mut c = Command::new("sleep");
