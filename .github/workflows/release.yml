@@ -118,12 +118,6 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # See ci.yml: Azure's copy of the archive sometimes stops resolving.
-          if ! getent hosts azure.archive.ubuntu.com > /dev/null; then
-            echo "azure.archive.ubuntu.com does not resolve: using archive.ubuntu.com"
-            sudo sed -i -e 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' -e 's#azure.archive.ubuntu.com#archive.ubuntu.com#' \
-              /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
-          fi
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
 

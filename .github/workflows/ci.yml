@@ -82,13 +82,6 @@ jobs:
         # This step once sat for 40 minutes on a stalled package mirror.
         timeout-minutes: 10
         run: |
-          # The runners fetch from Azure's copy of Ubuntu's archive; when its name
-          # stops resolving (it did for hours on 2026-11-11), use Ubuntu's own.
-          if ! getent hosts azure.archive.ubuntu.com > /dev/null; then
-            echo "azure.archive.ubuntu.com does not resolve: using archive.ubuntu.com"
-            sudo sed -i -e 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' -e 's#azure.archive.ubuntu.com#archive.ubuntu.com#' \
-              /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
-          fi
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg
       - name: Install FFmpeg (macOS)
