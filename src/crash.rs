@@ -108,6 +108,9 @@ fn utc_now() -> String {
 thread_local! {
     /// Set while this thread runs code whose panics are caught and dealt with.
     static EXPECTED_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The part of the main loop this thread is in, while a panic in it is
+    /// caught and the loop goes on (see `survive`).
+    static SURVIVING: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 /// Run `f`, and turn a panic in it into `Err`. For code that handles its own
@@ -119,6 +122,120 @@ pub fn catch_expected<R>(f: impl FnOnce() -> R) -> Result<R, ()> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     EXPECTED_PANIC.with(|c| c.set(false));
     result.map_err(|_| ())
+}
+
+/// Run a part of a loop that must go on whatever happens (`what` names it):
+/// a panic in it leaves its report like any other, the operator is told (see
+/// `take_notices`), and `None` comes back in place of the result. A show
+/// does not end because one part of the program met something it didn't
+/// expect; what that part was doing is left undone for this pass.
+pub fn survive<R>(what: &'static str, f: impl FnOnce() -> R) -> Option<R> {
+    let outer = SURVIVING.with(|c| c.replace(Some(what)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    SURVIVING.with(|c| c.set(outer));
+    result.ok()
+}
+
+/// Runs its closure if the thread is unwinding from a panic when it goes: for
+/// a worker thread to say that it stopped (set its error, mark its end), so
+/// what it worked for is not left waiting for it.
+pub struct OnPanic<F: FnMut()>(pub F);
+
+impl<F: FnMut()> Drop for OnPanic<F> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            (self.0)();
+        }
+    }
+}
+
+/// For trying the above on a running program: `NEWQ_TEST_PANIC=<part>@<seconds>`
+/// panics once in that part of the program, that long after it started. The
+/// parts are `engine`, `ui`, `outputs`, `render` (an output window's thread)
+/// and `audio` (the mixer). Costs one atomic read where it is called.
+pub fn test_panic(part: &str) {
+    use std::sync::OnceLock;
+    static FIRED: AtomicBool = AtomicBool::new(true);
+    static WANT: OnceLock<Option<(String, std::time::Instant)>> = OnceLock::new();
+    let want = WANT.get_or_init(|| {
+        let asked = test_panic_asked(&std::env::var("NEWQ_TEST_PANIC").ok()?)?;
+        FIRED.store(false, Ordering::Relaxed);
+        Some((
+            asked.0,
+            std::time::Instant::now() + std::time::Duration::from_secs_f64(asked.1),
+        ))
+    });
+    if FIRED.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some((p, at)) = want
+        && p == part
+        && std::time::Instant::now() >= *at
+        && !FIRED.swap(true, Ordering::SeqCst)
+    {
+        panic!("a panic asked for with NEWQ_TEST_PANIC in '{part}'");
+    }
+}
+
+/// `engine@5` as the part and the seconds; None for anything else.
+fn test_panic_asked(text: &str) -> Option<(String, f64)> {
+    let (part, secs) = text.split_once('@')?;
+    let secs: f64 = secs.trim().parse().ok()?;
+    (!part.trim().is_empty() && secs.is_finite() && (0.0..=86_400.0).contains(&secs))
+        .then(|| (part.trim().to_string(), secs))
+}
+
+/// How many times the same place may leave a full report in one run, and how
+/// many reports a run may leave in all. A fault that happens on every frame
+/// would otherwise fill the disk and spend the show writing backtraces.
+const REPORTS_PER_PLACE: u32 = 2;
+const REPORTS_PER_RUN: u32 = 40;
+/// The most notices kept for the operator at once.
+const MAX_NOTICES: usize = 20;
+
+/// What the hook has seen in this run.
+#[derive(Default)]
+struct Seen {
+    places: std::collections::HashMap<String, u32>,
+    reports: u32,
+}
+
+/// Whether the `n`th panic at one place, with `reports` written so far in the
+/// run, gets a full report (the rest are only counted in the log).
+fn full_report(n: u32, reports: u32) -> bool {
+    n <= REPORTS_PER_PLACE && reports < REPORTS_PER_RUN
+}
+
+/// Whether the `n`th repeat is worth a line in the log: ever more rarely.
+fn repeat_logged(n: u32) -> bool {
+    n.is_power_of_two()
+}
+
+/// Panics the program lived through, in words for the operator.
+static NOTICES: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+/// How many panics there have been in this run (expected ones not counted).
+static PANICS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// What went wrong since this was last asked, to show the operator.
+pub fn take_notices() -> Vec<String> {
+    std::mem::take(&mut *NOTICES.lock())
+}
+
+/// How many panics this run has had (Test Mode counts the ones in a run).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn panic_count() -> u32 {
+    PANICS.load(Ordering::Relaxed)
+}
+
+/// What to tell the operator about a panic the program lived through.
+fn notice(thread: &str, surviving: Option<&str>, message: &str, saved: Option<&Path>) -> String {
+    let part = match surviving {
+        Some(what) => format!("{what} met an error and carried on"),
+        None => format!("A part of NewQ stopped ({thread})"),
+    };
+    let first = message.lines().next().unwrap_or("").trim();
+    let report = saved.map_or_else(String::new, |p| format!(" Report: {}", p.display()));
+    format!("{part}: {first}.{report}")
 }
 
 /// Make a panic leave a report: in the log folder, in the log, and (on
@@ -133,33 +250,65 @@ fn install_in(dir: PathBuf, dialog: bool) {
     let previous = std::panic::take_hook();
     // One message box is enough if several threads fall over together.
     let told = AtomicBool::new(false);
+    let seen = parking_lot::Mutex::new(Seen::default());
     std::panic::set_hook(Box::new(move |info| {
         if EXPECTED_PANIC.with(std::cell::Cell::get) {
             log::warn!("a panic that was caught and handled: {info}");
             return;
         }
+        PANICS.fetch_add(1, Ordering::Relaxed);
         let thread = std::thread::current();
-        let what = format!(
-            "{}:\n{}",
-            info.location()
-                .map_or("an unknown place".to_string(), ToString::to_string),
-            info.payload()
-                .downcast_ref::<&str>()
-                .map(ToString::to_string)
-                .or_else(|| info.payload().downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "(no message)".into())
-        );
+        let name = thread.name().unwrap_or("unnamed");
+        let surviving = SURVIVING.with(std::cell::Cell::get);
+        let place = info
+            .location()
+            .map_or("an unknown place".to_string(), ToString::to_string);
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        // The same fault again and again is counted, not written out each time.
+        let (n, full) = {
+            let mut seen = seen.lock();
+            let reports = seen.reports;
+            let n = seen.places.entry(place.clone()).or_insert(0);
+            *n += 1;
+            let (n, full) = (*n, full_report(*n, reports));
+            if full {
+                seen.reports += 1;
+            }
+            (n, full)
+        };
+        if !full {
+            if repeat_logged(n) {
+                log::error!("thread '{name}' panicked at {place} again ({n} times): {message}");
+            }
+            return;
+        }
+        let what = format!("{place}:\n{message}");
         let text = report(
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             &utc_now(),
-            thread.name().unwrap_or("unnamed"),
+            name,
             &what,
             &std::backtrace::Backtrace::force_capture().to_string(),
         );
         let saved = write_report(&dir, &text);
         log::error!("{text}");
-        if dialog && !told.swap(true, Ordering::SeqCst) {
+        // The main thread outside its guarded loop (starting up) is the one
+        // panic that ends the program; any other is lived through, and a
+        // message box that says NewQ has to close would be wrong, and on the
+        // main thread would hold the show up until someone clicked it.
+        let fatal = name == "main" && surviving.is_none();
+        if !fatal {
+            let mut notices = NOTICES.lock();
+            if notices.len() < MAX_NOTICES {
+                notices.push(notice(name, surviving, &message, saved.as_deref()));
+            }
+        } else if dialog && !told.swap(true, Ordering::SeqCst) {
             let place = saved.map_or_else(
                 || "(it could not be saved)".to_string(),
                 |p| p.display().to_string(),
@@ -324,7 +473,66 @@ mod tests {
         ] {
             assert!(text.contains(needle), "{needle}\n{text}");
         }
+        // A part of a loop that panics is lived through: a report, a notice
+        // for the operator, and the loop's next part runs.
+        assert_eq!(survive("Drawing the window", || 3), Some(3));
+        let lived = survive("Drawing the window", || -> u8 { panic!("survived-marker") });
+        assert_eq!(lived, None);
+        let text = std::fs::read_to_string(dir.join("newq-crash.log")).unwrap();
+        assert!(text.contains("survived-marker"), "{text}");
+        let notices = take_notices();
+        assert!(
+            notices.iter().any(|n| n
+                .starts_with("Drawing the window met an error and carried on: survived-marker.")
+                && n.contains("newq-crash.log")),
+            "{notices:?}"
+        );
+        // A worker thread's panic is told too (it is not the end of the program).
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.starts_with("A part of NewQ stopped (output-render): index out of")),
+            "{notices:?}"
+        );
+        // The same fault on every frame leaves two reports, not thousands.
+        for _ in 0..50 {
+            let _ = survive("The show engine", || -> u8 { panic!("every-frame-marker") });
+        }
+        let text = std::fs::read_to_string(dir.join("newq-crash.log")).unwrap();
+        assert_eq!(text.matches("every-frame-marker").count(), 2, "{text}");
+        assert!(panic_count() >= 52);
+        // A worker that panics says so on its way out.
+        let said = std::sync::Arc::new(AtomicBool::new(false));
+        let said2 = said.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = OnPanic(|| said2.store(true, Ordering::SeqCst));
+            panic!("worker-marker");
+        })
+        .join();
+        assert!(said.load(Ordering::SeqCst));
+        let quiet = std::sync::Arc::new(AtomicBool::new(false));
+        let quiet2 = quiet.clone();
+        drop(OnPanic(|| quiet2.store(true, Ordering::SeqCst)));
+        assert!(!quiet.load(Ordering::SeqCst), "only when it panics");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fault_that_repeats_is_counted_not_written_out_every_time() {
+        assert!(full_report(1, 0) && full_report(2, 1));
+        assert!(!full_report(3, 2), "the third at one place is only counted");
+        assert!(!full_report(1, REPORTS_PER_RUN), "and a run has a limit");
+        let logged: Vec<u32> = (3..=40).filter(|n| repeat_logged(*n)).collect();
+        assert_eq!(logged, [4, 8, 16, 32]);
+        assert_eq!(test_panic_asked("engine@5"), Some(("engine".into(), 5.0)));
+        assert_eq!(test_panic_asked(" ui @ 0.5 "), Some(("ui".into(), 0.5)));
+        for bad in ["", "engine", "@3", "ui@x", "ui@-1", "ui@NaN"] {
+            assert_eq!(test_panic_asked(bad), None, "{bad}");
+        }
+        assert_eq!(
+            notice("audio-reader", None, "boom\nmore", None),
+            "A part of NewQ stopped (audio-reader): boom."
+        );
     }
 
     #[test]

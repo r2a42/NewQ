@@ -242,14 +242,18 @@ impl OutputThread {
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
         slot: Slot,
-    ) -> OutputThread {
+    ) -> std::io::Result<OutputThread> {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let handle = std::thread::Builder::new()
             .name("output-render".into())
-            .spawn(move || output_loop(gpu, window, surface, config, slot, mb))
-            .expect("spawn output render thread");
-        OutputThread { mailbox, handle }
+            .spawn(move || output_loop(gpu, window, surface, config, slot, mb))?;
+        Ok(OutputThread { mailbox, handle })
+    }
+
+    /// Whether the thread has ended by itself (it only should when asked to).
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
     }
 
     /// Draw `groups` (bottom first) on the whole screen, with its edges
@@ -307,6 +311,7 @@ fn output_loop(
             } => (size, groups, blend),
         };
         let started = Instant::now();
+        crate::crash::test_panic("render");
         resize(&gpu, &surface, &mut config, size);
         let asked = Instant::now();
         let Some(frame) = acquire(&gpu, &surface, &config) else {
@@ -397,7 +402,7 @@ impl CaptureThread {
         fps: u32,
         ff: crate::media::ffmpeg::Ffmpeg,
         kind: crate::show::StreamKind,
-    ) -> CaptureThread {
+    ) -> std::io::Result<CaptureThread> {
         Self::spawn_slow(gpu, slot, size, fps, ff, kind, std::time::Duration::ZERO)
     }
 
@@ -410,7 +415,7 @@ impl CaptureThread {
         ff: crate::media::ffmpeg::Ffmpeg,
         kind: crate::show::StreamKind,
         audio: Option<crate::media::audio::AudioTap>,
-    ) -> CaptureThread {
+    ) -> std::io::Result<CaptureThread> {
         Self::spawn_inner(
             gpu,
             slot,
@@ -434,7 +439,7 @@ impl CaptureThread {
         ff: crate::media::ffmpeg::Ffmpeg,
         kind: crate::show::StreamKind,
         slow: std::time::Duration,
-    ) -> CaptureThread {
+    ) -> std::io::Result<CaptureThread> {
         Self::spawn_inner(gpu, slot, size, fps, ff, kind, slow, None)
     }
 
@@ -448,7 +453,7 @@ impl CaptureThread {
         kind: crate::show::StreamKind,
         slow: std::time::Duration,
         audio: Option<crate::media::audio::AudioTap>,
-    ) -> CaptureThread {
+    ) -> std::io::Result<CaptureThread> {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let (err_tx, errors) = crossbeam_channel::unbounded();
@@ -458,6 +463,13 @@ impl CaptureThread {
         let handle = std::thread::Builder::new()
             .name("stream-render".into())
             .spawn(move || {
+                // A panic in here is a stream that stopped, with a reason the
+                // main loop can report and retry on (not a stream that is
+                // started again every frame).
+                let panicked = err_tx.clone();
+                let _said = crate::crash::OnPanic(move || {
+                    let _ = panicked.send("it stopped unexpectedly (a report was saved)".into());
+                });
                 // Started here: asking FFmpeg what it can encode and starting it
                 // can take a while.
                 match crate::stream::Sink::start_with_audio(&ff, size, fps, &kind, audio) {
@@ -469,15 +481,14 @@ impl CaptureThread {
                         let _ = err_tx.send(e);
                     }
                 }
-            })
-            .expect("spawn stream render thread");
-        CaptureThread {
+            })?;
+        Ok(CaptureThread {
             mailbox,
             errors,
             handle,
             killer,
             patience,
-        }
+        })
     }
 
     /// What to draw from now on (the picture's layers, on its own canvas).
@@ -674,20 +685,24 @@ impl ControlThread {
         window: Arc<Window>,
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
-    ) -> ControlThread {
+    ) -> std::io::Result<ControlThread> {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = presented.clone();
         let handle = std::thread::Builder::new()
             .name("control-render".into())
-            .spawn(move || control_loop(gpu, window, surface, config, mb, flag))
-            .expect("spawn control render thread");
-        ControlThread {
+            .spawn(move || control_loop(gpu, window, surface, config, mb, flag))?;
+        Ok(ControlThread {
             mailbox,
             handle,
             presented,
-        }
+        })
+    }
+
+    /// Whether the thread has ended by itself (it only should when asked to).
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
     }
 
     /// Whether a frame has reached the window yet. A window is kept hidden

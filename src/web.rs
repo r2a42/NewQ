@@ -450,8 +450,11 @@ impl WebServer {
                                             peer: peer.ip(),
                                             head_deadline: limits.head_deadline,
                                         };
+                                        // Given back however this ends: a place
+                                        // lost at each panic would in time turn
+                                        // every caller away.
+                                        let _place = Place(active);
                                         serve(stream, &ctx);
-                                        active.fetch_sub(1, Ordering::SeqCst);
                                     }
                                 });
                             if spawned.is_err() {
@@ -468,6 +471,15 @@ impl WebServer {
             thread: Some(thread),
             port,
         })
+    }
+}
+
+/// One of the connections allowed at once, given back when dropped.
+struct Place(Arc<AtomicUsize>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

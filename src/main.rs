@@ -129,6 +129,9 @@ fn main() -> anyhow::Result<()> {
         let _ = proxy.send_event(());
     });
     event_loop.run_app(&mut app)?;
+    if let Some(why) = app.start_failed() {
+        anyhow::bail!("{why}");
+    }
     Ok(())
 }
 

@@ -716,6 +716,13 @@ impl AudioOut {
         std::thread::Builder::new()
             .name("audio-reader".into())
             .spawn(move || {
+                // A panic in here ends the cue with a reason, rather than
+                // leaving it waiting for sound that will never come.
+                let (said, over) = (error_t.clone(), shared2.clone());
+                let _said = crate::crash::OnPanic(move || {
+                    *said.lock() = Some(READER_PANICKED.into());
+                    over.eof.store(true, Ordering::Release);
+                });
                 let mut feed = match build_feed() {
                     Ok(feed) => feed,
                     Err(e) => {
@@ -1383,6 +1390,9 @@ fn open_stream(
     Ok((stream, sr, channels, device_name))
 }
 
+/// What a cue is told when its reader thread panicked.
+pub const READER_PANICKED: &str = "its reader stopped unexpectedly (a report was saved)";
+
 fn build<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
@@ -1415,28 +1425,33 @@ where
             while let Ok(v) = voices_rx.try_recv() {
                 voices.push(v);
             }
+            let channels = channels.max(1);
             let frames = out.len() / channels;
             mix.clear();
             mix.resize(frames * channels, 0.0);
-            let mut i = 0;
-            while i < voices.len() {
-                if mix_voice(&mut voices[i], &mut mix, frames, channels) {
-                    i += 1;
-                } else {
-                    let _ = dead_tx.send(voices.swap_remove(i));
-                }
-            }
+            mix_each(&mut voices, &mut mix, &dead_tx, |v, mix| {
+                crate::crash::test_panic("audio");
+                mix_voice(v, mix, frames, channels)
+            });
             let master = if is_muted() { 0.0 } else { master };
             for (s, m) in out.iter_mut().zip(&mix) {
-                *s = T::from_sample((m * master).clamp(-1.0, 1.0));
+                // Something that isn't a number (an effect gone wrong) is silence.
+                let v = m * master;
+                *s = T::from_sample(if v.is_finite() {
+                    v.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                });
             }
-            tap.push(&mix, channels, master);
-            let used = began.elapsed().as_secs_f32() / (frames as f32 / rate).max(1e-6);
-            worst = used.max(worst * 0.99);
-            stats.load.store((worst * 1000.0) as u32, Ordering::Relaxed);
-            // Peaks fall by half about every 0.3 s.
-            let fall = 0.5f32.powf(frames as f32 / rate / 0.3);
-            update_peaks(&stats.peaks, &mix, channels, master, fall);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tap.push(&mix, channels, master);
+                let used = began.elapsed().as_secs_f32() / (frames as f32 / rate).max(1e-6);
+                worst = used.max(worst * 0.99);
+                stats.load.store((worst * 1000.0) as u32, Ordering::Relaxed);
+                // Peaks fall by half about every 0.3 s.
+                let fall = 0.5f32.powf(frames as f32 / rate / 0.3);
+                update_peaks(&stats.peaks, &mix, channels, master, fall);
+            }));
         },
         move |e| {
             log::error!("audio stream error: {e}");
@@ -1447,6 +1462,43 @@ where
         None,
     )?;
     Ok(stream)
+}
+
+/// Mix every voice into `mix` with `one` (false = the voice is over), handing
+/// the ones that are over to `dead` to be freed off the audio thread.
+///
+/// A panic must not leave the audio callback: on a Mac it is called from the
+/// system's own code, where a panic ends the whole program, and elsewhere it
+/// would silence the device for the rest of the show. The voice that panicked
+/// is dropped (its sound stops, its cue ends, and the report says why) and
+/// the others play on.
+fn mix_each(
+    voices: &mut Vec<MixVoice>,
+    mix: &mut [f32],
+    dead: &crossbeam_channel::Sender<MixVoice>,
+    mut one: impl FnMut(&mut MixVoice, &mut [f32]) -> bool,
+) {
+    let mut i = 0;
+    while i < voices.len() {
+        let voice = &mut voices[i];
+        let mixed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| one(voice, &mut *mix)));
+        match mixed {
+            Ok(true) => i += 1,
+            Ok(false) => {
+                let _ = dead.send(voices.swap_remove(i));
+            }
+            Err(_) => {
+                // What it had put in the mix so far may be anything: this
+                // buffer is silent rather than a burst of noise.
+                mix.fill(0.0);
+                let gone = voices.swap_remove(i);
+                gone.shared.stopped.store(true, Ordering::Relaxed);
+                gone.shared.eof.store(true, Ordering::Release);
+                let _ = dead.send(gone);
+            }
+        }
+    }
 }
 
 /// Raise each channel's stored peak to what `mix` (interleaved, `channels`
@@ -1725,6 +1777,32 @@ mod tests {
             matrix: Vec::new(),
             sr: 48_000.0,
         }
+    }
+
+    #[test]
+    fn a_voice_that_panics_in_the_mixer_is_dropped_and_the_others_play_on() {
+        let (bad, good) = (voice(&[1.0, 1.0], 0), voice(&[0.25, 0.25], 0));
+        let (bad_shared, good_shared) = (bad.shared.clone(), good.shared.clone());
+        let mut voices = vec![bad, good];
+        let (dead_tx, dead_rx) = crossbeam_channel::unbounded();
+        let mut mix = vec![0.0f32; 2];
+        let mix_one = |v: &mut MixVoice, mix: &mut [f32]| {
+            if Arc::ptr_eq(&v.shared, &bad_shared) {
+                mix[0] = 9.0;
+                panic!("an effect fell over");
+            }
+            mix_voice(v, mix, 1, 2)
+        };
+        // (Told to the panic hook as expected, so the test leaves no report.)
+        crate::crash::catch_expected(|| mix_each(&mut voices, &mut mix, &dead_tx, mix_one))
+            .expect("the panic stays inside");
+        assert_eq!(voices.len(), 1, "the one that panicked is gone");
+        assert!(Arc::ptr_eq(&voices[0].shared, &good_shared));
+        assert_eq!(mix, [0.25, 0.25], "its half-made noise is not played");
+        // Its cue is told it is over, and it is freed off the audio thread.
+        assert!(bad_shared.stopped.load(Ordering::Relaxed));
+        assert!(bad_shared.eof.load(Ordering::Relaxed));
+        assert!(dead_rx.try_recv().is_ok());
     }
 
     #[test]

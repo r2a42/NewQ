@@ -995,6 +995,20 @@ NewQ crashes it writes what went wrong, where, and a backtrace to
 `newq-crash.log` in the same folder, and on Windows shows a message with that
 path. Please send that file (and `newq.log`) when you report a crash.
 
+**A fault in one part does not end the show.** If a part of NewQ meets
+something it did not expect while a show is running (a panic, in the
+programmer's word), that part's work is dropped for the moment and everything
+else carries on: the main loop comes round again, the cues keep playing and
+the outputs keep their pictures. A display whose drawing stopped is started
+again by itself within two seconds, a cue whose sound or picture reader failed
+ends with a message instead of hanging, a stream that stopped is retried, and
+the controls let go of what was selected and draw again. The status bar says
+what happened (*Drawing a window met an error and carried on: …*) and the
+report is in `newq-crash.log` as before; the same fault happening again and
+again is written out twice and then only counted, so it cannot fill the disk.
+Only a failure to start at all (no graphics card, no main window) closes NewQ,
+with a message saying why.
+
 **The splash screen.** While the main window is being made ready (the graphics card is
 set up first, which takes a moment) a small window with the logo and the version is
 shown in the middle of the main display. It stays about two and a half seconds, longer
@@ -1242,6 +1256,7 @@ release build.
 | `WGPU_BACKEND`    | Force a graphics API: `dx12`, `vulkan`, `metal`, `gl`               |
 | `WGPU_POWER_PREF` | `low` prefers the integrated GPU, `high` the discrete GPU           |
 | `NEWQ_TRACE_OUTPUT` | Log the layer opacities of every frame each output composites     |
+| `NEWQ_TEST_PANIC` | For trying the above: `engine@10` makes that part fail once, 10 s after starting (`engine`, `ui`, `outputs`, `render`, `audio`) |
 | `RUST_LOG`        | Logging level, e.g. `RUST_LOG=debug`                                |
 | `NEWQ_STATS`      | Write a CSV of memory, CPU, FFmpeg processes, late frames, audio load and main-loop stalls (a file, or `1` for `newq-stats.csv` in the log folder) |
 | `NEWQ_STATS_SECS` | Seconds between rows of that file (default 10)                      |

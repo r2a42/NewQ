@@ -426,6 +426,28 @@ impl UiState {
         self.multi = ids;
     }
 
+    /// After a panic while the controls were drawn: let go of what was open
+    /// and chosen, since drawing one of those is what fell over, and the next
+    /// frame would fall over the same way. The show, its unsaved changes and
+    /// its undo history are not touched.
+    pub fn after_panic(&mut self) {
+        self.selected = None;
+        self.forget_multi();
+        self.scrubs.clear();
+        self.group_drag = None;
+        self.geometry_edit = None;
+        self.area_edit = None;
+        self.handle_sel.set(None);
+        self.capture_hotkey = None;
+        self.confirm_edit_mode = false;
+        self.show_media = false;
+        self.show_about = false;
+        self.stats_open = false;
+        self.slide_dialog = None;
+        self.deck_dialog = None;
+        self.cue_filter.clear();
+    }
+
     /// End a multiple selection.
     fn forget_multi(&mut self) {
         self.multi.clear();
@@ -3958,10 +3980,15 @@ fn progress_scrubber(
     if held.is_none() {
         st.scrubs.remove(&a.instance);
     }
-    let shown = held.map_or(a.bar_position(), |s| s.pos).clamp(0.0, length);
+    let shown = within(held.map_or(a.bar_position(), |s| s.pos), 0.0, length);
     let shift = ui.input(|i| i.modifiers.shift);
-    let at =
-        |x: f32| (((x - rect.left()) / rect.width().max(1.0)) as f64 * length).clamp(0.0, length);
+    let at = |x: f32| {
+        within(
+            ((x - rect.left()) / rect.width().max(1.0)) as f64 * length,
+            0.0,
+            length,
+        )
+    };
 
     // Moving it with the pointer.
     if bar.drag_started() || (bar.clicked() && !bar.dragged()) {
@@ -3991,7 +4018,7 @@ fn progress_scrubber(
                 let moves: Vec<(u64, f64)> = scrubbable
                     .iter()
                     .filter_map(|(i, _, len)| {
-                        Some((*i, (g.starts.get(i)? + delta).clamp(0.0, *len)))
+                        Some((*i, within(g.starts.get(i)? + delta, 0.0, *len)))
                     })
                     .collect();
                 for (i, to) in moves {
@@ -4030,7 +4057,7 @@ fn progress_scrubber(
             };
             for (i, elapsed, len) in targets {
                 let from = st.scrubs.get(&i).map_or(elapsed, |s| s.pos);
-                scrub_to(st, now, i, (from + delta).clamp(0.0, len), true, actions);
+                scrub_to(st, now, i, within(from + delta, 0.0, len), true, actions);
             }
         }
     }
@@ -4370,8 +4397,9 @@ fn quad_handles(
         }
         if resp.dragged() || resp.drag_stopped() {
             let d = drag_moved(ui, &resp) * scale;
-            let dx = (d.x / screen.width()).clamp(lo - x, hi - (x + w));
-            let dy = (d.y / screen.height()).clamp(lo - y, hi - (y + h));
+            // (An area from an older show can be bigger than it may be now.)
+            let dx = within(d.x / screen.width(), lo - x, hi - (x + w));
+            let dy = within(d.y / screen.height(), lo - y, hi - (y + h));
             for c in &mut corners.0 {
                 c[0] += dx;
                 c[1] += dy;
@@ -4458,6 +4486,25 @@ fn drag_moved(ui: &Ui, resp: &egui::Response) -> Vec2 {
     )
 }
 
+/// `v` kept from `lo` to `hi`, like `clamp`, for bounds worked out from a
+/// show or a file: where `clamp` panics (the bounds the wrong way round, or
+/// not numbers at all) this gives `lo`, or `v` itself if `lo` is no number.
+fn within<T: PartialOrd + Copy>(v: T, lo: T, hi: T) -> T {
+    if lo <= hi {
+        if v < lo {
+            lo
+        } else if v > hi {
+            hi
+        } else {
+            v
+        }
+    } else if lo.partial_cmp(&lo).is_some() {
+        lo
+    } else {
+        v
+    }
+}
+
 /// Move a point by `d` pixels of a `size`-pixel screen, stepping from the
 /// nearest whole pixel, within `range`.
 fn nudge_point(point: &mut [f32; 2], d: Vec2, size: (u32, u32), range: RangeInclusive<f32>) {
@@ -4491,7 +4538,7 @@ fn nudge(
             None => {
                 let b = corners.bounds();
                 let (min, len) = (b[axis], b[axis + 2]);
-                let delta = (step(min, axis) - min).clamp(lo - min, hi - (min + len));
+                let delta = within(step(min, axis) - min, lo - min, hi - (min + len));
                 for c in &mut corners.0 {
                     c[axis] += delta;
                 }
@@ -8159,7 +8206,11 @@ fn keyframe_lane(
     };
     let at = |p: egui::Pos2| {
         (
-            (f64::from(p.x - rect.left()) / f64::from(rect.width()) * len).clamp(0.0, len),
+            within(
+                f64::from(p.x - rect.left()) / f64::from(rect.width()) * len,
+                0.0,
+                len,
+            ),
             spec.min + ((rect.bottom() - p.y) / rect.height()).clamp(0.0, 1.0) * range,
         )
     };
@@ -9188,9 +9239,9 @@ fn move_handle(
 ) -> (f64, Option<f64>) {
     let out = end.unwrap_or(duration);
     match handle {
-        TrimHandle::In => (t.clamp(0.0, (out - MIN_TRIM).max(0.0)), end),
+        TrimHandle::In => (within(t, 0.0, (out - MIN_TRIM).max(0.0)), end),
         TrimHandle::Out => {
-            let new = t.clamp((start + MIN_TRIM).min(duration), duration);
+            let new = within(t, (start + MIN_TRIM).min(duration), duration);
             (start, (new < duration - 0.02).then_some(new))
         }
     }
@@ -9320,8 +9371,8 @@ fn waveform_trim(ui: &mut Ui, m: &mut MediaCue, engine: &mut Engine) {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
         let (from, to) = (
-            to_x(m.start.clamp(0.0, dur)),
-            to_x(m.end.unwrap_or(dur).clamp(0.0, dur)),
+            to_x(within(m.start, 0.0, dur)),
+            to_x(within(m.end.unwrap_or(dur), 0.0, dur)),
         );
         painter.rect_filled(
             egui::Rect::from_min_max(egui::pos2(from, rect.top()), egui::pos2(to, rect.bottom())),
@@ -11081,6 +11132,21 @@ mod tests {
             "{r:?}"
         );
         nudge(&mut a, None, vec2(0.0, 1.0), size, 0.0..=1.0);
+        // An area wider than it may be (an older show's) is moved to the
+        // edge, where `clamp` would have panicked on its bounds.
+        let mut wide = Corners::rect(-0.2, 0.0, 1.5, 1.0);
+        nudge(&mut wide, None, vec2(3.0, 0.0), size, 0.0..=1.0);
+        assert!((wide.bounds()[0] - 0.0).abs() < 1e-6, "{wide:?}");
+        assert_eq!(within(5.0, 0.0, 1.0), 1.0);
+        assert_eq!(within(-5.0, 0.0, 1.0), 0.0);
+        assert_eq!(within(0.5, 0.0, 1.0), 0.5);
+        assert_eq!(within(0.5, 2.0, 1.0), 2.0, "bounds the wrong way round");
+        assert_eq!(
+            within(0.5, 0.0, f64::NAN),
+            0.0,
+            "a length that is no number"
+        );
+        assert_eq!(within(0.5, f64::NAN, 1.0), 0.5);
         assert_eq!(a.bounds()[1], 0.0, "already at the bottom");
     }
 
@@ -11763,6 +11829,42 @@ mod tests {
         assert!(st.layout.is_docked(Pane::Preview));
         apply(Action::ResetLayout, &mut show, &mut e, &mut st);
         assert!(st.layout.popouts.is_empty() && !st.layout.is_open(Pane::Cart));
+    }
+
+    #[test]
+    fn the_controls_draw_again_after_a_panic_part_way_through_a_frame() {
+        let (mut show, mut e, mut st) = running();
+        st.selected = show.cues.first().map(|c| c.id);
+        st.show_about = true;
+        let input = || RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 800.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(input(), |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        // A panic deep inside the frame, as the main loop lives through it.
+        let fell = crate::crash::catch_expected(|| {
+            ctx.run_ui(input(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label("half a frame");
+                        panic!("a widget fell over");
+                    });
+                });
+            })
+        });
+        assert!(fell.is_err());
+        st.after_panic();
+        assert_eq!(st.selected, None, "what was open is let go of");
+        assert!(!st.show_about);
+        // The same context draws the next frame, and the one after.
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(input(), |ui| draw(ui, &mut show, &mut e, &mut st));
+            out.textures_delta.clear();
+            assert!(out.shapes.len() > 50);
+        }
     }
 
     #[test]

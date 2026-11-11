@@ -569,6 +569,11 @@ impl Runner {
     pub fn status(&self) -> Status {
         self.status.lock().clone()
     }
+
+    /// Whether its thread is still there to do as asked.
+    pub fn is_alive(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
 }
 
 impl Drop for Runner {

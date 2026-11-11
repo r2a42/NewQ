@@ -158,16 +158,15 @@ fn start_output_thread(
             .to_string()
     })?;
     surface.configure(&gpu.device, &config);
-    Ok((
-        OutputThread::spawn(
-            gpu.clone(),
-            window.clone(),
-            surface,
-            config,
-            gpu::Slot::Window(slot),
-        ),
-        size,
-    ))
+    let thread = OutputThread::spawn(
+        gpu.clone(),
+        window.clone(),
+        surface,
+        config,
+        gpu::Slot::Window(slot),
+    )
+    .map_err(|e| format!("Could not start drawing on display {{display}}: {e}"))?;
+    Ok((thread, size))
 }
 
 /// The graphics device was lost and its windows are being given a new one.
@@ -265,7 +264,8 @@ pub struct App {
     /// the runner was last told.
     hosting_seen: (Option<crate::mediamtx::Hosting>, Instant),
     hosting_sent: Option<crate::mediamtx::Hosting>,
-    adapters: (Instant, Vec<crate::streamlink::Adapter>),
+    /// The network adapters, and when they were last looked for.
+    adapters: (Option<Instant>, Vec<crate::streamlink::Adapter>),
     /// Streams that failed to start or stopped, by display, so they are not
     /// tried again until their settings change.
     stream_failed: HashMap<OutputId, (StreamOut, (u32, u32))>,
@@ -347,6 +347,10 @@ pub struct App {
     /// Keep every output in the main window, opening no output windows (a
     /// way in when the displays are what stops NewQ starting).
     main_window_only: bool,
+    /// Why the main window could not be opened, if it couldn't.
+    start_failed: Option<String>,
+    /// When a render thread that had stopped was last started again.
+    render_restart: Option<Instant>,
 }
 
 impl App {
@@ -431,7 +435,9 @@ impl App {
             hosting_runner: None,
             hosting_seen: (None, Instant::now()),
             hosting_sent: None,
-            adapters: (Instant::now() - Duration::from_secs(60), Vec::new()),
+            // (Not "a minute ago": taking time from an `Instant` panics when
+            // the computer has been up for less, as at a start with the system.)
+            adapters: (None, Vec::new()),
             stream_failed: HashMap::new(),
             stream_seen: HashMap::new(),
             stream_retry: HashMap::new(),
@@ -470,6 +476,8 @@ impl App {
             pending_recovery,
             was_active: false,
             main_window_only,
+            start_failed: None,
+            render_restart: None,
         }
     }
 
@@ -934,12 +942,13 @@ impl App {
             return;
         };
         surface.configure(&gpu.device, &config);
-        ctl.thread = Some(ControlThread::spawn(
-            gpu.clone(),
-            ctl.window.clone(),
-            surface,
-            config,
-        ));
+        ctl.thread = match ControlThread::spawn(gpu.clone(), ctl.window.clone(), surface, config) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::warn!("could not start drawing the main window: {e}");
+                return;
+            }
+        };
         ctl.next_repaint = Some(Instant::now());
         // The new renderer has none of the textures egui sent the old one
         // (its fonts); asking for the fonts again sends the lot.
@@ -1377,8 +1386,13 @@ impl App {
                 }
             )
         });
-        if hosts && self.adapters.0.elapsed() > Duration::from_secs(5) {
-            self.adapters = (Instant::now(), crate::streamlink::adapters());
+        if hosts
+            && self
+                .adapters
+                .0
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(5))
+        {
+            self.adapters = (Some(Instant::now()), crate::streamlink::adapters());
         }
         let plan = hosts
             .then(|| crate::mediamtx::plan(kinds.iter(), &self.adapters.1))
@@ -1396,6 +1410,13 @@ impl App {
             .map(|p| p.hosting);
         if self.hosting_seen.0 != desired {
             self.hosting_seen = (desired, Instant::now());
+        }
+        // A runner whose thread has ended by itself (a panic, which left its
+        // report) is replaced, and told again what is wanted.
+        if self.hosting_runner.as_ref().is_some_and(|r| !r.is_alive()) {
+            log::warn!("the streaming server's thread stopped; starting it again");
+            self.hosting_runner = None;
+            self.hosting_sent = None;
         }
         let settled = desired.is_none() || self.hosting_seen.1.elapsed() >= Duration::from_secs(1);
         if settled && self.hosting_sent != desired {
@@ -1478,7 +1499,15 @@ impl App {
         for id in stale {
             if let Some(r) = self.streams.remove(&id) {
                 let name = self.show.output(id).map_or("?", |o| o.name.as_str());
-                if let Some(why) = r.thread.failure() {
+                // A stream that is still wanted as it was and has stopped
+                // has failed, whether or not it could say why.
+                let stopped =
+                    !r.thread.is_running() && wanted.get(&id) == Some(&(r.config.clone(), r.size));
+                let why = r
+                    .thread
+                    .failure()
+                    .or_else(|| stopped.then(|| "it stopped".to_string()));
+                if let Some(why) = why {
                     if matches!(r.config.kind, crate::show::StreamKind::Server { .. }) {
                         let ran = r.started.elapsed();
                         let failures = match self.stream_retry.get(&id) {
@@ -1553,7 +1582,7 @@ impl App {
             };
             // FFmpeg is started on the stream's own thread, so neither
             // looking for what it can encode nor starting it holds up the show.
-            let thread = CaptureThread::spawn_with_audio(
+            let thread = match CaptureThread::spawn_with_audio(
                 gpu.clone(),
                 gpu::Slot::Capture(slot),
                 *size,
@@ -1561,7 +1590,13 @@ impl App {
                 ff,
                 config.kind.clone(),
                 audio,
-            );
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    fail(self, format!("could not start: {e}"));
+                    continue;
+                }
+            };
             self.engine.log(format!(
                 "Sending {name} out: {}×{} at {} fps",
                 size.0, size.1, config.fps
@@ -2116,7 +2151,14 @@ impl App {
                 window.theme(),
                 Some(gpu.device.limits().max_texture_dimension_2d as usize),
             );
-            let thread = ControlThread::spawn(gpu.clone(), window.clone(), surface, config);
+            let thread = match ControlThread::spawn(gpu.clone(), window.clone(), surface, config) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("could not draw a window for {}: {e}", want.pane.title());
+                    self.ui.layout.dock_back(want.pane);
+                    continue;
+                }
+            };
             self.popouts.push(PopoutWindow {
                 pane: want.pane,
                 window,
@@ -2268,6 +2310,7 @@ impl App {
                 p.window.request_redraw();
             }
         }
+        crate::crash::test_panic("ui");
         let (show, engine, ui_state) = (&mut self.show, &mut self.engine, &mut self.ui);
         let mut full = self
             .egui_ctx
@@ -2356,8 +2399,27 @@ impl App {
 }
 
 impl App {
-    /// The main window and the graphics card behind it: the slow part of starting.
+    /// Open the main window, or say why NewQ can't start and leave: without
+    /// it there is nothing to carry on with.
     fn open_main_window(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(why) = self.try_open_main_window(event_loop) {
+            log::error!("NewQ could not start: {why}");
+            self.start_failed = Some(why.clone());
+            self.splash = None;
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("NewQ could not start")
+                .set_description(format!(
+                    "{why}\n\nThe log is in:\n{}",
+                    crate::crash::log_dir().display()
+                ))
+                .show();
+            event_loop.exit();
+        }
+    }
+
+    /// The main window and the graphics card behind it: the slow part of starting.
+    fn try_open_main_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         // Be told the moment the displays are rearranged (Mac), and have the
         // program looked at if the main loop ever freezes.
         #[cfg(target_os = "macos")]
@@ -2377,7 +2439,7 @@ impl App {
                         .with_min_inner_size(LogicalSize::new(800.0, 500.0))
                         .with_maximized(true),
                 )
-                .expect("create control window"),
+                .map_err(|e| format!("The main window could not be opened: {e}"))?,
         );
         // DX12 on Windows (Vulkan drivers there can stall acquiring frames for
         // occluded windows). `WGPU_BACKEND=vulkan` etc. overrides this.
@@ -2388,11 +2450,12 @@ impl App {
             desc.backends = wgpu::Backends::DX12;
         }
         let instance = wgpu::Instance::new(desc.with_env());
-        let (gpu, surface) = Gpu::new(instance, window.clone()).expect("initialise GPU");
+        let (gpu, surface) = Gpu::new(instance, window.clone())
+            .map_err(|e| format!("The graphics card could not be set up: {e:#}"))?;
         let size = window.inner_size();
         let config = gpu
             .surface_config(&surface, (size.width, size.height))
-            .expect("the graphics card can't draw to the main window");
+            .ok_or("The graphics card can't draw to the main window")?;
         surface.configure(&gpu.device, &config);
         ui::setup_style(&self.egui_ctx);
         let state = egui_winit::State::new(
@@ -2403,7 +2466,8 @@ impl App {
             window.theme(),
             Some(gpu.device.limits().max_texture_dimension_2d as usize),
         );
-        let thread = ControlThread::spawn(gpu.clone(), window.clone(), surface, config);
+        let thread = ControlThread::spawn(gpu.clone(), window.clone(), surface, config)
+            .map_err(|e| format!("The main window's drawing could not be started: {e}"))?;
         self.gpu = Some(gpu);
         self.control = Some(ControlWindow {
             window,
@@ -2416,6 +2480,114 @@ impl App {
         });
         self.scan_monitors(event_loop);
         self.reconcile_outputs(event_loop);
+        Ok(())
+    }
+
+    /// Why NewQ could not start, if it couldn't.
+    pub fn start_failed(&self) -> Option<&str> {
+        self.start_failed.as_deref()
+    }
+
+    /// A render thread that ended by itself (a panic in the graphics code, which
+    /// has left its report) is started again on its window, so a display does
+    /// not stay frozen on its last picture for the rest of the show. At most
+    /// one restart every two seconds: a thread that falls over at once each
+    /// time must not take the main loop with it.
+    fn watch_render_threads(&mut self) {
+        if self.recovery.is_some() {
+            return;
+        }
+        let Some(gpu) = self.gpu.clone() else { return };
+        if self
+            .render_restart
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        let mut said = Vec::new();
+        for (monitor, screen) in &mut self.screens {
+            if !screen
+                .thread
+                .as_ref()
+                .is_some_and(OutputThread::is_finished)
+            {
+                continue;
+            }
+            self.render_restart = Some(Instant::now());
+            // The old thread took its surface with it, so the window is free
+            // for a new one.
+            screen.thread = None;
+            match start_output_thread(&gpu, &screen.window, screen.slot) {
+                Ok((thread, size)) => {
+                    screen.thread = Some(thread);
+                    screen.size = size;
+                    said.push(format!(
+                        "Display {}'s drawing stopped and was started again",
+                        monitor + 1
+                    ));
+                }
+                Err(e) => said.push(e.replace("{display}", &(monitor + 1).to_string())),
+            }
+            screen.sent.clear();
+            screen.needs_redraw = true;
+        }
+        if let Some(ctl) = &mut self.control
+            && ctl.thread.as_ref().is_some_and(ControlThread::is_finished)
+        {
+            self.render_restart = Some(Instant::now());
+            ctl.thread = None;
+            let size = ctl.window.inner_size();
+            let started = gpu
+                .instance
+                .create_surface(ctl.window.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|surface| {
+                    let config = gpu
+                        .surface_config(&surface, (size.width, size.height))
+                        .ok_or("the graphics card can't draw to it")?;
+                    surface.configure(&gpu.device, &config);
+                    ControlThread::spawn(gpu.clone(), ctl.window.clone(), surface, config)
+                        .map_err(|e| e.to_string())
+                });
+            match started {
+                Ok(thread) => {
+                    ctl.thread = Some(thread);
+                    ctl.next_repaint = Some(Instant::now());
+                    // The new renderer has none of the textures egui sent the
+                    // old one: have the fonts sent again (see `watch_gpu`).
+                    let mut fonts = egui::FontDefinitions::default();
+                    self.gpu_restarts += 1;
+                    fonts.families.insert(
+                        egui::FontFamily::Name(format!("restart-{}", self.gpu_restarts).into()),
+                        Vec::new(),
+                    );
+                    self.egui_ctx.set_fonts(fonts);
+                    said.push("The main window's drawing stopped and was started again".into());
+                }
+                Err(e) => said.push(format!("The main window can't be drawn: {e}")),
+            }
+        }
+        // A pop-out is opened again from the layout (`reconcile_popouts`).
+        let before = self.popouts.len();
+        self.popouts
+            .retain(|p| !p.thread.as_ref().is_some_and(ControlThread::is_finished));
+        if self.popouts.len() != before {
+            self.render_restart = Some(Instant::now());
+            said.push("A window's drawing stopped and was started again".into());
+        }
+        for line in said {
+            self.engine.log(line);
+        }
+    }
+
+    /// After a panic while a window was being drawn or its events handled: what
+    /// was open in the controls may be what it fell over, so it is closed, and
+    /// the window is drawn again.
+    fn after_window_panic(&mut self) {
+        self.ui.after_panic();
+        if let Some(ctl) = &mut self.control {
+            ctl.next_repaint = Some(Instant::now() + Duration::from_millis(100));
+        }
     }
 }
 
@@ -2545,51 +2717,15 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
-
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.control.is_some() || self.start_main_window.is_some() {
-            return;
-        }
-        // The splash goes up first, and the main window's set-up (the graphics
-        // card, which is the slow part) waits until it has been drawn.
-        if std::env::var_os("NEWQ_NO_SPLASH").is_none()
-            && let Some(splash) = crate::splash::Splash::open(event_loop)
-        {
-            splash.request_redraw();
-            self.splash = Some(splash);
-            self.start_main_window = Some(Instant::now());
-            return;
-        }
-        self.open_main_window(event_loop);
+impl App {
+    /// A panic in a part of the main loop that the rest can do without is
+    /// reported, and the rest of the pass still runs.
+    fn part(&mut self, what: &'static str, f: impl FnOnce(&mut App)) {
+        let _ = crate::crash::survive(what, || f(self));
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let redraw = matches!(event, WindowEvent::RedrawRequested);
-        let name = if self.control.as_ref().is_some_and(|c| c.window.id() == id) {
-            if redraw {
-                "drawing the control window"
-            } else {
-                "control window events"
-            }
-        } else if self.popouts.iter().any(|p| p.window.id() == id) {
-            "pop-out window events"
-        } else {
-            "output window events"
-        };
-        self.crumbs.skip();
-        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
-            self.clicker_in_window(key);
-        }
-        self.handle_window_event(event_loop, id, event);
-        self.crumbs.lap(name);
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "macos")]
-        crate::freeze::beat();
+    /// One pass of the main loop (see `about_to_wait`).
+    fn pass(&mut self, event_loop: &ActiveEventLoop) {
         // Only the splash screen is up so far: the main window's set-up begins
         // once the splash has been drawn, or after a moment whatever happens.
         if self.control.is_none() {
@@ -2636,10 +2772,32 @@ impl ApplicationHandler for App {
             self.crumbs.next_cycle();
         }
 
+        // What went wrong on any thread since the last pass, for the operator.
+        for told in crate::crash::take_notices() {
+            self.engine.log(told);
+        }
         self.crumbs.skip();
-        self.watch_gpu();
-        self.collect_devices();
+        self.part("Checking the graphics and devices", |app| {
+            app.watch_gpu();
+            app.watch_render_threads();
+            app.collect_devices();
+        });
         self.crumbs.lap("graphics and device checks");
+        self.part("Looking after the windows", |app| {
+            app.pass_windows(event_loop, now);
+        });
+        self.part("Remote control", |app| {
+            app.save_layout(false);
+            app.engine.audio.sync(&app.show.audio_outputs);
+            app.run_remote(now);
+            app.sync_clicker();
+        });
+        self.crumbs.lap("layout, audio outputs and remote control");
+        self.pass_show(event_loop, now, dt);
+    }
+
+    /// The displays and the windows on them.
+    fn pass_windows(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         // Output windows go back over their displays first, ahead of the look
         // at the displays, which the system can hold up for a long moment
         // while it rearranges them.
@@ -2667,44 +2825,56 @@ impl ApplicationHandler for App {
         self.reconcile_popouts(event_loop);
         self.popout_stopping.retain(|h| !h.is_finished());
         self.crumbs.lap("opening and closing windows");
-        self.save_layout(false);
-        self.engine.audio.sync(&self.show.audio_outputs);
-        self.run_remote(now);
-        self.sync_clicker();
-        self.crumbs.lap("layout, audio outputs and remote control");
+    }
+
+    /// The show itself: the engine, the pictures for the outputs, and when to
+    /// come round again.
+    fn pass_show(&mut self, event_loop: &ActiveEventLoop, now: Instant, dt: f64) {
         // However long it has been since the last look, by a steady clock: a
         // dialog or a stall is time that passed, a sleep is not.
         let gap = now.duration_since(self.last_clock_look).as_secs_f64();
         self.last_clock_look = now;
-        self.engine.on_clock(&self.show, crate::clock::now(), gap);
-        self.engine.tick(&self.show, dt);
+        self.part("The show engine", |app| {
+            crate::crash::test_panic("engine");
+            app.engine.on_clock(&app.show, crate::clock::now(), gap);
+            app.engine.tick(&app.show, dt);
+        });
         self.crumbs.lap("the show engine");
-        {
-            let mut test = std::mem::take(&mut self.ui.test);
-            test.update(&mut self.show, &mut self.engine, &mut self.ui);
-            self.ui.test = test;
-        }
+        self.part("Test Mode", |app| {
+            let mut test = std::mem::take(&mut app.ui.test);
+            // Put back whatever happens, or the test (and the show it is
+            // holding for the user) would be lost with the panic.
+            let done = crate::crash::survive("Test Mode", || {
+                test.update(&mut app.show, &mut app.engine, &mut app.ui);
+            });
+            if done.is_none() {
+                test.shutdown(&mut app.show, &mut app.engine, &mut app.ui);
+            }
+            app.ui.test = test;
+        });
         self.crumbs.lap("test mode");
         if self.autostart.is_some_and(|t| now >= t) {
             self.autostart = None;
             log::info!("autostart: GO");
             self.engine.go(&self.show);
         }
-        if let Some(stats) = &mut self.stats {
-            let engine = &self.engine;
-            stats.frame(now, || crate::stats::Inputs {
-                playing: engine.active.len(),
-                started_total: engine.started_total(),
-                layers: engine.picture_layers(),
-                late_permille: crate::render::late_frames_permille(),
-                audio_permille: engine
-                    .audio
-                    .device_status(None)
-                    .map_or(0, |d| d.load_permille),
-            });
-        }
+        self.part("The statistics log", |app| {
+            if let Some(stats) = &mut app.stats {
+                let engine = &app.engine;
+                stats.frame(now, || crate::stats::Inputs {
+                    playing: engine.active.len(),
+                    started_total: engine.started_total(),
+                    layers: engine.picture_layers(),
+                    late_permille: crate::render::late_frames_permille(),
+                    audio_permille: engine
+                        .audio
+                        .device_status(None)
+                        .map_or(0, |d| d.load_permille),
+                });
+            }
+            app.sample_for_window(now);
+        });
         self.crumbs.lap("the statistics log");
-        self.sample_for_window(now);
         // What control cues asked of the show (arming, disarming).
         for edit in self.engine.take_show_edits() {
             match edit {
@@ -2726,7 +2896,10 @@ impl ApplicationHandler for App {
 
         let playing = self.engine.is_active();
         // One extra frame after the last layer stops, so outputs go to black.
-        self.update_outputs(playing || removed_layer);
+        self.part("Drawing the outputs", |app| {
+            crate::crash::test_panic("outputs");
+            app.update_outputs(playing || removed_layer);
+        });
         self.crumbs
             .lap("making the pictures (textures and uploads)");
         // The uploads just made are held until something is submitted, and the
@@ -2791,6 +2964,72 @@ impl ApplicationHandler for App {
             next = next.min((s.opened + crate::splash::HOLD).max(now + Duration::from_millis(50)));
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+    }
+}
+
+impl ApplicationHandler for App {
+    /// A remote-control message arrived; `about_to_wait`, which runs next, acts on it.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.control.is_some() || self.start_main_window.is_some() {
+            return;
+        }
+        // The splash goes up first, and the main window's set-up (the graphics
+        // card, which is the slow part) waits until it has been drawn.
+        if std::env::var_os("NEWQ_NO_SPLASH").is_none()
+            && let Some(splash) = crate::splash::Splash::open(event_loop)
+        {
+            splash.request_redraw();
+            self.splash = Some(splash);
+            self.start_main_window = Some(Instant::now());
+            return;
+        }
+        self.open_main_window(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let redraw = matches!(event, WindowEvent::RedrawRequested);
+        let name = if self.control.as_ref().is_some_and(|c| c.window.id() == id) {
+            if redraw {
+                "drawing the control window"
+            } else {
+                "control window events"
+            }
+        } else if self.popouts.iter().any(|p| p.window.id() == id) {
+            "pop-out window events"
+        } else {
+            "output window events"
+        };
+        self.crumbs.skip();
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            self.clicker_in_window(key);
+        }
+        // A panic in the controls (or any window's events) is reported and
+        // the show plays on; the window is drawn afresh at the next event.
+        let what = if redraw {
+            "Drawing a window"
+        } else {
+            "A window's events"
+        };
+        if crate::crash::survive(what, || self.handle_window_event(event_loop, id, event)).is_none()
+        {
+            self.after_window_panic();
+        }
+        self.crumbs.lap(name);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        crate::freeze::beat();
+        // A panic anywhere in the pass is reported and the loop comes round
+        // again: the render threads go on showing what they have, the audio
+        // goes on playing, and the next pass picks the show up.
+        if crate::crash::survive("The main loop", || self.pass(event_loop)).is_none() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(20),
+            ));
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

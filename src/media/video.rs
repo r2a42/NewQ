@@ -351,6 +351,11 @@ impl VideoPlayer {
             .name("hap-reader".into())
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
+                let (said, over) = (error2.clone(), eof2.clone());
+                let _said = crate::crash::OnPanic(move || {
+                    *said.lock() = Some(super::audio::READER_PANICKED.into());
+                    over.store(true, Ordering::Release);
+                });
                 let mut feed = match PassFeed::start(&children2, passes, &error2, make) {
                     Ok(feed) => feed,
                     Err(e) => {
@@ -567,6 +572,11 @@ impl VideoPlayer {
             .name("video-reader".into())
             .spawn(move || {
                 let _done = ReaderDone(reader_done2);
+                let (said, over) = (error2.clone(), eof2.clone());
+                let _said = crate::crash::OnPanic(move || {
+                    *said.lock() = Some(super::audio::READER_PANICKED.into());
+                    over.store(true, Ordering::Release);
+                });
                 let mut feed = match PassFeed::start(&children2, passes, &error2, make) {
                     Ok(feed) => feed,
                     Err(e) => {

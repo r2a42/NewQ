@@ -578,11 +578,14 @@ pub struct LayerPlacement {
 /// rotation act about the centre of the uncropped picture; rotation is done
 /// in pixel proportions so it doesn't shear on a non-square canvas.
 pub fn layer_placement(fitted: [f32; 4], canvas: (u32, u32), t: &LayerTransform) -> LayerPlacement {
-    // Crops are limited so something always remains.
-    let cl = t.crop[0].clamp(0.0, 0.99);
-    let ct = t.crop[1].clamp(0.0, 0.99);
-    let cr = t.crop[2].clamp(0.0, 0.99 - cl);
-    let cb = t.crop[3].clamp(0.0, 0.99 - ct);
+    // Crops are limited so something always remains. A crop that isn't a
+    // number is no crop: as a bound it would panic in `clamp`, on the render
+    // thread.
+    let sane = |v: f32| if v.is_finite() { v } else { 0.0 };
+    let cl = sane(t.crop[0]).clamp(0.0, 0.99);
+    let ct = sane(t.crop[1]).clamp(0.0, 0.99);
+    let cr = sane(t.crop[2]).clamp(0.0, 0.99 - cl);
+    let cb = sane(t.crop[3]).clamp(0.0, 0.99 - ct);
     let [x0, y0, x1, y1] = fitted;
     let (w, h) = (x1 - x0, y1 - y0);
     let rect = [x0 + w * cl, y0 + h * ct, x1 - w * cr, y1 - h * cb];
@@ -1489,6 +1492,13 @@ mod tests {
     fn default_transform_changes_nothing() {
         let fitted = fit_rect((1920, 1080), (1920, 1080), Fit::Contain);
         let p = layer_placement(fitted, (1920, 1080), &LayerTransform::default());
+        // A crop that isn't a number is no crop, not a panic on the render thread.
+        let odd = LayerTransform {
+            crop: [f32::NAN, f32::INFINITY, f32::NAN, 0.1],
+            ..Default::default()
+        };
+        let q = layer_placement(fitted, (1920, 1080), &odd);
+        assert!(q.uvr.iter().all(|v| v.is_finite()), "{:?}", q.uvr);
         assert_eq!(p.rect, fitted);
         assert_eq!(p.uvr, [0.0, 0.0, 1.0, 1.0]);
         near(xf(&p, 0.3, -0.7), (0.3, -0.7));
@@ -2222,7 +2232,8 @@ mod tests {
             ),
         };
         let thread =
-            CaptureThread::spawn_slow(gpu.clone(), Slot::Capture(0), size, 30, ff, kind, slow);
+            CaptureThread::spawn_slow(gpu.clone(), Slot::Capture(0), size, 30, ff, kind, slow)
+                .unwrap();
         // A red picture, drawn at the stream's size from a 2×2 layer.
         let tex = LayerTexture::new_rgba(&gpu, 2, 2);
         tex.upload_rgba(&gpu.queue, &[255, 0, 0, 255].repeat(4));
@@ -2290,7 +2301,7 @@ mod tests {
         };
         // FFmpeg may refuse at once or as soon as a frame arrives; either way
         // the reason comes back.
-        let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, ff, kind);
+        let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, ff, kind).unwrap();
         let t0 = std::time::Instant::now();
         let reason = loop {
             if let Some(why) = thread.failure() {
@@ -2340,7 +2351,7 @@ mod tests {
             *encoder = std::env::var("NEWQ_STRESS_ENCODER").unwrap_or_default();
         }
         let size = (1920u32, 1080u32);
-        let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, ff, kind);
+        let thread = CaptureThread::spawn(gpu, Slot::Capture(1), size, 30, ff, kind).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(4));
         eprintln!(
             "after 4 s: running={} failure={:?}",
