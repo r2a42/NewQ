@@ -96,6 +96,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(code) = soak::run_if_asked(&args) {
         std::process::exit(code);
     }
+    // The full check with no window (see testmode/selftest.rs).
+    if let Some(code) = testmode::selftest::run_if_asked(&args) {
+        std::process::exit(code);
+    }
     // The log goes to a file in the log folder (and to the console where
     // there is one), at the level of `NEWQ_LOG` or, once the settings of
     // this computer are read, the one chosen there.

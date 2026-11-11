@@ -219,9 +219,9 @@ impl Device {
     }
 }
 
-#[cfg(test)]
 impl Device {
-    /// A device with no stream behind it, whose voices the test mixes itself.
+    /// A device with no stream behind it, whose voices are mixed by whoever
+    /// holds the receiver (a test, or `AudioOut::silent`'s thread).
     fn for_test(channels: u16) -> (Device, Receiver<MixVoice>) {
         let (voices_tx, voices_rx) = unbounded();
         let device = Device {
@@ -229,7 +229,7 @@ impl Device {
             open: true,
             sample_rate: 48_000,
             channels,
-            name: "test device".into(),
+            name: "no device (played in silence)".into(),
             error: None,
             voices_tx,
             lost: Arc::new(Lost::default()),
@@ -379,23 +379,50 @@ impl AudioOut {
     /// thread of its own, which ends with the device, for tests.
     #[cfg(test)]
     pub fn with_playing_device() -> AudioOut {
+        AudioOut::silent()
+    }
+
+    /// A default "device" that is no sound card at all: its voices are decoded,
+    /// put through their effects and mixed at the pace of the clock by a
+    /// thread of its own, and the mix is thrown away. For the self-test on a
+    /// computer with no sound device (a build server), where sound cues could
+    /// otherwise not be tried at all. The thread ends with the `AudioOut`.
+    pub fn silent() -> AudioOut {
         let (good, rx) = Device::for_test(2);
         let mut out = AudioOut::new();
         out.devices.insert(None, good);
-        std::thread::spawn(move || {
-            let mut voices: Vec<MixVoice> = Vec::new();
-            let mut mix = vec![0.0f32; 480 * 2];
-            loop {
-                match rx.try_recv() {
-                    Ok(v) => voices.push(v),
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
-                    Err(_) => {}
+        let _ = std::thread::Builder::new()
+            .name("silent-mixer".into())
+            .spawn(move || {
+                let mut voices: Vec<MixVoice> = Vec::new();
+                let (dead_tx, dead_rx) = crossbeam_channel::unbounded::<MixVoice>();
+                let frames = 480;
+                let mut mix = vec![0.0f32; frames * 2];
+                // Kept to the clock over the long run, however the sleeps fall.
+                let began = std::time::Instant::now();
+                let mut done: u64 = 0;
+                loop {
+                    loop {
+                        match rx.try_recv() {
+                            Ok(v) => voices.push(v),
+                            Err(crossbeam_channel::TryRecvError::Disconnected) => return,
+                            Err(_) => break,
+                        }
+                    }
+                    let due = (began.elapsed().as_secs_f64() * 48_000.0 / frames as f64) as u64;
+                    // (After a long stall, not a burst of catching up.)
+                    done = done.max(due.saturating_sub(10));
+                    while done < due {
+                        mix.fill(0.0);
+                        mix_each(&mut voices, &mut mix, &dead_tx, |v, mix| {
+                            mix_voice(v, mix, frames, 2)
+                        });
+                        done += 1;
+                    }
+                    while dead_rx.try_recv().is_ok() {}
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                mix.fill(0.0);
-                voices.retain_mut(|v| mix_voice(v, &mut mix, 480, 2));
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        });
+            });
         out
     }
 

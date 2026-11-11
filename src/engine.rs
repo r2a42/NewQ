@@ -679,6 +679,8 @@ pub struct Engine {
     pub messages: VecDeque<(Instant, String)>,
     /// A copy of the log for a test's file, while one is wanted.
     log_tap: Option<Vec<(Instant, String)>>,
+    /// What went wrong while the tap was on (`problem`), for Test Mode's checks.
+    problem_tap: Vec<String>,
     /// What the log has said of each cue playing, by instance: its name, and
     /// whether it has been said to be playing and to be on its way out.
     logged: HashMap<u64, (String, bool, bool)>,
@@ -752,6 +754,7 @@ impl Engine {
             paused: false,
             messages: VecDeque::new(),
             log_tap: None,
+            problem_tap: Vec::new(),
             logged: HashMap::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
@@ -794,6 +797,7 @@ impl Engine {
             paused: false,
             messages: VecDeque::new(),
             log_tap: None,
+            problem_tap: Vec::new(),
             logged: HashMap::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
@@ -942,6 +946,9 @@ impl Engine {
 
     fn say(&mut self, level: log::Level, msg: String) {
         log::log!(level, "{msg}");
+        if level <= log::Level::Warn && self.log_tap.is_some() && self.problem_tap.len() < 500 {
+            self.problem_tap.push(msg.clone());
+        }
         if let Some(tap) = &mut self.log_tap {
             tap.push((Instant::now(), msg.clone()));
         }
@@ -1204,7 +1211,13 @@ impl Engine {
     /// Start (or stop) keeping a copy of everything the engine logs, for a
     /// test's log file. `take_log_tap` hands over what has come since.
     pub fn set_log_tap(&mut self, on: bool) {
+        self.problem_tap.clear();
         self.log_tap = on.then(Vec::new);
+    }
+
+    /// What `problem` was told since this was last asked (while the tap is on).
+    pub fn take_problems(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.problem_tap)
     }
 
     pub fn take_log_tap(&mut self) -> Vec<(Instant, String)> {

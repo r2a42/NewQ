@@ -37,11 +37,19 @@ pub fn adapters() -> Vec<Adapter> {
     found
 }
 
+/// An adapter name that means this computer alone: a server on it listens on
+/// 127.0.0.1 and nothing else on the network can reach it. Test Mode uses it;
+/// it is not offered in the list.
+pub const LOOPBACK: &str = "this computer only";
+
 /// The address of the adapter called `name`, if this computer has it now.
 pub fn adapter_ip(name: &str, list: &[Adapter]) -> Option<IpAddr> {
     let name = name.trim();
     if name.is_empty() {
         return None;
+    }
+    if name == LOOPBACK {
+        return Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     }
     list.iter().find(|a| a.name == name).map(|a| a.ip)
 }

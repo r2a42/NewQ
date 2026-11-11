@@ -216,7 +216,6 @@ pub fn take_notices() -> Vec<String> {
 }
 
 /// How many panics this run has had (Test Mode counts the ones in a run).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn panic_count() -> u32 {
     PANICS.load(Ordering::Relaxed)
 }
@@ -237,6 +236,11 @@ fn notice(thread: &str, surviving: Option<&str>, message: &str, saved: Option<&P
 /// goes to stderr after it.
 pub fn install() {
     install_in(log_dir(), cfg!(windows));
+}
+
+/// `install`, with the reports in `dir` and no message box (the self-test).
+pub fn install_in_folder(dir: PathBuf) {
+    install_in(dir, false);
 }
 
 /// `install`, with the report folder and whether to show the message given.

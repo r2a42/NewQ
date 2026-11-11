@@ -61,6 +61,9 @@ enum Phase {
     Preparing(Box<Prep>),
     Running(Box<Run>),
     Comparing(Box<Compare>),
+    /// The full check (see `full`): its media being made, and it running.
+    FullPrep(Box<super::full::FullPrep>),
+    Full(Box<super::full::FullRun>),
     Done(Box<Done>),
 }
 
@@ -352,6 +355,10 @@ impl Run {
 /// A test that has ended and put the show back.
 pub struct Done {
     pub compare: Option<CompareResult>,
+    /// It was the full check: how each kind of cue came out (passed, failed, not run).
+    pub full: Option<Vec<(&'static str, usize, usize, usize)>>,
+    /// The one zip of everything, being made or made (see `bundle`).
+    pub bundle: super::bundle::Bundle,
     pub level: Level,
     pub verdict: Verdict,
     pub headline: String,
@@ -382,6 +389,8 @@ pub enum View<'a> {
     Preparing(&'a Prep),
     Running(&'a Run),
     Comparing(&'a Compare),
+    PreparingFull(&'a super::full::FullPrep),
+    Checking(&'a super::full::FullRun),
     Done(&'a Done),
 }
 
@@ -443,6 +452,8 @@ impl TestMode {
             Phase::Preparing(p) => View::Preparing(p),
             Phase::Running(r) => View::Running(r),
             Phase::Comparing(c) => View::Comparing(c),
+            Phase::FullPrep(p) => View::PreparingFull(p),
+            Phase::Full(r) => View::Checking(r),
             Phase::Done(d) => View::Done(d),
         }
     }
@@ -451,7 +462,11 @@ impl TestMode {
     pub fn busy(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Preparing(_) | Phase::Running(_) | Phase::Comparing(_)
+            Phase::Preparing(_)
+                | Phase::Running(_)
+                | Phase::Comparing(_)
+                | Phase::FullPrep(_)
+                | Phase::Full(_)
         )
     }
 
@@ -503,6 +518,25 @@ impl TestMode {
         }));
     }
 
+    /// Begin the full check, with no more questions: every kind of cue, from
+    /// media made on this computer, and one zip of everything at the end.
+    pub fn start_full(
+        &mut self,
+        ff: Ffmpeg,
+        log_dir: &Path,
+        displays: Vec<DisplayChoice>,
+        sound: SoundChoice,
+    ) {
+        if self.busy() {
+            return;
+        }
+        self.notice = None;
+        match super::full::FullPrep::start(ff, log_dir, displays, sound) {
+            Ok(prep) => self.phase = Phase::FullPrep(Box::new(prep)),
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
     /// Begin the decoding comparison: the film it makes its 4K clip from is
     /// made ready first.
     pub fn start_compare(&mut self, ff: Ffmpeg, log_dir: &Path, displays: Vec<DisplayChoice>) {
@@ -536,6 +570,8 @@ impl TestMode {
             Phase::Preparing(p) => p.fetch.cancel(),
             Phase::Running(r) => r.stop = true,
             Phase::Comparing(c) => c.request_stop(),
+            Phase::FullPrep(p) => p.cancel(),
+            Phase::Full(r) => r.stop = true,
             _ => {}
         }
     }
@@ -630,6 +666,38 @@ impl TestMode {
                     self.phase = Phase::Done(Box::new(finish(*r, end, show, engine, st)));
                 }
             }
+            Phase::FullPrep(p) => {
+                let Some(made) = p.ready() else {
+                    return;
+                };
+                let Phase::FullPrep(p) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                    return;
+                };
+                if p.cancelled() {
+                    self.notice = Some("Cancelled. Nothing was changed.".into());
+                    return;
+                }
+                let launched =
+                    made.and_then(|media| super::full::launch(*p, media, show, engine, st));
+                match launched {
+                    Ok(run) => self.phase = Phase::Full(Box::new(run)),
+                    Err(e) => {
+                        log::error!("test mode: {e}");
+                        self.notice = Some(format!(
+                            "The full check could not start: {e}. Nothing was changed."
+                        ));
+                    }
+                }
+            }
+            Phase::Full(r) => {
+                if let Some(end) = r.tick(show, engine, st, Instant::now()) {
+                    let Phase::Full(r) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                        return;
+                    };
+                    self.phase =
+                        Phase::Done(Box::new(super::full::finish(*r, end, show, engine, st)));
+                }
+            }
         }
     }
 
@@ -648,6 +716,16 @@ impl TestMode {
                 )));
             }
             Phase::Preparing(p) => p.fetch.cancel(),
+            Phase::FullPrep(p) => p.cancel(),
+            Phase::Full(r) => {
+                self.phase = Phase::Done(Box::new(super::full::finish(
+                    *r,
+                    End::Quit,
+                    show,
+                    engine,
+                    st,
+                )));
+            }
             other => self.phase = other,
         }
     }
@@ -663,7 +741,7 @@ fn utc_stamp(secs: i64) -> String {
     )
 }
 
-fn unix_now() -> i64 {
+pub(super) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -674,7 +752,7 @@ pub fn run_folder(log_dir: &Path, level: Level, secs: i64) -> PathBuf {
     run_folder_named(log_dir, &level.label().to_lowercase(), secs)
 }
 
-fn run_folder_named(log_dir: &Path, name: &str, secs: i64) -> PathBuf {
+pub(super) fn run_folder_named(log_dir: &Path, name: &str, secs: i64) -> PathBuf {
     log_dir
         .join("test-mode")
         .join("runs")
@@ -692,6 +770,12 @@ fn compare_done(
     use super::decode::Advice;
     let verdict = Verdict::of(&findings);
     Done {
+        full: None,
+        bundle: super::bundle::Bundle::start(
+            folder.clone(),
+            crate::crash::log_dir(),
+            matches!(end, End::Quit),
+        ),
         level: Level::Short,
         verdict,
         headline: match &end {
@@ -1184,6 +1268,14 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     };
     Done {
         compare: None,
+        full: None,
+        bundle: super::bundle::Bundle::start(
+            run.folder.clone(),
+            run.log_path
+                .parent()
+                .map_or_else(crate::crash::log_dir, Path::to_path_buf),
+            matches!(end, End::Quit),
+        ),
         level: run.level,
         verdict,
         headline,
@@ -1348,7 +1440,10 @@ fn compose(
         ("stats.csv", "one row of measurements every few seconds"),
         ("laps.csv", "how long each lap took"),
         ("events.log", "what the show engine said, with times"),
-        ("system.txt", "this computer, its displays and sound"),
+        (
+            "system.txt",
+            "this computer, its displays, sound, FFmpeg and MediaMTX",
+        ),
         ("newq-log-excerpt.txt", "the end of NewQ's own log"),
         ("media-credits.txt", "where the media came from"),
     ] {
@@ -1367,7 +1462,7 @@ fn compose(
 // ----- About this computer -------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn system_report(
+pub(super) fn system_report(
     engine: &Engine,
     st: &UiState,
     show: &Show,
@@ -1474,6 +1569,33 @@ fn system_report(
             ff.has_encoder("hap")
         ));
     }
+    match crate::mediamtx::locate() {
+        Some(exe) => {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.arg("--version");
+            crate::media::ffmpeg::no_console(&mut cmd);
+            // (Not waited for without a limit: it is asked on the main loop.)
+            let never = std::sync::atomic::AtomicBool::new(false);
+            let limit = Instant::now() + Duration::from_secs(3);
+            let version = crate::media::ffmpeg::output_until(&mut cmd, &never, Some(limit))
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .next()
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "(it did not say)".into());
+            p(format!("MediaMTX: {version}"));
+            p(format!("  at {}", exe.display()));
+        }
+        None => p("MediaMTX: not with this copy of NewQ".to_string()),
+    }
+    p(format!(
+        "Streaming server allowed on this computer: {}",
+        if st.prefs.allow_hosting { "yes" } else { "no" }
+    ));
+    p(format!("Log detail: {}", crate::logging::level().name()));
     p(format!(
         "Hardware video decoding: {}",
         if st.prefs.hw_decode { "on" } else { "off" }

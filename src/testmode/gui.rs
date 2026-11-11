@@ -285,6 +285,36 @@ fn body(
                 test.stop();
             }
         }
+        View::PreparingFull(p) => {
+            ui.label(RichText::new("Getting the full check ready").strong());
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!(
+                    "Making its clips, tone and pictures on this computer ({} s)…",
+                    p.since.elapsed().as_secs()
+                ));
+            });
+            if ui.button("Cancel").clicked() {
+                test.stop();
+            }
+            ui.label(
+                RichText::new("Nothing is downloaded. Nothing about your show has changed.")
+                    .weak()
+                    .small(),
+            );
+        }
+        View::Checking(r) => {
+            checking(ui, r);
+            ui.separator();
+            if ui.button("Stop the test").clicked() {
+                test.stop();
+            }
+            ui.label(
+                RichText::new("Stopping still makes the zip, with what was done so far.")
+                    .weak()
+                    .small(),
+            );
+        }
         View::Done(d) => {
             let (colour, word) = match d.verdict {
                 Verdict::Passed => (GREEN, "Passed"),
@@ -344,6 +374,12 @@ fn body(
                     .weak()
                     .small(),
                 );
+            } else if let Some(kinds) = &d.full {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(word).size(22.0).strong().color(colour));
+                    ui.label(format!("Full check, {}", clock(d.elapsed)));
+                });
+                kinds_table(ui, kinds);
             } else {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(word).size(22.0).strong().color(colour));
@@ -387,16 +423,53 @@ fn body(
                     }
                 });
             ui.separator();
-            ui.label("The log files are in:");
-            let mut path = d.folder.display().to_string();
-            ui.add(egui::TextEdit::singleline(&mut path).desired_width(f32::INFINITY));
+            // The one file to send: everything above and NewQ's own log.
+            match d.bundle.get() {
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Packing everything into one zip…");
+                    });
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                Some(Ok(zip)) => {
+                    ui.label(RichText::new("One file to send").strong());
+                    let mut path = zip.display().to_string();
+                    ui.add(egui::TextEdit::singleline(&mut path).desired_width(f32::INFINITY));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Show the zip in its folder").strong())
+                            .clicked()
+                            && let Err(e) = super::bundle::reveal(&zip)
+                        {
+                            failed = Some(e);
+                        }
+                        if ui.button("Copy its path").clicked() {
+                            ui.ctx().copy_text(zip.display().to_string());
+                        }
+                    });
+                    ui.label(
+                        RichText::new(
+                            "The report, the events, the measurements, this computer and its settings, NewQ's log and any crash reports. It stays on this computer: nothing is sent anywhere unless you send it.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+                Some(Err(why)) => {
+                    ui.colored_label(AMBER, format!("The zip could not be made: {why}"));
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("The run's own folder").small().weak());
             ui.horizontal(|ui| {
-                if ui.button("Open the folder").clicked()
+                if ui.small_button("Open the folder").clicked()
                     && let Err(e) = open_folder(&d.folder)
                 {
                     failed = Some(e);
                 }
-                if ui.button("Copy the path").clicked() {
+                if ui.small_button("Copy the path").clicked() {
                     ui.ctx().copy_text(d.folder.display().to_string());
                 }
                 if ui.button("Run another test").clicked() {
@@ -440,6 +513,39 @@ fn idle(
 ) {
     ui.label("Plays a show of its own to see how this computer copes, then puts yours back exactly as it was.");
     ui.add_space(6.0);
+    // The one button: no choices to make, and one file to send at the end.
+    let can_full = refusal.is_none() && engine.ff.is_some();
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if ui
+            .add_enabled(
+                can_full,
+                egui::Button::new(RichText::new("Run the full check").size(17.0).strong())
+                    .min_size(egui::vec2(220.0, 34.0)),
+            )
+            .clicked()
+            && let Some(ff) = engine.ff.clone()
+        {
+            test.start_full(
+                ff,
+                log_dir,
+                chosen(screens, selected),
+                sound_of(devices, sound),
+            );
+        }
+        ui.label(
+            RichText::new(
+                "About two minutes. Plays every kind of cue once (video, pictures, sound, text, shapes, camera, slides, groups, fades, control, stop, wait, send, timecode, effects, a recording) and checks that each did what it should. Then packs the report and NewQ's logs into one zip for you to send. Nothing is downloaded and nothing leaves this computer.",
+            )
+            .weak()
+            .small(),
+        );
+        if let Some(why) = refusal {
+            ui.colored_label(AMBER, why);
+        }
+    });
+    ui.add_space(8.0);
+    ui.label(RichText::new("Or a test of how it holds up over time").strong());
     choose(ui, test);
     ui.label(RichText::new(test.level.summary()).weak());
     let lengths = test.level.lengths();
@@ -691,6 +797,78 @@ fn running(ui: &mut egui::Ui, r: &Run) {
             ui.ctx().copy_text(r.folder.display().to_string());
         }
     });
+}
+
+/// How each kind of cue came out, as a small table.
+fn kinds_table(ui: &mut egui::Ui, kinds: &[(&'static str, usize, usize, usize)]) {
+    egui::Grid::new("full-kinds")
+        .num_columns(2)
+        .spacing([10.0, 2.0])
+        .show(ui, |ui| {
+            for (kind, passed, failed, skipped) in kinds {
+                let (colour, word) = if *failed > 0 {
+                    (RED, format!("{failed} failed"))
+                } else if *passed > 0 {
+                    (GREEN, "ok".to_string())
+                } else {
+                    (Color32::GRAY, "not run".to_string())
+                };
+                ui.label(*kind);
+                ui.horizontal(|ui| {
+                    ui.colored_label(colour, word);
+                    if *failed == 0 && *passed > 0 && *skipped > 0 {
+                        ui.label(RichText::new(format!("({skipped} not run)")).weak().small());
+                    }
+                });
+                ui.end_row();
+            }
+        });
+}
+
+/// The full check while it runs: where it is, and how the parts so far came out.
+fn checking(ui: &mut egui::Ui, r: &super::full::FullRun) {
+    use super::feature::Outcome;
+    ui.label(RichText::new("The full check is running").strong());
+    let (n, of, kind, title) = r.status();
+    ui.add(
+        egui::ProgressBar::new(r.progress())
+            .text(format!("part {n} of {of}, {}", clock(r.elapsed()))),
+    );
+    ui.label(format!("{kind}: {title}"));
+    let count = |o: Outcome| r.runner.results.iter().filter(|x| x.outcome == o).count();
+    ui.horizontal(|ui| {
+        ui.colored_label(GREEN, format!("{} ok", count(Outcome::Passed)));
+        let failed = count(Outcome::Failed);
+        if failed > 0 {
+            ui.colored_label(RED, format!("{failed} failed"));
+        }
+        let skipped = count(Outcome::Skipped);
+        if skipped > 0 {
+            ui.label(RichText::new(format!("{skipped} not run")).weak());
+        }
+    });
+    for x in r
+        .runner
+        .results
+        .iter()
+        .filter(|x| x.outcome == Outcome::Failed)
+        .take(4)
+    {
+        ui.colored_label(RED, format!("{}: {}", x.kind, x.title));
+    }
+    if let Some(s) = &r.last {
+        ui.label(
+            RichText::new(format!(
+                "Memory {} MB, processor {:.0}%, {} FFmpeg, slowest frame {} ms",
+                s.rss_mb, s.cpu_pct, s.ffmpeg, s.stall_ms
+            ))
+            .weak()
+            .small(),
+        );
+    }
+    ui.separator();
+    ui.label(RichText::new("Its files").small().weak());
+    ui.label(RichText::new(r.folder.display().to_string()).small());
 }
 
 fn comparing(ui: &mut egui::Ui, c: &super::decode::Compare) {

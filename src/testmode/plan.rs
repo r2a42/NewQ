@@ -229,7 +229,7 @@ impl SoundChoice {
 }
 
 /// Give the show the audio device that was chosen, in place of its own outputs.
-fn use_sound(show: &mut Show, sound: &SoundChoice) {
+pub(super) fn use_sound(show: &mut Show, sound: &SoundChoice) {
     let Some(device) = &sound.device else {
         return;
     };
@@ -245,7 +245,7 @@ fn use_sound(show: &mut Show, sound: &SoundChoice) {
 /// (a display that is "part of" another with the whole area is a mirror of it).
 /// With none chosen the show keeps the displays it has. Done before the cues
 /// are made, since a new cue is sent to the show's first display.
-fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
+pub(super) fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
     let Some(first) = displays.first() else {
         return;
     };

@@ -152,7 +152,25 @@ The README describes the features; this file is about working on the code.
   `gui.rs` is the window (its "Show the test on" ticks are `Prefs::test_displays`;
   `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
   display shows the picture and the others mirror it with a whole-area `part_of`; the
-  main window's own monitor is never offered). Cross-target clippy for Windows and Mac runs from Linux with
+  main window's own monitor is never offered). The full check (`feature.rs`, the "Run the full check"
+  button, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
+  clip in the run folder; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
+  `Check`s); `Runner` plays them one at a time, its clock starting when the part's `lead` cue is started,
+  noting `Obs` every 20 ms; `judge` (pure, tested on made-up notes) gives each check's `Verdict`. A problem
+  the engine reports in a part (`Engine::take_problems`) fails it unless the part expects it. The copy has
+  `own_layers` on (an old show's off makes cues in a together group replace each other: that is tested
+  behaviour, not a fault), no streams, no OSC feedback. `full.rs` does what needs the app: `Ask::RecordOn`
+  sets a `StreamKind::Record` on the first display and `judge_recording` probes the file once it has stopped
+  growing; `Ask::ServeOn` streams to a server on `streamlink::LOOPBACK` (127.0.0.1, free ports) and asks it
+  over RTSP whether the stream is there; skipped unless `mediamtx::locate()` and `Prefs::allow_hosting`.
+  `bundle.rs` zips the run folder plus newq.log, newq.previous.log and newq-crash.log beside it
+  (`NewQ-test-<run>.zip`, on a thread; every test's `Done::bundle`), and `reveal` shows it (`explorer
+  /select,"…"` needs `raw_arg`; `open -R`; `xdg-open` of the folder). `selftest.rs` is `newq --self-test
+  [--out dir]`: the same `Runner` on an `Engine` with `AudioOut::silent()` (a paced mixer thread, no
+  device), exit 0/1/2; CI runs it on all three systems and uploads the zip. Engine-level only: "reached the
+  screen" means the cue's layer with a frame was in `Engine::layers`, not that pixels were looked at. The
+  window's run was tried under xvfb (recording and a real MediaMTX passed); the sound parts never met a
+  real device. Cross-target clippy for Windows and Mac runs from Linux with
   `scripts/cross_clippy.sh` (a stand-in C compiler for `ring`, since nothing is linked); CI still builds and
   tests them.
 - `src/clicker.rs`: presenter remote. `decide` is the pure GO/Back logic (Back pauses, Back again

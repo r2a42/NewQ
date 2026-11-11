@@ -45,7 +45,9 @@ This program will not transfer any information to other networked systems
 unless specifically requested by the user. NewQ has no telemetry and no update
 check. It uses the network only for what you set up: OSC, MIDI-over-network,
 the web remote, NDI, PJLink and TCP sends, and streams go to the addresses you
-enter, and *Test Mode* downloads its free test media when you start it.
+enter, and *Test Mode* downloads its free test media when you start one of its longer
+tests with that box ticked (its *full check* downloads nothing). The zip a test makes
+stays on the computer until you send it yourself.
 
 ## Features
 
@@ -1048,7 +1050,72 @@ displays from the *Displays* page of the settings.
 ## Test mode: try this computer before the show
 
 *Help ▸ Test mode…* plays a show of its own to find out how this computer copes, with
-nothing to type: no command line, no files to find. Choose a test and press Start.
+nothing to type: no command line, no files to find. Press **Run the full check**, or
+choose one of the longer tests and press Start.
+
+### Run the full check: every kind of cue, and one file to send
+
+One button, no questions, about two minutes. It makes its own clips, tone and pictures
+on this computer with FFmpeg (nothing is downloaded), plays a show that uses every kind
+of cue, one part at a time, and checks that each part *did what it should*: not only
+that NewQ didn't fall over.
+
+| Kind | What is played | What is checked |
+|---|---|---|
+| Video | a clip with sound; a loop of three; double speed; Hap (if this FFmpeg can make a Hap clip) | it started, its picture was handed to its display at full opacity, new frames kept coming, the mixer took its sound, it lasted its length and then ended; the loop went round three times; the double-speed cue runs half as long |
+| Image, Text, Shape | a picture faded in and held; a title; a star | started, on its display, held its time, ended |
+| Live text | a clock and a timer | both drawn, and drawn again as the seconds passed |
+| Camera | the built-in `NewQ test pattern` device | live frames kept coming, and it ended when its time was up |
+| Audio | a tone through a routing matrix, a fade cue (level and a crosspoint), a stop cue | the mixer took its sound; -6 dB before the fade and -30 dB after it; still playing until the stop cue, gone after it |
+| Effects | a clip through blur (keyframed), vignette, sharpen, pixelate, negative; a tone through EQ, filter, compressor, echo, reverb | played through and ended |
+| Slide show | three slides by themselves; three slides on GO | each slide came after the last and crossed over it; on GO each stayed until the next GO |
+| Group | three pictures in order with crossfades; a clip, a shape and a text started together | order and overlap; all three on the display at once in the order of their layers |
+| Transitions | crossfade, dip to black, cut | each new picture took the place of the last at the right moment |
+| Fade | opacity, position and scale; then fade out and stop | 30% opacity and a quarter across after the fade; gone after the second |
+| Control | load, start, pause, resume, go to, disarm, arm, reset, devamp, memo | the picture was got ready ahead; the clip stood still while paused and went on when resumed; the playhead moved; the cue was disarmed and armed again; reset stopped the clip; the endless loop ended after devamp |
+| GO, wait and stop | GO on a picture that continues into a wait, followed after a pre-wait by a stop of everything | the wait lasted its second, the picture was there until the stop and gone after |
+| Send | one OSC message to a socket of its own on 127.0.0.1 | it arrived |
+| Timecode | a timecode cue with no MIDI output | it ran its two seconds and ended |
+| Send out | the first display recorded to a file in the test's folder; the streaming server run on 127.0.0.1 only with the display streamed to it | the recording is read back with FFmpeg and is long enough; the server is asked over RTSP whether the stream is there |
+| Load | four clips with sound and a text at once, twice round | all started and were on screen together; and the usual measurements (stalls, memory, late frames) |
+
+Each part's clock starts when its first cue has its first picture or sound, so a slow
+start of FFmpeg does not spoil the checks; the first cue not playing within five seconds
+is itself a failure. Anything NewQ reports as a problem during a part fails that part.
+*Live audio* is listed as not run (it would open a microphone). The sound parts are not
+run on a computer with no sound device, and say so. The server part is not run unless
+MediaMTX is with this copy of NewQ and this computer has been allowed to run a server
+(*Settings ▸ Media*): the test changes no settings. The show it plays has layers kept
+apart, as new shows have, whatever your show's own setting is.
+
+**Nothing leaves the computer.** The check's show is a copy of yours with the cues taken
+out and with its streams and OSC feedback switched off, so nothing of yours is sent
+anywhere while it runs; the only network use is that one OSC message to 127.0.0.1 and
+the server on 127.0.0.1. No projector is spoken to, no program is run, no MIDI is sent.
+Your show is put aside and put back exactly as for the other tests.
+
+**One zip.** At the end (also when you stop it part way, or it could not go on) NewQ
+packs `NewQ-test-DATE_TIME_full.zip` beside the run's folder, and the window shows where
+it is, with *Show the zip in its folder* (Explorer or the Finder with the file selected;
+its folder elsewhere) and *Copy its path*. In it: `report.txt` (the verdict, what each
+kind of cue did, every check of every part, the measurements), `events.log`,
+`stats.csv`, `system.txt` (NewQ's version, the system, processor, graphics card,
+displays, sound, FFmpeg and MediaMTX versions), `settings.txt` (this computer's settings,
+the log level, the `NEWQ_`/`WGPU_` environment), `full-check.newq` (the show that was
+played), `newq.log` at the level chosen in Settings (set *Detailed* first if you are
+chasing a fault), `newq.previous.log`, `newq-crash.log` if there is one, and on a Mac the
+samples taken while the program was frozen. The clips it made and the recording are not
+in it. **It is not sent anywhere**: attach it yourself to a message if you want someone
+to look. The other tests make the same zip of their own folder.
+
+**With no window:** `newq --self-test [--out FOLDER]` plays the same check through the
+show engine and FFmpeg with no window at all, against a mixer that throws the sound away
+(so it runs on a computer with no sound device), prints the report, writes the same zip
+and ends with 0 (passed), 1 (a part failed) or 2 (it could not run). The recording and
+the server need the app's graphics and are listed as not run. CI runs it on Linux,
+Windows and macOS and keeps the zip.
+
+### The longer tests
 
 | Test | Length | What it does |
 |---|---|---|
@@ -1127,7 +1194,7 @@ start a test (save first), and the test show can't be edited or saved. If you cl
 NewQ mid-test it ends properly first.
 
 **The log.** Each run has a folder `test-mode/runs/DATE_TIME_LEVEL` in the log folder
-holding `report.txt` (verdict, findings, laps, measurements, media and credits),
+(and a zip of it beside it, as above) holding `report.txt` (verdict, findings, laps, measurements, media and credits),
 `stats.csv` (a row every 2 to 15 seconds), `laps.csv`, `events.log` (what the engine
 said, with times), `system.txt` (OS, processor, graphics, displays, sound, FFmpeg) and
 an excerpt of `newq.log`. The window shows the path while it runs and at the end, with

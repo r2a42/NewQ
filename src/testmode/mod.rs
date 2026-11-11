@@ -6,9 +6,13 @@
 
 pub mod analysis;
 pub mod assets;
+pub mod bundle;
 pub mod decode;
+pub mod feature;
+pub mod full;
 pub mod gui;
 pub mod plan;
+pub mod selftest;
 pub mod session;
 
 pub use session::TestMode;
