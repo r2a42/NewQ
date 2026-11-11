@@ -105,3 +105,21 @@ jobs:
         run: cargo test
         env:
           NEWQ_REQUIRE_MEDIA: "1"
+
+      # The program itself, with no window: every kind of cue played through
+      # the show engine and FFmpeg on this system, each checked for what it
+      # did, and the same zip Test Mode makes kept as an artifact (the report,
+      # the log at its Detailed level, any crash report), passed or not.
+      - name: Self-test (the full check, headless)
+        timeout-minutes: 15
+        run: cargo run -- --self-test --out selftest/run
+      - name: Keep the self-test's files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ runner.os }}
+          path: |
+            selftest/*.zip
+            selftest/run/report.txt
+          if-no-files-found: warn
+          retention-days: 14
