@@ -3260,7 +3260,11 @@ mod tests {
     }
 
     /// The whole check, played for real through an engine with the silent mixer.
+    /// Ignored in `cargo test`: CI runs the same check as its own step
+    /// (`newq --self-test`), and playing it twice per job doubles 90 s of timing
+    /// on slow shared runners. Run it here with `--ignored`.
     #[test]
+    #[ignore = "CI runs the same check as `newq --self-test`"]
     fn the_whole_check_passes_when_played_through_the_engine() {
         let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
             return;

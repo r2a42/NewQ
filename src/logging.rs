@@ -5,8 +5,8 @@
 //! Writing is done by a thread of its own, so a slow disk never holds the
 //! show up: a line is handed over through a queue of limited length and, if
 //! that is ever full, dropped and counted. The file is limited too: when it
-//! reaches `MAX_FILE_BYTES` it becomes `newq.previous.log` and a new one is
-//! begun, so a show that runs for a week can't fill the disk.
+//! reaches `MAX_FILE_BYTES` it becomes `newq.earlier.log` and a new one is
+//! begun (the last run's stays `newq.previous.log`), so a show that runs for a week can't fill the disk.
 
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -190,7 +190,7 @@ fn now_text() -> String {
         .to_string()
 }
 
-/// The file may grow to this before it is put aside as `newq.previous.log`.
+/// The file may grow to this before it is put aside as `newq.earlier.log`.
 pub const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 /// Lines waiting to be written; more than this are dropped and counted.
 const QUEUE: usize = 8192;
@@ -229,15 +229,19 @@ impl Rotating {
     pub fn write(&mut self, line: &str) {
         if self.written + line.len() as u64 > self.limit && self.written > 0 {
             // Closed before it is renamed (Windows won't rename an open file).
+            // Not `open_log`: that would put this run's log where the last
+            // run's is kept and lose it.
             self.file = None;
-            self.file = crate::crash::open_log(&self.dir);
+            let log = self.dir.join("newq.log");
+            let _ = std::fs::rename(&log, self.dir.join("newq.earlier.log"));
+            self.file = std::fs::File::create(log).ok();
             self.written = 0;
             let note = format_line(
                 &now_text(),
                 log::Level::Info,
                 "log",
                 "newq::logging",
-                "the log reached its size limit: the earlier part is in newq.previous.log",
+                "the log reached its size limit: the earlier part is in newq.earlier.log",
             );
             self.put(&note);
         }
@@ -536,6 +540,9 @@ mod tests {
     #[test]
     fn a_full_log_is_put_aside_and_a_new_one_begun() {
         let d = dir("rotate");
+        // The run before this one.
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("newq.log"), "last run\n").unwrap();
         let mut log = Rotating::begin(&d, 2048);
         assert!(log.has_file());
         let line = format!("{}\n", "x".repeat(99));
@@ -544,18 +551,23 @@ mod tests {
         }
         drop(log);
         let now = std::fs::read_to_string(d.join("newq.log")).unwrap();
-        let before = std::fs::read_to_string(d.join("newq.previous.log")).unwrap();
+        let earlier = std::fs::read_to_string(d.join("newq.earlier.log")).unwrap();
         // Never more than the limit in either, and nothing lost at the join.
         assert!(
-            now.len() <= 2048 && before.len() <= 2048,
+            now.len() <= 2048 && earlier.len() <= 2048,
             "{} {}",
             now.len(),
-            before.len()
+            earlier.len()
         );
-        assert!(now.contains("the earlier part is in newq.previous.log"));
-        assert!(before.lines().all(|l| l == "x".repeat(99)));
+        assert!(now.contains("the earlier part is in newq.earlier.log"));
+        assert!(earlier.lines().all(|l| l == "x".repeat(99)));
         assert!(now.lines().filter(|l| *l == "x".repeat(99)).count() >= 1);
-        // The next run keeps this one's file beside its own.
+        // Putting this run's log aside for size kept the last run's.
+        assert_eq!(
+            std::fs::read_to_string(d.join("newq.previous.log")).unwrap(),
+            "last run\n"
+        );
+        // The next run keeps this one's file, and its earlier part, beside its own.
         let mut next = Rotating::begin(&d, 2048);
         next.write("second run\n");
         drop(next);
@@ -567,6 +579,14 @@ mod tests {
             std::fs::read_to_string(d.join("newq.previous.log")).unwrap(),
             now
         );
+        assert_eq!(
+            std::fs::read_to_string(d.join("newq.previous.earlier.log")).unwrap(),
+            earlier
+        );
+        assert!(!d.join("newq.earlier.log").exists());
+        // A run after one that never filled its log has no earlier part of it.
+        drop(Rotating::begin(&d, 2048));
+        assert!(!d.join("newq.previous.earlier.log").exists());
         let _ = std::fs::remove_dir_all(&d);
         // A folder that can't be made: no file, and writing is not a panic.
         let blocked = dir("blocked");

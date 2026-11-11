@@ -82,7 +82,7 @@ The README describes the features; this file is about working on the code.
   `set_level` applies it at once) or `NEWQ_LOG` (`Spec`: a level and `part=level` pairs; it wins, and the
   setting is greyed). Always to `newq.log` in the log folder (and stderr except on a Windows release),
   through a bounded queue to a `log-writer` thread (`write_loop`; a full queue drops and counts), put
-  aside as `newq.previous.log` at 20 MB (`Rotating`). Libraries (targets not `newq::`) are a step quieter
+  aside as `newq.earlier.log` at 20 MB (`Rotating`; the last run's stays `newq.previous.log`). Libraries (targets not `newq::`) are a step quieter
   (`for_libraries`). Levels: `Engine::problem` (warn) for what went wrong and `Engine::log` (info) both
   show in the status bar; debug is each cue's start/playing/out/end (`Engine::log_cue_changes`) and each
   FFmpeg's command line; trace is preloads and FFmpeg exits. The panic hook flushes the log.
@@ -165,7 +165,7 @@ The README describes the features; this file is about working on the code.
   sets a `StreamKind::Record` on the first display and `judge_recording` probes the file once it has stopped
   growing; `Ask::ServeOn` streams to a server on `streamlink::LOOPBACK` (127.0.0.1, free ports) and asks it
   over RTSP whether the stream is there; skipped unless `mediamtx::locate()` and `Prefs::allow_hosting`.
-  `bundle.rs` zips the run folder plus newq.log, newq.previous.log and newq-crash.log beside it
+  `bundle.rs` zips the run folder plus newq.log, newq.previous.log (and their `.earlier` parts) and newq-crash.log beside it
   (`NewQ-test-<run>.zip`, on a thread; every test's `Done::bundle`), and `reveal` shows it (`explorer
   /select,"…"` needs `raw_arg`; `open -R`; `xdg-open` of the folder). `selftest.rs` is `newq --self-test
   [--out dir]`: the same `Runner` on an `Engine` with `AudioOut::silent()` (a paced mixer thread, no

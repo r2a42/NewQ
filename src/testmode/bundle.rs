@@ -67,7 +67,13 @@ pub fn contents(folder: &Path, log_dir: &Path) -> Vec<(String, PathBuf)> {
         .filter(|(name, _)| name != "newq-log-excerpt.txt" && !name.ends_with(".part"))
         .collect();
     files.sort();
-    for name in ["newq.log", "newq.previous.log", "newq-crash.log"] {
+    for name in [
+        "newq.log",
+        "newq.earlier.log",
+        "newq.previous.log",
+        "newq.previous.earlier.log",
+        "newq-crash.log",
+    ] {
         let path = log_dir.join(name);
         if path.is_file() && !files.iter().any(|(n, _)| n == name) {
             files.push((name.to_string(), path));

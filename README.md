@@ -1016,8 +1016,9 @@ great deal during a show. For a single run, `NEWQ_LOG=debug` in the environment 
 same without touching the setting (`error`, `warn`, `info`, `debug`, `trace`; parts can
 be given their own, as in `NEWQ_LOG=info,newq::engine=trace,wgpu=debug`). The graphics
 and window libraries NewQ is built on are kept a step quieter than NewQ itself. The log
-can't grow without limit: at 20 MB it is put aside as `newq.previous.log` and begun
-again, so a show that runs for a week uses at most 40 MB. It is written by a thread of
+can't grow without limit: at 20 MB it is put aside as `newq.earlier.log` and begun
+again, so a show that runs for a week uses at most 40 MB (and the last run's log is
+still there beside it). It is written by a thread of
 its own, so a slow disk never holds the show up; if lines ever come faster than the disk
 takes them they are dropped and the log says how many.
 
@@ -1103,7 +1104,8 @@ kind of cue did, every check of every part, the measurements), `events.log`,
 displays, sound, FFmpeg and MediaMTX versions), `settings.txt` (this computer's settings,
 the log level, the `NEWQ_`/`WGPU_` environment), `full-check.newq` (the show that was
 played), `newq.log` at the level chosen in Settings (set *Detailed* first if you are
-chasing a fault), `newq.previous.log`, `newq-crash.log` if there is one, and on a Mac the
+chasing a fault), the last run's `newq.previous.log`, any part of either put aside
+for size (`newq.earlier.log`, `newq.previous.earlier.log`), `newq-crash.log` if there is one, and on a Mac the
 samples taken while the program was frozen. The clips it made and the recording are not
 in it. **It is not sent anywhere**: attach it yourself to a message if you want someone
 to look. The other tests make the same zip of their own folder.

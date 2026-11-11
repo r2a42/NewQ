@@ -53,13 +53,23 @@ pub fn log_dir() -> PathBuf {
     log_dir_for(Os::current(), |v| std::env::var(v).ok())
 }
 
-/// The log file for this run, made ready: an earlier one is kept as
-/// `newq.previous.log`. None if the folder can't be written to.
+/// The log file for this run, made ready: the last run's is kept as
+/// `newq.previous.log`, and the part of it put aside for size
+/// (`newq.earlier.log`) as `newq.previous.earlier.log`. None if the folder
+/// can't be written to.
 pub fn open_log(dir: &Path) -> Option<std::fs::File> {
     std::fs::create_dir_all(dir).ok()?;
     let log = dir.join("newq.log");
     if log.exists() {
         let _ = std::fs::rename(&log, dir.join("newq.previous.log"));
+    }
+    let earlier = dir.join("newq.earlier.log");
+    let previous_earlier = dir.join("newq.previous.earlier.log");
+    if earlier.exists() {
+        let _ = std::fs::rename(&earlier, &previous_earlier);
+    } else {
+        // One from an older run would read as the last run's.
+        let _ = std::fs::remove_file(&previous_earlier);
     }
     std::fs::File::create(log).ok()
 }
