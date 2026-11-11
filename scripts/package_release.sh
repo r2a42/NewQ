@@ -59,10 +59,11 @@ verify_ffmpeg() {
     echo "bundled ffmpeg cannot capture from ${indev} (camera cues need it)" >&2
     exit 1
   fi
-  # A display's Send out writes MPEG-TS, RTSP and FLV (RTMP).
+  # A display's Send out writes MPEG-TS, RTSP and FLV (RTMP), and records
+  # Matroska, MOV and MP4.
   local muxers
   muxers="$("$ff" -hide_banner -muxers)"
-  for m in mpegts rtsp flv; do
+  for m in mpegts rtsp flv matroska mov mp4; do
     # The flags column varies between FFmpeg versions: match the name as a word after an E.
     if ! awk -v m="$m" '$1 ~ /E/ && $2 == m { f = 1 } END { exit !f }' <<< "$muxers"; then
       echo "bundled ffmpeg is missing the ${m} muxer (Send out needs it)" >&2

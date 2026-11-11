@@ -685,6 +685,20 @@ fn missing_for(ff: &Ffmpeg, protocol: ServerProtocol) -> Option<String> {
     None
 }
 
+/// Why this FFmpeg can't record to `container`, if it can't (the Mac bundle
+/// of 0.20.0 and before had no Matroska muxer).
+fn missing_container(ff: &Ffmpeg, container: crate::show::RecordContainer) -> Option<String> {
+    let muxer = container.muxer();
+    let listed = &caps(ff).muxers;
+    // An FFmpeg that didn't answer is left to say for itself what is wrong.
+    (!listed.trim().is_empty() && !lists(listed, muxer)).then(|| {
+        format!(
+            "This FFmpeg can't write .{} files (it has no {muxer} muxer): choose another container",
+            container.extension()
+        )
+    })
+}
+
 /// Keep only the end of what FFmpeg has said, once it has said a lot. Cut as
 /// bytes, not as a string: FFmpeg's messages have characters of more than one
 /// byte in them (quotes, file names), and a string cut inside one is a panic.
@@ -925,6 +939,11 @@ impl Sink {
             {
                 return Err(why);
             }
+            if let StreamKind::Record { container, .. } = kind
+                && let Some(why) = missing_container(ff, *container)
+            {
+                return Err(why);
+            }
             if matches!(kind, StreamKind::DeckLink { .. })
                 && !crate::media::camera::ffmpeg_has_decklink_output(ff)
             {
@@ -1147,6 +1166,32 @@ mod tests {
         );
         assert_eq!(split_args(r#"-x "" y"#), ["-x", "", "y"]);
         assert!(split_args("   ").is_empty());
+    }
+
+    #[test]
+    fn a_container_is_recorded_only_with_its_muxer() {
+        use crate::show::RecordContainer;
+        // `ffmpeg -muxers` lines, as FFmpeg 7 to 9 print them.
+        let mac_0_20 =
+            " E mov             QuickTime / MOV\n E mp4             MP4 (MPEG-4 Part 14)\n";
+        assert!(!lists(mac_0_20, RecordContainer::Mkv.muxer()));
+        assert!(lists(mac_0_20, RecordContainer::Mov.muxer()));
+        assert!(lists(mac_0_20, RecordContainer::Mp4.muxer()));
+        assert!(lists(
+            " E matroska        Matroska\n",
+            RecordContainer::Mkv.muxer()
+        ));
+        // The FFmpeg the tests use writes all three.
+        let Some(ff) = crate::media::ffmpeg::Ffmpeg::locate() else {
+            return;
+        };
+        for c in [
+            RecordContainer::Mkv,
+            RecordContainer::Mov,
+            RecordContainer::Mp4,
+        ] {
+            assert_eq!(missing_container(&ff, c), None, "{c:?}");
+        }
     }
 
     #[test]

@@ -43,6 +43,7 @@ build_arch() {
   # clip with it, since there is no x264 here, and what the network and server
   # streams of a display's Send out use). Network stays on, with FFmpeg's own
   # sockets (UDP, TCP, RTP, RTSP, RTMP): no TLS and no libsrt, so no RTMPS or SRT.
+  # Matroska, MOV and MP4 are what a display's Send out records to.
   if ! "$src/configure" \
     --arch="$arch" $cross \
     --cc="clang -arch $arch" \
@@ -52,7 +53,7 @@ build_arch() {
     --enable-static --disable-shared \
     --disable-doc --disable-debug --disable-ffplay \
     --disable-encoders --enable-encoder=rawvideo,wrapped_avframe,pcm_f32le,pcm_s16le,png,mpeg4,aac,h264_videotoolbox,hevc_videotoolbox \
-    --disable-muxers --enable-muxer=rawvideo,pcm_f32le,pcm_s16le,null,image2,mp4,mov,wav,mpegts,rtsp,rtp,flv \
+    --disable-muxers --enable-muxer=rawvideo,pcm_f32le,pcm_s16le,null,image2,mp4,mov,matroska,wav,mpegts,rtsp,rtp,flv \
     > configure.log 2>&1; then
     tail -40 configure.log ffbuild/config.log
     exit 1

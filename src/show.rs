@@ -730,6 +730,15 @@ impl RecordContainer {
             Self::Mp4 => "mp4",
         }
     }
+
+    /// FFmpeg's name for the muxer that writes this container.
+    pub fn muxer(self) -> &'static str {
+        match self {
+            Self::Mov => "mov",
+            Self::Mkv => "matroska",
+            Self::Mp4 => "mp4",
+        }
+    }
 }
 
 /// The part of a display's picture that is recorded, as fractions of the
