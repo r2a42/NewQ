@@ -1051,12 +1051,12 @@ displays from the *Displays* page of the settings.
 ## Test mode: try this computer before the show
 
 *Help ▸ Test mode…* plays a show of its own to find out how this computer copes, with
-nothing to type: no command line, no files to find. Press **Run the full check**, or
-choose one of the longer tests and press Start.
+nothing to type: no command line, no files to find. Choose *Short*, *Medium*, *Long* or
+*Debug test* and press Start.
 
-### Run the full check: every kind of cue, and one file to send
+### The debug test: every kind of cue, and one file to send
 
-One button, no questions, about two minutes. It makes its own clips, tone and pictures
+No questions, about two minutes. It makes its own clips, tone and pictures
 on this computer with FFmpeg (nothing is downloaded), plays a show that uses every kind
 of cue, one part at a time, and checks that each part *did what it should*: not only
 that NewQ didn't fall over.
@@ -1096,7 +1096,7 @@ the server on 127.0.0.1. No projector is spoken to, no program is run, no MIDI i
 Your show is put aside and put back exactly as for the other tests.
 
 **One zip.** At the end (also when you stop it part way, or it could not go on) NewQ
-packs `NewQ-test-DATE_TIME_full.zip` beside the run's folder, and the window shows where
+packs `NewQ-test-DATE_TIME_full.zip` in the test runs folder, and the window shows where
 it is, with *Show the zip in its folder* (Explorer or the Finder with the file selected;
 its folder elsewhere) and *Copy its path*. In it: `report.txt` (the verdict, what each
 kind of cue did, every check of every part, the measurements), `events.log`,
@@ -1108,7 +1108,9 @@ chasing a fault), the last run's `newq.previous.log`, any part of either put asi
 for size (`newq.earlier.log`, `newq.previous.earlier.log`), `newq-crash.log` if there is one, and on a Mac the
 samples taken while the program was frozen. The clips it made and the recording are not
 in it. **It is not sent anywhere**: attach it yourself to a message if you want someone
-to look. The other tests make the same zip of their own folder.
+to look. Short, Medium, Long and the hardware decoding comparison make the same kind of
+zip. Once the zip holds them, the run's loose files are removed, so the zip is the one
+thing a test leaves (if the zip can't be made, the folder stays and the window offers it).
 
 **With no window:** `newq --self-test [--out FOLDER]` plays the same check through the
 show engine and FFmpeg with no window at all, against a mixer that throws the sound away

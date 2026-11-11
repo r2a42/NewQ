@@ -687,7 +687,12 @@ pub fn could_not_start(folder: &Path, log_dir: &Path, why: &str) -> Done {
         laps: 0,
         elapsed: Duration::ZERO,
         ended: End::Failed(why.to_string()),
-        bundle: Bundle::start(folder.to_path_buf(), log_dir.to_path_buf(), false),
+        bundle: Bundle::start(
+            folder.to_path_buf(),
+            log_dir.to_path_buf(),
+            false,
+            super::bundle::TIDY,
+        ),
     }
 }
 
@@ -853,6 +858,7 @@ pub fn finish(
         run.folder.clone(),
         run.log_dir.clone(),
         matches!(end, End::Quit),
+        super::bundle::TIDY,
     );
     Done {
         compare: None,

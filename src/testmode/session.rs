@@ -36,6 +36,8 @@ pub struct TestMode {
     pub decode_secs: u64,
     /// The heavier lap for the graphics card (remembered by the window).
     pub heavy: bool,
+    /// The window has the debug test (the full check) chosen, not a level.
+    pub debug: bool,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
     phase: Phase,
@@ -50,6 +52,7 @@ impl Default for TestMode {
             download: true,
             decode_secs: super::decode::TRIAL_SECS,
             heavy: false,
+            debug: false,
             notice: None,
             phase: Phase::Idle,
         }
@@ -783,6 +786,7 @@ fn compare_done(
             folder.clone(),
             crate::crash::log_dir(),
             matches!(end, End::Quit),
+            super::bundle::TIDY,
         ),
         level: Level::Short,
         verdict,
@@ -1283,6 +1287,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
                 .parent()
                 .map_or_else(crate::crash::log_dir, Path::to_path_buf),
             matches!(end, End::Quit),
+            super::bundle::TIDY,
         ),
         level: run.level,
         verdict,

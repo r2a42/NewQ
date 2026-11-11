@@ -21,14 +21,22 @@ impl Bundle {
 
     /// Make the zip for the run in `folder`. On a thread unless `wait` (the
     /// program is closing and there is no later).
-    pub fn start(folder: PathBuf, log_dir: PathBuf, wait: bool) -> Bundle {
+    /// Make the zip (on a thread unless `wait`). With `tidy`, the run's folder
+    /// is removed once the zip holds it, so the zip is the one thing a test
+    /// leaves; a zip that fails leaves the folder as it is.
+    pub fn start(folder: PathBuf, log_dir: PathBuf, wait: bool, tidy: bool) -> Bundle {
         let bundle = Bundle::default();
         let slot = bundle.0.clone();
         let work = move || {
             crate::logging::flush();
             let result = make(&folder, &log_dir);
             match &result {
-                Ok(p) => log::info!("test mode: the files to send are in {}", p.display()),
+                Ok(p) => {
+                    log::info!("test mode: the files to send are in {}", p.display());
+                    if tidy && let Err(e) = std::fs::remove_dir_all(&folder) {
+                        log::warn!("test mode: {} was left: {e}", folder.display());
+                    }
+                }
                 Err(e) => log::warn!("test mode: the zip could not be made: {e}"),
             }
             *slot.lock() = Some(result);
@@ -44,6 +52,10 @@ impl Bundle {
         bundle
     }
 }
+
+/// Whether a test from the window removes its run folder once the zip is made.
+/// The tests of the tests look in the folder after a run, so they keep it.
+pub const TIDY: bool = !cfg!(test);
 
 /// Where the zip for the run in `folder` goes: beside the folder, with its name.
 pub fn zip_path(folder: &Path) -> PathBuf {
@@ -323,6 +335,25 @@ mod tests {
         std::fs::write(run.join("report.txt"), "Result: Problems found").unwrap();
         let again = make(&run, &logs).unwrap();
         assert_eq!(text_in(&again, "report.txt"), "Result: Problems found");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tidy_bundle_leaves_only_the_zip_and_an_untidy_one_the_folder_too() {
+        let root = temp("tidy");
+        for (name, tidy) in [("kept", false), ("tidied", true)] {
+            let run = root.join("runs").join(name);
+            std::fs::create_dir_all(run.join("media")).unwrap();
+            std::fs::write(run.join("report.txt"), "Result: Passed").unwrap();
+            let b = Bundle::start(run.clone(), root.clone(), true, tidy);
+            let zip = b.get().expect("made at once").expect("a zip");
+            assert_eq!(text_in(&zip, "report.txt"), "Result: Passed");
+            assert_eq!(run.exists(), !tidy, "{name}");
+        }
+        // A zip that can't be made leaves the folder, whatever was asked.
+        let gone = root.join("nowhere").join("run");
+        let b = Bundle::start(gone.clone(), root.clone(), true, true);
+        assert!(matches!(b.get(), Some(Err(_))));
         let _ = std::fs::remove_dir_all(&root);
     }
 

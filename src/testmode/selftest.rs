@@ -205,7 +205,7 @@ pub fn run(folder: &Path) -> i32 {
             folder.join("report.txt"),
             format!("NewQ self-test report\n=====================\nResult: Could not run\n{why}\n"),
         );
-        let _ = bundle::Bundle::start(folder.to_path_buf(), log_dir.clone(), true);
+        let _ = bundle::Bundle::start(folder.to_path_buf(), log_dir.clone(), true, false);
         2
     };
     let Some(ff) = Ffmpeg::locate() else {
@@ -237,7 +237,7 @@ pub fn run(folder: &Path) -> i32 {
     println!("{text}");
     let failed = results.iter().any(|r| r.outcome == Outcome::Failed);
     let nothing = !results.iter().any(|r| r.outcome == Outcome::Passed);
-    let bundle = bundle::Bundle::start(folder.to_path_buf(), log_dir, true);
+    let bundle = bundle::Bundle::start(folder.to_path_buf(), log_dir, true, false);
     match bundle.get() {
         Some(Ok(zip)) => println!("The files to send: {}", zip.display()),
         Some(Err(e)) => eprintln!("self-test: the zip could not be made: {e}"),

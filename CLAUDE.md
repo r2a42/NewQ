@@ -16,6 +16,9 @@ The README describes the features; this file is about working on the code.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
+  Every `queue.submit` goes through `Gpu::submit` and every `surface.configure` through `Gpu::configure`
+  (`Gpu::gate`, a RwLock): configuring waits for the device to go idle and fails if another thread submits
+  meanwhile; a Mac whose external display went off left the control window undrawn for 34 s.
   Texture uploads happen on the main thread (`app.rs::update_outputs`) and wgpu holds each
   one's staging copy until the next `queue.submit`; a Mac stops presenting a background
   window, so nothing else submits: `Gpu::flush_uploads` after each frame's uploads (this
@@ -153,8 +156,8 @@ The README describes the features; this file is about working on the code.
   `gui.rs` is the window (its "Show the test on" ticks are `Prefs::test_displays`;
   `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
   display shows the picture and the others mirror it with a whole-area `part_of`; the
-  main window's own monitor is never offered). The full check (`feature.rs`, the "Run the full check"
-  button, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
+  main window's own monitor is never offered). The full check (`feature.rs`, chosen as "Debug test" beside
+  Short/Medium/Long, `TestMode::debug`, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
   clip in the run folder; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
   `Check`s); `Runner` plays them one at a time, its clock starting when the part's `lead` cue is started,
   noting `Obs` every 20 ms (what a part fires later is got ready first, `Engine::load_ahead`, so FFmpeg's start
@@ -166,7 +169,8 @@ The README describes the features; this file is about working on the code.
   growing; `Ask::ServeOn` streams to a server on `streamlink::LOOPBACK` (127.0.0.1, free ports) and asks it
   over RTSP whether the stream is there; skipped unless `mediamtx::locate()` and `Prefs::allow_hosting`.
   `bundle.rs` zips the run folder plus newq.log, newq.previous.log (and their `.earlier` parts) and newq-crash.log beside it
-  (`NewQ-test-<run>.zip`, on a thread; every test's `Done::bundle`), and `reveal` shows it (`explorer
+  (`NewQ-test-<run>.zip`, on a thread; every test's `Done::bundle`; with `bundle::TIDY`, off under
+  `cfg(test)`, the run folder is removed once the zip holds it), and `reveal` shows it (`explorer
   /select,"…"` needs `raw_arg`; `open -R`; `xdg-open` of the folder). `selftest.rs` is `newq --self-test
   [--out dir]`: the same `Runner` on an `Engine` with `AudioOut::silent()` (a paced mixer thread, no
   device), exit 0/1/2; CI runs it on all three systems and uploads the zip. Engine-level only: "reached the

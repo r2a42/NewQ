@@ -462,15 +462,17 @@ fn body(
                 }
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("The run's own folder").small().weak());
             ui.horizontal(|ui| {
-                if ui.small_button("Open the folder").clicked()
-                    && let Err(e) = open_folder(&d.folder)
-                {
-                    failed = Some(e);
-                }
-                if ui.small_button("Copy the path").clicked() {
-                    ui.ctx().copy_text(d.folder.display().to_string());
+                // The folder is only left when the zip couldn't hold it.
+                if d.folder.exists() {
+                    if ui.small_button("Open the run's folder").clicked()
+                        && let Err(e) = open_folder(&d.folder)
+                    {
+                        failed = Some(e);
+                    }
+                    if ui.small_button("Copy its path").clicked() {
+                        ui.ctx().copy_text(d.folder.display().to_string());
+                    }
                 }
                 if ui.button("Run another test").clicked() {
                     dismiss = true;
@@ -513,15 +515,34 @@ fn idle(
 ) {
     ui.label("Plays a show of its own to see how this computer copes, then puts yours back exactly as it was.");
     ui.add_space(6.0);
-    // The one button: no choices to make, and one file to send at the end.
-    let can_full = refusal.is_none() && engine.ff.is_some();
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    ui.label(RichText::new("Choose a test").strong());
+    choose(ui, test);
+    let can = refusal.is_none() && engine.ff.is_some();
+    if test.debug {
+        ui.label(
+            RichText::new(
+                "About two minutes. Plays every kind of cue once (video, pictures, sound, text, shapes, camera, slides, groups, fades, control, stop, wait, send, timecode, effects, a recording) and checks that each did what it should. Nothing is downloaded and nothing leaves this computer. Use this one when something seems wrong: send the zip it makes.",
+            )
+            .weak(),
+        );
+        ui.separator();
+        displays_section(ui, screens, selected);
+        ui.separator();
+        sound_section(ui, devices, sound);
+        ui.separator();
+        if let Some(why) = refusal {
+            ui.colored_label(AMBER, why);
+        }
+        if engine.ff.is_none() {
+            ui.colored_label(
+                RED,
+                "FFmpeg wasn't found, so there is nothing to play with. See Settings.",
+            );
+        }
         if ui
             .add_enabled(
-                can_full,
-                egui::Button::new(RichText::new("Run the full check").size(17.0).strong())
-                    .min_size(egui::vec2(220.0, 34.0)),
+                can,
+                egui::Button::new(RichText::new("Start the debug test").strong()),
             )
             .clicked()
             && let Some(ff) = engine.ff.clone()
@@ -533,20 +554,53 @@ fn idle(
                 sound_of(devices, sound),
             );
         }
-        ui.label(
-            RichText::new(
-                "About two minutes. Plays every kind of cue once (video, pictures, sound, text, shapes, camera, slides, groups, fades, control, stop, wait, send, timecode, effects, a recording) and checks that each did what it should. Then packs the report and NewQ's logs into one zip for you to send. Nothing is downloaded and nothing leaves this computer.",
-            )
+    } else {
+        level_section(
+            ui, engine, test, refusal, log_dir, screens, selected, devices, sound,
+        );
+    }
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(RichText::new("Does hardware decoding help here?").strong());
+    ui.label(
+        RichText::new(
+            "Plays a wall of 4K clips twice, with it off and on, about two minutes, and says which to use. It makes a 4K clip from the downloaded film (or, if this computer can't, plays the 1080p film several times).",
+        )
+        .weak()
+        .small(),
+    );
+    if ui
+        .add_enabled(can, egui::Button::new("Compare hardware decoding"))
+        .clicked()
+        && let Some(ff) = engine.ff.clone()
+    {
+        test.start_compare(ff, log_dir, chosen(screens, selected));
+    }
+    ui.label(
+        RichText::new("Sound and pictures go to your show's outputs while it runs. Log files: ")
             .weak()
             .small(),
-        );
-        if let Some(why) = refusal {
-            ui.colored_label(AMBER, why);
-        }
-    });
-    ui.add_space(8.0);
-    ui.label(RichText::new("Or a test of how it holds up over time").strong());
-    choose(ui, test);
+    );
+    ui.label(
+        RichText::new(log_dir.join("test-mode").join("runs").display().to_string())
+            .weak()
+            .small(),
+    );
+}
+
+/// The Short, Medium and Long tests' choices and their Start button.
+#[allow(clippy::too_many_arguments)]
+fn level_section(
+    ui: &mut egui::Ui,
+    engine: &Engine,
+    test: &mut super::TestMode,
+    refusal: Option<&'static str>,
+    log_dir: &std::path::Path,
+    screens: &[Screen],
+    selected: &mut Vec<String>,
+    devices: &[String],
+    sound: &mut (Option<String>, bool),
+) {
     ui.label(RichText::new(test.level.summary()).weak());
     let lengths = test.level.lengths();
     if !lengths.is_empty() {
@@ -635,33 +689,6 @@ fn idle(
             test.heavy,
         );
     }
-    ui.add_space(6.0);
-    ui.separator();
-    ui.label(RichText::new("Does hardware decoding help here?").strong());
-    ui.label(
-        RichText::new(
-            "Plays a wall of 4K clips twice, with it off and on, about two minutes, and says which to use. It makes a 4K clip from the downloaded film (or, if this computer can't, plays the 1080p film several times).",
-        )
-        .weak()
-        .small(),
-    );
-    if ui
-        .add_enabled(can, egui::Button::new("Compare hardware decoding"))
-        .clicked()
-        && let Some(ff) = engine.ff.clone()
-    {
-        test.start_compare(ff, log_dir, chosen(screens, selected));
-    }
-    ui.label(
-        RichText::new("Sound and pictures go to your show's outputs while it runs. Log files: ")
-            .weak()
-            .small(),
-    );
-    ui.label(
-        RichText::new(log_dir.join("test-mode").join("runs").display().to_string())
-            .weak()
-            .small(),
-    );
 }
 
 fn minutes_text(m: u32) -> String {
@@ -675,10 +702,15 @@ fn minutes_text(m: u32) -> String {
 fn choose(ui: &mut egui::Ui, test: &mut super::TestMode) {
     ui.horizontal(|ui| {
         for level in Level::ALL {
-            let selected = test.level == level;
+            let selected = !test.debug && test.level == level;
             if ui.selectable_label(selected, level.label()).clicked() {
+                test.debug = false;
                 test.set_level(level);
             }
+        }
+        ui.separator();
+        if ui.selectable_label(test.debug, "Debug test").clicked() {
+            test.debug = true;
         }
     });
 }
