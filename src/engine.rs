@@ -1215,6 +1215,19 @@ impl Engine {
         self.log_tap = on.then(Vec::new);
     }
 
+    /// Get a cue (and a group's children) ready ahead of time, as a control
+    /// cue's Load does, and keep it ready until it is fired or let go.
+    pub fn load_ahead(&mut self, show: &Show, id: CueId) {
+        for id in show.with_children(id) {
+            self.loads.insert(id);
+        }
+    }
+
+    /// Let go of everything that was asked to be kept ready.
+    pub fn unload_all(&mut self) {
+        self.loads.clear();
+    }
+
     /// What `problem` was told since this was last asked (while the tap is on).
     pub fn take_problems(&mut self) -> Vec<String> {
         std::mem::take(&mut self.problem_tap)

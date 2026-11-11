@@ -2306,6 +2306,7 @@ impl Runner {
         self.results.push(result);
         engine.stop_all(0.0);
         engine.set_paused(false);
+        engine.unload_all();
         self.obs.clear();
         self.ctx.osc.clear();
         self.rested = Some(Instant::now());
@@ -2403,6 +2404,16 @@ impl Runner {
             for a in &first {
                 self.act(a, show, engine);
             }
+            // What the part fires later is got ready now, so that it starts
+            // when it is fired however long FFmpeg takes to start here (the
+            // part's times are about the cues, not about that).
+            for (_, act) in self.parts[n].acts.iter().skip(first.len()) {
+                if let Act::Fire(id) | Act::GoAt(id) = act
+                    && show.cue(*id).is_some_and(|c| c.kind.preloads())
+                {
+                    engine.load_ahead(show, *id);
+                }
+            }
             self.now = Some(Playing {
                 n,
                 fired: now,
@@ -2420,6 +2431,17 @@ impl Runner {
             let up = part
                 .lead
                 .is_none_or(|l| engine.active.iter().any(|a| a.cue_id == l && a.started));
+            // (And what it fires later is ready, or has had as long to be.)
+            let ready = part.acts.iter().all(|(at, act)| match act {
+                Act::Fire(id) | Act::GoAt(id) if *at > 0.0 => {
+                    !show.cue(*id).is_some_and(|c| c.kind.preloads()) || engine.is_prepared(*id)
+                }
+                _ => true,
+            });
+            if up && !ready && waited < START {
+                self.now = Some(playing);
+                return false;
+            }
             if up {
                 playing.clock = Some(now);
                 playing.lead = lead_name.map(|n| {
