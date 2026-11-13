@@ -175,6 +175,34 @@ fn read_at_speed(
     }
 }
 
+/// What follows a live input's `-i`: its picture as raw frames of `w` x `h`
+/// on the pipe, each captured frame written once. Without `-fps_mode
+/// passthrough` FFmpeg writes raw video at the constant rate the input claims
+/// and fills the gaps with copies; a Mac's screen and many USB capture devices
+/// claim a million frames a second (AVFoundation's "1000k tbr"), so every real
+/// frame was followed by thousands of copies and the picture stood still on
+/// the first.
+fn live_output_args(w: u32, h: u32) -> Vec<String> {
+    [
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        &format!("scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        "pipe:1",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
 impl VideoPlayer {
     /// Start decoding `path` from `start`; `playback` says whether to play
     /// once or loop a slice.
@@ -458,20 +486,7 @@ impl VideoPlayer {
                 let mut cmd = ff.command();
                 cmd.args(["-fflags", "nobuffer", "-flags", "low_delay"]);
                 cmd.args(&input);
-                cmd.args([
-                    "-map",
-                    "0:v:0",
-                    "-an",
-                    "-sn",
-                    "-dn",
-                    "-vf",
-                    &format!("scale={w}:{h}:flags=bicubic:out_range=tv,format=yuv420p"),
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "pipe:1",
-                ]);
+                cmd.args(live_output_args(w, h));
                 cmd
             }
         };
@@ -1216,5 +1231,33 @@ mod tests {
         assert_eq!(decode_size((1920, 1080), (1080, 1920), false), (1080, 608));
         assert_eq!(decode_size((1920, 1080), (1080, 1920), true), (1920, 1080));
         assert_eq!(decode_size((641, 361), (4000, 4000), false), (640, 360));
+    }
+    /// A live source whose frames come further apart than the rate it claims
+    /// (as a Mac's screen capture does, by far) is written frame for frame,
+    /// not padded out with copies.
+    #[test]
+    fn a_live_picture_is_passed_on_frame_for_frame_with_no_copies() {
+        let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        // Thirty frames a second claimed, three a second delivered, for 2 s.
+        let mut cmd = ff.command();
+        cmd.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=30,select='not(mod(n,10))'",
+            "-t",
+            "2",
+        ]);
+        cmd.args(live_output_args(64, 64));
+        let out = cmd.output().expect("ffmpeg runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let frames = out.stdout.len() / (64 * 64 * 3 / 2);
+        assert!((5..=7).contains(&frames), "{frames} frames for 6 captured");
     }
 }
