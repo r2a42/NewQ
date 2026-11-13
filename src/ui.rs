@@ -8018,9 +8018,7 @@ fn effects_inspector(ui: &mut Ui, cue_id: CueId, ty: CueType, m: &mut MediaCue, 
                 );
             }
             let (mut remove, mut up) = (None, None);
-            let count = m.effects.len();
-            for i in 0..count {
-                let e = &mut m.effects[i];
+            for (i, e) in m.effects.iter_mut().enumerate() {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut e.enabled, "")
