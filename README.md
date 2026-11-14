@@ -638,7 +638,8 @@ stays on the computer until you send it yourself.
   together* fires every child at once (a child's pre-wait is its offset from the
   start, so a group is a small timeline, which the group's inspector draws: a bar for
   each child, with a line for where the group has got to while it plays; drag a bar
-  to move that cue in time); *Play in order* fires each child when
+  to move that cue in time; its tracks open in the timeline editor, see
+  *Timelines* below); *Play in order* fires each child when
   the one before it finishes. The group is running until all of its children
   have finished, so auto-follow after a group waits for the last child, and
   stopping or fading a group (or a Fade/Stop cue aimed at it) stops or fades its
@@ -985,6 +986,106 @@ stays on the computer until you send it yourself.
   main window and every output window again on a new device, usually in well
   under a second. Cues keep playing; a picture may blink out for that moment.
 
+## Timelines
+
+A *Start all together* group is a **timeline**: each cue in it (a *clip*) starts at
+its pre-wait on one clock, and the group can be paused, run on, stopped and moved
+about on that clock.
+
+**Making one.** Make a group and set it to *Start all together*, or, with the
+Timeline pane open and no timeline chosen, click **New timeline group**. Add cues
+to it as to any group (a cue added while the group is selected goes inside). A
+group made this way has *Clips at opacity 0 wait for their fade-in* ticked (see
+below); a group from an older show has it off and plays as it always did.
+
+**The tracks editor.** Double-click a timeline group in the cue list (or click
+*Open in timeline editor* in its inspector, or *Window ▸ Timeline*) to see its
+tracks: a row per display and layer ("V1 · Layer 0"), a row per audio output
+("A1"), and a *Cues* row for the control, fade and stop cues. It is a pane under
+the cue list (it can be popped out like the others); in the new interface it is a
+panel above the inspector (*Close timeline* puts it away). Each clip is a bar from
+its start to its end, with ramps for its fade-in and fade-out, and badges: 🔁 it
+loops, ⏩ its speed is keyframed, 🔊 a video with sound, ∞ it has no end of its
+own, ⚠ see *If a clip runs out* below. A dimmed bar is disarmed.
+
+- Drag a clip to move it in time; drag the selection to move them all (Ctrl-click
+  and Shift-click pick several, as in the cue list); drag a clip's end to trim it.
+  Moves snap to clip edges, fade-outs, markers and the playhead (the *Snap* button,
+  or hold Alt while dragging to place freely). Each move or trim is one undo step.
+- Ctrl+wheel (Cmd on a Mac) zooms around the pointer; the wheel scrolls; *Fit*
+  shows the whole timeline. A thin bar at the right shows there are more tracks
+  than fit.
+- **Markers:** *+ Marker* adds one at the playhead. Drag its flag to move it,
+  double-click it to rename it, right-click for *Add Pause cue here*, *Jump here*
+  and *Remove marker*.
+- Right-click a clip for *Pause before this clip comes in*, *Pause before this clip
+  fades out*, *Freeze clip* and *Resume clip*.
+- Editing is locked in show mode and while a test runs; Run, Pause and Stop still
+  work.
+
+**Running it.** GO on the group runs the timeline from the top, and the toolbar's
+*Run* from where its playhead is; the red playhead follows the clock and the toolbar says *Running · next pause
+in …*. The toolbar's *Pause* holds every clip where it is (live cameras and live
+sound stay live) and *Run* carries on; *Stop* stops its clips and leaves the
+playhead where it is.
+
+**Pause cues.** A *Pause timeline* control cue on the timeline stops its clock when
+the clock reaches it: nothing later starts until **GO**, which runs the timeline on
+from there (the toolbar says what GO will bring in, "GO: crossfade to …"). What a
+pause does to what is already playing is its *Freeze* choice:
+
+- *Nothing: content runs on* (a **free-run** pause): only the clock stops; clips go
+  on playing or looping. A transition timed after the pause (a crossfade, a fade
+  cue, a clip's fade-out, a keyframe ramp) waits for the GO and then takes its full
+  time.
+- *Everything (pause on a frame)*: every clip holds its frame and its sound stops.
+- *These clips*: only the ticked clips hold; the rest run on.
+- *Live inputs freeze too* (for the last two): a camera or NDI source holds its
+  last frame and live sound goes quiet; off (the default) they stay live, so a
+  frozen picture can have a live camera over it.
+
+The other timeline control cues: **Run timeline** (from its playhead, or from a
+point you choose), **Stop timeline** (stops what it plays, at once, leaving the
+playhead), **Jump in timeline** (moves the playhead to a time, a marker or the start
+of a clip). Each acts on its own timeline, or on another you pick. A clip's own
+*Pause* and *Resume* control cues (and *Freeze clip*) hold just that clip while the
+clock runs on.
+
+**If a clip runs out** before the timeline moves on (a free-run pause inside it
+lasts longer than the clip): *If it runs out* in the clip's inspector chooses
+**End** (the default: it fades out over its own fade-out, or the 2-second default
+fade if it has none, or the time you set; 0 is a cut), **Loop** (round again from
+its in point until the timeline ends it) or **Hold** (its last frame; a sound goes
+silent). The editor marks such a clip left on End with ⚠.
+
+**Clips at opacity 0 wait for their fade-in.** On a timeline with this ticked, a
+clip that is invisible when the clock reaches it (opacity 0, or opacity keyframes
+that start at 0; a sound at silence) doesn't start its content until it begins to
+fade in, by its own keyframes or by a fade cue, so the viewer sees it from its
+first frame. The editor hatches the wait before it; a clip waiting for a fade cue
+that never comes says so. A clip the run is waiting on right now is hatched in
+blue. To have a clip rolling unseen from its start instead, tick *Already running
+when it fades in* in its inspector.
+
+**Moving the playhead.** Click or drag on the ruler: where you let go, the timeline
+is **parked** there, with the picture at that moment on the displays and the sound
+ready, and the toolbar says *Parked*. *Run* or GO plays on from there. (A click at
+the very start shows the first frame.) In show mode the ruler of a timeline group
+is locked, since parking puts its picture on the outputs.
+
+**Keyframes on a timeline.** A clip's opacity, position and effect keyframes follow
+the timeline's clock, so they stand still at a pause and go on from the GO, even
+while the clip's content plays on. Its speed keyframes follow its content.
+
+**Not there yet:** a cue list that is a timeline (a Timeline tab of its own),
+automatic crossfades between overlapping clips (give the later clip a Crossfade
+transition; the group's *Overlapping clips crossfade* is greyed until then), adding
+clips and tracks, splitting and ripple delete from the editor, a speed lane, one
+clip on several displays, and a separate timeline workspace.
+
+A show that uses the timeline control cues (Run, Pause, Stop, Jump timeline) does
+not open in NewQ 0.20.3 or older.
+
 ## If NewQ crashes or won't start
 
 NewQ keeps a log. It is in `%LOCALAPPDATA%\NewQ\newq.log` on Windows
@@ -1276,6 +1377,9 @@ night is about 3,000 rows.
 | Ctrl-click / Shift-click | Add to the selection / select a run of cues  |
 | Ctrl+Z / Ctrl+Y       | Undo / redo (Ctrl+Shift+Z also redoes)          |
 | Ctrl+N / Ctrl+O / Ctrl+S | New / open / save show                       |
+| Double-click a timeline group | Open it in the tracks editor            |
+| Ctrl+wheel (tracks editor) | Zoom around the pointer                    |
+| Alt while dragging (tracks editor) | Place freely, without snapping     |
 | Ctrl+Shift+S          | Save as                                         |
 
 Space and Esc also work while an output window has focus.

@@ -7,6 +7,35 @@ release page, and a release is refused if it has none.
 ## Unreleased
 
 - **Changelog.** Each release page now starts with what changed in that version.
+- **Timelines.** A *Start all together* group is now a timeline you can see and
+  work on: double-click it (or *Window ▸ Timeline*) to open its tracks, one row per
+  display layer and sound output, with the clips as bars. Drag clips to move them,
+  drag their ends to trim, add markers, and click the ruler to park the show at
+  any moment with its picture on the displays. See *Timelines* in the README.
+- **Pause cues on a timeline.** A *Pause timeline* cue stops the timeline's clock
+  until GO. It can let what is playing run on (and then the next crossfade, fade
+  or keyframe ramp waits for your GO), or hold everything on a frame, or hold only
+  the clips you tick; cameras and live sound stay live unless you say otherwise.
+  *Run*, *Stop* and *Jump in timeline* cues go with it, and a clip's own Pause and
+  Resume cues still hold just that clip.
+- **A clip that runs out during a pause** fades out by default; choose Loop or Hold
+  for it in its inspector. The editor marks such clips with ⚠.
+- **Clips at opacity 0 wait for their fade-in** on a timeline made in this version,
+  so a picture that fades up later is seen from its first frame. A clip can opt out
+  (*Already running when it fades in*). Older shows play as they did.
+- **On a timeline, opacity, position and effect keyframes follow the timeline's
+  clock:** they stand still at a pause and go on from the GO. Speed keyframes
+  follow the clip.
+- **Duplicating a group** now aims the Pause, Fade and Stop cues inside it at the
+  copied cues, not at the originals.
+- **Double-clicking a timeline group** in the cue list opens its tracks instead of
+  firing it (GO and *Fire* still start it). Other cues still fire on a
+  double-click.
+- **Not yet:** timeline cue lists (a tab of their own), automatic crossfades where
+  clips overlap, adding clips, splitting and tracks from the editor, and one clip on
+  several displays.
+- **A show that uses the new timeline cues (Run, Pause, Stop or Jump timeline)
+  will not open in NewQ 0.20.3 or older.**
 
 ## 0.20.3
 

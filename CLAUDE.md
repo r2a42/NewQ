@@ -13,6 +13,39 @@ The README describes the features; this file is about working on the code.
   `next_top`, `move_cue` and `insert_slot` stay inside a list. The engine's
   `playhead` is the active list's; the other lists' are in `list_playheads`.
 - `src/engine.rs`: GO, pre-waits, continues, transitions, fades, groups, preload.
+- Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
+  sections win). A timeline is a "start all together" group that is not a slide show
+  (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0; nothing in the UI
+  makes one yet). `src/timeline/`: `mod.rs` the file's types (`TimelineSettings` with
+  `start_on_fade_in`/`crossfade_overlaps`, `Marker`, `TimelinePoint`, `RunOut`, `PauseFreeze`, `TrackId`;
+  all `#[serde(default)]`, unwritten at their default, so old shows are unchanged; the four
+  `ControlAction::Timeline*` variants are what 0.20.3 can't read); `model.rs` the pure read model
+  (`clips` with each clip's lead-in and `clocked`, `tracks`, `lead_in`, `fade_wake`, `key_of`, `members`
+  is structural only; `Dur` is the engine's `cue_duration`, and only its Group arm adds the lead-in);
+  `edit.rs` pure edits that say what they changed (move, trim, split, ripple delete, add clip/control/
+  pause-before/track/marker; `split` leaves fade cues on the first half and makes the second visible,
+  `starts_visible`); `snap.rs`; `chase.rs` works out what plays at a time (seek, parking, Jump), pure, its
+  own tests. `src/engine/timeline.rs`: a `Run` per timeline in `Runs.map` (clock `pos`, `RunState`
+  Stopped/Cueing/Running/Paused, `RunView` for the UI, `pub use`d by `engine.rs`); waiting clips are
+  `PendingCue`s tagged with the run; at equal times control cues go first (`model::due_order`), so a
+  pause stops the clock before anything after it; a clocked clip's end and fade-out come from the clock
+  (`ActiveCue::ends_at`, `run_out` when its content runs out first); a seek cues for up to `CUE_LIMIT`
+  while running, else parks (paused, picture on the outputs; a seek to exactly 0 parks with nothing up,
+  so the editor seeks to `ui::timeline::FIRST_FRAME`); `timeline_waiting`/`timeline_detached` feed the
+  editor's hatching. Tests in `engine/timeline/tests.rs` play real media (`color_red.png`, the test-pattern
+  camera); live sound under a freezing pause is untested (no device). `src/ui/timeline.rs` and
+  `src/ui/timeline/`: the tracks editor (`editor`, hosted as `Pane::Timeline` in the dock and as a bottom
+  panel of the new interface's Editor view; `Host` salts its ids); it takes `&Show` and asks for
+  `TimelineAction`s that `apply` makes after the frame (edits refused in show mode and tests by
+  `edits_the_show`); a drag lives in `EditorState` and is asked for once on release (one undo step);
+  `tracks.rs` clips, rows, drags and the vertical-overflow bar; `ruler.rs` ticks, markers, the playhead
+  (a ruler tap or drag seeks on release; locked in show mode for a group); `toolbar.rs` transport and
+  read-outs (`state_text`: "Parked" is guessed from no pause cue at the playhead, `RunView` has no flag);
+  `control.rs` the inspector rows (`inspector_rows` at the end of the inspector). Double-clicking a
+  timeline group's row opens it rather than firing it. Tests drive it with the mouse (`TimelineRects`,
+  `Draw::Full` for the whole window and undo); tried headless under xvfb in both interfaces. Variants and
+  hosts kept `allow(dead_code)` are for the tools still to come (split, ripple, add clip/track, speed lane:
+  P6; list tab: P4; workspace: P7).
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
