@@ -1146,6 +1146,33 @@ fn run_runs_the_timeline_and_a_pause_before_a_clip_brings_it_in_on_go() {
 }
 
 #[test]
+fn a_tap_on_the_ruler_pressed_and_let_go_in_one_frame_seeks_once() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    let at = pos2(r.x0 + 3.3 * r.pps, r.ruler.center().y);
+    let mut all = m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(at)]);
+    all.extend(m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![
+            button(at, true, PointerButton::Primary),
+            button(at, false, PointerButton::Primary),
+        ],
+    ));
+    all.extend(m.frame(&mut f.show, &mut f.st, vec![]));
+    match timeline_actions(&all).as_slice() {
+        [TimelineAction::Seek { key: k, pos }] => {
+            assert_eq!(*k, key);
+            assert!((pos - 3.3).abs() < 0.15, "{pos}");
+        }
+        other => panic!("wanted one Seek, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_click_at_the_very_start_of_the_ruler_parks_on_the_first_frame() {
     let Some((mut f, mut m)) = with_pictures() else {
         return;

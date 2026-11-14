@@ -86,6 +86,16 @@ pub(super) fn draw(
                 .input(|i| i.pointer.interact_pos())
                 .map_or(ctx.pos, |p| geo.t(p.x).max(0.0));
             st.timeline.drag = Some((host, Drag::Playhead { pos }));
+        } else if resp.clicked()
+            && st.timeline.drag_in(host).is_none()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            // Pressed and let go within one frame (a quick tap, or a busy
+            // frame): no drag was seen, so seek here and now.
+            actions.push(Action::Timeline(TimelineAction::Seek {
+                key,
+                pos: geo.t(p.x).max(0.0),
+            }));
         }
     }
 
