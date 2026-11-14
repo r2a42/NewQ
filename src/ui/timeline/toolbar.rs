@@ -25,7 +25,7 @@ pub(super) fn go_text(show: &Show, id: CueId) -> String {
 }
 
 /// How the run is doing, in a few words.
-fn state_text(run: &RunView, pos: f64) -> String {
+pub(super) fn state_text(show: &Show, run: &RunView, pos: f64) -> String {
     match run.state {
         RunState::Stopped => "Stopped".into(),
         RunState::Cueing => "Cueing…".into(),
@@ -37,8 +37,24 @@ fn state_text(run: &RunView, pos: f64) -> String {
             freeze: PauseFreeze::Nothing,
             ..
         } => "Paused · content runs on".into(),
+        RunState::Paused {
+            freeze: PauseFreeze::Everything,
+            waits_for_go: true,
+        } if parked(show, run.key, pos) => "Parked · Run or GO plays from here".into(),
         RunState::Paused { .. } => "Paused".into(),
     }
+}
+
+/// Whether a run held still for GO was put there by a seek (the ruler, a
+/// marker) rather than by one of its pause cues: no pause cue of it is where
+/// it stands. (`RunView` has no word for it; a pause cue elsewhere that names
+/// this timeline also reads as parked.)
+fn parked(show: &Show, key: TimelineKey, pos: f64) -> bool {
+    !model::members(show, key).iter().any(|c| {
+        c.armed
+            && (c.pre_wait - pos).abs() < 1e-3
+            && matches!(&c.kind, CueKind::Control(k) if k.action == ControlAction::TimelinePause)
+    })
 }
 
 /// Note, for the tests, where a toolbar button is.
@@ -95,7 +111,7 @@ pub(super) fn draw(
         }
         let length = ctx.run.length.map_or("–:––.–".to_string(), fmt_time);
         ui.label(RichText::new(format!("{} / {length}", fmt_time(ctx.pos))).monospace());
-        ui.label(RichText::new(state_text(ctx.run, ctx.pos)).weak());
+        ui.label(RichText::new(state_text(ctx.show, ctx.run, ctx.pos)).weak());
         if matches!(ctx.run.state, RunState::Paused { .. })
             && let Some(id) = ctx.run.on_go
         {
