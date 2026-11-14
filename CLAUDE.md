@@ -39,7 +39,7 @@ The README describes the features; this file is about working on the code.
   held in the mixer while the clock stands (`timeline_hold_crosspoints` -> `Voice::hold_crosspoints`,
   an atomic); untagged (by hand, off the timeline, a Stop's fade) move with show time. The Stop cue
   fades the run out over `ControlCue::fade` (`stop_fade()`: None = `TIMELINE_STOP_FADE`, 3 s; 0
-  cuts; a second Stop cuts). What GO does is `Engine::go_plan` (`GoPlan`, `TimelineGo`; `go` and
+  cuts; a second Stop cuts; `RunView.fading` meanwhile, "Stopping · fading out"). What GO does is `Engine::go_plan` (`GoPlan`, `TimelineGo`; `go` and
   `timeline_go` follow the same `timeline_go_for`), which the transports, the new interface and the web
   remote's `go` read out (`GoPlan::describe`, words from `model::on_go_text`). Tests in `engine/timeline/tests.rs` play real media (`color_red.png`, the test-pattern
   camera); live sound under a freezing pause is untested (no device). `src/ui/timeline.rs` and

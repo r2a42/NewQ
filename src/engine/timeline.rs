@@ -108,6 +108,8 @@ pub struct RunView {
     /// Paused where a seek (the ruler, a marker, a Jump) put it, or where a
     /// pause caught it cueing: GO or Run cues what is there and plays on.
     pub parked: bool,
+    /// Stopped, with what it played still fading out (a Stop's fade).
+    pub fading: bool,
 }
 
 /// What GO does to a timeline (`Engine::go_plan`, which `timeline_go` follows).
@@ -435,6 +437,7 @@ impl Engine {
                 length,
                 on_go: None,
                 parked: false,
+                fading: false,
             };
         };
         let (state, pos, instance, parked) = (run.state, run.pos, run.instance, run.parked);
@@ -460,6 +463,11 @@ impl Engine {
             length,
             on_go,
             parked,
+            fading: state == RunState::Stopped && self.active.iter().any(|a| {
+                a.stopping
+                    && (a.run == Some(instance)
+                        || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == Some(instance)))
+            }),
         }
     }
 

@@ -2388,6 +2388,7 @@ fn a_timeline_stop_fades_the_picture_out_over_three_seconds_and_then_the_run_is_
     // Stopped at once, where it was; the picture is on its way out.
     let v = view(&mut e, &show, key(g));
     assert_eq!((v.state, v.pos), (RunState::Stopped, 1.0));
+    assert!(v.fading, "the editor says it is fading out");
     assert!(active(&e, t).is_some_and(|a| a.stopping));
     ticks(&mut e, &show, 0.25, 6);
     let o = opacity(&e, t).expect("still fading at 1.5 s");
@@ -2398,6 +2399,7 @@ fn a_timeline_stop_fades_the_picture_out_over_three_seconds_and_then_the_run_is_
     assert!(!e.is_active(), "the group has ended with it");
     let v = view(&mut e, &show, key(g));
     assert_eq!((v.state, v.pos), (RunState::Stopped, 1.0));
+    assert!(!v.fading);
 }
 
 #[test]

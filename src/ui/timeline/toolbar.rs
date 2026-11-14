@@ -14,6 +14,7 @@ pub(super) fn go_text(show: &Show, id: CueId) -> String {
 /// How the run is doing, in a few words.
 pub(super) fn state_text(run: &RunView, pos: f64) -> String {
     match run.state {
+        RunState::Stopped if run.fading => "Stopping · fading out".into(),
         RunState::Stopped => "Stopped".into(),
         RunState::Cueing => "Cueing…".into(),
         RunState::Running => match run.next_pause {
