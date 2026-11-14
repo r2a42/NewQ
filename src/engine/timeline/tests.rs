@@ -1946,3 +1946,273 @@ fn a_run_cue_with_a_place_runs_its_timeline_from_there() {
     e.tick(&show, 1.0);
     assert!((view(&mut e, &show, key(g)).pos - 5.0).abs() < 1e-9);
 }
+
+// ----- Keyframes follow the timeline's clock (P2c) -------------------------------
+
+use crate::show::{Effect, EffectKind};
+
+/// Give `c` keys that ramp from 1.5 s to 2.5 s of its time: opacity 1 to 0.2,
+/// x 0 to 0.5 and a blur of 0 to 20.
+fn keyed(mut c: Cue) -> Cue {
+    let m = c.kind.media_mut().unwrap();
+    m.motion.opacity = Some(ramp(&[(0.0, 1.0), (1.5, 1.0), (2.5, 0.2)]));
+    m.motion.x = Some(ramp(&[(0.0, 0.0), (1.5, 0.0), (2.5, 0.5)]));
+    let mut blur = Effect::new(EffectKind::Blur);
+    blur.p[0] = ramp(&[(0.0, 0.0), (1.5, 0.0), (2.5, 20.0)]);
+    m.effects = vec![blur];
+    c
+}
+
+/// What a picture clip looks like: its opacity, x and blur.
+fn looks(e: &Engine, id: CueId) -> (f32, f32, f32) {
+    let a = active(e, id).expect("it is playing");
+    let (x, blur) = match &a.kind {
+        ActiveKind::Video(v) => (v.transform.x, v.fx.blur),
+        ActiveKind::Image(i) => (i.transform.x, i.fx.blur),
+        _ => panic!("a picture"),
+    };
+    (a.opacity.value, x, blur)
+}
+
+fn near(got: (f32, f32, f32), want: (f32, f32, f32), what: &str) {
+    let ok = (got.0 - want.0).abs() < 0.02
+        && (got.1 - want.1).abs() < 0.01
+        && (got.2 - want.2).abs() < 0.4;
+    assert!(ok, "{what}: {got:?}, not {want:?}");
+}
+
+/// A timeline group with a one-second looping video from 0 with `keyed`'s
+/// keys, and a free-run pause at 1 s, before the ramp.
+fn looping_keyed_show(clip: PathBuf) -> (Show, CueId, CueId) {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let mut c = keyed(file(&mut show, CueType::Video, clip, 1.0));
+    c.kind.media_mut().unwrap().loop_media = true;
+    let lp = child(&mut show, g, c, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 1.0);
+    (show, g, lp)
+}
+
+/// Play `looping_keyed_show` to its pause, let the loop run on there for 4 s,
+/// GO, and play on: how the loop looked at the pause, after 4 s of it, and with
+/// the clock at 1.5, 2.0 and 2.6 s after GO.
+fn through_the_pause(e: &mut Engine, show: &Show, g: CueId, lp: CueId) -> [(f32, f32, f32); 5] {
+    e.playhead = Some(g);
+    e.go(show);
+    until(e, show, Some(0.0), "the loop", 20, |e| started(e, lp));
+    ticks(e, show, 0.05, 30);
+    assert_eq!(paused_at(e, show, key(g)), Some(1.0));
+    let at_pause = looks(e, lp);
+    let (content, passes) = {
+        let a = active(e, lp).unwrap();
+        (a.elapsed, a.pass_number())
+    };
+    ticks(e, show, 0.05, 80);
+    let a = active(e, lp).unwrap();
+    // The content went on round its loop; its keyframes' time stood with the clock.
+    assert!(a.elapsed > content + 3.9, "{} {content}", a.elapsed);
+    assert!(
+        a.pass_number() >= passes.map(|p| p + 3),
+        "{:?}",
+        a.pass_number()
+    );
+    assert!((a.key_time() - 1.0).abs() < 1e-9, "{}", a.key_time());
+    let after_wait = looks(e, lp);
+    e.go(show);
+    assert_eq!(state(e, show, key(g)), RunState::Running);
+    let mut at = Vec::new();
+    for n in [10, 10, 12] {
+        ticks(e, show, 0.05, n);
+        at.push(looks(e, lp));
+    }
+    let pos = view(e, show, key(g)).pos;
+    assert!((pos - 2.6).abs() < 1e-6, "{pos}");
+    [at_pause, after_wait, at[0], at[1], at[2]]
+}
+
+#[test]
+fn opacity_keys_after_a_free_run_pause_stand_while_the_loop_runs_on_and_ramp_after_go() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let (show, g, lp) = looping_keyed_show(clip);
+    let seen = through_the_pause(&mut e, &show, g, lp);
+    let opacity: Vec<f32> = seen.iter().map(|s| s.0).collect();
+    assert_eq!(&opacity[..3], &[1.0, 1.0, 1.0], "nothing moves until GO");
+    // From GO, the ramp over its length: half way at 2 s, done by 2.5 s.
+    assert!((opacity[3] - 0.6).abs() < 0.02, "{opacity:?}");
+    assert!((opacity[4] - 0.2).abs() < 1e-4, "{opacity:?}");
+}
+
+#[test]
+fn geometry_and_effect_keys_after_a_free_run_pause_also_wait_for_go() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let (show, g, lp) = looping_keyed_show(clip);
+    let seen = through_the_pause(&mut e, &show, g, lp);
+    for (s, what) in seen[..3]
+        .iter()
+        .zip(["at the pause", "after 4 s", "at 1.5 s"])
+    {
+        assert!(s.1.abs() < 1e-6 && s.2.abs() < 1e-4, "{what}: {s:?}");
+    }
+    assert!(
+        (seen[3].1 - 0.25).abs() < 0.01 && (seen[3].2 - 10.0).abs() < 0.4,
+        "{seen:?}"
+    );
+    assert_eq!((seen[4].1, seen[4].2), (0.5, 20.0));
+}
+
+#[test]
+fn speed_keys_on_a_timeline_stay_with_the_content_through_a_free_run_pause() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip, 10.0);
+    c.kind.media_mut().unwrap().rate = ramp(&[(0.0, 1.0), (2.0, 2.0)]);
+    let v = child(&mut show, g, c, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 0.5);
+    e.playhead = Some(g);
+    e.go(&show);
+    until(&mut e, &show, Some(0.0), "the clip", 20, |e| started(e, v));
+    ticks(&mut e, &show, 0.05, 12);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(0.5));
+    until(&mut e, &show, Some(0.05), "3 s of content", 30, |e| {
+        elapsed(e, v) >= 3.0
+    });
+    let a = active(&e, v).unwrap();
+    assert!((a.key_time() - 0.5).abs() < 1e-9, "{}", a.key_time());
+    // The frame it shows is where its speed has got the file to by its content's
+    // own time (3 s: 5 s into the file), not by the clock's (0.5 s).
+    let t = a.elapsed - a.seek_base;
+    let map = show
+        .cue(v)
+        .unwrap()
+        .kind
+        .media()
+        .unwrap()
+        .speed_map()
+        .unwrap();
+    let frame = (t * 30.0 + 1e-6).floor() / 30.0;
+    let want = (map.media_at(frame) * 30.0).round();
+    assert!(want > 120.0, "{want}");
+    let near_want: Vec<Option<u64>> = [want - 1.0, want, want + 1.0]
+        .iter()
+        .map(|f| Some(frame_at(&mut e, &show, v, f / 30.0 - 0.001)))
+        .collect();
+    until(&mut e, &show, Some(0.0), "the frame", 20, |e| {
+        near_want.contains(&shown(e, v))
+    });
+    assert!((active(&e, v).unwrap().key_time() - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn keys_on_a_cue_fired_off_a_timeline_follow_its_own_time_as_before() {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = keyed(text(&mut show, None));
+    // A clip of a timeline fired on its own, and a cue on no timeline.
+    let clip = child(&mut show, g, c, 0.0);
+    let mut c = keyed(text(&mut show, None));
+    c.kind.media_mut().unwrap().layer = 1;
+    let lone = top(&mut show, c, 0, 0.0);
+    let hold = aimed(&mut show, ControlAction::Pause, lone);
+    let hold = top(&mut show, hold, 0, 0.0);
+    let go_on = aimed(&mut show, ControlAction::Resume, lone);
+    let go_on = top(&mut show, go_on, 0, 0.0);
+    let mut e = Engine::for_tests();
+    e.fire(&show, clip);
+    e.fire(&show, lone);
+    until(&mut e, &show, Some(0.0), "the texts", 20, |e| {
+        started(e, clip) && started(e, lone)
+    });
+    let follows = |e: &Engine, id: CueId| {
+        let a = active(e, id).unwrap();
+        let t = a.elapsed as f32;
+        let k = ((t - 1.5) / 1.0).clamp(0.0, 1.0);
+        assert_eq!(a.key_time(), a.elapsed);
+        near(
+            looks(e, id),
+            (1.0 - 0.8 * k, 0.5 * k, 20.0 * k),
+            "by its own time",
+        );
+    };
+    ticks(&mut e, &show, 0.1, 20);
+    follows(&e, clip);
+    follows(&e, lone);
+    // Held on its own, its keys stand with its time, and go on with it.
+    e.fire(&show, hold);
+    let before = elapsed(&e, lone);
+    ticks(&mut e, &show, 0.1, 3);
+    assert_eq!(elapsed(&e, lone), before);
+    follows(&e, lone);
+    e.fire(&show, go_on);
+    ticks(&mut e, &show, 0.1, 2);
+    assert!(elapsed(&e, lone) > before);
+    follows(&e, lone);
+    follows(&e, clip);
+}
+
+/// A timeline group with a text from 0 with `keyed`'s keys, frozen by a Pause
+/// of its own from 0.5 to 1 s, and a free-run pause at 1.2 s.
+fn keyed_text_show() -> (Show, CueId, CueId) {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = keyed(text(&mut show, None));
+    let t = child(&mut show, g, c, 0.0);
+    let p = aimed(&mut show, ControlAction::Pause, t);
+    child(&mut show, g, p, 0.5);
+    let r = aimed(&mut show, ControlAction::Resume, t);
+    child(&mut show, g, r, 1.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 1.2);
+    (show, g, t)
+}
+
+#[test]
+fn a_seek_into_a_ramp_shows_its_middle_as_playing_there_does() {
+    let (show, g, t) = keyed_text_show();
+    // Parked at 2 s, the middle of the ramp.
+    let mut e = Engine::for_tests();
+    e.timeline_seek(&show, key(g), 2.0, true);
+    assert!(parked(&mut e, &show, key(g)));
+    until(&mut e, &show, Some(0.0), "the text", 20, |e| started(e, t));
+    let parked_looks = looks(&e, t);
+    near(parked_looks, (0.6, 0.25, 10.0), "parked at 2 s");
+    // Its content is behind the clock by the half second it was frozen.
+    let a = active(&e, t).unwrap();
+    assert!((a.elapsed - 1.5).abs() < 1e-9 && (a.key_time() - 2.0).abs() < 1e-9);
+    // It stays so while parked, and a GO plays on from there.
+    ticks(&mut e, &show, 0.1, 5);
+    near(looks(&e, t), parked_looks, "still parked");
+    e.go(&show);
+    until(&mut e, &show, Some(0.0), "running", 20, |e| {
+        e.runs
+            .map
+            .get(&key(g))
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    ticks(&mut e, &show, 0.05, 2);
+    near(looks(&e, t), (0.52, 0.3, 12.0), "on from 2 s");
+
+    // Played there instead, with a wait at the pause: the same.
+    let mut e = Engine::for_tests();
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the text", 20, |e| started(e, t));
+    ticks(&mut e, &show, 0.05, 30);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(1.2));
+    ticks(&mut e, &show, 0.1, 30);
+    near(looks(&e, t), (1.0, 0.0, 0.0), "waiting at the pause");
+    e.go(&show);
+    ticks(&mut e, &show, 0.05, 16);
+    assert!((view(&mut e, &show, key(g)).pos - 2.0).abs() < 1e-6);
+    near(looks(&e, t), parked_looks, "played to 2 s");
+    let a = active(&e, t).unwrap();
+    assert!((a.key_time() - 2.0).abs() < 1e-9, "{}", a.key_time());
+}

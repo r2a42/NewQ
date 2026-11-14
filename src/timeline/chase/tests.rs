@@ -342,7 +342,8 @@ fn a_fade_cue_done_leaves_its_end_values_and_one_in_progress_goes_on_from_where_
     assert!((now + 5.0).abs() < 1e-3 && to == -20.0);
     let g = a.geometry.unwrap();
     assert!((g.now.x.unwrap() - 0.125).abs() < 1e-4 && g.to.x == Some(0.5));
-    assert!(g.now.y.is_none() && near(g.left, 3.0));
+    // What it doesn't name is kept where it was (no keyframes here: its base).
+    assert!(g.now.y == Some(0.0) && g.to.y == Some(0.0) && near(g.left, 3.0));
     assert!(a.faded);
     let ch = t.chase(10.0);
     let a = alive(&ch, v).unwrap();
@@ -579,4 +580,32 @@ fn a_list_timeline_is_chased_too() {
     show.normalize_lists();
     let ch = chase(&show, TimelineKey::List(l), 3.0, &mut fake_dur);
     assert!(alive(&ch, id).is_some_and(|a| near(a.from, 1.0)));
+}
+
+#[test]
+fn a_geometry_fade_starts_from_where_the_motion_keys_have_the_picture_by_the_clock() {
+    let mut t = T::new(false);
+    let v = t.video(1.0, 30.0);
+    // Keys in the clip's own time: x from 0 to 1 and y from 0 to 0.4 over 0..2 s.
+    let m = t.m(v);
+    m.motion.x = Some(keys(&[(0.0, 0.0), (2.0, 1.0)]));
+    m.motion.y = Some(keys(&[(0.0, 0.0), (2.0, 0.4)]));
+    // At 2 s on the timeline (1 s of the clip), a fade moves x to 0 over 2 s.
+    t.fade(v, 2.0, 2.0, |f| f.geometry.x = Some(0.0));
+    let g = alive(&t.chase(3.0), v).unwrap().geometry.unwrap();
+    // x half way from the keys' 0.5 to 0; y kept where the keys had it at the fade.
+    assert!((g.now.x.unwrap() - 0.25).abs() < 1e-4 && g.to.x == Some(0.0));
+    assert!((g.now.y.unwrap() - 0.2).abs() < 1e-4 && g.to.y == Some(g.now.y.unwrap()));
+    assert!(near(g.left, 1.0));
+    // A free-run pause on the way changes nothing: the keys are read by the clock.
+    t.control(
+        1.5,
+        ControlCue {
+            action: ControlAction::TimelinePause,
+            ..Default::default()
+        },
+    );
+    let again = alive(&t.chase(3.0), v).unwrap().geometry.unwrap();
+    assert_eq!(again.now.x, g.now.x);
+    assert_eq!(again.now.y, g.now.y);
 }

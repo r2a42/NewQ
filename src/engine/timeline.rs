@@ -209,6 +209,22 @@ fn start_of(cue: &Cue) -> f64 {
     }
 }
 
+/// Where on its timeline a clip's own time is 0: its start, or for a picture
+/// that dips in, half way through the dip, where it is started (the chase's
+/// `zero`). Its keyframes are read at the clock less this.
+pub(super) fn zero_of(cue: &Cue) -> f64 {
+    let half = match &cue.kind {
+        CueKind::Video(m) | CueKind::Image(m) => Some(m),
+        CueKind::Text(t) => Some(&t.media),
+        CueKind::Shape(s) => Some(&s.media),
+        CueKind::Camera(c) => Some(&c.media),
+        _ => None,
+    }
+    .filter(|m| m.transition.dip_color().is_some())
+    .map_or(0.0, |m| (m.fade_in / 2.0).max(0.0));
+    start_of(cue) + half
+}
+
 /// A clip's lead-in (plan 2.5) as its timeline would play it: where its opacity
 /// keys rise, or the first fade cue that raises it; 0 for a cue on no timeline,
 /// or one that doesn't wait.
@@ -236,7 +252,7 @@ pub(super) fn chase_levels(a: &mut ActiveCue, m: &MediaCue, ch: &Alive) {
         a.volume.ramp_to(to, left, curve);
     }
     if let Some(g) = ch.geometry {
-        let mut lt = LiveTransform::from(&m.motion.transform_at(&m.transform, a.elapsed));
+        let mut lt = LiveTransform::from(&m.motion.transform_at(&m.transform, a.key_time()));
         for (param, now, to) in [
             (&mut lt.x, g.now.x, g.to.x),
             (&mut lt.y, g.now.y, g.to.y),
@@ -752,6 +768,16 @@ impl Engine {
             self.start_at(show, id, at);
         }
         any
+    }
+
+    /// A media cue the run `run` is starting: where its own time is 0 on the run's
+    /// clock (`zero_of`), and its time by that clock now. None for any other cue,
+    /// or a run that is gone.
+    pub(super) fn timeline_clock_time(&self, cue: &Cue, run: u64) -> Option<(f64, f64)> {
+        cue.kind.media()?;
+        let (_, r) = self.runs.by_instance(run)?;
+        let zero = zero_of(cue);
+        Some((zero, (r.pos - zero).max(0.0)))
     }
 
     /// The clip time a clip about to be got ready is to follow its keyframed

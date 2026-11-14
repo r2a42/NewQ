@@ -438,6 +438,13 @@ pub struct ActiveCue {
     /// Seconds into the file past its in point at which the decoders playing
     /// now began (a seek's, or a start part way in).
     file_from: f64,
+    /// A timeline's clip: where on its run's clock its own time is 0 (its start,
+    /// or half way through its dip, `timeline::zero_of`). Its opacity, motion and
+    /// effect keyframes then follow that clock, not its content (`key_time`).
+    clip_zero: Option<f64>,
+    /// Its time by its run's clock (`pos - clip_zero`), set each tick. It stands
+    /// while the clock does, even while its content runs on or loops.
+    clock_time: f64,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -484,6 +491,18 @@ impl ActiveCue {
         match &self.speed {
             Some(map) => map.media_at(self.elapsed) - map.media_at(self.lead),
             None => self.elapsed - self.lead,
+        }
+    }
+
+    /// The time its opacity, motion and effect keyframes are read at: a
+    /// timeline's clip's time by its run's clock (so they stand at a pause while
+    /// its content runs on, and go on at GO), any other cue's own time. Speed
+    /// keyframes are not read at it: they stay with the content.
+    pub fn key_time(&self) -> f64 {
+        if self.clip_zero.is_some() {
+            self.clock_time
+        } else {
+            self.elapsed
         }
     }
 
@@ -2315,6 +2334,8 @@ impl Engine {
             live_frozen: false,
             lead: 0.0,
             file_from: 0.0,
+            clip_zero: None,
+            clock_time: 0.0,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2394,7 +2415,14 @@ impl Engine {
             live_frozen: false,
             lead: 0.0,
             file_from: 0.0,
+            clip_zero: None,
+            clock_time: 0.0,
         };
+        // A timeline's clip: its keyframes follow its run's clock from here.
+        if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
+            active.clip_zero = Some(zero);
+            active.clock_time = t;
+        }
         active.extra_hold = self.started_early.remove(&cue.id).unwrap_or(0.0);
         let mut ok = true;
         let mut begun = None;
@@ -2592,7 +2620,7 @@ impl Engine {
                         // Its opacity keyframes where it starts, so it doesn't show at
                         // its base opacity first (a lead-in starts where they are 0).
                         let base = if at.part_way() {
-                            m.motion.opacity_at(m.opacity, active.elapsed)
+                            m.motion.opacity_at(m.opacity, active.key_time())
                         } else {
                             m.opacity
                         };
@@ -2634,7 +2662,7 @@ impl Engine {
                         // From where the picture is now.
                         let now = match &t.live_transform {
                             Some(lt) => lt.apply(&m.transform),
-                            None => m.motion.transform_at(&m.transform, t.elapsed),
+                            None => m.motion.transform_at(&m.transform, t.key_time()),
                         };
                         let lt = t
                             .live_transform
@@ -2950,6 +2978,15 @@ impl Engine {
             let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
             // A cue held by a control cue stands still while the rest go on.
             let paused = paused || a.hold;
+            // A timeline's clip: its time by its run's clock, for its keyframes. One
+            // whose run has been replaced (its group fired again) goes on from there.
+            if let Some(zero) = a.clip_zero {
+                match a.run.and_then(|r| clocks.get(&r)) {
+                    Some(pos) => a.clock_time = (pos - zero).max(0.0),
+                    None if a.started && !paused => a.clock_time += dt,
+                    None => {}
+                }
+            }
             let cue = show.cue(a.cue_id);
             let media = cue.and_then(|c| c.kind.media()).filter(|_| !a.is_matte());
             // A timeline's clip whose end its clock keeps: how long the clock has
@@ -3213,9 +3250,11 @@ impl Engine {
                 // Live level edits apply until a fade cue takes over.
                 // So does position, scale, rotation and crop, so a cue can be
                 // lined up while it plays.
+                // (A timeline's clip: at its time by its run's clock.)
+                let kt = a.key_time();
                 let geometry = match &a.live_transform {
                     Some(lt) => lt.apply(&m.transform),
-                    None => m.motion.transform_at(&m.transform, a.elapsed),
+                    None => m.motion.transform_at(&m.transform, kt),
                 };
                 match &mut a.kind {
                     ActiveKind::Video(v) => {
@@ -3227,9 +3266,9 @@ impl Engine {
                         }
                         v.transform = geometry;
                         v.color = m.color;
-                        v.fx = VideoFx::at(&m.effects, a.elapsed);
+                        v.fx = VideoFx::at(&m.effects, kt);
                         if let Some(voice) = &v.voice {
-                            voice.set_effects(&m.effects, a.elapsed);
+                            voice.set_effects(&m.effects, kt);
                         }
                     }
                     ActiveKind::Image(i) => {
@@ -3244,9 +3283,9 @@ impl Engine {
                         }
                         i.transform = geometry;
                         i.color = m.color;
-                        i.fx = VideoFx::at(&m.effects, a.elapsed);
+                        i.fx = VideoFx::at(&m.effects, kt);
                     }
-                    ActiveKind::Audio(voice) => voice.set_effects(&m.effects, a.elapsed),
+                    ActiveKind::Audio(voice) => voice.set_effects(&m.effects, kt),
                     _ => {}
                 }
                 if a.relevel {
@@ -3258,7 +3297,7 @@ impl Engine {
                 }
                 if !a.faded && !a.stopping && !a.auto_faded {
                     if !a.opacity.ramping() {
-                        a.opacity.value = m.motion.opacity_at(m.opacity, a.elapsed);
+                        a.opacity.value = m.motion.opacity_at(m.opacity, kt);
                     }
                     if !a.volume.ramping() {
                         a.volume.value = m.volume_db;

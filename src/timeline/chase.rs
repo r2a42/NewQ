@@ -23,9 +23,13 @@
 //! - What is exactly at `pos` has happened (a GO from a marker on a pause cue
 //!   runs on), except at 0: that is the top, and everything is still to come.
 //!
+//! - A clip's opacity, motion and effect keyframes are read at its time by the
+//!   timeline's clock (`pos` less where its time is 0), as the engine plays them,
+//!   whatever its content did (frozen, or running on through a pause).
+//!
 //! Not modelled: a fade cue's matrix crosspoints, a fade on a clip while it is
 //! held, a stop of everything (the clips before it go; what comes after still
-//! does), motion keyframes under a geometry fade.
+//! does).
 
 use super::TimelineKey;
 use super::model::{self, Dur, LeadIn};
@@ -245,9 +249,10 @@ fn start_of(cue: &Cue) -> f64 {
     }
 }
 
-/// The base of each geometry field a fade can move.
-fn geometry_base(m: &MediaCue) -> [f32; 5] {
-    let t = &m.transform;
+/// Each geometry field a fade can move, as the clip has it at clip time `t`
+/// (its motion keyframes, read at its time by the timeline's clock).
+fn geometry_base(m: &MediaCue, t: f64) -> [f32; 5] {
+    let t = m.motion.transform_at(&m.transform, t);
     [t.x, t.y, t.scale_x, t.scale_y, t.rotation]
 }
 
@@ -398,8 +403,19 @@ pub fn chase(show: &Show, key: TimelineKey, pos: f64, dur: Dur) -> Chase {
                     if let Some(v) = f.volume_db {
                         c.volume = Some(Track::new(c.volume_at(t), v, t, f.duration, f.curve));
                     }
-                    let base = geometry_base(c.m);
-                    for (k, to) in geometry_fields(&f.geometry).into_iter().enumerate() {
+                    let base = geometry_base(c.m, t - c.zero);
+                    let named = geometry_fields(&f.geometry);
+                    // The first fade that moves its picture keeps it where its
+                    // keyframes had it then, in what it doesn't name too (as the
+                    // engine's `LiveTransform` does).
+                    if c.geometry.iter().all(Option::is_none)
+                        && named.iter().any(|v| v.is_some_and(f32::is_finite))
+                    {
+                        for (k, g) in c.geometry.iter_mut().enumerate() {
+                            *g = Some(Track::new(base[k], base[k], t, 0.0, f.curve));
+                        }
+                    }
+                    for (k, to) in named.into_iter().enumerate() {
                         if let Some(to) = to.filter(|v| v.is_finite()) {
                             let from = c.geometry[k].map_or(base[k], |g| g.at(t));
                             c.geometry[k] = Some(Track::new(from, to, t, f.duration, f.curve));

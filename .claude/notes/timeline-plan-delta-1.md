@@ -535,3 +535,23 @@ Left for later:
 3. **"Loop this section": a third kind of pause cue (wave 2, with P5's jumps).** When the timeline reaches the cue it jumps back to a section start (a marker or a time earlier on the timeline) and plays the section again, until GO. Everything in the section replays together, in sync. On GO: **default, finish the current pass and carry straight on past the cue** (the intro / looping middle / ending case); option on the cue: leave at once. The jump is not sample-accurate (clips are restarted); say so in the cue's description, and that a continuous bed of sound is better as a per-clip loop.
 4. **Split and fade cues:** a fade cue stays aimed at the first half of a split clip; the second half starts visible (no objection from the owner to this suggestion).
 5. Undecided, asked of the owner: whether the timeline Stop cue gets a fade time (today it cuts).
+
+## M. What P2c landed (keyframes on a timeline follow its clock, ruling L2)
+
+One commit, "Timeline: keyframes on a timeline follow the timeline's clock": `src/engine.rs`, `src/engine/timeline.rs`, `src/timeline/chase.rs` and the tests beside them. No show-file field.
+
+As built:
+- `ActiveCue` has private `clip_zero: Option<f64>` (where on its run's clock the clip's own time is 0) and `clock_time: f64` (`pos − clip_zero`, never below 0). `pub fn ActiveCue::key_time()` is `clock_time` for a timeline's clip and `elapsed` for any other cue, so a cue fired off a timeline (or a timeline's clip fired on its own) reads its keys exactly as before.
+- `timeline::zero_of(cue)`: the clip's start (`pre_wait`), plus half its fade for a picture that dips in (the dip starts it at its midpoint): the chase's `Clip::zero`. The lead-in needs nothing extra: a clip's own time already counts from its start, lead-in included (`elapsed = V` when its content starts).
+- `Engine::timeline_clock_time(cue, run)` (in `engine/timeline.rs`) gives both when `start_with` makes a run's media cue; `tick` sets `clock_time` from `Runs::clocks()` each pass. A clip whose run has gone (its group fired again) goes on counting by `dt` from where it was, so it doesn't jump.
+- Read at `key_time()`: the motion transform and opacity keys in `tick`, `VideoFx::at` and `Voice::set_effects` (picture and sound effects), the opacity a part-way start begins at, a fade cue's geometry starting point, and `chase_levels`' geometry base. `elapsed` stays the content's time for everything else: speed keys (`SpeedMap` in the readers, `pass_time`), file positions, a timer text's count, hold times, the content-driven fade-out and end.
+- Chase: a geometry fade now starts from where the motion keys have the picture at that clock time (`geometry_base(m, t − zero)`; was the bare transform), and the first one keeps the fields it doesn't name where the keys had them (still tracks), as the engine's `LiveTransform` does. `Alive.geometry.now`/`to` then have all five fields. The "motion keyframes under a geometry fade" gap in K is closed.
+- No keyframed volume exists in the model (`volume_db` is a plain number; `Motion` has opacity and geometry only), so nothing to do for sound levels.
+
+Behaviour to know (for the README and the owner):
+- A clip frozen by a `Pause` of its own while the clock runs holds its frame, but its opacity, motion and effect keys go on with the clock (Disguise's model; the plan's 2.2 table said they stop). A seek gives the same.
+- Scrubbing a timeline clip on its bar moves its content, not its keys.
+- What still moves at a free-run pause: Param ramps already going when the clock stops (a clip's own transition fade-in, a fade cue in progress, a crossfade's fade-out, a run-out fade). Ruling L2's model says those hold too; they are not keyframes and were not part of P2c. Holding them means not advancing `opacity`/`volume`/`live_transform` for a run's clip while its clock stands (and the fade cue's own `ActiveKind::Fade` time): a separate small package if wanted.
+- The matte of a dip runs its half by its own time; a dip that starts just before a pause still reaches its midpoint during the pause.
+
+Tests: `src/engine/timeline/tests.rs` (P2c section: opacity, geometry and blur keys standing through a free-run pause on a loop and ramping after GO; speed keys following the content through a pause, checked against FFmpeg's frame; a cue off any timeline and a timeline clip fired on its own reading keys at their own time, held and resumed; a parked seek into the middle of a ramp equal to playing there with a wait at the pause and a clip frozen part of the way), `src/timeline/chase/tests.rs` (`a_geometry_fade_starts_from_where_the_motion_keys_have_the_picture_by_the_clock`). Full suite: 988 passed, 5 ignored.
