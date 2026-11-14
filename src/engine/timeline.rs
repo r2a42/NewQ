@@ -36,13 +36,24 @@
 //! fade does what it does once it has stopped, the fading clips going on fading
 //! under what comes in.
 //!
+//! Ramps follow the clock too (ruling L2): a fade a run starts (a clip's own
+//! fade-in, a fade cue it fires, a crossfade's or a dip's, a fade-out by its
+//! clock) carries the run (`Param::follow`) and moves only as far as that run's
+//! clock moves (`Runs::steps`), so it waits at a pause and goes on at GO. A fade
+//! started any other way (by hand, by a cue fired off the timeline, a Stop's)
+//! carries none and moves with the show's time, as does every ramp once its run
+//! has stopped or gone. Content that runs out while such a fade waits stays on
+//! its last frame (or silent) for it.
+//!
 //! A clip at opacity 0 (or a sound at silence) on a timeline with
 //! `start_on_fade_in` waits, unseen, for its fade-in (`model::lead_in`): its
 //! content starts from its in point when its opacity keys rise (at its lead-in,
 //! clip time V), or when a fade cue raises it (`timeline_wake`), and its own
 //! time (`elapsed`) is V then, so its keyframes stay where they were drawn.
 
-use super::{ActiveCue, ActiveKind, Engine, LiveTransform, Param, PendingCue, StartAt};
+use super::{
+    ActiveCue, ActiveKind, ClockStep, ClockSteps, Engine, LiveTransform, Param, PendingCue, StartAt,
+};
 use crate::show::{
     ControlAction, ControlCue, Cue, CueId, CueKind, Curve, FadeCue, GroupCue, GroupMode, MIN_DB,
     MediaCue, PauseFreeze, RunOut, Show, TIMELINE_STOP_FADE, TimelineKey,
@@ -168,6 +179,24 @@ impl Runs {
     /// Each run's clock, by its instance.
     pub(super) fn clocks(&self) -> HashMap<u64, f64> {
         self.map.values().map(|r| (r.instance, r.pos)).collect()
+    }
+
+    /// The clocks of the runs that go on (not stopped) on this tick: where each
+    /// is and how far it moved from `before` (at most `dt`; nothing for a run
+    /// that wasn't there). The ramps a run started move as far (ruling L2); a
+    /// stopped run's, or one that has gone, move with the show's time.
+    pub(super) fn steps(&self, before: &HashMap<u64, f64>, dt: f64) -> ClockSteps {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        self.map
+            .values()
+            .filter(|r| r.state != RunState::Stopped)
+            .map(|r| {
+                let moved = before
+                    .get(&r.instance)
+                    .map_or(0.0, |b| (r.pos - b).max(0.0).min(dt));
+                (r.instance, ClockStep { pos: r.pos, moved })
+            })
+            .collect()
     }
 
     /// The instances of the runs whose clocks are running.
@@ -320,15 +349,20 @@ fn run_out_fade(m: &MediaCue) -> f64 {
     }
 }
 
-/// Fade a clip out over `secs`, from where it is.
-fn fade_away(a: &mut ActiveCue, m: &MediaCue, secs: f64) {
+/// Fade a clip out over `secs`, from where it is. Begun while its clock runs
+/// (`clock`: the run and where its clock is), the fade is the clock's and waits
+/// if it stops.
+fn fade_away(a: &mut ActiveCue, m: &MediaCue, secs: f64, clock: Option<(u64, f64)>) {
     a.auto_faded = true;
     a.opacity.ramp_to(0.0, secs.max(0.0), m.curve);
     a.volume.ramp_to(MIN_DB, secs.max(0.0), m.curve);
+    a.opacity.follow(clock);
+    a.volume.follow(clock);
 }
 
 /// A clocked clip, each tick (`on_clock`: how far its timeline's clock has to go
-/// to the end of its slot; `moving`: the clock is running). Its own fade-out
+/// to the end of its slot; `clock`: its run and where its clock is, while it is
+/// running). Its own fade-out
 /// begins that long before the clock reaches the end, and it ends there; neither
 /// while the clock stands (a pause right at the fade-out's start holds it).
 /// Content that has run ahead of the clock and will run out first, set to end
@@ -337,23 +371,26 @@ pub(super) fn clock_end(
     a: &mut ActiveCue,
     m: &MediaCue,
     on_clock: Option<f64>,
-    moving: bool,
+    clock: Option<(u64, f64)>,
 ) -> bool {
+    let moving = clock.is_some();
     if a.detached
         && m.run_out == RunOut::End
         && !a.auto_faded
-        && let (Some(d), Some(clock)) = (a.duration, on_clock)
+        && let (Some(d), Some(to_go)) = (a.duration, on_clock)
     {
         let left = d - a.elapsed;
-        if left < clock - SAME_TIME && left <= run_out_fade(m) {
-            fade_away(a, m, left);
+        if left < to_go - SAME_TIME && left <= run_out_fade(m) {
+            // Begun while the clock stands, it follows the content, which runs
+            // on: it fades as the content ends (ruling 5).
+            fade_away(a, m, left, clock);
         }
     }
     let Some(left) = on_clock.filter(|_| moving) else {
         return false;
     };
     if !a.auto_faded && m.fade_out > 0.0 && left <= m.fade_out {
-        fade_away(a, m, left);
+        fade_away(a, m, left, clock);
     }
     // A video holding its last frame for good (no fade-out) keeps it, as it would
     // off a timeline.
@@ -779,6 +816,13 @@ impl Engine {
             self.start_at(show, id, at);
         }
         any
+    }
+
+    /// The run `run` and where its clock is, for a ramp it starts to follow
+    /// (`Param::follow`); None for no run, or one that has stopped or gone.
+    pub(super) fn run_clock(&self, run: Option<u64>) -> Option<(u64, f64)> {
+        let (_, r) = self.runs.by_instance(run?)?;
+        (r.state != RunState::Stopped).then_some((r.instance, r.pos))
     }
 
     /// A media cue the run `run` is starting: where its own time is 0 on the run's

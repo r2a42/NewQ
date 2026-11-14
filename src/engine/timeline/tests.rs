@@ -2372,3 +2372,189 @@ fn a_timeline_stop_fades_a_sound_out_too() {
     ticks(&mut e, &show, 0.25, 6);
     assert!(active(&e, clip).is_none() && !e.is_active());
 }
+
+// ----- Fades under way wait while the clock stands (P2d, ruling L2) ---------------
+
+/// A timeline group with a text up from 0, a fade cue at 1 s taking it to
+/// opacity 0 and x 0.5 over 2 s, and a free-run pause at 2 s, half way.
+fn fading_text_show() -> (Show, CueId, CueId) {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let t = text(&mut show, None);
+    let t = child(&mut show, g, t, 0.0);
+    let mut f = fade(&mut show, t, Some(0.0), 2.0);
+    if let CueKind::Fade(fc) = &mut f.kind {
+        fc.geometry.x = Some(0.5);
+    }
+    child(&mut show, g, f, 1.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 2.0);
+    (show, g, t)
+}
+
+/// Fire `fading_text_show`'s group and play it to its pause.
+fn to_the_pause(show: &Show, g: CueId, t: CueId) -> Engine {
+    let mut e = Engine::for_tests();
+    e.fire(show, g);
+    until(&mut e, show, Some(0.0), "the text", 10, |e| started(e, t));
+    ticks(&mut e, show, 0.25, 8);
+    assert_eq!(paused_at(&mut e, show, key(g)), Some(2.0));
+    e
+}
+
+#[test]
+fn a_fade_cue_half_done_at_a_free_run_pause_waits_there_and_finishes_after_go() {
+    let (show, g, t) = fading_text_show();
+    let mut e = to_the_pause(&show, g, t);
+    near(looks(&e, t), (0.5, 0.25, 0.0), "half way at the pause");
+    let fade_time = |e: &Engine| {
+        e.active
+            .iter()
+            .find(|a| matches!(a.kind, ActiveKind::Fade))
+            .expect("the fade cue is still going")
+            .elapsed
+    };
+    let at_pause = fade_time(&e);
+    ticks(&mut e, &show, 0.25, 12);
+    near(looks(&e, t), (0.5, 0.25, 0.0), "still half way after 3 s");
+    assert_eq!(fade_time(&e), at_pause, "the fade cue waits too");
+    e.go(&show);
+    ticks(&mut e, &show, 0.25, 2);
+    let played = looks(&e, t);
+    near(played, (0.25, 0.375, 0.0), "on from GO");
+    ticks(&mut e, &show, 0.25, 2);
+    near(looks(&e, t), (0.0, 0.5, 0.0), "done");
+
+    // A seek to the same place on the timeline (2.5 s) shows the same.
+    let mut e = Engine::for_tests();
+    e.timeline_seek(&show, key(g), 2.5, true);
+    until(&mut e, &show, Some(0.0), "the text", 10, |e| started(e, t));
+    near(looks(&e, t), played, "seeked to 2.5 s");
+}
+
+#[test]
+fn a_hand_fade_during_a_timeline_pause_runs_and_a_cue_off_the_timeline_is_unchanged() {
+    let (mut show, g, t) = fading_text_show();
+    // A fade cue in the main list, aimed at the clip, and a text of no timeline
+    // that fades in over 2 s.
+    let mut up = fade(&mut show, t, Some(1.0), 1.0);
+    if let CueKind::Fade(fc) = &mut up.kind {
+        fc.curve = Curve::Linear;
+    }
+    let up = top(&mut show, up, 0, 0.0);
+    let mut lone = text(&mut show, None);
+    let m = lone.kind.media_mut().unwrap();
+    m.transition = Transition::FadeIn;
+    m.fade_in = 2.0;
+    m.curve = Curve::Linear;
+    let lone = top(&mut show, lone, 0, 0.0);
+
+    // The active panel's fade-out: it runs while the clock stands.
+    let mut e = to_the_pause(&show, g, t);
+    e.fade_out_instance(&show, instance(&e, t));
+    ticks(&mut e, &show, 0.25, 4);
+    let o = opacity(&e, t).expect("fading out");
+    assert!(o > 0.0 && o < 0.4, "{o}");
+    ticks(&mut e, &show, 0.25, 5);
+    assert!(active(&e, t).is_none(), "gone over its fade-out");
+
+    // A fade cue fired from the main list moves the level it names; the
+    // timeline's own fade of its position still waits for GO.
+    let mut e = to_the_pause(&show, g, t);
+    e.fire(&show, up);
+    ticks(&mut e, &show, 0.25, 2);
+    near(looks(&e, t), (0.75, 0.25, 0.0), "brought up by hand");
+    ticks(&mut e, &show, 0.25, 2);
+    near(looks(&e, t), (1.0, 0.25, 0.0), "up");
+
+    // A cue on no timeline fades in as ever while the timeline waits.
+    e.fire(&show, lone);
+    until(&mut e, &show, Some(0.0), "the other text", 10, |e| {
+        started(e, lone)
+    });
+    ticks(&mut e, &show, 0.25, 4);
+    let o = opacity(&e, lone).unwrap();
+    assert!((o - 0.5).abs() < 0.02, "{o}");
+    ticks(&mut e, &show, 0.25, 4);
+    assert_eq!(opacity(&e, lone), Some(1.0));
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(2.0));
+}
+
+#[test]
+fn a_clips_fade_in_waits_at_a_free_run_pause_while_its_content_plays_on() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip, 8.0);
+    let m = c.kind.media_mut().unwrap();
+    m.transition = Transition::FadeIn;
+    m.fade_in = 2.0;
+    let v = child(&mut show, g, c, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 1.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the clip", 10, |e| started(e, v));
+    ticks(&mut e, &show, 0.25, 4);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(1.0));
+    let o = opacity(&e, v).unwrap();
+    assert!((o - 0.5).abs() < 0.02, "half way in: {o}");
+    ticks(&mut e, &show, 0.25, 8);
+    assert_eq!(opacity(&e, v), Some(o), "it waits for GO");
+    assert!(
+        elapsed(&e, v) > 2.9,
+        "its content plays on: {}",
+        elapsed(&e, v)
+    );
+    e.go(&show);
+    ticks(&mut e, &show, 0.25, 2);
+    let o = opacity(&e, v).unwrap();
+    assert!((o - 0.75).abs() < 0.02, "on from GO: {o}");
+    ticks(&mut e, &show, 0.25, 2);
+    assert_eq!(opacity(&e, v), Some(1.0));
+}
+
+#[test]
+fn a_run_out_fade_under_way_at_a_pause_waits_on_the_last_frame_and_finishes_after_go() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    // Three seconds of content running out over a second; a free-run pause at
+    // 0.5 s lets the content get a second ahead of the clock, a second at 1.5 s
+    // comes half way through its run-out fade.
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Video, clip, 3.0);
+    let v = child(&mut show, g, c, 0.0);
+    media_of(&mut show, v).run_out_fade = Some(1.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 0.5);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 1.5);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the clip", 10, |e| started(e, v));
+    ticks(&mut e, &show, 0.25, 2);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(0.5));
+    ticks(&mut e, &show, 0.25, 4);
+    assert!(!active(&e, v).unwrap().auto_faded);
+    e.go(&show);
+    ticks(&mut e, &show, 0.25, 4);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(1.5));
+    let a = active(&e, v).unwrap();
+    assert!(a.auto_faded, "running out");
+    let o = a.opacity.value;
+    assert!((0.3..0.7).contains(&o), "half way out: {o}");
+    // Its content runs out meanwhile: it stays on its last frame, as faded.
+    until(&mut e, &show, Some(0.05), "its last frame", 20, |e| {
+        active(e, v).is_some_and(|a| a.held)
+    });
+    ticks(&mut e, &show, 0.25, 4);
+    assert_eq!(opacity(&e, v), Some(o));
+    e.go(&show);
+    ticks(&mut e, &show, 0.25, 1);
+    let left = opacity(&e, v).expect("fading on");
+    assert!(left < o && left > 0.0, "{left}");
+    ticks(&mut e, &show, 0.25, 2);
+    assert!(active(&e, v).is_none(), "faded out and gone");
+}

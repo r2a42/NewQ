@@ -73,7 +73,23 @@ struct Ramp {
     duration: f64,
     t: f64,
     curve: Curve,
+    /// The timeline run (its instance) that started it, if one did: while that
+    /// run goes on, it moves as its clock does, standing while it stands
+    /// (`Param::step`). None: it moves with the show's time.
+    run: Option<u64>,
+    /// Where that clock was when it began, until its first step.
+    since: Option<f64>,
 }
+
+/// A timeline run's clock on this tick: where it is now and how far it moved.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ClockStep {
+    pub pos: f64,
+    pub moved: f64,
+}
+
+/// The clocks of the runs that go on (not stopped), by instance.
+pub(super) type ClockSteps = HashMap<u64, ClockStep>;
 
 /// A value that can be faded over time (opacity 0..1, or volume in dB).
 #[derive(Clone, Debug)]
@@ -99,8 +115,43 @@ impl Param {
                 duration,
                 t: 0.0,
                 curve,
+                run: None,
+                since: None,
             });
         }
+    }
+    /// The ramp under way (if any) is the timeline run's that `clock` names
+    /// (its instance, and where its clock is now): it moves as that clock does,
+    /// waiting while it stands and going on from there when it runs (ruling
+    /// L2). None: it moves with the show's time.
+    fn follow(&mut self, clock: Option<(u64, f64)>) {
+        if let Some(r) = &mut self.ramp {
+            r.run = clock.map(|c| c.0);
+            r.since = clock.map(|c| c.1);
+        }
+    }
+    /// Whether its ramp waits for a clock that stands (`clocks`: this tick's).
+    fn waits(&self, clocks: &ClockSteps) -> bool {
+        self.ramp
+            .as_ref()
+            .and_then(|r| r.run)
+            .and_then(|i| clocks.get(&i))
+            .is_some_and(|c| c.moved <= 0.0)
+    }
+    /// Advance by `dt`, or a timeline's ramp by as far as its clock moved (on
+    /// its first step, from where the clock was when it began).
+    fn step(&mut self, dt: f64, clocks: &ClockSteps) {
+        let by = match &mut self.ramp {
+            Some(r) => match r.run.and_then(|i| clocks.get(&i)) {
+                Some(c) => match r.since.take() {
+                    Some(from) => (c.pos - from).max(0.0).min(c.moved),
+                    None => c.moved,
+                },
+                None => dt,
+            },
+            None => return,
+        };
+        self.advance(by);
     }
     pub fn advance(&mut self, dt: f64) {
         if let Some(r) = &mut self.ramp {
@@ -139,15 +190,27 @@ impl LiveTransform {
         }
     }
 
-    fn advance(&mut self, dt: f64) {
-        for p in [
+    fn params(&mut self) -> [&mut Param; 5] {
+        [
             &mut self.x,
             &mut self.y,
             &mut self.scale_x,
             &mut self.scale_y,
             &mut self.rotation,
-        ] {
-            p.advance(dt);
+        ]
+    }
+
+    /// Advance its ramps (`Param::step`).
+    fn step(&mut self, dt: f64, clocks: &ClockSteps) {
+        for p in self.params() {
+            p.step(dt, clocks);
+        }
+    }
+
+    /// Its ramps under way are the timeline run's that `clock` names (`Param::follow`).
+    fn follow(&mut self, clock: Option<(u64, f64)>) {
+        for p in self.params() {
+            p.follow(clock);
         }
     }
 
@@ -612,6 +675,19 @@ impl ActiveCue {
         self.opacity.ramp_to(0.0, fade, curve);
         self.volume.ramp_to(MIN_DB, fade, curve);
         self.stopping = true;
+    }
+    /// The ramps of its levels and geometry under way are the timeline run's
+    /// that `clock` names: they move as its clock does (`Param::follow`).
+    fn follow(&mut self, clock: Option<(u64, f64)>) {
+        self.opacity.follow(clock);
+        self.volume.follow(clock);
+        if let Some(lt) = &mut self.live_transform {
+            lt.follow(clock);
+        }
+    }
+    /// Whether a ramp of its levels waits for a clock that stands.
+    fn levels_wait(&self, clocks: &ClockSteps) -> bool {
+        self.opacity.waits(clocks) || self.volume.waits(clocks)
     }
 }
 
@@ -2276,6 +2352,8 @@ impl Engine {
     /// started at the midpoint (see `tick`).
     fn begin_dip(&mut self, show: &Show, cue: &Cue, m: &MediaCue, color: [u8; 4], at: StartAt) {
         let half = (m.fade_in / 2.0).max(0.0);
+        // (A timeline's dip waits while its clock stands.)
+        let run = self.run_clock(at.run);
         // Outgoing content stays visible under the matte; its sound fades
         // out, and it is removed once the matte is opaque.
         for other in &mut self.active {
@@ -2283,11 +2361,14 @@ impl Engine {
                 other.volume.ramp_to(MIN_DB, half, m.curve);
                 let v = other.opacity.value;
                 other.opacity.ramp_to(v, half, m.curve);
+                other.opacity.follow(run);
+                other.volume.follow(run);
                 other.stopping = true;
             }
         }
         let mut opacity = Param::new(0.0);
         opacity.ramp_to(1.0, half, m.curve);
+        opacity.follow(run);
         let instance = self.alloc_instance();
         self.active.push(ActiveCue {
             instance,
@@ -2632,6 +2713,9 @@ impl Engine {
                         if let Some(ch) = &at.chase {
                             timeline::chase_levels(&mut active, m, ch);
                         }
+                        // A timeline's clip: its fade-in (and what a seek left
+                        // going) waits while its clock stands.
+                        active.follow(self.run_clock(at.run));
                     }
                 }
             }
@@ -2641,6 +2725,9 @@ impl Engine {
                 let mut hit = false;
                 // A group as target means its children.
                 let targets = f.target.map(|t| show.with_children(t)).unwrap_or_default();
+                // A timeline's fade cue: what it ramps moves with the timeline's
+                // clock, waiting while it stands. One fired by hand always moves.
+                let clock = self.run_clock(at.run);
                 // A timeline's clips waiting for this fade to raise them start now
                 // (from their in points), and it fades them up.
                 hit |= self.timeline_wake(show, f, &targets);
@@ -2652,9 +2739,11 @@ impl Engine {
                     t.faded = true;
                     if let Some(o) = f.opacity {
                         t.opacity.ramp_to(o, f.duration, f.curve);
+                        t.opacity.follow(clock);
                     }
                     if let Some(v) = f.volume_db {
                         t.volume.ramp_to(v, f.duration, f.curve);
+                        t.volume.follow(clock);
                     }
                     if !f.geometry.is_empty()
                         && let Some(m) = show.cue(t.cue_id).and_then(|c| c.kind.media())
@@ -2677,6 +2766,7 @@ impl Engine {
                         ] {
                             if let Some(to) = to.filter(|v| v.is_finite()) {
                                 param.ramp_to(to, f.duration, f.curve);
+                                param.follow(clock);
                             }
                         }
                     }
@@ -2691,6 +2781,7 @@ impl Engine {
                         // Ensure the stop happens after `duration` even if no level changes.
                         if f.opacity.is_none() {
                             t.opacity.ramp_to(t.opacity.value, f.duration, f.curve);
+                            t.opacity.follow(clock);
                         }
                         t.stopping = true;
                     }
@@ -2838,6 +2929,13 @@ impl Engine {
             .find(|a| a.instance == instance)
             .and_then(|a| a.together);
         let brother = |o: &ActiveCue| together.is_some() && o.together == together;
+        // A timeline's clip coming in: what it fades waits while its clock stands.
+        let run = self.run_clock(
+            self.active
+                .iter()
+                .find(|a| a.instance == instance)
+                .and_then(|a| a.run),
+        );
         // A picture replaces only what is on its own layer of the display (and a
         // dip's matte, which covers every layer): the other layers stay.
         let entering = self.active.iter().find(|a| a.instance == instance);
@@ -2859,6 +2957,8 @@ impl Engine {
                     // quick second GO) is not for this one to fade away.
                     if o.instance < instance && replaced(o) && !o.stopping && !brother(o) {
                         o.fade_out_and_stop(time, curve);
+                        o.opacity.follow(run);
+                        o.volume.follow(run);
                     }
                 }
             }
@@ -2876,6 +2976,7 @@ impl Engine {
                 });
                 if let Some(m) = self.active.iter_mut().find(|a| a.instance == matte) {
                     m.opacity.ramp_to(0.0, time, curve);
+                    m.opacity.follow(run);
                     m.stopping = true;
                 }
             }
@@ -2908,6 +3009,7 @@ impl Engine {
         }
 
         // The timelines' clocks, and what they reach, in order.
+        let before = self.runs.clocks();
         self.timeline_tick(show, dt);
         if !self.paused {
             // (the cue, a dip's reveal, how to start it)
@@ -2974,6 +3076,10 @@ impl Engine {
         let mut midpoints = Vec::new();
         let clocks = self.runs.clocks();
         let moving = self.runs.running();
+        // How far each run's clock moved: the ramps they started move as far,
+        // so they wait while it stands (ruling L2).
+        let steps = self.runs.steps(&before, dt);
+        let on_clock_of = |run: Option<u64>| run.and_then(|r| clocks.get(&r).map(|p| (r, *p)));
         self.active.retain_mut(|a| {
             let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
             // A cue held by a control cue stands still while the rest go on.
@@ -3000,6 +3106,14 @@ impl Engine {
             let keep = on_clock.is_some_and(|l| l > timeline::SAME_TIME)
                 && media.is_some_and(|m| m.run_out != RunOut::End);
             let clock_ends = a.clocked && cue.is_some_and(|c| holds(&c.kind));
+            // A fade of its timeline's waits while the clock stands: content that
+            // runs out meanwhile stays (on its last frame, or silent) for it.
+            let levels_wait = a.levels_wait(&steps);
+            // A timeline's fade cue keeps its clock's time.
+            let fade_dt = match (&a.kind, a.run.and_then(|r| steps.get(&r))) {
+                (ActiveKind::Fade, Some(c)) => c.moved,
+                _ => dt,
+            };
             let mut completed = false;
             let was_started = a.started;
             let (audio_lead, video_lag) = (a.audio_lead, a.video_lag);
@@ -3077,7 +3191,10 @@ impl Engine {
                                     cue.map(|c| c.number.as_str()).unwrap_or("?")
                                 ));
                             }
-                            if (keep || media.is_some_and(|m| m.hold_last_frame)) && !a.stopping {
+                            if levels_wait
+                                || ((keep || media.is_some_and(|m| m.hold_last_frame))
+                                    && !a.stopping)
+                            {
                                 a.held = true;
                                 completed_follow(a, cue, &mut follow);
                             } else {
@@ -3185,7 +3302,7 @@ impl Engine {
                         }
                         if vo.finished() {
                             // Out of sound before its timeline moves on: silence.
-                            if keep {
+                            if keep || levels_wait {
                                 a.held = true;
                             } else {
                                 completed = true;
@@ -3204,6 +3321,7 @@ impl Engine {
                     }
                     if mt.fired && !a.stopping && a.elapsed - mt.fired_at > REVEAL_TIMEOUT {
                         a.opacity.ramp_to(0.0, mt.half, mt.curve);
+                        a.opacity.follow(on_clock_of(mt.start.run));
                         a.stopping = true;
                     }
                 }
@@ -3218,7 +3336,7 @@ impl Engine {
                         }
                     }
                     if !paused {
-                        a.elapsed += dt;
+                        a.elapsed += fade_dt;
                     }
                     if a.duration.is_some_and(|d| a.elapsed >= d) {
                         completed = true;
@@ -3233,10 +3351,10 @@ impl Engine {
             }
 
             if a.started && !paused {
-                a.opacity.advance(dt);
-                a.volume.advance(dt);
+                a.opacity.step(dt, &steps);
+                a.volume.step(dt, &steps);
                 if let Some(lt) = &mut a.live_transform {
-                    lt.advance(dt);
+                    lt.step(dt, &steps);
                 }
             }
             if !was_started
@@ -3325,12 +3443,17 @@ impl Engine {
                         a.auto_faded = true;
                         a.opacity.ramp_to(0.0, remaining.max(0.0), m.curve);
                         a.volume.ramp_to(MIN_DB, remaining.max(0.0), m.curve);
+                        // Begun as its timeline runs: it waits if the clock stops.
+                        let run = on_clock_of(a.run.filter(|r| moving.contains(r)));
+                        a.opacity.follow(run);
+                        a.volume.follow(run);
                     }
                 }
                 if a.clocked && a.started && !a.stopping {
                     // (A clip held on its own still ends when its clock gets there.)
                     let moving = !show_paused && a.run.is_some_and(|r| moving.contains(&r));
-                    completed |= timeline::clock_end(a, m, on_clock, moving);
+                    let clock = on_clock_of(a.run).filter(|_| moving);
+                    completed |= timeline::clock_end(a, m, on_clock, clock);
                 }
             }
 
