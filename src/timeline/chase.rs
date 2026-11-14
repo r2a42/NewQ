@@ -155,8 +155,6 @@ struct Clip<'a> {
     /// Where its clip time is 0 (its start, or half way through a dip).
     zero: f64,
     lead: f64,
-    /// When it comes in (`zero + lead`); None: waiting for a fade cue after `pos`.
-    entry: Option<f64>,
     /// Its content's length, if known and not open-ended.
     len: Option<f64>,
     picture: bool,
@@ -348,7 +346,6 @@ pub fn chase(show: &Show, key: TimelineKey, pos: f64, dur: Dur) -> Chase {
             start,
             zero,
             lead,
-            entry: (start + lead <= pos + SAME_TIME).then_some(entry),
             len: None,
             picture,
             dip,

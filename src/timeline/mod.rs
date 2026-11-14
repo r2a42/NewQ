@@ -7,9 +7,6 @@
 //! Everything here is `#[serde(default)]` and left out of the file at its
 //! default, so a show that uses no timeline is written as before.
 
-// `chase::Clip::entry` is written and not read yet (the engine's file; see
-// section N of the plan's delta).
-#[allow(dead_code)]
 pub mod chase;
 pub mod edit;
 pub mod model;
