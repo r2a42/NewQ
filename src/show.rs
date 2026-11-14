@@ -4261,8 +4261,15 @@ impl Show {
                 c.parent = Some(g);
             }
         }
-        // A copied group's timeline cues aim at the copy and its clips.
+        // A copied group's cues aim at the copy and its clips: a fade, stop or
+        // control cue's target (a clip's Pause cue), and a timeline cue's
+        // timeline, point and clips. A cue copied alone keeps its aim.
         for c in &mut copies {
+            if let Some(target) = c.kind.target_mut()
+                && let Some(n) = target.and_then(|t| renamed.get(&t))
+            {
+                *target = Some(*n);
+            }
             if let CueKind::Control(ctl) = &mut c.kind {
                 ctl.remap_timeline(
                     &|t| Some(renamed.get(&t).copied().unwrap_or(t)),
@@ -7776,6 +7783,65 @@ mod tests {
         let a = control_of(&show, alone);
         assert_eq!(a.timeline, Some(TimelineKey::Group(g)));
         assert_eq!(a.clips, vec![clip]);
+    }
+
+    #[test]
+    fn duplicating_a_group_aims_the_cues_in_it_at_the_copies() {
+        let aim_of = |c: &Cue| c.kind.clone().target_mut().and_then(|t| *t);
+        let mut show = Show::default();
+        let (g, clip, _) = timeline_with_a_pause(&mut show, TimelinePoint::Time(1.0));
+        // A clip Pause cue, a fade and a stop in the group aim at its clip; a
+        // stop aims at a cue outside it.
+        let outside = show.make_cue(CueType::Video, None, show.cues.len());
+        let outside_id = outside.id;
+        show.cues.push(outside);
+        let aim = |show: &mut Show, ty: CueType, at: CueId| {
+            let slot = show.insert_slot(Some(clip), false, 0);
+            let mut c = show.make_cue(ty, None, slot.at);
+            *c.kind.target_mut().unwrap() = Some(at);
+            if let CueKind::Control(ctl) = &mut c.kind {
+                ctl.action = ControlAction::Pause;
+            }
+            let id = c.id;
+            show.insert_cue(slot, c);
+            id
+        };
+        let pause = aim(&mut show, CueType::Control, clip);
+        let fade = aim(&mut show, CueType::Fade, clip);
+        let stop = aim(&mut show, CueType::Stop, outside_id);
+        for id in [pause, fade, stop] {
+            assert_eq!(show.cue(id).unwrap().parent, Some(g));
+        }
+        let copy = show.duplicate(show.cue_index(g).unwrap());
+        let kids = show.children(copy);
+        let new_clip = kids
+            .iter()
+            .find(|c| c.kind.cue_type() == CueType::Video)
+            .unwrap()
+            .id;
+        assert_ne!(new_clip, clip);
+        let target = |ty: CueType| {
+            let c = kids.iter().find(|c| c.kind.cue_type() == ty).unwrap();
+            aim_of(c)
+        };
+        assert_eq!(
+            target(CueType::Control),
+            Some(new_clip),
+            "the clip's Pause cue"
+        );
+        assert_eq!(target(CueType::Fade), Some(new_clip));
+        assert_eq!(
+            target(CueType::Stop),
+            Some(outside_id),
+            "outside the group: kept"
+        );
+        // The originals are as they were.
+        for id in [pause, fade] {
+            assert_eq!(aim_of(show.cue(id).unwrap()), Some(clip));
+        }
+        // A fade duplicated on its own keeps its aim.
+        let alone = show.duplicate(show.cue_index(fade).unwrap());
+        assert_eq!(aim_of(show.cue(alone).unwrap()), Some(clip));
     }
 
     #[test]
