@@ -3,6 +3,10 @@
 
 mod timeline;
 
+// For the timeline editor, which names a run's state (`ui/timeline.rs`).
+#[allow(unused_imports)]
+pub use timeline::{RunState, RunView};
+
 use crate::clock::{ClockFollower, TimeOfDay};
 use crate::fx::VideoFx;
 use crate::media::audio::{AudioOut, Voice};
@@ -260,7 +264,7 @@ pub struct MatteState {
 
 /// How a cue is started, over and above what its own settings say. The default
 /// is a cue fired by hand or by GO.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct StartAt {
     /// The timeline run (its instance) that started it: the clip is then the run's
     /// (`ActiveCue::run`), frozen by its pauses and, if clocked, ended by its clock.
@@ -268,6 +272,26 @@ struct StartAt {
     /// The instance of what started it together with its brothers (a timeline's
     /// run): those started at 0 share the display without replacing each other.
     together: Option<u64>,
+    /// Clip time to start at (`elapsed`): part way in (a seek), or where its
+    /// lead-in ends (`lead`). The content starts at the file position for
+    /// `from` counted from `lead` (`prepare_from`).
+    from: f64,
+    /// The clip's lead-in: its content starts there, at its in point.
+    lead: f64,
+    /// Start it held (a seek's clips wait to be let go together; a parked
+    /// timeline shows them still). A group started so is opened for a seek:
+    /// its run is set by the seek, nothing of it is started.
+    hold: bool,
+    /// What a seek worked out for it: levels, held or not, and it cuts in
+    /// together with the rest of the seek, whatever its transition says.
+    chase: Option<crate::timeline::chase::Alive>,
+}
+
+impl StartAt {
+    /// Started part way in, or after a lead-in, or by a seek (not as a cue starts).
+    fn part_way(&self) -> bool {
+        self.from > 0.0 || self.lead > 0.0 || self.chase.is_some()
+    }
 }
 
 /// A running group. Its children are separate active cues; the group is
@@ -408,6 +432,12 @@ pub struct ActiveCue {
     /// A live input (camera, NDI, live sound) frozen by a pause: the picture holds
     /// its frame, the sound is muted, and what arrives meanwhile is let go.
     live_frozen: bool,
+    /// Its lead-in (a timeline's clip that waited for its fade-in): its content
+    /// began at its in point at this clip time, and file positions count from here.
+    lead: f64,
+    /// Seconds into the file past its in point at which the decoders playing
+    /// now began (a seek's, or a start part way in).
+    file_from: f64,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -416,6 +446,7 @@ struct Seek {
     player: Option<VideoPlayer>,
     voice: Option<Voice>,
     base: f64,
+    file_from: f64,
     spawned_at: Instant,
 }
 
@@ -451,8 +482,8 @@ impl ActiveCue {
     /// time, or with a keyframed speed the file's time that has been played.
     fn pass_time(&self) -> f64 {
         match &self.speed {
-            Some(map) => map.media_at(self.elapsed),
-            None => self.elapsed,
+            Some(map) => map.media_at(self.elapsed) - map.media_at(self.lead),
+            None => self.elapsed - self.lead,
         }
     }
 
@@ -578,6 +609,9 @@ pub struct PendingCue {
     run: Option<u64>,
     /// Where on its timeline it starts (with `run`).
     at: f64,
+    /// A timeline's clip that is invisible (or silent) until a fade cue raises it:
+    /// not due by the clock, it is started by that fade (`timeline_wake`).
+    waits_for_fade: bool,
     /// How it is to be started.
     start: StartAt,
 }
@@ -694,6 +728,10 @@ struct Prepared {
     /// Something the operator should be told when the cue starts (its sound
     /// couldn't be started, say), though it can play.
     warning: Option<String>,
+    /// The clip time a keyframed speed is followed from (`SpeedPlan::t0`).
+    t0: f64,
+    /// Seconds into the file past the in point at which the decoders begin.
+    file_from: f64,
 }
 
 /// Where the playheads were, put aside while a test show runs.
@@ -1058,6 +1096,9 @@ impl Engine {
     }
 
     /// Duration of a cue's action, if it can be known. `Some(None)` = infinite.
+    /// For a timeline's clip that waits for its fade-in it is the length of its
+    /// content, which begins at the end of its lead-in (`model::clips` adds the
+    /// lead-in); a timeline group's length includes its clips' lead-ins.
     pub fn cue_duration(&mut self, show: &Show, cue: &Cue) -> Option<Option<f64>> {
         match &cue.kind {
             CueKind::Video(m) | CueKind::Audio(m) => {
@@ -1067,10 +1108,17 @@ impl Engine {
                 };
                 let rate = m.speed();
                 // File seconds to the cue's own, at a steady speed or along
-                // the keyframes.
+                // the keyframes. With keyframes and a lead-in, the file starts
+                // at clip time V, so `file` seconds of it take until the time
+                // whose integral is `M(V) + file` (as `timeline::edit` trims).
                 let map = self.speed_map_cached(cue.id, m);
+                let lead = if map.is_some() {
+                    timeline::lead_of(show, cue)
+                } else {
+                    0.0
+                };
                 let cue_secs = |file: f64| match &map {
-                    Some(map) => map.time_for(file),
+                    Some(map) => map.time_for(map.media_at(lead) + file) - lead,
                     None => file / rate,
                 };
                 match m.playback(total) {
@@ -1101,7 +1149,13 @@ impl Engine {
                     let Some(d) = self.cue_duration(show, child)? else {
                         return Some(None);
                     };
-                    let t = child.pre_wait + d;
+                    // A timeline's clip that waits for its fade-in plays its
+                    // content after its lead-in.
+                    let lead = match g.mode {
+                        GroupMode::Timeline => timeline::lead_of(show, child),
+                        GroupMode::Playlist => 0.0,
+                    };
+                    let t = child.pre_wait + lead + d;
                     total = match g.mode {
                         GroupMode::Timeline => total.max(t),
                         GroupMode::Playlist => total + t,
@@ -1374,6 +1428,7 @@ impl Engine {
                 reading: None,
                 run: None,
                 at: 0.0,
+                waits_for_fade: false,
                 start: StartAt::default(),
             });
         } else {
@@ -1449,9 +1504,15 @@ impl Engine {
             }
             let Some(len) = a.pass_len else { continue };
             // The end of the pass that is playing, in the cue's time.
+            // (Counted from its lead-in, where its content began.)
             let end = match &a.speed {
-                Some(map) => map.time_for(((map.media_at(a.elapsed) / len).floor() + 1.0) * len),
-                None => ((a.elapsed / len).floor() + 1.0) * len,
+                Some(map) => {
+                    let base = map.media_at(a.lead);
+                    map.time_for(
+                        base + (((map.media_at(a.elapsed) - base) / len).floor() + 1.0) * len,
+                    )
+                }
+                None => a.lead + (((a.elapsed - a.lead) / len).floor() + 1.0) * len,
             };
             // A loop that plays on goes on to the rest of the file instead.
             if let ActiveKind::Audio(vo) = &a.kind
@@ -1666,16 +1727,22 @@ impl Engine {
         // A loop with a keyframed speed that never ends has its bar in the
         // file's time: jump to where in this pass of the file `to` is, which
         // is a time in the cue that keeps the speed where the keyframes put it.
+        // (A clip that waited for its fade-in has no content before its lead-in:
+        // its passes count from there.)
+        let lead = a.lead;
         let to = match (&a.speed, a.loops_forever()) {
             (Some(map), true) => {
                 let len = a.pass_len.unwrap_or(1.0).max(1e-6);
-                let pass = (map.media_at(a.elapsed) / len).floor();
-                map.time_for(pass * len + to)
+                let base = map.media_at(lead);
+                let pass = ((map.media_at(a.elapsed) - base) / len).floor();
+                map.time_for(base + pass * len + to)
             }
-            _ => to,
+            (None, true) => lead + to,
+            _ => to.max(lead),
         };
         let cue = show.cue(a.cue_id).ok_or("that cue was deleted")?.clone();
         let is_image = matches!(a.kind, ActiveKind::Image(_));
+        let mut file_from = 0.0;
         let (player, voice) = if is_image {
             (None, None)
         } else {
@@ -1686,7 +1753,9 @@ impl Engine {
                 ProbeState::Failed(e) => return Err(e.clone()),
                 ProbeState::Pending => return Err("still reading the file".into()),
             };
-            match self.prepare_from(&cue, &info, to)?.kind {
+            let p = self.prepare_from(&cue, &info, to, lead)?;
+            file_from = p.file_from;
+            match p.kind {
                 PreparedKind::Video { player, voice } => (Some(player), voice),
                 PreparedKind::Audio(voice) => (None, Some(voice)),
                 _ => return Err("that cue can't be scrubbed".into()),
@@ -1705,6 +1774,7 @@ impl Engine {
                 player,
                 voice,
                 base: to,
+                file_from,
                 spawned_at: Instant::now(),
             });
         }
@@ -1815,6 +1885,8 @@ impl Engine {
                 },
                 duration: c.media.end.filter(|d| *d > 0.0),
                 warning: None,
+                t0: 0.0,
+                file_from: 0.0,
             });
         }
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
@@ -1850,6 +1922,8 @@ impl Engine {
             },
             duration: c.media.end.filter(|d| *d > 0.0),
             warning: None,
+            t0: 0.0,
+            file_from: 0.0,
         })
     }
 
@@ -1884,6 +1958,8 @@ impl Engine {
             kind: PreparedKind::Audio(voice),
             duration: m.end.filter(|d| *d > 0.0),
             warning: None,
+            t0: 0.0,
+            file_from: 0.0,
         })
     }
 
@@ -1923,16 +1999,32 @@ impl Engine {
         })
     }
 
-    /// Spawn the decoders for a media cue. They start paused/buffering.
-    fn prepare(&self, cue: &Cue, info: &MediaInfo) -> Result<Prepared, String> {
-        self.prepare_from(cue, info, 0.0)
-    }
-
-    /// Like `prepare`, but starting `shift` seconds into the cue (a seek).
-    fn prepare_from(&self, cue: &Cue, info: &MediaInfo, shift: f64) -> Result<Prepared, String> {
+    /// Spawn the decoders for a media cue (they start paused, buffering), at
+    /// `shift` seconds of the cue's own time (0, or a seek), for a clip whose
+    /// content began at its in point at `lead` (its lead-in): the file position is `M(shift) - M(lead)` past the in point,
+    /// `M` being the file seconds played by a time (`SpeedMap::media_at`), the
+    /// same rule as the timeline editor's trims and splits. With a steady speed
+    /// that is `(shift - lead) * rate`.
+    fn prepare_from(
+        &self,
+        cue: &Cue,
+        info: &MediaInfo,
+        shift: f64,
+        lead: f64,
+    ) -> Result<Prepared, String> {
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
         let sig = self.signature(cue).ok_or("not a media cue")?;
         let mut shifted = sig.media.clone();
+        let shift = if shift.is_finite() {
+            shift.max(0.0)
+        } else {
+            0.0
+        };
+        let lead = if lead.is_finite() {
+            lead.clamp(0.0, shift)
+        } else {
+            0.0
+        };
         // A keyframed speed is followed from where the cue is started (a
         // seek); otherwise `shift`, in the cue's time, is `rate` times as much
         // of the file.
@@ -1940,9 +2032,10 @@ impl Engine {
             .speed_map()
             .map(|map| crate::speed::SpeedPlan { map, t0: shift });
         let (rate, shift_file) = match &speed {
-            Some(p) => (1.0, p.map.media_at(shift)),
-            None => (shifted.speed(), shift * shifted.speed()),
+            Some(p) => (1.0, p.map.media_at(shift) - p.map.media_at(lead)),
+            None => (shifted.speed(), (shift - lead) * shifted.speed()),
         };
+        let shift_file = shift_file.max(0.0);
         let looping = shifted.loop_media && shifted.playback(info.duration).pass_len().is_some();
         // A loop is jumped about in without moving its in point: the first
         // pass starts part way in and the ones after it are whole.
@@ -1952,7 +2045,7 @@ impl Engine {
         let m = &shifted;
         let mut playback = m.playback(info.duration);
         let pass_len = playback.pass_len().map(|l| l / rate);
-        if looping && shift > 0.0 {
+        if looping && shift_file > 0.0 {
             playback = playback.started_at(shift_file);
         }
         let duration = match playback {
@@ -2074,6 +2167,8 @@ impl Engine {
             kind,
             duration,
             warning,
+            t0: shift,
+            file_from: shift_file,
         })
     }
 
@@ -2096,6 +2191,8 @@ impl Engine {
             )),
             duration: t.media.end.filter(|d| *d > 0.0),
             warning: None,
+            t0: 0.0,
+            file_from: 0.0,
         }
     }
 
@@ -2114,15 +2211,18 @@ impl Engine {
             kind: PreparedKind::Text(draw_shape_on_thread(s.clone(), size)),
             duration: s.media.end.filter(|d| *d > 0.0),
             warning: None,
+            t0: 0.0,
+            file_from: 0.0,
         }
     }
 
-    fn take_prepared(&mut self, cue: &Cue) -> Option<Prepared> {
+    /// What was got ready for `cue`, if it was got ready as it is now, and (with
+    /// a keyframed speed) to follow the speed from clip time `t0`.
+    fn take_prepared(&mut self, cue: &Cue, t0: f64) -> Option<Prepared> {
         let sig = self.signature(cue)?;
-        let idx = self
-            .prepared
-            .iter()
-            .position(|p| p.cue_id == cue.id && p.sig == sig)?;
+        let idx = self.prepared.iter().position(|p| {
+            p.cue_id == cue.id && p.sig == sig && (p.speed.is_none() || (p.t0 - t0).abs() < 1e-9)
+        })?;
         Some(self.prepared.remove(idx))
     }
 
@@ -2213,6 +2313,8 @@ impl Engine {
             clocked: false,
             detached: false,
             live_frozen: false,
+            lead: 0.0,
+            file_from: 0.0,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2228,7 +2330,7 @@ impl Engine {
         };
         // A timeline's clip: whether its clock keeps its end, and where that is;
         // one that is to loop until the clock ends it is played as a loop.
-        let clip = at.run.map(|_| self.timeline_clip(show, original));
+        let clip = at.run.map(|_| self.timeline_clip(show, original, at.lead));
         let cue = clip
             .as_ref()
             .and_then(|c| c.looped.clone())
@@ -2240,13 +2342,20 @@ impl Engine {
             CueKind::Camera(c) => Some(&c.media),
             _ => None,
         };
+        // (A seek's clips cut in together: no dip.)
         if reveal.is_none()
+            && at.chase.is_none()
             && let Some(m) = dips
             && let Some(color) = m.transition.dip_color()
         {
             self.begin_dip(show, &cue, m, color, at);
             return;
         }
+        // Part way in: where its content starts, or nothing if it has none left
+        // there (`None`); a video that holds its last frame shows that.
+        let Some(at) = self.part_way_start(show, &cue, at) else {
+            return;
+        };
         let instance = self.alloc_instance();
         let mut active = ActiveCue {
             instance,
@@ -2283,15 +2392,20 @@ impl Engine {
             clocked: false,
             detached: false,
             live_frozen: false,
+            lead: 0.0,
+            file_from: 0.0,
         };
         active.extra_hold = self.started_early.remove(&cue.id).unwrap_or(0.0);
         let mut ok = true;
         let mut begun = None;
         active.own_layer = show.own_layers;
-        // A child with a pre-wait comes in by itself, later, and replaces what was there.
-        // (A show from before layers were kept apart: they all replace each other.)
+        // A child with a pre-wait (or a lead-in) comes in by itself, later, and
+        // replaces what was there. (A show from before layers were kept apart:
+        // they all replace each other.) A seek's clips come in together.
         let together = at.together;
-        active.together = if cue.pre_wait > 0.0 || !show.own_layers {
+        active.together = if at.chase.is_some() {
+            together
+        } else if cue.pre_wait > 0.0 || at.lead > 0.0 || !show.own_layers {
             None
         } else {
             together
@@ -2305,7 +2419,17 @@ impl Engine {
             | CueKind::Camera(_)
             | CueKind::LiveAudio(_) => {
                 let m = cue.kind.media().expect("these cues have playback settings");
-                let prepared = match self.take_prepared(&cue) {
+                // A file part way in needs its own decoders: what was got ready
+                // starts at the in point (with a keyframed speed, followed from
+                // the clip time it was got ready for).
+                let file = matches!(cue.kind, CueKind::Video(_) | CueKind::Audio(_));
+                let (shift, lead) = if file { (at.from, at.lead) } else { (0.0, 0.0) };
+                let ready = if (shift - lead).abs() < 1e-9 {
+                    self.take_prepared(&cue, shift)
+                } else {
+                    None
+                };
+                let prepared = match ready {
                     Some(p) => Ok(p),
                     None => match (&cue.kind, &self.ff) {
                         (CueKind::Text(t), _) => Ok(self.prepare_text(&cue, t)),
@@ -2332,12 +2456,13 @@ impl Engine {
                                         }),
                                         run: None,
                                         at: 0.0,
+                                        waits_for_fade: false,
                                         start: at,
                                     });
                                     return;
                                 }
                             };
-                            known.and_then(|info| self.prepare(&cue, &info))
+                            known.and_then(|info| self.prepare_from(&cue, &info, shift, lead))
                         }
                     },
                 };
@@ -2351,6 +2476,21 @@ impl Engine {
                             self.problem(format!("Cue {} ({}): {w}", cue.number, cue.name));
                         }
                         active.duration = p.duration;
+                        active.file_from = p.file_from;
+                        if at.part_way() {
+                            // Its own time from `from`; a held picture's or a camera's
+                            // time and a live sound's run count from its lead-in, a
+                            // file's length from where its decoders begin.
+                            active.lead = at.lead;
+                            active.elapsed = at.from;
+                            active.seek_base = at.from;
+                            if holds(&cue.kind) || matches!(cue.kind, CueKind::LiveAudio(_)) {
+                                active.extra_hold += at.lead;
+                                active.duration = p.duration.map(|d| d + active.extra_hold);
+                            } else {
+                                active.duration = p.duration.map(|d| d + at.from);
+                            }
+                        }
                         active.pass_len = p.pass_len;
                         active.speed = p.speed.clone();
                         active.started = false;
@@ -2421,7 +2561,12 @@ impl Engine {
                         } else {
                             Transition::FadeIn
                         };
-                        // (fade-in time for opacity, for volume)
+                        // (fade-in time for opacity, for volume); a seek's clips cut in.
+                        let transition = if at.chase.is_some() {
+                            Transition::Cut
+                        } else {
+                            transition
+                        };
                         let (fade_op, fade_vol) = match (reveal, transition) {
                             (Some((matte, time)), _) => {
                                 active.entry = Some(EntryAction::Reveal {
@@ -2444,11 +2589,21 @@ impl Engine {
                             }
                             (None, _) => (m.fade_in, m.fade_in),
                         };
-                        active.opacity = Param::new(if fade_op > 0.0 { 0.0 } else { m.opacity });
+                        // Its opacity keyframes where it starts, so it doesn't show at
+                        // its base opacity first (a lead-in starts where they are 0).
+                        let base = if at.part_way() {
+                            m.motion.opacity_at(m.opacity, active.elapsed)
+                        } else {
+                            m.opacity
+                        };
+                        active.opacity = Param::new(if fade_op > 0.0 { 0.0 } else { base });
                         active.opacity.ramp_to(m.opacity, fade_op, m.curve);
                         active.volume =
                             Param::new(if fade_vol > 0.0 { MIN_DB } else { m.volume_db });
                         active.volume.ramp_to(m.volume_db, fade_vol, m.curve);
+                        if let Some(ch) = &at.chase {
+                            timeline::chase_levels(&mut active, m, ch);
+                        }
                     }
                 }
             }
@@ -2458,6 +2613,9 @@ impl Engine {
                 let mut hit = false;
                 // A group as target means its children.
                 let targets = f.target.map(|t| show.with_children(t)).unwrap_or_default();
+                // A timeline's clips waiting for this fade to raise them start now
+                // (from their in points), and it fades them up.
+                hit |= self.timeline_wake(show, f, &targets);
                 for t in &mut self.active {
                     if !targets.contains(&t.cue_id) || t.stopping {
                         continue;
@@ -2577,10 +2735,13 @@ impl Engine {
                     };
                     if g.mode == GroupMode::Timeline && !deck && g.slides.is_none() {
                         // A timeline: its run starts the children on its clock
-                        // (those at 0 once the group is on, below).
+                        // (those at 0 once the group is on, below). Opened for a
+                        // seek (`hold`), the seek sets its run.
                         let key = TimelineKey::Group(id);
-                        self.timeline_begin(show, key, instance, 0.0);
-                        begun = Some(key);
+                        if !at.hold {
+                            self.timeline_begin(show, key, instance);
+                            begun = Some(key);
+                        }
                     } else {
                         for &child in &children[..first] {
                             self.fire(show, child);
@@ -2596,8 +2757,8 @@ impl Engine {
             }
         }
         if ok {
-            if let (Some(run), Some(clip)) = (at.run, clip) {
-                self.timeline_adopt(show, &mut active, run, clip);
+            if let (Some(_), Some(clip)) = (at.run, clip) {
+                self.timeline_adopt(show, &mut active, &at, clip);
             }
             self.active.push(active);
             // A timeline group's run starts what is at 0, in order.
@@ -2621,8 +2782,13 @@ impl Engine {
                 self.fire_next(show, id);
             }
         }
-        // For a dip, continues were handled when the dip began.
-        if cue.continue_mode == ContinueMode::AutoContinue && reveal.is_none() {
+        // For a dip, continues were handled when the dip began. A start part way
+        // in (a seek's) is not a cue being fired: nothing follows it.
+        if cue.continue_mode == ContinueMode::AutoContinue
+            && reveal.is_none()
+            && !at.part_way()
+            && !at.hold
+        {
             self.fire_next(show, id);
         }
     }
@@ -2736,14 +2902,14 @@ impl Engine {
                         }
                         // Answered (or forgotten meanwhile: it asks again).
                         _ => {
-                            due.push((p.cue_id, r.reveal, p.start));
+                            due.push((p.cue_id, r.reveal, p.start.clone()));
                             false
                         }
                     };
                 }
                 p.remaining -= dt;
                 if p.remaining <= 0.0 {
-                    due.push((p.cue_id, None, p.start));
+                    due.push((p.cue_id, None, p.start.clone()));
                     false
                 } else {
                     true
@@ -2944,7 +3110,8 @@ impl Engine {
                         if live.pending.is_none()
                             && let Some(now) = crate::live_text::resolve(
                                 t,
-                                a.elapsed,
+                                // A timer counts from where its content began.
+                                a.elapsed - a.lead,
                                 crate::live_text::now_hms(),
                             )
                             && live_key(&now) != live.drawn
@@ -2996,7 +3163,7 @@ impl Engine {
                     if !mt.fired && !a.stopping && !a.opacity.ramping() {
                         mt.fired = true;
                         mt.fired_at = a.elapsed;
-                        midpoints.push((a.cue_id, a.instance, mt.half, mt.start));
+                        midpoints.push((a.cue_id, a.instance, mt.half, mt.start.clone()));
                     }
                     if mt.fired && !a.stopping && a.elapsed - mt.fired_at > REVEAL_TIMEOUT {
                         a.opacity.ramp_to(0.0, mt.half, mt.curve);
@@ -3314,10 +3481,12 @@ impl Engine {
         // Cues that have already been fired but not started yet: in a
         // pre-wait, or waiting for a dip's midpoint. A timeline's clips only as
         // the clock nears them (`timeline_wanted`).
+        // (A start part way in that waits for its file gets decoders of its
+        // own when it is read: what would be got ready starts at the in point.)
         let mut wanted: Vec<CueId> = self
             .pending
             .iter()
-            .filter(|p| p.run.is_none())
+            .filter(|p| p.run.is_none() && !(p.reading.is_some() && p.start.part_way()))
             .map(|p| p.cue_id)
             .collect();
         for id in self.timeline_wanted(show) {
@@ -3431,7 +3600,7 @@ impl Engine {
         let looped: Vec<Cue> = wanted
             .iter()
             .filter_map(|id| show.cue(*id))
-            .filter_map(|c| self.timeline_clip(show, c).looped)
+            .filter_map(|c| self.timeline_clip(show, c, 0.0).looped)
             .collect();
         let as_played = |id: CueId| looped.iter().find(|c| c.id == id).or_else(|| show.cue(id));
         let sigs: Vec<(CueId, Option<PrepSig>)> = wanted
@@ -3486,7 +3655,10 @@ impl Engine {
                 ProbeState::Ready(info) => info.clone(),
                 _ => continue,
             };
-            match self.prepare(cue, &info) {
+            // A timeline's clip that waits for its fade-in, with a keyframed
+            // speed, is got ready to follow it from its lead-in.
+            let t0 = self.timeline_preload_t0(id);
+            match self.prepare_from(cue, &info, t0, t0) {
                 Ok(p) => {
                     log::trace!("cue {} ({}) is being got ready", cue.number, cue.name);
                     self.prepared.push(p)
@@ -3683,6 +3855,7 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
     }
     a.seek_base = s.base;
     a.elapsed = s.base;
+    a.file_from = s.file_from;
     a.restart_auto_fade();
     note
 }

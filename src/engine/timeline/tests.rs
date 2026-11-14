@@ -885,7 +885,11 @@ fn a_video_that_runs_out_during_a_free_run_pause_ends_loops_or_holds_as_it_is_se
     let (began, part) = watch_fade(&mut e, &show, clip, 0.05, 8.0);
     let began = began.expect("it faded");
     assert!(part && (1.95..2.15).contains(&began), "{began}");
-    assert!(active(&e, clip).is_none());
+    // It goes when its picture runs out, which a busy machine may not have
+    // decoded yet in the few real seconds those ticks took.
+    until(&mut e, &show, None, "it to end", 20, |e| {
+        active(e, clip).is_none()
+    });
     // End with a cut.
     let (show, g, clip) = run_out_show(
         CueType::Video,
@@ -1109,4 +1113,836 @@ fn the_transports_pause_leaves_a_camera_live_and_a_clip_pause_on_it_freezes_it()
     e.fire(&show, thaw);
     run_for(&mut e, &show, 0.6);
     assert!(shown_frames(&e, cam) >= held + 5);
+}
+
+// ----- Seek, parking, jumps (plan 2.6, 2.7) -------------------------------------
+
+use crate::engine::{LayerSource, PreparedKind};
+use crate::media::ProbeState;
+use crate::media::ffmpeg::MediaInfo;
+use crate::show::{Animated, Keyframe, Marker, TimelinePoint};
+
+/// A timeline group made in the editor (clips at opacity 0 wait for their fade-in).
+fn editor_group(show: &mut Show) -> CueId {
+    let g = group(show);
+    if let Some(CueKind::Group(gc)) = show.cue_mut(g).map(|c| &mut c.kind) {
+        gc.timeline = Some(TimelineSettings::for_editor());
+    }
+    g
+}
+
+fn ramp(pairs: &[(f64, f32)]) -> Animated {
+    let mut a = Animated::new(pairs.first().map_or(1.0, |p| p.1));
+    a.keys = pairs
+        .iter()
+        .map(|&(t, v)| Keyframe {
+            t,
+            v,
+            curve: Curve::Linear,
+        })
+        .collect();
+    a
+}
+
+/// What FFmpeg says of a file, once it has.
+fn probed(e: &mut Engine, file: &std::path::Path) -> MediaInfo {
+    let t0 = Instant::now();
+    loop {
+        e.probe.poll();
+        match e.probe.get_urgent(e.ff.as_ref(), file) {
+            ProbeState::Ready(info) => return info.clone(),
+            ProbeState::Failed(err) => panic!("{err}"),
+            ProbeState::Pending => {}
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "never probed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A picture's bytes, made short to compare.
+fn digest(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish()
+}
+
+/// The first frame of `id`'s video decoded from `file_pos` seconds past its in
+/// point at a steady speed, by FFmpeg, as the engine would decode it.
+fn frame_at(e: &mut Engine, show: &Show, id: CueId, file_pos: f64) -> u64 {
+    let mut cue = show.cue(id).unwrap().clone();
+    let m = cue.kind.media_mut().unwrap();
+    m.start += file_pos;
+    m.rate = Animated::new(1.0);
+    m.loop_media = false;
+    let info = probed(e, &m.file.clone());
+    let p = e.prepare_from(&cue, &info, 0.0, 0.0).unwrap();
+    let PreparedKind::Video { mut player, .. } = p.kind else {
+        panic!("a video");
+    };
+    let t0 = Instant::now();
+    while !player.ready() {
+        assert!(t0.elapsed() < Duration::from_secs(20), "no reference frame");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    player.update(0.0);
+    digest(&player.current().unwrap().data)
+}
+
+/// The frame a clip shows.
+fn shown(e: &Engine, id: CueId) -> Option<u64> {
+    match active(e, id).map(|a| &a.kind) {
+        Some(ActiveKind::Video(v)) => v.player.current().map(|f| digest(&f.data)),
+        _ => None,
+    }
+}
+
+fn started(e: &Engine, id: CueId) -> bool {
+    active(e, id).is_some_and(|a| a.started)
+}
+
+fn state(e: &mut Engine, show: &Show, k: TimelineKey) -> RunState {
+    view(e, show, k).state
+}
+
+fn parked(e: &mut Engine, show: &Show, k: TimelineKey) -> bool {
+    matches!(
+        state(e, show, k),
+        RunState::Paused {
+            freeze: PauseFreeze::Everything,
+            waits_for_go: true
+        }
+    )
+}
+
+#[test]
+fn seeking_a_running_timeline_cues_its_clips_part_way_in_and_lets_them_go_on_one_tick() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Video, clip.clone(), 9.0);
+    let a = child(&mut show, g, c, 1.0);
+    let mut c = file(&mut show, CueType::Video, clip, 9.0);
+    c.kind.media_mut().unwrap().layer = 1;
+    let b = child(&mut show, g, c, 2.0);
+    e.fire(&show, g);
+    ticks(&mut e, &show, 0.1, 3);
+    assert_eq!(state(&mut e, &show, key(g)), RunState::Running);
+    e.timeline_seek(&show, key(g), 4.5, true);
+    assert_eq!(state(&mut e, &show, key(g)), RunState::Cueing);
+    let v = view(&mut e, &show, key(g));
+    assert_eq!(v.pos, 4.5);
+    for (id, from) in [(a, 3.5), (b, 2.5)] {
+        let c = active(&e, id).expect("started");
+        assert!(c.hold && (c.elapsed - from).abs() < 1e-9 && (c.file_from - from).abs() < 1e-9);
+    }
+    // The clock stands until both have a frame; then both go on the same tick.
+    let mut released = None;
+    for n in 0..4000 {
+        std::thread::sleep(Duration::from_millis(3));
+        e.tick(&show, 0.0);
+        let holds = (active(&e, a).unwrap().hold, active(&e, b).unwrap().hold);
+        if state(&mut e, &show, key(g)) == RunState::Running {
+            assert_eq!(holds, (false, false), "let go together");
+            released = Some(n);
+            break;
+        }
+        assert_eq!(holds, (true, true));
+        assert_eq!(view(&mut e, &show, key(g)).pos, 4.5, "the clock stands");
+    }
+    assert!(released.is_some(), "never let go");
+    assert!(started(&e, a) && started(&e, b));
+    // Each shows the picture of its new place in the file, not of its start.
+    let here = frame_at(&mut e, &show, a, 3.5);
+    let top = frame_at(&mut e, &show, a, 0.0);
+    assert!(shown(&e, a) == Some(here) && shown(&e, a) != Some(top));
+    assert_eq!(shown(&e, b), Some(frame_at(&mut e, &show, b, 2.5)));
+    // And the run goes on from there.
+    ticks(&mut e, &show, 0.1, 5);
+    assert!(view(&mut e, &show, key(g)).pos > 4.5 && elapsed(&e, a) > 3.5);
+}
+
+#[test]
+fn a_sound_seeked_into_plays_from_that_place_in_its_file_to_its_end() {
+    let Some((mut e, wav)) = with_media("tone_5s.wav") else {
+        return;
+    };
+    e.audio = AudioOut::with_playing_device();
+    probed(&mut e, &wav);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Audio, wav, 5.0);
+    let s = child(&mut show, g, c, 1.0);
+    e.fire(&show, g);
+    e.timeline_seek(&show, key(g), 4.5, true);
+    let a = active(&e, s).unwrap();
+    assert!((a.elapsed - 3.5).abs() < 1e-9 && (a.file_from - 3.5).abs() < 1e-9);
+    assert_eq!(a.duration, Some(5.0), "the whole clip's length");
+    // Played to its end: its time then is its length, which it would be 3.5 s
+    // past had its decoder begun at the in point.
+    let mut last = 0.0;
+    until(&mut e, &show, None, "the sound to end", 20, |e| {
+        if let Some(a) = active(e, s) {
+            last = a.elapsed;
+        }
+        active(e, s).is_none() && e.pending.iter().all(|p| p.cue_id != s)
+    });
+    assert!((last - 5.0).abs() < 0.3, "ended at {last}");
+}
+
+#[test]
+fn a_seek_into_a_faster_or_keyframed_speed_starts_where_the_speed_has_got_the_file_to() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip.clone(), 10.0);
+    c.kind.media_mut().unwrap().rate = Animated::new(2.0);
+    let fast = child(&mut show, g, c, 0.0);
+    let mut c = file(&mut show, CueType::Video, clip, 10.0);
+    let m = c.kind.media_mut().unwrap();
+    m.layer = 1;
+    m.rate = ramp(&[(0.0, 0.5), (4.0, 2.0)]);
+    let keyed = child(&mut show, g, c, 1.0);
+    e.timeline_seek(&show, key(g), 2.0, true);
+    assert!((active(&e, fast).unwrap().file_from - 4.0).abs() < 1e-9);
+    let map = show
+        .cue(keyed)
+        .unwrap()
+        .kind
+        .media()
+        .unwrap()
+        .speed_map()
+        .unwrap();
+    let want = map.media_at(1.0);
+    let k = active(&e, keyed).unwrap();
+    assert!(
+        (k.file_from - want).abs() < 1e-9 && k.elapsed == 1.0,
+        "{}",
+        k.file_from
+    );
+    until(&mut e, &show, Some(0.0), "the frames", 20, |e| {
+        started(e, fast) && started(e, keyed)
+    });
+    assert_eq!(shown(&e, fast), Some(frame_at(&mut e, &show, fast, 4.0)));
+    assert_eq!(shown(&e, keyed), Some(frame_at(&mut e, &show, keyed, want)));
+    // The keyframed one's length is where its file runs out along the map.
+    let len = e
+        .cue_duration(&show, show.cue(keyed).unwrap())
+        .flatten()
+        .unwrap();
+    assert!((len - map.time_for(10.0)).abs() < 1e-6);
+}
+
+#[test]
+fn a_loop_seeked_into_starts_in_the_pass_it_has_got_to() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip, 2.0);
+    c.kind.media_mut().unwrap().loop_media = true;
+    let lp = child(&mut show, g, c, 1.0);
+    e.timeline_seek(&show, key(g), 6.3, true);
+    until(&mut e, &show, Some(0.0), "the loop", 20, |e| started(e, lp));
+    let a = active(&e, lp).unwrap();
+    assert!((a.elapsed - 5.3).abs() < 1e-9);
+    assert_eq!(a.pass_number(), Some(3));
+    assert!((a.bar_position() - 1.3).abs() < 1e-6);
+    assert_eq!(shown(&e, lp), Some(frame_at(&mut e, &show, lp, 1.3)));
+}
+
+#[test]
+fn a_still_a_text_and_a_camera_under_the_playhead_are_up_with_their_time_counted_from_their_start()
+{
+    let Some((mut e, img)) = with_media("color_red.png") else {
+        return;
+    };
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let g = group(&mut show);
+    let mut c = show.make_cue(CueType::Image, Some(img), show.cues.len());
+    let m = c.kind.media_mut().unwrap();
+    (m.transition, m.fade_in, m.end) = (Transition::Cut, 0.0, Some(5.0));
+    let still = child(&mut show, g, c, 1.0);
+    let mut c = text(&mut show, None);
+    c.kind.media_mut().unwrap().layer = 1;
+    let words = child(&mut show, g, c, 0.0);
+    let mut c = camera(&mut show);
+    let m = c.kind.media_mut().unwrap();
+    (m.layer, m.end) = (2, Some(10.0));
+    let cam = child(&mut show, g, c, 2.0);
+    // Parked at 3: all three up, held, each at its own time.
+    e.timeline_seek(&show, key(g), 3.0, true);
+    assert!(parked(&mut e, &show, key(g)));
+    until(&mut e, &show, None, "all three up", 20, |e| {
+        [still, words, cam].iter().all(|c| started(e, *c)) && shown_frames(e, cam) > 0
+    });
+    assert_eq!(e.layers(out).len(), 3);
+    assert_eq!(
+        (elapsed(&e, still), elapsed(&e, words), elapsed(&e, cam)),
+        (2.0, 3.0, 1.0)
+    );
+    // The camera is live while parked; the rest stand still.
+    let first = shown_frames(&e, cam);
+    run_for(&mut e, &show, 0.5);
+    assert!(shown_frames(&e, cam) > first, "live");
+    assert_eq!((elapsed(&e, still), elapsed(&e, cam)), (2.0, 1.0));
+    // Run: the still ends at its time (5 s after its start), the camera's run at 10.
+    e.timeline_run(&show, key(g));
+    ticks(&mut e, &show, 0.0, 2);
+    ticks(&mut e, &show, 0.5, 7);
+    assert!(active(&e, still).is_none() && active(&e, cam).is_some());
+    // Past a still's time it is not started at all.
+    e.timeline_seek(&show, key(g), 7.0, true);
+    assert!(active(&e, still).is_none() && active(&e, words).is_some());
+}
+
+#[test]
+fn seeking_past_a_pause_cue_or_onto_one_leaves_the_run_running_or_parked_as_it_was() {
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    let c = text(&mut show, None);
+    let t = top(&mut show, c, l, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    top(&mut show, p, l, 3.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    top(&mut show, p, l, 8.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.active_list = l;
+    e.go(&show);
+    ticks(&mut e, &show, 0.0, 2);
+    // Running: past the pause at 3, it runs on from 5.
+    e.timeline_seek(&show, k, 5.0, true);
+    until(&mut e, &show, Some(0.0), "running", 10, |e| {
+        e.runs
+            .map
+            .get(&k)
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    e.tick(&show, 1.0);
+    assert!((view(&mut e, &show, k).pos - 6.0).abs() < 1e-9);
+    // Exactly onto it: it counts as passed.
+    e.timeline_seek(&show, k, 3.0, true);
+    until(&mut e, &show, Some(0.0), "running", 10, |e| {
+        e.runs
+            .map
+            .get(&k)
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    e.tick(&show, 0.5);
+    assert!((view(&mut e, &show, k).pos - 3.5).abs() < 1e-9);
+    // Paused at the next one, a seek past it parks there; GO runs on.
+    e.tick(&show, 5.0);
+    assert_eq!(paused_at(&mut e, &show, k), Some(8.0));
+    e.timeline_seek(&show, k, 9.0, true);
+    assert!(parked(&mut e, &show, k));
+    ticks(&mut e, &show, 0.0, 3);
+    assert!(active(&e, t).is_some_and(|a| a.hold), "the text held");
+    e.go(&show);
+    ticks(&mut e, &show, 0.0, 3);
+    assert_eq!(state(&mut e, &show, k), RunState::Running);
+    assert!(active(&e, t).is_some_and(|a| !a.hold));
+    e.tick(&show, 1.0);
+    assert!((view(&mut e, &show, k).pos - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn fades_and_stops_passed_are_played_through_and_control_cues_passed_are_not_done_again() {
+    let mut show = Show::default();
+    let elsewhere = wait(&mut show, 30.0);
+    let elsewhere = top(&mut show, elsewhere, 0, 0.0);
+    let g = group(&mut show);
+    let c = text(&mut show, None);
+    let a = child(&mut show, g, c, 0.0);
+    let mut c = text(&mut show, None);
+    c.kind.media_mut().unwrap().layer = 1;
+    let b = child(&mut show, g, c, 0.0);
+    let f = fade(&mut show, a, Some(0.25), 2.0);
+    child(&mut show, g, f, 1.0);
+    let s = aimed(&mut show, ControlAction::Start, elsewhere);
+    child(&mut show, g, s, 1.5);
+    let d = aimed(&mut show, ControlAction::Disarm, elsewhere);
+    child(&mut show, g, d, 1.5);
+    let mut st = show.make_cue(CueType::Stop, None, show.cues.len());
+    if let CueKind::Stop(sc) = &mut st.kind {
+        sc.target = Some(b);
+        sc.fade = 3.0;
+    }
+    child(&mut show, g, st, 2.5);
+    let mut e = Engine::for_tests();
+    // In the middle of the fade: on its way from 1 to 0.25, held there.
+    e.timeline_seek(&show, key(g), 2.0, true);
+    ticks(&mut e, &show, 0.1, 3);
+    let o = opacity(&e, a).unwrap();
+    assert!((o - 0.625).abs() < 1e-4, "{o}");
+    assert!(active(&e, a).unwrap().faded && active(&e, b).is_some());
+    // Run: it goes on over the second left.
+    e.timeline_run(&show, key(g));
+    ticks(&mut e, &show, 0.0, 2);
+    ticks(&mut e, &show, 0.25, 6);
+    assert!((opacity(&e, a).unwrap() - 0.25).abs() < 1e-4);
+    // Past it all: the end level, the stopped one gone, the cue elsewhere not
+    // started, nothing disarmed.
+    e.stop_all(0.0);
+    e.take_show_edits();
+    e.timeline_seek(&show, key(g), 4.0, true);
+    ticks(&mut e, &show, 0.1, 3);
+    assert!((opacity(&e, a).unwrap() - 0.25).abs() < 1e-6);
+    assert!(active(&e, b).is_none() && !playing(&e, elsewhere));
+    assert!(e.take_show_edits().is_empty());
+}
+
+#[test]
+fn a_clip_waiting_for_its_fade_in_is_waiting_and_ready_in_its_lead_in_and_counts_from_it_after() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = editor_group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip, 10.0);
+    c.kind.media_mut().unwrap().motion.opacity = Some(ramp(&[(0.0, 0.0), (4.0, 0.0), (5.0, 1.0)]));
+    let v = child(&mut show, g, c, 1.0);
+    // Inside the lead-in (1 to 5): not started, waiting, got ready.
+    e.timeline_seek(&show, key(g), 3.0, true);
+    assert!(active(&e, v).is_none());
+    assert_eq!(e.timeline_waiting(key(g)), vec![v]);
+    until(&mut e, &show, Some(0.0), "it to be ready", 20, |e| {
+        e.is_prepared(v)
+    });
+    // In its visible part: its own time from its start, its file from the lead-in.
+    e.timeline_seek(&show, key(g), 7.0, true);
+    let a = active(&e, v).unwrap();
+    assert!(a.elapsed == 6.0 && (a.file_from - 2.0).abs() < 1e-9 && a.lead == 4.0);
+    assert!(e.timeline_waiting(key(g)).is_empty());
+    until(&mut e, &show, Some(0.0), "its frame", 20, |e| started(e, v));
+    assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 2.0)));
+    // Its keyframed opacity where it is, not its base.
+    assert_eq!(opacity(&e, v), Some(1.0));
+    // The group's length has the lead-in in it.
+    let len = e
+        .cue_duration(&show, show.cue(g).unwrap())
+        .flatten()
+        .unwrap();
+    assert!((len - 15.0).abs() < 0.2, "{len}");
+}
+
+#[test]
+fn a_clip_whose_opacity_rises_late_starts_its_content_from_its_in_point_as_it_appears() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    // Made in the editor, already running when it fades in, and an old show's.
+    for case in ["waits", "runs unseen", "old show"] {
+        let mut show = Show::default();
+        let g = if case == "old show" {
+            group(&mut show)
+        } else {
+            editor_group(&mut show)
+        };
+        let mut c = file(&mut show, CueType::Video, clip.clone(), 10.0);
+        let m = c.kind.media_mut().unwrap();
+        m.motion.opacity = Some(ramp(&[(0.0, 0.0), (4.0, 0.0), (5.0, 1.0)]));
+        m.runs_unseen = case == "runs unseen";
+        let v = child(&mut show, g, c, 0.0);
+        let w = wait(&mut show, 9.0);
+        child(&mut show, g, w, 0.0);
+        e.stop_all(0.0);
+        e.fire(&show, g);
+        let mut t = 0.0;
+        while t < 3.9 {
+            e.tick(&show, 0.1);
+            t += 0.1;
+            std::thread::sleep(Duration::from_millis(2));
+            assert_eq!(active(&e, v).is_none(), case == "waits", "{case} at {t}");
+        }
+        until(&mut e, &show, Some(0.1), "it to start", 20, |e| {
+            active(e, v).is_some()
+        });
+        // (Its first frame, with the clock still.)
+        until(&mut e, &show, Some(0.0), "it to be up", 20, |e| {
+            started(e, v)
+        });
+        let a = active(&e, v).unwrap();
+        if case == "waits" {
+            assert!(
+                (a.elapsed - 4.0).abs() < 0.15 && a.file_from == 0.0,
+                "{}",
+                a.elapsed
+            );
+            // One of its first frames, counted from its in point: as many as it
+            // has had time for since its lead-in (it may have had a tick, and a
+            // busy machine may not have decoded them all yet).
+            let n = ((a.elapsed - a.lead) * 30.0).round() as u32;
+            let now = shown(&e, v);
+            let first: Vec<Option<u64>> = (0..=n)
+                .map(|i| {
+                    let at = if i > 0 {
+                        f64::from(i) / 30.0 - 0.001
+                    } else {
+                        0.0
+                    };
+                    Some(frame_at(&mut e, &show, v, at))
+                })
+                .collect();
+            assert!(
+                first.contains(&now),
+                "not one of its first {} frames",
+                n + 1
+            );
+            assert_ne!(now, Some(frame_at(&mut e, &show, v, 4.0)));
+        } else {
+            assert!(a.file_from == 0.0 && a.lead == 0.0, "{case}");
+        }
+    }
+}
+
+#[test]
+fn a_clip_at_opacity_0_starts_when_a_fade_cue_raises_it_and_never_without_one() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = editor_group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip.clone(), 10.0);
+    c.kind.media_mut().unwrap().opacity = 0.0;
+    let v = child(&mut show, g, c, 0.0);
+    let f = fade(&mut show, v, Some(1.0), 1.0);
+    child(&mut show, g, f, 6.0);
+    e.fire(&show, g);
+    for _ in 0..55 {
+        e.tick(&show, 0.1);
+        assert!(active(&e, v).is_none());
+    }
+    assert_eq!(e.timeline_waiting(key(g)), vec![v]);
+    until(&mut e, &show, Some(0.1), "the fade", 20, |e| {
+        active(e, v).is_some()
+    });
+    let a = active(&e, v).unwrap();
+    assert!((a.lead - 6.0).abs() < 0.15 && a.elapsed == a.lead && a.file_from == 0.0);
+    assert!(a.faded && a.opacity.ramping(), "the fade brings it up");
+    until(&mut e, &show, Some(0.0), "its frame", 20, |e| started(e, v));
+    assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 0.0)));
+    ticks(&mut e, &show, 0.25, 6);
+    assert!(opacity(&e, v).unwrap() > 0.99);
+    // With no fade cue it never starts, and the group still ends.
+    let mut show = Show::default();
+    let g = editor_group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip, 10.0);
+    c.kind.media_mut().unwrap().opacity = 0.0;
+    let v = child(&mut show, g, c, 0.0);
+    let w = wait(&mut show, 1.0);
+    child(&mut show, g, w, 0.0);
+    e.stop_all(0.0);
+    e.fire(&show, g);
+    ticks(&mut e, &show, 0.5, 4);
+    assert!(active(&e, v).is_none() && !playing(&e, g) && !e.is_active());
+}
+
+#[test]
+fn a_silent_sound_on_a_timeline_starts_when_a_fade_cue_brings_it_up() {
+    let Some((mut e, wav)) = with_media("tone_5s.wav") else {
+        return;
+    };
+    e.audio = AudioOut::with_playing_device();
+    probed(&mut e, &wav);
+    let mut show = Show::default();
+    let g = editor_group(&mut show);
+    let mut c = file(&mut show, CueType::Audio, wav, 5.0);
+    c.kind.media_mut().unwrap().volume_db = MIN_DB;
+    let s = child(&mut show, g, c, 0.0);
+    let mut f = fade(&mut show, s, None, 1.0);
+    if let CueKind::Fade(fc) = &mut f.kind {
+        fc.volume_db = Some(0.0);
+    }
+    child(&mut show, g, f, 1.0);
+    e.fire(&show, g);
+    ticks(&mut e, &show, 0.2, 4);
+    assert!(active(&e, s).is_none() && waiting(&e, s));
+    e.tick(&show, 0.3);
+    let a = active(&e, s).expect("woken");
+    assert!((a.lead - 1.0).abs() < 1e-9 && a.file_from == 0.0 && a.volume.ramping());
+}
+
+#[test]
+fn with_a_keyframed_speed_and_a_lead_in_the_file_counts_from_the_lead_in_as_the_editor_trims() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let mut show = Show::default();
+    let g = editor_group(&mut show);
+    let mut c = file(&mut show, CueType::Video, clip, 10.0);
+    let m = c.kind.media_mut().unwrap();
+    m.motion.opacity = Some(ramp(&[(0.0, 0.0), (2.0, 0.0), (3.0, 1.0)]));
+    m.rate = ramp(&[(0.0, 0.5), (6.0, 2.0)]);
+    m.end = None;
+    let v = child(&mut show, g, c, 1.0);
+    let map = show
+        .cue(v)
+        .unwrap()
+        .kind
+        .media()
+        .unwrap()
+        .speed_map()
+        .unwrap();
+    probed(
+        &mut e,
+        &show.cue(v).unwrap().kind.media().unwrap().file.clone(),
+    );
+    // Clip time 4 (2 s after the lead-in): M(4) - M(2) into the file.
+    e.timeline_seek(&show, key(g), 5.0, true);
+    let a = active(&e, v).unwrap();
+    let want = map.media_at(4.0) - map.media_at(2.0);
+    assert!((a.file_from - want).abs() < 1e-9, "{} {want}", a.file_from);
+    // Trimmed by the editor to end at clip time 7, its content is 5 s long.
+    let was = show.clone();
+    assert!(crate::timeline::edit::trim(
+        &mut show,
+        v,
+        crate::timeline::edit::Edge::Right,
+        8.0,
+        &mut |c| e.cue_duration(&was, c),
+    ));
+    let content = e
+        .cue_duration(&show, show.cue(v).unwrap())
+        .flatten()
+        .unwrap();
+    assert!((content - 5.0).abs() < 1e-6, "{content}");
+    let clips = model::clips(&show, key(g), &mut |c| e.cue_duration(&show, c));
+    assert!((clips[0].len.unwrap() - 7.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_parked_timeline_shows_the_frame_at_its_playhead_held_and_runs_on_from_it() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    e.audio = AudioOut::with_playing_device();
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let l = timeline_list(&mut show);
+    let c = file(&mut show, CueType::Video, clip, 10.0);
+    let v = top(&mut show, c, l, 1.0);
+    let k = TimelineKey::List(l);
+    probed(
+        &mut e,
+        &show.cue(v).unwrap().kind.media().unwrap().file.clone(),
+    );
+    ticks(&mut e, &show, 0.1, 3);
+    assert!(
+        e.layers(out).is_empty() && e.active.is_empty(),
+        "nothing until a seek"
+    );
+    // Without the picture: parked, nothing started.
+    e.timeline_seek(&show, k, 4.0, false);
+    ticks(&mut e, &show, 0.1, 3);
+    assert!(parked(&mut e, &show, k) && e.active.is_empty() && e.layers(out).is_empty());
+    // With it: the frame at the playhead is on the output, held.
+    e.timeline_seek(&show, k, 4.0, true);
+    until(&mut e, &show, None, "the frame", 20, |e| {
+        !e.layers(out).is_empty()
+    });
+    assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 3.0)));
+    let held = |e: &Engine| {
+        let a = active(e, v).unwrap();
+        let clock = match &a.kind {
+            ActiveKind::Video(s) => s.voice.as_ref().map(|vo| vo.clock()),
+            _ => None,
+        };
+        (a.elapsed, clock)
+    };
+    let before = held(&e);
+    assert!(before.1.is_some(), "it has its sound");
+    run_for(&mut e, &show, 0.4);
+    assert_eq!(held(&e), before, "still, and silent");
+    let LayerSource::Video(_) = &e.layers(out)[0].source else {
+        panic!("its video");
+    };
+    // GO: it runs on from there at once.
+    e.active_list = l;
+    e.go(&show);
+    assert_eq!(state(&mut e, &show, k), RunState::Running);
+    run_for(&mut e, &show, 0.4);
+    assert!(elapsed(&e, v) > 3.1 && view(&mut e, &show, k).pos > 4.1);
+}
+
+#[test]
+fn moving_a_parked_playhead_again_and_again_leaves_no_decoders_behind() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Video, clip.clone(), 10.0);
+    let a = child(&mut show, g, c, 0.0);
+    let mut c = file(&mut show, CueType::Video, clip, 10.0);
+    c.kind.media_mut().unwrap().layer = 1;
+    let b = child(&mut show, g, c, 0.5);
+    let mut readers = Vec::new();
+    for n in 0..15 {
+        e.timeline_seek(&show, key(g), 1.0 + f64::from(n) * 0.37, true);
+        for id in [a, b] {
+            if let Some(ActiveKind::Video(v)) = active(&e, id).map(|x| &x.kind) {
+                readers.push(v.player.reader_done());
+            }
+        }
+        ticks(&mut e, &show, 0.0, 2);
+    }
+    assert_eq!(readers.len(), 30);
+    assert_eq!(e.active.iter().filter(|x| x.run.is_some()).count(), 2);
+    let (old, now) = readers.split_at(28);
+    let t0 = Instant::now();
+    while !old
+        .iter()
+        .all(|r| r.load(std::sync::atomic::Ordering::Acquire))
+    {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "old decoders left running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        e.tick(&show, 0.0);
+    }
+    assert!(
+        now.iter()
+            .all(|r| !r.load(std::sync::atomic::Ordering::Acquire))
+    );
+    // The group parked is still the one group, and stopping it ends them.
+    assert_eq!(e.active.iter().filter(|x| x.cue_id == g).count(), 1);
+    e.stop_cue(g, 0.0);
+    assert!(e.active.is_empty());
+}
+
+#[test]
+fn jump_cues_go_to_a_time_a_marker_or_a_clip_and_one_to_its_own_place_does_not_spin() {
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    show.lists.last_mut().unwrap().timeline = Some(TimelineSettings {
+        markers: vec![Marker {
+            id: 1,
+            time: 12.0,
+            name: "Chorus".into(),
+            color: None,
+        }],
+        ..TimelineSettings::default()
+    });
+    let c = text(&mut show, Some(2.0));
+    let early = top(&mut show, c, l, 0.0);
+    let c = text(&mut show, Some(3.0));
+    let late = top(&mut show, c, l, 10.0);
+    let jump = |show: &mut Show, at: TimelinePoint| {
+        control(
+            show,
+            ControlCue {
+                action: ControlAction::TimelineJump,
+                at: Some(at),
+                ..Default::default()
+            },
+        )
+    };
+    let j = jump(&mut show, TimelinePoint::Time(10.5));
+    let j = top(&mut show, j, l, 1.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.active_list = l;
+    e.go(&show);
+    e.tick(&show, 1.5);
+    assert!(active(&e, early).is_none() && active(&e, late).is_some());
+    assert!((elapsed(&e, late) - 0.5).abs() < 1e-9);
+    until(&mut e, &show, Some(0.0), "the text cued", 10, |e| {
+        e.runs
+            .map
+            .get(&k)
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    // To a marker, and to a clip's start.
+    for (at, pos) in [
+        (TimelinePoint::Marker(1), 12.0),
+        (TimelinePoint::Cue(late), 10.0),
+    ] {
+        if let CueKind::Control(c) = &mut show.cue_mut(j).unwrap().kind {
+            c.at = Some(at);
+        }
+        e.stop_all(0.0);
+        e.timeline_seek(&show, k, 0.0, false);
+        e.go(&show);
+        e.tick(&show, 1.0);
+        ticks(&mut e, &show, 0.0, 2);
+        let v = view(&mut e, &show, k);
+        assert!((v.pos - pos).abs() < 1e-9, "{at:?}: {}", v.pos);
+    }
+    // To its own time: it has been passed there, so it runs on.
+    if let CueKind::Control(c) = &mut show.cue_mut(j).unwrap().kind {
+        c.at = Some(TimelinePoint::Time(1.0));
+    }
+    e.stop_all(0.0);
+    e.timeline_seek(&show, k, 0.0, false);
+    e.go(&show);
+    e.tick(&show, 1.0);
+    until(&mut e, &show, Some(0.0), "the text cued", 10, |e| {
+        e.runs
+            .map
+            .get(&k)
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    e.tick(&show, 0.5);
+    assert!((view(&mut e, &show, k).pos - 1.5).abs() < 1e-9);
+    assert!(e.take_problems().is_empty());
+    // One at 0 to 0 would go round for ever in a frame: it is stopped.
+    if let CueKind::Control(c) = &mut show.cue_mut(j).unwrap().kind {
+        c.at = Some(TimelinePoint::Time(0.0));
+    }
+    show.cue_mut(j).unwrap().pre_wait = 0.0;
+    e.set_log_tap(true);
+    e.stop_all(0.0);
+    e.timeline_seek(&show, k, 0.0, false);
+    e.go(&show);
+    e.tick(&show, 0.1);
+    assert!(
+        e.take_problems().iter().any(|p| p.contains("jumped")),
+        "it says so"
+    );
+}
+
+#[test]
+fn a_run_cue_with_a_place_runs_its_timeline_from_there() {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = text(&mut show, Some(5.0));
+    let a = child(&mut show, g, c, 2.0);
+    let mut r = control(
+        &mut show,
+        ControlCue {
+            action: ControlAction::TimelineRun,
+            timeline: Some(key(g)),
+            at: Some(TimelinePoint::Time(4.0)),
+            ..Default::default()
+        },
+    );
+    r.pre_wait = 0.0;
+    let r = top(&mut show, r, 0, 0.0);
+    let mut e = Engine::for_tests();
+    e.fire(&show, r);
+    assert_eq!(state(&mut e, &show, key(g)), RunState::Cueing);
+    until(&mut e, &show, Some(0.0), "the text cued", 10, |e| {
+        e.runs
+            .map
+            .get(&key(g))
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    assert!(playing(&e, g) && (elapsed(&e, a) - 2.0).abs() < 1e-9);
+    e.tick(&show, 1.0);
+    assert!((view(&mut e, &show, key(g)).pos - 5.0).abs() < 1e-9);
 }
