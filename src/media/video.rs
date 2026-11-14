@@ -84,6 +84,8 @@ pub struct VideoPlayer {
     pub serial: u64,
     /// A camera: show the newest frame, whatever its time stamp says.
     live: bool,
+    /// A camera held on the frame it shows (`set_frozen`).
+    frozen: bool,
     /// Set by the reader thread as it ends (only tests look).
     #[cfg_attr(not(test), allow(dead_code))]
     reader_done: Arc<AtomicBool>,
@@ -464,6 +466,7 @@ impl VideoPlayer {
             pending: None,
             serial: 0,
             live: false,
+            frozen: false,
             reader_done,
         })
     }
@@ -682,6 +685,7 @@ impl VideoPlayer {
             pending: None,
             serial: 0,
             live,
+            frozen: false,
             reader_done,
         })
     }
@@ -698,8 +702,15 @@ impl VideoPlayer {
         self.current.is_some() || self.pending.is_some()
     }
 
-    /// Advance to the frame that should be on screen at media time `t`.
+    /// Advance to the frame that should be on screen at media time `t`. A frozen
+    /// camera keeps the frame it shows and lets go of the ones that arrive.
     pub fn update(&mut self, t: f64) {
+        if self.frozen && self.current.is_some() {
+            for f in self.pending.take().into_iter().chain(self.rx.try_iter()) {
+                let _ = self.recycle.send(f.data);
+            }
+            return;
+        }
         loop {
             self.fill_pending();
             let due = match &self.pending {
@@ -728,6 +739,14 @@ impl VideoPlayer {
     /// A camera, which has no end of its own.
     pub fn is_live(&self) -> bool {
         self.live
+    }
+
+    /// Hold a camera on the frame it shows (a pause that freezes live inputs),
+    /// or let it go live again. While frozen, what arrives is let go at once, so
+    /// nothing is kept to be shown late: let go, it shows the newest frame. (A
+    /// file plays by its clock, which its cue holds: this is for cameras only.)
+    pub fn set_frozen(&mut self, frozen: bool) {
+        self.frozen = frozen && self.live;
     }
 
     pub fn current(&self) -> Option<&VideoFrame> {

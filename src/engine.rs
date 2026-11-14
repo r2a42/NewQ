@@ -253,6 +253,21 @@ pub struct MatteState {
     /// The incoming cue has been started.
     fired: bool,
     fired_at: f64,
+    /// How the incoming cue is to be started at the midpoint (a timeline's clip
+    /// stays its run's).
+    start: StartAt,
+}
+
+/// How a cue is started, over and above what its own settings say. The default
+/// is a cue fired by hand or by GO.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct StartAt {
+    /// The timeline run (its instance) that started it: the clip is then the run's
+    /// (`ActiveCue::run`), frozen by its pauses and, if clocked, ended by its clock.
+    run: Option<u64>,
+    /// The instance of what started it together with its brothers (a timeline's
+    /// run): those started at 0 share the display without replacing each other.
+    together: Option<u64>,
 }
 
 /// A running group. Its children are separate active cues; the group is
@@ -380,6 +395,19 @@ pub struct ActiveCue {
     extra_hold: f64,
     /// Whether this cue replaces only its own layer (`Show::own_layers`).
     own_layer: bool,
+    /// The timeline run (its instance) this is a clip of, if one started it.
+    run: Option<u64>,
+    /// Where on its timeline this clip's slot ends (its start plus its length).
+    ends_at: Option<f64>,
+    /// Its fade-out and end are kept by the timeline's clock, not by its content
+    /// (a pause lies inside it, or it was frozen or ran free while the clock stood).
+    clocked: bool,
+    /// Its content has left the timeline's clock: it ran on while the clock was
+    /// stopped, or was frozen while the clock ran.
+    detached: bool,
+    /// A live input (camera, NDI, live sound) frozen by a pause: the picture holds
+    /// its frame, the sound is muted, and what arrives meanwhile is let go.
+    live_frozen: bool,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -492,13 +520,44 @@ impl ActiveCue {
             _ => None,
         }
     }
+    /// Whether its sound is to be paused, with the show paused or not (`paused`):
+    /// a held cue's is, except a frozen live input's, which goes on being taken in
+    /// (muted) so that nothing is kept to be played late.
+    fn voice_paused(&self, paused: bool) -> bool {
+        paused || (self.hold && !self.live_frozen)
+    }
+    /// Hold it where it is (`live`: it is a live input, to be frozen too).
+    fn freeze(&mut self, live: bool, paused: bool) {
+        self.hold = true;
+        self.live_frozen = live;
+        if live && let ActiveKind::Video(v) = &mut self.kind {
+            v.player.set_frozen(true);
+        }
+        if self.started
+            && let Some(v) = self.voice()
+        {
+            v.set_paused(self.voice_paused(paused));
+        }
+    }
+    /// Let it go on from where it was held.
+    fn unfreeze(&mut self, paused: bool) {
+        self.hold = false;
+        if self.live_frozen
+            && let ActiveKind::Video(v) = &mut self.kind
+        {
+            v.player.set_frozen(false);
+        }
+        self.live_frozen = false;
+        if self.started
+            && let Some(v) = self.voice()
+        {
+            v.set_paused(paused);
+        }
+    }
     fn fade_out_and_stop(&mut self, fade: f64, curve: Curve) {
         // A cue held by a control cue lets go to fade: its levels don't move while held.
         if self.hold {
-            self.hold = false;
-            if let Some(v) = self.voice() {
-                v.set_paused(false);
-            }
+            self.unfreeze(false);
         }
         self.opacity.ramp_to(0.0, fade, curve);
         self.volume.ramp_to(MIN_DB, fade, curve);
@@ -513,6 +572,14 @@ pub struct PendingCue {
     /// Not waiting out a time but for the file to be read (ffprobe), which
     /// takes a moment when the cue wasn't read ahead of GO.
     pub reading: Option<Reading>,
+    /// Waiting for a timeline's clock (that run's instance), not counting down:
+    /// it is due when the run's clock reaches `at`, and `remaining` is kept as
+    /// the time to that.
+    run: Option<u64>,
+    /// Where on its timeline it starts (with `run`).
+    at: f64,
+    /// How it is to be started.
+    start: StartAt,
 }
 
 /// A cue whose start waits for its file to be probed. The rest of the show
@@ -635,6 +702,7 @@ pub struct ListState {
     active_list: u32,
     list_playheads: HashMap<u32, Option<CueId>>,
     paused: bool,
+    runs: timeline::Runs,
 }
 
 pub enum CueStatus {
@@ -696,11 +764,6 @@ pub struct Engine {
     /// settings for a few seconds, so a bad file isn't retried every tick.
     failed_preps: HashMap<CueId, (PrepSig, Instant)>,
     next_instance: u64,
-    /// The children a "start all together" group has fired and not yet started,
-    /// and the group's instance: they share the display without replacing each
-    /// other. (Fired children start after the group's own start, from the fire
-    /// queue, so this is kept until each one starts.)
-    together_for: HashMap<CueId, u64>,
     /// Cues started early to crossfade over the child ahead of them in a "play
     /// in order" group, and by how much (see `ActiveCue::extra_hold`).
     started_early: HashMap<CueId, f64>,
@@ -766,7 +829,6 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
-            together_for: HashMap::new(),
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -810,7 +872,6 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
-            together_for: HashMap::new(),
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -965,7 +1026,7 @@ impl Engine {
     }
 
     pub fn is_active(&self) -> bool {
-        !self.active.is_empty() || !self.pending.is_empty()
+        !self.active.is_empty() || !self.pending.is_empty() || self.timeline_busy()
     }
 
     pub fn probe_state(&mut self, path: &Path) -> &ProbeState {
@@ -1124,9 +1185,14 @@ impl Engine {
 
     /// Fire the cue at the playhead and move the playhead past its continue chain.
     /// While a slide show that advances on GO has slides left, GO shows the
-    /// next one instead.
+    /// next one instead. On a timeline list GO runs (or resumes) the timeline,
+    /// and a timeline group of this list waiting at its own pause cue is
+    /// resumed before anything else is fired.
     pub fn go(&mut self, show: &Show) {
         if self.deck_step(show, true) == DeckStep::Moved {
+            return;
+        }
+        if self.timeline_go(show, self.active_list) {
             return;
         }
         self.go_playhead(show);
@@ -1194,6 +1260,7 @@ impl Engine {
             self.active_list = 0;
             self.playhead = Self::first_in_list(show, 0);
         }
+        self.timeline_sync(show);
     }
 
     /// Take the playheads away, leaving none, to put back later (a test show
@@ -1204,6 +1271,7 @@ impl Engine {
             active_list: std::mem::take(&mut self.active_list),
             list_playheads: std::mem::take(&mut self.list_playheads),
             paused: self.paused,
+            runs: self.take_runs(),
         }
     }
 
@@ -1211,6 +1279,7 @@ impl Engine {
         self.playhead = state.playhead;
         self.active_list = state.active_list;
         self.list_playheads = state.list_playheads;
+        self.runs = state.runs;
         self.set_paused(state.paused);
     }
 
@@ -1250,12 +1319,17 @@ impl Engine {
     pub fn forget_lists(&mut self) {
         self.active_list = 0;
         self.list_playheads.clear();
+        self.timeline_forget();
     }
 
     /// GO on a cue list that is not the one being worked, leaving that one as
     /// it is. Does nothing if there is no such list.
     pub fn go_list(&mut self, show: &Show, list: u32) {
         if !show.has_list(list) {
+            return;
+        }
+        // A timeline list runs; a group of that list waiting at its pause cue resumes.
+        if self.timeline_go(show, list) {
             return;
         }
         let was = self.active_list;
@@ -1290,12 +1364,17 @@ impl Engine {
         }
         // Fired: it is no longer waiting to be got ready.
         self.loads.remove(&id);
-        if cue.pre_wait > 0.0 {
+        // A clip of a timeline list fired on its own starts now: its pre-wait is
+        // its place on the timeline.
+        if cue.pre_wait > 0.0 && !timeline::on_a_timeline_list(show, id) {
             self.pending.push(PendingCue {
                 cue_id: id,
                 remaining: cue.pre_wait,
                 total: cue.pre_wait,
                 reading: None,
+                run: None,
+                at: 0.0,
+                start: StartAt::default(),
             });
         } else {
             self.start(show, id);
@@ -1308,7 +1387,8 @@ impl Engine {
         let Some(i) = show.cue_index(after) else {
             return;
         };
-        if show.cues[i].parent.is_some() {
+        // Nor do the clips of a timeline list: the timeline times them.
+        if show.cues[i].parent.is_some() || timeline::on_a_timeline_list(show, after) {
             return;
         }
         if let Some(next) = show.next_armed_top(i) {
@@ -1322,7 +1402,7 @@ impl Engine {
             if a.started
                 && let Some(v) = a.voice()
             {
-                v.set_paused(paused || a.hold);
+                v.set_paused(a.voice_paused(paused));
             }
         }
     }
@@ -1333,7 +1413,10 @@ impl Engine {
         std::mem::take(&mut self.edits)
     }
 
-    /// Hold the cue `id` (a group's children too), or let it go on.
+    /// Hold the cue `id` (a group's children too), or let it go on. A live
+    /// input (a camera, live sound) named itself is frozen too: naming it is the
+    /// choice. A timeline's clip held this way leaves its clock, which then keeps
+    /// its end (`ActiveCue::detached`).
     fn hold_cue(&mut self, show: &Show, id: CueId, hold: bool) -> bool {
         let targets = show.with_children(id);
         let paused = self.paused;
@@ -1343,11 +1426,13 @@ impl Engine {
                 continue;
             }
             hit = true;
-            a.hold = hold;
-            if a.started
-                && let Some(v) = a.voice()
-            {
-                v.set_paused(paused || hold);
+            if hold {
+                a.freeze(a.cue_id == id && timeline::is_live(show, a.cue_id), paused);
+                if a.run.is_some() {
+                    timeline::detach(a);
+                }
+            } else {
+                a.unfreeze(paused);
             }
         }
         hit
@@ -1387,6 +1472,7 @@ impl Engine {
     /// playhead back at the top of the list.
     pub fn reset_all(&mut self, show: &Show) {
         self.stop_all(0.0);
+        self.timeline_forget();
         self.loads.clear();
         self.list_playheads.clear();
         for l in show.list_ids() {
@@ -1401,6 +1487,10 @@ impl Engine {
 
     /// Do what a control cue says.
     fn control(&mut self, show: &Show, cue: &Cue, c: &ControlCue) {
+        // The timeline actions, and a Pause of a timeline group (with its live setting).
+        if self.timeline_control(show, cue, c) {
+            return;
+        }
         if !c.action.needs_target() {
             return;
         }
@@ -1425,6 +1515,10 @@ impl Engine {
             .cue(target)
             .map(|t| format!("{} ({})", t.number, t.name))
             .unwrap_or_default();
+        // A timeline group's Pause, Resume and Reset are its run's.
+        if self.timeline_route(show, action, target, false, name) {
+            return;
+        }
         match action {
             ControlAction::Start => self.fire(show, target),
             ControlAction::Pause => {
@@ -1466,7 +1560,7 @@ impl Engine {
                 }
             }
             ControlAction::Memo => {}
-            // A timeline's, not a cue's: `control` never gets here with them.
+            // A timeline's: `timeline_route` has said why it can't.
             ControlAction::TimelineRun
             | ControlAction::TimelinePause
             | ControlAction::TimelineStop
@@ -1478,7 +1572,7 @@ impl Engine {
     pub fn stop_all(&mut self, fade: f64) {
         self.pending.clear();
         self.started_early.clear();
-        self.together_for.clear();
+        self.timeline_stop_all();
         if fade <= 0.0 {
             self.active.clear();
             return;
@@ -1522,6 +1616,8 @@ impl Engine {
     }
 
     pub fn stop_instance(&mut self, instance: u64, fade: f64) {
+        // A timeline group's run stops with it, keeping its place.
+        self.timeline_stopped(instance);
         // Stopping a group stops its children; the group itself just ends.
         if let Some(kids) = self.group_children(instance) {
             self.active.retain(|a| a.instance != instance);
@@ -2030,16 +2126,6 @@ impl Engine {
         Some(self.prepared.remove(idx))
     }
 
-    /// The instance of the group, started to play all its children together, that
-    /// `cue` is a child of (those children share a display without replacing each other).
-    fn together_with(&self, cue: &Cue) -> Option<u64> {
-        // Only the children the group itself started: one fired on its own (a
-        // hotkey, OSC, GO on it) while the group plays replaces as any cue does.
-        // (Kept until the cue is on: a start can wait for its file to be read
-        // and come back, see `start_with`.)
-        self.together_for.get(&cue.id).copied()
-    }
-
     fn alloc_instance(&mut self) -> u64 {
         let i = self.next_instance;
         self.next_instance += 1;
@@ -2047,8 +2133,13 @@ impl Engine {
     }
 
     fn start(&mut self, show: &Show, id: CueId) {
+        self.start_at(show, id, StartAt::default());
+    }
+
+    /// `start`, as `at` says (a timeline's clip).
+    fn start_at(&mut self, show: &Show, id: CueId, at: StartAt) {
         let began = Instant::now();
-        self.start_with(show, id, None);
+        self.start_with(show, id, None, at);
         // Starting a cue runs on the main loop: one that takes long shows up
         // as a stall, and this says which.
         let took = began.elapsed();
@@ -2064,7 +2155,7 @@ impl Engine {
 
     /// Begin a dip: fade a colour matte up over the output. The cue itself is
     /// started at the midpoint (see `tick`).
-    fn begin_dip(&mut self, show: &Show, cue: &Cue, m: &MediaCue, color: [u8; 4]) {
+    fn begin_dip(&mut self, show: &Show, cue: &Cue, m: &MediaCue, color: [u8; 4], at: StartAt) {
         let half = (m.fade_in / 2.0).max(0.0);
         // Outgoing content stays visible under the matte; its sound fades
         // out, and it is removed once the matte is opaque.
@@ -2089,6 +2180,7 @@ impl Engine {
                 curve: m.curve,
                 fired: false,
                 fired_at: 0.0,
+                start: at,
             }),
             elapsed: 0.0,
             duration: Some(m.fade_in),
@@ -2116,6 +2208,11 @@ impl Engine {
             together: None,
             extra_hold: 0.0,
             own_layer: false,
+            run: None,
+            ends_at: None,
+            clocked: false,
+            detached: false,
+            live_frozen: false,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2123,11 +2220,19 @@ impl Engine {
     }
 
     /// Start a cue. `reveal` is set when this is the second half of a dip:
-    /// (matte instance, time to fade the matte away).
-    fn start_with(&mut self, show: &Show, id: CueId, reveal: Option<(u64, f64)>) {
-        let Some(cue) = show.cue(id).cloned() else {
+    /// (matte instance, time to fade the matte away). `at` says how (a
+    /// timeline's clip).
+    fn start_with(&mut self, show: &Show, id: CueId, reveal: Option<(u64, f64)>, at: StartAt) {
+        let Some(original) = show.cue(id) else {
             return;
         };
+        // A timeline's clip: whether its clock keeps its end, and where that is;
+        // one that is to loop until the clock ends it is played as a loop.
+        let clip = at.run.map(|_| self.timeline_clip(show, original));
+        let cue = clip
+            .as_ref()
+            .and_then(|c| c.looped.clone())
+            .unwrap_or_else(|| original.clone());
         let dips = match &cue.kind {
             CueKind::Video(m) | CueKind::Image(m) => Some(m),
             CueKind::Text(t) => Some(&t.media),
@@ -2139,7 +2244,7 @@ impl Engine {
             && let Some(m) = dips
             && let Some(color) = m.transition.dip_color()
         {
-            self.begin_dip(show, &cue, m, color);
+            self.begin_dip(show, &cue, m, color, at);
             return;
         }
         let instance = self.alloc_instance();
@@ -2173,13 +2278,19 @@ impl Engine {
             together: None,
             extra_hold: 0.0,
             own_layer: false,
+            run: None,
+            ends_at: None,
+            clocked: false,
+            detached: false,
+            live_frozen: false,
         };
         active.extra_hold = self.started_early.remove(&cue.id).unwrap_or(0.0);
         let mut ok = true;
+        let mut begun = None;
         active.own_layer = show.own_layers;
         // A child with a pre-wait comes in by itself, later, and replaces what was there.
         // (A show from before layers were kept apart: they all replace each other.)
-        let together = self.together_with(&cue);
+        let together = at.together;
         active.together = if cue.pre_wait > 0.0 || !show.own_layers {
             None
         } else {
@@ -2219,6 +2330,9 @@ impl Engine {
                                             since: Instant::now(),
                                             reveal,
                                         }),
+                                        run: None,
+                                        at: 0.0,
+                                        start: at,
                                     });
                                     return;
                                 }
@@ -2461,12 +2575,16 @@ impl Engine {
                         GroupMode::Timeline => children.len(),
                         GroupMode::Playlist => 1,
                     };
-                    let together = g.mode == GroupMode::Timeline && !deck && g.slides.is_none();
-                    for &child in &children[..first] {
-                        if together {
-                            self.together_for.insert(child, instance);
+                    if g.mode == GroupMode::Timeline && !deck && g.slides.is_none() {
+                        // A timeline: its run starts the children on its clock
+                        // (those at 0 once the group is on, below).
+                        let key = TimelineKey::Group(id);
+                        self.timeline_begin(show, key, instance, 0.0);
+                        begun = Some(key);
+                    } else {
+                        for &child in &children[..first] {
+                            self.fire(show, child);
                         }
-                        self.fire(show, child);
                     }
                     active.kind = ActiveKind::Group(GroupState {
                         mode: g.mode,
@@ -2477,10 +2595,15 @@ impl Engine {
                 }
             }
         }
-        // Whatever came of it, the group's start of this cue is over.
-        self.together_for.remove(&cue.id);
         if ok {
+            if let (Some(run), Some(clip)) = (at.run, clip) {
+                self.timeline_adopt(show, &mut active, run, clip);
+            }
             self.active.push(active);
+            // A timeline group's run starts what is at 0, in order.
+            if let Some(key) = begun {
+                self.timeline_step(show, key, 0.0);
+            }
         } else {
             // A failed dip still has to fade its matte away.
             if let Some((matte, time)) = reveal {
@@ -2590,11 +2713,19 @@ impl Engine {
             }
         }
 
+        // The timelines' clocks, and what they reach, in order.
+        self.timeline_tick(show, dt);
         if !self.paused {
-            let mut due: Vec<(CueId, Option<(u64, f64)>)> = Vec::new();
+            // (the cue, a dip's reveal, how to start it)
+            type Due = (CueId, Option<(u64, f64)>, StartAt);
+            let mut due: Vec<Due> = Vec::new();
             let mut gave_up: Vec<CueId> = Vec::new();
             let probe = &self.probe;
             self.pending.retain_mut(|p| {
+                // A timeline's own: its run starts it (`timeline_tick`).
+                if p.run.is_some() {
+                    return true;
+                }
                 if let Some(r) = &p.reading {
                     // Waiting for the file to be read, not for time to pass.
                     return match probe.peek(&r.file) {
@@ -2605,14 +2736,14 @@ impl Engine {
                         }
                         // Answered (or forgotten meanwhile: it asks again).
                         _ => {
-                            due.push((p.cue_id, r.reveal));
+                            due.push((p.cue_id, r.reveal, p.start));
                             false
                         }
                     };
                 }
                 p.remaining -= dt;
                 if p.remaining <= 0.0 {
-                    due.push((p.cue_id, None));
+                    due.push((p.cue_id, None, p.start));
                     false
                 } else {
                     true
@@ -2625,8 +2756,8 @@ impl Engine {
                     .unwrap_or_default();
                 self.problem(format!("Cue {name}: reading its file took too long"));
             }
-            for (id, reveal) in due {
-                self.start_with(show, id, reveal);
+            for (id, reveal, at) in due {
+                self.start_with(show, id, reveal, at);
             }
         }
 
@@ -2647,11 +2778,25 @@ impl Engine {
         let mut messages = Vec::new();
         let mut entries = Vec::new();
         let mut midpoints = Vec::new();
+        let clocks = self.runs.clocks();
+        let moving = self.runs.running();
         self.active.retain_mut(|a| {
+            let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
             // A cue held by a control cue stands still while the rest go on.
             let paused = paused || a.hold;
             let cue = show.cue(a.cue_id);
             let media = cue.and_then(|c| c.kind.media()).filter(|_| !a.is_matte());
+            // A timeline's clip whose end its clock keeps: how long the clock has
+            // to go to it. Content that runs out sooner holds (`RunOut::Hold`, or
+            // `Loop` for one not played as a loop) rather than ends; a still's or
+            // a camera's own time doesn't end it at all.
+            let on_clock = match (a.clocked, a.ends_at, a.run.and_then(|r| clocks.get(&r))) {
+                (true, Some(end), Some(pos)) => Some(end - pos),
+                _ => None,
+            };
+            let keep = on_clock.is_some_and(|l| l > timeline::SAME_TIME)
+                && media.is_some_and(|m| m.run_out != RunOut::End);
+            let clock_ends = a.clocked && cue.is_some_and(|c| holds(&c.kind));
             let mut completed = false;
             let was_started = a.started;
             let (audio_lead, video_lag) = (a.audio_lead, a.video_lag);
@@ -2687,7 +2832,7 @@ impl Engine {
                             }
                             if let Some(vo) = &v.voice {
                                 vo.set_lead(audio_lead);
-                                vo.set_paused(paused);
+                                vo.set_paused(voice_paused);
                             }
                         } else if v.player.finished() {
                             let err = v.player.error().unwrap_or_else(|| "no frames".into());
@@ -2720,7 +2865,7 @@ impl Engine {
                         let audio_done = v.voice.as_ref().is_none_or(|vo| vo.finished());
                         // A camera never ends by itself; "run for" ends it.
                         if v.player.is_live() && a.duration.is_some_and(|d| a.elapsed >= d) {
-                            completed = true;
+                            completed = !clock_ends;
                         } else if v.player.finished() && audio_done && !a.held {
                             if v.player.is_live() {
                                 let err = v.player.error().unwrap_or_else(|| "it stopped".into());
@@ -2729,7 +2874,7 @@ impl Engine {
                                     cue.map(|c| c.number.as_str()).unwrap_or("?")
                                 ));
                             }
-                            if media.is_some_and(|m| m.hold_last_frame) && !a.stopping {
+                            if (keep || media.is_some_and(|m| m.hold_last_frame)) && !a.stopping {
                                 a.held = true;
                                 completed_follow(a, cue, &mut follow);
                             } else {
@@ -2808,7 +2953,7 @@ impl Engine {
                             live.pending = Some(draw_text_on_thread(now, live.size));
                         }
                     }
-                    if a.duration.is_some_and(|d| a.elapsed >= d) {
+                    if a.duration.is_some_and(|d| a.elapsed >= d) && !clock_ends {
                         completed = true;
                     }
                 }
@@ -2824,7 +2969,7 @@ impl Engine {
                     if !a.started && vo.ready() {
                         a.started = true;
                         vo.set_lead(audio_lead);
-                        vo.set_paused(paused);
+                        vo.set_paused(voice_paused);
                     }
                     if a.started {
                         a.elapsed = a.seek_base + vo.clock();
@@ -2835,7 +2980,12 @@ impl Engine {
                             a.duration = Some(a.seek_base + at + vo.tail_len());
                         }
                         if vo.finished() {
-                            completed = true;
+                            // Out of sound before its timeline moves on: silence.
+                            if keep {
+                                a.held = true;
+                            } else {
+                                completed = true;
+                            }
                         }
                     }
                 }
@@ -2846,7 +2996,7 @@ impl Engine {
                     if !mt.fired && !a.stopping && !a.opacity.ramping() {
                         mt.fired = true;
                         mt.fired_at = a.elapsed;
-                        midpoints.push((a.cue_id, a.instance, mt.half));
+                        midpoints.push((a.cue_id, a.instance, mt.half, mt.start));
                     }
                     if mt.fired && !a.stopping && a.elapsed - mt.fired_at > REVEAL_TIMEOUT {
                         a.opacity.ramp_to(0.0, mt.half, mt.curve);
@@ -2947,8 +3097,10 @@ impl Engine {
                         a.volume.value = m.volume_db;
                     }
                 }
-                // Automatic fade-out before the media ends.
+                // Automatic fade-out before the media ends (a clip whose end its
+                // timeline's clock keeps fades by the clock instead, below).
                 if let Some(d) = a.duration
+                    && !a.clocked
                     && m.fade_out > 0.0
                     && !cue
                         .and_then(|c| crossfade_into_next(show, c))
@@ -2969,10 +3121,21 @@ impl Engine {
                         a.volume.ramp_to(MIN_DB, remaining.max(0.0), m.curve);
                     }
                 }
+                if a.clocked && a.started && !a.stopping {
+                    // (A clip held on its own still ends when its clock gets there.)
+                    let moving = !show_paused && a.run.is_some_and(|r| moving.contains(&r));
+                    completed |= timeline::clock_end(a, m, on_clock, moving);
+                }
             }
 
+            // A frozen live sound is muted, its input let go meanwhile.
+            let gain = if a.live_frozen {
+                0.0
+            } else {
+                db_to_gain(a.volume.value)
+            };
             let device_lost = a.voice().and_then(|vo| {
-                vo.set_gain(db_to_gain(a.volume.value));
+                vo.set_gain(gain);
                 vo.device_lost()
             });
             if let Some(why) = device_lost
@@ -3008,12 +3171,14 @@ impl Engine {
         for (instance, output, e) in entries {
             self.apply_entry(instance, output, e);
         }
-        for (id, matte, half) in midpoints {
-            self.start_with(show, id, Some((matte, half)));
+        for (id, matte, half, at) in midpoints {
+            self.start_with(show, id, Some((matte, half)), at);
         }
         for id in follow {
             self.fire_next(show, id);
         }
+        // The timelines: their groups' times, and the runs that have ended.
+        self.timeline_after_tick(show);
 
         self.update_preload(show);
         self.log_cue_changes(show);
@@ -3112,6 +3277,11 @@ impl Engine {
             if a.stopping || g.children.iter().any(|c| self.is_running(*c)) {
                 continue;
             }
+            // A timeline group is over only while its run is running, once
+            // nothing its clock still keeps is left.
+            if !self.timeline_group_may_end(a.instance) {
+                continue;
+            }
             match g.children.get(g.next) {
                 Some(&child) if g.mode == GroupMode::Playlist => to_fire.push((a.instance, child)),
                 _ => done.push(a.instance),
@@ -3142,8 +3312,19 @@ impl Engine {
     /// Keep the next cue(s) at the playhead decoded and ready, so GO is instant.
     fn update_preload(&mut self, show: &Show) {
         // Cues that have already been fired but not started yet: in a
-        // pre-wait, or waiting for a dip's midpoint.
-        let mut wanted: Vec<CueId> = self.pending.iter().map(|p| p.cue_id).collect();
+        // pre-wait, or waiting for a dip's midpoint. A timeline's clips only as
+        // the clock nears them (`timeline_wanted`).
+        let mut wanted: Vec<CueId> = self
+            .pending
+            .iter()
+            .filter(|p| p.run.is_none())
+            .map(|p| p.cue_id)
+            .collect();
+        for id in self.timeline_wanted(show) {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
         // Cues a control cue asked to have ready (the ones that exist and can be).
         self.loads
             .retain(|id| show.cue(*id).is_some_and(|c| c.kind.preloads()));
@@ -3176,7 +3357,10 @@ impl Engine {
                             room
                         },
                     ) {
-                        if child.kind.preloads() && !wanted.contains(&child.id) {
+                        if child.kind.preloads()
+                            && timeline::starts_soon(g, child)
+                            && !wanted.contains(&child.id)
+                        {
                             wanted.push(child.id);
                         }
                     }
@@ -3223,6 +3407,7 @@ impl Engine {
                             break;
                         }
                         if child.kind.preloads()
+                            && timeline::starts_soon(g, child)
                             && group_children_wanted(&wanted, show) < MAX_PRELOAD_CHILDREN
                         {
                             wanted.push(child.id);
@@ -3242,9 +3427,16 @@ impl Engine {
                 }
             }
         }
+        // A timeline's clip that is to loop until the clock ends it is got ready as a loop.
+        let looped: Vec<Cue> = wanted
+            .iter()
+            .filter_map(|id| show.cue(*id))
+            .filter_map(|c| self.timeline_clip(show, c).looped)
+            .collect();
+        let as_played = |id: CueId| looped.iter().find(|c| c.id == id).or_else(|| show.cue(id));
         let sigs: Vec<(CueId, Option<PrepSig>)> = wanted
             .iter()
-            .map(|id| (*id, show.cue(*id).and_then(|c| self.signature(c))))
+            .map(|id| (*id, as_played(*id).and_then(|c| self.signature(c))))
             .collect();
         self.prepared.retain(|p| {
             let keep = sigs
@@ -3264,7 +3456,7 @@ impl Engine {
             if self.is_prepared(id) {
                 continue;
             }
-            let Some(cue) = show.cue(id) else { continue };
+            let Some(cue) = as_played(id) else { continue };
             let sig = self.signature(cue);
             if let (Some(sig), Some((failed, _))) = (&sig, self.failed_preps.get(&id))
                 && sig == failed
