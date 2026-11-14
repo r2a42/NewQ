@@ -2,6 +2,7 @@
 
 mod modern;
 mod settings;
+mod timeline;
 
 use crate::clicker::{BACK_GUARD, Button, Do};
 use crate::clock::{self, TimeOfDay};
@@ -766,11 +767,17 @@ enum Action {
     SetShowMode(bool),
     /// Go to the search box.
     FocusFind,
+    /// Something the timeline editor asks for. (Nothing asks yet.)
+    #[allow(dead_code)]
+    Timeline(timeline::TimelineAction),
 }
 
 impl Action {
     /// Whether this changes the show (or replaces it), and so is refused in show mode.
     fn edits_the_show(&self) -> bool {
+        if let Action::Timeline(a) = self {
+            return a.edits_the_show();
+        }
         matches!(
             self,
             Action::AddCue(_)
@@ -1288,6 +1295,7 @@ fn pane_ui(
                 settings::settings_view(ui, show, engine, st, actions)
             });
         }
+        Pane::Timeline => timeline::pane(ui, show, engine, st, actions),
     }
 }
 
@@ -1469,7 +1477,8 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         ui.close();
     }
     ui.separator();
-    for pane in Pane::ALL {
+    // The timeline pane isn't offered until the editor is built.
+    for pane in Pane::ALL.into_iter().filter(|p| *p != Pane::Timeline) {
         let open = st.layout.is_open(pane);
         let popped = st.layout.is_popped_out(pane);
         ui.horizontal(|ui| {
@@ -10053,6 +10062,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     }
     let sel_idx = st.selected.and_then(|id| show.cue_index(id));
     match action {
+        Action::Timeline(a) => timeline::apply(a, show, engine, st),
         Action::Go => {
             engine.go(show);
             st.selected = engine.playhead;

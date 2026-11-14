@@ -56,6 +56,25 @@ pub struct Prefs {
     /// How much the log says (see `logging`).
     #[serde(default, skip_serializing_if = "is_default_level")]
     pub log_level: crate::logging::LogLevel,
+    /// Where the timeline editor goes: a pane, or a workspace of its own.
+    #[serde(default, skip_serializing_if = "TimelineLayout::is_pane")]
+    pub timeline_layout: TimelineLayout,
+}
+
+/// Where the timeline editor is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineLayout {
+    /// A pane of the dock (the new interface: a panel under the cue list).
+    #[default]
+    Pane,
+    /// A workspace that takes the place of the panes while it is open.
+    Workspace,
+}
+
+impl TimelineLayout {
+    fn is_pane(&self) -> bool {
+        *self == TimelineLayout::Pane
+    }
 }
 
 fn is_default_level(l: &crate::logging::LogLevel) -> bool {
@@ -113,6 +132,7 @@ mod tests {
             clicker_back: Some(0x49),
             new_layout: true,
             log_level: crate::logging::LogLevel::Debug,
+            timeline_layout: TimelineLayout::Workspace,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
@@ -131,6 +151,12 @@ mod tests {
         );
         assert!(!json.contains("clicker"), "{json}");
         assert!(!json.contains("log_level"), "{json}");
+        assert!(!json.contains("timeline"), "{json}");
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"timeline_layout\":\"Workspace\"")
+        );
         // The level is a word in the file, and one this version doesn't know
         // (from a newer one) gives the defaults, not a failure to start.
         assert!(

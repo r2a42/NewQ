@@ -16,16 +16,19 @@ pub enum Pane {
     Preview,
     Active,
     Settings,
+    /// The timeline editor. (Not offered in the Window menu yet.)
+    Timeline,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 6] = [
+    pub const ALL: [Pane; 7] = [
         Pane::Cues,
         Pane::Inspector,
         Pane::Cart,
         Pane::Preview,
         Pane::Active,
         Pane::Settings,
+        Pane::Timeline,
     ];
 
     pub fn title(self) -> &'static str {
@@ -36,13 +39,14 @@ impl Pane {
             Pane::Preview => "Preview",
             Pane::Active => "Active",
             Pane::Settings => "Settings",
+            Pane::Timeline => "Timeline",
         }
     }
 
     /// The pane a hidden one comes back beside: its own kind of company.
     fn companion(self) -> Option<Pane> {
         match self {
-            Pane::Settings => Some(Pane::Cues),
+            Pane::Settings | Pane::Timeline => Some(Pane::Cues),
             Pane::Cart => Some(Pane::Inspector),
             Pane::Active => Some(Pane::Preview),
             Pane::Preview => Some(Pane::Active),
@@ -467,6 +471,36 @@ mod tests {
         assert!(!loaded.is_open(Pane::Cues) && loaded.is_docked(Pane::Cart));
         assert!(loaded.is_popped_out(Pane::Inspector));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_layout_from_before_the_timeline_pane_loads_and_one_with_it_round_trips() {
+        let dir = std::env::temp_dir().join(format!("newq_dock_timeline_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // What 0.20.3 writes: the timeline is not in it, and it is not opened.
+        let old = serde_json::to_string(&Layout::default()).unwrap();
+        assert!(!old.contains("Timeline"), "{old}");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FILE), &old).unwrap();
+        let back = Layout::load(&dir);
+        assert!(back.is_valid() && !back.is_open(Pane::Timeline));
+        assert_eq!(
+            sorted(back.docked_panes()),
+            sorted(Layout::default().docked_panes())
+        );
+        // Opened, it docks beside the cue list and is saved and read back.
+        let mut l = Layout::default();
+        l.open(Pane::Timeline);
+        assert_eq!(
+            l.dock.find_tab(&Pane::Timeline).unwrap().node,
+            l.dock.find_tab(&Pane::Cues).unwrap().node
+        );
+        l.save(&dir).unwrap();
+        assert!(Layout::load(&dir).is_docked(Pane::Timeline));
+        l.pop_out(Pane::Timeline);
+        l.save(&dir).unwrap();
+        assert!(Layout::load(&dir).is_popped_out(Pane::Timeline));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
