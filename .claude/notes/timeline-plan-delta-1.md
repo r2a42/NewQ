@@ -433,3 +433,25 @@ Real after P0: `timeline/mod.rs`, `timeline/model.rs`, and in `edit.rs` `new_tim
 ## G. How the wave-1 agents share this machine
 
 Disk is small. Every worktree builds into the ONE target folder: set `CARGO_TARGET_DIR=/home/user/NewQ/target` for every cargo command. Builds then wait on each other's lock ("Blocking waiting for file lock"): that is expected, wait for it. Do not create another target folder, and do not run `scripts/cross_clippy.sh` (integration does). The test media is not in git: `ln -s /home/user/NewQ/test_media test_media` in the worktree's root before running tests. Other agents' tests run at the same time, so a timing test may fail once from load; re-run that one test alone before believing it.
+
+---
+
+## H. What P1 landed (the editing library), for P2b, P6 and I1
+
+`src/timeline/edit.rs` and `src/timeline/snap.rs` are real, with wave 0's signatures unchanged. Added: `edit::MIN_LEN: f64 = 0.05` and `pub(crate) fn edit::shift_keys(a: &mut Animated, by: f64)`.
+
+Behaviour worth knowing:
+- `set_list_timeline` refuses list 0 and a list that does not exist ("There is no such list").
+- `sort_by_start` breaks a tie in start time by `model::due_order` (control, then fade and stop, then clips): a pause added at a clip's start comes before the clip in the show.
+- `split`: only media cues; refused inside a lead-in, outside the clip and on loops; clears `hold_last_frame` on the first half; the second half gets `runs_unseen = true` when it would otherwise wait for a fade-in.
+- `add_marker` ids come from `show.alloc_id()` and are never reused.
+- `add_track`: a picture track goes one layer above the highest on the first picture track's display; a sound track on the first audio output without one (`None` first).
+- `remove_track` refuses the Cues track. `trim` finds the timeline with `model::key_of` and refuses a cue on none.
+- Ripple delete moves a marker only if every track that had clips rippled, by the least any of them moved before it.
+- A move's "same track step" is an index step in `model::tracks` order (so it can cross displays); a clip whose target row is of another kind stays put.
+- Trim never shortens `fade_in`/`fade_out` to fit.
+
+Open items:
+1. **P2b: `Engine::cue_duration` and keyframed speed with a lead-in.** `trim` and `split` put the file position at clip time `t` at `in + M(t) − M(V)` (plan 2.5). `cue_duration` maps the file length with `time_for` from clip time 0, leaving out `M(V)`. They agree at a steady speed or with no lead-in. P2b makes `cue_duration` and `prepare_from` use the same rule (with F1).
+2. **I1:** remove `#![allow(dead_code)]` from `src/timeline/mod.rs` once P3's editor calls `edit` and `snap`.
+3. **I1 or P6: a split leaves fade cues aimed at the first half.** A fade-triggered clip split after its fade leaves the second half at opacity 0; retargeting needs a rule.
