@@ -642,3 +642,58 @@ Left (not I1's, or not cheap):
   zoom shift while it runs.
 - The control cue's icon (🎛) draws as a box-like glyph in the cue list (font coverage; older than timelines).
 - Editor adds clips only through the cue list (no AddClip/AddTrack/split from the editor: P6).
+
+## P. What I1b landed (the last polish before the first timeline release)
+
+Commits "Timeline:" and one "Docs:" on top of N. Full suite: 1012 passed, 5 ignored.
+
+- **`RunView.parked`** (the run's own flag: a seek that parks, or a pause while cueing) and
+  **`RunView.fading`** (Stopped, its clips or a dip's matte still fading out). `toolbar::state_text(run,
+  pos)` reads them: "Parked · Run or GO plays from here", "Stopping · fading out". The guess from pause
+  cues at the playhead is gone.
+- **`chase::Clip::entry`** removed (the Enter event's time is the same); `pub mod chase;` has no allow.
+- **What GO does is one engine decision:** `Engine::go_plan(show) -> GoPlan` (`Slide { deck, slide }`,
+  `Timeline { key, does: TimelineGo, then }`, `Cue(Option<CueId>)`); `TimelineGo` is Start (a stopped
+  timeline list), Resume (at a pause), Play (parked), Running and Cueing (a list: GO does nothing).
+  `go` follows the same pieces: `deck_at` (shared with `deck_step`), `timeline_go_for` (which
+  `timeline_go` acts on), `playhead_top` (shared with `go_playhead`). `GoPlan::describe` gives
+  "Continue 1 · Opening" / "then bring in 5 · Still" (`then` is `on_go_of`, the toolbar's `on_go`);
+  the words are `timeline::model::on_go_text` (the toolbar's `go_text` adds "GO: ") and
+  `model::name`. Read out by the classic transport (`ui::go_readout`), the new interface's header (fixed
+  width `HEADER_NEXT_WIDTH`, cut short, hover for all) and Operator view (THEN then lists the next
+  cue first), and the web remote (`"go"` in the state JSON; the page shows it in place of the next cue).
+  OSC feedback's `/newq/playhead` is the playhead cue itself, not GO's action: left as it is.
+- **Toolbar:** the state and GO texts come last, truncated (hover for the whole); the time is padded.
+  Test `the_toolbar_buttons_stay_put_as_the_run_state_text_changes` (fails on the old layout).
+- **The flaky test** (`seeking_past_a_pause_cue_or_onto_one…`): not an engine race. A text is drawn on
+  a thread; going on from a park cues the run until it is up; the test gave it three 2 ms ticks.
+  Reproduced (9 of 40 runs with four busy loops), now waits with 0-ticks for the drawing and for
+  Running, and checks the clock is still at 9; 40 of 40 under the same load.
+- **Matrix crosspoint fades hold at a pause:** `VoiceShared::xp_hold` (an `AtomicBool` the mixer reads;
+  no lock, no allocation), `Voice::hold_crosspoints/crosspoints_held/has_crosspoints`.
+  `Engine::timeline_hold_crosspoints` (after each tick) holds the voices a run's fade cue with `matrix`
+  targets aims at while that run is Paused or Cueing; it clears when the clock moves, the run stops or
+  goes, or the fade ends. The rate was set at the start, so the fade takes its time in all.
+  A crosspoint fade begun by hand on a voice such a fade also aims at waits with it (not separated).
+  Also: a run's fade cue counts its own time from where its run's clock was when it began
+  (`ActiveCue::fade_from`); one begun part way through a tick counted the whole tick and ended up to a
+  frame early. Tests: the mixer (`…stands_while_held`) and the engine on the fake device, mixed in real
+  time (`a_matrix_crosspoint_fade_waits_at_a_free_run_pause_and_goes_on_after_go`).
+- **Docs:** README (toolbar Stop and the Stop cue fade over 3 s / the cue's time, 0 cuts, a second Stop
+  cuts, GO or Run during the fade; fades under way wait at a pause, hand fades run; a clip frozen by its
+  own Pause follows its keys; the transports' GO read-out), CHANGELOG lines, CLAUDE.md entry.
+- **Looked at headless** (1280×760 window, both interfaces; screenshots in the session scratchpad
+  `i1b/`): stopped, running, waiting at the pause ("Continue 1 · Opening"), parked ("Play 1 · Opening
+  from its playhead / then 5 · Dim the red"), the Stop fade, the Stop cue's "Fade out 3.00 s" row, the
+  Operator view at a pause. Fixed from what was seen: the toolbar said "Stopped" during the fade, and
+  the new interface's view tabs moved with the read-out.
+
+Still to know (not I1b's):
+- No "then …" when the next thing on a paused timeline is a control cue (a Stop or Jump): `on_go`
+  skips control cues; the read-out is just "Continue …".
+- A still on a timeline whose own time passes its end while the clock keeps it reads "0:08.0 / 0:08.0
+  (-0:00.0)" in the active panel (cosmetic). In the look show the free-run pause let the 10 s video and
+  the still run out before the Stop (by design, the ⚠ case), so the Stop's fade had little to fade.
+- The Stop cue's "Fade out" row is below the fold of the classic inspector with the Timeline pane open
+  (as N said for the timeline rows); scroll the inspector.
+- The matte's `REVEAL_TIMEOUT` still counts real time (O).
