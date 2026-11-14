@@ -362,7 +362,12 @@ mod tests {
                 super::ProbeState::Pending
             ));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        // The three workers each take a file as they start, which a loaded
+        // machine does in its own time: wait for it, not for a tenth of a second.
+        let began = std::time::Instant::now();
+        while cache.load().1 > 27 && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let (workers, waiting) = cache.load();
         assert_eq!(workers, 3, "three at once, not thirty");
         assert_eq!(waiting, 27, "the rest wait their turn");
