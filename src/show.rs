@@ -3,11 +3,10 @@
 use crate::clock::TimeOfDay;
 use crate::media::playback::Playback;
 use crate::timecode::Timecode;
-// Marker and TrackId are for the timeline editor's code (`use crate::show::*`).
-#[allow(unused_imports)]
-pub use crate::timeline::{
-    Marker, PauseFreeze, RunOut, TimelineKey, TimelinePoint, TimelineSettings, TrackId,
-};
+pub use crate::timeline::{PauseFreeze, RunOut, TimelineKey, TimelinePoint, TimelineSettings};
+// Tests name a marker through the show's types.
+#[cfg(test)]
+pub use crate::timeline::Marker;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

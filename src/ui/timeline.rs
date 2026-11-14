@@ -9,10 +9,6 @@
 //! is shown from `EditorState` while it lasts and asked for once, on release,
 //! so it is one undo step.
 
-// Some of the actions are for the packages that build on this one (a list's
-// tab, the workspace, split and the speed lane).
-#![allow(dead_code)]
-
 mod control;
 mod ruler;
 mod toolbar;
@@ -34,7 +30,10 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Host {
     Pane,
+    // A list's tab (P4) and the workspace (P7).
+    #[allow(dead_code)]
     ListTab,
+    #[allow(dead_code)]
     Workspace,
 }
 
@@ -48,6 +47,8 @@ pub struct EditorState {
     pub pps: f32,
     pub scroll: Vec2,
     pub snap: bool,
+    // The toolbar's ripple toggle (P6).
+    #[allow(dead_code)]
     pub ripple: bool,
     /// What is being dragged, and in which host.
     drag: Option<(Host, Drag)>,
@@ -279,6 +280,10 @@ fn empty_state(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
 /// What the editor asks for; made after the frame by `apply`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TimelineAction {
+    // The variants allowed dead are asked for by the editor tools still to come
+    // (split, ripple delete, adding clips and tracks, the speed lane: P6) and
+    // the standalone tab (a new timeline list, converting one: P4) and the layout
+    // choice (P7); `apply` already makes them.
     // edits (refused in show mode)
     MoveClips {
         key: TimelineKey,
@@ -291,16 +296,19 @@ pub enum TimelineAction {
         edge: Edge,
         to: f64,
     },
+    #[allow(dead_code)]
     Split {
         key: TimelineKey,
         ids: Vec<CueId>,
         at: f64,
     },
+    #[allow(dead_code)]
     Delete {
         key: TimelineKey,
         ids: Vec<CueId>,
         ripple: bool,
     },
+    #[allow(dead_code)]
     AddClip {
         key: TimelineKey,
         ty: CueType,
@@ -318,10 +326,12 @@ pub enum TimelineAction {
         clip: CueId,
         what: PauseBefore,
     },
+    #[allow(dead_code)]
     AddTrack {
         key: TimelineKey,
         picture: bool,
     },
+    #[allow(dead_code)]
     RemoveTrack {
         key: TimelineKey,
         track: TrackId,
@@ -344,12 +354,15 @@ pub enum TimelineAction {
         key: TimelineKey,
         id: u64,
     },
+    #[allow(dead_code)]
     SetRate {
         id: CueId,
         rate: Animated,
     },
+    #[allow(dead_code)]
     NewTimelineList,
     NewTimelineGroup,
+    #[allow(dead_code)]
     SetListTimeline {
         list: u32,
         on: bool,
@@ -371,6 +384,7 @@ pub enum TimelineAction {
     // view
     Open(Option<TimelineKey>),
     Close,
+    #[allow(dead_code)]
     SetLayout(TimelineLayout),
 }
 

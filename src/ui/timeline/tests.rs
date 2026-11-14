@@ -29,6 +29,9 @@ enum Draw {
     Popout,
     /// The new interface.
     Modern,
+    /// The whole window (`ui::draw`: its actions are made, and the undo
+    /// history kept, as in the app).
+    Full,
 }
 
 /// Draws the editor (or what holds it) frame by frame with made-up input.
@@ -61,7 +64,14 @@ impl Mouse {
             self.sent = self.mods;
         }
         let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 520.0))),
+            screen_rect: Some(Rect::from_min_size(
+                Pos2::ZERO,
+                if self.draw == Draw::Full {
+                    vec2(1300.0, 900.0)
+                } else {
+                    vec2(1000.0, 520.0)
+                },
+            )),
             time: Some(self.t),
             events,
             ..Default::default()
@@ -82,16 +92,10 @@ impl Mouse {
             }
             Draw::Popout => super::super::draw_popout(ui, Pane::Timeline, show, e, st),
             Draw::Modern => super::super::modern::draw(ui, show, e, st, &mut actions),
+            Draw::Full => super::super::draw(ui, show, e, st),
         });
         out.textures_delta.clear();
         actions
-    }
-
-    /// A frame whose actions are made, as the app makes them.
-    fn frame_apply(&mut self, show: &mut Show, st: &mut UiState, events: Vec<Event>) {
-        for a in self.frame(show, st, events) {
-            super::super::apply(a, show, &mut self.e, st);
-        }
     }
 
     fn rects(&self) -> Option<TimelineRects> {
@@ -980,4 +984,157 @@ fn a_marker_is_dragged_and_its_menu_adds_a_pause_cue_there() {
             at: 5.0
         }]
     );
+}
+
+// ----- End to end: the editor, the show, the undo history and the engine -----
+
+/// The fixture with its pictures showing `color_red.png`, the engine able to
+/// play them; None (the test skips) without FFmpeg or the file.
+fn with_pictures() -> Option<(Fixture, Mouse)> {
+    let (ff, img) = crate::media::test_media("color_red.png")?;
+    let mut f = fixture();
+    for id in [f.a, f.b, f.c] {
+        let i = f.show.cue_index(id).unwrap();
+        f.show.cues[i].kind.media_mut().unwrap().file = img.clone();
+    }
+    let mut m = Mouse::new();
+    m.e.ff = Some(ff);
+    Some((f, m))
+}
+
+fn playing(e: &Engine, id: CueId) -> bool {
+    matches!(e.status(id), crate::engine::CueStatus::Playing { .. })
+}
+
+/// Tick the engine in real time until `cond`, at most `secs`.
+fn until(
+    m: &mut Mouse,
+    show: &Show,
+    what: &str,
+    secs: u64,
+    mut cond: impl FnMut(&mut Engine) -> bool,
+) {
+    let t0 = std::time::Instant::now();
+    while !cond(&mut m.e) {
+        assert!(
+            t0.elapsed().as_secs() < secs,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        m.e.tick(show, 0.005);
+    }
+}
+
+#[test]
+fn a_clip_dragged_in_the_window_moves_and_one_undo_puts_it_back() {
+    let mut f = fixture();
+    let mut m = Mouse::new();
+    m.draw = Draw::Full;
+    super::super::apply(
+        Action::Timeline(TimelineAction::Open(None)),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    let before = f.show.cue(f.b).unwrap().pre_wait;
+    let b = m.clip(&mut f.show, &mut f.st, f.b);
+    let pps = m.rects().unwrap().pps;
+    m.drag(
+        &mut f.show,
+        &mut f.st,
+        b.center(),
+        b.center() + vec2(1.5 * pps, 0.0),
+    );
+    // A frame or two for the history to see it.
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let moved = f.show.cue(f.b).unwrap().pre_wait;
+    assert!((moved - before - 1.5).abs() < 0.3, "{before} -> {moved}");
+    super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+    assert_eq!(f.show.cue(f.b).unwrap().pre_wait, before);
+}
+
+#[test]
+fn letting_go_on_the_ruler_parks_the_timeline_with_its_picture_up() {
+    let Some((mut f, mut m)) = with_pictures() else {
+        return;
+    };
+    let key = TimelineKey::Group(f.group);
+    let out = f.show.outputs[0].id;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    let a = pos2(r.x0 + 1.5 * r.pps, r.ruler.center().y);
+    let b = pos2(r.x0 + 3.0 * r.pps, r.ruler.center().y);
+    for frame in m.drag(&mut f.show, &mut f.st, a, b) {
+        for a in frame {
+            super::super::apply(a, &mut f.show, &mut m.e, &mut f.st);
+        }
+    }
+    let v = m.e.timeline(&f.show, key);
+    assert!(
+        matches!(
+            v.state,
+            RunState::Paused {
+                waits_for_go: true,
+                ..
+            }
+        ),
+        "{:?}",
+        v.state
+    );
+    assert!((v.pos - 3.0).abs() < 0.15, "{}", v.pos);
+    // A (0-4 s) and C (2-5 s) are under the playhead.
+    let show = f.show.clone();
+    until(&mut m, &show, "the pictures", 20, |e| {
+        e.layers(out).len() == 2
+    });
+}
+
+#[test]
+fn run_runs_the_timeline_and_a_pause_before_a_clip_brings_it_in_on_go() {
+    let Some((mut f, mut m)) = with_pictures() else {
+        return;
+    };
+    let key = TimelineKey::Group(f.group);
+    // The clip menu's pause before B comes in (6 s).
+    super::super::apply(
+        Action::Timeline(TimelineAction::AddPauseBefore {
+            key,
+            clip: f.b,
+            what: PauseBefore::ClipIn,
+        }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    // The toolbar's Run.
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let run = m.button_at("run").center();
+    for a in m.click(&mut f.show, &mut f.st, run, PointerButton::Primary) {
+        super::super::apply(a, &mut f.show, &mut m.e, &mut f.st);
+    }
+    assert_eq!(m.e.timeline(&f.show, key).state, RunState::Running);
+    // The clock runs to the pause and stops there; B is not in.
+    let show = f.show.clone();
+    for _ in 0..70 {
+        m.e.tick(&show, 0.1);
+    }
+    let v = m.e.timeline(&show, key);
+    assert!(
+        matches!(
+            v.state,
+            RunState::Paused {
+                waits_for_go: true,
+                ..
+            }
+        ),
+        "{:?}",
+        v.state
+    );
+    assert!((v.pos - 6.0).abs() < 1e-6, "{}", v.pos);
+    assert_eq!(v.on_go, Some(f.b));
+    assert!(!playing(&m.e, f.b));
+    super::super::apply(Action::Go, &mut f.show, &mut m.e, &mut f.st);
+    let show = f.show.clone();
+    until(&mut m, &show, "B", 20, |e| playing(e, f.b));
+    assert_eq!(m.e.timeline(&show, key).state, RunState::Running);
 }

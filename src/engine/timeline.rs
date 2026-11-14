@@ -398,15 +398,12 @@ pub(super) fn clock_end(
 }
 
 /// Whether `cue` is a timeline pause of the timeline `key` (it is one of its cues).
-#[allow(dead_code)]
 fn is_pause_of(cue: &Cue, key: TimelineKey) -> bool {
     matches!(&cue.kind, CueKind::Control(c)
         if c.action == ControlAction::TimelinePause && c.timeline.is_none_or(|k| k == key))
 }
 
 impl Engine {
-    // For the editor (`ui/timeline.rs`), which doesn't call it yet.
-    #[allow(dead_code)]
     /// A timeline's state; `Stopped` at 0 when it has never been touched.
     pub fn timeline(&mut self, show: &Show, key: TimelineKey) -> RunView {
         let clips = model::clips(show, key, &mut |c| self.cue_duration(show, c));
@@ -454,8 +451,6 @@ impl Engine {
         }
     }
 
-    // For the editor (`ui/timeline.rs`), which doesn't call it yet.
-    #[allow(dead_code)]
     /// The first pause cue of a timeline at or after `pos`.
     fn next_pause_from(&self, show: &Show, key: TimelineKey, pos: f64) -> Option<f64> {
         model::members(show, key)
@@ -1588,8 +1583,6 @@ impl Engine {
         }
     }
 
-    // For the editor (`ui/timeline.rs`), which doesn't call it yet.
-    #[allow(dead_code)]
     /// The clips of a run that are free-running, for the editor.
     pub fn timeline_detached(&self, key: TimelineKey) -> Vec<CueId> {
         let Some(run) = self.runs.map.get(&key) else {
