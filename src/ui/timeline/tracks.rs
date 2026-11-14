@@ -497,6 +497,15 @@ pub(super) fn draw(
     }
 
     scroll_bar(ui, base, &mut st.timeline, lanes, area, content_w);
+    // More tracks than fit (the wheel scrolls them): a thin bar says where.
+    let all_h = rows_height(ctx);
+    if all_h > lanes.height() + 0.5 {
+        let h = (lanes.height() * lanes.height() / all_h).max(12.0);
+        let top = lanes.top()
+            + (lanes.height() - h) * st.timeline.scroll.y / (all_h - lanes.height()).max(1.0);
+        let thumb = Rect::from_min_size(pos2(lanes.right() - 5.0, top), vec2(4.0, h));
+        painter.rect_filled(thumb, 2.0, visuals.weak_text_color().gamma_multiply(0.8));
+    }
     follow_drag(ui, ctx, st, geo, &rows, markers, snapping, actions);
 
     #[cfg(test)]

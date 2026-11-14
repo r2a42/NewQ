@@ -219,7 +219,8 @@ fn editor(
     if st.timeline.open {
         egui::Panel::bottom("modern_timeline")
             .resizable(true)
-            .default_size(230.0)
+            // Room for three tracks and the cue track; more scroll.
+            .default_size(250.0)
             .min_size(120.0)
             .show(ui, |ui| {
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
