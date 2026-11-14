@@ -85,7 +85,10 @@ The README describes the features; this file is about working on the code.
   watcher (`newq --reap <pid>`) with a pipe; `reaper::watch(&child)` after each spawn (playback, stream,
   waveform, probes, MediaMTX) gives it the pid; the watcher notes it only if it is running as a child of that
   NewQ and named ffmpeg/ffprobe/mediamtx/newq, with its start time; when the pipe closes (NewQ ended in
-  any way) it ends the noted ones still running with the same pid and start time, and nothing else. Unix only (a Mac has no
+  any way) it ends the noted ones still running with the same pid and start time, and nothing else. It also
+  writes them to `<log folder>/started/<NewQ's pid>.txt` (first line the NewQ itself); `sweep`, at the next
+  start, ends what the records of NewQs no longer running list, by the same rule, and removes those records
+  (for when NewQ and its watcher went together). Unix only (a Mac has no
   `PR_SET_PDEATHSIG`; FFmpegs waiting on a capture permission were left after a crash). Tried on Linux
   with `kill -9`; not on a Mac.
 - `src/logging.rs`: the log. `LogLevel` (`Prefs::log_level`, Settings ▸ General ▸ Recovery and logs;

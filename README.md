@@ -1025,7 +1025,9 @@ takes them they are dropped and the log says how many.
 (`newq --reap`, a second copy of NewQ that does nothing else) is told each FFmpeg and
 streaming server NewQ starts. If NewQ ends in any way, a crash or a forced quit
 included, the watcher ends whatever is still running, so nothing is left holding a
-camera or a processor.
+camera or a processor. Should the watcher go at the same moment (a logout, say), the
+next NewQ you start ends what was left. Only programs NewQ itself started are ever
+ended: an FFmpeg you or another program started is never touched.
 
 **A fault in one part does not end the show.** If a part of NewQ meets
 something it did not expect while a show is running (a panic, in the

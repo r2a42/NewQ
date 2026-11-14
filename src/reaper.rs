@@ -6,16 +6,23 @@
 //! they stayed, holding a camera or a processor. Linux can ask the kernel to
 //! end a child with its parent; a Mac can't. So NewQ starts a copy of itself
 //! as a watcher (`newq --reap`), tells it each program it starts, and holds
-//! the writing end of a pipe to it. The watcher notes a program only if it
-//! finds it running as a child of that NewQ and of a kind NewQ starts, with
-//! the moment it began; it ends only programs it noted, and only while the
-//! number still belongs to the one that began then. An FFmpeg anyone else
-//! started is never touched. That end closes when NewQ is gone, in
+//! the writing end of a pipe to it. That end closes when NewQ is gone, in
 //! any way at all, and the watcher then ends what is left.
+//!
+//! The watcher notes a program only if it finds it running as a child of
+//! that NewQ and of a kind NewQ starts, with the moment it began; it ends
+//! only programs it noted, and only while the number still belongs to the
+//! one that began then. An FFmpeg anyone else started is never touched.
+//!
+//! It also writes what it notes to a file (`started/<NewQ's pid>.txt` in the
+//! log folder). If NewQ and its watcher go together (a logout, a kill of
+//! both), the next NewQ to start reads the files of those that are gone and
+//! ends what they left, by the same rule (`sweep`).
 //!
 //! Windows does this with job objects where it matters (`mediamtx::tie_to_us`).
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 
@@ -35,9 +42,15 @@ pub fn start() {
         if !cfg!(unix) {
             return None;
         }
+        let dir = crate::crash::log_dir().join("started");
+        let left = sweep(&dir);
+        if left > 0 {
+            log::warn!("ended {left} program(s) an earlier NewQ left running");
+        }
         let exe = std::env::current_exe().ok()?;
         let mut child = Command::new(exe)
             .args([FLAG, &std::process::id().to_string()])
+            .arg(&dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -91,24 +104,113 @@ fn note(pid: u32, parent: Option<u32>) -> Option<Seen> {
     })
 }
 
-/// `newq --reap <pid of NewQ>`: note each program NewQ says it started until
-/// the pipe closes (NewQ has ended), then end those still running.
+/// The moment the program numbered `pid` began, if it is running.
+fn started(pid: u32) -> Option<u64> {
+    let system = processes(&[pid]);
+    system
+        .process(sysinfo::Pid::from_u32(pid))
+        .map(sysinfo::Process::start_time)
+}
+
+/// The file a watcher keeps for the NewQ numbered `owner`.
+fn record_path(dir: &Path, owner: u32) -> PathBuf {
+    dir.join(format!("{owner}.txt"))
+}
+
+/// A record as text: the NewQ it is for on the first line, then a line for
+/// each program noted, each as a number and the moment it began.
+fn record_line(s: Seen) -> String {
+    format!("{} {}\n", s.pid, s.started)
+}
+
+fn parse_line(line: &str) -> Option<Seen> {
+    let mut words = line.split_whitespace();
+    let seen = Seen {
+        pid: words.next()?.parse().ok()?,
+        started: words.next()?.parse().ok()?,
+    };
+    words.next().is_none().then_some(seen)
+}
+
+/// `newq --reap <pid of NewQ> [folder]`: note each program NewQ says it
+/// started (and write it in the folder) until the pipe closes (NewQ has
+/// ended), then end those still running.
 pub fn run_if_asked(args: &[String]) -> Option<i32> {
     if args.first().map(String::as_str) != Some(FLAG) {
         return None;
     }
     let parent: Option<u32> = args.get(1).and_then(|p| p.parse().ok());
+    // The record is for the case where this watcher ends with NewQ; without
+    // one (no folder, a disk that can't be written) the watching still works.
+    let path = parent
+        .zip(args.get(2))
+        .map(|(owner, dir)| (PathBuf::from(dir), owner))
+        .filter(|(dir, _)| std::fs::create_dir_all(dir).is_ok())
+        .map(|(dir, owner)| record_path(&dir, owner));
+    let mut record = path.as_ref().and_then(|p| {
+        let owner = Seen {
+            pid: parent?,
+            started: started(parent?)?,
+        };
+        let mut f = std::fs::File::create(p).ok()?;
+        f.write_all(record_line(owner).as_bytes()).ok()?;
+        Some(f)
+    });
     let mut seen = Vec::new();
     for line in std::io::stdin().lines() {
         let Ok(line) = line else { break };
         if let Ok(pid) = line.trim().parse::<u32>()
             && let Some(s) = note(pid, parent)
         {
+            if let Some(f) = &mut record {
+                let _ = f.write_all(record_line(s).as_bytes());
+            }
             seen.push(s);
         }
     }
     reap(&seen);
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
     Some(0)
+}
+
+/// End what NewQs that are gone left running, from the records in `dir`: a
+/// record whose NewQ is still running is left alone (a second NewQ open at
+/// the same time), the others are acted on and removed. Returns how many
+/// programs were ended.
+fn sweep(dir: &Path) -> usize {
+    let mut ended = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "txt") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut lines = text.lines();
+        let owner = lines.next().and_then(parse_line);
+        let owner_runs = owner.is_some_and(|o| {
+            let system = processes(&[o.pid]);
+            system
+                .process(sysinfo::Pid::from_u32(o.pid))
+                .is_some_and(|p| {
+                    p.start_time() == o.started
+                        && p.name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .starts_with("newq")
+                })
+        });
+        if owner_runs {
+            continue;
+        }
+        let left: Vec<Seen> = lines.filter_map(parse_line).collect();
+        ended += reap(&left);
+        let _ = std::fs::remove_file(&path);
+    }
+    ended
 }
 
 /// End each of `seen` that is still running: the very program that was
@@ -207,5 +309,82 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+    #[test]
+    fn records_are_read_back_as_they_were_written() {
+        let s = Seen {
+            pid: 4321,
+            started: 1_800_000_000,
+        };
+        assert_eq!(parse_line(record_line(s).trim()), Some(s));
+        for bad in ["", "12", "a b", "1 2 3", "ffmpeg 12 13"] {
+            assert_eq!(parse_line(bad), None, "{bad:?}");
+        }
+    }
+
+    /// What a NewQ that is gone left running is ended by the next one to
+    /// start; what a NewQ still running has is left alone.
+    #[test]
+    fn the_next_newq_ends_what_one_that_is_gone_left_and_no_more() {
+        let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("newq_started_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let spawn = || {
+            let mut cmd = ff.command();
+            cmd.args(["-re", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=5"]);
+            cmd.args(["-t", "60", "-f", "null", "-"]);
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            cmd.spawn().expect("ffmpeg starts")
+        };
+        let (mut left, mut kept) = (spawn(), spawn());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let me = std::process::id();
+        let seen_left = note(left.id(), Some(me)).expect("noted");
+        let seen_kept = note(kept.id(), Some(me)).expect("noted");
+        // A NewQ that is gone (no program has its number) left one FFmpeg.
+        let gone = Seen {
+            pid: u32::MAX - 9,
+            started: 1,
+        };
+        std::fs::write(
+            record_path(&dir, gone.pid),
+            record_line(gone) + &record_line(seen_left),
+        )
+        .unwrap();
+        // A NewQ still running (this test) has another.
+        let running = Seen {
+            pid: me,
+            started: started(me).unwrap(),
+        };
+        std::fs::write(
+            record_path(&dir, me),
+            record_line(running) + &record_line(seen_kept),
+        )
+        .unwrap();
+        // And a file that is not a record at all is no reason to end anything.
+        std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+        assert_eq!(sweep(&dir), 1);
+        let began = std::time::Instant::now();
+        while left.try_wait().unwrap().is_none() {
+            assert!(began.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            kept.try_wait().unwrap().is_none(),
+            "the running NewQ's is kept"
+        );
+        assert!(
+            !record_path(&dir, gone.pid).exists(),
+            "its record is removed"
+        );
+        assert!(record_path(&dir, me).exists(), "the running one's stays");
+        // A folder that isn't there is nothing to do.
+        assert_eq!(sweep(&dir.join("none")), 0);
+        let _ = kept.kill();
+        let _ = kept.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
