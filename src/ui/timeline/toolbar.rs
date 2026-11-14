@@ -1,6 +1,7 @@
 //! The editor's toolbar: which timeline it is, its transport (Run, Pause,
-//! Stop, the time, the next pause, what GO will do), then Snap, + Marker and
-//! the zoom.
+//! Stop, the time), Snap, + Marker and the zoom, then how the run is doing
+//! (the next pause, what GO will do), last so that its changing length moves
+//! nothing.
 
 use super::tracks::Ctx;
 use super::*;
@@ -80,14 +81,9 @@ pub(super) fn draw(
         if r.clicked() {
             push(actions, TimelineAction::Stop(key));
         }
+        // Padded, so that the buttons after it stay put as the time grows.
         let length = ctx.run.length.map_or("–:––.–".to_string(), fmt_time);
-        ui.label(RichText::new(format!("{} / {length}", fmt_time(ctx.pos))).monospace());
-        ui.label(RichText::new(state_text(ctx.run, ctx.pos)).weak());
-        if matches!(ctx.run.state, RunState::Paused { .. })
-            && let Some(id) = ctx.run.on_go
-        {
-            ui.label(RichText::new(go_text(ctx.show, id)).color(super::super::PLAYHEAD));
-        }
+        ui.label(RichText::new(format!("{:>7} / {length:>7}", fmt_time(ctx.pos))).monospace());
         ui.separator();
         let ed = &mut st.timeline;
         let r = ui
@@ -118,6 +114,22 @@ pub(super) fn draw(
         {
             ed.pps = 0.0;
             ed.scroll.x = 0.0;
+        }
+        // How the run is doing comes last, its length changing as it runs
+        // ("Running · next pause in …"): nothing after it to push about, and
+        // cut short rather than wrapped onto a row of its own.
+        ui.separator();
+        let state = state_text(ctx.run, ctx.pos);
+        ui.add(egui::Label::new(RichText::new(&state).weak()).truncate())
+            .on_hover_text(state);
+        if matches!(ctx.run.state, RunState::Paused { .. })
+            && let Some(id) = ctx.run.on_go
+        {
+            let go = go_text(ctx.show, id);
+            ui.add(
+                egui::Label::new(RichText::new(&go).color(super::super::PLAYHEAD)).truncate(),
+            )
+            .on_hover_text(go);
         }
     });
 }

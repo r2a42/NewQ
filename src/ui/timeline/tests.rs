@@ -1198,3 +1198,36 @@ fn a_click_at_the_very_start_of_the_ruler_parks_on_the_first_frame() {
         e.layers(out).len() == 1
     });
 }
+
+#[test]
+fn the_toolbar_buttons_stay_put_as_the_run_state_text_changes() {
+    let mut f = fixture();
+    let mut m = Mouse::new();
+    let key = TimelineKey::Group(f.group);
+    super::super::apply(
+        Action::Timeline(TimelineAction::AddPauseBefore {
+            key,
+            clip: f.b,
+            what: PauseBefore::ClipIn,
+        }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    let names = ["run", "pause", "stop", "marker"];
+    let at = |m: &mut Mouse, f: &mut Fixture| {
+        m.frame(&mut f.show, &mut f.st, vec![]);
+        names.map(|n| m.button_at(n))
+    };
+    let stopped = at(&mut m, &mut f);
+    m.e.timeline_run(&f.show, key);
+    m.e.tick(&f.show, 0.5);
+    assert_eq!(m.e.timeline(&f.show, key).state, RunState::Running);
+    assert_eq!(at(&mut m, &mut f), stopped, "running · next pause in …");
+    m.e.tick(&f.show, 6.0);
+    assert!(matches!(
+        m.e.timeline(&f.show, key).state,
+        RunState::Paused { .. }
+    ));
+    assert_eq!(at(&mut m, &mut f), stopped, "paused, with what GO does");
+}
