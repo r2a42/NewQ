@@ -358,6 +358,10 @@ NEWQ_REQUIRE_MEDIA=1 cargo test                 # over 700 tests, about 3 minute
   files load and that the default isn't written.
 - New features get tests, a README entry (and a keyboard-table row if they have
   a key), and are checked by running the app where the UI changed.
+- **`CHANGELOG.md`** gets a line under `## Unreleased` with each change a user would notice, in
+  words for people who run shows. A release moves them under `## X.Y.Z`; `scripts/check_release_tag.sh`
+  (the dry run) refuses a version with no section, and the Release workflow puts the section at the
+  top of the release page (`scripts/changelog_section.sh`).
 - Commits are one feature each. PRs are merged with a **rebase merge** to keep
   `main` linear. After a merge, delete the session branch on GitHub (or let the repository's
   "Automatically delete head branches" do it) and restart it from `main`: a rebase merge gives the

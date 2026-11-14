@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Check that a release tag is well formed and matches the version in
-# Cargo.toml: v1.2.3 or v1.2.3-rc1 for version 1.2.3.
+# Cargo.toml (v1.2.3 or v1.2.3-rc1 for version 1.2.3), and that CHANGELOG.md
+# has a section for that version.
 # Usage: scripts/check_release_tag.sh <tag>      (CARGO_TOML overrides the file)
 set -euo pipefail
 
@@ -16,3 +17,6 @@ if [ "$have" != "$want" ]; then
   exit 1
 fi
 echo "$tag matches Cargo.toml ($have)"
+# And the changelog says what changed in it (it goes on the release page).
+"$(dirname "$0")/changelog_section.sh" "$tag" > /dev/null
+echo "CHANGELOG.md has a section for $want"

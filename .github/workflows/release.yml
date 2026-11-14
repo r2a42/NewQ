@@ -71,7 +71,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
+          # What changed (this version's section of CHANGELOG.md), then the downloads.
+          { echo "## What's new"; echo; scripts/changelog_section.sh "$TAG"; echo; \
+            sed "s/{{TAG}}/$TAG/g" .github/release_notes.md; } > notes.md
           # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
@@ -280,7 +282,9 @@ jobs:
           ls -l dist
           (cd dist && sha256sum * > SHA256SUMS.txt)
           gh release upload "$TAG" dist/SHA256SUMS.txt --clobber
-          sed "s/{{TAG}}/$TAG/g" .github/release_notes.md > notes.md
+          # What changed (this version's section of CHANGELOG.md), then the downloads.
+          { echo "## What's new"; echo; scripts/changelog_section.sh "$TAG"; echo; \
+            sed "s/{{TAG}}/$TAG/g" .github/release_notes.md; } > notes.md
           # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac

@@ -12,7 +12,10 @@ verified, or you are blocked on something only they can do.** Never end a turn w
 ## Steps
 
 1. **Bump.** `version` in `Cargo.toml` and the `newq` entry in `Cargo.lock` (`cargo check`
-   updates it). Commit "Bump version to X.Y.Z". Run fmt, clippy (also
+   updates it). Add the version's section to `CHANGELOG.md` (`## X.Y.Z`, moved from
+   `## Unreleased`): plain words for people who run shows, what they will notice, not commit
+   subjects. `scripts/changelog_section.sh vX.Y.Z` prints it; the dry run fails without one, and
+   the Release workflow puts it at the top of the release page. Commit "Bump version to X.Y.Z". Run fmt, clippy (also
    `--target x86_64-pc-windows-msvc` and `--target aarch64-apple-darwin`) and
    `NEWQ_REQUIRE_MEDIA=1 cargo test` first: one clean push beats three.
 2. **PR.** Push the session branch, `create_pull_request` (base `main`), then
