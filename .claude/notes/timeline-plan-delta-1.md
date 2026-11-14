@@ -455,3 +455,50 @@ Open items:
 1. **P2b: `Engine::cue_duration` and keyframed speed with a lead-in.** `trim` and `split` put the file position at clip time `t` at `in + M(t) − M(V)` (plan 2.5). `cue_duration` maps the file length with `time_for` from clip time 0, leaving out `M(V)`. They agree at a steady speed or with no lead-in. P2b makes `cue_duration` and `prepare_from` use the same rule (with F1).
 2. **I1:** remove `#![allow(dead_code)]` from `src/timeline/mod.rs` once P3's editor calls `edit` and `snap`.
 3. **I1 or P6: a split leaves fade cues aimed at the first half.** A fade-triggered clip split after its fade leaves the second half at opacity 0; retargeting needs a rule.
+
+---
+
+## I. What P2a landed (engine: run, pause cues, GO-timed transitions), for P2b and I1
+
+One commit, "Timeline: the engine's run, pause cues and GO-timed transitions": `src/engine.rs` hooks, `src/engine/timeline.rs` (real), `src/engine/timeline/tests.rs` (23 tests), and in `src/media/video.rs` a `frozen` field, `set_frozen`, `update`.
+
+Signatures as built:
+- `start_with(show, id, reveal, at: StartAt)`; `start_at(show, id, at)`; `start` uses the default.
+- `StartAt { run: Option<u64>, together: Option<u64> }` so far. **P2b adds** `from`, `lead`, `hold`, `chase`.
+- `PendingCue` has private `run`, `at`, `start: StartAt` (no `waits_for_fade` yet: P2b). `ActiveCue` has private `run`, `ends_at`, `clocked`, `detached`, `live_frozen`. `MatteState` has `start: StartAt`. `ListState` has `runs`.
+- `together_for`/`together_with` are gone; `StartAt.together` replaces them.
+- `VideoPlayer::set_frozen(&mut self, bool)` (live players only). `audio.rs` is unchanged: a frozen live voice keeps running at gain 0.
+- `timeline_seek` and `timeline_waiting` are still stubs (seek logs "not built yet"); `timeline_detached` is real. The file-level `allow(dead_code)` is gone; items only the editor calls carry their own.
+
+For P2b:
+- Runs live in `Runs.map` (`TimelineKey` -> `Run { instance, state, pos, frozen, pause_clips, pause_live }`).
+- `timeline_begin(show, key, instance, from)` lists the waiting clips (`comes_after` decides which); `timeline_step(show, key, dt)` moves the clock and starts what it reaches; `timeline_adopt` tags a started clip, sets `clocked` and `ends_at` (from `timeline_clip`; no lead-in yet), and freezes it if the run is paused.
+- To add: the `Cueing` state (unused, marked allowed), a real `timeline_seek`, `timeline_waiting`, Jump and `ControlCue::at`, hooks H14 and H15.
+- The chase plugs into `timeline_start`: for a list it starts only what comes after the playhead today; for a group it fires from the top.
+- Tests go in `src/engine/timeline/tests.rs`.
+- **Also for P2b (asked by P3):** in `engine.rs` add `pub use timeline::{RunState, RunView};` so the UI can name them.
+
+Behaviour as built (for the README and the owner):
+- A clock-driven fade-out or end does not start while the clock stands (that is what holds a fade at a pause placed on its start).
+- A clocked still, text, shape or camera ends by the clock alone, not by its own hold time.
+- `TimelineStop` cuts (a control cue has no fade field).
+- A `Pause` aimed at a live cue freezes it only when the cue is named itself, not through its group.
+- GO resuming a run also lifts the show's global pause.
+- A stopped list timeline run starts only what comes after the playhead plus clips exactly on it; a pause cue exactly there counts as passed (until P2b's seek).
+- Preload looks ahead `PRELOAD_HORIZON` (10 s), at most `MAX_PRELOAD_CHILDREN`.
+- A clocked `Loop` clip is played as an endless loop, and the preload uses the same looped version.
+
+## J. What P3 landed (tracks editor, Option A), for I1 and wave 2
+
+Two commits. New: `src/ui/timeline/{tracks,ruler,toolbar,control,tests}.rs`; `src/ui/timeline.rs` holds the editor, `pane`, `target`, `apply`. `UiState::timeline: timeline::EditorState` (manual `Default`, `snap` starts true). `pub(super) fn inspector_rows(ui, &mut Show, idx)` is called at the end of the inspector's right column (it edits a clone and writes back only on change), because `control_fields`/`clip_fields` cannot be called where the plan said.
+
+The pane splits the dock **root** (full width along the bottom), not the cue list's node. In the new interface it is a resizable bottom panel in the Editor view.
+
+For I1:
+1. Replace `run_of` (it parses `{:?}` of `RunView::state`) with the real types once `engine.rs` exports `RunState`/`RunView`.
+2. Double-click on a timeline group's row to open the editor is not done: it lives in `cue_list` and double-click fires the selected cue today. Decide, or leave the inspector button and Window menu as the ways in.
+3. `UiState::after_panic` should clear `st.timeline`'s drag and renaming state.
+4. README section, keyboard-table rows, CLAUDE.md entries (`engine/timeline.rs`, `ui/timeline/`, `timeline/`), CHANGELOG line.
+5. The module-level `allow(dead_code)` in `ui/timeline.rs` and `timeline/mod.rs`: remove what is now called.
+6. Known look issues: in the short new-interface panel the Cues row needs a vertical scroll; the inspector's timeline rows sit below the fold when the pane is open.
+7. Machine trap: `target/debug/newq` can be another worktree's binary even when cargo says it is fresh; `touch src/main.rs` and rebuild before a screenshot.
