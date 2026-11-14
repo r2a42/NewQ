@@ -1138,3 +1138,30 @@ fn run_runs_the_timeline_and_a_pause_before_a_clip_brings_it_in_on_go() {
     until(&mut m, &show, "B", 20, |e| playing(e, f.b));
     assert_eq!(m.e.timeline(&show, key).state, RunState::Running);
 }
+
+#[test]
+fn a_click_at_the_very_start_of_the_ruler_parks_on_the_first_frame() {
+    let Some((mut f, mut m)) = with_pictures() else {
+        return;
+    };
+    let key = TimelineKey::Group(f.group);
+    let out = f.show.outputs[0].id;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    // At 0 (a point in): what is asked for is 0, or a hair past it.
+    let at = pos2(r.x0 + 0.5, r.ruler.center().y);
+    for a in m.click(&mut f.show, &mut f.st, at, PointerButton::Primary) {
+        if let Action::Timeline(TimelineAction::Seek { pos, .. }) = &a {
+            assert!(*pos < 0.05, "{pos}");
+        }
+        super::super::apply(a, &mut f.show, &mut m.e, &mut f.st);
+    }
+    let v = m.e.timeline(&f.show, key);
+    assert!(matches!(v.state, RunState::Paused { .. }), "{:?}", v.state);
+    assert!(v.pos > 0.0 && v.pos < 0.05, "{}", v.pos);
+    // A (from 0) is up.
+    let show = f.show.clone();
+    until(&mut m, &show, "the first picture", 20, |e| {
+        e.layers(out).len() == 1
+    });
+}

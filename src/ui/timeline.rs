@@ -423,6 +423,17 @@ impl TimelineAction {
     }
 }
 
+/// Where the editor seeks for a time picked on it. The engine takes a seek to
+/// exactly 0 as "from the top" and parks with nothing up; the operator who
+/// clicks the very start wants its first frame, so a hair past it.
+fn seek_to(pos: f64) -> f64 {
+    pos.max(FIRST_FRAME)
+}
+
+/// How far past 0 a seek to the start goes (`seek_to`): more than the engine's
+/// "same time", less than a frame.
+const FIRST_FRAME: f64 = 0.001;
+
 /// Make what the editor asked for. (`ui::apply` has already refused an edit
 /// in show mode or during a test.)
 pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
@@ -524,10 +535,10 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
         }
         // As a timeline Stop cue does: a fade, and a second Stop cuts.
         A::Stop(key) => engine.timeline_stop(show, key, crate::show::TIMELINE_STOP_FADE),
-        A::Seek { key, pos } => engine.timeline_seek(show, key, pos.max(0.0), true),
+        A::Seek { key, pos } => engine.timeline_seek(show, key, seek_to(pos), true),
         A::JumpToMarker { key, id } => {
             if let Some(t) = model::resolve(show, key, TimelinePoint::Marker(id)) {
-                engine.timeline_seek(show, key, t, true);
+                engine.timeline_seek(show, key, seek_to(t), true);
             }
         }
         A::FreezeClip(id, on) => {

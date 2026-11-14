@@ -2498,7 +2498,14 @@ fn cue_list(
                     });
                 }
                 if resp.double_clicked() {
-                    actions.push(Action::FireSelected);
+                    // A timeline group opens in the tracks editor (GO or the
+                    // menu's Fire start it); any other cue fires.
+                    let tl = crate::timeline::TimelineKey::Group(c.id);
+                    actions.push(if crate::timeline::model::is_timeline(show, tl) {
+                        Action::Timeline(timeline::TimelineAction::Open(Some(tl)))
+                    } else {
+                        Action::FireSelected
+                    });
                 }
                 if can_drag && resp.drag_started() {
                     // Dragging a cue of the selection takes all of it; any other cue alone.
@@ -14281,6 +14288,41 @@ mod tests {
 
     fn ctrl() -> egui::Modifiers {
         egui::Modifiers::COMMAND
+    }
+
+    #[test]
+    fn double_clicking_a_timeline_group_opens_it_in_the_editor_and_any_other_cue_fires() {
+        let mut show = listed();
+        let g = show.cues.iter().find(|c| c.name == "G").unwrap().id;
+        let gi = show.cue_index(g).unwrap();
+        if let CueKind::Group(gc) = &mut show.cues[gi].kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        if let CueKind::Wait(w) = &mut show.cues[0].kind {
+            w.duration = 30.0;
+        }
+        let mut m = ListMouse::new();
+        let mut st = UiState::default();
+        let double = |m: &mut ListMouse, show: &mut Show, st: &mut UiState, name: &str| {
+            m.t += 1.0;
+            let at = m.row(show, st, name).center() + vec2(40.0, 0.0);
+            m.frame(show, st, vec![Event::PointerMoved(at)]);
+            for _ in 0..2 {
+                m.frame(show, st, vec![button(at, true)]);
+                m.frame(show, st, vec![button(at, false)]);
+            }
+        };
+        double(&mut m, &mut show, &mut st, "G");
+        assert!(st.timeline.open);
+        assert_eq!(st.timeline.pinned, Some(TimelineKey::Group(g)));
+        assert!(!m.e.is_active(), "it isn't fired");
+        assert!(st.layout.is_open(Pane::Timeline));
+        double(&mut m, &mut show, &mut st, "a");
+        let a = show.cues.iter().find(|c| c.name == "a").unwrap().id;
+        assert!(
+            !matches!(m.e.status(a), CueStatus::Idle),
+            "a plain cue fires"
+        );
     }
 
     #[test]
