@@ -578,3 +578,67 @@ Ramps wait while the clock stands (L2, what M left):
 - Chase/seek: the chase works from the clock, so a seek to a time now matches playing there through a pause (tested for a fade cue's opacity and x).
 
 Tests (engine/timeline/tests.rs, "The timeline Stop fades" and "Fades under way wait"): stop at 3 s by default, opacity part way at 1.5 s, run over after 3 s, the clock stands; 0 cuts; a second Stop (cue and editor) cuts; Run during the fade re-cues over the fading picture; a sound's level fades; a fade cue half done stays so through a free-run pause and finishes after GO, equal to a seek there; a hand fade-out and a main-list fade cue move during the pause, a cue on no timeline is unchanged; a video's fade-in waits while its content plays on; a run-out fade under way waits on the last frame and finishes after GO. show.rs: default 3 s, not written, old cue loads, round trip.
+
+---
+
+## N. What I1 landed (integration 1)
+
+Commits starting "Timeline:" and one "Docs:" on top of section L's notes; engine files touched only to drop
+`allow` lines that the editor's calls made unneeded (`engine.rs` `pub use`, and in `engine/timeline.rs`
+on `is_pause_of`, `timeline`, `next_pause_from`, `timeline_detached`; `timelines` keeps its allow).
+
+- **The editor's run:** `run_of`'s Debug parsing is gone; `tracks::Ctx::run` is the engine's `RunView`,
+  matched on `RunState`. A clip in `timeline_waiting` is hatched blue (`WAITING`) over its lead-in (all of
+  it when it waits for a fade cue) and noted "waiting to fade in" (the static lead-in now says "waits to
+  fade in").
+- **Parked:** `toolbar::state_text` says "Parked · Run or GO plays from here" for
+  `Paused { Everything, waits_for_go: true }` when no armed pause cue of the timeline sits at the
+  playhead. A guess: a pause cue elsewhere that names this timeline also reads as parked. **Wanted from
+  the engine:** a `parked: bool` on `RunView` (the `Run` has one).
+- **Seek to the start:** `TimelineAction::Seek` and `JumpToMarker` go to `seek_to(pos)` = at least
+  `FIRST_FRAME` (1 ms), since the engine parks with nothing at exactly 0. A ruler tap (press and release
+  in one frame) now seeks too (`ruler.rs`, `resp.clicked()`); before, only a press seen over two frames did.
+- **Double-click** on a timeline group's row opens it in the editor (`Open(Some(key))`) instead of firing
+  it; every other row still fires (`FireSelected`). Double-click-to-fire was never in the README; GO,
+  the inspector's Fire and the right-click menu still fire a group.
+- `UiState::after_panic` calls `EditorState::let_go` (drag and marker renaming).
+- **`allow(dead_code)`:** the module-level ones in `timeline/mod.rs` and `ui/timeline.rs` are gone, and
+  `show.rs`'s `unused_imports` (`TrackId` dropped from the re-export; `Marker` re-exported only under
+  `cfg(test)`). What stays, each on its item: `Host::ListTab`/`Workspace` (P4, P7), `EditorState::ripple`
+  (P6), the `TimelineAction` variants `Split`, `Delete`, `AddClip`, `AddTrack`, `RemoveTrack`, `SetRate`
+  (P6), `NewTimelineList`, `SetListTimeline` (P4), `SetLayout` (P7) (their `apply` arms are real);
+  `Engine::timelines` (only tests call it; P4/P8 transport and feedback); and `#[allow(dead_code)]` on
+  `pub mod chase;` because `chase::Clip::entry` is written and never read (**engine's file: use it or
+  drop it, then remove that allow**). The test helper `frame_apply` was deleted.
+- **Duplicate** (`Show::duplicate`): a fade, stop or control cue inside a duplicated group whose `target`
+  is a cue of the group now aims at that cue's copy (as `paste_cues` did); one aimed outside, or a cue
+  duplicated alone, keeps its aim. Test `duplicating_a_group_aims_the_cues_in_it_at_the_copies`.
+  (Noticed, not changed: `duplicate` and `paste_cues` set a child's parent to the top group only;
+  groups don't nest, so it is harmless today.)
+- **Split (L4):** `edit::starts_visible`: a second half that would be unseen by itself (opacity 0, or
+  opacity keys all at 0; a sound at `MIN_DB`) gets the level of the last fade cue aimed at the first half
+  at or before the split (else the first such fade, else 1.0 / 0 dB), its opacity keys dropped. Fade cues
+  are not retargeted. Test in `edit.rs`.
+- **End-to-end tests** (`ui/timeline/tests.rs`, plan I1's list): a clip dragged in the whole window
+  (`Draw::Full`) moves and one Undo restores it; letting go on the ruler parks with both pictures up;
+  Run from the toolbar runs it and a "Pause before this clip comes in" holds the clock until GO brings
+  the clip in; a click at the ruler's start parks with the first picture up; a one-frame tap seeks.
+- **Look (headless, 1280×760 window):** the new interface's timeline panel is 250 high so three tracks
+  and the Cues row fit; a thin bar at the right of the lanes shows when tracks overflow (the wheel
+  scrolls them). The group inspector's "Overlapping clips crossfade" is disabled with a "not working
+  yet" hover, since nothing reads `crossfade_overlaps` before P5.
+- Docs: README "Timelines" section and three keyboard-table rows, CLAUDE.md layout entry, CHANGELOG
+  lines (with the 0.20.3 note).
+
+Left (not I1's, or not cheap):
+- The old inspector `timeline_panel` (bars you drag in the group's inspector) is still in the group's
+  inspector; not decided (plan I1 recommended read-only with the "Open" button).
+- Transports don't say what GO will do on a paused timeline: the main transport reads "NEXT · 8 ·
+  Blackout" while GO would run the timeline on (P4's read-outs).
+- In the classic layout with the Timeline pane open, the inspector's timeline rows are below the fold
+  (the pane splits the dock root); in the new interface on a 760-high window the cue list is left about
+  two rows.
+- The toolbar's items move right as the state text grows ("Running · next pause in …"), so Snap/Marker/
+  zoom shift while it runs.
+- The control cue's icon (🎛) draws as a box-like glyph in the cue list (font coverage; older than timelines).
+- Editor adds clips only through the cue list (no AddClip/AddTrack/split from the editor: P6).
