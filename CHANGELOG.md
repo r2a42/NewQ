@@ -17,7 +17,15 @@ release page, and a release is refused if it has none.
   or keyframe ramp waits for your GO), or hold everything on a frame, or hold only
   the clips you tick; cameras and live sound stay live unless you say otherwise.
   *Run*, *Stop* and *Jump in timeline* cues go with it, and a clip's own Pause and
-  Resume cues still hold just that clip.
+  Resume cues still hold just that clip. Fades already under way when the clock
+  stops (a fade cue, a crossfade, a clip's fade-in or fade-out, matrix levels) wait
+  where they are and finish after GO; a fade you start by hand still runs.
+- **The timeline Stop cue fades what the timeline is playing out**, over 3 seconds
+  unless you set another time (0 cuts); pressing Stop again during the fade cuts at
+  once. The editor's Stop button does the same.
+- **The transport says what GO will do on a timeline that waits:** "Continue …" and
+  what it brings in next, instead of the next cue in the list (also in the new
+  interface and on the web remote).
 - **A clip that runs out during a pause** fades out by default; choose Loop or Hold
   for it in its inspector. The editor marks such clips with ⚠.
 - **Clips at opacity 0 wait for their fade-in** on a timeline made in this version,

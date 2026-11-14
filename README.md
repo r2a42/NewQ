@@ -1026,8 +1026,13 @@ own, ⚠ see *If a clip runs out* below. A dimmed bar is disarmed.
 **Running it.** GO on the group runs the timeline from the top, and the toolbar's
 *Run* from where its playhead is; the red playhead follows the clock and the toolbar says *Running · next pause
 in …*. The toolbar's *Pause* holds every clip where it is (live cameras and live
-sound stay live) and *Run* carries on; *Stop* stops its clips and leaves the
-playhead where it is.
+sound stay live) and *Run* carries on; *Stop* fades out what the timeline plays over
+3 seconds (picture and sound) and leaves the playhead where it is: press it again
+during the fade to cut at once, and GO or *Run* during the fade starts the timeline
+again over the fading picture. While a timeline waits for GO (at a pause cue, or
+parked), the main transport says what GO will do, "Continue …" and what comes in
+next on it, instead of naming the next cue in the list; so do the new interface's
+header and Operator view and the web remote.
 
 **Pause cues.** A *Pause timeline* control cue on the timeline stops its clock when
 the clock reaches it: nothing later starts until **GO**, which runs the timeline on
@@ -1037,7 +1042,12 @@ pause does to what is already playing is its *Freeze* choice:
 - *Nothing: content runs on* (a **free-run** pause): only the clock stops; clips go
   on playing or looping. A transition timed after the pause (a crossfade, a fade
   cue, a clip's fade-out, a keyframe ramp) waits for the GO and then takes its full
-  time.
+  time. A fade already under way when the clock stops (a fade cue, a clip's
+  fade-in, a crossfade, a dip, a fade-out as a clip runs out, a fade cue's matrix
+  crosspoint levels) waits too, where it is, and finishes after the GO. A fade you
+  start by hand (the active panel's fade-out or stop) or by a cue outside the
+  timeline still runs. A clip frozen by its own *Pause* keeps following its
+  opacity, position and effect keyframes with the timeline's clock.
 - *Everything (pause on a frame)*: every clip holds its frame and its sound stops.
 - *These clips*: only the ticked clips hold; the rest run on.
 - *Live inputs freeze too* (for the last two): a camera or NDI source holds its
@@ -1045,8 +1055,9 @@ pause does to what is already playing is its *Freeze* choice:
   frozen picture can have a live camera over it.
 
 The other timeline control cues: **Run timeline** (from its playhead, or from a
-point you choose), **Stop timeline** (stops what it plays, at once, leaving the
-playhead), **Jump in timeline** (moves the playhead to a time, a marker or the start
+point you choose), **Stop timeline** (fades out what it plays over its *Fade out*
+time, 3 seconds unless you set another, 0 for a cut, leaving the playhead; a second
+Stop during the fade cuts at once), **Jump in timeline** (moves the playhead to a time, a marker or the start
 of a clip). Each acts on its own timeline, or on another you pick. A clip's own
 *Pause* and *Resume* control cues (and *Freeze clip*) hold just that clip while the
 clock runs on.

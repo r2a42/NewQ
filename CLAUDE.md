@@ -31,8 +31,17 @@ The README describes the features; this file is about working on the code.
   pause stops the clock before anything after it; a clocked clip's end and fade-out come from the clock
   (`ActiveCue::ends_at`, `run_out` when its content runs out first); a seek cues for up to `CUE_LIMIT`
   while running, else parks (paused, picture on the outputs; a seek to exactly 0 parks with nothing up,
-  so the editor seeks to `ui::timeline::FIRST_FRAME`); `timeline_waiting`/`timeline_detached` feed the
-  editor's hatching. Tests in `engine/timeline/tests.rs` play real media (`color_red.png`, the test-pattern
+  so the editor seeks to `ui::timeline::FIRST_FRAME`; `Run::parked`, `RunView.parked`);
+  `timeline_waiting`/`timeline_detached` feed the editor's hatching. A clip's keys read at
+  `ActiveCue::key_time()` (its run's clock less `clip_zero`; `elapsed` off a timeline). Ramps a run
+  starts are tagged (`Ramp.run`, `Param::follow`) and move only as far as its clock does
+  (`Runs::steps`); a run's fade cue keeps its clock's time (`fade_from`), and its matrix crosspoints are
+  held in the mixer while the clock stands (`timeline_hold_crosspoints` -> `Voice::hold_crosspoints`,
+  an atomic); untagged (by hand, off the timeline, a Stop's fade) move with show time. The Stop cue
+  fades the run out over `ControlCue::fade` (`stop_fade()`: None = `TIMELINE_STOP_FADE`, 3 s; 0
+  cuts; a second Stop cuts). What GO does is `Engine::go_plan` (`GoPlan`, `TimelineGo`; `go` and
+  `timeline_go` follow the same `timeline_go_for`), which the transports, the new interface and the web
+  remote's `go` read out (`GoPlan::describe`, words from `model::on_go_text`). Tests in `engine/timeline/tests.rs` play real media (`color_red.png`, the test-pattern
   camera); live sound under a freezing pause is untested (no device). `src/ui/timeline.rs` and
   `src/ui/timeline/`: the tracks editor (`editor`, hosted as `Pane::Timeline` in the dock and as a bottom
   panel of the new interface's Editor view; `Host` salts its ids); it takes `&Show` and asks for
@@ -40,7 +49,8 @@ The README describes the features; this file is about working on the code.
   `edits_the_show`); a drag lives in `EditorState` and is asked for once on release (one undo step);
   `tracks.rs` clips, rows, drags and the vertical-overflow bar; `ruler.rs` ticks, markers, the playhead
   (a ruler tap or drag seeks on release; locked in show mode for a group); `toolbar.rs` transport and
-  read-outs (`state_text`: "Parked" is guessed from no pause cue at the playhead, `RunView` has no flag);
+  read-outs (`state_text` from `RunState` and `RunView.parked`; the state text comes last so the
+  buttons don't move);
   `control.rs` the inspector rows (`inspector_rows` at the end of the inspector). Double-clicking a
   timeline group's row opens it rather than firing it. Tests drive it with the mouse (`TimelineRects`,
   `Draw::Full` for the whole window and undo); tried headless under xvfb in both interfaces. Variants and
