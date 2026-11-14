@@ -556,7 +556,8 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
         A::Pause(key) => {
             engine.timeline_pause(show, key, PauseFreeze::Everything, &[], false, false)
         }
-        A::Stop(key) => engine.timeline_stop(show, key, 0.0),
+        // As a timeline Stop cue does: a fade, and a second Stop cuts.
+        A::Stop(key) => engine.timeline_stop(show, key, crate::show::TIMELINE_STOP_FADE),
         A::Seek { key, pos } => engine.timeline_seek(show, key, pos.max(0.0), true),
         A::JumpToMarker { key, id } => {
             if let Some(t) = model::resolve(show, key, TimelinePoint::Marker(id)) {

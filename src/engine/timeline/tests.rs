@@ -683,6 +683,8 @@ fn another_timeline_is_run_paused_and_stopped_by_its_key() {
     e.fire(&show, stop);
     let v = view(&mut e, &show, k);
     assert_eq!(v.state, RunState::Stopped);
+    // Stopped at once; what it played fades out over the default three seconds.
+    ticks(&mut e, &show, 0.5, 7);
     assert!(!playing(&e, a) && !playing(&e, b) && !e.is_active());
     // A timeline action from a cue on no timeline, naming none, says so.
     let c = control(
@@ -2215,4 +2217,158 @@ fn a_seek_into_a_ramp_shows_its_middle_as_playing_there_does() {
     near(looks(&e, t), parked_looks, "played to 2 s");
     let a = active(&e, t).unwrap();
     assert!((a.key_time() - 2.0).abs() < 1e-9, "{}", a.key_time());
+}
+
+// ----- The timeline Stop fades (P2d) ---------------------------------------------
+
+/// A timeline Stop on the cue's own timeline, with `fade` (None: the default).
+fn timeline_stop_cue(show: &mut Show, fade: Option<f64>) -> Cue {
+    control(
+        show,
+        ControlCue {
+            action: ControlAction::TimelineStop,
+            fade,
+            ..Default::default()
+        },
+    )
+}
+
+/// A timeline group with a text up from 0 and a timeline Stop (`fade`) at 1 s,
+/// played to the Stop.
+fn stopped_text(fade: Option<f64>) -> (Engine, Show, CueId, CueId, CueId) {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let t = text(&mut show, None);
+    let t = child(&mut show, g, t, 0.0);
+    let s = timeline_stop_cue(&mut show, fade);
+    let s = child(&mut show, g, s, 1.0);
+    let mut e = Engine::for_tests();
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the text", 10, |e| {
+        active(e, t).is_some_and(|a| a.started)
+    });
+    ticks(&mut e, &show, 0.5, 2);
+    (e, show, g, t, s)
+}
+
+#[test]
+fn a_timeline_stop_fades_the_picture_out_over_three_seconds_and_then_the_run_is_over() {
+    let (mut e, show, g, t, _) = stopped_text(None);
+    // Stopped at once, where it was; the picture is on its way out.
+    let v = view(&mut e, &show, key(g));
+    assert_eq!((v.state, v.pos), (RunState::Stopped, 1.0));
+    assert!(active(&e, t).is_some_and(|a| a.stopping));
+    ticks(&mut e, &show, 0.25, 6);
+    let o = opacity(&e, t).expect("still fading at 1.5 s");
+    assert!((0.2..0.8).contains(&o), "part way: {o}");
+    assert_eq!(view(&mut e, &show, key(g)).pos, 1.0, "the clock stands");
+    ticks(&mut e, &show, 0.25, 6);
+    assert!(active(&e, t).is_none(), "gone after 3 s");
+    assert!(!e.is_active(), "the group has ended with it");
+    let v = view(&mut e, &show, key(g));
+    assert_eq!((v.state, v.pos), (RunState::Stopped, 1.0));
+}
+
+#[test]
+fn a_timeline_stop_of_0_cuts_and_a_second_stop_during_the_fade_cuts() {
+    let (e, _, _, t, _) = stopped_text(Some(0.0));
+    assert!(active(&e, t).is_none() && !e.is_active(), "cut");
+
+    let (mut e, mut show, g, t, _) = stopped_text(None);
+    ticks(&mut e, &show, 0.25, 2);
+    assert!(opacity(&e, t).is_some_and(|o| o > 0.5 && o < 1.0));
+    // Another Stop of that timeline, from the main list.
+    let again = control(
+        &mut show,
+        ControlCue {
+            action: ControlAction::TimelineStop,
+            timeline: Some(key(g)),
+            ..Default::default()
+        },
+    );
+    let again = top(&mut show, again, 0, 0.0);
+    e.fire(&show, again);
+    assert!(active(&e, t).is_none() && !e.is_active(), "the second cuts");
+    // The editor's Stop does the same: a fade, then a cut on a second press.
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let t = text(&mut show, None);
+    let t = child(&mut show, g, t, 0.0);
+    let mut e = Engine::for_tests();
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the text", 10, |e| {
+        active(e, t).is_some_and(|a| a.started)
+    });
+    e.timeline_stop(&show, key(g), crate::show::TIMELINE_STOP_FADE);
+    ticks(&mut e, &show, 0.25, 4);
+    assert!(opacity(&e, t).is_some_and(|o| o > 0.0 && o < 1.0));
+    e.timeline_stop(&show, key(g), crate::show::TIMELINE_STOP_FADE);
+    assert!(active(&e, t).is_none() && !e.is_active());
+}
+
+#[test]
+fn running_a_list_timeline_during_its_stops_fade_cues_it_again_over_the_fading_picture() {
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    let t = text(&mut show, None);
+    let t = top(&mut show, t, l, 0.0);
+    let s = timeline_stop_cue(&mut show, None);
+    top(&mut show, s, l, 1.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.switch_list(&show, l);
+    e.go(&show);
+    until(&mut e, &show, Some(0.0), "the text", 10, |e| {
+        active(e, t).is_some_and(|a| a.started)
+    });
+    ticks(&mut e, &show, 0.5, 2);
+    assert_eq!(view(&mut e, &show, k).state, RunState::Stopped);
+    ticks(&mut e, &show, 0.25, 2);
+    let old = instance(&e, t);
+    // GO runs it on from where it stopped; the old picture fades on meanwhile.
+    e.go(&show);
+    assert!(
+        e.active
+            .iter()
+            .any(|a| a.instance == old && a.stopping && a.opacity.value < 1.0)
+    );
+    until(&mut e, &show, Some(0.0), "running again", 10, |e| {
+        e.runs
+            .map
+            .get(&k)
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    ticks(&mut e, &show, 0.05, 2);
+    let a = active(&e, t).expect("the text again");
+    assert!(a.instance != old && !a.stopping && a.opacity.value == 1.0);
+    assert!(
+        !e.active.iter().any(|a| a.instance == old),
+        "the new picture took the old one's place"
+    );
+    assert_eq!(view(&mut e, &show, k).pos, 1.1);
+}
+
+#[test]
+fn a_timeline_stop_fades_a_sound_out_too() {
+    let Some((mut e, wav)) = with_media("tone_5s.wav") else {
+        return;
+    };
+    e.audio = AudioOut::with_playing_device();
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Audio, wav, 5.0);
+    let clip = child(&mut show, g, c, 0.0);
+    let s = timeline_stop_cue(&mut show, None);
+    child(&mut show, g, s, 0.5);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the sound", 10, |e| {
+        active(e, clip).is_some_and(|a| a.started)
+    });
+    ticks(&mut e, &show, 0.25, 2);
+    assert_eq!(view(&mut e, &show, key(g)).state, RunState::Stopped);
+    ticks(&mut e, &show, 0.25, 6);
+    let v = active(&e, clip).expect("still fading").volume.value;
+    assert!(v < -1.0 && v > MIN_DB + 1.0, "part way at 1.5 s: {v} dB");
+    ticks(&mut e, &show, 0.25, 6);
+    assert!(active(&e, clip).is_none() && !e.is_active());
 }

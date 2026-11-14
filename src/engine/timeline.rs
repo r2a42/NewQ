@@ -30,6 +30,12 @@
 //! the real outputs (the picture at the playhead), and GO or Run lets them go.
 //! A Jump cue and a Run cue with a place (`ControlCue::at`) are seeks.
 //!
+//! A Stop (the cue, or the editor's) stops the clock at once and fades what the
+//! run plays out over the cue's fade (`ControlCue::stop_fade`, 3 s unless set;
+//! 0 cuts); a second Stop meanwhile cuts. Running the timeline again during the
+//! fade does what it does once it has stopped, the fading clips going on fading
+//! under what comes in.
+//!
 //! A clip at opacity 0 (or a sound at silence) on a timeline with
 //! `start_on_fade_in` waits, unseen, for its fade-in (`model::lead_in`): its
 //! content starts from its in point when its opacity keys rise (at its lead-in,
@@ -39,7 +45,7 @@
 use super::{ActiveCue, ActiveKind, Engine, LiveTransform, Param, PendingCue, StartAt};
 use crate::show::{
     ControlAction, ControlCue, Cue, CueId, CueKind, Curve, FadeCue, GroupCue, GroupMode, MIN_DB,
-    MediaCue, PauseFreeze, RunOut, Show, TimelineKey,
+    MediaCue, PauseFreeze, RunOut, Show, TIMELINE_STOP_FADE, TimelineKey,
 };
 use crate::timeline::chase::{self, Alive, Waiting};
 use crate::timeline::model::{self, LeadIn};
@@ -478,7 +484,7 @@ impl Engine {
     pub(super) fn timeline_begin(&mut self, show: &Show, key: TimelineKey, instance: u64) {
         if let Some(old) = self.runs.map.remove(&key) {
             if old.parked {
-                self.clear_clips(old.instance);
+                self.clear_clips(old.instance, false);
             }
             self.cancel_run(&old);
         }
@@ -525,11 +531,14 @@ impl Engine {
 
     /// Everything of the run `instance`: its clips playing (and a dip's matte
     /// on its way to one), and what it was waiting to start, goes at once.
-    fn clear_clips(&mut self, instance: u64) {
+    /// `fading`: those fading out (a Stop's fade) go on fading.
+    fn clear_clips(&mut self, instance: u64, fading: bool) {
         let i = Some(instance);
         self.pending.retain(|p| p.run != i && p.start.run != i);
-        self.active
-            .retain(|a| a.run != i && !matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == i));
+        self.active.retain(|a| {
+            (fading && a.stopping)
+                || (a.run != i && !matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == i))
+        });
     }
 
     /// Open the timeline group `g` for a seek: the group is on, with a run the
@@ -577,9 +586,11 @@ impl Engine {
             TimelineKey::List(_) => self.alloc_instance(),
         };
         if let Some(old) = self.runs.map.remove(&key) {
-            self.clear_clips(old.instance);
+            // Run again while a Stop's fade is going: that goes on under what
+            // comes in (which replaces it on its layer as it always would).
+            self.clear_clips(old.instance, old.state == RunState::Stopped);
         }
-        self.clear_clips(instance);
+        self.clear_clips(instance, false);
         let ch = chase::chase(show, key, pos, &mut |c| self.cue_duration(show, c));
         let run = then == Then::Run;
         if run && ch.alive.is_empty() && ch.upcoming.is_empty() {
@@ -1062,7 +1073,7 @@ impl Engine {
             if let Some(run) = self.runs.map.remove(&key) {
                 // A parked run's clips were held for it alone: they go too.
                 if run.parked || run.state == RunState::Cueing {
-                    self.clear_clips(run.instance);
+                    self.clear_clips(run.instance, false);
                 }
                 self.cancel_run(&run);
             }
@@ -1311,16 +1322,31 @@ impl Engine {
         self.timeline_step(show, key, 0.0);
     }
 
-    /// Stop its clips (fade seconds; 0 = cut), keep the playhead where it is.
+    /// Stop its clips, fading them out (picture and sound) over `fade` seconds
+    /// (0 = a cut), and keep the playhead where it is. The run stops at once: its
+    /// clock stands and nothing more of it starts; it is over when the last of
+    /// them has gone. A Stop while an earlier one's fade is still going cuts.
     pub fn timeline_stop(&mut self, _show: &Show, key: TimelineKey, fade: f64) {
         let Some(run) = self.runs.map.get(&key) else {
             return;
         };
         let instance = run.instance;
+        let i = Some(instance);
+        // Its clips, and a dip's matte on its way to one.
+        let theirs = |a: &ActiveCue| {
+            a.run == i || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == i)
+        };
+        let fading =
+            run.state == RunState::Stopped && self.active.iter().any(|a| theirs(a) && a.stopping);
+        let fade = if fading || !fade.is_finite() {
+            0.0
+        } else {
+            fade.max(0.0)
+        };
         let clips: Vec<u64> = self
             .active
             .iter()
-            .filter(|a| a.run == Some(instance))
+            .filter(|a| theirs(a))
             .map(|a| a.instance)
             .collect();
         self.timeline_stopped(instance);
@@ -1434,7 +1460,7 @@ impl Engine {
                     own == Some(key),
                 );
             }
-            ControlAction::TimelineStop => self.timeline_stop(show, key, 0.0),
+            ControlAction::TimelineStop => self.timeline_stop(show, key, c.stop_fade()),
             ControlAction::TimelineJump => match c.at.map(|p| model::resolve(show, key, p)) {
                 None => self.problem(format!("Cue {name}: it names no place to jump to")),
                 Some(None) => self.problem(format!(
@@ -1475,7 +1501,7 @@ impl Engine {
                 ControlAction::TimelinePause => {
                     self.timeline_pause(show, key, PauseFreeze::Everything, &[], live, false)
                 }
-                ControlAction::TimelineStop => self.timeline_stop(show, key, 0.0),
+                ControlAction::TimelineStop => self.timeline_stop(show, key, TIMELINE_STOP_FADE),
                 _ => self.problem(format!(
                     "Cue {from}: a jump needs a place; use a Jump cue that names one"
                 )),

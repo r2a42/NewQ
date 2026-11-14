@@ -4,7 +4,7 @@
 //! the cue list.
 
 use super::*;
-use crate::show::{ControlCue, Cue, MediaCue, RunOut};
+use crate::show::{ControlCue, Cue, MediaCue, RunOut, TIMELINE_STOP_FADE};
 use crate::timeline::{TimelinePoint, TimelineSettings};
 
 /// What a clip whose end the clock keeps can do when its content runs out,
@@ -106,6 +106,10 @@ pub fn describe_control(show: &Show, cue: &Cue, c: &ControlCue) -> String {
             Some(p) => s += &format!(" to {}", point_text(show, key, p)),
             None => s += " (nowhere chosen)",
         },
+        ControlAction::TimelineStop => match c.stop_fade() {
+            f if f > 0.0 => s += &format!(" · fades out over {f:.1} s"),
+            _ => s += " · cuts",
+        },
         _ => {}
     }
     if key.is_none() {
@@ -185,6 +189,29 @@ pub fn control_fields(ui: &mut Ui, show: &Show, cue_id: CueId, c: &mut ControlCu
                             );
                         ui.end_row();
                     }
+                }
+                ControlAction::TimelineStop => {
+                    note_row(ui, "fade");
+                    ui.label("Fade out");
+                    let mut t = c.stop_fade();
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut t)
+                                .speed(0.05)
+                                .range(0.0..=3_600.0)
+                                .fixed_decimals(2)
+                                .suffix(" s"),
+                        )
+                        .on_hover_text(
+                            "What the timeline plays fades out over this time, then it stops. \
+                             0 is a cut; a second Stop during the fade cuts at once.",
+                        )
+                        .changed()
+                    {
+                        // The default is left out of the file.
+                        c.fade = ((t - TIMELINE_STOP_FADE).abs() > 1e-9).then_some(t);
+                    }
+                    ui.end_row();
                 }
                 _ => {}
             }

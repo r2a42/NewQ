@@ -2286,7 +2286,8 @@ pub enum ControlAction {
     TimelineRun,
     /// Stop a timeline's clock here; what plays goes on unless `freeze` says.
     TimelinePause,
-    /// Stop a timeline's clips, keeping its playhead where it is.
+    /// Fade out a timeline's clips (`ControlCue::fade`) and stop it, keeping its
+    /// playhead where it is.
     TimelineStop,
     /// Move a timeline's playhead to `ControlCue::at`.
     TimelineJump,
@@ -2356,7 +2357,8 @@ impl ControlAction {
                  playing goes on unless it is set to hold"
             }
             ControlAction::TimelineStop => {
-                "Stop what a timeline is playing, leaving its playhead where it is"
+                "Fade out what a timeline is playing and stop it, leaving its playhead where \
+                 it is"
             }
             ControlAction::TimelineJump => {
                 "Move a timeline's playhead to a time, a marker or the start of a clip"
@@ -2397,9 +2399,24 @@ pub struct ControlCue {
     /// live sound). Default false: they carry on live.
     #[serde(default, skip_serializing_if = "is_false")]
     pub freeze_live: bool,
+    /// A timeline Stop's fade: what the timeline plays fades out over this many
+    /// seconds before its run ends (0 = a cut). None = `TIMELINE_STOP_FADE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade: Option<f64>,
 }
 
+/// How long a timeline Stop fades the timeline out unless the cue says.
+pub const TIMELINE_STOP_FADE: f64 = 3.0;
+
 impl ControlCue {
+    /// The fade of a timeline Stop (`fade`, or `TIMELINE_STOP_FADE`), in seconds.
+    pub fn stop_fade(&self) -> f64 {
+        match self.fade {
+            Some(f) if f.is_finite() => f.max(0.0),
+            _ => TIMELINE_STOP_FADE,
+        }
+    }
+
     /// Aim the timeline fields (`timeline`, a clip's start in `at`, `clips`)
     /// anew, as `target` is when cues are pasted: `cue` gives the id a cue has
     /// now (None: there is no such cue to aim at), and `list` whether a list is
@@ -7498,8 +7515,9 @@ mod tests {
         {"id":6,"number":"1","name":"Other","list":1,"kind":{"Wait":{"duration":2.0}}}]}"#;
 
     /// The keys the timeline fields are written under.
-    const TIMELINE_KEYS: [&str; 9] = [
+    const TIMELINE_KEYS: [&str; 10] = [
         "\"timeline\":",
+        "\"fade\":",
         "\"also_on\":",
         "\"freeze_live\":",
         "\"run_out\":",
@@ -7514,6 +7532,39 @@ mod tests {
         match &show.cue(id).unwrap().kind {
             CueKind::Control(c) => c,
             _ => panic!("a control cue"),
+        }
+    }
+
+    #[test]
+    fn a_timeline_stop_fades_three_seconds_unless_it_says_and_writes_only_a_change() {
+        // A timeline Stop written before it had a fade (and every older control
+        // cue) loads with none set: it fades over the default.
+        let old = r#"{"action":"TimelineStop","target":null}"#;
+        let c: ControlCue = serde_json::from_str(old).unwrap();
+        assert_eq!(c.fade, None);
+        assert_eq!(c.stop_fade(), TIMELINE_STOP_FADE);
+        assert_eq!(TIMELINE_STOP_FADE, 3.0);
+        assert!(!serde_json::to_string(&c).unwrap().contains("\"fade\""));
+        let mut show = Show::default();
+        let fresh = show.make_cue(CueType::Control, None, 0);
+        let CueKind::Control(fresh) = fresh.kind else {
+            panic!("a control cue")
+        };
+        assert_eq!(fresh.stop_fade(), 3.0);
+        // A time set is written and read back; 0 is a cut; nonsense is the default.
+        for (set, means) in [(0.0, 0.0), (1.25, 1.25), (-2.0, 0.0), (f64::NAN, 3.0)] {
+            let c = ControlCue {
+                action: ControlAction::TimelineStop,
+                fade: Some(set),
+                ..Default::default()
+            };
+            assert_eq!(c.stop_fade(), means, "{set}");
+            if set.is_finite() {
+                let j = serde_json::to_string(&c).unwrap();
+                assert!(j.contains("\"fade\":"), "{j}");
+                let back: ControlCue = serde_json::from_str(&j).unwrap();
+                assert_eq!(back.fade, Some(set));
+            }
         }
     }
 
@@ -7595,6 +7646,7 @@ mod tests {
             freeze: PauseFreeze::Clips,
             clips: vec![v.id],
             freeze_live: true,
+            fade: None,
         });
         let mut g = show.make_cue(CueType::Group, None, 2);
         if let CueKind::Group(gc) = &mut g.kind {
@@ -7692,6 +7744,7 @@ mod tests {
             freeze: PauseFreeze::Clips,
             clips: vec![clip_id],
             freeze_live: false,
+            fade: None,
         });
         let pid = p.id;
         show.insert_cue(slot, p);
@@ -7793,6 +7846,7 @@ mod tests {
                 freeze: PauseFreeze::Clips,
                 clips: vec![clip_id],
                 freeze_live: false,
+                fade: None,
             });
             let id = c.id;
             let slot = show.insert_slot(None, false, 0);
