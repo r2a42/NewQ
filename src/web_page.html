@@ -76,7 +76,7 @@ function render(s) {
   paused = s.paused;
   $('pause').textContent = paused ? 'Resume' : 'Pause';
   $('standing').textContent = (s.show || 'Show') + ' — standing by' + (s.timecode ? '   ⏱ ' + s.timecode : '');
-  $('next').textContent = s.next ? s.next.number + '  ' + s.next.name : 'End of cue list';
+  $('next').textContent = s.go ? s.go : s.next ? s.next.number + '  ' + s.next.name : 'End of cue list';
   const ul = $('cues');
   ul.textContent = '';
   for (const c of s.cues) {

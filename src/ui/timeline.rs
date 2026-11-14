@@ -168,10 +168,7 @@ pub(super) fn inspector_rows(ui: &mut Ui, show: &mut Show, idx: usize) {
 
 /// What a timeline is called: its group's number and name, or its list's name.
 fn timeline_name(show: &Show, key: TimelineKey) -> String {
-    match key {
-        TimelineKey::Group(id) => show.cue(id).map_or_else(|| "(gone)".into(), cue_label),
-        TimelineKey::List(n) => show.list_name(n),
-    }
+    model::name(show, key)
 }
 
 /// Every timeline in the show: the timeline groups, then the timeline lists.

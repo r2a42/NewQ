@@ -750,6 +750,119 @@ fn a_run_gets_ready_only_the_clips_its_clock_is_nearing() {
     assert!(clips[16..].iter().all(|c| !e.is_prepared(*c)));
 }
 
+#[test]
+fn go_plan_says_what_go_does_to_a_timeline_group_that_waits_and_go_does_just_that() {
+    use crate::engine::{GoPlan, TimelineGo};
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = text(&mut show, None);
+    child(&mut show, g, c, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 2.0);
+    let mut c = text(&mut show, None);
+    c.kind.media_mut().unwrap().layer = 1;
+    let b = child(&mut show, g, c, 3.0);
+    let after = wait(&mut show, 5.0);
+    let after = top(&mut show, after, 0, 0.0);
+    let mut e = Engine::for_tests();
+    e.playhead = Some(g);
+    // Nothing waits: GO fires the cue at the playhead.
+    assert_eq!(e.go_plan(&show), GoPlan::Cue(Some(g)));
+    assert_eq!(e.go_plan(&show).describe(&show), None);
+    e.go(&show);
+    e.tick(&show, 1.0);
+    assert_eq!(
+        e.go_plan(&show),
+        GoPlan::Cue(Some(after)),
+        "it runs: GO fires on"
+    );
+    // At its pause: GO carries the timeline on, and says what it brings in next.
+    e.tick(&show, 1.5);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(2.0));
+    let plan = e.go_plan(&show);
+    assert_eq!(
+        plan,
+        GoPlan::Timeline {
+            key: key(g),
+            does: TimelineGo::Resume,
+            then: Some(b),
+        }
+    );
+    let (what, then) = plan.describe(&show).unwrap();
+    assert_eq!(what, format!("Continue {}", model::name(&show, key(g))));
+    let b_cue = show.cue(b).unwrap();
+    assert_eq!(
+        then.as_deref(),
+        Some(format!("then bring in {} · {}", b_cue.number, b_cue.name).as_str())
+    );
+    // The editor's toolbar says the same of the run.
+    assert_eq!(view(&mut e, &show, key(g)).on_go, Some(b));
+    e.go(&show);
+    assert_eq!(state(&mut e, &show, key(g)), RunState::Running);
+    assert!(
+        !waiting(&e, after) && active(&e, after).is_none(),
+        "GO fired nothing else"
+    );
+    assert_eq!(e.go_plan(&show), GoPlan::Cue(Some(after)));
+    // Paused by hand and parked by a seek: GO plays from there.
+    e.timeline_pause(&show, key(g), PauseFreeze::Everything, &[], false, false);
+    assert_eq!(
+        e.go_plan(&show),
+        GoPlan::Cue(Some(after)),
+        "a hand pause isn't GO's"
+    );
+    e.timeline_seek(&show, key(g), 1.0, true);
+    assert!(view(&mut e, &show, key(g)).parked);
+    let plan = e.go_plan(&show);
+    assert!(
+        matches!(
+            plan,
+            GoPlan::Timeline {
+                does: TimelineGo::Play,
+                ..
+            }
+        ),
+        "{plan:?}"
+    );
+    assert!(plan.describe(&show).unwrap().0.starts_with("Play "));
+    e.go(&show);
+    assert!(!view(&mut e, &show, key(g)).parked);
+    assert!(matches!(
+        state(&mut e, &show, key(g)),
+        RunState::Cueing | RunState::Running
+    ));
+    assert!(active(&e, after).is_none(), "GO fired nothing else");
+}
+
+#[test]
+fn go_plan_on_a_timeline_list_runs_it_does_nothing_while_it_runs_and_continues_it_at_a_pause() {
+    use crate::engine::{GoPlan, TimelineGo};
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    let w = wait(&mut show, 10.0);
+    top(&mut show, w, l, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    top(&mut show, p, l, 1.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.active_list = l;
+    let does = |e: &Engine| match e.go_plan(&show) {
+        GoPlan::Timeline { key, does, .. } if key == k => Some(does),
+        _ => None,
+    };
+    assert_eq!(does(&e), Some(TimelineGo::Start));
+    e.go(&show);
+    assert_eq!(state(&mut e, &show, k), RunState::Running);
+    assert_eq!(does(&e), Some(TimelineGo::Running));
+    e.go(&show);
+    assert_eq!(state(&mut e, &show, k), RunState::Running, "GO did nothing");
+    e.tick(&show, 1.5);
+    assert_eq!(paused_at(&mut e, &show, k), Some(1.0));
+    assert_eq!(does(&e), Some(TimelineGo::Resume));
+    e.go(&show);
+    assert_eq!(state(&mut e, &show, k), RunState::Running);
+}
+
 // ----- With media: the stage manager's hold, and running out --------------------
 
 #[test]
@@ -1445,7 +1558,10 @@ fn seeking_past_a_pause_cue_or_onto_one_leaves_the_run_running_or_parked_as_it_w
     // Paused at the next one, a seek past it parks there; GO runs on.
     e.tick(&show, 5.0);
     assert_eq!(paused_at(&mut e, &show, k), Some(8.0));
-    assert!(!view(&mut e, &show, k).parked, "a pause cue's wait is not parked");
+    assert!(
+        !view(&mut e, &show, k).parked,
+        "a pause cue's wait is not parked"
+    );
     e.timeline_seek(&show, k, 9.0, true);
     assert!(parked(&mut e, &show, k));
     assert!(view(&mut e, &show, k).parked);

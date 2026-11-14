@@ -110,6 +110,21 @@ pub struct RunView {
     pub parked: bool,
 }
 
+/// What GO does to a timeline (`Engine::go_plan`, which `timeline_go` follows).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TimelineGo {
+    /// A stopped timeline list runs from its playhead.
+    Start,
+    /// A run waiting at a pause goes on.
+    Resume,
+    /// A parked run cues what is at its playhead and plays on from there.
+    Play,
+    /// A timeline list that is running: GO does nothing until it pauses.
+    Running,
+    /// A timeline list getting its clips ready: GO does nothing.
+    Cueing,
+}
+
 /// One timeline's run.
 struct Run {
     /// Its instance number: the group's own, or one taken for a list's run. Its
@@ -434,16 +449,8 @@ impl Engine {
                 .map(|p| p.at)
                 .min_by(f64::total_cmp)
         };
-        // Paused: the first thing the clock will reach that is not a control cue.
         let on_go = matches!(state, RunState::Paused { .. })
-            .then(|| {
-                self.pending
-                    .iter()
-                    .filter(waiting)
-                    .filter(|p| show.cue(p.cue_id).is_some_and(|c| model::due_order(c) > 0))
-                    .min_by(|a, b| a.at.total_cmp(&b.at))
-                    .map(|p| p.cue_id)
-            })
+            .then(|| self.on_go_of(show, instance))
             .flatten();
         RunView {
             key,
@@ -454,6 +461,17 @@ impl Engine {
             on_go,
             parked,
         }
+    }
+
+    /// The first thing the clock of the run `instance` will reach that is not a
+    /// control cue: what GO brings in or fades when the run is paused.
+    fn on_go_of(&self, show: &Show, instance: u64) -> Option<CueId> {
+        self.pending
+            .iter()
+            .filter(|p| p.run == Some(instance))
+            .filter(|p| show.cue(p.cue_id).is_some_and(|c| model::due_order(c) > 0))
+            .min_by(|a, b| a.at.total_cmp(&b.at))
+            .map(|p| p.cue_id)
     }
 
     /// The first pause cue of a timeline at or after `pos`.
@@ -1405,28 +1423,37 @@ impl Engine {
         }
     }
 
-    /// GO for the cue list `list`: on a timeline list, run it (or resume it;
-    /// while it runs GO does nothing). Otherwise a timeline group of this list
-    /// waiting at a pause cue of its own is resumed. Whether GO was taken.
-    pub(super) fn timeline_go(&mut self, show: &Show, list: u32) -> bool {
+    /// What GO on the cue list `list` does to a timeline, if anything: on a
+    /// timeline list, run it (or resume it, or nothing while it runs or cues);
+    /// otherwise the latest timeline group of the list that waits for GO (at a
+    /// pause cue of its own, or parked) goes on. `timeline_go` does this, and
+    /// `Engine::go_plan` reads it out, so the two can't disagree. The run GO
+    /// goes on with (paused or parked), and the first clip or fade it reaches.
+    pub(super) fn timeline_go_for(
+        &self,
+        show: &Show,
+        list: u32,
+    ) -> Option<(TimelineKey, TimelineGo, Option<CueId>)> {
+        let goes_on = |r: &Run| {
+            let does = if r.parked {
+                TimelineGo::Play
+            } else {
+                TimelineGo::Resume
+            };
+            (does, self.on_go_of(show, r.instance))
+        };
         let key = TimelineKey::List(list);
         if model::is_timeline(show, key) {
-            match self.runs.map.get(&key).map(|r| r.state) {
-                Some(RunState::Running) => {
-                    self.log("GO: the timeline is running; GO does nothing until it pauses")
-                }
-                Some(RunState::Cueing) => {}
-                _ => {
-                    // GO lets go of the show's pause, as firing a cue does.
-                    if self.paused {
-                        self.set_paused(false);
-                    }
-                    self.timeline_run(show, key);
-                }
-            }
-            return true;
+            let run = self.runs.map.get(&key);
+            let (does, then) = match run.map(|r| r.state) {
+                Some(RunState::Running) => (TimelineGo::Running, None),
+                Some(RunState::Cueing) => (TimelineGo::Cueing, None),
+                Some(RunState::Paused { .. }) => run.map_or((TimelineGo::Resume, None), goes_on),
+                Some(RunState::Stopped) | None => (TimelineGo::Start, None),
+            };
+            return Some((key, does, then));
         }
-        let waiting = self
+        let (key, run) = self
             .runs
             .map
             .iter()
@@ -1441,20 +1468,35 @@ impl Engine {
                     )
                     && self.active.iter().any(|a| a.instance == r.instance)
             })
-            .max_by_key(|(_, r)| r.instance)
-            .map(|(k, _)| *k);
-        let Some(key) = waiting else {
+            .max_by_key(|(_, r)| r.instance)?;
+        let (does, then) = goes_on(run);
+        Some((*key, does, then))
+    }
+
+    /// GO for the cue list `list`, on a timeline (`timeline_go_for` says what
+    /// it does). Whether GO was taken.
+    pub(super) fn timeline_go(&mut self, show: &Show, list: u32) -> bool {
+        let Some((key, does, _)) = self.timeline_go_for(show, list) else {
             return false;
         };
-        if let TimelineKey::Group(g) = key
-            && let Some(c) = show.cue(g)
-        {
-            log::info!("GO resumes {} ({})", c.number, c.name);
+        match does {
+            TimelineGo::Running => {
+                self.log("GO: the timeline is running; GO does nothing until it pauses")
+            }
+            TimelineGo::Cueing => {}
+            TimelineGo::Start | TimelineGo::Resume | TimelineGo::Play => {
+                if let TimelineKey::Group(g) = key
+                    && let Some(c) = show.cue(g)
+                {
+                    log::info!("GO resumes {} ({})", c.number, c.name);
+                }
+                // GO lets go of the show's pause, as firing a cue does.
+                if self.paused {
+                    self.set_paused(false);
+                }
+                self.timeline_run(show, key);
+            }
         }
-        if self.paused {
-            self.set_paused(false);
-        }
-        self.timeline_resume(show, key);
         true
     }
 

@@ -4,7 +4,7 @@
 mod timeline;
 
 // For the timeline editor, which names a run's state (`ui/timeline.rs`).
-pub use timeline::{RunState, RunView};
+pub use timeline::{RunState, RunView, TimelineGo};
 
 use crate::clock::{ClockFollower, TimeOfDay};
 use crate::fx::VideoFx;
@@ -366,6 +366,56 @@ pub struct GroupState {
     next: usize,
     /// A slide show that advances on GO: GO and the remote step through it.
     deck: bool,
+}
+
+/// What GO will do now (`Engine::go_plan`): what `Engine::go` does, for the
+/// transports' read-outs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GoPlan {
+    /// Bring in the next slide of the slide show that advances on GO.
+    Slide { deck: CueId, slide: CueId },
+    /// Do this to a timeline; `then`: the first clip or fade its clock will
+    /// reach when it goes on (paused or parked only).
+    Timeline {
+        key: TimelineKey,
+        does: TimelineGo,
+        then: Option<CueId>,
+    },
+    /// Fire this cue (the first armed one from the playhead), or nothing.
+    Cue(Option<CueId>),
+}
+
+impl GoPlan {
+    /// The read-out of a plan that is not a plain cue: what GO does ("Continue
+    /// 5 · Opening") and, when known, what comes next on it ("then bring in
+    /// 6 · Still", as the timeline editor's toolbar says it). None for a cue.
+    pub fn describe(&self, show: &Show) -> Option<(String, Option<String>)> {
+        use crate::timeline::model;
+        match *self {
+            GoPlan::Cue(_) => None,
+            GoPlan::Slide { deck, slide } => {
+                let label = |id| {
+                    show.cue(id)
+                        .map_or_else(String::new, |c| format!("{} · {}", c.number, c.name))
+                };
+                Some((format!("Next slide of {}", label(deck)), Some(label(slide))))
+            }
+            GoPlan::Timeline { key, does, then } => {
+                let name = model::name(show, key);
+                let then = then.map(|id| format!("then {}", model::on_go_text(show, id)));
+                Some(match does {
+                    TimelineGo::Start => (format!("Run {name}"), None),
+                    TimelineGo::Resume => (format!("Continue {name}"), then),
+                    TimelineGo::Play => (format!("Play {name} from its playhead"), then),
+                    TimelineGo::Running => (
+                        format!("{name} is running"),
+                        Some("GO does nothing until it pauses".into()),
+                    ),
+                    TimelineGo::Cueing => (format!("{name} is cueing"), None),
+                })
+            }
+        }
+    }
 }
 
 /// What stepping through a slide show that advances on GO came to.
@@ -1296,12 +1346,7 @@ impl Engine {
     /// forward (`forward`) or back. Another slide fades in over the one shown;
     /// the slide before or after is loaded ahead (`update_preload`).
     pub fn deck_step(&mut self, show: &Show, forward: bool) -> DeckStep {
-        let Some(a) = self
-            .active
-            .iter_mut()
-            .rev()
-            .find(|a| !a.stopping && matches!(&a.kind, ActiveKind::Group(g) if g.deck))
-        else {
+        let Some(a) = self.deck_at().map(|i| &mut self.active[i]) else {
             return DeckStep::NoDeck;
         };
         let ActiveKind::Group(g) = &mut a.kind else {
@@ -1331,11 +1376,50 @@ impl Engine {
         DeckStep::Moved
     }
 
+    /// Where in `active` the slide show that advances on GO and is on (the
+    /// latest one) is.
+    fn deck_at(&self) -> Option<usize> {
+        self.active
+            .iter()
+            .rposition(|a| !a.stopping && matches!(&a.kind, ActiveKind::Group(g) if g.deck))
+    }
+
+    /// What GO will do now, as `go` decides it: the next slide of a slide show
+    /// that advances on GO, a timeline that waits for GO (or a timeline list),
+    /// or the cue at the playhead. The transports read it out.
+    pub fn go_plan(&self, show: &Show) -> GoPlan {
+        if let Some(a) = self.deck_at().map(|i| &self.active[i])
+            && let ActiveKind::Group(g) = &a.kind
+            && let Some(&slide) = g.children.get(g.next)
+        {
+            return GoPlan::Slide {
+                deck: a.cue_id,
+                slide,
+            };
+        }
+        if let Some((key, does, then)) = self.timeline_go_for(show, self.active_list) {
+            return GoPlan::Timeline { key, does, then };
+        }
+        GoPlan::Cue(
+            self.playhead_top(show)
+                .and_then(|i| show.armed_top_from(i))
+                .map(|i| show.cues[i].id),
+        )
+    }
+
+    /// The top-level cue the playhead is on (or in), by its index.
+    fn playhead_top(&self, show: &Show) -> Option<usize> {
+        self.playhead
+            .and_then(|id| show.cue_index(id))
+            .map(|i| show.top_index(i))
+    }
+
     /// Fire the cue at the playhead and move the playhead past its continue chain.
     /// While a slide show that advances on GO has slides left, GO shows the
     /// next one instead. On a timeline list GO runs (or resumes) the timeline,
     /// and a timeline group of this list waiting at its own pause cue is
     /// resumed before anything else is fired.
+    /// `go_plan` says beforehand what it will do.
     pub fn go(&mut self, show: &Show) {
         if self.deck_step(show, true) == DeckStep::Moved {
             return;
@@ -1350,11 +1434,7 @@ impl Engine {
     /// cue 12" and a cue list's own GO, which ask for a particular cue and must
     /// not be taken for a step through the slides.
     pub fn go_playhead(&mut self, show: &Show) {
-        let Some(here) = self
-            .playhead
-            .and_then(|id| show.cue_index(id))
-            .map(|i| show.top_index(i))
-        else {
+        let Some(here) = self.playhead_top(show) else {
             self.log("GO: no cue at the playhead");
             return;
         };

@@ -4,24 +4,10 @@
 
 use super::tracks::Ctx;
 use super::*;
-use crate::show::{CueKind, Transition};
 
 /// What GO will do on a paused timeline, for the read-out: "GO: crossfade to …".
 pub(super) fn go_text(show: &Show, id: CueId) -> String {
-    let Some(c) = show.cue(id) else {
-        return "GO: run on".into();
-    };
-    let what = match &c.kind {
-        CueKind::Fade(_) | CueKind::Stop(_) => cue_label(c),
-        k => match k.media() {
-            Some(m) if m.transition == Transition::Crossfade => {
-                format!("crossfade to {}", cue_label(c))
-            }
-            Some(_) => format!("bring in {}", cue_label(c)),
-            None => cue_label(c),
-        },
-    };
-    format!("GO: {what}")
+    format!("GO: {}", model::on_go_text(show, id))
 }
 
 /// How the run is doing, in a few words.

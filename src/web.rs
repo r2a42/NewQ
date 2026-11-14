@@ -355,8 +355,16 @@ pub fn snapshot_json(show: &Show, engine: &Engine) -> String {
         )
     });
     let timecode = timecode.map_or("null".to_string(), |t| json_string(&t));
+    // GO carries a timeline on (or shows a slide) before it fires `next`.
+    let go = engine
+        .go_plan(show)
+        .describe(show)
+        .map_or("null".to_string(), |(what, then)| match then {
+            Some(then) => json_string(&format!("{what} · {then}")),
+            None => json_string(&what),
+        });
     format!(
-        r#"{{"show":{},"paused":{},"next":{next},"timecode":{timecode},"cues":{cues}}}"#,
+        r#"{{"show":{},"paused":{},"next":{next},"go":{go},"timecode":{timecode},"cues":{cues}}}"#,
         json_string(&show.name),
         engine.paused,
     )
@@ -726,6 +734,43 @@ mod tests {
     }
 
     #[test]
+    fn the_state_says_go_carries_on_a_timeline_waiting_at_its_pause() {
+        use crate::show::{ControlAction, ControlCue, CueKind, GroupMode};
+        let mut show = Show::default();
+        let mut g = show.make_cue(CueType::Group, None, 0);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        let gid = g.id;
+        show.cues.push(g);
+        let mut w = show.make_cue(CueType::Wait, None, 1);
+        if let CueKind::Wait(c) = &mut w.kind {
+            c.duration = 10.0;
+        }
+        w.parent = Some(gid);
+        show.cues.push(w);
+        let mut p = show.make_cue(CueType::Control, None, 2);
+        p.kind = CueKind::Control(ControlCue {
+            action: ControlAction::TimelinePause,
+            ..Default::default()
+        });
+        p.parent = Some(gid);
+        p.pre_wait = 1.0;
+        show.cues.push(p);
+        let after = show.make_cue(CueType::Wait, None, 3);
+        show.cues.push(after);
+        let mut engine = Engine::for_tests();
+        engine.playhead = Some(gid);
+        engine.go(&show);
+        engine.tick(&show, 1.5);
+        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let name = format!("{} · {}", show.cues[0].number, show.cues[0].name);
+        assert_eq!(v["go"], format!("Continue {name}"));
+        // The list's next cue is still there, for after it.
+        assert_eq!(v["next"]["name"], show.cues[3].name);
+    }
+
+    #[test]
     fn the_state_describes_the_cues_the_playhead_and_what_is_playing() {
         let mut show = Show {
             name: "Hamlet".into(),
@@ -751,6 +796,7 @@ mod tests {
         assert_eq!(v["show"], "Hamlet");
         assert_eq!(v["paused"], false);
         assert_eq!(v["timecode"], serde_json::Value::Null);
+        assert_eq!(v["go"], serde_json::Value::Null, "GO fires the next cue");
         // The playhead is on a disarmed cue, so the next to fire is the one after.
         assert_eq!(v["next"]["name"], show.cues[2].name);
         let cues = v["cues"].as_array().unwrap();

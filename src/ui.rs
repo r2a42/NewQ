@@ -861,6 +861,13 @@ fn cue_label(c: &Cue) -> String {
     format!("{} · {}", c.number, c.name)
 }
 
+/// What GO will do when that is not firing the next cue: carry a timeline on
+/// that waits for it, or the next slide (`Engine::go_plan`, which GO follows):
+/// what it does and, when known, what comes next on it.
+fn go_readout(show: &Show, engine: &Engine) -> Option<(String, Option<String>)> {
+    engine.go_plan(show).describe(show)
+}
+
 pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     st.sync_selection();
     if st.saved_json.is_none() {
@@ -1919,6 +1926,13 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState, actions: &
                 format!("STANDING BY · {}", show.list_name(engine.active_list))
             };
             ui.label(RichText::new(standing).small().weak());
+            if let Some((what, then)) = go_readout(show, engine) {
+                ui.label(RichText::new(what).size(24.0).strong().color(PLAYHEAD));
+                if let Some(then) = then {
+                    ui.label(RichText::new(then).italics());
+                }
+                return;
+            }
             match next {
                 Some(c) => {
                     ui.label(

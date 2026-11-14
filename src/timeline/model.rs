@@ -6,7 +6,7 @@
 use super::{TimelineKey, TimelinePoint, TimelineSettings, TrackId};
 use crate::show::{
     ControlAction, Cue, CueColor, CueId, CueKind, CueType, GroupMode, MIN_DB, OutputId,
-    PauseFreeze, Show,
+    PauseFreeze, Show, Transition,
 };
 
 /// How long a cue's content is, if known: the engine's own length sum, or a fake in tests.
@@ -57,6 +57,35 @@ pub struct Clip {
     pub clocked: bool,
     /// Further displays; the track is the home display's.
     pub also_on: Vec<OutputId>,
+}
+
+/// What a timeline is called: its group's number and name, or its list's name.
+pub fn name(show: &Show, key: TimelineKey) -> String {
+    match key {
+        TimelineKey::Group(id) => show
+            .cue(id)
+            .map_or_else(|| "(gone)".into(), |c| format!("{} · {}", c.number, c.name)),
+        TimelineKey::List(n) => show.list_name(n),
+    }
+}
+
+/// What a paused timeline's clock brings when GO runs it on, the cue `id`
+/// being the first clip or fade it will reach: "crossfade to 3 · Still",
+/// "bring in 4 · Song", or a fade or stop cue's own name. For the editor's
+/// toolbar and the transports' GO read-out.
+pub fn on_go_text(show: &Show, id: CueId) -> String {
+    let Some(c) = show.cue(id) else {
+        return "run on".into();
+    };
+    let label = format!("{} · {}", c.number, c.name);
+    match &c.kind {
+        CueKind::Fade(_) | CueKind::Stop(_) => label,
+        k => match k.media() {
+            Some(m) if m.transition == Transition::Crossfade => format!("crossfade to {label}"),
+            Some(_) => format!("bring in {label}"),
+            None => label,
+        },
+    }
 }
 
 /// Whether `key` is a timeline: a "start all together" group that is not a

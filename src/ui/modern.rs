@@ -120,9 +120,17 @@ fn strip(ui: &mut Ui, show: &Show, engine: &Engine, st: &mut UiState, actions: &
                         .small()
                         .weak(),
                 );
-                match next_cue(show, engine) {
-                    Some(c) => ui.label(RichText::new(cue_label(c)).strong().color(PLAYHEAD)),
-                    None => ui.label(RichText::new("End of cue list").weak()),
+                match (go_readout(show, engine), next_cue(show, engine)) {
+                    (Some((what, then)), _) => {
+                        ui.label(RichText::new(what).strong().color(PLAYHEAD))
+                            .on_hover_text(then.unwrap_or_default());
+                    }
+                    (None, Some(c)) => {
+                        ui.label(RichText::new(cue_label(c)).strong().color(PLAYHEAD));
+                    }
+                    (None, None) => {
+                        ui.label(RichText::new("End of cue list").weak());
+                    }
                 };
             });
             ui.add_space(12.0);
@@ -279,7 +287,14 @@ fn operator(
                 .small()
                 .weak(),
         );
+        let readout = go_readout(show, engine);
         match next {
+            _ if let Some((what, then)) = &readout => {
+                ui.label(RichText::new(what).size(40.0).strong().color(PLAYHEAD));
+                if let Some(then) = then {
+                    ui.label(RichText::new(then).size(18.0).italics());
+                }
+            }
             Some(c) => {
                 ui.label(
                     RichText::new(cue_label(c))
@@ -313,7 +328,12 @@ fn operator(
         }
         ui.add_space(14.0);
         if let Some(c) = next {
-            let later = upcoming(show, c.id, 6);
+            // GO carries a timeline on first: the next cue comes after it.
+            let mut later = upcoming(show, c.id, 6);
+            if readout.is_some() {
+                later.insert(0, c);
+                later.truncate(6);
+            }
             if !later.is_empty() {
                 ui.label(RichText::new("THEN").small().weak());
                 for c in later {
