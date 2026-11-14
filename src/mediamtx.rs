@@ -452,6 +452,7 @@ impl Hosted {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("can't start MediaMTX: {e}"))?;
+        crate::reaper::watch(&child);
         #[cfg(windows)]
         let job = tie_to_us(&child);
         let pidfile = dir.join("server.pid");

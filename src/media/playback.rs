@@ -220,6 +220,7 @@ impl Children {
         // (Stop, a cue ending) would wait for it.
         let began = std::time::Instant::now();
         let mut child = cmd.spawn().context("starting ffmpeg")?;
+        crate::reaper::watch(&child);
         if log::log_enabled!(log::Level::Debug) {
             let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
             log::debug!(

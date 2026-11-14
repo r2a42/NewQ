@@ -1005,6 +1005,7 @@ impl Sink {
                 return Err(format!("could not start FFmpeg: {e}"));
             }
         };
+        crate::reaper::watch(&child);
         if log::log_enabled!(log::Level::Debug) {
             let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
             log::debug!("stream ffmpeg {} started: {}", child.id(), args.join(" "));

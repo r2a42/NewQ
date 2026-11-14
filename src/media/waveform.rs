@@ -129,6 +129,7 @@ pub fn read(ff: &Ffmpeg, path: &Path, duration_hint: Option<f64>) -> Result<Wave
         "pipe:1",
     ]);
     let mut child = cmd.spawn().map_err(|e| format!("starting ffmpeg: {e}"))?;
+    crate::reaper::watch(&child);
     let mut stdout = child.stdout.take().ok_or("no ffmpeg output")?;
     // ffmpeg's complaints are read as they come, on their own thread: if they
     // piled up unread (a damaged file can produce thousands of lines) it would

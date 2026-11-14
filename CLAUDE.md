@@ -81,6 +81,13 @@ The README describes the features; this file is about working on the code.
   `NEWQ_TEST_PANIC=<engine|ui|outputs|render|audio>@<seconds>` makes one happen. Never take time from an
   `Instant` (`Instant::now() - d` panics soon after boot): use `Option<Instant>` or `checked_sub`.
   A `clamp` whose bounds come from a show or a file panics when they are inverted or NaN (`ui.rs::within`).
+- `src/reaper.rs`: no program NewQ starts outlives it. `reaper::start` (main.rs) runs a copy of NewQ as a
+  watcher (`newq --reap <pid>`) with a pipe; `reaper::watch(&child)` after each spawn (playback, stream,
+  waveform, probes, MediaMTX) gives it the pid; the watcher notes it only if it is running as a child of that
+  NewQ and named ffmpeg/ffprobe/mediamtx/newq, with its start time; when the pipe closes (NewQ ended in
+  any way) it ends the noted ones still running with the same pid and start time, and nothing else. Unix only (a Mac has no
+  `PR_SET_PDEATHSIG`; FFmpegs waiting on a capture permission were left after a crash). Tried on Linux
+  with `kill -9`; not on a Mac.
 - `src/logging.rs`: the log. `LogLevel` (`Prefs::log_level`, Settings ▸ General ▸ Recovery and logs;
   `set_level` applies it at once) or `NEWQ_LOG` (`Spec`: a level and `part=level` pairs; it wins, and the
   setting is greyed). Always to `newq.log` in the log folder (and stderr except on a Windows release),
@@ -273,8 +280,8 @@ The README describes the features; this file is about working on the code.
   A stream's FFmpeg must never be waited on without a limit: `Sink::finish` kills it after
   `finish_patience(kind)` (3 s; a Custom output gets 60 s for closing a file), `CaptureThread::stop`
   ends it through a `Killer` when the thread is stuck writing to it (a hung server fills the pipe),
-  and on Windows it is in a kill-on-close job (`mediamtx::tie_to_us`). Linux and Mac have no
-  equivalent for a crash yet. The stress tests (`mediamtx/stress.rs`, `gpu.rs::stress_stop_…`) are
+  and on Windows it is in a kill-on-close job (`mediamtx::tie_to_us`); on Linux and a Mac the
+  watcher in `reaper.rs` ends it after a crash. The stress tests (`mediamtx/stress.rs`, `gpu.rs::stress_stop_…`) are
   `#[ignore]`d; run them with `NEWQ_MEDIAMTX_DIR` and `NEWQ_FFMPEG_DIR` set and `--ignored --nocapture`.
   sysinfo only fills `Process::cmd()` when asked (`ProcessRefreshKind::with_cmd`); without it a
   "no FFmpeg left" check passes for the wrong reason.

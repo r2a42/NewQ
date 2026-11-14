@@ -39,6 +39,7 @@ mod power;
 mod pptx;
 mod prefs;
 mod projector;
+mod reaper;
 mod recovery;
 mod relink;
 mod remote;
@@ -83,6 +84,10 @@ fn main() -> anyhow::Result<()> {
     // A copy of this program started to talk to NDI's library for the show
     // (see ndi.rs): it does that and nothing else.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The watcher that ends what NewQ started once NewQ is gone (see reaper.rs).
+    if let Some(code) = reaper::run_if_asked(&args) {
+        std::process::exit(code);
+    }
     if let Some(code) = ndi::run_helper_if_asked(&args) {
         std::process::exit(code);
     }
@@ -105,6 +110,7 @@ fn main() -> anyhow::Result<()> {
     // this computer are read, the one chosen there.
     let has_file = logging::init(&crash::log_dir());
     crash::install();
+    reaper::start();
     log::info!(
         "NewQ {} on {} ({}), logs in {}{}, log detail: {}",
         env!("CARGO_PKG_VERSION"),

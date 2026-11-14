@@ -182,6 +182,7 @@ pub fn output_until(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
+    crate::reaper::watch(&child);
     type Collected = (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>);
     fn drain(pipe: Option<Box<dyn Read + Send>>) -> Collected {
         let bytes = Arc::new(Mutex::new(Vec::new()));

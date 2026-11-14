@@ -1021,6 +1021,12 @@ still there beside it). It is written by a thread of
 its own, so a slow disk never holds the show up; if lines ever come faster than the disk
 takes them they are dropped and the log says how many.
 
+**Nothing is left running behind NewQ.** On a Mac and on Linux a small watcher
+(`newq --reap`, a second copy of NewQ that does nothing else) is told each FFmpeg and
+streaming server NewQ starts. If NewQ ends in any way, a crash or a forced quit
+included, the watcher ends whatever is still running, so nothing is left holding a
+camera or a processor.
+
 **A fault in one part does not end the show.** If a part of NewQ meets
 something it did not expect while a show is running (a panic, in the
 programmer's word), that part's work is dropped for the moment and everything
