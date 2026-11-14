@@ -681,6 +681,17 @@ fn a_clip_the_run_waits_on_to_fade_in_is_hatched() {
 }
 
 #[test]
+fn a_panic_lets_go_of_a_drag_and_a_renaming() {
+    let mut f = fixture();
+    f.st.timeline.drag = Some((Host::Pane, Drag::Playhead { pos: 3.0 }));
+    f.st.timeline.renaming = Some((Host::Pane, 1, "Cho".into()));
+    f.st.timeline.pps = 40.0;
+    f.st.after_panic();
+    assert!(f.st.timeline.drag.is_none() && f.st.timeline.renaming.is_none());
+    assert_eq!(f.st.timeline.pps, 40.0, "the view stays");
+}
+
+#[test]
 fn show_mode_refuses_edit_drags_and_keeps_the_transport() {
     let mut f = fixture();
     let key = TimelineKey::Group(f.group);

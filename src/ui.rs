@@ -449,6 +449,7 @@ impl UiState {
         self.slide_dialog = None;
         self.deck_dialog = None;
         self.cue_filter.clear();
+        self.timeline.let_go();
     }
 
     /// End a multiple selection.

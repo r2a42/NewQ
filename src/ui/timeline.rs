@@ -95,6 +95,13 @@ enum Drag {
 }
 
 impl EditorState {
+    /// Drop a drag and a marker's renaming half done (after a panic: drawing
+    /// one of them may be what fell over). What is shown and how stays.
+    pub fn let_go(&mut self) {
+        self.drag = None;
+        self.renaming = None;
+    }
+
     /// The drag in progress in `host`.
     fn drag_in(&self, host: Host) -> Option<&Drag> {
         self.drag
