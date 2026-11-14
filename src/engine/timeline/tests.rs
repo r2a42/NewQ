@@ -1565,11 +1565,23 @@ fn seeking_past_a_pause_cue_or_onto_one_leaves_the_run_running_or_parked_as_it_w
     e.timeline_seek(&show, k, 9.0, true);
     assert!(parked(&mut e, &show, k));
     assert!(view(&mut e, &show, k).parked);
-    ticks(&mut e, &show, 0.0, 3);
+    // The text is drawn on a thread of its own: under load that can take
+    // longer than a few ticks, and going on from a park cues it (the clock
+    // stands until it is up), so these wait for it rather than for a count of
+    // ticks. Ticks of 0 keep the clock where it is meanwhile.
+    until(&mut e, &show, Some(0.0), "the text drawn", 10, |e| {
+        started(e, t)
+    });
     assert!(active(&e, t).is_some_and(|a| a.hold), "the text held");
+    assert!(parked(&mut e, &show, k));
     e.go(&show);
-    ticks(&mut e, &show, 0.0, 3);
-    assert_eq!(state(&mut e, &show, k), RunState::Running);
+    until(&mut e, &show, Some(0.0), "running", 10, |e| {
+        e.runs
+            .map
+            .get(&k)
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    assert!((view(&mut e, &show, k).pos - 9.0).abs() < 1e-9);
     assert!(!view(&mut e, &show, k).parked);
     assert!(active(&e, t).is_some_and(|a| !a.hold));
     e.tick(&show, 1.0);
