@@ -42,6 +42,9 @@ impl View {
     }
 }
 
+/// How wide the header's "what GO does next" read-out is.
+const HEADER_NEXT_WIDTH: f32 = 260.0;
+
 /// The cue GO would fire: the first armed one at or after the playhead.
 fn next_cue<'a>(show: &'a Show, engine: &Engine) -> Option<&'a Cue> {
     let at = engine.playhead.and_then(|id| show.cue_index(id))?;
@@ -114,24 +117,34 @@ fn strip(ui: &mut Ui, show: &Show, engine: &Engine, st: &mut UiState, actions: &
                 actions.push(Action::Go);
             }
             ui.add_space(4.0);
+            // A fixed width, so the view tabs after it stay put as the read-out
+            // changes (a long name is cut short; the whole of it on hover).
             ui.vertical(|ui| {
+                ui.set_width(HEADER_NEXT_WIDTH);
                 ui.label(
                     RichText::new(format!("NEXT · {}", show.list_name(engine.active_list)))
                         .small()
                         .weak(),
                 );
-                match (go_readout(show, engine), next_cue(show, engine)) {
+                let (text, hover) = match (go_readout(show, engine), next_cue(show, engine)) {
                     (Some((what, then)), _) => {
-                        ui.label(RichText::new(what).strong().color(PLAYHEAD))
-                            .on_hover_text(then.unwrap_or_default());
+                        let hover = match &then {
+                            Some(then) => format!("GO: {what}, {then}"),
+                            None => format!("GO: {what}"),
+                        };
+                        (RichText::new(what).strong().color(PLAYHEAD), hover)
                     }
                     (None, Some(c)) => {
-                        ui.label(RichText::new(cue_label(c)).strong().color(PLAYHEAD));
+                        let label = cue_label(c);
+                        (RichText::new(&label).strong().color(PLAYHEAD), label)
                     }
-                    (None, None) => {
-                        ui.label(RichText::new("End of cue list").weak());
-                    }
+                    (None, None) => (
+                        RichText::new("End of cue list").weak(),
+                        "End of cue list".into(),
+                    ),
                 };
+                ui.add(egui::Label::new(text).truncate())
+                    .on_hover_text(hover);
             });
             ui.add_space(12.0);
         }
