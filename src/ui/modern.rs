@@ -215,6 +215,27 @@ fn editor(
                     .show(ui, |ui| inspector(ui, show, engine, st, actions));
             });
         });
+    // The timeline editor, above the inspector, while it is wanted.
+    if st.timeline.open {
+        egui::Panel::bottom("modern_timeline")
+            .resizable(true)
+            .default_size(230.0)
+            .min_size(120.0)
+            .show(ui, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if ui
+                        .small_button("Close timeline")
+                        .on_hover_text(
+                            "Put the timeline editor away (Window ▸ Timeline brings it back)",
+                        )
+                        .clicked()
+                    {
+                        actions.push(Action::Timeline(timeline::TimelineAction::Close));
+                    }
+                });
+                timeline::pane(ui, show, engine, st, actions);
+            });
+    }
     egui::Panel::right("modern_active")
         .resizable(true)
         .default_size(260.0)

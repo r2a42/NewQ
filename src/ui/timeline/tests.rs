@@ -27,6 +27,8 @@ enum Draw {
     Inspector,
     /// The pane in a window of its own.
     Popout,
+    /// The new interface.
+    Modern,
 }
 
 /// Draws the editor (or what holds it) frame by frame with made-up input.
@@ -79,6 +81,7 @@ impl Mouse {
                 });
             }
             Draw::Popout => super::super::draw_popout(ui, Pane::Timeline, show, e, st),
+            Draw::Modern => super::super::modern::draw(ui, show, e, st, &mut actions),
         });
         out.textures_delta.clear();
         actions
@@ -860,13 +863,25 @@ fn opening_the_editor_docks_the_pane_or_shows_the_new_interfaces_panel() {
 }
 
 #[test]
-fn the_pane_pops_out() {
+fn the_pane_pops_out_and_the_new_interfaces_editor_view_has_it() {
     let mut f = fixture();
     let mut m = Mouse::new();
     m.draw = Draw::Popout;
     f.st.layout.pop_out(Pane::Timeline);
     m.frame(&mut f.show, &mut f.st, vec![]);
     assert_eq!(m.rects().expect("drawn in its own window").clips.len(), 4);
+
+    // The Editor view: no panel until it is wanted, then the editor in it.
+    let mut m = Mouse::new();
+    m.draw = Draw::Modern;
+    f.st.prefs.new_layout = true;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert!(m.rects().is_none());
+    f.st.timeline.open = true;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().expect("the panel draws the editor");
+    assert_eq!(r.clips.len(), 4);
+    assert!(r.ruler.width() > 300.0);
 }
 
 #[test]

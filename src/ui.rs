@@ -1479,6 +1479,24 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     }
     ui.separator();
     for pane in Pane::ALL {
+        // The new interface has the timeline editor as a panel of its Editor
+        // view, not as a pane.
+        if pane == Pane::Timeline && st.prefs.new_layout {
+            let mut shown = st.timeline.open;
+            if ui
+                .checkbox(&mut shown, pane.title())
+                .on_hover_text("The timeline editor, under the cue list in the Editor view")
+                .changed()
+            {
+                actions.push(Action::Timeline(if shown {
+                    timeline::TimelineAction::Open(None)
+                } else {
+                    timeline::TimelineAction::Close
+                }));
+                ui.close();
+            }
+            continue;
+        }
         let open = st.layout.is_open(pane);
         let popped = st.layout.is_popped_out(pane);
         ui.horizontal(|ui| {
