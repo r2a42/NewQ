@@ -1460,6 +1460,11 @@ impl Engine {
                 }
             }
             ControlAction::Memo => {}
+            // A timeline's, not a cue's: `control` never gets here with them.
+            ControlAction::TimelineRun
+            | ControlAction::TimelinePause
+            | ControlAction::TimelineStop
+            | ControlAction::TimelineJump => {}
         }
     }
 
@@ -6708,6 +6713,7 @@ mod tests {
         c.kind = CueKind::Control(ControlCue {
             action,
             target: Some(target),
+            ..Default::default()
         });
         let id = c.id;
         show.cues.push(c);
@@ -6723,6 +6729,7 @@ mod tests {
         memo.kind = CueKind::Control(ControlCue {
             action: ControlAction::Memo,
             target: None,
+            ..Default::default()
         });
         let memo_id = memo.id;
         show.cues.push(memo);

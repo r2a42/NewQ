@@ -36,8 +36,15 @@ const OWN: &[&str] = &[
 
 /// Fields inside a cue's kind that belong to that one cue (its file, its text).
 /// (A fade, stop or control cue's target and a camera's or sound input's device
-/// are as much its own: copying them would aim every picked cue at one thing.)
-const OWN_IN_KIND: &[&str] = &["file", "text", "target", "device"];
+/// are as much its own: copying them would aim every picked cue at one thing.
+/// So are a control cue's timeline, point and clips, and a group's timeline.)
+const OWN_IN_KIND: &[&str] = &[
+    "file", "text", "target", "device", "timeline", "at", "clips",
+];
+
+/// Of those, the ones that hold more than a value (`{"Group": 4}`, a list of
+/// clips, a timeline's markers): nothing inside them is spread either.
+const OWN_WHOLE_IN_KIND: &[&str] = &["timeline", "at", "clips"];
 
 /// Playback settings that mean something different in each sort of cue (a
 /// picture's hold time is a video's out point): made only in cues of the same
@@ -268,7 +275,10 @@ pub fn diff(before: &Cue, after: &Cue) -> Option<Change> {
         }
         // ["kind", "Video", ..fields..]: the fields are what matter. A change of
         // kind itself is not spread, nor is a cue's own file or text.
-        if path.len() < 3 || OWN_IN_KIND.contains(&path[path.len() - 1].as_str()) {
+        if path.len() < 3
+            || OWN_IN_KIND.contains(&path[path.len() - 1].as_str())
+            || OWN_WHOLE_IN_KIND.contains(&path[2].as_str())
+        {
             continue;
         }
         let (scope, rest) = if MEDIA_KINDS.contains(&path[1].as_str()) {
@@ -571,6 +581,49 @@ mod tests {
         let mut both = added.clone();
         both.pre_wait = 2.0;
         assert_eq!(spread(&a, &both, &b).unwrap().pre_wait, 2.0);
+    }
+
+    fn ctl(c: &mut Cue) -> &mut crate::show::ControlCue {
+        match &mut c.kind {
+            CueKind::Control(k) => k,
+            _ => panic!("a control cue"),
+        }
+    }
+
+    #[test]
+    fn a_control_cues_timeline_point_and_clips_and_a_groups_timeline_stay_its_own() {
+        use crate::show::{PauseFreeze, TimelineKey, TimelinePoint, TimelineSettings};
+        let mut show = Show::default();
+        let base = show.make_cue(CueType::Control, None, 0);
+        let other = show.make_cue(CueType::Control, None, 0);
+        let mut aimed = base.clone();
+        ctl(&mut aimed).timeline = Some(TimelineKey::Group(CueId(40)));
+        ctl(&mut aimed).at = Some(TimelinePoint::Time(3.0));
+        ctl(&mut aimed).clips = vec![CueId(41)];
+        assert!(spread(&base, &aimed, &other).is_none(), "re-aimed");
+        // Changed inside, from one key or point to another: still its own.
+        let mut again = aimed.clone();
+        ctl(&mut again).timeline = Some(TimelineKey::Group(CueId(42)));
+        ctl(&mut again).at = Some(TimelinePoint::Time(4.0));
+        ctl(&mut again).clips = vec![CueId(43)];
+        let mut other_aimed = other.clone();
+        ctl(&mut other_aimed).timeline = Some(TimelineKey::Group(CueId(7)));
+        ctl(&mut other_aimed).at = Some(TimelinePoint::Time(1.0));
+        ctl(&mut other_aimed).clips = vec![CueId(8)];
+        assert!(spread(&aimed, &again, &other_aimed).is_none());
+        // What a pause holds is a setting, and spreads.
+        let mut held = base.clone();
+        ctl(&mut held).freeze = PauseFreeze::Everything;
+        let mut moved = spread(&base, &held, &other).unwrap();
+        assert_eq!(ctl(&mut moved).freeze, PauseFreeze::Everything);
+        // A group's timeline (its markers) is its own.
+        let g = show.make_cue(CueType::Group, None, 0);
+        let other_g = show.make_cue(CueType::Group, None, 0);
+        let mut marked = g.clone();
+        if let CueKind::Group(gc) = &mut marked.kind {
+            gc.timeline = Some(TimelineSettings::for_editor());
+        }
+        assert!(spread(&g, &marked, &other_g).is_none());
     }
 
     #[test]

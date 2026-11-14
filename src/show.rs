@@ -3,6 +3,11 @@
 use crate::clock::TimeOfDay;
 use crate::media::playback::Playback;
 use crate::timecode::Timecode;
+// Marker and TrackId are for the timeline editor's code (`use crate::show::*`).
+#[allow(unused_imports)]
+pub use crate::timeline::{
+    Marker, PauseFreeze, RunOut, TimelineKey, TimelinePoint, TimelineSettings, TrackId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1212,6 +1217,10 @@ fn is_main_list(l: &u32) -> bool {
 pub struct CueList {
     pub id: u32,
     pub name: String,
+    /// Set for a timeline list: its top-level cues are clips on one clock,
+    /// each starting at its pre-wait (see `timeline`). `{}` at least.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<TimelineSettings>,
 }
 
 /// The colours a cue can be labelled with.
@@ -2012,6 +2021,24 @@ pub struct MediaCue {
     /// one starts to fade in, in place of the show's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_duration: Option<f64>,
+    /// What a clip does if its content runs out before the timeline moves on
+    /// (read only for a clip whose end the timeline's clock keeps). Default:
+    /// end, fading.
+    #[serde(default, skip_serializing_if = "RunOut::is_end")]
+    pub run_out: RunOut,
+    /// The fade when it ends that way, finishing as the content ends. None =
+    /// the cue's own fade-out, or the default fade (`manual_fade_out()`);
+    /// `Some(0.0)` = a cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_out_fade: Option<f64>,
+    /// On a timeline whose clips wait for their fade-in: this one is already
+    /// running when it fades in (it starts at its place, unseen).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub runs_unseen: bool,
+    /// Further displays this cue is shown on, besides `output` (its home).
+    /// Empty = only `output`. (Kept, not yet shown on them.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_on: Vec<OutputId>,
     /// Legacy (pre-transition) crossfade flag, migrated on load.
     #[serde(default, skip_serializing)]
     crossfade: bool,
@@ -2089,6 +2116,10 @@ impl MediaCue {
             rate: unit_rate(),
             slide_fade: None,
             slide_duration: None,
+            run_out: RunOut::End,
+            run_out_fade: None,
+            runs_unseen: false,
+            also_on: Vec::new(),
             crossfade: false,
         }
     }
@@ -2251,6 +2282,14 @@ pub enum ControlAction {
     Devamp,
     /// Does nothing: a note in the cue list.
     Memo,
+    /// Run a timeline: from where its playhead is, or from `ControlCue::at`.
+    TimelineRun,
+    /// Stop a timeline's clock here; what plays goes on unless `freeze` says.
+    TimelinePause,
+    /// Stop a timeline's clips, keeping its playhead where it is.
+    TimelineStop,
+    /// Move a timeline's playhead to `ControlCue::at`.
+    TimelineJump,
 }
 
 impl ControlAction {
@@ -2267,6 +2306,15 @@ impl ControlAction {
         ControlAction::Memo,
     ];
 
+    /// The actions on a timeline. (Not yet in `ALL`, which the cue inspector
+    /// offers and Test Mode's full check covers one by one.)
+    pub const TIMELINE: [ControlAction; 4] = [
+        ControlAction::TimelineRun,
+        ControlAction::TimelinePause,
+        ControlAction::TimelineStop,
+        ControlAction::TimelineJump,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             ControlAction::Start => "Start",
@@ -2279,6 +2327,10 @@ impl ControlAction {
             ControlAction::Disarm => "Disarm",
             ControlAction::Devamp => "Devamp",
             ControlAction::Memo => "Memo",
+            ControlAction::TimelineRun => "Run timeline",
+            ControlAction::TimelinePause => "Pause timeline",
+            ControlAction::TimelineStop => "Stop timeline",
+            ControlAction::TimelineJump => "Jump in timeline",
         }
     }
 
@@ -2296,12 +2348,30 @@ impl ControlAction {
                 "Let a loop that is playing finish its pass and go on, rather than go round again"
             }
             ControlAction::Memo => "Does nothing: a note in the cue list",
+            ControlAction::TimelineRun => {
+                "Run a timeline from where its playhead is, or from the point chosen"
+            }
+            ControlAction::TimelinePause => {
+                "Stop a timeline's clock here: nothing later starts until GO. What is \
+                 playing goes on unless it is set to hold"
+            }
+            ControlAction::TimelineStop => {
+                "Stop what a timeline is playing, leaving its playhead where it is"
+            }
+            ControlAction::TimelineJump => {
+                "Move a timeline's playhead to a time, a marker or the start of a clip"
+            }
         }
     }
 
-    /// Whether it acts on a cue.
+    /// Whether it acts on a cue. (The timeline actions act on a timeline.)
     pub fn needs_target(self) -> bool {
-        self != ControlAction::Memo
+        self != ControlAction::Memo && !self.is_timeline()
+    }
+
+    /// One of the actions on a timeline (`TIMELINE`).
+    pub fn is_timeline(self) -> bool {
+        Self::TIMELINE.contains(&self)
     }
 }
 
@@ -2311,6 +2381,63 @@ pub struct ControlCue {
     #[serde(default)]
     pub action: ControlAction,
     pub target: Option<CueId>,
+    /// The timeline a timeline action is for: None = the one this cue is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<TimelineKey>,
+    /// Where a Run starts from, or where a Jump goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<TimelinePoint>,
+    /// What a timeline pause holds while the clock is stopped.
+    #[serde(default, skip_serializing_if = "PauseFreeze::is_nothing")]
+    pub freeze: PauseFreeze,
+    /// The clips that hold, for `PauseFreeze::Clips`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<CueId>,
+    /// A pause that freezes content also freezes live inputs (camera, NDI,
+    /// live sound). Default false: they carry on live.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub freeze_live: bool,
+}
+
+impl ControlCue {
+    /// Aim the timeline fields (`timeline`, a clip's start in `at`, `clips`)
+    /// anew, as `target` is when cues are pasted: `cue` gives the id a cue has
+    /// now (None: there is no such cue to aim at), and `list` whether a list is
+    /// still there. A timeline that is no longer there is forgotten, and so is a
+    /// marker on it; with `markers` false a marker is forgotten too unless the
+    /// timeline it is on came along (this cue's own, or a group copied with it).
+    pub fn remap_timeline(
+        &mut self,
+        cue: &dyn Fn(CueId) -> Option<CueId>,
+        list: &dyn Fn(u32) -> bool,
+        markers: bool,
+    ) {
+        let (mut carried, mut lost) = (self.timeline.is_none(), false);
+        self.timeline = match self.timeline {
+            Some(TimelineKey::Group(g)) => match cue(g) {
+                Some(n) => {
+                    carried = n != g;
+                    Some(TimelineKey::Group(n))
+                }
+                None => {
+                    lost = true;
+                    None
+                }
+            },
+            Some(TimelineKey::List(n)) if list(n) => Some(TimelineKey::List(n)),
+            Some(TimelineKey::List(_)) => {
+                lost = true;
+                None
+            }
+            None => None,
+        };
+        self.at = match self.at {
+            Some(TimelinePoint::Cue(c)) => cue(c).map(TimelinePoint::Cue),
+            Some(TimelinePoint::Marker(_)) if lost || (!markers && !carried) => None,
+            other => other,
+        };
+        self.clips = self.clips.iter().filter_map(|c| cue(*c)).collect();
+    }
 }
 
 /// Sends MIDI Time Code from `start` on a MIDI output until it has run for
@@ -2952,6 +3079,11 @@ pub struct GroupCue {
     /// if it has them); see `Show::relay_slides`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slides: Option<SlideShow>,
+    /// A "start all together" group's timeline settings (markers, tracks, the
+    /// rules made in the editor). None while they are the defaults (see
+    /// `timeline::model::settle`), so an untouched group is written as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<TimelineSettings>,
 }
 
 /// What starts the next slide of a slide show.
@@ -3181,10 +3313,14 @@ impl Show {
             .map(|c| c.id)
             .collect();
         for c in &mut self.cues {
-            if retarget.contains(&c.id)
-                && let Some(m) = c.kind.media_mut()
-            {
-                m.output = fallback;
+            if let Some(m) = c.kind.media_mut() {
+                if retarget.contains(&c.id) {
+                    m.output = fallback;
+                }
+                // Nor is it on the display that has gone, or twice on its home.
+                let known = |o: &OutputId| self.outputs.iter().any(|x| x.id == *o);
+                let home = m.output;
+                m.also_on.retain(|o| known(o) && Some(*o) != home);
             }
         }
     }
@@ -3734,6 +3870,7 @@ impl Show {
         self.lists.push(CueList {
             id,
             name: name.to_string(),
+            timeline: None,
         });
         id
     }
@@ -3752,6 +3889,17 @@ impl Show {
             .collect();
         self.cues.retain(|c| c.list != id);
         self.lists.retain(|l| l.id != id);
+        // What aimed at the list's timeline, or at a clip of it, no longer does.
+        let removed: std::collections::HashSet<CueId> = gone.iter().copied().collect();
+        for c in &mut self.cues {
+            if let CueKind::Control(ctl) = &mut c.kind {
+                ctl.remap_timeline(
+                    &|t| (!removed.contains(&t)).then_some(t),
+                    &|l| l != id,
+                    true,
+                );
+            }
+        }
         gone
     }
 
@@ -4080,8 +4228,11 @@ impl Show {
         let old_group = copies[0].id;
         let mut new_group = None;
         let first_number: i64 = self.next_cue_number().parse().unwrap_or(1);
+        let mut renamed: HashMap<CueId, CueId> = HashMap::new();
         for (n, c) in copies.iter_mut().enumerate() {
+            let old = c.id;
             c.id = CueId(self.alloc_id());
+            renamed.insert(old, c.id);
             c.number = (first_number + n as i64).to_string();
             // A key or note fires one cue: the copy doesn't take it over.
             c.hotkey = None;
@@ -4092,6 +4243,16 @@ impl Show {
                 && let Some(g) = new_group
             {
                 c.parent = Some(g);
+            }
+        }
+        // A copied group's timeline cues aim at the copy and its clips.
+        for c in &mut copies {
+            if let CueKind::Control(ctl) = &mut c.kind {
+                ctl.remap_timeline(
+                    &|t| Some(renamed.get(&t).copied().unwrap_or(t)),
+                    &|_| true,
+                    true,
+                );
             }
         }
         let first = copies[0].id;
@@ -4209,6 +4370,16 @@ impl Show {
                     if m.output.is_some_and(|o| self.output(o).is_none()) {
                         m.output = self.outputs.first().map(|o| o.id);
                     }
+                    // Further displays this show doesn't have have no counterpart:
+                    // they go, as does one that is now the home display.
+                    let home = m.output;
+                    let mut also: Vec<OutputId> = Vec::new();
+                    for o in m.also_on.drain(..) {
+                        if self.output(o).is_some() && Some(o) != home && !also.contains(&o) {
+                            also.push(o);
+                        }
+                    }
+                    m.also_on = also;
                     if m.audio_output
                         .is_some_and(|a| !self.audio_outputs.iter().any(|o| o.id == a))
                     {
@@ -4226,6 +4397,16 @@ impl Show {
                     Some(_) if !same_show => None,
                     other => other,
                 };
+            }
+            if let CueKind::Control(ctl) = &mut c.kind {
+                ctl.remap_timeline(
+                    &|t| match renamed.get(&t) {
+                        Some(n) => Some(*n),
+                        None => same_show.then_some(t),
+                    },
+                    &|_| same_show,
+                    same_show,
+                );
             }
         }
         // The run after the group first, so the other's place doesn't move.
@@ -6981,6 +7162,7 @@ mod tests {
         c.kind = CueKind::Control(ControlCue {
             action: ControlAction::Devamp,
             target: Some(tid),
+            ..Default::default()
         });
         let back: Cue = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         let CueKind::Control(b) = &back.kind else {
@@ -7298,5 +7480,403 @@ mod tests {
         for k in CueColor::ALL {
             assert!(!k.label().is_empty());
         }
+    }
+
+    // ----- Timelines -----
+
+    /// A show as 0.20.3 wrote it: a timeline group with a clip and a Pause cue
+    /// in it, a play-in-order group and a second list.
+    const SHOW_0_20_3: &str = r#"{"version":2,"name":"Old","outputs":[{"id":1,"name":"Display 1","enabled":true}],
+        "own_layers":true,"next_id":20,"lists":[{"id":1,"name":"Second"}],"cues":[
+        {"id":2,"number":"1","name":"Group","kind":{"Group":{"mode":"Timeline","collapsed":false}}},
+        {"id":3,"number":"1.1","name":"Clip","parent":2,"pre_wait":1.5,"kind":{"Video":{"file":"a.mp4",
+            "output":1,"layer":1,"fade_in":1.0,"fade_out":1.0,"opacity":1.0,"volume_db":0.0,"start":0.0,
+            "end":null,"loop_media":false,"loop_count":0,"hold_last_frame":false}}},
+        {"id":4,"number":"1.2","name":"Pause","parent":2,"pre_wait":3.0,
+            "kind":{"Control":{"action":"Pause","target":3}}},
+        {"id":5,"number":"2","name":"Playlist","kind":{"Group":{"mode":"Playlist","collapsed":true}}},
+        {"id":6,"number":"1","name":"Other","list":1,"kind":{"Wait":{"duration":2.0}}}]}"#;
+
+    /// The keys the timeline fields are written under.
+    const TIMELINE_KEYS: [&str; 9] = [
+        "\"timeline\":",
+        "\"also_on\":",
+        "\"freeze_live\":",
+        "\"run_out\":",
+        "\"run_out_fade\":",
+        "\"runs_unseen\":",
+        "\"freeze\":",
+        "\"clips\":",
+        "\"at\":",
+    ];
+
+    fn control_of(show: &Show, id: CueId) -> &ControlCue {
+        match &show.cue(id).unwrap().kind {
+            CueKind::Control(c) => c,
+            _ => panic!("a control cue"),
+        }
+    }
+
+    #[test]
+    fn a_show_from_0_20_3_loads_and_is_written_without_the_timeline_fields() {
+        use crate::timeline::model;
+        let dir = std::env::temp_dir().join(format!("newq_timeline_old_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.newq");
+        std::fs::write(&path, SHOW_0_20_3).unwrap();
+        let show = Show::load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(show.cues.len(), 5);
+        assert!(show.lists[0].timeline.is_none());
+        let CueKind::Group(g) = &show.cue(CueId(2)).unwrap().kind else {
+            panic!()
+        };
+        assert!(g.timeline.is_none());
+        let m = show.cue(CueId(3)).unwrap().kind.media().unwrap();
+        assert_eq!(
+            (m.run_out, m.run_out_fade, m.runs_unseen),
+            (RunOut::End, None, false)
+        );
+        assert!(m.also_on.is_empty());
+        let c = control_of(&show, CueId(4));
+        assert_eq!((c.action, c.target), (ControlAction::Pause, Some(CueId(3))));
+        assert_eq!(
+            (c.timeline, c.at, c.freeze, c.clips.len(), c.freeze_live),
+            (None, None, PauseFreeze::Nothing, 0, false)
+        );
+        // An old timeline group is still one (with no settings: today's rules);
+        // a list without settings is a plain list.
+        assert!(model::is_timeline(&show, TimelineKey::Group(CueId(2))));
+        assert!(!model::is_timeline(&show, TimelineKey::List(1)));
+        assert!(!model::is_timeline(&show, TimelineKey::Group(CueId(5))));
+        let json = serde_json::to_string(&show).unwrap();
+        for k in TIMELINE_KEYS {
+            assert!(!json.contains(k), "{k} written: {json}");
+        }
+        // Nor does a new show, or any new cue, write them.
+        let mut fresh = Show::default();
+        for ty in [
+            CueType::Video,
+            CueType::Image,
+            CueType::Audio,
+            CueType::Group,
+            CueType::Control,
+            CueType::Text,
+        ] {
+            let c = fresh.make_cue(ty, None, fresh.cues.len());
+            fresh.cues.push(c);
+        }
+        fresh.add_list("Second");
+        let json = serde_json::to_string(&fresh).unwrap();
+        for k in TIMELINE_KEYS {
+            assert!(!json.contains(k), "{k} written: {json}");
+        }
+    }
+
+    #[test]
+    fn the_timeline_fields_round_trip_and_leave_a_preload_alone() {
+        let mut show = Show::default();
+        let mut v = show.make_cue(CueType::Video, None, 0);
+        let before = v.kind.media().unwrap().clone();
+        let m = v.kind.media_mut().unwrap();
+        m.run_out = RunOut::Loop;
+        m.run_out_fade = Some(0.0);
+        m.runs_unseen = true;
+        m.also_on = vec![OutputId(77)];
+        // What the clock does at the end doesn't change what is decoded, nor
+        // (until cues are shown on them) the further displays.
+        assert!(m.decodes_like(&before));
+        let mut c = show.make_cue(CueType::Control, None, 1);
+        c.kind = CueKind::Control(ControlCue {
+            action: ControlAction::TimelinePause,
+            target: None,
+            timeline: Some(TimelineKey::List(3)),
+            at: Some(TimelinePoint::Marker(2)),
+            freeze: PauseFreeze::Clips,
+            clips: vec![v.id],
+            freeze_live: true,
+        });
+        let mut g = show.make_cue(CueType::Group, None, 2);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.timeline = Some(TimelineSettings {
+                markers: vec![Marker {
+                    id: 2,
+                    time: 4.0,
+                    name: "Here".into(),
+                    color: Some(CueColor::Red),
+                }],
+                ..TimelineSettings::for_editor()
+            });
+        }
+        show.cues.extend([v, c, g]);
+        let id = show.add_list("Timeline");
+        show.lists[0].timeline = Some(TimelineSettings::default());
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(
+            json.contains("\"name\":\"Timeline\",\"timeline\":{}"),
+            "{json}"
+        );
+        assert!(json.contains("\"freeze_live\":true"), "{json}");
+        assert!(json.contains("\"also_on\":[77]"), "{json}");
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.lists, show.lists);
+        assert_eq!(back.lists[0].id, id);
+        for (a, b) in back.cues.iter().zip(&show.cues) {
+            assert_eq!(
+                serde_json::to_value(a).unwrap(),
+                serde_json::to_value(b).unwrap()
+            );
+        }
+        let m = back.cues[0].kind.media().unwrap();
+        assert_eq!(
+            (m.run_out, m.run_out_fade, m.runs_unseen),
+            (RunOut::Loop, Some(0.0), true)
+        );
+        assert_eq!(m.also_on, vec![OutputId(77)]);
+        let c = control_of(&back, back.cues[1].id);
+        assert_eq!((c.freeze, c.freeze_live), (PauseFreeze::Clips, true));
+        // Loop and Hold are written; End, the default, is not.
+        for (r, written) in [
+            (RunOut::Loop, true),
+            (RunOut::Hold, true),
+            (RunOut::End, false),
+        ] {
+            let mut v = Show::default().make_cue(CueType::Video, None, 0);
+            v.kind.media_mut().unwrap().run_out = r;
+            let j = serde_json::to_string(&v).unwrap();
+            assert_eq!(j.contains("\"run_out\":"), written, "{j}");
+            let b: Cue = serde_json::from_str(&j).unwrap();
+            assert_eq!(b.kind.media().unwrap().run_out, r);
+        }
+        assert_eq!(c.at, Some(TimelinePoint::Marker(2)));
+    }
+
+    #[test]
+    fn a_timeline_made_in_the_editor_is_written_with_both_rules() {
+        use crate::timeline::edit;
+        let mut show = Show::default();
+        let list = edit::new_timeline_list(&mut show, "Tl");
+        let slot = show.insert_slot(None, true, 0);
+        let g = edit::new_timeline_group(&mut show, slot);
+        let both = "\"timeline\":{\"crossfade_overlaps\":true,\"start_on_fade_in\":true}";
+        let json = serde_json::to_string(&show).unwrap();
+        assert_eq!(json.matches(both).count(), 2, "{json}");
+        assert!(show.cue(g).unwrap().parent.is_none());
+        // A list that holds groups can't be made one; the main list never can.
+        let plain = show.add_list("Plain");
+        let slot = show.insert_slot(None, true, plain);
+        let grp = show.make_cue(CueType::Group, None, slot.at);
+        show.insert_cue(slot, grp);
+        assert!(edit::set_list_timeline(&mut show, plain, true).is_err());
+        assert!(edit::set_list_timeline(&mut show, 0, true).is_err());
+        assert!(edit::set_list_timeline(&mut show, list, false).is_ok());
+        assert!(show.lists[0].timeline.is_none());
+    }
+
+    /// A timeline group with a clip and a control cue that names the group,
+    /// the clip's start, the clip and a marker; returns (group, clip, control).
+    fn timeline_with_a_pause(show: &mut Show, at: TimelinePoint) -> (CueId, CueId, CueId) {
+        let slot = show.insert_slot(None, true, 0);
+        let g = crate::timeline::edit::new_timeline_group(show, slot);
+        let slot = show.insert_slot(Some(g), false, 0);
+        let clip = show.make_cue(CueType::Video, None, slot.at);
+        let clip_id = clip.id;
+        show.insert_cue(slot, clip);
+        let slot = show.insert_slot(Some(clip_id), false, 0);
+        let mut p = show.make_cue(CueType::Control, None, slot.at);
+        p.kind = CueKind::Control(ControlCue {
+            action: ControlAction::TimelinePause,
+            target: None,
+            timeline: Some(TimelineKey::Group(g)),
+            at: Some(at),
+            freeze: PauseFreeze::Clips,
+            clips: vec![clip_id],
+            freeze_live: false,
+        });
+        let pid = p.id;
+        show.insert_cue(slot, p);
+        (g, clip_id, pid)
+    }
+
+    #[test]
+    fn duplicating_a_timeline_group_aims_its_cues_at_the_copy() {
+        let mut show = Show::default();
+        let (g, clip, p) = timeline_with_a_pause(&mut show, TimelinePoint::Cue(CueId(0)));
+        if let CueKind::Control(c) = &mut show.cues.iter_mut().find(|c| c.id == p).unwrap().kind {
+            c.at = Some(TimelinePoint::Cue(clip));
+        }
+        let copy = show.duplicate(show.cue_index(g).unwrap());
+        let kids: Vec<CueId> = show.children(copy).iter().map(|c| c.id).collect();
+        assert_eq!(kids.len(), 2);
+        let c = control_of(&show, kids[1]);
+        assert_eq!(c.timeline, Some(TimelineKey::Group(copy)));
+        assert_eq!(c.at, Some(TimelinePoint::Cue(kids[0])));
+        assert_eq!(c.clips, vec![kids[0]]);
+        // The original is as it was.
+        let o = control_of(&show, p);
+        assert_eq!(o.timeline, Some(TimelineKey::Group(g)));
+        assert_eq!(
+            (o.at, o.clips.clone()),
+            (Some(TimelinePoint::Cue(clip)), vec![clip])
+        );
+        // A control cue duplicated on its own keeps its aim.
+        let alone = show.duplicate(show.cue_index(p).unwrap());
+        let a = control_of(&show, alone);
+        assert_eq!(a.timeline, Some(TimelineKey::Group(g)));
+        assert_eq!(a.clips, vec![clip]);
+    }
+
+    #[test]
+    fn pasting_aims_the_timeline_fields_at_the_copies_or_drops_what_another_show_means() {
+        let mut show = Show::default();
+        let (g, clip, p) = timeline_with_a_pause(&mut show, TimelinePoint::Marker(1));
+        // The whole group, in this show: aimed at the copies, the marker kept.
+        let cues = show.copy_cues(&[g]);
+        let heads = show.paste_cues(&cues, None, 0, true, false);
+        let kids: Vec<CueId> = show.children(heads[0]).iter().map(|c| c.id).collect();
+        let c = control_of(&show, kids[1]);
+        assert_eq!(c.timeline, Some(TimelineKey::Group(heads[0])));
+        assert_eq!(
+            (c.at, c.clips.clone()),
+            (Some(TimelinePoint::Marker(1)), vec![kids[0]])
+        );
+        // The control cue alone, in this show: it keeps its aim.
+        let cues = show.copy_cues(&[p]);
+        let alone = show.paste_cues(&cues, None, 0, true, false)[0];
+        let a = control_of(&show, alone);
+        assert_eq!(a.timeline, Some(TimelineKey::Group(g)));
+        assert_eq!(
+            (a.at, a.clips.clone()),
+            (Some(TimelinePoint::Marker(1)), vec![clip])
+        );
+        // In another show: the group, its clip and its marker mean nothing there.
+        let mut other = Show::default();
+        let cues = show.copy_cues(&[p]);
+        let there = other.paste_cues(&cues, None, 0, false, false)[0];
+        let t = control_of(&other, there);
+        assert_eq!((t.timeline, t.at, t.clips.len()), (None, None, 0));
+        // A list there is another list too; a time is a time.
+        if let CueKind::Control(c) = &mut show.cues.iter_mut().find(|c| c.id == p).unwrap().kind {
+            c.timeline = Some(TimelineKey::List(1));
+            c.at = Some(TimelinePoint::Time(5.0));
+        }
+        let cues = show.copy_cues(&[p]);
+        let there = other.paste_cues(&cues, None, 0, false, false)[0];
+        let t = control_of(&other, there);
+        assert_eq!((t.timeline, t.at), (None, Some(TimelinePoint::Time(5.0))));
+        // The whole group in another show comes with its marker.
+        let cues = show.copy_cues(&[g]);
+        let heads = other.paste_cues(&cues, None, 0, false, false);
+        let kids: Vec<CueId> = other.children(heads[0]).iter().map(|c| c.id).collect();
+        let c = control_of(&other, kids[1]);
+        assert_eq!(c.clips, vec![kids[0]]);
+        // (Its timeline was made a list above: that list is not in this show.)
+        assert_eq!((c.timeline, c.at), (None, Some(TimelinePoint::Time(5.0))));
+    }
+
+    #[test]
+    fn removing_a_list_forgets_what_aimed_at_its_timeline_and_clips() {
+        let mut show = Show::default();
+        let gone = crate::timeline::edit::new_timeline_list(&mut show, "Gone");
+        let kept = crate::timeline::edit::new_timeline_list(&mut show, "Kept");
+        let slot = show.insert_slot(None, false, gone);
+        let clip = show.make_cue(CueType::Video, None, slot.at);
+        let clip_id = clip.id;
+        show.insert_cue(slot, clip);
+        let aim = |show: &mut Show, key: TimelineKey, at: TimelinePoint| {
+            let mut c = show.make_cue(CueType::Control, None, show.cues.len());
+            c.kind = CueKind::Control(ControlCue {
+                action: ControlAction::TimelineJump,
+                target: None,
+                timeline: Some(key),
+                at: Some(at),
+                freeze: PauseFreeze::Clips,
+                clips: vec![clip_id],
+                freeze_live: false,
+            });
+            let id = c.id;
+            let slot = show.insert_slot(None, false, 0);
+            show.insert_cue(slot, c);
+            id
+        };
+        let at_gone = aim(&mut show, TimelineKey::List(gone), TimelinePoint::Marker(3));
+        let at_kept = aim(
+            &mut show,
+            TimelineKey::List(kept),
+            TimelinePoint::Cue(clip_id),
+        );
+        let at_kept_marker = aim(&mut show, TimelineKey::List(kept), TimelinePoint::Marker(3));
+        assert_eq!(show.remove_list(gone), vec![clip_id]);
+        let a = control_of(&show, at_gone);
+        assert_eq!((a.timeline, a.at, a.clips.len()), (None, None, 0));
+        let b = control_of(&show, at_kept);
+        assert_eq!(
+            (b.timeline, b.at, b.clips.len()),
+            (Some(TimelineKey::List(kept)), None, 0)
+        );
+        let c = control_of(&show, at_kept_marker);
+        assert_eq!(c.at, Some(TimelinePoint::Marker(3)));
+    }
+
+    #[test]
+    fn a_cues_further_displays_lose_one_that_goes_and_are_mapped_when_pasted() {
+        let mut show = Show::default();
+        let d1 = show.outputs[0].id;
+        let d2 = show.add_display();
+        let d3 = show.add_display();
+        let mut v = show.make_cue(CueType::Video, None, 0);
+        v.kind.media_mut().unwrap().output = Some(d1);
+        v.kind.media_mut().unwrap().also_on = vec![d2, d3];
+        let vid = v.id;
+        show.cues.push(v);
+        let also =
+            |show: &Show, id: CueId| show.cue(id).unwrap().kind.media().unwrap().also_on.clone();
+        show.remove_output(d2);
+        assert_eq!(also(&show, vid), vec![d3]);
+        // The home going: the cue moves to the first display, and isn't "also" on it.
+        show.cues[0].kind.media_mut().unwrap().output = Some(d3);
+        show.cues[0].kind.media_mut().unwrap().also_on = vec![d1];
+        show.remove_output(d3);
+        assert_eq!(
+            show.cue(vid).unwrap().kind.media().unwrap().output,
+            Some(d1)
+        );
+        assert!(also(&show, vid).is_empty(), "d1 is its home now");
+        // Pasted here, the displays are kept; in a show without them they go,
+        // and one that becomes the home display goes too.
+        let d4 = show.add_display();
+        show.cues[0].kind.media_mut().unwrap().also_on = vec![d4];
+        let cues = show.copy_cues(&[vid]);
+        let here = show.paste_cues(&cues, None, 0, true, false)[0];
+        assert_eq!(also(&show, here), vec![d4]);
+        let mut other = Show::default();
+        let there = other.paste_cues(&cues, None, 0, false, false)[0];
+        assert!(also(&other, there).is_empty());
+        let mut other = Show::default();
+        let o1 = other.outputs[0].id;
+        let mut c = cues.clone();
+        c[0].kind.media_mut().unwrap().output = Some(OutputId(999));
+        c[0].kind.media_mut().unwrap().also_on = vec![o1, OutputId(998)];
+        let there = other.paste_cues(&c, None, 0, false, false)[0];
+        assert_eq!(
+            other.cue(there).unwrap().kind.media().unwrap().output,
+            Some(o1)
+        );
+        assert!(also(&other, there).is_empty());
+    }
+
+    #[test]
+    fn the_timeline_actions_need_no_cue_and_are_not_offered_yet() {
+        for a in ControlAction::TIMELINE {
+            assert!(a.is_timeline() && !a.needs_target());
+            assert!(!ControlAction::ALL.contains(&a), "{a:?} is in ALL");
+            assert!(!a.label().is_empty() && !a.description().is_empty());
+            let json = serde_json::to_string(&a).unwrap();
+            assert_eq!(serde_json::from_str::<ControlAction>(&json).unwrap(), a);
+        }
+        for a in ControlAction::ALL {
+            assert!(!a.is_timeline());
+        }
+        assert!(ControlAction::Pause.needs_target());
     }
 }

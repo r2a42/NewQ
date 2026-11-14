@@ -56,6 +56,7 @@ mod streamlink;
 mod testmode;
 mod text;
 mod timecode;
+mod timeline;
 mod ui;
 mod web;
 
