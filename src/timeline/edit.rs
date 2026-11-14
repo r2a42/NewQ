@@ -1,11 +1,26 @@
 //! Changes to a timeline, on the show: moving, trimming and splitting clips,
 //! adding cues, tracks and markers. Each is pure and says whether it changed
-//! anything. (Stubs for now: the editing library fills them in.)
+//! anything (or what it made).
+//!
+//! A clip's start is its pre-wait and its length is what `Dur` says (the
+//! engine's `cue_duration`, a fake in tests), with its lead-in added as
+//! `model::clips` does. Times that come in are checked: a time that isn't a
+//! number changes nothing, and nothing starts before 0 or gets shorter than
+//! `MIN_LEN`. (No `clamp` on bounds from the show: inverted or NaN ones panic.)
 
-use super::model::Dur;
-use super::{TimelineKey, TimelineSettings, TrackId};
-use crate::show::{Animated, ControlAction, CueId, CueKind, CueType, Show, Slot};
+use super::model::{self, Dur, LeadIn};
+use super::{Marker, TimelineKey, TimelineSettings, TrackId};
+use crate::show::{
+    Animated, ControlAction, ControlCue, Cue, CueId, CueKind, CueType, Keyframe, MAX_RATE,
+    MIN_RATE, MediaCue, Show, Slot, Transition,
+};
 use std::path::PathBuf;
+
+/// The shortest a clip (its content, after any lead-in) can be made.
+pub const MIN_LEN: f64 = 0.05;
+
+/// Times closer than this are the same time.
+const SAME_TIME: f64 = 1e-6;
 
 /// Which end of a clip is dragged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,108 +36,844 @@ pub enum PauseBefore {
     ClipFadeOut,
 }
 
+// ----- Helpers -------------------------------------------------------------
+
+/// Where a cue starts on its timeline (as `model` reads it).
+fn start_of(cue: &Cue) -> f64 {
+    if cue.pre_wait.is_finite() {
+        cue.pre_wait.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn cue_mut(show: &mut Show, id: CueId) -> Option<&mut Cue> {
+    show.cues.iter_mut().find(|c| c.id == id)
+}
+
+/// How long a clip's content waits for its fade-in, in seconds after its start
+/// (what `model::clips` adds to the length).
+fn lead_secs(show: &Show, key: TimelineKey, cue: &Cue) -> f64 {
+    match model::lead_in(show, key, cue) {
+        LeadIn::None => 0.0,
+        LeadIn::At(v) => v.max(0.0),
+        LeadIn::UntilFaded => model::fade_wake(show, key, cue).unwrap_or(0.0),
+    }
+}
+
+/// The length of a clip's content (no lead-in): `Some(None)` open-ended, None not known.
+fn content_len(cue: &Cue, dur: Dur) -> Option<Option<f64>> {
+    match dur(cue)? {
+        Some(d) if d.is_finite() => Some(Some(d.max(0.0))),
+        Some(_) => None,
+        None => Some(None),
+    }
+}
+
+/// File seconds played from clip time 0 to `t` (the speed map's integral, or a
+/// steady speed's product).
+fn media_at(m: &MediaCue, t: f64) -> f64 {
+    match m.speed_map() {
+        Some(map) => map.media_at(t),
+        None => t.max(0.0) * m.speed(),
+    }
+}
+
+/// A video or sound file, whose in and out points are times in the file (an
+/// image's `end` is how long it is held).
+fn plays_file(kind: &CueKind) -> bool {
+    matches!(kind, CueKind::Video(_) | CueKind::Audio(_))
+}
+
+/// Whether a kind can be trimmed at all (the model's rule, `Clip::trim_*`).
+fn trims(kind: &CueKind) -> bool {
+    let loops = kind.media().is_some_and(|m| m.loop_media);
+    !loops
+        && matches!(
+            kind,
+            CueKind::Video(_)
+                | CueKind::Audio(_)
+                | CueKind::Image(_)
+                | CueKind::Text(_)
+                | CueKind::Shape(_)
+                | CueKind::Camera(_)
+                | CueKind::LiveAudio(_)
+                | CueKind::Fade(_)
+                | CueKind::Wait(_)
+        )
+}
+
+/// Keyframes moved `by` seconds earlier (later if `by` is negative). Those
+/// that would come before 0 go, and a key at 0 with the value there takes
+/// their place, so the curve from 0 on is what it was from `by` on.
+pub(crate) fn shift_keys(a: &mut Animated, by: f64) {
+    if !a.is_animated() || !by.is_finite() || by == 0.0 {
+        return;
+    }
+    if by < 0.0 {
+        for k in &mut a.keys {
+            k.t -= by;
+        }
+        return;
+    }
+    let v0 = a.at(by);
+    let dropped: Vec<Keyframe> = a.keys.iter().copied().filter(|k| k.t < by).collect();
+    a.keys.retain(|k| k.t >= by);
+    for k in &mut a.keys {
+        k.t = (k.t - by).max(0.0);
+    }
+    if let Some(last) = dropped.last()
+        && a.keys.first().is_none_or(|k| k.t > SAME_TIME)
+    {
+        a.keys.insert(
+            0,
+            Keyframe {
+                t: 0.0,
+                v: v0,
+                curve: last.curve,
+            },
+        );
+    }
+}
+
+/// Every keyframed number of a clip (speed, motion, effects) moved `by` earlier.
+fn shift_all_keys(m: &mut MediaCue, by: f64) {
+    shift_keys(&mut m.rate, by);
+    for t in crate::show::MotionTrack::ALL {
+        if let Some(a) = m.motion.track_mut(t) {
+            shift_keys(a, by);
+        }
+    }
+    for e in &mut m.effects {
+        for p in &mut e.p {
+            shift_keys(p, by);
+        }
+    }
+}
+
+/// Whether a cue may go on a track: pictures on picture tracks, sounds on
+/// sound tracks, the rest on the cue track.
+fn fits(cue_track: TrackId, to: TrackId) -> bool {
+    matches!(
+        (cue_track, to),
+        (TrackId::Picture { .. }, TrackId::Picture { .. })
+            | (TrackId::Sound { .. }, TrackId::Sound { .. })
+            | (TrackId::Cues, TrackId::Cues)
+    )
+}
+
+/// Put a cue on a track of its kind. Returns whether that changed anything.
+fn set_track(cue: &mut Cue, to: TrackId) -> bool {
+    if !fits(model::track_of(cue), to) || model::track_of(cue) == to {
+        return false;
+    }
+    let Some(m) = cue.kind.media_mut() else {
+        return false;
+    };
+    match to {
+        TrackId::Picture { output, layer } => {
+            m.output = output;
+            m.layer = layer;
+        }
+        TrackId::Sound { output } => m.audio_output = output,
+        TrackId::Cues => return false,
+    }
+    true
+}
+
+/// Where a new cue goes on a timeline: the end of the group, or of the list.
+fn slot_for(show: &Show, key: TimelineKey) -> Option<Slot> {
+    match key {
+        TimelineKey::Group(g) => {
+            let i = show.cue_index(g)?;
+            Some(Slot {
+                at: show.block_end(i),
+                parent: Some(g),
+                list: show.cues[i].list,
+            })
+        }
+        TimelineKey::List(n) => Some(Slot {
+            at: show.list_end(n),
+            parent: None,
+            list: n,
+        }),
+    }
+}
+
+/// Add a new cue at `at` on a timeline, sorted into place.
+fn add_cue(show: &mut Show, key: TimelineKey, mut cue: Cue, at: f64) -> Option<CueId> {
+    let slot = slot_for(show, key)?;
+    cue.pre_wait = at.max(0.0);
+    let id = cue.id;
+    show.insert_cue(slot, cue);
+    sort_by_start(show, key);
+    Some(id)
+}
+
+// ----- Clips ---------------------------------------------------------------
+
 /// Move clips by `dt` (clamped so none starts before 0); `to` moves the anchor
 /// (`ids[0]`) to that track and the others by the same track step where the kind allows.
 pub fn move_clips(
-    _show: &mut Show,
-    _key: TimelineKey,
-    _ids: &[CueId],
-    _dt: f64,
-    _to: Option<TrackId>,
+    show: &mut Show,
+    key: TimelineKey,
+    ids: &[CueId],
+    dt: f64,
+    to: Option<TrackId>,
 ) -> bool {
-    false
+    if !model::is_timeline(show, key) || !dt.is_finite() {
+        return false;
+    }
+    let moving: Vec<(CueId, f64, TrackId)> = model::members(show, key)
+        .into_iter()
+        .filter(|c| ids.contains(&c.id))
+        .map(|c| (c.id, start_of(c), model::track_of(c)))
+        .collect();
+    if moving.is_empty() {
+        return false;
+    }
+    // The whole selection stops where its earliest clip reaches 0.
+    let earliest = moving.iter().map(|m| m.1).fold(f64::INFINITY, f64::min);
+    let dt = dt.max(-earliest);
+    // The track step: from the anchor's track to `to`, in the order drawn.
+    let mut targets: Vec<(CueId, TrackId)> = Vec::new();
+    if let Some(to) = to
+        && let Some(&(_, _, anchor)) = moving.iter().find(|m| m.0 == ids[0])
+        && fits(anchor, to)
+    {
+        let clips = model::clips(show, key, &mut |_| None);
+        let mut order = model::tracks(show, key, &clips);
+        if !order.contains(&to) {
+            order.push(to);
+        }
+        let place = |t: TrackId| order.iter().position(|o| *o == t);
+        if let (Some(a), Some(b)) = (place(anchor), place(to)) {
+            let step = b as isize - a as isize;
+            for &(id, _, own) in &moving {
+                let target = if id == ids[0] {
+                    Some(to)
+                } else {
+                    place(own)
+                        .and_then(|p| p.checked_add_signed(step))
+                        .and_then(|p| order.get(p).copied())
+                        .filter(|t| fits(own, *t))
+                };
+                if let Some(t) = target {
+                    targets.push((id, t));
+                }
+            }
+        }
+    }
+    let mut changed = false;
+    for &(id, start, _) in &moving {
+        let Some(c) = cue_mut(show, id) else {
+            continue;
+        };
+        if dt != 0.0 {
+            c.pre_wait = (start + dt).max(0.0);
+            changed = true;
+        }
+        if let Some(&(_, t)) = targets.iter().find(|t| t.0 == id) {
+            changed |= set_track(c, t);
+        }
+    }
+    if changed {
+        sort_by_start(show, key);
+    }
+    changed
 }
 
 /// Drag an edge of a clip to `to`, a time on the timeline.
-pub fn trim(_show: &mut Show, _id: CueId, _edge: Edge, _to: f64, _dur: Dur) -> bool {
-    false
+///
+/// File clips move their in point (left) or out point (right), through a
+/// steady speed or the speed map, less any lead-in; still and live kinds their
+/// hold (`end`); fade and wait cues their duration. Not a looping clip, and no
+/// left trim with a keyframed speed.
+pub fn trim(show: &mut Show, id: CueId, edge: Edge, to: f64, dur: Dur) -> bool {
+    if !to.is_finite() {
+        return false;
+    }
+    let Some(key) = model::key_of(show, id) else {
+        return false;
+    };
+    let Some(cue) = show.cue(id) else {
+        return false;
+    };
+    if !trims(&cue.kind) {
+        return false;
+    }
+    let file = plays_file(&cue.kind);
+    if edge == Edge::Left && file && cue.kind.media().is_some_and(|m| m.rate.is_animated()) {
+        return false;
+    }
+    let start = start_of(cue);
+    let lead = lead_secs(show, key, cue);
+    // The content's length: a file clip must have one; a still may be open-ended.
+    let content = match content_len(cue, dur) {
+        Some(c) => c,
+        None if file => return false,
+        None => None,
+    };
+    let Some(cue) = cue_mut(show, id) else {
+        return false;
+    };
+    let changed = match edge {
+        Edge::Right => trim_right(cue, lead, content, to - start),
+        Edge::Left => trim_left(cue, start, lead, content, to - start),
+    };
+    if changed {
+        sort_by_start(show, key);
+    }
+    changed
+}
+
+/// The clip ends `t` seconds after its start (clip time, lead-in included).
+fn trim_right(cue: &mut Cue, lead: f64, content: Option<f64>, t: f64) -> bool {
+    let t = t.max(lead + MIN_LEN);
+    match &mut cue.kind {
+        CueKind::Video(m) | CueKind::Audio(m) => {
+            let Some(len) = content else {
+                return false;
+            };
+            // Played to the file's end: it can be made shorter, not longer.
+            let t = if m.end.is_none() {
+                t.min(lead + len)
+            } else {
+                t
+            };
+            let end = m.start + (media_at(m, t) - media_at(m, lead)).max(0.0);
+            if m.end == Some(end) || (m.end.is_none() && (t - (lead + len)).abs() < SAME_TIME) {
+                return false;
+            }
+            m.end = Some(end);
+            true
+        }
+        CueKind::Fade(f) => set_if(&mut f.duration, t),
+        CueKind::Wait(w) => set_if(&mut w.duration, t),
+        kind => {
+            let Some(m) = kind.media_mut() else {
+                return false;
+            };
+            let hold = Some(t - lead);
+            if m.end == hold {
+                return false;
+            }
+            m.end = hold;
+            true
+        }
+    }
+}
+
+/// The clip starts `d` seconds later (earlier if negative), its end staying put.
+fn trim_left(cue: &mut Cue, start: f64, lead: f64, content: Option<f64>, d: f64) -> bool {
+    // Never before 0, never shorter than the least.
+    let mut d = d.max(-start);
+    if let Some(len) = content {
+        d = d.min(lead + len - MIN_LEN);
+    }
+    match &cue.kind {
+        CueKind::Fade(f) => d = d.min(f.duration - MIN_LEN),
+        CueKind::Wait(w) => d = d.min(w.duration - MIN_LEN),
+        // Without a lead-in to grow, the in point can't go before the file's start.
+        CueKind::Video(m) | CueKind::Audio(m) if lead <= 0.0 => d = d.max(-m.start / m.speed()),
+        _ => {}
+    }
+    // Content cut from (or put back at) the front: what the lead-in doesn't absorb.
+    let cut = if d >= 0.0 {
+        (d - lead).max(0.0)
+    } else if lead > 0.0 {
+        0.0
+    } else {
+        d
+    };
+    if d.abs() < SAME_TIME {
+        return false;
+    }
+    cue.pre_wait = (start + d).max(0.0);
+    match &mut cue.kind {
+        CueKind::Fade(f) => f.duration -= d,
+        CueKind::Wait(w) => w.duration -= d,
+        CueKind::Video(m) | CueKind::Audio(m) => {
+            m.start = (m.start + cut * m.speed()).max(0.0);
+            shift_all_keys(m, d);
+        }
+        kind => {
+            if let Some(m) = kind.media_mut() {
+                if let Some(e) = &mut m.end {
+                    *e = (*e - cut).max(MIN_LEN);
+                }
+                shift_all_keys(m, d);
+            }
+        }
+    }
+    true
+}
+
+fn set_if(v: &mut f64, to: f64) -> bool {
+    if (*v - to).abs() < SAME_TIME {
+        return false;
+    }
+    *v = to;
+    true
 }
 
 /// Split clips at `at`. Returns the new halves.
-pub fn split(
-    _show: &mut Show,
-    _key: TimelineKey,
-    _ids: &[CueId],
-    _at: f64,
-    _dur: Dur,
-) -> Vec<CueId> {
-    Vec::new()
+///
+/// The first half keeps its fade-in and loses its fade-out; the second starts
+/// at `at` with a cut and no fade-in, its content and keyframes taken up where
+/// the first's stop. A looping clip isn't split, nor one `at` isn't inside.
+pub fn split(show: &mut Show, key: TimelineKey, ids: &[CueId], at: f64, dur: Dur) -> Vec<CueId> {
+    let mut made = Vec::new();
+    if !model::is_timeline(show, key) || !at.is_finite() {
+        return made;
+    }
+    let picked: Vec<CueId> = model::members(show, key)
+        .into_iter()
+        .filter(|c| ids.contains(&c.id))
+        .map(|c| c.id)
+        .collect();
+    for id in picked {
+        let Some(cue) = show.cue(id) else {
+            continue;
+        };
+        let Some(m) = cue.kind.media() else {
+            continue;
+        };
+        if m.loop_media {
+            continue;
+        }
+        let file = plays_file(&cue.kind);
+        let start = start_of(cue);
+        let lead = lead_secs(show, key, cue);
+        let content = match content_len(cue, dur) {
+            Some(c) => c,
+            None => continue,
+        };
+        if file && content.is_none() {
+            continue;
+        }
+        let off = at - start;
+        // Inside the content, leaving each half its least length.
+        if off < lead + MIN_LEN || content.is_some_and(|l| off > lead + l - MIN_LEN) {
+            continue;
+        }
+        let mut second = cue.clone();
+        let Some(first) = cue_mut(show, id) else {
+            continue;
+        };
+        let Some(fm) = first.kind.media_mut() else {
+            continue;
+        };
+        let played = off - lead;
+        let file_at = if file {
+            fm.start + (media_at(fm, off) - media_at(fm, lead)).max(0.0)
+        } else {
+            0.0
+        };
+        // The first half ends at the split.
+        fm.fade_out = 0.0;
+        fm.hold_last_frame = false;
+        fm.end = Some(if file { file_at } else { played });
+        // The second takes up from there.
+        second.id = CueId(show.alloc_id());
+        second.number = show.next_cue_number();
+        second.hotkey = None;
+        second.midi_note = None;
+        second.pre_wait = at;
+        if let Some(sm) = second.kind.media_mut() {
+            sm.transition = Transition::Cut;
+            sm.fade_in = 0.0;
+            if file {
+                sm.start = file_at;
+            } else if let Some(e) = &mut sm.end {
+                *e = (*e - played).max(MIN_LEN);
+            }
+            shift_all_keys(sm, off);
+        }
+        // Its content goes straight on: it doesn't wait for a fade-in of its own.
+        if model::lead_in(show, key, &second) != LeadIn::None
+            && let Some(sm) = second.kind.media_mut()
+        {
+            sm.runs_unseen = true;
+        }
+        let new = second.id;
+        let Some(i) = show.cue_index(id) else {
+            continue;
+        };
+        show.cues.insert(i + 1, second);
+        made.push(new);
+    }
+    if !made.is_empty() {
+        sort_by_start(show, key);
+    }
+    made
 }
 
 /// Remove clips, closing the gap with `ripple`. Returns the cues removed.
+///
+/// A ripple moves up the later clips on the tracks the removed clips were on,
+/// by the time removed before each; markers move only when every track with
+/// clips on it rippled, by the least any of them moved there.
 pub fn delete(
-    _show: &mut Show,
-    _key: TimelineKey,
-    _ids: &[CueId],
-    _ripple: bool,
-    _dur: Dur,
+    show: &mut Show,
+    key: TimelineKey,
+    ids: &[CueId],
+    ripple: bool,
+    dur: Dur,
 ) -> Vec<CueId> {
-    Vec::new()
+    if !model::is_timeline(show, key) {
+        return Vec::new();
+    }
+    let clips = model::clips(show, key, dur);
+    let gone: Vec<CueId> = clips
+        .iter()
+        .filter(|c| ids.contains(&c.id))
+        .map(|c| c.id)
+        .collect();
+    if gone.is_empty() {
+        return Vec::new();
+    }
+    let removed = show.delete_many(&gone).map(|(_, r)| r).unwrap_or_default();
+    if ripple {
+        // The gaps of each track, joined where they overlap.
+        let mut gaps: Vec<(TrackId, Vec<(f64, f64)>)> = Vec::new();
+        for c in clips.iter().filter(|c| gone.contains(&c.id)) {
+            let Some(len) = c.len else {
+                continue;
+            };
+            let span = (c.start, c.start + len);
+            match gaps.iter_mut().find(|g| g.0 == c.track) {
+                Some(g) => g.1.push(span),
+                None => gaps.push((c.track, vec![span])),
+            }
+        }
+        for g in &mut gaps {
+            g.1 = union(std::mem::take(&mut g.1));
+        }
+        let before = |spans: &[(f64, f64)], t: f64| -> f64 {
+            spans
+                .iter()
+                .filter(|s| s.1 <= t + SAME_TIME)
+                .map(|s| s.1 - s.0)
+                .sum()
+        };
+        let kept: Vec<(CueId, f64, TrackId)> = clips
+            .iter()
+            .filter(|c| !gone.contains(&c.id))
+            .map(|c| (c.id, c.start, c.track))
+            .collect();
+        for (id, start, track) in &kept {
+            let Some(g) = gaps.iter().find(|g| g.0 == *track) else {
+                continue;
+            };
+            let by = before(&g.1, *start);
+            if by > 0.0
+                && let Some(c) = cue_mut(show, *id)
+            {
+                c.pre_wait = (start - by).max(0.0);
+            }
+        }
+        let used: Vec<TrackId> = clips.iter().map(|c| c.track).fold(Vec::new(), |mut v, t| {
+            if !v.contains(&t) {
+                v.push(t);
+            }
+            v
+        });
+        let all = !gaps.is_empty() && used.iter().all(|t| gaps.iter().any(|g| g.0 == *t));
+        if all && let Some(s) = model::settings_mut(show, key) {
+            for mk in &mut s.markers {
+                let by = gaps
+                    .iter()
+                    .map(|g| before(&g.1, mk.time))
+                    .fold(f64::INFINITY, f64::min);
+                if by.is_finite() && by > 0.0 {
+                    mk.time = (mk.time - by).max(0.0);
+                }
+            }
+            sort_markers(&mut s.markers);
+        }
+    }
+    sort_by_start(show, key);
+    model::settle(show, key);
+    removed
 }
 
+/// Spans joined where they overlap or touch, in order.
+fn union(mut spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for s in spans {
+        match out.last_mut() {
+            Some(l) if s.0 <= l.1 + SAME_TIME => l.1 = l.1.max(s.1),
+            _ => out.push(s),
+        }
+    }
+    out
+}
+
+/// A new clip of type `ty` on `track` at `at` (a file for one that plays one).
+/// None if the track isn't for that kind of cue, or for a group.
 pub fn add_clip(
-    _show: &mut Show,
-    _key: TimelineKey,
-    _ty: CueType,
-    _file: Option<PathBuf>,
-    _track: TrackId,
-    _at: f64,
+    show: &mut Show,
+    key: TimelineKey,
+    ty: CueType,
+    file: Option<PathBuf>,
+    track: TrackId,
+    at: f64,
 ) -> Option<CueId> {
-    None
+    if !model::is_timeline(show, key) || !at.is_finite() || ty == CueType::Group {
+        return None;
+    }
+    let slot = slot_for(show, key)?;
+    let mut cue = show.make_cue(ty, file, slot.at);
+    if !fits(model::track_of(&cue), track) {
+        return None;
+    }
+    set_track(&mut cue, track);
+    add_cue(show, key, cue, at)
 }
 
+/// A control cue doing `action` at `at` on the timeline's cue track.
 pub fn add_control(
-    _show: &mut Show,
-    _key: TimelineKey,
-    _action: ControlAction,
-    _at: f64,
+    show: &mut Show,
+    key: TimelineKey,
+    action: ControlAction,
+    at: f64,
 ) -> Option<CueId> {
-    None
+    if !model::is_timeline(show, key) || !at.is_finite() {
+        return None;
+    }
+    let slot = slot_for(show, key)?;
+    let mut cue = show.make_cue(CueType::Control, None, slot.at);
+    cue.name = action.label().to_string();
+    cue.kind = CueKind::Control(ControlCue {
+        action,
+        ..ControlCue::default()
+    });
+    add_cue(show, key, cue, at)
 }
 
 /// A free-run `TimelinePause` at exactly the time `what` names for `clip`.
 pub fn add_pause_before(
-    _show: &mut Show,
-    _key: TimelineKey,
-    _clip: CueId,
-    _what: PauseBefore,
-    _dur: Dur,
+    show: &mut Show,
+    key: TimelineKey,
+    clip: CueId,
+    what: PauseBefore,
+    dur: Dur,
 ) -> Option<CueId> {
-    None
+    if !model::is_timeline(show, key) {
+        return None;
+    }
+    let c = model::clips(show, key, dur)
+        .into_iter()
+        .find(|c| c.id == clip)?;
+    let (at, name) = match what {
+        PauseBefore::ClipIn => (c.start, format!("Pause before {}", c.name)),
+        PauseBefore::ClipFadeOut => {
+            let end = c.start + c.len?;
+            (
+                (end - c.fade_out).max(c.start),
+                format!("Pause before {} fades out", c.name),
+            )
+        }
+    };
+    let id = add_control(show, key, ControlAction::TimelinePause, at)?;
+    if let Some(p) = cue_mut(show, id) {
+        p.name = name;
+    }
+    Some(id)
 }
 
-pub fn add_track(_show: &mut Show, _key: TimelineKey, _picture: bool) -> Option<TrackId> {
-    None
+// ----- Tracks --------------------------------------------------------------
+
+/// An empty track kept on the timeline: a picture track a layer above the
+/// highest on the first picture track's display, or a sound track on the
+/// first audio output without one. Returns it (None if there's no output left).
+pub fn add_track(show: &mut Show, key: TimelineKey, picture: bool) -> Option<TrackId> {
+    if !model::is_timeline(show, key) {
+        return None;
+    }
+    let clips = model::clips(show, key, &mut |_| None);
+    let have = model::tracks(show, key, &clips);
+    let t = if picture {
+        let output = have
+            .iter()
+            .find_map(|t| match t {
+                TrackId::Picture { output, .. } => Some(*output),
+                _ => None,
+            })
+            .unwrap_or_else(|| show.outputs.first().map(|o| o.id));
+        let top = have
+            .iter()
+            .filter_map(|t| match t {
+                TrackId::Picture { output: o, layer } if *o == output => Some(*layer),
+                _ => None,
+            })
+            .max();
+        TrackId::Picture {
+            output,
+            layer: top.map_or(0, |l| l.saturating_add(1)),
+        }
+    } else {
+        std::iter::once(None)
+            .chain(show.audio_outputs.iter().map(|o| Some(o.id)))
+            .map(|output| TrackId::Sound { output })
+            .find(|t| !have.contains(t))?
+    };
+    model::settings_mut(show, key)?.tracks.push(t);
+    Some(t)
 }
 
-/// Only if it is empty.
-pub fn remove_track(_show: &mut Show, _key: TimelineKey, _t: TrackId) -> bool {
-    false
+/// Only if it is empty (and not the cue track, which is always there).
+pub fn remove_track(show: &mut Show, key: TimelineKey, t: TrackId) -> bool {
+    if !model::is_timeline(show, key) || t == TrackId::Cues {
+        return false;
+    }
+    if model::members(show, key)
+        .iter()
+        .any(|c| model::track_of(c) == t)
+    {
+        return false;
+    }
+    let Some(s) = model::settings_mut(show, key) else {
+        return false;
+    };
+    let before = s.tracks.len();
+    s.tracks.retain(|k| *k != t);
+    let changed = s.tracks.len() != before;
+    model::settle(show, key);
+    changed
 }
 
-pub fn add_marker(_show: &mut Show, _key: TimelineKey, _at: f64, _name: &str) -> Option<u64> {
-    None
+// ----- Markers -------------------------------------------------------------
+
+fn sort_markers(markers: &mut [Marker]) {
+    markers.sort_by(|a, b| a.time.total_cmp(&b.time));
 }
 
-pub fn move_marker(_show: &mut Show, _key: TimelineKey, _id: u64, _to: f64) -> bool {
-    false
+/// A marker at `at`, named `name`. Its id is new to the show, so a cue that
+/// pointed at a removed marker never finds another in its place.
+pub fn add_marker(show: &mut Show, key: TimelineKey, at: f64, name: &str) -> Option<u64> {
+    if !model::is_timeline(show, key) || !at.is_finite() {
+        return None;
+    }
+    let id = show.alloc_id();
+    let s = model::settings_mut(show, key)?;
+    s.markers.push(Marker {
+        id,
+        time: at.max(0.0),
+        name: name.to_string(),
+        color: None,
+    });
+    sort_markers(&mut s.markers);
+    Some(id)
 }
 
-pub fn rename_marker(_show: &mut Show, _key: TimelineKey, _id: u64, _name: &str) -> bool {
-    false
+pub fn move_marker(show: &mut Show, key: TimelineKey, id: u64, to: f64) -> bool {
+    if !to.is_finite() {
+        return false;
+    }
+    let Some(s) = model::settings_mut(show, key) else {
+        return false;
+    };
+    let Some(m) = s.markers.iter_mut().find(|m| m.id == id) else {
+        model::settle(show, key);
+        return false;
+    };
+    let to = to.max(0.0);
+    let changed = m.time != to;
+    m.time = to;
+    sort_markers(&mut s.markers);
+    changed
 }
 
-pub fn remove_marker(_show: &mut Show, _key: TimelineKey, _id: u64) -> bool {
-    false
+pub fn rename_marker(show: &mut Show, key: TimelineKey, id: u64, name: &str) -> bool {
+    let Some(s) = model::settings_mut(show, key) else {
+        return false;
+    };
+    let Some(m) = s.markers.iter_mut().find(|m| m.id == id) else {
+        model::settle(show, key);
+        return false;
+    };
+    let changed = m.name != name;
+    m.name = name.to_string();
+    changed
 }
 
-/// Set a clip's keyframed speed (sanitised).
-pub fn set_rate(_show: &mut Show, _id: CueId, _rate: Animated) -> bool {
-    false
+pub fn remove_marker(show: &mut Show, key: TimelineKey, id: u64) -> bool {
+    let Some(s) = model::settings_mut(show, key) else {
+        return false;
+    };
+    let before = s.markers.len();
+    s.markers.retain(|m| m.id != id);
+    let changed = s.markers.len() != before;
+    model::settle(show, key);
+    changed
 }
+
+// ----- Speed ---------------------------------------------------------------
+
+/// Set a clip's keyframed speed (sanitised: numbers that are numbers, keys in
+/// order from 0, every value within `MIN_RATE`..`MAX_RATE`). Video and sound
+/// files only.
+pub fn set_rate(show: &mut Show, id: CueId, mut rate: Animated) -> bool {
+    rate.sanitize(1.0);
+    let keep = |v: f32| v.max(MIN_RATE as f32).min(MAX_RATE as f32);
+    rate.value = keep(rate.value);
+    for k in &mut rate.keys {
+        k.v = keep(k.v);
+        k.t = k.t.max(0.0);
+    }
+    let Some(c) = cue_mut(show, id) else {
+        return false;
+    };
+    let (CueKind::Video(m) | CueKind::Audio(m)) = &mut c.kind else {
+        return false;
+    };
+    if m.rate == rate {
+        return false;
+    }
+    m.rate = rate;
+    true
+}
+
+// ----- Order and new timelines --------------------------------------------
 
 /// Put a timeline's clips in order of their starts (stable); the ops above call it.
-pub fn sort_by_start(_show: &mut Show, _key: TimelineKey) {}
+/// A group's children stay right after the group, a list's cues inside the
+/// list (and a group in a list with its children).
+pub fn sort_by_start(show: &mut Show, key: TimelineKey) {
+    let range = match key {
+        TimelineKey::Group(g) => match show.cue_index(g) {
+            Some(i) if show.is_group(i) => i + 1..show.block_end(i),
+            _ => return,
+        },
+        TimelineKey::List(n) => {
+            if n == 0 || !show.has_list(n) {
+                return;
+            }
+            show.list_range(n)
+        }
+    };
+    // Blocks: a cue, or a group with its children (only in a list).
+    let mut blocks: Vec<Vec<Cue>> = Vec::new();
+    for c in show.cues.drain(range.clone()) {
+        match (c.parent, blocks.last_mut()) {
+            (Some(p), Some(b)) if matches!(key, TimelineKey::List(_)) && b[0].id == p => b.push(c),
+            _ => blocks.push(vec![c]),
+        }
+    }
+    // At the same time, in the order they are due (control, fade and stop, clips).
+    blocks.sort_by(|a, b| {
+        start_of(&a[0])
+            .total_cmp(&start_of(&b[0]))
+            .then(model::due_order(&a[0]).cmp(&model::due_order(&b[0])))
+    });
+    let at = range.start;
+    show.cues
+        .splice(at..at, blocks.into_iter().flatten())
+        .for_each(drop);
+}
 
 /// A new cue list that is a timeline, with the editor's settings. Returns its id.
 pub fn new_timeline_list(show: &mut Show, name: &str) -> u32 {
@@ -155,12 +906,15 @@ pub fn new_timeline_group(show: &mut Show, at: Slot) -> CueId {
 /// Make a list a timeline or a plain list again. A list that holds groups
 /// can't be a timeline, and the main list never is one.
 pub fn set_list_timeline(show: &mut Show, list: u32, on: bool) -> Result<(), String> {
+    if list == 0 {
+        return Err("The main list can't be a timeline".into());
+    }
     let has_groups = show
         .cues
         .iter()
         .any(|c| c.list == list && matches!(c.kind, CueKind::Group(_)));
     let Some(l) = show.lists.iter_mut().find(|l| l.id == list) else {
-        return Err("The main list can't be a timeline".into());
+        return Err("There is no such list".into());
     };
     if !on {
         l.timeline = None;
@@ -173,4 +927,746 @@ pub fn set_list_timeline(show: &mut Show, list: u32, on: bool) -> Result<(), Str
         l.timeline = Some(TimelineSettings::for_editor());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::show::{AudioOutputId, Curve, Effect, EffectKind, OutputId};
+    use crate::speed::SpeedMap;
+
+    /// Every file in these tests is this long.
+    const FILE: f64 = 20.0;
+
+    /// The engine's sum (`Engine::cue_duration`) with every file `FILE` long.
+    fn fake_dur(c: &Cue) -> Option<Option<f64>> {
+        Some(match &c.kind {
+            CueKind::Video(m) | CueKind::Audio(m) => {
+                if m.loop_media {
+                    return Some(None);
+                }
+                let file = (m.end.unwrap_or(FILE).min(FILE) - m.start).max(0.0);
+                Some(match m.speed_map() {
+                    Some(map) => map.time_for(file),
+                    None => file / m.speed(),
+                })
+            }
+            CueKind::Fade(f) => Some(f.duration),
+            CueKind::Wait(w) => Some(w.duration),
+            CueKind::Stop(_) | CueKind::Control(_) | CueKind::Send(_) => Some(0.0),
+            kind => kind.media().and_then(|m| m.end.filter(|e| *e > 0.0)),
+        })
+    }
+
+    /// A show with cues before and after a timeline group (made in the editor,
+    /// in the main list), a timeline list between two plain lists, a second
+    /// display and an audio output.
+    struct Fixture {
+        show: Show,
+        group: TimelineKey,
+        list: TimelineKey,
+        audio: AudioOutputId,
+    }
+
+    fn push_to(show: &mut Show, list: u32) {
+        let c = show.make_cue(CueType::Wait, None, show.cues.len());
+        let at = show.list_end(list);
+        show.insert_cue(
+            Slot {
+                at,
+                parent: None,
+                list,
+            },
+            c,
+        );
+    }
+
+    fn fixture() -> Fixture {
+        let mut show = Show::default();
+        show.add_display();
+        let audio = show.add_audio_output();
+        push_to(&mut show, 0);
+        let slot = show.insert_slot(None, true, 0);
+        let g = new_timeline_group(&mut show, slot);
+        push_to(&mut show, 0);
+        let before = show.add_list("Before");
+        push_to(&mut show, before);
+        let list = new_timeline_list(&mut show, "Timeline");
+        let after = show.add_list("After");
+        push_to(&mut show, after);
+        Fixture {
+            show,
+            group: TimelineKey::Group(g),
+            list: TimelineKey::List(list),
+            audio,
+        }
+    }
+
+    fn display(show: &Show, n: usize) -> Option<OutputId> {
+        show.outputs.get(n).map(|o| o.id)
+    }
+
+    fn picture(show: &Show, n: usize, layer: i32) -> TrackId {
+        TrackId::Picture {
+            output: display(show, n),
+            layer,
+        }
+    }
+
+    fn clip(show: &mut Show, key: TimelineKey, ty: CueType, track: TrackId, at: f64) -> CueId {
+        add_clip(show, key, ty, Some(PathBuf::from("a.mp4")), track, at).unwrap()
+    }
+
+    fn media(show: &mut Show, id: CueId) -> &mut MediaCue {
+        cue_mut(show, id).unwrap().kind.media_mut().unwrap()
+    }
+
+    fn start(show: &Show, id: CueId) -> f64 {
+        show.cue(id).unwrap().pre_wait
+    }
+
+    fn ids(show: &Show, key: TimelineKey) -> Vec<CueId> {
+        model::members(show, key).iter().map(|c| c.id).collect()
+    }
+
+    fn len(show: &Show, key: TimelineKey, id: CueId) -> Option<f64> {
+        model::clips(show, key, &mut fake_dur)
+            .into_iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.len)
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    /// The show as a file would hold it.
+    fn json(show: &Show) -> String {
+        serde_json::to_string(show).unwrap()
+    }
+
+    /// What the loader repairs finds nothing to repair.
+    fn assert_sound(show: &Show) {
+        let mut copy = show.clone();
+        copy.normalize_groups();
+        copy.normalize_lists();
+        assert_eq!(json(&copy), json(show), "the structure needed repair");
+    }
+
+    fn keys(f: &Fixture) -> [TimelineKey; 2] {
+        [f.group, f.list]
+    }
+
+    #[test]
+    fn clips_are_added_on_their_tracks_in_order_of_their_starts() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let sound = TrackId::Sound {
+                output: Some(f.audio),
+            };
+            let show = &mut f.show;
+            let v1 = picture(show, 0, 0);
+            let a = clip(show, key, CueType::Video, v1, 4.0);
+            let b = clip(show, key, CueType::Image, picture(show, 1, 2), 1.0);
+            let s = clip(show, key, CueType::Audio, sound, 2.0);
+            let p = add_control(show, key, ControlAction::TimelinePause, 3.0).unwrap();
+            // A cue is refused a track of another kind, and a group anywhere.
+            assert!(add_clip(show, key, CueType::Audio, None, v1, 0.0).is_none());
+            assert!(add_clip(show, key, CueType::Fade, None, v1, 0.0).is_none());
+            assert!(add_clip(show, key, CueType::Group, None, TrackId::Cues, 0.0).is_none());
+            assert!(add_clip(show, key, CueType::Video, None, v1, f64::NAN).is_none());
+            assert_eq!(ids(show, key), vec![b, s, p, a]);
+            assert_eq!(model::track_of(show.cue(b).unwrap()), picture(show, 1, 2));
+            assert_eq!(model::track_of(show.cue(s).unwrap()), sound);
+            assert_eq!(model::key_of(show, p), Some(key));
+            let CueKind::Control(c) = &show.cue(p).unwrap().kind else {
+                panic!("not a control cue");
+            };
+            assert_eq!(c.action, ControlAction::TimelinePause);
+            assert_eq!(show.cue(p).unwrap().name, "Pause timeline");
+            assert_sound(show);
+            // Not on something that isn't a timeline.
+            let plain = TimelineKey::List(show.lists[0].id);
+            assert!(add_control(show, plain, ControlAction::TimelineRun, 0.0).is_none());
+        }
+    }
+
+    #[test]
+    fn moving_clamps_the_whole_selection_at_zero_and_changes_tracks_by_kind() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let (v0, v1) = (picture(show, 0, 0), picture(show, 0, 1));
+            let a = clip(show, key, CueType::Video, v0, 1.0);
+            let b = clip(show, key, CueType::Image, v1, 3.0);
+            let s = clip(
+                show,
+                key,
+                CueType::Audio,
+                TrackId::Sound { output: None },
+                2.0,
+            );
+            let other = clip(show, key, CueType::Video, v0, 6.0);
+            let top = clip(show, key, CueType::Image, picture(show, 0, 2), 9.0);
+            assert!(move_clips(show, key, &[a, b, s], -2.0, None));
+            assert_eq!(
+                (start(show, a), start(show, s), start(show, b)),
+                (0.0, 1.0, 2.0)
+            );
+            assert_eq!(start(show, other), 6.0, "not picked");
+            assert!(!move_clips(show, key, &[a, b], -1.0, None), "already at 0");
+            assert!(!move_clips(show, key, &[a], f64::NAN, None));
+            // The anchor (a, on layer 0) goes up a row to layer 1; b goes up a
+            // row too, to layer 2; the sound can't go to a picture track.
+            assert!(move_clips(show, key, &[a, b, s], 0.5, Some(v1)));
+            assert_eq!(model::track_of(show.cue(a).unwrap()), v1);
+            assert_eq!(model::track_of(show.cue(b).unwrap()), picture(show, 0, 2));
+            assert_eq!(
+                model::track_of(show.cue(s).unwrap()),
+                TrackId::Sound { output: None }
+            );
+            assert_eq!(start(show, a), 0.5);
+            // A track of another kind is not the anchor's to go to.
+            assert!(!move_clips(show, key, &[a], 0.0, Some(TrackId::Cues)));
+            // To the other display.
+            assert!(move_clips(show, key, &[a], 0.0, Some(picture(show, 1, 0))));
+            let second = display(show, 1);
+            assert_eq!(media(show, a).output, second);
+            let _ = top;
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn trimming_a_file_follows_a_steady_speed_and_the_file_s_end() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 2.0);
+        media(show, v).start = 1.0;
+        media(show, v).rate = Animated::new(2.0);
+        // 19 s of file at double speed.
+        assert!(near(len(show, key, v).unwrap(), 9.5));
+        assert!(trim(show, v, Edge::Right, 6.0, &mut fake_dur));
+        assert_eq!(media(show, v).end, Some(1.0 + 4.0 * 2.0));
+        assert!(near(len(show, key, v).unwrap(), 4.0));
+        // Left: 1 s later on the timeline is 2 s of file.
+        assert!(trim(show, v, Edge::Left, 3.0, &mut fake_dur));
+        assert_eq!((start(show, v), media(show, v).start), (3.0, 3.0));
+        assert!(near(len(show, key, v).unwrap(), 3.0), "the end stays");
+        // Back further than the file goes: only to its start (1.5 s at double speed).
+        assert!(trim(show, v, Edge::Left, 0.0, &mut fake_dur));
+        assert_eq!((start(show, v), media(show, v).start), (1.5, 0.0));
+        // Never shorter than the least, never inside out.
+        assert!(trim(show, v, Edge::Right, 0.0, &mut fake_dur));
+        assert!(near(len(show, key, v).unwrap(), MIN_LEN));
+        assert!(media(show, v).end.unwrap() > media(show, v).start);
+        assert!(!trim(show, v, Edge::Left, 100.0, &mut fake_dur), "no room");
+        assert!(near(len(show, key, v).unwrap(), MIN_LEN));
+        assert!(!trim(show, v, Edge::Right, f64::NAN, &mut fake_dur));
+        // A file played to its end can't be made longer than it is.
+        let w = clip(
+            show,
+            key,
+            CueType::Audio,
+            TrackId::Sound { output: None },
+            0.0,
+        );
+        assert!(!trim(show, w, Edge::Right, 30.0, &mut fake_dur));
+        assert_eq!(media(show, w).end, None);
+        // Not a loop; not without a length.
+        media(show, w).loop_media = true;
+        assert!(!trim(show, w, Edge::Right, 5.0, &mut fake_dur));
+        media(show, w).loop_media = false;
+        assert!(!trim(show, w, Edge::Right, 5.0, &mut |_| None));
+        assert_sound(show);
+    }
+
+    #[test]
+    fn trimming_with_a_speed_ramp_follows_the_speed_map() {
+        let mut f = fixture();
+        let key = f.list;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 1.0);
+        let mut ramp = Animated::new(1.0);
+        ramp.set_key(0.0, 1.0);
+        ramp.set_key(4.0, 3.0);
+        assert!(set_rate(show, v, ramp.clone()));
+        assert!(trim(show, v, Edge::Right, 6.0, &mut fake_dur));
+        let map = SpeedMap::new(&ramp);
+        assert!(near(media(show, v).end.unwrap(), map.media_at(5.0)));
+        assert!((len(show, key, v).unwrap() - 5.0).abs() < 1e-3);
+        // No left trim with keyframed speed.
+        assert!(!trim(show, v, Edge::Left, 2.0, &mut fake_dur));
+        assert_eq!(start(show, v), 1.0);
+    }
+
+    #[test]
+    fn trimming_leaves_a_lead_in_out_of_the_content() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 1.0);
+        let mut op = Animated::new(1.0);
+        op.set_key(0.0, 0.0);
+        op.set_key(2.0, 0.0);
+        op.set_key(3.0, 1.0);
+        media(show, v).motion.opacity = Some(op);
+        let lead = |show: &Show| model::lead_in(show, key, show.cue(v).unwrap());
+        assert_eq!(lead(show), LeadIn::At(2.0));
+        assert!(trim(show, v, Edge::Right, 7.0, &mut fake_dur));
+        assert_eq!(
+            media(show, v).end,
+            Some(4.0),
+            "6 s of clip less the 2 s lead-in"
+        );
+        assert!(near(len(show, key, v).unwrap(), 6.0));
+        // Left inside the lead-in: the keys move, the content doesn't.
+        assert!(trim(show, v, Edge::Left, 2.0, &mut fake_dur));
+        assert_eq!((start(show, v), media(show, v).start), (2.0, 0.0));
+        assert_eq!(lead(show), LeadIn::At(1.0));
+        assert!(near(len(show, key, v).unwrap(), 5.0));
+        // Past it: the content is cut by what is past.
+        assert!(trim(show, v, Edge::Left, 4.0, &mut fake_dur));
+        assert_eq!(start(show, v), 4.0);
+        assert!(near(media(show, v).start, 1.0));
+        assert_eq!(lead(show), LeadIn::None);
+        assert!(near(len(show, key, v).unwrap(), 3.0));
+        assert_sound(show);
+    }
+
+    #[test]
+    fn trimming_stills_fades_and_waits_moves_their_hold_or_duration() {
+        let mut f = fixture();
+        let key = f.list;
+        let show = &mut f.show;
+        let img = clip(show, key, CueType::Image, picture(show, 0, 0), 1.0);
+        assert_eq!(len(show, key, img), None, "open-ended");
+        assert!(trim(show, img, Edge::Right, 4.0, &mut fake_dur));
+        assert_eq!(media(show, img).end, Some(3.0));
+        assert!(trim(show, img, Edge::Left, 2.0, &mut fake_dur));
+        assert_eq!((start(show, img), media(show, img).end), (2.0, Some(2.0)));
+        let fade = add_clip(show, key, CueType::Fade, None, TrackId::Cues, 5.0).unwrap();
+        assert!(trim(show, fade, Edge::Right, 6.0, &mut fake_dur));
+        assert!(trim(show, fade, Edge::Left, 5.5, &mut fake_dur));
+        let CueKind::Fade(fc) = &show.cue(fade).unwrap().kind else {
+            panic!("not a fade")
+        };
+        assert!(near(fc.duration, 0.5) && start(show, fade) == 5.5);
+        let wait = add_clip(show, key, CueType::Wait, None, TrackId::Cues, 0.0).unwrap();
+        assert!(trim(show, wait, Edge::Right, 0.0, &mut fake_dur));
+        assert!(near(len(show, key, wait).unwrap(), MIN_LEN));
+        // A control cue has nothing to trim.
+        let p = add_control(show, key, ControlAction::TimelinePause, 1.0).unwrap();
+        assert!(!trim(show, p, Edge::Right, 3.0, &mut fake_dur));
+        assert_sound(show);
+    }
+
+    #[test]
+    fn splitting_keeps_the_length_and_takes_up_content_and_keys_where_it_stopped() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let v = clip(show, key, CueType::Video, picture(show, 0, 0), 1.0);
+            {
+                let m = media(show, v);
+                m.fade_in = 1.0;
+                m.fade_out = 1.5;
+                m.transition = Transition::Crossfade;
+                let mut x = Animated::new(0.0);
+                x.set_key(0.0, 0.0);
+                x.set_key(10.0, 1.0);
+                m.motion.x = Some(x.clone());
+                let mut blur = Effect::new(EffectKind::Blur);
+                blur.p[0] = x;
+                m.effects.push(blur);
+            }
+            let whole = len(show, key, v).unwrap();
+            assert_eq!(whole, FILE);
+            let made = split(show, key, &[v], 6.0, &mut fake_dur);
+            assert_eq!(made.len(), 1);
+            let w = made[0];
+            assert!(near(
+                len(show, key, v).unwrap() + len(show, key, w).unwrap(),
+                whole
+            ));
+            assert!(near(start(show, w), 6.0));
+            let (first, second) = (media(show, v).clone(), media(show, w).clone());
+            assert_eq!(
+                (first.fade_in, first.fade_out, first.end),
+                (1.0, 0.0, Some(5.0))
+            );
+            assert_eq!((second.fade_in, second.fade_out), (0.0, 1.5));
+            assert_eq!(second.transition, Transition::Cut);
+            assert_eq!((second.start, second.end), (5.0, None));
+            // The keys from the split on, from 0.
+            for a in [second.motion.x.as_ref().unwrap(), &second.effects[0].p[0]] {
+                assert!(near(f64::from(a.at(0.0)), 0.5));
+                assert!(near(f64::from(a.at(5.0)), 1.0));
+                assert_eq!(a.keys[0].t, 0.0);
+            }
+            // It comes straight after the first, a new cue of its own.
+            assert_eq!(ids(show, key), vec![v, w]);
+            assert_ne!(show.cue(w).unwrap().number, show.cue(v).unwrap().number);
+            // Not outside a clip, not a loop.
+            assert!(split(show, key, &[v], 0.5, &mut fake_dur).is_empty());
+            assert!(split(show, key, &[w], 30.0, &mut fake_dur).is_empty());
+            media(show, w).loop_media = true;
+            assert!(split(show, key, &[w], 10.0, &mut fake_dur).is_empty());
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn splitting_a_speed_ramp_and_stills() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 0.0);
+        let mut ramp = Animated::new(1.0);
+        ramp.set_key(0.0, 1.0);
+        ramp.set_key(4.0, 2.0);
+        set_rate(show, v, ramp.clone());
+        let whole = len(show, key, v).unwrap();
+        let w = split(show, key, &[v], 2.0, &mut fake_dur)[0];
+        let map = SpeedMap::new(&ramp);
+        assert!(near(media(show, w).start, map.media_at(2.0)));
+        assert!(near(media(show, v).end.unwrap(), map.media_at(2.0)));
+        // The second half's speed goes on from where it was (a linear ramp
+        // re-anchors exactly).
+        assert!(near(f64::from(media(show, w).rate.at(0.0)), 1.5));
+        assert!(near(f64::from(media(show, w).rate.at(2.0)), 2.0));
+        assert!((len(show, key, v).unwrap() + len(show, key, w).unwrap() - whole).abs() < 1e-3);
+
+        let img = clip(show, key, CueType::Image, picture(show, 0, 1), 1.0);
+        media(show, img).end = Some(6.0);
+        let j = split(show, key, &[img], 3.0, &mut fake_dur)[0];
+        assert_eq!(
+            (media(show, img).end, media(show, j).end),
+            (Some(2.0), Some(4.0))
+        );
+        // Open-ended stays open-ended.
+        let open = clip(show, key, CueType::Text, picture(show, 0, 2), 0.0);
+        let o2 = split(show, key, &[open], 5.0, &mut fake_dur)[0];
+        assert_eq!(
+            (media(show, open).end, media(show, o2).end),
+            (Some(5.0), None)
+        );
+        assert_sound(show);
+    }
+
+    #[test]
+    fn a_split_after_a_lead_in_goes_straight_on() {
+        let mut f = fixture();
+        let key = f.list;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 0.0);
+        let mut op = Animated::new(1.0);
+        op.set_key(0.0, 0.0);
+        op.set_key(2.0, 0.0);
+        op.set_key(4.0, 1.0);
+        media(show, v).motion.opacity = Some(op);
+        // A list made with `new_timeline_list` waits for fade-ins.
+        let whole = len(show, key, v).unwrap();
+        assert_eq!(whole, FILE + 2.0);
+        // Not inside the lead-in.
+        assert!(split(show, key, &[v], 1.0, &mut fake_dur).is_empty());
+        let w = split(show, key, &[v], 3.0, &mut fake_dur)[0];
+        assert_eq!(media(show, v).end, Some(1.0));
+        assert_eq!(media(show, w).start, 1.0);
+        assert_eq!(
+            model::lead_in(show, key, show.cue(w).unwrap()),
+            LeadIn::None
+        );
+        assert!(near(
+            len(show, key, v).unwrap() + len(show, key, w).unwrap(),
+            whole
+        ));
+    }
+
+    #[test]
+    fn ripple_closes_the_gap_on_the_deleted_clips_tracks_only() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let (v0, v1) = (picture(show, 0, 0), picture(show, 0, 1));
+            let gone = clip(show, key, CueType::Image, v0, 2.0);
+            media(show, gone).end = Some(3.0);
+            let later = clip(show, key, CueType::Image, v0, 7.0);
+            let earlier = clip(show, key, CueType::Image, v0, 0.0);
+            media(show, earlier).end = Some(1.0);
+            let other = clip(show, key, CueType::Image, v1, 7.0);
+            let m = add_marker(show, key, 8.0, "Chorus").unwrap();
+            let removed = delete(show, key, &[gone], true, &mut fake_dur);
+            assert_eq!(removed, vec![gone]);
+            assert!(show.cue(gone).is_none());
+            assert_eq!(start(show, later), 4.0);
+            assert_eq!((start(show, earlier), start(show, other)), (0.0, 7.0));
+            let marker = |show: &Show| model::settings(show, key).unwrap().markers[0].time;
+            assert_eq!(marker(show), 8.0, "not every track rippled");
+            assert_sound(show);
+            // Every track with clips rippling moves the markers after the gap too,
+            // by the least any track moved.
+            let a = clip(show, key, CueType::Image, v0, 2.0);
+            media(show, a).end = Some(1.0);
+            let b = clip(show, key, CueType::Image, v1, 4.0);
+            media(show, b).end = Some(2.0);
+            delete(show, key, &[a, b], true, &mut fake_dur);
+            assert_eq!(start(show, other), 5.0);
+            assert_eq!(start(show, later), 3.0);
+            assert_eq!(marker(show), 7.0, "one second on V1, two on V2");
+            assert_eq!(model::settings(show, key).unwrap().markers[0].id, m);
+            // Without ripple nothing moves.
+            delete(show, key, &[earlier], false, &mut fake_dur);
+            assert_eq!(start(show, later), 3.0);
+            assert!(delete(show, key, &[gone], true, &mut fake_dur).is_empty());
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn a_pause_before_a_clip_lands_on_its_exact_time() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let v = clip(show, key, CueType::Video, picture(show, 0, 0), 1.3);
+            media(show, v).end = Some(7.1);
+            media(show, v).fade_out = 0.7;
+            let c = model::clips(show, key, &mut fake_dur)
+                .into_iter()
+                .find(|c| c.id == v)
+                .unwrap();
+            let p = add_pause_before(show, key, v, PauseBefore::ClipIn, &mut fake_dur).unwrap();
+            let q =
+                add_pause_before(show, key, v, PauseBefore::ClipFadeOut, &mut fake_dur).unwrap();
+            assert_eq!(start(show, p), c.start);
+            assert_eq!(start(show, q), c.start + c.len.unwrap() - c.fade_out);
+            for id in [p, q] {
+                let pc = show.cue(id).unwrap();
+                let CueKind::Control(ctl) = &pc.kind else {
+                    panic!("not a control cue")
+                };
+                assert_eq!(ctl.action, ControlAction::TimelinePause);
+                assert!(ctl.freeze.is_nothing() && ctl.timeline.is_none());
+                assert!(pc.name.contains("a"), "{}", pc.name);
+            }
+            assert_eq!(show.cue(p).unwrap().name, "Pause before a");
+            assert_eq!(show.cue(q).unwrap().name, "Pause before a fades out");
+            // The pause comes before the clip at the same time, and the clip is
+            // now one whose end the clock keeps.
+            assert_eq!(ids(show, key)[0], p);
+            assert!(model::clocked(show, key, show.cue(v).unwrap(), c.len));
+            // Without a length there is no fade-out to pause before.
+            let img = clip(show, key, CueType::Image, picture(show, 0, 1), 0.0);
+            let none = add_pause_before(show, key, img, PauseBefore::ClipFadeOut, &mut fake_dur);
+            assert!(none.is_none());
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn tracks_are_added_and_removed_only_when_empty() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let audio = f.audio;
+            let show = &mut f.show;
+            clip(show, key, CueType::Video, picture(show, 0, 1), 0.0);
+            let t = add_track(show, key, true).unwrap();
+            assert_eq!(t, picture(show, 0, 2));
+            let s1 = add_track(show, key, false).unwrap();
+            let s2 = add_track(show, key, false).unwrap();
+            assert_eq!(s1, TrackId::Sound { output: None });
+            assert_eq!(
+                s2,
+                TrackId::Sound {
+                    output: Some(audio)
+                }
+            );
+            assert!(add_track(show, key, false).is_none(), "no output left");
+            let drawn = model::tracks(show, key, &model::clips(show, key, &mut |_| None));
+            assert!(drawn.contains(&t) && drawn.contains(&s2));
+            assert!(!remove_track(show, key, picture(show, 0, 1)), "has a clip");
+            assert!(!remove_track(show, key, TrackId::Cues));
+            assert!(remove_track(show, key, t));
+            assert!(!remove_track(show, key, t));
+            assert!(remove_track(show, key, s1) && remove_track(show, key, s2));
+            assert!(model::settings(show, key).unwrap().tracks.is_empty());
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn markers_are_added_moved_renamed_and_removed_in_time_order() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let a = add_marker(show, key, 10.0, "B").unwrap();
+            let b = add_marker(show, key, -3.0, "A").unwrap();
+            assert_ne!(a, b);
+            assert!(add_marker(show, key, f64::INFINITY, "x").is_none());
+            let names = |show: &Show| {
+                model::settings(show, key)
+                    .unwrap()
+                    .markers
+                    .iter()
+                    .map(|m| (m.name.clone(), m.time))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(names(show), vec![("A".into(), 0.0), ("B".into(), 10.0)]);
+            assert!(move_marker(show, key, b, 12.0));
+            assert!(!move_marker(show, key, b, 12.0));
+            assert!(!move_marker(show, key, b, f64::NAN));
+            assert!(rename_marker(show, key, b, "C"));
+            assert!(!rename_marker(show, key, 9999, "C"));
+            assert_eq!(names(show), vec![("B".into(), 10.0), ("C".into(), 12.0)]);
+            assert_eq!(
+                model::resolve(show, key, crate::timeline::TimelinePoint::Marker(b)),
+                Some(12.0)
+            );
+            assert!(remove_marker(show, key, a) && !remove_marker(show, key, a));
+            // A new marker never takes the id of one removed.
+            let c = add_marker(show, key, 1.0, "D").unwrap();
+            assert!(c != a && c != b);
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn a_plain_group_s_settings_go_again_when_its_last_marker_does() {
+        let mut show = Show::default();
+        let g = show.make_cue(CueType::Group, None, 0);
+        let key = TimelineKey::Group(g.id);
+        show.cues.push(g);
+        let m = add_marker(&mut show, key, 1.0, "M").unwrap();
+        assert!(model::settings(&show, key).is_some());
+        assert!(remove_marker(&mut show, key, m));
+        assert!(model::settings(&show, key).is_none());
+        assert!(!json(&show).contains("timeline"));
+    }
+
+    #[test]
+    fn a_speed_is_kept_to_what_plays() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 0.0);
+        let key_at = |t: f64, v: f32| Keyframe {
+            t,
+            v,
+            curve: Curve::Linear,
+        };
+        let mut r = Animated::new(f32::NAN);
+        r.keys = vec![key_at(3.0, 9.0), key_at(1.0, 0.0), key_at(f64::NAN, 1.0)];
+        assert!(set_rate(show, v, r.clone()));
+        let rate = &media(show, v).rate;
+        assert_eq!(rate.value, 1.0);
+        let ks: Vec<(f64, f32)> = rate.keys.iter().map(|k| (k.t, k.v)).collect();
+        assert_eq!(ks, vec![(1.0, MIN_RATE as f32), (3.0, MAX_RATE as f32)]);
+        assert!(!set_rate(show, v, r), "the same again");
+        // Only a file plays at a speed.
+        let img = clip(show, key, CueType::Image, picture(show, 0, 1), 0.0);
+        assert!(!set_rate(show, img, Animated::new(2.0)));
+    }
+
+    #[test]
+    fn sorting_is_stable_and_keeps_groups_and_lists_whole() {
+        let mut f = fixture();
+        let (group, list) = (f.group, f.list);
+        let show = &mut f.show;
+        for key in [group, list] {
+            let v0 = picture(show, 0, 0);
+            let a = clip(show, key, CueType::Image, v0, 2.0);
+            let b = clip(show, key, CueType::Image, v0, 1.0);
+            let c = clip(show, key, CueType::Image, v0, 2.0);
+            assert_eq!(ids(show, key), vec![b, a, c], "ties stay as they were");
+            cue_mut(show, b).unwrap().pre_wait = 5.0;
+            sort_by_start(show, key);
+            assert_eq!(ids(show, key), vec![a, c, b]);
+        }
+        // A group's children follow it, a list's cues are in the list.
+        let TimelineKey::Group(g) = group else {
+            unreachable!()
+        };
+        let gi = show.cue_index(g).unwrap();
+        assert_eq!(show.block_end(gi) - gi, 4);
+        let TimelineKey::List(n) = list else {
+            unreachable!()
+        };
+        assert!(show.cues[show.list_range(n)].iter().all(|c| c.list == n));
+        assert_sound(show);
+        // An old list timeline that holds a group (not made any more) keeps it whole.
+        let slot = show.insert_slot(None, true, n);
+        let grp = show.make_cue(CueType::Group, None, slot.at);
+        let gid = grp.id;
+        show.insert_cue(slot, grp);
+        let mut child = show.make_cue(CueType::Wait, None, 0);
+        child.parent = Some(gid);
+        child.list = n;
+        let at = show.list_end(n);
+        show.cues.insert(at, child);
+        sort_by_start(show, list);
+        assert_eq!(model::members(show, list)[0].id, gid);
+        assert_sound(show);
+    }
+
+    #[test]
+    fn lists_become_timelines_unless_they_hold_groups_and_never_the_main_one() {
+        let mut show = Show::default();
+        let l = show.add_list("Plain");
+        assert!(set_list_timeline(&mut show, l, true).is_ok());
+        assert_eq!(show.lists[0].timeline, Some(TimelineSettings::for_editor()));
+        assert!(model::is_timeline(&show, TimelineKey::List(l)));
+        assert!(set_list_timeline(&mut show, l, false).is_ok());
+        assert!(!model::is_timeline(&show, TimelineKey::List(l)));
+        // The main list stays a cue list (the owner's ruling E1).
+        assert!(set_list_timeline(&mut show, 0, true).is_err());
+        assert!(set_list_timeline(&mut show, 42, true).is_err());
+        let slot = show.insert_slot(None, true, l);
+        let g = show.make_cue(CueType::Group, None, slot.at);
+        show.insert_cue(slot, g);
+        let err = set_list_timeline(&mut show, l, true).unwrap_err();
+        assert!(err.contains("groups"), "{err}");
+        // New timelines are the editor's.
+        let n = new_timeline_list(&mut show, "T");
+        assert_eq!(
+            model::settings(&show, TimelineKey::List(n)),
+            Some(&TimelineSettings::for_editor())
+        );
+        assert_sound(&show);
+    }
+
+    #[test]
+    fn keys_move_and_are_re_anchored_at_zero() {
+        let mut a = Animated::new(0.0);
+        a.set_key(1.0, 0.0);
+        a.set_key(3.0, 2.0);
+        let mut later = a.clone();
+        shift_keys(&mut later, -2.0);
+        assert_eq!(later.keys[0].t, 3.0);
+        let mut cut = a.clone();
+        shift_keys(&mut cut, 2.0);
+        assert_eq!(cut.keys.len(), 2);
+        assert_eq!((cut.keys[0].t, cut.keys[0].v), (0.0, 1.0));
+        assert_eq!(cut.keys[1].t, 1.0);
+        // Past every key: one key holding the last value.
+        let mut past = a.clone();
+        shift_keys(&mut past, 10.0);
+        assert_eq!(past.keys.len(), 1);
+        assert_eq!(past.at(0.0), 2.0);
+        // Before the first: nothing is dropped and the values keep their times.
+        let mut early = a.clone();
+        shift_keys(&mut early, 0.5);
+        assert_eq!(early.keys.len(), 2);
+        assert_eq!(early.at(0.5), a.at(1.0));
+        let mut steady = Animated::new(3.0);
+        shift_keys(&mut steady, 4.0);
+        assert_eq!(steady, Animated::new(3.0));
+    }
 }
