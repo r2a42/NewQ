@@ -375,6 +375,8 @@ pub struct UiState {
     pub test: crate::testmode::TestMode,
     /// A test show is in place of the show: nothing may be saved, opened or edited.
     pub test_locked: bool,
+    /// The timeline editor: whether it is wanted, what it shows, its zoom and drags.
+    pub timeline: timeline::EditorState,
 }
 
 /// What a test show displaces, kept to put back exactly (see `begin_test`).
@@ -767,8 +769,7 @@ enum Action {
     SetShowMode(bool),
     /// Go to the search box.
     FocusFind,
-    /// Something the timeline editor asks for. (Nothing asks yet.)
-    #[allow(dead_code)]
+    /// Something the timeline editor asks for.
     Timeline(timeline::TimelineAction),
 }
 
@@ -1477,8 +1478,7 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         ui.close();
     }
     ui.separator();
-    // The timeline pane isn't offered until the editor is built.
-    for pane in Pane::ALL.into_iter().filter(|p| *p != Pane::Timeline) {
+    for pane in Pane::ALL {
         let open = st.layout.is_open(pane);
         let popped = st.layout.is_popped_out(pane);
         ui.horizontal(|ui| {
@@ -2142,18 +2142,7 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             t.start,
             t.rate.label()
         ),
-        CueKind::Control(c) => {
-            let target = c
-                .target
-                .and_then(|t| show.cue(t))
-                .map(cue_label)
-                .unwrap_or_else(|| "(no cue)".into());
-            if c.action.needs_target() {
-                format!("{} » {target}", c.action.label())
-            } else {
-                String::new()
-            }
-        }
+        CueKind::Control(ctl) => timeline::describe_control(show, c, ctl),
         CueKind::Send(s) => crate::output::describe(s),
         CueKind::Text(t) => {
             let first = match t.source {
@@ -7042,6 +7031,8 @@ fn inspector_one(
     ui.separator();
 
     ui.columns(2, |cols| {
+        // (Taken here, so that the show is free again for the timeline rows at the end.)
+        let cue = &mut show.cues[idx];
         let ui = &mut cols[0];
         egui::Grid::new("basics")
             .num_columns(2)
@@ -7360,9 +7351,17 @@ fn inspector_one(
                                     ui.selectable_value(&mut c.action, a, a.label())
                                         .on_hover_text(a.description());
                                 }
+                                // The timeline actions act on a timeline, not a cue.
+                                ui.separator();
+                                for a in ControlAction::TIMELINE {
+                                    ui.selectable_value(&mut c.action, a, a.label())
+                                        .on_hover_text(a.description());
+                                }
                             });
                         ui.end_row();
                         if c.action.needs_target() {
+                            #[cfg(test)]
+                            timeline::note_row(ui, "cue_picker");
                             ui.label("Cue");
                             cue_picker(ui, "control_target", &candidates, &mut c.target, "(none)");
                             ui.end_row();
@@ -7483,6 +7482,27 @@ fn inspector_one(
                 if let (Some(d), Some(rows)) = (&mut g.slides, &slide_rows) {
                     slides_panel(ui, cue_id, d, rows, actions);
                 }
+                if g.mode == GroupMode::Timeline && g.slides.is_none() {
+                    ui.separator();
+                    let was = g.timeline.clone().unwrap_or_default();
+                    let mut s = was.clone();
+                    timeline::settings_fields(ui, &mut s);
+                    if s != was {
+                        // Back to none at the defaults, so the group is written as before.
+                        g.timeline = (!s.is_default()).then_some(s);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Open in timeline editor")
+                            .on_hover_text("Its tracks, under the cue list")
+                            .clicked()
+                        {
+                            actions.push(Action::Timeline(timeline::TimelineAction::Open(Some(
+                                crate::timeline::TimelineKey::Group(cue_id),
+                            ))));
+                        }
+                    });
+                }
             }
             CueKind::Wait(w) => {
                 egui::Grid::new("wait")
@@ -7504,6 +7524,7 @@ fn inspector_one(
         if let Some(n) = new_name {
             cue.name = n;
         }
+        timeline::inspector_rows(ui, show, idx);
     });
     if let Some(rows) = &timeline {
         let at = match engine.status(selected_id) {

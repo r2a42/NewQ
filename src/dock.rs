@@ -16,7 +16,7 @@ pub enum Pane {
     Preview,
     Active,
     Settings,
-    /// The timeline editor. (Not offered in the Window menu yet.)
+    /// The timeline editor (opened under the cue list).
     Timeline,
 }
 
@@ -124,6 +124,22 @@ impl Layout {
         }
         if self.dock.iter_all_tabs().next().is_none() {
             self.dock = DockState::new(vec![pane]);
+            return;
+        }
+        // The timeline goes along the bottom of the window, under the cue list
+        // and everything beside it, as a video editor's tracks do: it wants width.
+        if pane == Pane::Timeline
+            && let Some(cues) = self.docked_path(Pane::Cues)
+        {
+            self.dock.split(
+                egui_dock::NodePath {
+                    surface: cues.surface,
+                    node: NodeIndex::root(),
+                },
+                egui_dock::Split::Below,
+                0.6,
+                egui_dock::Node::leaf_with(vec![pane]),
+            );
             return;
         }
         let beside =
@@ -488,13 +504,26 @@ mod tests {
             sorted(back.docked_panes()),
             sorted(Layout::default().docked_panes())
         );
-        // Opened, it docks beside the cue list and is saved and read back.
+        // Opened, it docks along the bottom, under the cue list and the panes
+        // beside it, and is saved and read back.
+        let under_the_rest = |l: &Layout| {
+            let root = NodeIndex::root();
+            let tl = l.dock.find_tab(&Pane::Timeline).unwrap().node;
+            let mut cues = l.dock.find_tab(&Pane::Cues).unwrap().node;
+            while cues.parent().is_some_and(|p| p != root) {
+                cues = cues.parent().unwrap();
+            }
+            let vertical = matches!(l.dock.main_surface()[root], egui_dock::Node::Vertical(_));
+            vertical && tl == root.right() && cues == root.left()
+        };
         let mut l = Layout::default();
         l.open(Pane::Timeline);
-        assert_eq!(
-            l.dock.find_tab(&Pane::Timeline).unwrap().node,
-            l.dock.find_tab(&Pane::Cues).unwrap().node
-        );
+        assert!(under_the_rest(&l) && l.is_valid());
+        assert_eq!(sorted(l.docked_panes()).len(), 5);
+        // Shut and opened again, it goes back there.
+        l.close(Pane::Timeline);
+        l.open(Pane::Timeline);
+        assert!(under_the_rest(&l) && l.is_valid());
         l.save(&dir).unwrap();
         assert!(Layout::load(&dir).is_docked(Pane::Timeline));
         l.pop_out(Pane::Timeline);

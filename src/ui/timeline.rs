@@ -1,18 +1,32 @@
 //! The timeline editor: one component (`editor`) with its toolbar, ruler,
-//! markers, tracks, clips and playhead, hosted as a pane, a cue list's tab or a
-//! workspace; and the timeline rows of the inspector. (Stubs for now: nothing
-//! opens it yet, and none of it is in a menu.)
+//! markers, tracks, clips and playhead, hosted as a pane (`pane`: the dock's
+//! Timeline pane, and the bottom panel of the new interface's Editor view), and
+//! later as a cue list's tab or a workspace; and the timeline rows of the
+//! inspector (`control`).
+//!
+//! The editor never changes the show while it draws: what it is asked to do
+//! comes back as `TimelineAction`s, which `apply` makes after the frame. A drag
+//! is shown from `EditorState` while it lasts and asked for once, on release,
+//! so it is one undo step.
 
-// Used once the editor is built and wired in.
+// Some of the actions are for the packages that build on this one (a list's
+// tab, the workspace, split and the speed lane).
 #![allow(dead_code)]
 
-use super::{Action, UiState};
+mod control;
+mod ruler;
+mod toolbar;
+mod tracks;
+
+pub use control::{clip_fields, control_fields, describe_control, settings_fields};
+
+use super::{Action, Pane, UiState, cue_label, fmt_time};
 use crate::engine::Engine;
 pub use crate::prefs::TimelineLayout;
-use crate::show::{Animated, ControlAction, ControlCue, Cue, CueId, CueType, MediaCue, Show};
-use crate::timeline::edit::{Edge, PauseBefore};
-use crate::timeline::{TimelineKey, TimelineSettings, TrackId, model};
-use egui::{Ui, Vec2};
+use crate::show::{Animated, ControlAction, CueId, CueType, PauseFreeze, Show};
+use crate::timeline::edit::{self, Edge, PauseBefore};
+use crate::timeline::{TimelineKey, TimelinePoint, TrackId, model};
+use egui::{RichText, Ui, Vec2};
 use std::path::PathBuf;
 
 /// Where the editor is drawn. Also the salt of its egui ids, so two hosts
@@ -25,7 +39,6 @@ pub enum Host {
 }
 
 /// The editor's own state (`UiState::timeline`).
-#[derive(Default)]
 pub struct EditorState {
     /// The editor is wanted (pane or workspace).
     pub open: bool,
@@ -36,6 +49,59 @@ pub struct EditorState {
     pub scroll: Vec2,
     pub snap: bool,
     pub ripple: bool,
+    /// What is being dragged, and in which host.
+    drag: Option<(Host, Drag)>,
+    /// A marker whose name is being typed, and the name so far.
+    renaming: Option<(Host, u64, String)>,
+    /// The zoom last drawn (what "fit" came to), for the zoom buttons.
+    shown_pps: f32,
+}
+
+impl Default for EditorState {
+    fn default() -> EditorState {
+        EditorState {
+            open: false,
+            pinned: None,
+            pps: 0.0,
+            scroll: Vec2::ZERO,
+            // Snapping is what an editor is expected to do; Alt turns it off for a drag.
+            snap: true,
+            ripple: false,
+            drag: None,
+            renaming: None,
+            shown_pps: 0.0,
+        }
+    }
+}
+
+/// A drag in progress, shown as it goes and asked for on release.
+#[derive(Clone, Debug, PartialEq)]
+enum Drag {
+    /// Clips moved in time (and the first, the anchor, perhaps to another track).
+    Clips {
+        ids: Vec<CueId>,
+        /// The time under the pointer when it was pressed.
+        grab: f64,
+        /// How far they have moved, snapped, and the track the anchor is over.
+        dt: f64,
+        to: Option<TrackId>,
+    },
+    /// An edge of a clip, now at `to` (a time on the timeline).
+    Trim { id: CueId, edge: Edge, to: f64 },
+    /// The playhead on the ruler, not yet let go.
+    Playhead { pos: f64 },
+    /// A marker, now at `to`.
+    Marker { id: u64, to: f64, grab: f64 },
+}
+
+impl EditorState {
+    /// The drag in progress in `host`.
+    fn drag_in(&self, host: Host) -> Option<&Drag> {
+        self.drag
+            .as_ref()
+            .filter(|(h, _)| *h == host)
+            .map(|(_, d)| d)
+    }
 }
 
 /// The timeline the editor should show: the active list if it is a timeline, else the
@@ -45,25 +111,180 @@ pub fn target(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey>
     if model::is_timeline(show, list) {
         return Some(list);
     }
-    let selected = st.selected?;
-    let group = TimelineKey::Group(selected);
-    if model::is_timeline(show, group) {
-        return Some(group);
+    let selected = st.selected.and_then(|id| {
+        let group = TimelineKey::Group(id);
+        if model::is_timeline(show, group) {
+            Some(group)
+        } else {
+            model::key_of(show, id).filter(|k| matches!(k, TimelineKey::Group(_)))
+        }
+    });
+    selected.or(st.timeline.pinned.filter(|k| model::is_timeline(show, *k)))
+}
+
+/// A timeline's run as the editor reads it (`Engine::timeline`'s `RunView`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Run {
+    state: RunKind,
+    pos: f64,
+    next_pause: Option<f64>,
+    length: Option<f64>,
+    on_go: Option<CueId>,
+}
+
+/// The engine's `RunState`, which this module can't name (see `run_of`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RunKind {
+    Stopped,
+    Cueing,
+    Running,
+    Paused {
+        freeze: PauseFreeze,
+        waits_for_go: bool,
+    },
+}
+
+/// The run of `key`. `RunState` and `RunView` are public types in the
+/// engine's private `timeline` module: their fields can be read here but the
+/// state's variants can't be named, so its Debug text is read instead.
+fn run_of(engine: &mut Engine, show: &Show, key: TimelineKey) -> Run {
+    let v = engine.timeline(show, key);
+    let text = format!("{:?}", v.state);
+    let state = if text.starts_with("Cueing") {
+        RunKind::Cueing
+    } else if text.starts_with("Running") {
+        RunKind::Running
+    } else if text.starts_with("Paused") {
+        RunKind::Paused {
+            freeze: if text.contains("Everything") {
+                PauseFreeze::Everything
+            } else if text.contains("Clips") {
+                PauseFreeze::Clips
+            } else {
+                PauseFreeze::Nothing
+            },
+            waits_for_go: text.contains("waits_for_go: true"),
+        }
+    } else {
+        RunKind::Stopped
+    };
+    Run {
+        state,
+        pos: v.pos,
+        next_pause: v.next_pause,
+        length: v.length,
+        on_go: v.on_go,
     }
-    // (The pinned one comes with `UiState::timeline`.)
-    model::key_of(show, selected).filter(|k| matches!(k, TimelineKey::Group(_)))
+}
+
+/// The timeline rows for the cue at `idx`, at the end of its inspector: a
+/// control cue's timeline action, a clip's run-out and lead-in choices. (They
+/// need the show and the cue at once, so they edit a copy of the cue's part
+/// and put it back if it changed.)
+pub(super) fn inspector_rows(ui: &mut Ui, show: &mut Show, idx: usize) {
+    let Some(cue) = show.cues.get(idx) else {
+        return;
+    };
+    let id = cue.id;
+    match &cue.kind {
+        crate::show::CueKind::Control(c) if c.action.is_timeline() => {
+            let mut edited = c.clone();
+            ui.separator();
+            control_fields(ui, show, id, &mut edited);
+            if let crate::show::CueKind::Control(c) = &mut show.cues[idx].kind
+                && *c != edited
+            {
+                *c = edited;
+            }
+        }
+        k if k.media().is_some() && model::key_of(show, id).is_some() => {
+            let Some(mut edited) = k.media().cloned() else {
+                return;
+            };
+            ui.separator();
+            clip_fields(ui, show, id, &mut edited);
+            if let Some(m) = show.cues[idx].kind.media_mut()
+                && *m != edited
+            {
+                *m = edited;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// What a timeline is called: its group's number and name, or its list's name.
+fn timeline_name(show: &Show, key: TimelineKey) -> String {
+    match key {
+        TimelineKey::Group(id) => show.cue(id).map_or_else(|| "(gone)".into(), cue_label),
+        TimelineKey::List(n) => show.list_name(n),
+    }
+}
+
+/// Every timeline in the show: the timeline groups, then the timeline lists.
+fn all_timelines(show: &Show) -> Vec<TimelineKey> {
+    let groups = show
+        .cues
+        .iter()
+        .map(|c| TimelineKey::Group(c.id))
+        .filter(|k| model::is_timeline(show, *k));
+    let lists = show
+        .lists
+        .iter()
+        .map(|l| TimelineKey::List(l.id))
+        .filter(|k| model::is_timeline(show, *k));
+    groups.chain(lists).collect()
+}
+
+/// Edits are refused while the show is locked (show mode) or a test runs.
+fn can_edit(st: &UiState) -> bool {
+    !st.show_mode && !st.test_locked
 }
 
 /// THE component: toolbar, ruler, markers, tracks, clips, playhead.
 pub fn editor(
-    _ui: &mut Ui,
-    _show: &Show,
-    _engine: &mut Engine,
-    _st: &mut UiState,
-    _key: TimelineKey,
-    _host: Host,
-    _actions: &mut Vec<Action>,
+    ui: &mut Ui,
+    show: &Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+    key: TimelineKey,
+    host: Host,
+    actions: &mut Vec<Action>,
 ) {
+    let clips = model::clips(show, key, &mut |c| engine.cue_duration(show, c));
+    let tracks = model::tracks(show, key, &clips);
+    let run = run_of(engine, show, key);
+    // The playhead: the run's, or while the group plays the old way (before
+    // the engine runs timelines) where the group has got to.
+    let pos = match (run.state, key) {
+        (RunKind::Stopped, TimelineKey::Group(g)) => match engine.status(g) {
+            crate::engine::CueStatus::Playing { elapsed, .. } => elapsed,
+            _ => run.pos,
+        },
+        _ => run.pos,
+    };
+    // What it shows stays when the selection moves off it.
+    st.timeline.pinned = Some(key);
+    let ctx = tracks::Ctx {
+        show,
+        key,
+        host,
+        clips: &clips,
+        tracks: &tracks,
+        run: &run,
+        pos,
+        detached: engine.timeline_detached(key),
+        waiting: engine.timeline_waiting(key),
+        editable: can_edit(st),
+        // In show mode only the active list's timeline may be parked from its
+        // ruler: parking puts picture on the real outputs (plan 2.7).
+        ruler_locked: st.show_mode && key != TimelineKey::List(engine.active_list),
+    };
+    ui.push_id(("timeline_editor", host), |ui| {
+        toolbar::draw(ui, &ctx, engine, st, actions);
+        ui.separator();
+        tracks::draw(ui, &ctx, engine, st, actions);
+    });
 }
 
 /// Option A's body: `editor` for `target(..)`, or the empty state.
@@ -76,24 +297,31 @@ pub fn pane(
 ) {
     match target(show, engine, st) {
         Some(key) => editor(ui, show, engine, st, key, Host::Pane, actions),
-        None => {
-            ui.label("Select a timeline group to see its timeline here.");
-        }
+        None => empty_state(ui, st, actions),
     }
 }
 
-/// The control cue's timeline fields, called from the inspector's Control arm.
-pub fn control_fields(_ui: &mut Ui, _show: &Show, _cue_id: CueId, _c: &mut ControlCue) {}
-
-/// A clip's timeline rows in the media inspector: run_out, its fade, runs_unseen.
-pub fn clip_fields(_ui: &mut Ui, _show: &Show, _cue_id: CueId, _m: &mut MediaCue) {}
-
-/// A timeline's own settings (the two flags), in the group's or list's inspector.
-pub fn settings_fields(_ui: &mut Ui, _s: &mut TimelineSettings) {}
-
-/// The cue-list row text of a control cue.
-pub fn describe_control(_show: &Show, _cue: &Cue, c: &ControlCue) -> String {
-    c.action.label().to_string()
+/// What the pane shows with no timeline to edit.
+fn empty_state(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("timeline_empty"), true));
+    ui.add_space(8.0);
+    ui.label("Select a timeline group to see its tracks here.");
+    ui.label(
+        RichText::new(
+            "A timeline group is a group set to \u{201c}Start all together\u{201d}: each cue in it \
+             starts at its pre-wait on one clock.",
+        )
+        .weak(),
+    );
+    ui.add_space(4.0);
+    if ui
+        .add_enabled(can_edit(st), egui::Button::new("New timeline group"))
+        .on_hover_text("Add an empty timeline group after the selected cue")
+        .clicked()
+    {
+        actions.push(Action::Timeline(TimelineAction::NewTimelineGroup));
+    }
 }
 
 /// What the editor asks for; made after the frame by `apply`.
@@ -229,8 +457,148 @@ impl TimelineAction {
     }
 }
 
-/// Make what the editor asked for.
-pub(super) fn apply(_a: TimelineAction, _show: &mut Show, _engine: &mut Engine, _st: &mut UiState) {
+/// Make what the editor asked for. (`ui::apply` has already refused an edit
+/// in show mode or during a test.)
+pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    use TimelineAction as A;
+    // The edits that need lengths get them from the engine, on the show as it
+    // was before the edit.
+    let before = || show.clone();
+    match a {
+        A::MoveClips { key, ids, dt, to } => {
+            edit::move_clips(show, key, &ids, dt, to);
+        }
+        A::Trim { id, edge, to } => {
+            let was = before();
+            edit::trim(show, id, edge, to, &mut |c| engine.cue_duration(&was, c));
+        }
+        A::Split { key, ids, at } => {
+            let was = before();
+            edit::split(show, key, &ids, at, &mut |c| engine.cue_duration(&was, c));
+        }
+        A::Delete { key, ids, ripple } => {
+            let was = before();
+            let gone = edit::delete(show, key, &ids, ripple, &mut |c| {
+                engine.cue_duration(&was, c)
+            });
+            if st.selected.is_some_and(|s| gone.contains(&s)) {
+                st.selected = None;
+            }
+        }
+        A::AddClip {
+            key,
+            ty,
+            file,
+            track,
+            at,
+        } => {
+            if let Some(id) = edit::add_clip(show, key, ty, file, track, at) {
+                super::apply(Action::Select(id), show, engine, st);
+            }
+        }
+        A::AddControl { key, action, at } => {
+            if let Some(id) = edit::add_control(show, key, action, at) {
+                super::apply(Action::Select(id), show, engine, st);
+            }
+        }
+        A::AddPauseBefore { key, clip, what } => {
+            let was = before();
+            if edit::add_pause_before(show, key, clip, what, &mut |c| engine.cue_duration(&was, c))
+                .is_some()
+            {
+                engine.log("Added a pause cue: GO runs the timeline on from it");
+            }
+        }
+        A::AddTrack { key, picture } => {
+            edit::add_track(show, key, picture);
+        }
+        A::RemoveTrack { key, track } => {
+            edit::remove_track(show, key, track);
+        }
+        A::AddMarker { key, at } => {
+            let n = model::settings(show, key).map_or(0, |s| s.markers.len()) + 1;
+            edit::add_marker(show, key, at, &format!("Marker {n}"));
+        }
+        A::MoveMarker { key, id, to } => {
+            edit::move_marker(show, key, id, to);
+        }
+        A::RenameMarker { key, id, name } => {
+            edit::rename_marker(show, key, id, &name);
+        }
+        A::RemoveMarker { key, id } => {
+            edit::remove_marker(show, key, id);
+        }
+        A::SetRate { id, rate } => {
+            edit::set_rate(show, id, rate);
+        }
+        A::NewTimelineList => {
+            let n = show.lists.iter().filter(|l| l.timeline.is_some()).count() + 1;
+            let id = edit::new_timeline_list(show, &format!("Timeline {n}"));
+            super::apply(Action::SelectList(id), show, engine, st);
+        }
+        A::NewTimelineGroup => {
+            let slot = show.insert_slot(st.selected, true, engine.active_list);
+            let id = edit::new_timeline_group(show, slot);
+            if let Some(i) = show.cue_index(id) {
+                show.cues[i].name = "Timeline".into();
+            }
+            super::select_new(show, st, engine, None, id);
+            st.timeline.pinned = Some(TimelineKey::Group(id));
+        }
+        A::SetListTimeline { list, on } => {
+            if let Err(e) = edit::set_list_timeline(show, list, on) {
+                engine.log(e);
+            }
+        }
+        A::Run(key) => engine.timeline_run(show, key),
+        // The editor's Pause holds everything (as the transport's Pause does)
+        // and leaves live inputs live; its Run carries on.
+        A::Pause(key) => {
+            engine.timeline_pause(show, key, PauseFreeze::Everything, &[], false, false)
+        }
+        A::Stop(key) => engine.timeline_stop(show, key, 0.0),
+        A::Seek { key, pos } => engine.timeline_seek(show, key, pos.max(0.0), true),
+        A::JumpToMarker { key, id } => {
+            if let Some(t) = model::resolve(show, key, TimelinePoint::Marker(id)) {
+                engine.timeline_seek(show, key, t, true);
+            }
+        }
+        A::FreezeClip(id, on) => {
+            let action = if on {
+                ControlAction::Pause
+            } else {
+                ControlAction::Resume
+            };
+            engine.control_target(show, action, id, "the timeline editor");
+        }
+        A::Open(key) => {
+            st.timeline.open = true;
+            if key.is_some() {
+                st.timeline.pinned = key;
+            }
+            // The new interface has its own place for it (the Editor view's
+            // bottom panel); the panes get the Timeline pane.
+            if !st.prefs.new_layout {
+                st.layout.open(Pane::Timeline);
+            }
+        }
+        A::Close => {
+            st.timeline.open = false;
+            if !st.prefs.new_layout {
+                st.layout.close(Pane::Timeline);
+            }
+        }
+        // Kept for this computer. (The workspace isn't built yet: the editor
+        // stays a pane until it is.)
+        A::SetLayout(layout) => {
+            st.prefs.timeline_layout = layout;
+            if let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
+    }
 }
 
 /// Where the editor drew things, for tests to aim the mouse at; stored at
@@ -247,36 +615,17 @@ pub struct TimelineRects {
     pub pps: f32,
 }
 
+/// Note, for the tests, that an inspector row was drawn.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn edits_are_refused_in_show_mode_and_the_transport_is_not() {
-        let key = TimelineKey::List(1);
-        assert!(TimelineAction::AddMarker { key, at: 1.0 }.edits_the_show());
-        assert!(TimelineAction::NewTimelineGroup.edits_the_show());
-        assert!(!TimelineAction::Run(key).edits_the_show());
-        assert!(!TimelineAction::Seek { key, pos: 2.0 }.edits_the_show());
-        assert!(!TimelineAction::SetLayout(TimelineLayout::Workspace).edits_the_show());
-    }
-
-    #[test]
-    fn the_editor_follows_a_selected_timeline_group_or_its_child() {
-        let mut show = Show::default();
-        let g = show.make_cue(CueType::Group, None, 0);
-        let gid = g.id;
-        show.cues.push(g);
-        let mut child = show.make_cue(CueType::Video, None, 1);
-        child.parent = Some(gid);
-        let cid = child.id;
-        show.cues.push(child);
-        let engine = Engine::for_tests();
-        let mut st = UiState::default();
-        assert_eq!(target(&show, &engine, &st), None);
-        st.selected = Some(gid);
-        assert_eq!(target(&show, &engine, &st), Some(TimelineKey::Group(gid)));
-        st.selected = Some(cid);
-        assert_eq!(target(&show, &engine, &st), Some(TimelineKey::Group(gid)));
-    }
+pub(super) fn note_row(ui: &Ui, row: &'static str) {
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<&'static str>>(egui::Id::new("timeline_rows"))
+            .push(row)
+    });
 }
+
+#[cfg(not(test))]
+fn note_row(_ui: &Ui, _row: &'static str) {}
+
+#[cfg(test)]
+mod tests;
