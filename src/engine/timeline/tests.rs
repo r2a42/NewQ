@@ -1445,13 +1445,16 @@ fn seeking_past_a_pause_cue_or_onto_one_leaves_the_run_running_or_parked_as_it_w
     // Paused at the next one, a seek past it parks there; GO runs on.
     e.tick(&show, 5.0);
     assert_eq!(paused_at(&mut e, &show, k), Some(8.0));
+    assert!(!view(&mut e, &show, k).parked, "a pause cue's wait is not parked");
     e.timeline_seek(&show, k, 9.0, true);
     assert!(parked(&mut e, &show, k));
+    assert!(view(&mut e, &show, k).parked);
     ticks(&mut e, &show, 0.0, 3);
     assert!(active(&e, t).is_some_and(|a| a.hold), "the text held");
     e.go(&show);
     ticks(&mut e, &show, 0.0, 3);
     assert_eq!(state(&mut e, &show, k), RunState::Running);
+    assert!(!view(&mut e, &show, k).parked);
     assert!(active(&e, t).is_some_and(|a| !a.hold));
     e.tick(&show, 1.0);
     assert!((view(&mut e, &show, k).pos - 10.0).abs() < 1e-9);

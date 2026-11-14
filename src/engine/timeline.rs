@@ -105,6 +105,9 @@ pub struct RunView {
     pub length: Option<f64>,
     /// What GO will bring in or fade, for the read-out.
     pub on_go: Option<CueId>,
+    /// Paused where a seek (the ruler, a marker, a Jump) put it, or where a
+    /// pause caught it cueing: GO or Run cues what is there and plays on.
+    pub parked: bool,
 }
 
 /// One timeline's run.
@@ -416,9 +419,10 @@ impl Engine {
                 next_pause: self.next_pause_from(show, key, 0.0),
                 length,
                 on_go: None,
+                parked: false,
             };
         };
-        let (state, pos, instance) = (run.state, run.pos, run.instance);
+        let (state, pos, instance, parked) = (run.state, run.pos, run.instance, run.parked);
         let waiting = |p: &&PendingCue| p.run == Some(instance);
         let next_pause = if state == RunState::Stopped {
             self.next_pause_from(show, key, pos)
@@ -448,6 +452,7 @@ impl Engine {
             next_pause,
             length,
             on_go,
+            parked,
         }
     }
 

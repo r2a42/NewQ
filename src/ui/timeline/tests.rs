@@ -1082,7 +1082,7 @@ fn letting_go_on_the_ruler_parks_the_timeline_with_its_picture_up() {
         v.state
     );
     assert!((v.pos - 3.0).abs() < 0.15, "{}", v.pos);
-    assert!(super::toolbar::state_text(&f.show, &v, v.pos).starts_with("Parked"));
+    assert!(super::toolbar::state_text(&v, v.pos).starts_with("Parked"));
     // A (0-4 s) and C (2-5 s) are under the playhead.
     let show = f.show.clone();
     until(&mut m, &show, "the pictures", 20, |e| {
@@ -1135,7 +1135,7 @@ fn run_runs_the_timeline_and_a_pause_before_a_clip_brings_it_in_on_go() {
     assert_eq!(v.on_go, Some(f.b));
     // A free-run pause, not a seek.
     assert_eq!(
-        super::toolbar::state_text(&show, &v, v.pos),
+        super::toolbar::state_text(&v, v.pos),
         "Paused · content runs on"
     );
     assert!(!playing(&m.e, f.b));
