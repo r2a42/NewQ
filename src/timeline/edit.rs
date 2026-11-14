@@ -11,7 +11,7 @@
 use super::model::{self, Dur, LeadIn};
 use super::{Marker, TimelineKey, TimelineSettings, TrackId};
 use crate::show::{
-    Animated, ControlAction, ControlCue, Cue, CueId, CueKind, CueType, Keyframe, MAX_RATE,
+    Animated, ControlAction, ControlCue, Cue, CueId, CueKind, CueType, Keyframe, MAX_RATE, MIN_DB,
     MIN_RATE, MediaCue, Show, Slot, Transition,
 };
 use std::path::PathBuf;
@@ -422,6 +422,8 @@ fn set_if(v: &mut f64, to: f64) -> bool {
 /// The first half keeps its fade-in and loses its fade-out; the second starts
 /// at `at` with a cut and no fade-in, its content and keyframes taken up where
 /// the first's stop. A looping clip isn't split, nor one `at` isn't inside.
+/// Fade cues stay aimed at the first half, and a second half that would be
+/// unseen without them starts visible (`starts_visible`).
 pub fn split(show: &mut Show, key: TimelineKey, ids: &[CueId], at: f64, dur: Dur) -> Vec<CueId> {
     let mut made = Vec::new();
     if !model::is_timeline(show, key) || !at.is_finite() {
@@ -490,6 +492,8 @@ pub fn split(show: &mut Show, key: TimelineKey, ids: &[CueId], at: f64, dur: Dur
             }
             shift_all_keys(sm, off);
         }
+        // Fade cues stay aimed at the first half; the second starts visible.
+        starts_visible(show, key, id, at, &mut second);
         // Its content goes straight on: it doesn't wait for a fade-in of its own.
         if model::lead_in(show, key, &second) != LeadIn::None
             && let Some(sm) = second.kind.media_mut()
@@ -507,6 +511,57 @@ pub fn split(show: &mut Show, key: TimelineKey, ids: &[CueId], at: f64, dur: Dur
         sort_by_start(show, key);
     }
     made
+}
+
+/// The second half of a split clip that is unseen by itself (a picture at
+/// opacity 0, or keys that stay there; a sound at silence) and was brought up
+/// by fade cues: those stay aimed at the first half (`first`), so the second
+/// is made visible at the level the last of them before the split (`at`)
+/// takes it to, else the first of them, else full.
+fn starts_visible(show: &Show, key: TimelineKey, first: CueId, at: f64, second: &mut Cue) {
+    let picture = model::is_picture(&second.kind);
+    let sound = model::is_sound(&second.kind);
+    let Some(m) = second.kind.media_mut() else {
+        return;
+    };
+    let unseen = if picture {
+        match &m.motion.opacity {
+            Some(a) if a.is_animated() => a.keys.iter().all(|k| k.v <= 0.0),
+            _ => m.opacity <= 0.0,
+        }
+    } else {
+        sound && m.volume_db <= MIN_DB
+    };
+    if !unseen {
+        return;
+    }
+    let fades: Vec<(f64, f32)> = model::members(show, key)
+        .into_iter()
+        .filter(|f| f.armed)
+        .filter_map(|f| match &f.kind {
+            CueKind::Fade(fade) if fade.target == Some(first) => {
+                let level = if picture {
+                    fade.opacity.filter(|o| *o > 0.0)
+                } else {
+                    fade.volume_db.filter(|v| *v > MIN_DB)
+                };
+                level.map(|l| (start_of(f), l))
+            }
+            _ => None,
+        })
+        .collect();
+    let before = fades
+        .iter()
+        .filter(|(t, _)| *t <= at + SAME_TIME)
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    let first_one = fades.iter().min_by(|a, b| a.0.total_cmp(&b.0));
+    let level = before.or(first_one).map(|f| f.1);
+    if picture {
+        m.motion.opacity = None;
+        m.opacity = level.unwrap_or(1.0);
+    } else {
+        m.volume_db = level.unwrap_or(0.0);
+    }
 }
 
 /// Remove clips, closing the gap with `ripple`. Returns the cues removed.
@@ -1385,6 +1440,86 @@ mod tests {
             len(show, key, v).unwrap() + len(show, key, w).unwrap(),
             whole
         ));
+    }
+
+    #[test]
+    fn a_split_leaves_the_fade_cue_on_the_first_half_and_the_second_starts_visible() {
+        for (n, ty) in [
+            (0, CueType::Video),
+            (1, CueType::Video),
+            (0, CueType::Audio),
+        ] {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let sound = ty == CueType::Audio;
+            let show = &mut f.show;
+            let track = if sound {
+                TrackId::Sound { output: None }
+            } else {
+                picture(show, 0, 0)
+            };
+            let v = clip(show, key, ty, track, 0.0);
+            if sound {
+                media(show, v).volume_db = MIN_DB;
+            } else {
+                media(show, v).opacity = 0.0;
+            }
+            // Brought up by a fade at 1 s, to 0.8 (or -6 dB).
+            let fade = add_clip(show, key, CueType::Fade, None, TrackId::Cues, 1.0).unwrap();
+            let i = show.cue_index(fade).unwrap();
+            if let CueKind::Fade(fc) = &mut show.cues[i].kind {
+                fc.target = Some(v);
+                fc.opacity = (!sound).then_some(0.8);
+                fc.volume_db = sound.then_some(-6.0);
+            }
+            let w = split(show, key, &[v], 4.0, &mut fake_dur)[0];
+            let i = show.cue_index(fade).unwrap();
+            let CueKind::Fade(fc) = &show.cues[i].kind else {
+                panic!()
+            };
+            assert_eq!(fc.target, Some(v), "the fade stays on the first half");
+            let second = media(show, w).clone();
+            if sound {
+                assert_eq!(second.volume_db, -6.0);
+            } else {
+                assert_eq!(
+                    (second.opacity, second.motion.opacity.is_none()),
+                    (0.8, true)
+                );
+            }
+            // It doesn't wait for a fade-in of its own: it starts as it comes.
+            let cue = show.cue(w).unwrap();
+            assert_eq!(model::lead_in(show, key, cue), LeadIn::None);
+            assert!(!second.runs_unseen);
+            // The first half is as it was.
+            let first = media(show, v).clone();
+            assert!(if sound {
+                first.volume_db == MIN_DB
+            } else {
+                first.opacity == 0.0
+            });
+        }
+        // Keys that stay at 0, and no fade cue: full.
+        let mut f = fixture();
+        let key = f.list;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 0.0);
+        let mut op = Animated::new(1.0);
+        op.set_key(0.0, 0.0);
+        op.set_key(9.0, 0.0);
+        media(show, v).motion.opacity = Some(op);
+        media(show, v).runs_unseen = true;
+        let w = split(show, key, &[v], 4.0, &mut fake_dur)[0];
+        let second = media(show, w).clone();
+        assert_eq!(
+            (second.opacity, second.motion.opacity.is_none()),
+            (1.0, true)
+        );
+        // A clip seen already is left as it is.
+        let u = clip(show, key, CueType::Video, picture(show, 0, 1), 0.0);
+        media(show, u).opacity = 0.5;
+        let x = split(show, key, &[u], 4.0, &mut fake_dur)[0];
+        assert_eq!(media(show, x).opacity, 0.5);
     }
 
     #[test]

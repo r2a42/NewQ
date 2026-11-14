@@ -145,7 +145,7 @@ pub fn settle(show: &mut Show, key: TimelineKey) {
 }
 
 /// Cues that put a picture on a display.
-fn is_picture(kind: &CueKind) -> bool {
+pub(super) fn is_picture(kind: &CueKind) -> bool {
     matches!(
         kind,
         CueKind::Video(_)
@@ -157,7 +157,7 @@ fn is_picture(kind: &CueKind) -> bool {
 }
 
 /// Cues that are only sound.
-fn is_sound(kind: &CueKind) -> bool {
+pub(super) fn is_sound(kind: &CueKind) -> bool {
     matches!(kind, CueKind::Audio(_) | CueKind::LiveAudio(_))
 }
 
