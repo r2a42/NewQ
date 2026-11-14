@@ -502,3 +502,36 @@ For I1:
 5. The module-level `allow(dead_code)` in `ui/timeline.rs` and `timeline/mod.rs`: remove what is now called.
 6. Known look issues: in the short new-interface panel the Cues row needs a vertical scroll; the inspector's timeline rows sit below the fold when the pane is open.
 7. Machine trap: `target/debug/newq` can be another worktree's binary even when cargo says it is fresh; `touch src/main.rs` and rebuild before a screenshot.
+
+---
+
+## K. What P2b landed (seek, parking, jumps, the wait-for-fade-in rule)
+
+Two commits: "Timeline: the chase, what plays at a given time on a timeline" (`src/timeline/chase.rs`, `chase/tests.rs`) and "Timeline: seek, parking, jumps and clips that wait for their fade-in" (`engine.rs`, `engine/timeline.rs`, its tests). Full suite: 982 passed.
+
+As built:
+- `prepare_from(cue, info, shift, lead)`: file position `M(shift) − M(lead)`. `take_prepared(cue, t0)`. `cue_duration` (H15): with keyframed speed and a lead-in the content length is `time_for(M(V) + file) − V`; only the Group arm adds the lead-in.
+- `StartAt` has `from`, `lead`, `hold`, `chase: Option<Alive>`, `part_way()`; it is `Clone`, not `Copy`. `PendingCue.waits_for_fade`; `ActiveCue.lead`, `file_from`.
+- `timeline_begin(show, key, instance)`; a start from a later position goes through `timeline_place`. `timeline_clip(show, cue, lead)`. `timeline_adopt(show, active, &at, clip)`.
+- `timeline_seek`, `timeline_waiting` are real. `Run` has `parked`, `cue_since`, `unstarted`. Constants `CUE_LIMIT = 2 s`, `MAX_JUMPS = 8`, `LAST_FRAME = 0.2 s`.
+- `chase::Alive.geometry` is `Option<GeometryRamp { now, to, left, curve }>`; `Alive.faded: bool`; a `Level` alias.
+- `engine.rs`: `pub use timeline::{RunState, RunView};` (with `allow(unused_imports)` until the UI uses it).
+- States: a seek while Running or Cueing goes to Cueing (released when every clip is started or after `CUE_LIMIT`); otherwise the run parks as `Paused { Everything, waits_for_go: true }`. `RunView` has no `parked` flag.
+- A seek to exactly 0 parks with nothing on screen (0 means "from the top"); a cue exactly at `pos` counts as passed.
+- Parking: one FFmpeg (and a paused voice) per video/audio clip under the playhead, started on each `timeline_seek` and only then; each seek ends the previous seek's clips at once; preloads within 10 s (at most 12) are kept between seeks.
+
+Left for later:
+- I1: replace the editor's `run_of` Debug parsing with `RunState`/`RunView`; hatch the real `timeline_waiting`; decide whether the toolbar says "Parked" (needs a flag on `RunView`); the ruler seeking to a hair above 0 if the first frame should show at 0.
+- P5: a running seek shows a partly-built picture for a moment (old clips go at once, new ones appear as decoders are ready).
+- A fade cue that wakes a clip whose file is not read yet misses it (rare: the preload horizon reads files well before).
+- Not modelled by the chase: fade cues' matrix crosspoints, a fade on a clip while it is held, motion keyframes under a geometry fade.
+- One P2a test was made to wait in real time for a clip's end (it failed under full-suite load).
+
+## L. Owner's rulings after wave 1's engine work (these win over anything earlier)
+
+1. **`run_out` default stays End with the fade.** The integrated fade on a clip that runs out is by design; no prompt, no automatic Hold when a pause is added. The editor's ⚠ stays.
+2. **On a timeline, keyframes follow the timeline's clock, not the content.** A fade the operator controls (timed to GO) is done with a discrete fade time or with opacity keyframes, with a pause cue before it: nothing moves at the pause, and the fade or ramp starts on GO. So for a clip in a timeline run, its opacity, geometry (`Motion`) and effect keyframes are evaluated at the clip's *timeline* time (`run.pos − clip start`, less any lead-in as the tracks draw it), which stands still while the clock is paused, even while the content free-runs or loops. Speed keyframes stay tied to the content. Off a timeline nothing changes. This is package **P2c** (engine), in the first release.
+   The model is Disguise's: the timeline waits at each change. A cut, a crossfade to the next clip, a fade cue, a clip's own fade-out and a keyframe ramp all hold at a pause and go on GO.
+3. **"Loop this section": a third kind of pause cue (wave 2, with P5's jumps).** When the timeline reaches the cue it jumps back to a section start (a marker or a time earlier on the timeline) and plays the section again, until GO. Everything in the section replays together, in sync. On GO: **default, finish the current pass and carry straight on past the cue** (the intro / looping middle / ending case); option on the cue: leave at once. The jump is not sample-accurate (clips are restarted); say so in the cue's description, and that a continuous bed of sound is better as a per-clip loop.
+4. **Split and fade cues:** a fade cue stays aimed at the first half of a split clip; the second half starts visible (no objection from the owner to this suggestion).
+5. Undecided, asked of the owner: whether the timeline Stop cue gets a fade time (today it cuts).
