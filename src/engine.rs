@@ -1,6 +1,8 @@
 //! Playback engine: fires cues, runs pre-waits, continues, fades and stops,
 //! and owns the decoders for everything that is playing.
 
+mod timeline;
+
 use crate::clock::{ClockFollower, TimeOfDay};
 use crate::fx::VideoFx;
 use crate::media::audio::{AudioOut, Voice};
@@ -729,6 +731,8 @@ pub struct Engine {
     /// Changes to the show that control cues ask for (the engine only reads
     /// the show); the app makes them after each tick.
     edits: Vec<ShowEdit>,
+    /// The timelines' runs: their clocks and states (see `engine/timeline.rs`).
+    runs: timeline::Runs,
 }
 
 /// A change to the show asked for by a control cue.
@@ -776,6 +780,7 @@ impl Engine {
             firing: false,
             loads: HashSet::new(),
             edits: Vec::new(),
+            runs: timeline::Runs::default(),
         }
     }
 
@@ -819,6 +824,7 @@ impl Engine {
             firing: false,
             loads: HashSet::new(),
             edits: Vec::new(),
+            runs: timeline::Runs::default(),
         }
     }
 
