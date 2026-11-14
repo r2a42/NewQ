@@ -2689,3 +2689,70 @@ fn a_run_out_fade_under_way_at_a_pause_waits_on_the_last_frame_and_finishes_afte
     ticks(&mut e, &show, 0.25, 2);
     assert!(active(&e, v).is_none(), "faded out and gone");
 }
+
+#[test]
+fn a_matrix_crosspoint_fade_waits_at_a_free_run_pause_and_goes_on_after_go() {
+    use crate::show::Crosspoint;
+    let Some((mut e, wav)) = with_media("tone_5s.wav") else {
+        return;
+    };
+    // The fake device, mixed in real time by a thread of its own.
+    e.audio = AudioOut::with_playing_device();
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let mut c = file(&mut show, CueType::Audio, wav, 5.0);
+    let xp = |db| Crosspoint { from: 0, to: 0, db };
+    c.kind.media_mut().unwrap().matrix = vec![xp(0.0)];
+    let s = child(&mut show, g, c, 0.0);
+    // At 0.5 s, the crosspoint down to silence over 1 s; a free-run pause at 1 s.
+    let mut f = fade(&mut show, s, None, 1.0);
+    if let CueKind::Fade(fc) = &mut f.kind {
+        fc.matrix = vec![xp(MIN_DB)];
+    }
+    let f = child(&mut show, g, f, 0.5);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 1.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the sound", 10, |e| {
+        active(e, s).is_some_and(|a| a.started)
+    });
+    let voice = |e: &Engine| {
+        active(e, s)
+            .and_then(|a| a.voice())
+            .map(|v| (v.crosspoints_held(), v.crosspoint_now(0)))
+    };
+    // Into the fade, then to the pause at once.
+    e.tick(&show, 0.6);
+    // Begun at 0.5 in a tick from 0 to 0.6, its own time counts from 0.5.
+    let fade_time = active(&e, f).expect("the fade is under way").elapsed;
+    assert!((fade_time - 0.1).abs() < 1e-9, "{fade_time}");
+    assert_eq!(
+        voice(&e).map(|v| v.0),
+        Some(false),
+        "it moves while the clock runs"
+    );
+    e.tick(&show, 0.5);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(1.0));
+    let (held, at_pause) = voice(&e).unwrap();
+    assert!(held, "held while the clock stands");
+    // Real time passes (the mixer runs on), the show's clock with it; the
+    // crosspoint stays where it was.
+    std::thread::sleep(Duration::from_millis(60));
+    let at_pause = voice(&e).unwrap().1.min(at_pause);
+    for _ in 0..12 {
+        std::thread::sleep(Duration::from_millis(40));
+        e.tick(&show, 0.04);
+    }
+    let (held, now) = voice(&e).unwrap();
+    assert!(held);
+    assert!(at_pause > 0.05, "not at silence yet: {at_pause}");
+    assert!((now - at_pause).abs() < 1e-6, "{at_pause} -> {now}");
+    assert!(active(&e, f).is_some(), "the fade cue waits too");
+    // GO: it goes on, and reaches silence.
+    e.go(&show);
+    e.tick(&show, 0.0);
+    assert_eq!(voice(&e).map(|v| v.0), Some(false), "let go");
+    until(&mut e, &show, None, "the crosspoint at silence", 10, |e| {
+        voice(e).is_some_and(|v| v.1 < 1e-4)
+    });
+}

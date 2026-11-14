@@ -42,6 +42,9 @@ struct VoiceShared {
     xp_target: Crosspoints,
     xp_rate: Crosspoints,
     xp_now: Crosspoints,
+    /// The crosspoints stay where they are for now (a timeline's fade waiting
+    /// while its clock stands), going on to their targets when it is cleared.
+    xp_hold: AtomicBool,
     gain_bits: AtomicU32,
     paused: AtomicBool,
     stopped: AtomicBool,
@@ -1188,6 +1191,24 @@ impl Voice {
     pub fn fade_crosspoint(&self, from: u8, to: u16, db: f32, over: f64) -> bool {
         fade_crosspoint(&self.shared, &self.matrix_keys, (from, to), db, over)
     }
+    /// Hold the crosspoint fades under way where they are (`hold`), or let them
+    /// go on at the rate they had. One atomic flag the mixer reads.
+    pub fn hold_crosspoints(&self, hold: bool) {
+        self.shared.xp_hold.store(hold, Ordering::Relaxed);
+    }
+    /// Whether its crosspoints are held.
+    pub fn crosspoints_held(&self) -> bool {
+        self.shared.xp_hold.load(Ordering::Relaxed)
+    }
+    /// Whether it has crosspoints a fade can move.
+    pub fn has_crosspoints(&self) -> bool {
+        !self.matrix_keys.is_empty()
+    }
+    /// Where crosspoint `i` (in the matrix's order) is now, as a gain.
+    #[cfg(test)]
+    pub fn crosspoint_now(&self, i: usize) -> f32 {
+        f32::from_bits(self.shared.xp_now.0[i].load(Ordering::Relaxed))
+    }
 
     /// Whether `release` has been called.
     pub fn released(&self) -> bool {
@@ -1615,8 +1636,9 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
         return true;
     }
     let src = v.src.clamp(1, MAX_SOURCE_CHANNELS);
-    // Crosspoint gains go on towards where they are being faded to.
-    if !v.matrix.is_empty() {
+    // Crosspoint gains go on towards where they are being faded to, unless
+    // held where they are.
+    if !v.matrix.is_empty() && !sh.xp_hold.load(Ordering::Relaxed) {
         let dt = frames as f32 / v.sr.max(1.0);
         for (i, c) in v.matrix.iter_mut().enumerate().take(MAX_FADEABLE) {
             let target = f32::from_bits(sh.xp_target.0[i].load(Ordering::Relaxed));
@@ -2151,8 +2173,8 @@ mod tests {
     }
 
     #[test]
-    fn a_crosspoint_fades_to_its_target_at_the_rate_given() {
-        let mut v = voice(&[1.0; 8], 0);
+    fn a_crosspoint_fades_to_its_target_at_the_rate_given_and_stands_while_held() {
+        let mut v = voice(&[1.0; 16], 0);
         v.sr = 4.0;
         v.matrix = vec![(0, 0, 1.0), (1, 1, 1.0)];
         let sh = v.shared.clone();
@@ -2178,6 +2200,19 @@ mod tests {
         let mut mix = vec![0.0; 2];
         assert!(mix_voice(&mut v, &mut mix, 1, 2));
         assert_eq!(mix[0], 0.8);
+        // Held, a fade under way stands; let go, it goes on at its rate.
+        sh.xp_target.0[0].store(0.0f32.to_bits(), Ordering::Relaxed);
+        sh.xp_rate.0[0].store(1.6f32.to_bits(), Ordering::Relaxed);
+        sh.xp_hold.store(true, Ordering::Relaxed);
+        for _ in 0..3 {
+            let mut mix = vec![0.0; 2];
+            assert!(mix_voice(&mut v, &mut mix, 1, 2));
+            assert_eq!(mix[0], 0.8, "held");
+        }
+        sh.xp_hold.store(false, Ordering::Relaxed);
+        let mut mix = vec![0.0; 2];
+        assert!(mix_voice(&mut v, &mut mix, 1, 2));
+        assert!((mix[0] - 0.4).abs() < 1e-6, "{}", mix[0]);
     }
 
     #[test]

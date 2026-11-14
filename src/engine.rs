@@ -557,6 +557,10 @@ pub struct ActiveCue {
     /// Its time by its run's clock (`pos - clip_zero`), set each tick. It stands
     /// while the clock does, even while its content runs on or loops.
     clock_time: f64,
+    /// A fade cue its run fired: where the run's clock was when it began. Its
+    /// own time is the clock's from there, so one begun part way through a tick
+    /// counts only the rest of it.
+    fade_from: Option<f64>,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -2496,6 +2500,7 @@ impl Engine {
             file_from: 0.0,
             clip_zero: None,
             clock_time: 0.0,
+            fade_from: None,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2577,6 +2582,7 @@ impl Engine {
             file_from: 0.0,
             clip_zero: None,
             clock_time: 0.0,
+            fade_from: None,
         };
         // A timeline's clip: its keyframes follow its run's clock from here.
         if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
@@ -2807,6 +2813,7 @@ impl Engine {
                 // A timeline's fade cue: what it ramps moves with the timeline's
                 // clock, waiting while it stands. One fired by hand always moves.
                 let clock = self.run_clock(at.run);
+                active.fade_from = clock.map(|(_, pos)| pos);
                 // A timeline's clips waiting for this fade to raise them start now
                 // (from their in points), and it fades them up.
                 hit |= self.timeline_wake(show, f, &targets);
@@ -3190,7 +3197,10 @@ impl Engine {
             let levels_wait = a.levels_wait(&steps);
             // A timeline's fade cue keeps its clock's time.
             let fade_dt = match (&a.kind, a.run.and_then(|r| steps.get(&r))) {
-                (ActiveKind::Fade, Some(c)) => c.moved,
+                (ActiveKind::Fade, Some(c)) => match a.fade_from {
+                    Some(from) => (c.pos - from - a.elapsed).max(0.0).min(c.moved),
+                    None => c.moved,
+                },
                 _ => dt,
             };
             let mut completed = false;
@@ -3587,6 +3597,7 @@ impl Engine {
         }
         // The timelines: their groups' times, and the runs that have ended.
         self.timeline_after_tick(show);
+        self.timeline_hold_crosspoints(show);
 
         self.update_preload(show);
         self.log_cue_changes(show);

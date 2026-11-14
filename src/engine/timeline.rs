@@ -843,6 +843,43 @@ impl Engine {
         (r.state != RunState::Stopped).then_some((r.instance, r.pos))
     }
 
+    /// Matrix crosspoint fades wait with the clock too (ruling L2): a fade cue
+    /// a run fired, with crosspoints to fade, whose run's clock stands (paused,
+    /// or cueing) holds the crosspoints of the voices it aims at where they are
+    /// (`Voice::hold_crosspoints`, a flag the mixer reads), and they go on at
+    /// their rate when the clock moves, the run stops or goes, or the fade is
+    /// over. After each tick. (A crosspoint fade begun by hand on a voice that
+    /// such a fade also aims at waits with it.)
+    pub(super) fn timeline_hold_crosspoints(&mut self, show: &Show) {
+        let mut held: Vec<CueId> = Vec::new();
+        for a in &self.active {
+            let stands = a.run.is_some_and(|r| {
+                self.runs.by_instance(r).is_some_and(|(_, r)| {
+                    matches!(r.state, RunState::Paused { .. } | RunState::Cueing)
+                })
+            });
+            if !stands || !matches!(a.kind, ActiveKind::Fade) {
+                continue;
+            }
+            if let Some(CueKind::Fade(f)) = show.cue(a.cue_id).map(|c| &c.kind)
+                && !f.matrix.is_empty()
+                && let Some(t) = f.target
+            {
+                held.extend(show.with_children(t));
+            }
+        }
+        for a in &self.active {
+            if let Some(v) = a.voice()
+                && v.has_crosspoints()
+            {
+                let hold = held.contains(&a.cue_id);
+                if v.crosspoints_held() != hold {
+                    v.hold_crosspoints(hold);
+                }
+            }
+        }
+    }
+
     /// A media cue the run `run` is starting: where its own time is 0 on the run's
     /// clock (`zero_of`), and its time by that clock now. None for any other cue,
     /// or a run that is gone.
