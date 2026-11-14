@@ -21,7 +21,7 @@ mod tracks;
 pub use control::{clip_fields, control_fields, describe_control, settings_fields};
 
 use super::{Action, Pane, UiState, cue_label, fmt_time};
-use crate::engine::Engine;
+use crate::engine::{Engine, RunState, RunView};
 pub use crate::prefs::TimelineLayout;
 use crate::show::{Animated, ControlAction, CueId, CueType, PauseFreeze, Show};
 use crate::timeline::edit::{self, Edge, PauseBefore};
@@ -122,61 +122,6 @@ pub fn target(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey>
     selected.or(st.timeline.pinned.filter(|k| model::is_timeline(show, *k)))
 }
 
-/// A timeline's run as the editor reads it (`Engine::timeline`'s `RunView`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Run {
-    state: RunKind,
-    pos: f64,
-    next_pause: Option<f64>,
-    length: Option<f64>,
-    on_go: Option<CueId>,
-}
-
-/// The engine's `RunState`, which this module can't name (see `run_of`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum RunKind {
-    Stopped,
-    Cueing,
-    Running,
-    Paused {
-        freeze: PauseFreeze,
-        waits_for_go: bool,
-    },
-}
-
-/// The run of `key`. `RunState` and `RunView` are public types in the
-/// engine's private `timeline` module: their fields can be read here but the
-/// state's variants can't be named, so its Debug text is read instead.
-fn run_of(engine: &mut Engine, show: &Show, key: TimelineKey) -> Run {
-    let v = engine.timeline(show, key);
-    let text = format!("{:?}", v.state);
-    let state = if text.starts_with("Cueing") {
-        RunKind::Cueing
-    } else if text.starts_with("Running") {
-        RunKind::Running
-    } else if text.starts_with("Paused") {
-        RunKind::Paused {
-            freeze: if text.contains("Everything") {
-                PauseFreeze::Everything
-            } else if text.contains("Clips") {
-                PauseFreeze::Clips
-            } else {
-                PauseFreeze::Nothing
-            },
-            waits_for_go: text.contains("waits_for_go: true"),
-        }
-    } else {
-        RunKind::Stopped
-    };
-    Run {
-        state,
-        pos: v.pos,
-        next_pause: v.next_pause,
-        length: v.length,
-        on_go: v.on_go,
-    }
-}
-
 /// The timeline rows for the cue at `idx`, at the end of its inspector: a
 /// control cue's timeline action, a clip's run-out and lead-in choices. (They
 /// need the show and the cue at once, so they edit a copy of the cue's part
@@ -253,11 +198,11 @@ pub fn editor(
 ) {
     let clips = model::clips(show, key, &mut |c| engine.cue_duration(show, c));
     let tracks = model::tracks(show, key, &clips);
-    let run = run_of(engine, show, key);
+    let run = engine.timeline(show, key);
     // The playhead: the run's, or while the group plays the old way (before
     // the engine runs timelines) where the group has got to.
     let pos = match (run.state, key) {
-        (RunKind::Stopped, TimelineKey::Group(g)) => match engine.status(g) {
+        (RunState::Stopped, TimelineKey::Group(g)) => match engine.status(g) {
             crate::engine::CueStatus::Playing { elapsed, .. } => elapsed,
             _ => run.pos,
         },

@@ -17,7 +17,7 @@ pub(in crate::ui) struct Ctx<'a> {
     pub host: Host,
     pub clips: &'a [Clip],
     pub tracks: &'a [TrackId],
-    pub run: &'a Run,
+    pub run: &'a RunView,
     /// Where the playhead is (the run's, or a group playing the old way).
     pub pos: f64,
     /// Clips the run has let run free of its clock, and those waiting to fade in.
@@ -49,6 +49,8 @@ const SNAP_PX: f32 = 8.0;
 pub(super) const PLAYHEAD: Color32 = Color32::from_rgb(235, 85, 70);
 pub(super) const MARKER: Color32 = Color32::from_rgb(232, 184, 48);
 const WARN: Color32 = Color32::from_rgb(240, 175, 60);
+/// The hatching of a clip the run is waiting on to fade in.
+const WAITING: Color32 = Color32::from_rgba_premultiplied(120, 190, 255, 200);
 
 /// Screen x of a time and back.
 #[derive(Clone, Copy, Debug)]
@@ -551,6 +553,25 @@ fn draw_clip(
         inner.rect_filled(r, 0.0, Color32::from_black_alpha(70));
         hatch(&inner, r, Color32::from_white_alpha(60));
     }
+    // The run has reached it and it is waiting, now, for its fade-in (the
+    // engine's word, `timeline_waiting`): its lead-in, or all of it when it
+    // waits for a fade cue, hatched brighter.
+    if ctx.waiting.contains(&c.id) {
+        let r = if lead > 0.0 && !never {
+            Rect::from_min_max(
+                rect.min,
+                pos2(geo.x(start + lead).min(rect.right()), rect.bottom()),
+            )
+        } else {
+            rect
+        };
+        hatch(&inner, r, WAITING);
+        #[cfg(test)]
+        p.ctx().data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<CueId>>(egui::Id::new(("timeline_waiting", ctx.host)))
+                .push(c.id)
+        });
+    }
     // The fades, as a ramp in each end.
     let content_left = if never {
         rect.left()
@@ -634,10 +655,12 @@ fn draw_clip(
         )
     };
     let mut notes: Vec<&str> = Vec::new();
-    if never {
+    if ctx.waiting.contains(&c.id) {
+        notes.push("waiting to fade in");
+    } else if never {
         notes.push("waits for a fade cue");
     } else if lead > 0.0 {
-        notes.push("waiting to fade in");
+        notes.push("waits to fade in");
     }
     if ctx.detached.contains(&c.id) {
         notes.push("free-running");

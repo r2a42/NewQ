@@ -4,7 +4,6 @@
 mod timeline;
 
 // For the timeline editor, which names a run's state (`ui/timeline.rs`).
-#[allow(unused_imports)]
 pub use timeline::{RunState, RunView};
 
 use crate::clock::{ClockFollower, TimeOfDay};

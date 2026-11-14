@@ -25,19 +25,19 @@ pub(super) fn go_text(show: &Show, id: CueId) -> String {
 }
 
 /// How the run is doing, in a few words.
-fn state_text(run: &Run, pos: f64) -> String {
+fn state_text(run: &RunView, pos: f64) -> String {
     match run.state {
-        RunKind::Stopped => "Stopped".into(),
-        RunKind::Cueing => "Cueing…".into(),
-        RunKind::Running => match run.next_pause {
+        RunState::Stopped => "Stopped".into(),
+        RunState::Cueing => "Cueing…".into(),
+        RunState::Running => match run.next_pause {
             Some(p) if p >= pos => format!("Running · next pause in {}", fmt_time(p - pos)),
             _ => "Running".into(),
         },
-        RunKind::Paused {
+        RunState::Paused {
             freeze: PauseFreeze::Nothing,
             ..
         } => "Paused · content runs on".into(),
-        RunKind::Paused { .. } => "Paused".into(),
+        RunState::Paused { .. } => "Paused".into(),
     }
 }
 
@@ -96,7 +96,7 @@ pub(super) fn draw(
         let length = ctx.run.length.map_or("–:––.–".to_string(), fmt_time);
         ui.label(RichText::new(format!("{} / {length}", fmt_time(ctx.pos))).monospace());
         ui.label(RichText::new(state_text(ctx.run, ctx.pos)).weak());
-        if matches!(ctx.run.state, RunKind::Paused { .. })
+        if matches!(ctx.run.state, RunState::Paused { .. })
             && let Some(id) = ctx.run.on_go
         {
             ui.label(RichText::new(go_text(ctx.show, id)).color(super::super::PLAYHEAD));

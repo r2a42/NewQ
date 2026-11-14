@@ -643,6 +643,44 @@ fn a_clip_waiting_for_its_fade_in_draws_longer_than_its_content() {
 }
 
 #[test]
+fn a_clip_the_run_waits_on_to_fade_in_is_hatched() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    // C waits 1.5 s, unseen, from its start at 2 s, then fades in.
+    let i = f.show.cue_index(f.c).unwrap();
+    let m = f.show.cues[i].kind.media_mut().unwrap();
+    let k = |t, v| Keyframe {
+        t,
+        v,
+        curve: Default::default(),
+    };
+    m.motion.opacity = Some(Animated {
+        value: 1.0,
+        keys: vec![k(0.0, 0.0), k(1.5, 0.0), k(2.5, 1.0)],
+    });
+    let mut mouse = Mouse::new();
+    let waiting = |mouse: &Mouse| {
+        mouse
+            .ctx
+            .data_mut(|d| {
+                d.remove_temp::<Vec<CueId>>(egui::Id::new(("timeline_waiting", Host::Pane)))
+            })
+            .unwrap_or_default()
+    };
+    // Stopped: drawn with its lead-in, but nobody is waiting on it.
+    mouse.frame(&mut f.show, &mut f.st, vec![]);
+    assert!(waiting(&mouse).is_empty());
+    mouse.e.timeline_run(&f.show, key);
+    for _ in 0..25 {
+        mouse.e.tick(&f.show, 0.1);
+    }
+    assert_eq!(mouse.e.timeline_waiting(key), vec![f.c]);
+    waiting(&mouse);
+    mouse.frame(&mut f.show, &mut f.st, vec![]);
+    assert!(waiting(&mouse).contains(&f.c));
+}
+
+#[test]
 fn show_mode_refuses_edit_drags_and_keeps_the_transport() {
     let mut f = fixture();
     let key = TimelineKey::Group(f.group);
