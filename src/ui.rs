@@ -2123,6 +2123,25 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
     });
 }
 
+/// The display a cue's picture is on, and how many more it is on too:
+/// "Display 1 +2".
+fn outputs_text(show: &Show, m: &MediaCue) -> String {
+    let home = m
+        .output
+        .and_then(|o| show.output(o))
+        .map_or("no output", |o| o.name.as_str());
+    let more = m
+        .also_on
+        .iter()
+        .filter(|o| Some(**o) != m.output && show.output(**o).is_some())
+        .count();
+    if more == 0 {
+        home.to_string()
+    } else {
+        format!("{home} +{more}")
+    }
+}
+
 pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
     match &c.kind {
         CueKind::LiveAudio(a) => {
@@ -2142,11 +2161,7 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "(no file)".into());
-            let out = m
-                .output
-                .and_then(|o| show.output(o))
-                .map(|o| o.name.as_str())
-                .unwrap_or("no output");
+            let out = outputs_text(show, m);
             if m.layer == 0 {
                 format!("{file}  »  {out}")
             } else {
@@ -2189,21 +2204,11 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             } else {
                 ""
             };
-            let out = t
-                .media
-                .output
-                .and_then(|o| show.output(o))
-                .map(|o| o.name.as_str())
-                .unwrap_or("no output");
+            let out = outputs_text(show, &t.media);
             format!("“{first}{more}”  »  {out}")
         }
         CueKind::Shape(s) => {
-            let out = s
-                .media
-                .output
-                .and_then(|o| show.output(o))
-                .map(|o| o.name.as_str())
-                .unwrap_or("no output");
+            let out = outputs_text(show, &s.media);
             let layer = if s.media.layer == 0 {
                 String::new()
             } else {
@@ -2221,12 +2226,7 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             } else {
                 device_label(&cam.device)
             };
-            let out = cam
-                .media
-                .output
-                .and_then(|o| show.output(o))
-                .map(|o| o.name.as_str())
-                .unwrap_or("no output");
+            let out = outputs_text(show, &cam.media);
             format!("{device}  »  {out}")
         }
         CueKind::Group(g) if g.slides.is_some() => {
@@ -7710,6 +7710,39 @@ fn media_inspector(
                         }
                     });
                 ui.end_row();
+                // Its home display is never one of the others.
+                if m.also_on.iter().any(|o| Some(*o) == m.output) {
+                    m.also_on.retain(|o| Some(*o) != m.output);
+                }
+                if outputs.len() > 1 {
+                    ui.label("Also on");
+                    ui.horizontal_wrapped(|ui| {
+                        #[cfg(test)]
+                        timeline::note_row(ui, "also_on");
+                        for (id, name) in outputs.iter().filter(|o| Some(o.0) != m.output) {
+                            let mut on = m.also_on.contains(id);
+                            let r = ui.checkbox(&mut on, name).on_hover_text(
+                                "Show this cue on that display too: the same picture, with the \
+                                 same effects, geometry and keyframes, on the same layer",
+                            );
+                            #[cfg(test)]
+                            ui.data_mut(|d| {
+                                d.get_temp_mut_or_default::<Vec<(OutputId, egui::Rect)>>(
+                                    egui::Id::new("also_on_boxes"),
+                                )
+                                .push((*id, r.rect))
+                            });
+                            if r.changed() {
+                                if on {
+                                    m.also_on.push(*id);
+                                } else {
+                                    m.also_on.retain(|o| o != id);
+                                }
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
                 ui.label("Layer");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut m.layer).range(-1000..=1000))

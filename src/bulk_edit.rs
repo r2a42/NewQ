@@ -17,7 +17,7 @@
 //!   part of it, and those of a video, picture or sound are the cue itself,
 //!   so they are matched up.
 
-use crate::show::{ColorAdjust, Cue, LayerTransform, Motion};
+use crate::show::{ColorAdjust, Cue, CueKind, LayerTransform, Motion};
 use serde_json::Value;
 
 /// Fields that make a cue its own: they are never copied to the others.
@@ -45,6 +45,11 @@ const OWN_IN_KIND: &[&str] = &[
 /// Of those, the ones that hold more than a value (`{"Group": 4}`, a list of
 /// clips, a timeline's markers): nothing inside them is spread either.
 const OWN_WHOLE_IN_KIND: &[&str] = &["timeline", "at", "clips"];
+
+/// Lists that are spread whole, as one setting: the displays a picture is also
+/// on (`also_on`) are a choice like its display, not items to match up. (The
+/// cue's own display is taken out of them where they land: `tidy`.)
+const WHOLE: &[&str] = &["also_on"];
 
 /// Playback settings that mean something different in each sort of cue (a
 /// picture's hold time is a video's out point): made only in cues of the same
@@ -101,6 +106,13 @@ fn changes(before: &Value, after: &Value, path: &mut Path, out: &mut Vec<(Path, 
         (Value::Object(a), Value::Object(b)) => {
             for (k, new) in b {
                 path.push(k.clone());
+                if WHOLE.contains(&k.as_str()) {
+                    if a.get(k) != Some(new) {
+                        out.push((path.clone(), Some(new.clone())));
+                    }
+                    path.pop();
+                    continue;
+                }
                 match a.get(k) {
                     Some(old) => changes(old, new, path, out),
                     None => match default_object(k).filter(|_| new.is_object()) {
@@ -117,6 +129,12 @@ fn changes(before: &Value, after: &Value, path: &mut Path, out: &mut Vec<(Path, 
             }
             for (k, old) in a.iter().filter(|(k, _)| !b.contains_key(*k)) {
                 path.push(k.clone());
+                if WHOLE.contains(&k.as_str()) {
+                    // Emptied: left out of the file.
+                    out.push((path.clone(), None));
+                    path.pop();
+                    continue;
+                }
                 match default_object(k).filter(|_| old.is_object()) {
                     Some(default) => changes(old, &default, path, out),
                     // A list that became empty has shrunk: not spread either.
@@ -339,7 +357,23 @@ impl Change {
         if !any || value == before {
             return None;
         }
-        serde_json::from_value(value).ok()
+        let mut cue: Cue = serde_json::from_value(value).ok()?;
+        tidy(&mut cue);
+        (serde_json::to_value(&cue).ok()? != before).then_some(cue)
+    }
+}
+
+/// What a whole list spread into a cue must not leave: its own display among
+/// the displays it is also on, or other displays on a cue with no picture.
+fn tidy(cue: &mut Cue) {
+    let pictureless = matches!(cue.kind, CueKind::Audio(_) | CueKind::LiveAudio(_));
+    if let Some(m) = cue.kind.media_mut() {
+        if pictureless {
+            m.also_on.clear();
+        } else {
+            let home = m.output;
+            m.also_on.retain(|o| Some(*o) != home);
+        }
     }
 }
 
@@ -668,6 +702,47 @@ mod tests {
                 .unwrap()
                 .end,
             Some(5.0)
+        );
+    }
+
+    #[test]
+    fn the_displays_a_picture_is_also_on_spread_whole_but_never_onto_its_own() {
+        let mut show = Show::default();
+        let d1 = show.outputs[0].id;
+        let d2 = show.add_display();
+        let d3 = show.add_display();
+        let pic = |show: &mut Show, home: OutputId| {
+            let mut c = show.make_cue(CueType::Image, None, 0);
+            c.kind.media_mut().unwrap().output = Some(home);
+            c
+        };
+        let before = pic(&mut show, d1);
+        let mut after = before.clone();
+        after.kind.media_mut().unwrap().also_on = vec![d2, d3];
+        let also = |c: &Cue| c.kind.media().unwrap().also_on.clone();
+        // Onto a picture at home on display 3: the whole list, less its own.
+        let other = pic(&mut show, d3);
+        let got = spread(&before, &after, &other).expect("spread");
+        assert_eq!(also(&got), vec![d2]);
+        // Onto one at home on display 1, as it was ticked.
+        let same = pic(&mut show, d1);
+        assert_eq!(also(&spread(&before, &after, &same).unwrap()), vec![d2, d3]);
+        // A text cue (its settings are in `media`) takes it too; a sound doesn't.
+        let mut text = show.make_cue(CueType::Text, None, 0);
+        text.kind.media_mut().unwrap().output = Some(d1);
+        assert_eq!(also(&spread(&before, &after, &text).unwrap()), vec![d2, d3]);
+        let sound = show.make_cue(CueType::Audio, None, 0);
+        assert!(spread(&before, &after, &sound).is_none());
+        // Emptying it empties the others.
+        let mut both = same.clone();
+        both.kind.media_mut().unwrap().also_on = vec![d2];
+        assert!(also(&spread(&after, &before, &both).unwrap()).is_empty());
+        // Changed one display for another (same length): the whole list again.
+        let mut swapped = after.clone();
+        swapped.kind.media_mut().unwrap().also_on = vec![d3, d2];
+        assert_eq!(
+            also(&spread(&after, &swapped, &same).unwrap()),
+            vec![d3, d2]
         );
     }
 }
