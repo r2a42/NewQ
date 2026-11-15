@@ -90,6 +90,15 @@ fn tidy(m: &Mouse) {
     let chips = chips(m);
     for (i, a) in labels.iter().enumerate() {
         if a.whole {
+            // A whole name on top: the names it would cover give way.
+            for b in labels.iter().filter(|b| !b.whole) {
+                assert!(
+                    !a.rect.expand2(vec2(3.0, 1.0)).intersects(b.rect),
+                    "{:?} shows under {:?}",
+                    b.text,
+                    a.text
+                );
+            }
             continue;
         }
         assert!(a.rect.width() >= MIN_LABEL_W - 0.5 || !a.cut);
@@ -156,6 +165,7 @@ fn the_hovered_and_the_picked_names_are_drawn_whole() {
     m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(at)]);
     m.frame(&mut f.show, &mut f.st, vec![]);
     let l = labels(&m);
+    tidy(&m);
     let hovered = l.iter().find(|l| l.id == spread[1]).expect("drawn");
     assert!(hovered.whole && !hovered.cut && hovered.text == name_of(&f.show, spread[1]));
     // Picked: the same, with the pointer elsewhere.

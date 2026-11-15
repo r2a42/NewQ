@@ -429,6 +429,16 @@ fn cue_labels(ui: &Ui, p: &egui::Painter, host: Host, labels: &[CueLabel]) {
     let _ = host;
     let bg = ui.visuals().extreme_bg_color;
     let edge = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let back_of = |rect: Rect| rect.expand2(vec2(3.0, 1.0));
+    // Where the whole ones go: the names they would cover give way.
+    let covers: Vec<Rect> = labels
+        .iter()
+        .filter(|l| l.whole)
+        .map(|l| {
+            let g = p.layout_no_wrap(l.text.clone(), FontId::proportional(LABEL_FONT), l.color);
+            back_of(egui::Align2::LEFT_CENTER.anchor_size(l.at, g.size()))
+        })
+        .collect();
     for whole in [false, true] {
         for l in labels.iter().filter(|l| l.whole == whole) {
             let galley = if whole {
@@ -440,8 +450,11 @@ fn cue_labels(ui: &Ui, p: &egui::Painter, host: Host, labels: &[CueLabel]) {
                 continue;
             };
             let rect = egui::Align2::LEFT_CENTER.anchor_size(l.at, galley.size());
+            if !whole && covers.iter().any(|c| c.intersects(rect)) {
+                continue;
+            }
             if whole {
-                let back = rect.expand2(vec2(3.0, 1.0));
+                let back = back_of(rect);
                 p.rect_filled(back, 3.0, bg.gamma_multiply(0.94));
                 p.rect_stroke(back, 3.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
             }
