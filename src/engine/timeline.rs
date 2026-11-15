@@ -86,6 +86,12 @@ const MAX_JUMPS: u32 = 8;
 /// A clip that starts no later than this after the end of the one before it on
 /// its track abuts it: the one before is kept up until it comes in.
 const JOIN_GAP: f64 = 0.05;
+
+/// Where a seek to the start of a timeline goes: a seek to exactly 0 is "from
+/// the top" and parks with nothing up (`timeline_seek`), so the editor's ruler
+/// and a remote's jump ask for a hair past it, which shows the first frame
+/// (more than "the same time", less than a frame).
+pub const FIRST_FRAME: f64 = 0.001;
 /// A video that holds its last frame, started at its end, is started this long
 /// before it so that it has a frame to hold.
 const LAST_FRAME: f64 = 0.2;

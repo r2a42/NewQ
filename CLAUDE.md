@@ -36,7 +36,7 @@ The README describes the features; this file is about working on the code.
   (`ActiveCue::ends_at`, `run_out` when its content runs out first; a detached clip set to Loop goes
   round, `timeline_go_round`); a seek cues for up to `CUE_LIMIT` while running, else parks (paused,
   picture on the outputs; a seek to exactly 0 parks with nothing up, so the editor seeks to
-  `ui::timeline::FIRST_FRAME`; `Run::parked`, `RunView.parked`); the picture changes all at once
+  `engine::FIRST_FRAME`, as a remote's jump does; `Run::parked`, `RunView.parked`); the picture changes all at once
   (`Run::outgoing`, `timeline_unseen`, `timeline_settle`; clips alive on both sides are jumped in place,
   `timeline_carry`); jumps are got ready ahead (`timeline_jump_wanted`, `Prepared::fits`); overlaps
   crossfade (`timeline_overlap`, `ActiveCue::crossed_by`) and abutting pictures are held over the join
@@ -282,8 +282,9 @@ The README describes the features; this file is about working on the code.
   Two "Timeline" parts (`timeline_parts`; `Obs::clocks` from `Engine::timeline_clock`, checks `ClockStill`,
   `Frozen`, `Live`, `Never`, `Later`) cover the four timeline actions, both pause kinds (the camera held
   with `freeze_live`), an overlap and a GO-timed crossfade, a jump to a marker and a lead-in; a test
-  plays just them through an engine (about 25 s). The timeline actions stay out of `ControlAction::ALL`
-  (the inspector would list them twice); the plan test checks `ALL` and `TIMELINE` are used. A problem
+  plays just them through an engine (about 25 s). `ControlAction::ALL` is every action (the
+  timeline ones, `TIMELINE`, last; the inspector's menu draws a line before them); the plan test checks
+  each is used. A problem
   the engine reports in a part (`Engine::take_problems`) fails it unless the part expects it. The copy has
   `own_layers` on (an old show's off makes cues in a together group replace each other: that is tested
   behaviour, not a fault), no streams, no OSC feedback. `full.rs` does what needs the app: `Ask::RecordOn`
@@ -350,8 +351,10 @@ The README describes the features; this file is about working on the code.
 - `src/remote.rs`: OSC and MIDI. Timelines: `/timeline/<name>/<verb>[/<place>]` parses to
   `Command::Timeline { timeline, does: TimelineDo }` (`timeline_command`, shared with the web
   remote's paths; a place is `Place::Time`/`Marker`, from the first argument, `OscValue`, or a fourth
-  part); `run_timeline` (called by `ui::run_remote`) finds it (`find_timeline`: a timeline list's name,
-  squashed, then a timeline group's cue number, then `#<id>`/`list:<n>`) and calls the engine
+  part); `run_timeline` (called by `ui::run_remote`) finds it (`find_timeline`: a reference `list:<n>`/`#<id>`/
+  `cue_id:<id>` first, then of `timelines_named` a list (first tab) before a group (worked list, main,
+  any); a shared name is said in the status bar; feedback's `timeline_address` falls back to the
+  reference where a name isn't one timeline's alone) and calls the engine
   (`timeline_go_one`, `timeline_continue`, `timeline_leave`, `timeline_run_from`, `timeline_seek`, a
   stop with `TIMELINE_STOP_FADE`). `remote::fixtures` is a timeline show for tests (here, feedback,
   web, ui). `src/text.rs`: text cue rendering.

@@ -374,7 +374,9 @@ stays on the computer until you send it yourself.
   while it runs, pauses or fades out) `/newq/timeline/<list name|group's cue
   number>/state` (`stopped`, `stopping`, `at_end`, `cueing`, `running`, `looping`,
   `last_pass`, `paused` or `parked`) and `/newq/timeline/<…>/position` (seconds, in
-  tenths); spaces in a name become `_`. At most ten times a second and only what
+  tenths); spaces in a name become `_`, and a name that another timeline has too
+  (two lists called the same, or a list named like a group's number) is replaced by
+  `list:<id>` or `cue_id:<id>`, so no two timelines share an address. At most ten times a second and only what
   changed, with everything repeated every five seconds so a controller started late
   catches up. For TouchOSC pages, tally lights and other desks. (Only tested here
   against a loopback listener, not a real controller.)
@@ -815,7 +817,8 @@ stays on the computer until you send it yourself.
   `POST /api/timeline/<timeline>/run|go|pause|resume|stop|hardstop|leave_loop` and
   `…/jump/<seconds or marker>` (also `…/run/<place>` and `…/stop/<fade seconds>`),
   where the timeline is a timeline list's name, a timeline group's cue number, or
-  the `ref` the state gives each one (`list:<id>`, `#<cue id>`).
+  the `ref` the state gives each one (`list:<id>`, `#<cue id>`; `cue_id:<id>` works
+  too), as over OSC.
 - **Hotkeys, MIDI notes and the cart:** give a cue its own key in its
   inspector (click *Hotkey*, then press a letter, digit or F-key; P and A are
   taken by the transport). Pressing the key fires just that cue, like the
@@ -863,9 +866,12 @@ stays on the computer until you send it yourself.
     (NewQ doesn't send QLab's replies and updates, so a button can fire a cue
     but won't show its state; *OSC feedback* below sends NewQ's own.)
   - *Timelines over OSC*: `/timeline/<timeline>/…`, where the timeline is a
-    timeline list's name (case doesn't count, and `_` stands for a space) or a
-    timeline group's cue number (in the list being worked first, then the main
-    list), with:
+    timeline list's name (case doesn't count, and `_` stands for a space), a
+    timeline group's cue number, or a reference that can't be mistaken:
+    `list:<id>` or `cue_id:<id>` (the group's own id). Where two timelines answer
+    to one name, a list wins over a group, the first tab over a later one, and a
+    group in the list being worked over one in the main list over any other; the
+    status bar says so each time, with the reference to send instead. Commands:
 
     | Address | Does |
     |---|---|

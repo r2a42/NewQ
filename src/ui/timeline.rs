@@ -614,12 +614,8 @@ impl TimelineAction {
 /// exactly 0 as "from the top" and parks with nothing up; the operator who
 /// clicks the very start wants its first frame, so a hair past it.
 fn seek_to(pos: f64) -> f64 {
-    pos.max(FIRST_FRAME)
+    pos.max(crate::engine::FIRST_FRAME)
 }
-
-/// How far past 0 a seek to the start goes (`seek_to`): more than the engine's
-/// "same time", less than a frame.
-const FIRST_FRAME: f64 = 0.001;
 
 /// Make what the editor asked for. (`ui::apply` has already refused an edit
 /// in show mode or during a test.)

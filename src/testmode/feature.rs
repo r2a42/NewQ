@@ -3552,10 +3552,7 @@ mod tests {
             "no microphone is opened"
         );
         // Every control action is used, the timeline ones too.
-        for action in ControlAction::ALL
-            .into_iter()
-            .chain(ControlAction::TIMELINE)
-        {
+        for action in ControlAction::ALL {
             assert!(
                 has(&|k| matches!(k, CueKind::Control(c) if c.action == action)),
                 "{action:?}"

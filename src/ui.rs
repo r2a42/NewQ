@@ -7536,12 +7536,11 @@ fn inspector_one(
                             .selected_text(c.action.label())
                             .show_ui(ui, |ui| {
                                 for a in ControlAction::ALL {
-                                    ui.selectable_value(&mut c.action, a, a.label())
-                                        .on_hover_text(a.description());
-                                }
-                                // The timeline actions act on a timeline, not a cue.
-                                ui.separator();
-                                for a in ControlAction::TIMELINE {
+                                    // The timeline actions act on a timeline,
+                                    // not a cue: a line before them.
+                                    if a == ControlAction::TIMELINE[0] {
+                                        ui.separator();
+                                    }
                                     ui.selectable_value(&mut c.action, a, a.label())
                                         .on_hover_text(a.description());
                                 }

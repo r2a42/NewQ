@@ -2307,7 +2307,10 @@ pub enum ControlAction {
 }
 
 impl ControlAction {
-    pub const ALL: [ControlAction; 10] = [
+    /// Every action, as the cue inspector offers them: those on a cue, then
+    /// those on a timeline (`TIMELINE`, the inspector's menu puts a line
+    /// between). Test Mode's full check uses each.
+    pub const ALL: [ControlAction; 14] = [
         ControlAction::Start,
         ControlAction::Pause,
         ControlAction::Resume,
@@ -2318,10 +2321,13 @@ impl ControlAction {
         ControlAction::Disarm,
         ControlAction::Devamp,
         ControlAction::Memo,
+        ControlAction::TimelineRun,
+        ControlAction::TimelinePause,
+        ControlAction::TimelineStop,
+        ControlAction::TimelineJump,
     ];
 
-    /// The actions on a timeline. (Not yet in `ALL`, which the cue inspector
-    /// offers and Test Mode's full check covers one by one.)
+    /// The actions on a timeline (the end of `ALL`).
     pub const TIMELINE: [ControlAction; 4] = [
         ControlAction::TimelineRun,
         ControlAction::TimelinePause,
@@ -8073,16 +8079,50 @@ mod tests {
     }
 
     #[test]
-    fn the_timeline_actions_need_no_cue_and_are_not_offered_yet() {
-        for a in ControlAction::TIMELINE {
-            assert!(a.is_timeline() && !a.needs_target());
-            assert!(!ControlAction::ALL.contains(&a), "{a:?} is in ALL");
+    fn every_action_is_in_all_once_with_the_timeline_ones_last() {
+        let n = ControlAction::ALL.len();
+        for (i, a) in ControlAction::ALL.into_iter().enumerate() {
+            assert_eq!(
+                ControlAction::ALL.iter().filter(|b| **b == a).count(),
+                1,
+                "{a:?}"
+            );
+            // The timeline ones are the last four, in TIMELINE's order.
+            assert_eq!(
+                a.is_timeline(),
+                i >= n - ControlAction::TIMELINE.len(),
+                "{a:?}"
+            );
             assert!(!a.label().is_empty() && !a.description().is_empty());
             let json = serde_json::to_string(&a).unwrap();
             assert_eq!(serde_json::from_str::<ControlAction>(&json).unwrap(), a);
         }
+        assert_eq!(
+            ControlAction::ALL[n - ControlAction::TIMELINE.len()..],
+            ControlAction::TIMELINE
+        );
+        for a in ControlAction::TIMELINE {
+            assert!(a.is_timeline() && !a.needs_target());
+        }
+        // Every variant: a new one must be added to ALL (the match fails to
+        // compile without its arm here).
         for a in ControlAction::ALL {
-            assert!(!a.is_timeline());
+            match a {
+                ControlAction::Start
+                | ControlAction::Pause
+                | ControlAction::Resume
+                | ControlAction::Load
+                | ControlAction::Reset
+                | ControlAction::GoTo
+                | ControlAction::Arm
+                | ControlAction::Disarm
+                | ControlAction::Devamp
+                | ControlAction::Memo
+                | ControlAction::TimelineRun
+                | ControlAction::TimelinePause
+                | ControlAction::TimelineStop
+                | ControlAction::TimelineJump => {}
+            }
         }
         assert!(ControlAction::Pause.needs_target());
     }

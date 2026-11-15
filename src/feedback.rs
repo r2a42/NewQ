@@ -142,7 +142,8 @@ pub fn snapshot(show: &Show, engine: &mut Engine) -> Snapshot {
     let mut timelines = BTreeMap::new();
     for key in timelines_to_tell(show, engine) {
         let v = engine.timeline(show, key);
-        let name = part(&crate::remote::timeline_name(show, key));
+        // Its name, or its reference where the name is another's too.
+        let name = crate::remote::timeline_address(show, key);
         timelines.insert(name, (state_word(&v), (v.pos * 10.0).round() as i64));
     }
     let engine = &*engine;
@@ -589,6 +590,26 @@ mod tests {
             "/newq/timeline/Act_1/position",
         ] {
             assert!(addresses(&r).contains(&a), "{a}");
+        }
+    }
+
+    #[test]
+    fn timelines_that_share_a_name_are_told_at_addresses_of_their_own() {
+        use crate::remote::fixtures;
+        let (mut show, l, _) = fixtures::show();
+        let l2 = show.add_list("Act 1");
+        crate::timeline::edit::set_list_timeline(&mut show, l2, true).unwrap();
+        let mut e = fixtures::engine(&show);
+        let snap = snapshot(&show, &mut e);
+        let names: Vec<&String> = snap.timelines.keys().collect();
+        assert_eq!(names, vec![&format!("list:{l}"), &format!("list:{l2}")]);
+        let m = changes(None, &snap);
+        for n in [l, l2] {
+            assert!(
+                addresses(&m).contains(&format!("/newq/timeline/list:{n}/state").as_str()),
+                "{:?}",
+                addresses(&m)
+            );
         }
     }
 

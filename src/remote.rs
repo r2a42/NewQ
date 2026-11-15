@@ -347,43 +347,67 @@ fn squash(s: &str) -> String {
         .to_lowercase()
 }
 
-/// The timeline a remote means by `name`: a timeline list of that name, else
-/// the timeline group with that cue number (in the list being worked first,
-/// then the main list, then any), else `#<id>` (a timeline group's own id) or
-/// `list:<n>` (a timeline list by its id), the forms the web remote uses.
-pub fn find_timeline(show: &Show, active_list: u32, name: &str) -> Option<TimelineKey> {
-    let wanted = squash(name);
-    if wanted.is_empty() {
-        return None;
-    }
-    if let Some(l) = show
-        .lists
-        .iter()
-        .find(|l| squash(&l.name) == wanted && model::is_timeline(show, TimelineKey::List(l.id)))
-    {
-        return Some(TimelineKey::List(l.id));
-    }
-    let groups = |list: Option<u32>| {
-        show.cues
-            .iter()
-            .filter(|c| list.is_none_or(|l| c.list == l))
-            .find(|c| {
-                c.number.trim() == name.trim() && model::is_timeline(show, TimelineKey::Group(c.id))
-            })
-            .map(|c| TimelineKey::Group(c.id))
-    };
-    if let Some(k) = groups(Some(active_list))
-        .or_else(|| groups(Some(0)))
-        .or_else(|| groups(None))
-    {
-        return Some(k);
-    }
-    let key = if let Some(id) = name.trim().strip_prefix('#') {
+/// A timeline named by its reference rather than its name: `list:<id>` (a
+/// timeline list), `#<id>` or `cue_id:<id>` (a timeline group's own cue id).
+/// These never clash, so they are what feedback falls back to.
+fn by_reference(show: &Show, name: &str) -> Option<TimelineKey> {
+    let s = squash(name);
+    let key = if let Some(id) = s.strip_prefix('#').or_else(|| s.strip_prefix("cue_id:")) {
         TimelineKey::Group(CueId(id.parse().ok()?))
     } else {
-        TimelineKey::List(wanted.strip_prefix("list:")?.parse().ok()?)
+        TimelineKey::List(s.strip_prefix("list:")?.parse().ok()?)
     };
     model::is_timeline(show, key).then_some(key)
+}
+
+/// Every timeline that answers to `name` (case and space/underscore aside):
+/// the timeline lists of that name in the tabs' order, then the timeline
+/// groups with that cue number in the cue list's order.
+pub fn timelines_named(show: &Show, name: &str) -> Vec<TimelineKey> {
+    let wanted = squash(name);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let lists = show
+        .lists
+        .iter()
+        .filter(|l| squash(&l.name) == wanted)
+        .map(|l| TimelineKey::List(l.id));
+    let groups = show
+        .cues
+        .iter()
+        .filter(|c| squash(&c.number) == wanted)
+        .map(|c| TimelineKey::Group(c.id));
+    lists
+        .chain(groups)
+        .filter(|k| model::is_timeline(show, *k))
+        .collect()
+}
+
+/// The timeline a remote means by `name`. A reference (`list:<id>`, `#<id>`,
+/// `cue_id:<id>`) first; else, of the timelines that answer to the name
+/// (`timelines_named`), a list before a group (the first tab), and a group in
+/// the list being worked before one in the main list before any other. So a
+/// name two timelines share always means the same one while the show and the
+/// worked list stay as they are; `run_timeline` says so in the log.
+pub fn find_timeline(show: &Show, active_list: u32, name: &str) -> Option<TimelineKey> {
+    if let Some(k) = by_reference(show, name) {
+        return Some(k);
+    }
+    let named = timelines_named(show, name);
+    let in_list = |list: u32| {
+        named.iter().copied().find(|k| match k {
+            TimelineKey::Group(id) => show.cue(*id).is_some_and(|c| c.list == list),
+            TimelineKey::List(_) => false,
+        })
+    };
+    named
+        .iter()
+        .copied()
+        .find(|k| matches!(k, TimelineKey::List(_)))
+        .or_else(|| in_list(active_list))
+        .or_else(|| in_list(0))
+        .or_else(|| named.first().copied())
 }
 
 /// How a remote names a timeline in what it is told (OSC feedback, the web
@@ -392,6 +416,41 @@ pub fn timeline_name(show: &Show, key: TimelineKey) -> String {
     match key {
         TimelineKey::List(n) => show.list_name(n),
         TimelineKey::Group(id) => show.cue(id).map_or_else(String::new, |c| c.number.clone()),
+    }
+}
+
+/// A timeline's reference, which no name can clash with.
+fn timeline_address_ref(key: TimelineKey) -> String {
+    match key {
+        TimelineKey::List(n) => format!("list:{n}"),
+        TimelineKey::Group(id) => format!("cue_id:{}", id.0),
+    }
+}
+
+/// The timeline's part of an OSC address (`/newq/timeline/<this>/…`): its name
+/// (`timeline_name`, with what an address can't hold made `_`) when that names
+/// it and nothing else, else its reference: `list:<id>` or `cue_id:<id>`. So
+/// two timelines never share an address, and a command sent to the address
+/// fed back reaches the one it came from.
+pub fn timeline_address(show: &Show, key: TimelineKey) -> String {
+    let name: String = timeline_name(show, key)
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || "/#*,?[]{}".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let clear = !name.is_empty()
+        && by_reference(show, &name).is_none()
+        && timelines_named(show, &name) == [key];
+    if clear {
+        name
+    } else {
+        timeline_address_ref(key)
     }
 }
 
@@ -411,10 +470,6 @@ pub fn place_time(show: &Show, key: TimelineKey, place: &Place) -> Option<f64> {
     }
 }
 
-/// The time a remote's seek goes to: a seek to exactly 0 parks with nothing up
-/// (`timeline_seek`), so the first frame is asked for, as the editor's ruler does.
-const FIRST_FRAME: f64 = 0.001;
-
 /// Do what a remote asks of the timeline it names; the log says when there is
 /// no such timeline or place, or nothing to do.
 pub fn run_timeline(show: &Show, engine: &mut Engine, timeline: &str, does: &TimelineDo) {
@@ -422,6 +477,17 @@ pub fn run_timeline(show: &Show, engine: &mut Engine, timeline: &str, does: &Tim
         engine.log(format!("Remote: there is no timeline “{timeline}”"));
         return;
     };
+    let named = timelines_named(show, timeline);
+    if named.len() > 1 && by_reference(show, timeline).is_none() {
+        engine.problem(format!(
+            "Remote: {} timelines are called “{timeline}”; this went to {} ({}). \
+             Rename one, or send {} to be sure",
+            named.len(),
+            model::name(show, key),
+            timeline_address_ref(key),
+            timeline_address_ref(key),
+        ));
+    }
     let place = |p: &Place, engine: &mut Engine| {
         let t = place_time(show, key, p);
         if t.is_none()
@@ -461,7 +527,8 @@ pub fn run_timeline(show: &Show, engine: &mut Engine, timeline: &str, does: &Tim
         }
         TimelineDo::Jump(p) => {
             if let Some(t) = place(p, engine) {
-                engine.timeline_seek(show, key, t.max(FIRST_FRAME), true);
+                // As the editor's ruler: the very start shows its first frame.
+                engine.timeline_seek(show, key, t.max(crate::engine::FIRST_FRAME), true);
             }
         }
         TimelineDo::LeaveLoop => engine.timeline_leave(show, key),
@@ -939,6 +1006,7 @@ pub mod fixtures {
 mod tests {
     use super::*;
     use crate::engine::RunState;
+    use crate::timeline::edit;
 
     /// An OSC message with the given address and no arguments.
     fn osc(address: &str) -> Vec<u8> {
@@ -1421,6 +1489,82 @@ mod tests {
             );
         }
         assert_eq!(Place::parse("  "), None);
+    }
+
+    #[test]
+    fn names_two_timelines_share_resolve_one_way_and_feedback_addresses_stay_apart() {
+        let (mut show, l, g) = fixtures::show();
+        let list = TimelineKey::List(l);
+        let group = TimelineKey::Group(g);
+        // Alone, each keeps its name.
+        assert_eq!(timeline_address(&show, list), "Act_1");
+        assert_eq!(timeline_address(&show, group), "5");
+        // A second timeline list "act 1", and a timeline list named "5" like
+        // the group's number.
+        let l2 = show.add_list("act 1");
+        edit::set_list_timeline(&mut show, l2, true).unwrap();
+        let l5 = show.add_list("5");
+        edit::set_list_timeline(&mut show, l5, true).unwrap();
+        let (list2, list5) = (TimelineKey::List(l2), TimelineKey::List(l5));
+        assert_eq!(timelines_named(&show, "Act_1"), vec![list, list2]);
+        assert_eq!(timelines_named(&show, "5"), vec![list5, group]);
+        // The rule: a list before a group, the first tab first, whichever list
+        // is worked.
+        for worked in [0, l, l2, l5] {
+            assert_eq!(find_timeline(&show, worked, "ACT_1"), Some(list));
+            assert_eq!(find_timeline(&show, worked, "5"), Some(list5));
+        }
+        // Each one's address is its reference now, and finds it.
+        let all = [list, list2, list5, group];
+        let addresses: Vec<String> = all.iter().map(|k| timeline_address(&show, *k)).collect();
+        assert_eq!(
+            addresses,
+            vec![
+                format!("list:{l}"),
+                format!("list:{l2}"),
+                format!("list:{l5}"),
+                format!("cue_id:{}", g.0)
+            ]
+        );
+        for (k, a) in all.iter().zip(&addresses) {
+            assert_eq!(find_timeline(&show, 0, a), Some(*k), "{a}");
+            assert!(!a.contains(['#', ' ', '/']), "{a} in an OSC address");
+        }
+        assert_eq!(find_timeline(&show, 0, &format!("#{}", g.0)), Some(group));
+        // A list named like a reference doesn't take the reference over.
+        let tricky = show.add_list(&format!("list:{l}"));
+        edit::set_list_timeline(&mut show, tricky, true).unwrap();
+        assert_eq!(find_timeline(&show, 0, &format!("list:{l}")), Some(list));
+        assert_eq!(
+            timeline_address(&show, TimelineKey::List(tricky)),
+            format!("list:{tricky}")
+        );
+        // A command by a shared name says which it went to.
+        let mut e = fixtures::engine(&show);
+        run_timeline(&show, &mut e, "5", &TimelineDo::Stop(Some(0.0)));
+        let said: Vec<String> = e.messages.iter().map(|m| m.1.clone()).collect();
+        let said = said.join("\n");
+        assert!(said.contains("2 timelines are called “5”"), "{said}");
+        assert!(said.contains(&format!("list:{l5}")), "{said}");
+        let n = e.messages.len();
+        run_timeline(
+            &show,
+            &mut e,
+            &format!("cue_id:{}", g.0),
+            &TimelineDo::Stop(Some(0.0)),
+        );
+        assert!(
+            !e.messages
+                .iter()
+                .skip(n)
+                .any(|m| m.1.contains("are called")),
+            "a reference is never ambiguous"
+        );
+        // Renamed apart, the names come back.
+        let i = show.lists.iter().position(|x| x.id == l2).unwrap();
+        show.lists[i].name = "Act 2".into();
+        assert_eq!(timeline_address(&show, list), "Act_1");
+        assert_eq!(timeline_address(&show, list2), "Act_2");
     }
 
     #[test]

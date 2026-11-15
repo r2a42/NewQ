@@ -5,7 +5,7 @@ mod displays;
 mod timeline;
 
 // For the timeline editor, which names a run's state (`ui/timeline.rs`).
-pub use timeline::{RunState, RunView, TimelineGo};
+pub use timeline::{FIRST_FRAME, RunState, RunView, TimelineGo};
 
 use crate::clock::{ClockFollower, TimeOfDay};
 use crate::fx::VideoFx;
