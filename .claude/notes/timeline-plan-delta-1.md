@@ -697,3 +697,62 @@ Still to know (not I1b's):
 - The Stop cue's "Fade out" row is below the fold of the classic inspector with the Timeline pane open
   (as N said for the timeline rows); scroll the inspector.
 - The matte's `REVEAL_TIMEOUT` still counts real time (O).
+
+## Q. What P9 landed (a cue on several displays)
+
+Commits "Displays: a picture on several displays, replaced on each alone" (engine, chase, one helper in
+`show.rs`) and "Docs: what P9 landed". No show-file change (`also_on` was stored since P0).
+
+As built (owner's ruling E2, not A4's "replaced everywhere"):
+- `MediaCue::displays(show)`: the home (`output`), then each of `also_on` the show has; one that is the
+  home or listed twice counts once, one the show lacks is ignored. Every reader goes through it.
+- `ActiveCue::screens: Vec<displays::Screen>` (`src/engine/displays.rs`): per display `{ output, exit:
+  Option<Param>, gone }`, set at start for a picture and for a dip's matte, kept in step with the show each
+  tick (`displays::sync`, next to `v.output = m.output`), so editing `also_on` while it plays adds and drops
+  a display at once; a display it was replaced on stays gone while it is listed. Empty: `output()` alone.
+- `Engine::layers(output)` reads `level_on(output)`: the cue's opacity times its exit level there.
+- `apply_entry(instance, e)` (the `output` parameter is gone): what enters replaces on *its own* displays
+  (`showing()`), per cue `o`: `cut_from` (a cut, a dip's reveal) and `crossfade_from`. Off all of `o`'s
+  displays (and leaving none alone), it is removed or `fade_out_and_stop`ped exactly as before, so a cue
+  on one display behaves as it always did. Off some: those are gone (cut) or get an exit ramp 1 -> 0 over
+  the crossfade, tagged to the entering clip's run like every other ramp (`Param::follow`), stepped in
+  `tick` while the show isn't paused (a control cue's hold of the cue doesn't stop it: the hold is the
+  other displays' business). A cue gone on every display ends (`gone_everywhere`, no follow-on, like a
+  replaced cue). Layers mode off: the layer test is skipped, as before; the display rule is the same.
+- Sound (one voice): plays while the picture is fully on some display; when the last full display goes
+  and some are still fading (`leave_sound`), the cue is `stopping`, its volume ramps to silence over the
+  longest exit left, and it ends then.
+- Dips: one matte instance on all the entering cue's displays. `begin_dip` fades and marks stopping only
+  content wholly under the matte; a cue also on other displays is left alone and the reveal cuts it from
+  the dipped displays.
+- Fade cues, Stop cues, hand fades/stops, a timeline Stop and `clear_clips` act on the whole cue (all its
+  displays).
+- `crossfade_into_next` (play-in-order groups) needs the same display set, not just the same home.
+- Decode size: `picture_size(m)` = the home's size, or the largest (by area) *open* window among
+  `also_on` (`output_sizes`); a display with no window open doesn't count. Text and shapes are drawn at the
+  home's size and stretched on the others. `decodes_like` still ignores `also_on`: the preload's `size`
+  carries the only decode difference. Sync (`video_lag`) is the home display's. Geometry and fit are the
+  cue's own, applied against each display's size by its window (open question in D3, decided this way).
+- Chase: `Clip::screens` (`Shown { output, gone, exit: Track }`) with the same `cut_from`/
+  `crossfade_from`/`leave_sound`; `Alive::off` (displays it was replaced on) and `Alive::leaving`
+  (display, `Level`); `chase_levels` sets the screens from them.
+- Renderer: no change. `app.rs::update_outputs` keys textures by instance and uploads once per frame
+  serial; each window composites with its own slot, as for `part_of`. Read, not tested (no GPU test was
+  written for it).
+- Paste and display removal were already right (P0): tested in `show.rs`.
+
+Tests: `src/engine/displays/tests.rs` (15, text cues, no media): one instance on each display; unknown and
+home displays ignored; a single-display cue unchanged; a cut on display 2 leaves it on 1 at full opacity
+and running, then a cut on 1 ends it; a crossfade on 2 fades it there alone, then one on 1 fades it (and
+its sound) as usual; crossfades on both at once end it with the longer; a higher layer on 2 changes
+nothing on 1; layers mode off; a shared cue entering replaces on each of its displays; a fade cue, a hand
+fade and a Stop cue act on every display; live `also_on` edits; a dip on two displays; the decode size;
+a free-run pause holding a per-display crossfade until GO; a seek giving what playing gives.
+`src/timeline/chase/tests.rs` (2): per-display replacement, a higher layer, passing on no display, the
+sound fading with the longer fade.
+
+Left / not tried:
+- No real displays: all through `Engine::layers` (two output windows of one instance were not looked at).
+- The inspector's "Also on" row (P4) and the editor's badge and ghosts (P6) are not P9's.
+- A cue held by a control cue that leaves its last full display unfreezes to fade its sound (as
+  `fade_out_and_stop` does).
