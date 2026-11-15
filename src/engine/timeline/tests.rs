@@ -1769,10 +1769,38 @@ fn a_clip_at_opacity_0_starts_when_a_fade_cue_raises_it_and_never_without_one() 
         active(e, v).is_some()
     });
     let a = active(&e, v).unwrap();
-    assert!((a.lead - 6.0).abs() < 0.15 && a.elapsed == a.lead && a.file_from == 0.0);
+    // It starts at the fade, from its in point. Its file was got ready ahead, so
+    // on some machines its first frame is there in the tick that starts it, and
+    // it has then had that tick (seen on the Mac runner).
+    let had = a.elapsed - a.lead;
+    assert!(
+        (a.lead - 6.0).abs() < 0.15 && (-1e-9..0.1 + 1e-9).contains(&had) && a.file_from == 0.0,
+        "lead {} elapsed {} from {}",
+        a.lead,
+        a.elapsed,
+        a.file_from
+    );
     assert!(a.faded && a.opacity.ramping(), "the fade brings it up");
     until(&mut e, &show, Some(0.0), "its frame", 20, |e| started(e, v));
-    assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 0.0)));
+    // One of its first frames: as many as it has had time for.
+    let a = active(&e, v).unwrap();
+    let n = ((a.elapsed - a.lead) * 30.0).round() as u32;
+    let now = shown(&e, v);
+    let first: Vec<Option<u64>> = (0..=n)
+        .map(|i| {
+            let at = if i > 0 {
+                f64::from(i) / 30.0 - 0.001
+            } else {
+                0.0
+            };
+            Some(frame_at(&mut e, &show, v, at))
+        })
+        .collect();
+    assert!(
+        first.contains(&now),
+        "not one of its first {} frames",
+        n + 1
+    );
     ticks(&mut e, &show, 0.25, 6);
     assert!(opacity(&e, v).unwrap() > 0.99);
     // With no fade cue it never starts, and the group still ends.
