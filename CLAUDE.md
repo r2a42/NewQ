@@ -42,7 +42,8 @@ The README describes the features; this file is about working on the code.
   crossfade (`timeline_overlap`, `ActiveCue::crossed_by`) and abutting pictures are held over the join
   (`timeline_joins`, `JOIN_GAP`, `ActiveCue::joined`); a loop pause (`ControlCue::loop_from`,
   `leave_at_once`, `is_loop()`) is `Run::looping` (`timeline_loop`, `timeline_leave_loop`);
-  `timeline_waiting`/`timeline_detached` feed the editor's hatching. A clip's keys read at
+  `timeline_waiting`/`timeline_detached` feed the editor's hatching. The active panels show a
+  clocked clip set to Hold or Loop on the clock (`ActiveCue::panel_times`); one set to End by its own time. A clip's keys read at
   `ActiveCue::key_time()` (its run's clock less `clip_zero`; `elapsed` off a timeline). Ramps a run
   starts are tagged (`Ramp.run`, `Param::follow`) and move only as far as its clock does
   (`Runs::steps`); a run's fade cue keeps its clock's time (`fade_from`), and its matrix crosspoints are
@@ -70,7 +71,8 @@ The README describes the features; this file is about working on the code.
   the workspace; `Host` salts its ids); it takes `&Show` and asks for `TimelineAction`s that `apply` makes after the
   frame (edits refused in show mode and tests by `edits_the_show`); a drag lives in `EditorState` and is
   asked for once on release (one undo step). `tracks.rs` clips, rows, drags, ghosts, the overlap's
-  crossfade mark and the vertical-overflow bar (a lane just opened is scrolled into view,
+  crossfade mark, a loop pause's section (`loop_sections`, shaded on the Cues track and the ruler) and the
+  vertical-overflow bar (a lane just opened is scrolled into view,
   `EditorState::reveal`; fade handles only on the hovered or picked clip); `ruler.rs` ticks, markers,
   the playhead (a ruler tap or drag seeks on release; locked in show mode for a group); `toolbar.rs`
   transport and read-outs (`state_text` from `RunState` and `RunView.parked`; two rows under

@@ -579,7 +579,6 @@ fn a_picture_goes_on_a_free_track_and_over_the_others_when_all_are_taken() {
     );
     show.cues[i].kind.media_mut().unwrap().also_on.clear();
     let clips = model::clips(&show, key, none);
-    let clips = model::clips(&show, key, none);
     assert_eq!(
         fitting_track(&show, key, CueType::Audio, 2.0, &clips),
         TrackId::Sound { output: None }
