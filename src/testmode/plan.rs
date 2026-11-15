@@ -896,6 +896,9 @@ impl Builder<'_> {
                 m.end = Some(len);
                 m.fit = Fit::Cover;
                 m.layer = layer;
+                // Held through a pause that lets the content run on, until
+                // the clock takes it off (a still's own time would run out).
+                m.run_out = crate::timeline::RunOut::Hold;
                 m.transition = Transition::Cut;
                 m.fade_in = 0.0;
                 m.fade_out = 0.0;
@@ -1276,7 +1279,7 @@ pub fn build_timeline(
         b.words(&tl, "Curiosity on Mars", 54.5, Some(7.0), false);
         if tl.second.is_none() {
             b.notes.push(
-                "Only one display: the picture shown on a second display too was shown on one"
+                "Only one display was used, so the picture meant for a second display too (\"Also on\") was shown on the first alone"
                     .into(),
             );
         }

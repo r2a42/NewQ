@@ -162,7 +162,8 @@ impl Driver {
         if state == RunState::Running && self.script.loop_passes > 0 {
             match engine.timeline(show, key).looping.filter(|l| !l.last_pass) {
                 Some(l) => {
-                    let (last, mut passes) = self.looping.unwrap_or((pos, 0));
+                    // (A run is looping once it has gone back the first time.)
+                    let (last, mut passes) = self.looping.unwrap_or((pos, 1));
                     if pos < last - 0.25 {
                         passes += 1;
                     }
@@ -281,6 +282,7 @@ struct Open {
 
 /// A clip the clock reached, waiting to come up.
 struct Due {
+    key: TimelineKey,
     cue: CueId,
     due: f64,
     at: f64,
@@ -303,6 +305,9 @@ pub struct Watch {
     /// Instances already judged or left out.
     seen: HashSet<u64>,
     cueing: HashMap<TimelineKey, (Instant, f64)>,
+    /// Where each run's clock last began to run on its own (from the top, or
+    /// after cueing): what it reaches from there is judged.
+    from: HashMap<TimelineKey, f64>,
     pub notes: TimelineNotes,
     /// The clips that came up on the clock, in turn.
     pub came: Vec<CueId>,
@@ -375,6 +380,12 @@ impl Watch {
         }
         let wall = now.duration_since(p.at).as_secs_f64();
         let clock = pos - p.pos;
+        // The app doesn't count the time before the first tick after it was
+        // idle as any cue's (it may have slept up to half a second), so a run
+        // started from nothing stands for that one tick: by design, not drift.
+        if clock == 0.0 && !self.open.contains_key(&key) {
+            return;
+        }
         if clock < -1e-6 || (clock - wall).abs() > JUMPED {
             // Put somewhere else (a loop going round, a jump): a new stretch.
             self.close(key);
@@ -415,18 +426,32 @@ impl Watch {
         t: f64,
     ) {
         let clips = engine.timeline_clips_up(key);
-        // Only what the running clock reached since the last look is judged: a
-        // seek's clips (started while it cued) are cueing's business.
-        let reached = prev.filter(|p| p.state == RunState::Running && state != RunState::Cueing);
+        // Only what the clock reached running on its own is judged: a seek's
+        // clips (started part way in while it cued) are cueing's business. A
+        // clip whose start came late (its file wasn't ready) is still judged,
+        // by its place.
+        match (prev.map(|p| p.state), state) {
+            (_, RunState::Stopped | RunState::Cueing) => {
+                self.from.insert(key, pos);
+            }
+            (None | Some(RunState::Stopped), _) => {
+                self.from.insert(key, 0.0);
+            }
+            _ => {}
+        }
+        let from = self.from.get(&key).copied().unwrap_or(f64::INFINITY);
         for c in &clips {
             if self.seen.contains(&c.instance) || self.due.contains_key(&c.instance) {
                 continue;
             }
-            match reached {
-                Some(p) if c.due >= p.pos - 1e-6 && c.due <= pos + 1e-6 => {
+            match state {
+                RunState::Running | RunState::Paused { .. }
+                    if c.due >= from - 1e-6 && c.due <= pos + 1e-6 =>
+                {
                     self.due.insert(
                         c.instance,
                         Due {
+                            key,
                             cue: c.cue,
                             due: c.due,
                             at: t,
@@ -441,7 +466,8 @@ impl Watch {
         let name = |id: CueId| show.cue(id).map_or_else(String::new, |c| c.name.clone());
         let run_on: HashSet<u64> = clips.iter().map(|c| c.instance).collect();
         let mut done = Vec::new();
-        for (instance, d) in &self.due {
+        // (Each timeline's own: another's clips are not among `clips`.)
+        for (instance, d) in self.due.iter().filter(|(_, d)| d.key == key) {
             if let Some(c) = clips.iter().find(|c| c.instance == *instance) {
                 if c.up {
                     self.notes.arrivals.push(Arrival {
@@ -607,6 +633,71 @@ mod tests {
             (took - built.lap_secs).abs() < 6.0,
             "the lap took {took:.1} s of show time; the plan says {:.1}",
             built.lap_secs
+        );
+    }
+
+    /// Two timelines watched at once: each one's clips are judged by its own
+    /// clock (another's are not "gone" from it). Texts, no media.
+    #[test]
+    fn the_watch_judges_each_timelines_clips_by_its_own_run() {
+        use crate::show::{CueType, GroupMode, TimelineSettings};
+        let mut show = Show::default();
+        let text = |show: &mut Show, at: f64| {
+            let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+            c.pre_wait = at;
+            if let CueKind::Text(t) = &mut c.kind {
+                t.media.end = Some(3.0);
+            }
+            c
+        };
+        let mut g = show.make_cue(CueType::Group, None, 0);
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        let gid = g.id;
+        show.cues.push(g);
+        let mut a = text(&mut show, 0.5);
+        a.parent = Some(gid);
+        let a = {
+            let id = a.id;
+            show.cues.push(a);
+            id
+        };
+        let l = show.add_list("Programme");
+        show.lists.last_mut().unwrap().timeline = Some(TimelineSettings::for_editor());
+        let mut b = text(&mut show, 0.5);
+        b.list = l;
+        let b = {
+            let id = b.id;
+            show.cues.push(b);
+            id
+        };
+        let keys = [TimelineKey::List(l), TimelineKey::Group(gid)];
+        let mut e = Engine::for_tests();
+        e.output_sizes.insert(show.outputs[0].id, (64, 36));
+        let mut watch = Watch::default();
+        let base = Instant::now();
+        // The list runs; the group starts 2 s later, while the list's clip plays.
+        e.timeline_run(&show, keys[0]);
+        let mut t = 0.0;
+        while t < 8.0 {
+            std::thread::sleep(Duration::from_millis(2));
+            if (t - 2.0f64).abs() < 0.01 {
+                e.timeline_run(&show, keys[1]);
+            }
+            e.tick(&show, 0.02);
+            t += 0.02;
+            watch.tick(&show, &e, &keys, base + Duration::from_secs_f64(t), t, 1);
+        }
+        assert!(
+            watch.notes.arrivals.iter().all(|x| x.late.is_some()),
+            "{:?}",
+            watch.notes.arrivals
+        );
+        assert!(
+            watch.came.contains(&a) && watch.came.contains(&b),
+            "{:?}",
+            watch.notes.arrivals
         );
     }
 }

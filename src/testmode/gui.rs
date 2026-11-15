@@ -1078,7 +1078,7 @@ fn sound_section(ui: &mut egui::Ui, devices: &[String], sound: &mut (Option<Stri
         RichText::new(if sound.1 {
             "Nothing is heard, but the sound is still decoded, mixed and put through its effects, so the test costs what it would with sound. Meters stay flat."
         } else {
-            "The test's sound plays on the device above, in place of your show's own audio outputs while it runs; your show is not changed. The 5.1 trailer is mixed down to a stereo pair."
+            "The test's sound plays on the device above, in place of your show's own audio outputs while it runs; your show is not changed. In the cue tests the 5.1 trailer is mixed down to a stereo pair."
         })
         .weak()
         .small(),

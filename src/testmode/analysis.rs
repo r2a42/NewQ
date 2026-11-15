@@ -506,10 +506,11 @@ pub fn analyse_timeline(n: &TimelineNotes, laps: &[f64]) -> Vec<Finding> {
     // 2. Clips that came up late, or never.
     let never: Vec<&Arrival> = n.arrivals.iter().filter(|a| a.late.is_none()).collect();
     if let Some(first) = never.first() {
+        // (The words stay the same as the count grows: the window's log
+        // follows a finding by its words without their numbers.)
         out.push(problem(format!(
-            "{} clip{} the timeline reached never came up (the first: {}, {} into the test).",
+            "Clips the timeline reached that never came up: {} (the first: {}, {} into the test).",
             never.len(),
-            if never.len() == 1 { "" } else { "s" },
             first.name,
             clock(first.at)
         )));
@@ -698,7 +699,7 @@ mod tests {
         assert!(f.iter().all(|x| x.severity == Severity::Problem), "{f:?}");
         assert!(
             f.iter()
-                .any(|x| x.text.contains("never came up") && x.text.contains("Blue Marble")),
+                .any(|x| x.text.contains("never came up: 1") && x.text.contains("Blue Marble")),
             "{f:?}"
         );
         assert!(
