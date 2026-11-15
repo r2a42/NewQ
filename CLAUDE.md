@@ -113,8 +113,9 @@ The README describes the features; this file is about working on the code.
   there and the Operator view adds `operator_state`. Tabs: `+` menu and the tab's right-click
   (`SetListTimeline`, which then `sync_lists`). Layout B, `workspace.rs` (`Host::Workspace`): chosen by
   `Prefs::timeline_layout` (`workspace::chosen`; `TimelineAction::SetLayout` saves it and moves an open
-  editor; reached from Settings ▸ General, the Window menu under Timeline and the toolbar's
-  `Workspace`); classic `ui::draw` draws it in `dock_area`'s place while `st.timeline.open` and no
+  editor; reached from Settings ▸ General (its first section, two rows: the classic window's settings are
+  short while a Timeline pane is open), the Window menu under Timeline (with the follow mode too) and
+  the toolbar's `Workspace`); classic `ui::draw` draws it in `dock_area`'s place while `st.timeline.open` and no
   docked Settings (`replaces_panes`); the new interface's `View::Timeline` (in the strip only for B;
   leaving it is `Close`); `Open` goes to it (and `SelectList` into a timeline list does), the tab then
   keeps its rows (`shows_tracks` false) and its Tracks button opens it; a Timeline pane under B only

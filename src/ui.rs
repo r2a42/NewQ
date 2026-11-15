@@ -1609,6 +1609,43 @@ fn timeline_layout_choice(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) 
             ui.close();
         }
     }
+    // And how its view follows a running playhead (as Settings ▸ General).
+    use timeline::TimelineFollow as F;
+    ui.indent("timeline_follow_label", |ui| {
+        ui.label(RichText::new("While it runs, the view").weak())
+    });
+    for (follow, words, tip) in [
+        (
+            F::Page,
+            "turns the page",
+            "Turns the page as the playhead nears the edge",
+        ),
+        (
+            F::Centre,
+            "keeps the playhead centred",
+            "Keeps the playhead in the middle",
+        ),
+    ] {
+        let r = ui
+            .indent(("timeline_follow", follow == F::Page), |ui| {
+                ui.radio(st.prefs.timeline_follow == follow, words)
+                    .on_hover_text(tip)
+            })
+            .inner;
+        #[cfg(test)]
+        ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
+                "window_timeline_follow",
+            ))
+            .push((follow == F::Centre, r.rect))
+        });
+        if r.clicked() && st.prefs.timeline_follow != follow {
+            actions.push(Action::Timeline(timeline::TimelineAction::SetFollow(
+                follow,
+            )));
+            ui.close();
+        }
+    }
 }
 
 /// The Settings menu: the same pages as the sidebar, in the same groups.
@@ -12374,6 +12411,56 @@ mod tests {
         st.capture_hotkey = Some(d);
         assert!(!output_key(Key::Q, M::NONE, &mut show, &mut e, &mut st));
         assert!(!is_playing(&e, d));
+    }
+
+    #[test]
+    fn the_window_menu_has_the_timelines_follow_choice_in_both_interfaces() {
+        use timeline::TimelineFollow as F;
+        for modern in [false, true] {
+            let ctx = egui::Context::default();
+            let mut st = UiState::default();
+            st.prefs.new_layout = modern;
+            let mut actions = Vec::new();
+            let frame = |events: Vec<Event>, n: f64, st: &UiState, actions: &mut Vec<Action>| {
+                ctx.data_mut(|d| {
+                    d.remove::<Vec<(bool, egui::Rect)>>(egui::Id::new("window_timeline_follow"))
+                });
+                let input = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 700.0))),
+                    time: Some(1.0 + n * 0.05),
+                    events,
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| window_menu(ui, st, actions));
+                });
+                out.textures_delta.clear();
+                ctx.data(|d| {
+                    d.get_temp::<Vec<(bool, egui::Rect)>>(egui::Id::new("window_timeline_follow"))
+                })
+                .unwrap_or_default()
+            };
+            let radios = frame(vec![], 0.0, &st, &mut actions);
+            assert_eq!(radios.len(), 2, "modern {modern}");
+            let at = radios.iter().find(|r| r.0).unwrap().1.center();
+            let click = |pressed| Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(vec![Event::PointerMoved(at)], 1.0, &st, &mut actions);
+            frame(vec![click(true)], 2.0, &st, &mut actions);
+            frame(vec![click(false)], 3.0, &st, &mut actions);
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    Action::Timeline(timeline::TimelineAction::SetFollow(F::Centre))
+                )),
+                "modern {modern}: {} actions",
+                actions.len()
+            );
+        }
     }
 
     #[test]

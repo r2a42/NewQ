@@ -6,6 +6,11 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **The timeline editor's settings are easy to reach.** In the classic interface with a Timeline
+  pane open, the settings page had so little room that the choice of how the view follows a
+  running timeline was out of sight. The *Timeline editor* settings are now the first thing on
+  Settings ▸ General, in two short rows (hover a choice for what it does), and the follow choice
+  is also under *Window ▸ Timeline*, beside pane or workspace.
 - **Hotkeys work while an output window has the keyboard.** A cue's hotkey did nothing if you had
   clicked on an output window; it now fires the cue there as it does in the main window, and a
   cue given 0 as its hotkey takes 0 from GO there too.

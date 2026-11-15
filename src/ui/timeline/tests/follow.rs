@@ -357,6 +357,9 @@ fn the_setting_on_the_general_page_changes_an_open_editor_at_once_in_both_interf
         let key = TimelineKey::Group(f.group);
         let mut m = Mouse::new();
         m.draw = Draw::Full;
+        // The size the settings have to be usable at, with the editor open
+        // (in the classic window a pane under the settings, taking height).
+        m.size = Some(egui::vec2(1280.0, 760.0));
         let ui = |a, f: &mut Fixture, m: &mut Mouse| {
             super::super::super::apply(a, &mut f.show, &mut m.e, &mut f.st)
         };
@@ -373,19 +376,11 @@ fn the_setting_on_the_general_page_changes_an_open_editor_at_once_in_both_interf
             } else {
                 TimelineFollow::Centre
             };
-            if modern {
-                let r = follow_radio(&m, !page);
-                m.click(&mut f.show, &mut f.st, r.center(), PointerButton::Primary);
-            } else {
-                // The classic window's settings page shares the height with
-                // the panes, and the section is below its fold: what its radio asks.
-                assert!(follow_radio(&m, !page).width() > 0.0);
-                ui(
-                    Action::Timeline(TimelineAction::SetFollow(want)),
-                    &mut f,
-                    &mut m,
-                );
-            }
+            // The radio itself, in sight without scrolling (`follow_radio`
+            // gives an empty rect for one scrolled out of sight).
+            let r = follow_radio(&m, !page);
+            assert!(r.width() > 0.0, "modern {modern}: the radio is in sight");
+            m.click(&mut f.show, &mut f.st, r.center(), PointerButton::Primary);
             assert_eq!(f.st.prefs.timeline_follow, want);
             if !page {
                 assert_eq!(Prefs::load(&dir).timeline_follow, TimelineFollow::Centre);

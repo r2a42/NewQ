@@ -338,6 +338,16 @@ fn warning(ui: &mut Ui, text: &str) {
 }
 
 fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    // First, and two rows: with a Timeline pane open, the classic window's
+    // settings have only a little height, and this is the section wanted then.
+    section(ui, "Timeline editor (this computer)", |ui| {
+        timeline_layout(ui, st, actions);
+        timeline_follow(ui, st, actions);
+        hint(
+            ui,
+            "Also in the Window menu, under Timeline. Hover a choice for what it does.",
+        );
+    });
     section(ui, "Show", |ui| {
         egui::Grid::new("settings_show")
             .num_columns(2)
@@ -383,11 +393,6 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
              have it on; a show opened from an older NewQ has it off until you turn it on.",
         );
     });
-    section(ui, "Timeline editor (this computer)", |ui| {
-        timeline_layout(ui, st, actions);
-        ui.add_space(6.0);
-        timeline_follow(ui, st, actions);
-    });
     section(ui, "Recovery and logs", |ui| {
         ui.label(format!(
             "Unsaved changes are copied to a recovery file every {} seconds, and offered \
@@ -418,70 +423,95 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
 /// How the timeline editor's view keeps a running playhead in sight.
 fn timeline_follow(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     use super::timeline::TimelineFollow as F;
-    ui.label("While a timeline runs, its view:");
-    for (follow, words) in [
-        (F::Page, "Turns the page as the playhead nears the edge"),
-        (F::Centre, "Keeps the playhead in the middle"),
-    ] {
-        let r = ui.radio(st.prefs.timeline_follow == follow, words);
-        #[cfg(test)]
-        ui.data_mut(|d| {
-            d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
-                "settings_timeline_follow",
-            ))
-            .push((follow == F::Centre, r.rect))
-        });
-        if r.clicked() && st.prefs.timeline_follow != follow {
-            actions.push(Action::Timeline(
-                super::timeline::TimelineAction::SetFollow(follow),
-            ));
+    const HOW: &str = "Either way you can scroll and zoom while it runs (in the middle, it \
+         comes back to the playhead), nothing moves while you hold a drag, and a stopped or \
+         paused timeline stays where you put it.";
+    ui.horizontal_wrapped(|ui| {
+        ui.label("While it runs, the view");
+        for (follow, words, tip) in [
+            (
+                F::Page,
+                "turns the page",
+                "Turns the page as the playhead nears the edge",
+            ),
+            (
+                F::Centre,
+                "keeps the playhead centred",
+                "Keeps the playhead in the middle",
+            ),
+        ] {
+            let r = ui
+                .radio(st.prefs.timeline_follow == follow, words)
+                .on_hover_text(format!("{tip}. {HOW}"));
+            // For the tests: where it is, if it is in sight (not scrolled out).
+            #[cfg(test)]
+            let seen = if ui.clip_rect().contains_rect(r.rect) {
+                r.rect
+            } else {
+                egui::Rect::NOTHING
+            };
+            #[cfg(test)]
+            ui.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
+                    "settings_timeline_follow",
+                ))
+                .push((follow == F::Centre, seen))
+            });
+            if r.clicked() && st.prefs.timeline_follow != follow {
+                actions.push(Action::Timeline(
+                    super::timeline::TimelineAction::SetFollow(follow),
+                ));
+            }
         }
-    }
-    hint(
-        ui,
-        "Either way you can scroll and zoom while it runs (in the middle, it comes back to the \
-         playhead), nothing moves while you hold a drag, and a stopped or paused timeline stays \
-         where you put it.",
-    );
+    });
 }
 
 /// Where the timeline editor opens: a pane or a workspace of its own, in
 /// either interface. Kept for this computer; an editor open moves.
 fn timeline_layout(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     use super::timeline::TimelineLayout as L;
+    const WHERE: &str = "Where a timeline opens when you double-click a timeline group, tick \
+         Timeline in the Window menu or go to a timeline list's tab. The workspace takes the cue \
+         list's place until Back to cue list; in the new interface it is the Timeline view. The \
+         Window menu and the Workspace button of the tracks' toolbar switch it too.";
     let pane = if st.prefs.new_layout {
-        "A panel under the cue list (Editor view)"
+        ("a panel", "A panel under the cue list (Editor view)")
     } else {
-        "A pane, beside the cue list and the other panes"
+        ("a pane", "A pane, beside the cue list and the other panes")
     };
-    for (layout, words) in [
-        (L::Pane, pane),
-        (
-            L::Workspace,
-            "A workspace of its own: bin, picture, inspector and the tracks across the window",
-        ),
-    ] {
-        let r = ui.radio(st.prefs.timeline_layout == layout, words);
-        #[cfg(test)]
-        ui.data_mut(|d| {
-            d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
-                "settings_timeline_layout",
-            ))
-            .push((layout == L::Workspace, r.rect))
-        });
-        if r.clicked() && st.prefs.timeline_layout != layout {
-            actions.push(Action::Timeline(
-                super::timeline::TimelineAction::SetLayout(layout),
-            ));
+    ui.horizontal_wrapped(|ui| {
+        ui.label("It opens as");
+        for (layout, words, tip) in [
+            (L::Pane, pane.0, pane.1),
+            (
+                L::Workspace,
+                "a workspace",
+                "A workspace of its own: bin, picture, inspector and the tracks across the window",
+            ),
+        ] {
+            let r = ui
+                .radio(st.prefs.timeline_layout == layout, words)
+                .on_hover_text(format!("{tip}. {WHERE}"));
+            #[cfg(test)]
+            let seen = if ui.clip_rect().contains_rect(r.rect) {
+                r.rect
+            } else {
+                egui::Rect::NOTHING
+            };
+            #[cfg(test)]
+            ui.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
+                    "settings_timeline_layout",
+                ))
+                .push((layout == L::Workspace, seen))
+            });
+            if r.clicked() && st.prefs.timeline_layout != layout {
+                actions.push(Action::Timeline(
+                    super::timeline::TimelineAction::SetLayout(layout),
+                ));
+            }
         }
-    }
-    hint(
-        ui,
-        "Where a timeline opens when you double-click a timeline group, tick Timeline in the \
-         Window menu or go to a timeline list's tab. The workspace takes the cue list's place \
-         until Back to cue list; in the new interface it is the Timeline view. The Window menu \
-         and the Workspace button of the tracks' toolbar switch it too.",
-    );
+    });
 }
 
 /// How much the log says: a setting of this computer, used at once.
