@@ -83,6 +83,14 @@ pub fn describe_control(show: &Show, cue: &Cue, c: &ControlCue) -> String {
         s += &format!(" » {}", timeline_name(show, k));
     }
     match c.action {
+        ControlAction::TimelinePause if c.is_loop() => {
+            if let Some(p) = c.loop_from {
+                s += &format!(" · loops from {} until GO", point_text(show, key, p));
+            }
+            if c.leave_at_once {
+                s += ", which leaves at once";
+            }
+        }
         ControlAction::TimelinePause => {
             s += match c.freeze {
                 PauseFreeze::Nothing => " · content runs on",
@@ -176,6 +184,37 @@ pub fn control_fields(ui: &mut Ui, show: &Show, cue_id: CueId, c: &mut ControlCu
                         note_row(ui, "clips");
                         ui.label("Clips");
                         ui.vertical(|ui| clip_ticks(ui, show, key, cue_id, &mut c.clips));
+                        ui.end_row();
+                    }
+                    note_row(ui, "loop");
+                    ui.label("Loop");
+                    let mut looping = c.loop_from.is_some();
+                    if ui
+                        .checkbox(&mut looping, "Play a section again until GO")
+                        .on_hover_text(
+                            "Reached, the timeline jumps back to where the section starts and \
+                             plays it again, round and round, until GO. Not sample-accurate: \
+                             the clips start again each time, so a sound that must not break \
+                             is better as a clip that loops by itself.",
+                        )
+                        .changed()
+                    {
+                        c.loop_from = looping.then_some(TimelinePoint::Time(0.0));
+                    }
+                    ui.end_row();
+                    if c.loop_from.is_some() {
+                        note_row(ui, "loop_from");
+                        ui.label("Section from");
+                        point_picker(ui, show, key, cue_id, &mut c.loop_from, false);
+                        ui.end_row();
+                        note_row(ui, "leave_at_once");
+                        ui.label("On GO");
+                        ui.checkbox(&mut c.leave_at_once, "Leave the loop at once")
+                            .on_hover_text(
+                                "Off: GO lets the pass that is playing finish, and the \
+                                 timeline carries straight on past this cue. On: GO leaves \
+                                 the loop at once and goes on from this cue.",
+                            );
                         ui.end_row();
                     }
                     if c.freeze != PauseFreeze::Nothing {

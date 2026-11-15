@@ -419,6 +419,13 @@ impl GoPlan {
                         Some("GO does nothing until it pauses".into()),
                     ),
                     TimelineGo::Cueing => (format!("{name} is cueing"), None),
+                    TimelineGo::LeaveLoop { at_once: false } => (
+                        format!("Finish this pass and continue {name}"),
+                        Some("the loop plays to its end once more, then goes on".into()),
+                    ),
+                    TimelineGo::LeaveLoop { at_once: true } => {
+                        (format!("Leave the loop and continue {name}"), None)
+                    }
                 })
             }
         }

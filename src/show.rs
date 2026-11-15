@@ -2416,12 +2416,27 @@ pub struct ControlCue {
     /// seconds before its run ends (0 = a cut). None = `TIMELINE_STOP_FADE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade: Option<f64>,
+    /// A timeline pause that loops a section (`is_loop`): reached, the
+    /// timeline jumps back to this place (earlier on it) and plays the section
+    /// again, round and round until GO. None: a pause that stops the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_from: Option<TimelinePoint>,
+    /// A loop's GO leaves it at once, going on from the cue; unset, GO lets
+    /// the pass that is playing finish and the timeline carries straight on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub leave_at_once: bool,
 }
 
 /// How long a timeline Stop fades the timeline out unless the cue says.
 pub const TIMELINE_STOP_FADE: f64 = 3.0;
 
 impl ControlCue {
+    /// A timeline pause that loops a section (`loop_from`) rather than stopping
+    /// the clock.
+    pub fn is_loop(&self) -> bool {
+        self.action == ControlAction::TimelinePause && self.loop_from.is_some()
+    }
+
     /// The fade of a timeline Stop (`fade`, or `TIMELINE_STOP_FADE`), in seconds.
     pub fn stop_fade(&self) -> f64 {
         match self.fade {
@@ -2461,11 +2476,13 @@ impl ControlCue {
             }
             None => None,
         };
-        self.at = match self.at {
+        let point = |p: Option<TimelinePoint>| match p {
             Some(TimelinePoint::Cue(c)) => cue(c).map(TimelinePoint::Cue),
             Some(TimelinePoint::Marker(_)) if lost || (!markers && !carried) => None,
             other => other,
         };
+        self.at = point(self.at);
+        self.loop_from = point(self.loop_from);
         self.clips = self.clips.iter().filter_map(|c| cue(*c)).collect();
     }
 }
@@ -7589,6 +7606,48 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_pause_writes_only_what_it_sets_and_an_older_pause_loads_as_a_plain_one() {
+        // A pause written before loops (and every older control cue) is no loop.
+        let old = r#"{"action":"TimelinePause","target":null,"freeze":"Everything"}"#;
+        let c: ControlCue = serde_json::from_str(old).unwrap();
+        assert!(c.loop_from.is_none() && !c.leave_at_once && !c.is_loop());
+        let j = serde_json::to_string(&c).unwrap();
+        assert!(
+            !j.contains("loop_from") && !j.contains("leave_at_once"),
+            "{j}"
+        );
+        let mut show = Show::default();
+        let fresh = show.make_cue(CueType::Control, None, 0);
+        let CueKind::Control(fresh) = fresh.kind else {
+            panic!("a control cue")
+        };
+        assert!(!fresh.is_loop());
+        for (from, at_once) in [
+            (TimelinePoint::Time(2.5), false),
+            (TimelinePoint::Marker(3), true),
+            (TimelinePoint::Cue(CueId(9)), false),
+        ] {
+            let c = ControlCue {
+                action: ControlAction::TimelinePause,
+                loop_from: Some(from),
+                leave_at_once: at_once,
+                ..Default::default()
+            };
+            assert!(c.is_loop());
+            let j = serde_json::to_string(&c).unwrap();
+            assert_eq!(j.contains("leave_at_once"), at_once, "{j}");
+            assert_eq!(serde_json::from_str::<ControlCue>(&j).unwrap(), c);
+        }
+        // Only a pause loops.
+        let c = ControlCue {
+            action: ControlAction::TimelineJump,
+            loop_from: Some(TimelinePoint::Time(1.0)),
+            ..Default::default()
+        };
+        assert!(!c.is_loop());
+    }
+
+    #[test]
     fn a_show_from_0_20_3_loads_and_is_written_without_the_timeline_fields() {
         use crate::timeline::model;
         let dir = std::env::temp_dir().join(format!("newq_timeline_old_{}", std::process::id()));
@@ -7667,6 +7726,7 @@ mod tests {
             clips: vec![v.id],
             freeze_live: true,
             fade: None,
+            ..Default::default()
         });
         let mut g = show.make_cue(CueType::Group, None, 2);
         if let CueKind::Group(gc) = &mut g.kind {
@@ -7765,6 +7825,7 @@ mod tests {
             clips: vec![clip_id],
             freeze_live: false,
             fade: None,
+            ..Default::default()
         });
         let pid = p.id;
         show.insert_cue(slot, p);
@@ -7926,6 +7987,7 @@ mod tests {
                 clips: vec![clip_id],
                 freeze_live: false,
                 fade: None,
+                ..Default::default()
             });
             let id = c.id;
             let slot = show.insert_slot(None, false, 0);

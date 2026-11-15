@@ -105,6 +105,22 @@ pub enum RunState {
     },
 }
 
+/// A timeline playing a section round and round, until GO (a loop pause,
+/// `ControlCue::loop_from`, ruling L3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Looping {
+    /// The loop pause cue; the section runs from `from` to it (`to`).
+    pub cue: CueId,
+    pub from: f64,
+    pub to: f64,
+    /// GO leaves at once (the cue's `leave_at_once`), rather than letting the
+    /// pass playing finish.
+    pub at_once: bool,
+    /// GO has been pressed: this pass is the last, and the timeline carries
+    /// straight on past the cue.
+    pub last_pass: bool,
+}
+
 /// A timeline's run, for the editor and the transport.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RunView {
@@ -120,6 +136,8 @@ pub struct RunView {
     pub parked: bool,
     /// Stopped, with what it played still fading out (a Stop's fade).
     pub fading: bool,
+    /// Playing a section round and round until GO (a loop pause).
+    pub looping: Option<Looping>,
 }
 
 /// What GO does to a timeline (`Engine::go_plan`, which `timeline_go` follows).
@@ -135,6 +153,9 @@ pub enum TimelineGo {
     Running,
     /// A timeline list getting its clips ready: GO does nothing.
     Cueing,
+    /// A run playing a section round and round (a loop pause): GO lets this
+    /// pass finish and carries on past the cue, or (`at_once`) leaves at once.
+    LeaveLoop { at_once: bool },
 }
 
 /// One timeline's run.
@@ -169,6 +190,8 @@ struct Run {
     /// Clips alive on both sides of the seek, jumped where they are (decoders
     /// swapped once they have a frame): seen all along.
     carried: Vec<u64>,
+    /// Playing a section round and round (a loop pause).
+    looping: Option<Looping>,
 }
 
 impl Run {
@@ -186,6 +209,7 @@ impl Run {
             outgoing: Vec::new(),
             outgoing_since: None,
             carried: Vec::new(),
+            looping: None,
         }
     }
 
@@ -199,6 +223,7 @@ impl Run {
         self.outgoing.clear();
         self.outgoing_since = None;
         self.carried.clear();
+        self.looping = None;
     }
 }
 
@@ -472,7 +497,8 @@ pub(super) fn clock_end(
 }
 
 /// Where the control cue `cue` on the timeline `key` puts a timeline, if it is
-/// a jump: a Jump, or a Run from a place (the timeline it names, at the time).
+/// a jump: a Jump, a Run from a place (the timeline it names, at the time), or
+/// a loop going back to its section's start.
 fn jump_of(show: &Show, key: TimelineKey, cue: &Cue) -> Option<(TimelineKey, f64)> {
     let CueKind::Control(c) = &cue.kind else {
         return None;
@@ -482,14 +508,21 @@ fn jump_of(show: &Show, key: TimelineKey, cue: &Cue) -> Option<(TimelineKey, f64
         ControlAction::TimelineJump | ControlAction::TimelineRun => {
             Some((goes, model::resolve(show, goes, c.at?)?))
         }
+        // A loop goes back to its section's start, on its own timeline.
+        ControlAction::TimelinePause if c.timeline.is_none_or(|k| k == key) => {
+            Some((key, model::resolve(show, key, c.loop_from?)?))
+        }
         _ => None,
     }
 }
 
-/// Whether `cue` is a timeline pause of the timeline `key` (it is one of its cues).
+/// Whether `cue` is a timeline pause of the timeline `key` (it is one of its
+/// cues) that stops its clock: not a loop.
 fn is_pause_of(cue: &Cue, key: TimelineKey) -> bool {
     matches!(&cue.kind, CueKind::Control(c)
-        if c.action == ControlAction::TimelinePause && c.timeline.is_none_or(|k| k == key))
+        if c.action == ControlAction::TimelinePause
+            && !c.is_loop()
+            && c.timeline.is_none_or(|k| k == key))
 }
 
 impl Engine {
@@ -507,9 +540,11 @@ impl Engine {
                 on_go: None,
                 parked: false,
                 fading: false,
+                looping: None,
             };
         };
         let (state, pos, instance, parked) = (run.state, run.pos, run.instance, run.parked);
+        let looping = run.looping;
         let waiting = |p: &&PendingCue| p.run == Some(instance);
         let next_pause = if state == RunState::Stopped {
             self.next_pause_from(show, key, pos)
@@ -537,6 +572,7 @@ impl Engine {
                     && (a.run == Some(instance)
                         || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == Some(instance)))
             }),
+            looping,
         }
     }
 
@@ -817,6 +853,12 @@ impl Engine {
         }
         r.outgoing_since = (!outgoing.is_empty()).then(Instant::now);
         r.outgoing = outgoing;
+        // A seek inside a section being looped goes on looping; one out of it
+        // ends the loop.
+        r.looping = old
+            .as_ref()
+            .and_then(|o| o.looping)
+            .filter(|l| pos >= l.from - SAME_TIME && pos < l.to - SAME_TIME);
         r.carried = carried.iter().map(|c| c.0).collect();
         self.runs.map.insert(key, r);
         for (i, x) in carried {
@@ -1726,7 +1768,10 @@ impl Engine {
                 let Some(cue) = show.cue(p.cue_id).filter(|c| c.armed) else {
                     continue;
                 };
+                // (A loop on its last pass is not going back.)
+                let last = run.looping.is_some_and(|l| l.cue == cue.id && l.last_pass);
                 if let Some(t) = jump_of(show, *key, cue)
+                    && !last
                     && !targets.contains(&t)
                 {
                     targets.push(t);
@@ -2017,14 +2062,23 @@ impl Engine {
             };
             (does, self.on_go_of(show, r.instance))
         };
+        // Playing a section round and round: GO is for leaving it.
+        let leaves = |r: &Run| {
+            r.looping
+                .filter(|l| !l.last_pass && matches!(r.state, RunState::Running | RunState::Cueing))
+                .map(|l| (TimelineGo::LeaveLoop { at_once: l.at_once }, None))
+        };
         let key = TimelineKey::List(list);
         if model::is_timeline(show, key) {
             let run = self.runs.map.get(&key);
-            let (does, then) = match run.map(|r| r.state) {
-                Some(RunState::Running) => (TimelineGo::Running, None),
-                Some(RunState::Cueing) => (TimelineGo::Cueing, None),
-                Some(RunState::Paused { .. }) => run.map_or((TimelineGo::Resume, None), goes_on),
-                Some(RunState::Stopped) | None => (TimelineGo::Start, None),
+            let (does, then) = match (run.and_then(leaves), run.map(|r| r.state)) {
+                (Some(leave), _) => leave,
+                (None, Some(RunState::Running)) => (TimelineGo::Running, None),
+                (None, Some(RunState::Cueing)) => (TimelineGo::Cueing, None),
+                (None, Some(RunState::Paused { .. })) => {
+                    run.map_or((TimelineGo::Resume, None), goes_on)
+                }
+                (None, Some(RunState::Stopped) | None) => (TimelineGo::Start, None),
             };
             return Some((key, does, then));
         }
@@ -2034,17 +2088,17 @@ impl Engine {
             .iter()
             .filter(|(k, r)| {
                 matches!(k, TimelineKey::Group(g) if show.cue(*g).is_some_and(|c| c.list == list))
-                    && matches!(
+                    && (matches!(
                         r.state,
                         RunState::Paused {
                             waits_for_go: true,
                             ..
                         }
-                    )
+                    ) || leaves(r).is_some())
                     && self.active.iter().any(|a| a.instance == r.instance)
             })
             .max_by_key(|(_, r)| r.instance)?;
-        let (does, then) = goes_on(run);
+        let (does, then) = leaves(run).unwrap_or_else(|| goes_on(run));
         Some((*key, does, then))
     }
 
@@ -2059,6 +2113,7 @@ impl Engine {
                 self.log("GO: the timeline is running; GO does nothing until it pauses")
             }
             TimelineGo::Cueing => {}
+            TimelineGo::LeaveLoop { .. } => self.timeline_leave_loop(show, key),
             TimelineGo::Start | TimelineGo::Resume | TimelineGo::Play => {
                 if let TimelineKey::Group(g) = key
                     && let Some(c) = show.cue(g)
@@ -2110,6 +2165,9 @@ impl Engine {
                     )),
                 },
             },
+            ControlAction::TimelinePause if c.is_loop() => {
+                self.timeline_loop(show, key, cue, c, &name)
+            }
             ControlAction::TimelinePause => {
                 // A pause on its own timeline waits for GO there.
                 self.timeline_pause(
@@ -2136,6 +2194,88 @@ impl Engine {
             _ => {}
         }
         true
+    }
+
+    /// A loop pause (`ControlCue::loop_from`, ruling L3) reached by its run's
+    /// clock: the timeline jumps back to the section's start and plays the
+    /// section again (a seek, so everything in it is cued and let go together,
+    /// got ready ahead as for any jump), and so each time round, until GO. On
+    /// the pass GO marked the last, it lets the clock carry straight on.
+    fn timeline_loop(
+        &mut self,
+        show: &Show,
+        key: TimelineKey,
+        cue: &Cue,
+        c: &ControlCue,
+        name: &str,
+    ) {
+        if model::key_of(show, cue.id) != Some(key) {
+            self.problem(format!(
+                "Cue {name}: a loop plays a section of its own timeline, not another"
+            ));
+            return;
+        }
+        let to = start_of(cue);
+        let Some(from) = c.loop_from.and_then(|p| model::resolve(show, key, p)) else {
+            self.problem(format!(
+                "Cue {name}: the place its section starts is not on the timeline"
+            ));
+            return;
+        };
+        if from >= to - SAME_TIME {
+            self.problem(format!(
+                "Cue {name}: its section has to start before it on the timeline"
+            ));
+            return;
+        }
+        let Some(run) = self.runs.map.get_mut(&key) else {
+            return;
+        };
+        if run.looping.is_some_and(|l| l.cue == cue.id && l.last_pass) {
+            run.looping = None;
+            log::info!("cue {name}: the loop's last pass is done; the timeline goes on");
+            return;
+        }
+        if run.state != RunState::Running || !self.may_jump(name) {
+            return;
+        }
+        let looping = Looping {
+            cue: cue.id,
+            from,
+            to,
+            at_once: c.leave_at_once,
+            last_pass: false,
+        };
+        self.timeline_place(show, key, from, Then::Run);
+        if let Some(run) = self.runs.map.get_mut(&key) {
+            run.looping = Some(looping);
+        }
+    }
+
+    /// GO while a section loops: the pass playing is the last (the timeline
+    /// carries on past the cue when it gets there), or with `leave_at_once` the
+    /// timeline leaves now, going on from the cue.
+    fn timeline_leave_loop(&mut self, show: &Show, key: TimelineKey) {
+        let Some(run) = self.runs.map.get_mut(&key) else {
+            return;
+        };
+        let Some(l) = run.looping.filter(|l| !l.last_pass) else {
+            return;
+        };
+        if !l.at_once {
+            run.looping = Some(Looping {
+                last_pass: true,
+                ..l
+            });
+            self.log("GO: the loop finishes this pass and the timeline goes on");
+            return;
+        }
+        run.looping = None;
+        self.log("GO: the timeline leaves the loop");
+        // From the cue's place: it has been passed there.
+        if self.may_jump("GO") {
+            self.timeline_place(show, key, l.to, Then::Run);
+        }
     }
 
     /// `action` aimed at `target`, when that is a timeline group: its Pause

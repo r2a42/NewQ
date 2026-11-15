@@ -16,6 +16,13 @@ pub(super) fn state_text(run: &RunView, pos: f64) -> String {
     match run.state {
         RunState::Stopped if run.fading => "Stopping · fading out".into(),
         RunState::Stopped => "Stopped".into(),
+        RunState::Running | RunState::Cueing if run.looping.is_some() => {
+            match run.looping.map(|l| (l.last_pass, l.at_once)) {
+                Some((true, _)) => "Looping · last pass, then on".into(),
+                Some((false, true)) => "Looping · GO leaves the loop".into(),
+                _ => "Looping · GO continues".into(),
+            }
+        }
         RunState::Cueing => "Cueing…".into(),
         RunState::Running => match run.next_pause {
             Some(p) if p >= pos => format!("Running · next pause in {}", fmt_time(p - pos)),

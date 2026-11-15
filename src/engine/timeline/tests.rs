@@ -3342,3 +3342,288 @@ fn a_clip_with_a_keyframed_speed_set_to_loop_goes_round_through_a_free_run_pause
         active(e, v).is_none()
     });
 }
+
+// ----- Loop this section (P5, ruling L3) --------------------------------------------
+
+use crate::engine::GoPlan;
+
+/// A loop pause going back to `from`, leaving at once or not.
+fn loop_pause(show: &mut Show, from: TimelinePoint, at_once: bool) -> Cue {
+    control(
+        show,
+        ControlCue {
+            action: ControlAction::TimelinePause,
+            loop_from: Some(from),
+            leave_at_once: at_once,
+            ..Default::default()
+        },
+    )
+}
+
+/// A group: a text all through (0 to 10 s), one inside the section (2 to 4 s),
+/// a loop at 5 s back to 1 s, and the next text at 5 s.
+fn looped_show(at_once: bool) -> (Show, CueId, [CueId; 4]) {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = faded_text(&mut show, 10.0, 0.0);
+    let bed = child(&mut show, g, c, 0.0);
+    let mut c = faded_text(&mut show, 2.0, 0.0);
+    c.kind.media_mut().unwrap().layer = 1;
+    let inside = child(&mut show, g, c, 2.0);
+    let l = loop_pause(&mut show, TimelinePoint::Time(1.0), at_once);
+    let l = child(&mut show, g, l, 5.0);
+    let mut c = faded_text(&mut show, 2.0, 0.0);
+    c.kind.media_mut().unwrap().layer = 2;
+    let after = child(&mut show, g, c, 5.0);
+    (show, g, [bed, inside, l, after])
+}
+
+/// Tick by `dt` (waiting with 0-ticks while a clip is being drawn or the run
+/// cues) until `cond`; the clock positions seen, in order.
+fn run_while(
+    e: &mut Engine,
+    show: &Show,
+    k: TimelineKey,
+    dt: f64,
+    mut cond: impl FnMut(&mut Engine) -> bool,
+) -> Vec<f64> {
+    let t0 = Instant::now();
+    let mut seen = Vec::new();
+    while cond(e) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "timed out");
+        let busy =
+            e.active.iter().any(|a| !a.started) || view(e, show, k).state == RunState::Cueing;
+        if busy {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        e.tick(show, if busy { 0.0 } else { dt });
+        seen.push(view(e, show, k).pos);
+    }
+    seen
+}
+
+/// How many times the clock went back.
+fn jumps_back(seen: &[f64]) -> usize {
+    seen.windows(2).filter(|w| w[1] < w[0] - 1e-9).count()
+}
+
+/// Run until the clock has gone back `n` times and the run is running again:
+/// the clock positions seen.
+fn rounds(e: &mut Engine, show: &Show, k: TimelineKey, n: usize) -> Vec<f64> {
+    let mut seen = vec![view(e, show, k).pos];
+    run_while(e, show, k, 0.1, |e| {
+        seen.push(view(e, show, k).pos);
+        jumps_back(&seen) < n || view(e, show, k).state != RunState::Running
+    });
+    seen
+}
+
+#[test]
+fn a_loop_plays_its_section_again_until_go_and_go_finishes_the_pass_and_carries_on() {
+    let (show, g, [bed, inside, l, after]) = looped_show(false);
+    let k = key(g);
+    let out = show.outputs[0].id;
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(out, (64, 36));
+    e.fire(&show, g);
+    // Three times round: back to 1 s each time it reaches 5 s.
+    let seen = rounds(&mut e, &show, k, 3);
+    assert_eq!(jumps_back(&seen), 3);
+    assert!(
+        seen.iter().filter(|p| **p > 4.5).count() >= 3,
+        "each time to the end"
+    );
+    assert!(seen.iter().all(|p| *p <= 5.0 + 1e-9), "never past the loop");
+    assert!(active(&e, after).is_none() && waiting(&e, after));
+    let v = view(&mut e, &show, k);
+    assert_eq!(v.state, RunState::Running, "the clock never stopped");
+    let lp = v.looping.expect("looping");
+    assert!(lp.cue == l && lp.from == 1.0 && lp.to == 5.0 && !lp.at_once && !lp.last_pass);
+    // GO says what it will do, and does it on the pass playing.
+    let (does, then) = e.go_plan(&show).describe(&show).unwrap();
+    assert!(does.starts_with("Finish this pass and continue"), "{does}");
+    assert!(then.is_some());
+    run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 3.0);
+    assert!(active(&e, inside).is_some() && active(&e, bed).is_some());
+    e.go(&show);
+    assert!(view(&mut e, &show, k).looping.unwrap().last_pass);
+    assert!(
+        matches!(e.go_plan(&show), GoPlan::Cue(_)),
+        "GO again is for the next cue"
+    );
+    // On to 6 s: past the cue without going back, without a stop.
+    let seen = run_while(&mut e, &show, k, 0.1, |e| {
+        assert_ne!(view(e, &show, k).state, RunState::Stopped);
+        assert!(!matches!(view(e, &show, k).state, RunState::Paused { .. }));
+        view(e, &show, k).pos < 6.0
+    });
+    assert_eq!(jumps_back(&seen), 0);
+    let v = view(&mut e, &show, k);
+    assert!(v.looping.is_none() && v.state == RunState::Running);
+    assert!(active(&e, after).is_some(), "what comes after it plays");
+    assert!(e.take_problems().is_empty());
+}
+
+#[test]
+fn a_loop_set_to_leave_at_once_leaves_on_go_and_goes_on_from_the_cue() {
+    let (show, g, [_, inside, _, after]) = looped_show(true);
+    let k = key(g);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    e.fire(&show, g);
+    let seen = rounds(&mut e, &show, k, 1);
+    assert!(seen.last().is_some_and(|p| *p < 2.0), "went round");
+    run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 3.0);
+    let (does, _) = e.go_plan(&show).describe(&show).unwrap();
+    assert!(does.starts_with("Leave the loop"), "{does}");
+    assert!(active(&e, inside).is_some());
+    e.go(&show);
+    // At once to the cue's place: it has been passed there, so it goes on.
+    let v = view(&mut e, &show, k);
+    assert!(v.pos == 5.0 && v.looping.is_none(), "{v:?}");
+    let seen = run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 6.0);
+    assert_eq!(jumps_back(&seen), 0);
+    assert!(active(&e, after).is_some() && active(&e, inside).is_none());
+}
+
+#[test]
+fn a_pause_inside_a_loop_still_stops_it_and_a_seek_out_of_it_ends_the_loop() {
+    let (mut show, g, [bed, ..]) = looped_show(false);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 3.0);
+    let k = key(g);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    e.fire(&show, g);
+    // Twice round, each time held at 3 s until GO.
+    for round in 0..2 {
+        run_while(&mut e, &show, k, 0.1, |e| {
+            !matches!(view(e, &show, k).state, RunState::Paused { .. })
+        });
+        assert_eq!(paused_at(&mut e, &show, k), Some(3.0), "round {round}");
+        assert_eq!(view(&mut e, &show, k).looping.is_some(), round > 0);
+        // GO at the pause runs it on (it doesn't leave the loop).
+        let (does, _) = e.go_plan(&show).describe(&show).unwrap();
+        assert!(does.starts_with("Continue"), "{does}");
+        e.go(&show);
+        assert_eq!(state(&mut e, &show, k), RunState::Running);
+        run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos > 2.0);
+    }
+    assert!(view(&mut e, &show, k).looping.is_some());
+    // A seek in the section keeps it looping; one out of it ends the loop.
+    e.timeline_seek(&show, k, 4.0, true);
+    assert!(view(&mut e, &show, k).looping.is_some());
+    e.timeline_seek(&show, k, 7.0, true);
+    assert!(view(&mut e, &show, k).looping.is_none());
+    let seen = run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 8.0);
+    assert_eq!(jumps_back(&seen), 0);
+    assert!(active(&e, bed).is_some());
+}
+
+#[test]
+fn a_timeline_stop_during_a_loop_fades_it_out() {
+    let (show, g, [bed, ..]) = looped_show(false);
+    let k = key(g);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    e.fire(&show, g);
+    let seen = rounds(&mut e, &show, k, 1);
+    assert!(seen.last().is_some_and(|p| *p < 2.0));
+    e.timeline_stop(&show, k, 1.0);
+    let v = view(&mut e, &show, k);
+    assert!(v.state == RunState::Stopped && v.looping.is_none() && v.fading);
+    e.tick(&show, 0.5);
+    assert!(opacity(&e, bed).is_some_and(|o| (o - 0.5).abs() < 0.05));
+    e.tick(&show, 0.6);
+    assert!(active(&e, bed).is_none() && !e.is_active());
+}
+
+#[test]
+fn a_loops_way_back_is_got_ready_and_comes_round_within_a_tick_or_two() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    // A video from 1 s to 4 s; the section from 1.5 s to 3 s.
+    let c = file(&mut show, CueType::Video, clip, 3.0);
+    let v = child(&mut show, g, c, 1.0);
+    let l = loop_pause(&mut show, TimelinePoint::Time(1.5), false);
+    child(&mut show, g, l, 3.0);
+    let k = key(g);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.05), "the video", 10, |e| {
+        started(e, v)
+    });
+    // Got ready 0.5 s in, where the loop goes back to.
+    let t0 = Instant::now();
+    while !ready_at(&mut e, v, 0.5) {
+        assert!(t0.elapsed() < Duration::from_secs(20), "never got ready");
+        std::thread::sleep(Duration::from_millis(5));
+        e.tick(&show, 0.0);
+    }
+    for round in 0..2 {
+        run_while(&mut e, &show, k, 0.05, |e| view(e, &show, k).pos < 2.9);
+        e.tick(&show, 0.1);
+        assert_eq!(view(&mut e, &show, k).pos, 1.5, "round {round}");
+        let mut n = 0;
+        while state(&mut e, &show, k) != RunState::Running {
+            n += 1;
+            assert!(n <= 3, "round {round}: the jump took {n} ticks");
+            std::thread::sleep(Duration::from_millis(3));
+            e.tick(&show, 0.0);
+        }
+        let a = active(&e, v).unwrap();
+        assert!(
+            !a.seeking() && (a.file_from - 0.5).abs() < 1e-6,
+            "round {round}"
+        );
+        // Ready again for the next time round.
+        let t0 = Instant::now();
+        while !ready_at(&mut e, v, 0.5) {
+            assert!(
+                t0.elapsed() < Duration::from_secs(20),
+                "never got ready again"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+            e.tick(&show, 0.0);
+        }
+    }
+}
+
+#[test]
+fn go_on_a_timeline_list_that_loops_finishes_the_pass() {
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    let c = faded_text(&mut show, 10.0, 0.0);
+    top(&mut show, c, l, 0.0);
+    let lp = loop_pause(&mut show, TimelinePoint::Time(1.0), false);
+    top(&mut show, lp, l, 3.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    e.active_list = l;
+    e.go(&show);
+    rounds(&mut e, &show, k, 2);
+    assert!(matches!(
+        e.go_plan(&show),
+        GoPlan::Timeline {
+            does: TimelineGo::LeaveLoop { at_once: false },
+            ..
+        }
+    ));
+    e.go(&show);
+    assert!(view(&mut e, &show, k).looping.unwrap().last_pass);
+    // GO again: the timeline is running, it does nothing.
+    assert!(matches!(
+        e.go_plan(&show),
+        GoPlan::Timeline {
+            does: TimelineGo::Running,
+            ..
+        }
+    ));
+    let seen = run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 4.0);
+    assert_eq!(jumps_back(&seen), 0);
+    assert!(view(&mut e, &show, k).looping.is_none());
+}
