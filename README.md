@@ -1088,8 +1088,9 @@ cue list* to go back. The main list is always a plain cue list.
   other and offers to turn it on; nothing changes until you click it.
 
 **The tracks editor.** Double-click a timeline group in the cue list (or click
-*Open in timeline editor* in its inspector, or *Window ▸ Timeline*) to see its
-tracks: a row per display and layer ("V1 · Layer 0"), a row per audio output
+*Open in timeline editor* in its inspector, or *Window ▸ Timeline*; while its tracks
+are in sight the inspector says so instead, and a Timeline pane hidden behind another
+tab is brought to the front by the button) to see its tracks: a row per display and layer ("V1 · Layer 0"), a row per audio output
 ("A1"), and a *Cues* row for the control, fade and stop cues. It is a pane under
 the cue list (it can be popped out like the others); in the new interface it is a
 panel above the inspector (*Close timeline* puts it away). Each clip is a bar from

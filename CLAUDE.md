@@ -116,7 +116,9 @@ The README describes the features; this file is about working on the code.
   docked Settings (`replaces_panes`); the new interface's `View::Timeline` (in the strip only for B;
   leaving it is `Close`); `Open` goes to it (and `SelectList` into a timeline list does), the tab then
   keeps its rows (`shows_tracks` false) and its Tracks button opens it; a Timeline pane under B only
-  points to it (`workspace::pointer`). Bar (Back = `Close`, `Show as a pane`), tracks across the
+  points to it (`workspace::pointer`). `workspace::showing` (the inspector's "tracks are open" instead
+  of its Open button) counts a classic Timeline pane only in front of its tabs (`dock::Layout::in_front`,
+  read through `EditorState::pane_in_front` while the dock is drawn). Bar (Back = `Close`, `Show as a pane`), tracks across the
   bottom (`TRACKS_SHARE`), left column the monitor (its own paint of `PreviewOutput`, a resizable top panel,
   `monitor_height`) over `bin.rs` (shelves `Shelf` New/Files/Clips, one shown: new clips click to the
   playhead or drag a `BinItem` onto a track: `bin::dropped`, called by `tracks.rs` next to

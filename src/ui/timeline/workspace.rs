@@ -20,8 +20,9 @@ pub fn replaces_panes(st: &UiState) -> bool {
 
 /// The timeline whose tracks are surely on screen now, if any: the workspace
 /// (in the panes' place, or as the new interface's Timeline view), or the
-/// new interface's Editor view with its timeline panel. (A classic Timeline
-/// pane may be a tab behind another, so it doesn't count.)
+/// new interface's Editor view with its timeline panel, or a classic Timeline
+/// pane in sight (popped out, or the tab in front of its node: one behind
+/// another tab doesn't count) that draws its tracks.
 pub fn showing(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey> {
     use super::super::modern::View;
     let on_screen = if st.prefs.new_layout {
@@ -30,10 +31,20 @@ pub fn showing(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey
         } else {
             st.modern_view == View::Editor && st.timeline.open
         }
-    } else {
+    } else if chosen(st) {
         replaces_panes(st)
+    } else {
+        st.timeline
+            .pane_in_front
+            .unwrap_or_else(|| st.layout.in_front(Pane::Timeline))
     };
-    on_screen.then(|| target(show, engine, st)).flatten()
+    let key = on_screen.then(|| target(show, engine, st)).flatten()?;
+    // A timeline list's own tab has its tracks; the pane then only says so.
+    let in_tab = !st.prefs.new_layout
+        && !chosen(st)
+        && Some(key) == super::list_tab::active(show, engine)
+        && super::list_tab::shows_tracks(show, engine, st);
+    (!in_tab).then_some(key)
 }
 
 /// How much of the height the tracks take when the workspace first opens.

@@ -1393,7 +1393,8 @@ fn dock_area(
     style.separator.width = 2.0;
     style.separator.extra_interact_width = 6.0;
     // The dock is moved out of the state while it is drawn: the panes borrow
-    // the rest of it.
+    // the rest of it. (What the inspector needs of it is noted first.)
+    st.timeline.pane_in_front = Some(st.layout.in_front(Pane::Timeline));
     let mut dock = std::mem::replace(&mut st.layout.dock, egui_dock::DockState::new(vec![]));
     egui_dock::DockArea::new(&mut dock)
         .id(egui::Id::new("newq_dock"))
@@ -1412,6 +1413,7 @@ fn dock_area(
             },
         );
     st.layout.dock = dock;
+    st.timeline.pane_in_front = None;
 }
 
 /// What a pane in a window of its own draws: the pane, under a bar that puts
@@ -7739,11 +7741,13 @@ fn inspector_one(
                             "Its tracks, under the cue list"
                         };
                         ui.horizontal(|ui| {
-                            if ui
-                                .button("Open in timeline editor")
-                                .on_hover_text(hover)
-                                .clicked()
-                            {
+                            let b = ui.button("Open in timeline editor").on_hover_text(hover);
+                            #[cfg(test)]
+                            ui.data_mut(|d| {
+                                d.insert_temp(egui::Id::new("open_in_editor_button"), b.rect)
+                            });
+                            if b.clicked() {
+                                // (A Timeline pane behind another tab comes to the front.)
                                 actions.push(Action::Timeline(timeline::TimelineAction::Open(
                                     Some(key),
                                 )));

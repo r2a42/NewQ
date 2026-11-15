@@ -60,6 +60,9 @@ pub struct EditorState {
     /// Deleting a clip closes the gap it leaves on its track (the toolbar's
     /// Ripple; Shift+Delete ripples either way).
     pub ripple: bool,
+    /// While the dock is drawn (it is out of `UiState::layout` meanwhile):
+    /// whether a Timeline pane is in sight (`dock::Layout::in_front`).
+    pub pane_in_front: Option<bool>,
     /// What is being dragged, and in which host.
     drag: Option<(Host, Drag)>,
     /// A marker whose name is being typed, and the name so far.
@@ -105,6 +108,7 @@ impl Default for EditorState {
             snap: true,
             list_rows: false,
             ripple: false,
+            pane_in_front: None,
             drag: None,
             renaming: None,
             shown_pps: 0.0,

@@ -6,6 +6,10 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A timeline group's inspector knows its Timeline pane is open.** With the tracks editor as a
+  pane in the classic interface, the group's inspector offered *Open in timeline editor* even
+  while the pane showed its tracks. It now says the tracks are open; if the pane is a tab hidden
+  behind another, the button stays and brings it to the front.
 - **A control cue's "Do" menu shows every action.** The menu scrolled, so the timeline actions
   (Run, Pause, Stop and Jump a timeline) were out of sight below the others on a smaller
   screen. It now has two columns, the actions on a cue and those on a timeline, all in sight.

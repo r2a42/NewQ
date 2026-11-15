@@ -107,6 +107,17 @@ impl Layout {
         self.is_docked(pane) || self.is_popped_out(pane)
     }
 
+    /// In sight: popped out, or docked as the tab in front of its node (not
+    /// behind another tab).
+    pub fn in_front(&self, pane: Pane) -> bool {
+        self.is_popped_out(pane)
+            || self.docked_path(pane).is_some_and(|p| {
+                self.dock[p.node_path()]
+                    .get_leaf()
+                    .is_some_and(|l| l.active == p.tab)
+            })
+    }
+
     pub fn docked_panes(&self) -> Vec<Pane> {
         self.dock.iter_all_tabs().map(|(_, p)| *p).collect()
     }

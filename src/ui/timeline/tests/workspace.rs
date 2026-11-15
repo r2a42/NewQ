@@ -886,3 +886,52 @@ fn every_action_of_the_do_menu_is_in_sight_without_scrolling() {
         }
     }
 }
+
+/// The classic interface with the editor as a pane: a Timeline pane on the
+/// group, in front of its tabs, is where its tracks are, so the inspector says
+/// so; behind another tab it isn't seen, so the button stays, and brings it
+/// to the front.
+#[test]
+fn a_timeline_pane_in_front_on_the_group_replaces_the_open_button_and_one_behind_comes_forward() {
+    let mut f = fixture();
+    let mut m = window(&mut f, false, TimelineLayout::Pane);
+    // Tall enough for the button to be in sight above the pane, unscrolled.
+    m.size = Some(egui::vec2(1280.0, 1300.0));
+    let g = f.group;
+    super::super::super::apply(Action::Select(g), &mut f.show, &mut m.e, &mut f.st);
+    settle(&mut m, &mut f);
+    assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(true), "not open");
+    open_by_row(&mut m, &mut f, g);
+    assert!(f.st.layout.in_front(Pane::Timeline));
+    assert_eq!(f.st.selected, Some(g));
+    m.ctx
+        .data_mut(|d| d.remove::<bool>(egui::Id::new("open_in_editor")));
+    settle(&mut m, &mut f);
+    assert_eq!(
+        noted::<bool>(&m, "open_in_editor"),
+        Some(false),
+        "the pane in front shows its tracks"
+    );
+    // Another tab put in front of it in its node.
+    f.st.layout.close(Pane::Active);
+    let tl = f.st.layout.dock.find_tab(&Pane::Timeline).unwrap();
+    f.st.layout
+        .dock
+        .set_focused_node_and_surface(tl.node_path());
+    f.st.layout.dock.push_to_focused_leaf(Pane::Active);
+    assert!(!f.st.layout.in_front(Pane::Timeline) && f.st.layout.is_docked(Pane::Timeline));
+    settle(&mut m, &mut f);
+    assert_eq!(
+        noted::<bool>(&m, "open_in_editor"),
+        Some(true),
+        "behind a tab: offered"
+    );
+    let b: Rect = noted(&m, "open_in_editor_button").expect("the button");
+    press(&mut m, &mut f, b.center());
+    assert!(f.st.layout.in_front(Pane::Timeline), "brought to the front");
+    m.ctx
+        .data_mut(|d| d.remove::<bool>(egui::Id::new("open_in_editor")));
+    settle(&mut m, &mut f);
+    assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(false));
+    assert!(editors(&m).contains(&Host::Pane));
+}
