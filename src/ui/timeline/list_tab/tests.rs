@@ -1102,3 +1102,26 @@ fn with_the_timeline_pane_open_a_timeline_list_opens_on_its_rows_and_the_pane_ha
     act(Action::SelectList(f.list), &mut f, &mut w);
     assert!(!f.st.timeline.list_rows);
 }
+
+#[test]
+fn a_clip_over_an_earlier_one_on_its_track_is_drawn_crossfading_in() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let a = text_clip(&mut f.show, f.list, 0.0, 4.0, 3);
+    let b = text_clip(&mut f.show, f.list, 2.5, 4.0, 3);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    let said = w.clip_text(&mut f.show, &mut f.st, b);
+    assert!(said.contains("crossfades in 1.5 s"), "{said}");
+    assert!(
+        !w.clip_text(&mut f.show, &mut f.st, a)
+            .contains("crossfades")
+    );
+    // With the timeline's setting off, nothing crossfades.
+    model::settings_mut(&mut f.show, TimelineKey::List(f.list))
+        .unwrap()
+        .crossfade_overlaps = false;
+    assert!(
+        !w.clip_text(&mut f.show, &mut f.st, b)
+            .contains("crossfades")
+    );
+}

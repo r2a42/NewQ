@@ -1016,6 +1016,19 @@ fn draw_clip(
     let inner = p.with_clip_rect(rect.intersect(p.clip_rect()));
     // The lead-in: waiting, unseen, for its fade-in.
     let (lead, never) = lead_of(ctx, c);
+    // Over an earlier clip on its track (the timeline's "Overlapping clips
+    // crossfade"): the overlap, drawn as a crossfade over the start of this
+    // one (which is drawn over the end of the other).
+    let xfade = ctx
+        .show
+        .cue(c.id)
+        .and_then(|q| {
+            crate::timeline::chase::overlap(ctx.show, ctx.key, q, &mut |x| {
+                engine.cue_duration(ctx.show, x)
+            })
+        })
+        .map(|o| o.secs)
+        .filter(|s| *s > 0.0);
     if c.ty == CueType::Audio {
         waveform(&inner, ctx, engine, c, rect, geo, start + lead);
     }
@@ -1093,6 +1106,19 @@ fn draw_clip(
             ramp,
         );
     }
+    if let Some(secs) = xfade
+        && !never
+    {
+        let x0 = geo.x(start + lead).max(rect.left());
+        let x1 = geo.x(start + lead + secs).min(rect.right());
+        if x1 > x0 + 1.0 {
+            let r = Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom()));
+            inner.rect_filled(r, 0.0, Color32::from_black_alpha(60));
+            let line = Stroke::new(1.0, Color32::from_white_alpha(170));
+            inner.line_segment([r.left_bottom(), r.right_top()], line);
+            inner.line_segment([r.left_top(), r.right_bottom()], line);
+        }
+    }
     if ctx.detached.contains(&c.id) {
         hatch(
             &inner,
@@ -1141,6 +1167,10 @@ fn draw_clip(
     }
     if cuts {
         notes.push("cuts the clip under it");
+    }
+    let xfade_note = xfade.map(|s| format!("crossfades in {}", fmt_secs_short(s)));
+    if let Some(n) = &xfade_note {
+        notes.push(n);
     }
     if ctx.detached.contains(&c.id) {
         notes.push("free-running");
@@ -1563,4 +1593,10 @@ fn follow_drag(
     for a in done {
         actions.push(Action::Timeline(a));
     }
+}
+
+/// Seconds for a clip's note: "2 s", "1.5 s".
+fn fmt_secs_short(s: f64) -> String {
+    let t = format!("{s:.1}");
+    format!("{} s", t.strip_suffix(".0").unwrap_or(&t))
 }
