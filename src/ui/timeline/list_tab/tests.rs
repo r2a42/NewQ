@@ -688,3 +688,51 @@ fn a_show_with_a_timeline_list_saves_and_loads_and_an_old_one_is_unchanged() {
     assert!(!text.contains("timeline"), "{text}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ----- Drops, pastes and moves into a timeline list (I2) -----
+
+fn added(show: &Show, before: &[CueId]) -> Vec<crate::show::Cue> {
+    show.cues
+        .iter()
+        .filter(|c| !before.contains(&c.id))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn cues_pasted_or_moved_into_a_timeline_list_go_to_its_playhead() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let key = TimelineKey::List(f.list);
+    // Two main-list cues 4 s apart, far from the playhead.
+    let x = wait(&mut f.show, "X", 0, 20.0, 1.0);
+    let y = wait(&mut f.show, "Y", 0, 24.0, 1.0);
+    f.show.normalize_lists();
+    f.st.select_many(vec![x, y], y);
+    act(Action::Copy, &mut f, &mut w);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    act(
+        Action::Timeline(TimelineAction::Seek { key, pos: 1.5 }),
+        &mut f,
+        &mut w,
+    );
+    f.st.selected = None;
+    let before: Vec<CueId> = f.show.cues.iter().map(|c| c.id).collect();
+    act(Action::Paste, &mut f, &mut w);
+    let mut new = added(&f.show, &before);
+    new.sort_by(|a, b| a.pre_wait.total_cmp(&b.pre_wait));
+    assert_eq!(new.len(), 2);
+    assert!((new[0].pre_wait - 1.5).abs() < 1e-6, "{}", new[0].pre_wait);
+    assert!((new[1].pre_wait - 5.5).abs() < 1e-6, "the spacing is kept");
+    assert!(new.iter().all(|c| c.list == f.list));
+    // Moved in from the main list: at the playhead too.
+    act(Action::SelectList(0), &mut f, &mut w);
+    act(Action::MoveToList(x, f.list), &mut f, &mut w);
+    let c = f.show.cue(x).unwrap();
+    assert_eq!(c.list, f.list);
+    assert!((c.pre_wait - 1.5).abs() < 1e-6, "{}", c.pre_wait);
+    // A move into a plain list keeps its pre-wait.
+    let plain = f.show.add_list("Plain");
+    act(Action::MoveToList(y, plain), &mut f, &mut w);
+    assert_eq!(f.show.cue(y).unwrap().pre_wait, 24.0);
+}

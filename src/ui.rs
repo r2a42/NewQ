@@ -10306,9 +10306,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             engine.log(timeline::list_tab::NO_GROUPS);
         }
         Action::MoveToList(id, list) => {
+            let top = show.top_id(id);
             if let Some(i) = show.cue_index(id)
                 && show.move_to_list(i, list).is_some()
             {
+                // Into a timeline list: at its playhead (not at its old pre-wait).
+                let key = TimelineKey::List(list);
+                if timeline::list_tab::is_timeline_list(show, list) {
+                    let at = engine.timeline(show, key).pos;
+                    crate::timeline::edit::place_at(show, key, &[top], at);
+                }
                 // Where it was is no longer where the playhead can be.
                 if engine
                     .playhead
@@ -10561,6 +10568,11 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     .any(|c| matches!(c.kind, CueKind::Group(_))) =>
         {
             engine.log(timeline::list_tab::NO_GROUPS);
+        }
+        // Onto the timeline list being worked: at its playhead, on their tracks.
+        Action::Paste if let Some(key) = timeline::list_tab::active(show, engine) => {
+            let at = engine.timeline(show, key).pos;
+            timeline::paste_into(show, engine, st, key, at);
         }
         Action::Paste => {
             let copies = std::mem::take(&mut st.clipboard);

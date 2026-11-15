@@ -1,5 +1,7 @@
 //! The editor's keys and what comes from outside it: Ctrl/Cmd+K splits at
 //! the playhead, Delete (Shift+Delete to ripple) removes the picked clips,
+//! Ctrl/Cmd+X cuts them, Ctrl/Cmd+D duplicates them just after themselves,
+//! Ctrl/Cmd+V pastes the clipboard at the playhead,
 //! files dropped on a track become clips there, and a file chosen in a
 //! dialog for a new clip.
 //!
@@ -7,7 +9,7 @@
 //! so Delete has already been turned into the cue list's `Action::Delete`
 //! when the editor sees it: the editor that holds the keys (the last clicked,
 //! or under the pointer) puts its own delete in its place when every picked
-//! cue is one of its clips. The same for a drop: `Action::AddFiles` gives way
+//! cue is one of its clips (Cut, Duplicate and Paste likewise). The same for a drop: `Action::AddFiles` gives way
 //! to clips on the track the files were let go over.
 
 use super::tracks::{Ctx, Geo};
@@ -52,20 +54,56 @@ pub(super) fn handle(
             at: ctx.pos,
         }));
     }
-    // Delete, as the window's keys read it: ours when every picked cue is a
-    // clip here (Shift, or the Ripple toggle, closes the gaps).
-    if let Some(at) = actions.iter().position(|a| matches!(a, Action::Delete)) {
-        let picked = st.selection(ctx.show);
-        let ids: Vec<CueId> = picked
-            .iter()
-            .copied()
-            .filter(|id| ctx.clips.iter().any(|c| c.id == *id))
-            .collect();
-        if ctx.editable && !ids.is_empty() && ids.len() == picked.len() {
-            let ripple = st.timeline.ripple || ui.input(|i| i.modifiers.shift);
-            actions[at] = Action::Timeline(TimelineAction::Delete { key, ids, ripple });
-        }
+    // Delete, cut and duplicate, as the window's keys read them: ours when
+    // every picked cue is a clip here (Shift, or the Ripple toggle, closes the
+    // gaps a delete or a cut leaves). Copy is the cue list's: it copies the
+    // picked cues either way.
+    let picked = st.selection(ctx.show);
+    let ids: Vec<CueId> = picked
+        .iter()
+        .copied()
+        .filter(|id| ctx.clips.iter().any(|c| c.id == *id))
+        .collect();
+    let all_clips = ctx.editable && !ids.is_empty() && ids.len() == picked.len();
+    let ripple = st.timeline.ripple || ui.input(|i| i.modifiers.shift);
+    for a in actions.iter_mut() {
+        let ours = match a {
+            Action::Delete if all_clips => TimelineAction::Delete {
+                key,
+                ids: ids.clone(),
+                ripple,
+            },
+            Action::Cut if all_clips => TimelineAction::Cut {
+                key,
+                ids: ids.clone(),
+                ripple,
+            },
+            Action::Duplicate if all_clips => TimelineAction::Duplicate {
+                key,
+                ids: ids.clone(),
+            },
+            // A paste lands at the playhead, when what is picked is of this
+            // timeline (its clips, or its group) or nothing is.
+            Action::Paste if ctx.editable && pastes_here(ctx, st, &picked) => {
+                TimelineAction::Paste { key, at: ctx.pos }
+            }
+            _ => continue,
+        };
+        *a = Action::Timeline(ours);
     }
+}
+
+/// Whether a paste with the editor holding the keys is the editor's: the
+/// clipboard holds no group, and nothing is picked outside this timeline.
+fn pastes_here(ctx: &Ctx, st: &UiState, picked: &[CueId]) -> bool {
+    !st.clipboard.is_empty()
+        && !st
+            .clipboard
+            .iter()
+            .any(|c| matches!(c.kind, crate::show::CueKind::Group(_)))
+        && picked
+            .iter()
+            .all(|id| ctx.clips.iter().any(|c| c.id == *id) || ctx.key == TimelineKey::Group(*id))
 }
 
 /// Files let go over a track become clips there, at the time under the

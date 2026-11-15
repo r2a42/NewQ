@@ -2096,3 +2096,144 @@ fn a_lane_key_near_the_ends_snaps_to_unseen_full_and_normal_speed() {
     assert_eq!(Lane::Speed.value(1.0), 4.0);
     assert_eq!(Lane::Speed.value(0.0), 0.25);
 }
+
+// ----- Copy, cut, paste and duplicate (I2) -----
+
+/// A frame with the pointer over clip `id` (so the editor holds the keys).
+fn hover(m: &mut Mouse, f: &mut Fixture, id: CueId) {
+    let r = m.clip(&mut f.show, &mut f.st, id);
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![Event::PointerMoved(r.center())],
+    );
+}
+
+fn layer_of(show: &Show, id: CueId) -> i32 {
+    show.cue(id).unwrap().kind.media().unwrap().layer
+}
+
+#[test]
+fn ctrl_c_and_v_paste_the_picked_clips_at_the_playhead_on_their_tracks_in_one_undo() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = in_window(&mut f);
+    let a = f.a;
+    pick(&mut m, &mut f, a);
+    f.st.select_many(vec![f.a, f.c], f.c);
+    let id = f.a;
+    hover(&mut m, &mut f, id);
+    m.frame(&mut f.show, &mut f.st, vec![Event::Copy]);
+    assert_eq!(f.st.clipboard.len(), 2);
+    super::super::apply(
+        Action::Timeline(TimelineAction::Seek { key, pos: 12.0 }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    let before: Vec<CueId> = model::members(&f.show, key).iter().map(|c| c.id).collect();
+    let id = f.a;
+    hover(&mut m, &mut f, id);
+    m.frame(&mut f.show, &mut f.st, vec![Event::Paste(String::new())]);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let new: Vec<CueId> = model::members(&f.show, key)
+        .iter()
+        .map(|c| c.id)
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(new.len(), 2, "both pasted into the group");
+    // A (0 s, layer 0) and C (2 s, layer 1): at 12 s and 14 s, on their layers.
+    let mut got: Vec<(f64, i32)> = new
+        .iter()
+        .map(|id| (f.show.cue(*id).unwrap().pre_wait, layer_of(&f.show, *id)))
+        .collect();
+    got.sort_by(|x, y| x.0.total_cmp(&y.0));
+    assert!((got[0].0 - 12.0).abs() < 1e-3 && (got[1].0 - 14.0).abs() < 1e-3);
+    assert_eq!((got[0].1, got[1].1), (0, 1));
+    assert_eq!(f.st.selection(&f.show).len(), 2, "the copies are picked");
+    super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+    assert_eq!(model::members(&f.show, key).len(), before.len(), "one undo");
+}
+
+#[test]
+fn ctrl_d_duplicates_a_clip_just_after_it_and_ctrl_x_cuts_it_to_paste_back() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = in_window(&mut f);
+    let a = f.a;
+    pick(&mut m, &mut f, a);
+    let id = f.a;
+    hover(&mut m, &mut f, id);
+    let n = model::members(&f.show, key).len();
+    m.mods = Modifiers::COMMAND;
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        key_press(egui::Key::D, Modifiers::COMMAND),
+    );
+    m.mods = Modifiers::NONE;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert_eq!(model::members(&f.show, key).len(), n + 1);
+    let copy = f.st.selected.unwrap();
+    assert_ne!(copy, f.a);
+    // A is 0–4 s: its copy starts at 4 s, on its layer, in the group.
+    assert_eq!(starts(&f.show, &[copy]), vec![4.0]);
+    assert_eq!(model::key_of(&f.show, copy), Some(key));
+    super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+    assert_eq!(model::members(&f.show, key).len(), n);
+    // Cut: A goes; pasted back at the playhead (3 s) it has its id again.
+    let a = f.a;
+    pick(&mut m, &mut f, a);
+    let id = f.a;
+    hover(&mut m, &mut f, id);
+    m.frame(&mut f.show, &mut f.st, vec![Event::Cut]);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert!(f.show.cue(f.a).is_none(), "A is cut");
+    assert_eq!(starts(&f.show, &[f.b]), vec![6.0], "no ripple");
+    super::super::apply(
+        Action::Timeline(TimelineAction::Seek { key, pos: 3.0 }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    let id = f.b;
+    hover(&mut m, &mut f, id);
+    m.frame(&mut f.show, &mut f.st, vec![Event::Paste(String::new())]);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert_eq!(starts(&f.show, &[f.a]), vec![3.0], "back with its id");
+}
+
+#[test]
+fn a_paste_with_a_cue_outside_picked_or_in_show_mode_is_not_the_editors() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let other = f.show.make_cue(CueType::Wait, None, f.show.cues.len());
+    let other_id = other.id;
+    f.show.cues.push(other);
+    let mut m = in_window(&mut f);
+    f.st.clipboard = f.show.copy_cues(&[f.a]);
+    f.st.clipboard_epoch = f.st.show_epoch;
+    // A cue outside the timeline picked: the cue list's paste, after it.
+    f.st.selected = Some(other_id);
+    let id = f.a;
+    hover(&mut m, &mut f, id);
+    let n = model::members(&f.show, key).len();
+    m.frame(&mut f.show, &mut f.st, vec![Event::Paste(String::new())]);
+    assert_eq!(model::members(&f.show, key).len(), n, "not into the group");
+    // Show mode: nothing is pasted at all.
+    f.st.selected = Some(f.a);
+    f.st.show_mode = true;
+    let cues = f.show.cues.len();
+    let id = f.a;
+    hover(&mut m, &mut f, id);
+    m.frame(&mut f.show, &mut f.st, vec![Event::Paste(String::new())]);
+    assert_eq!(f.show.cues.len(), cues);
+    assert!(TimelineAction::Paste { key, at: 0.0 }.edits_the_show());
+    assert!(
+        TimelineAction::Duplicate {
+            key,
+            ids: vec![f.a]
+        }
+        .edits_the_show()
+    );
+}

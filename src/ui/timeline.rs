@@ -485,6 +485,22 @@ pub enum TimelineAction {
         key: TimelineKey,
         id: u64,
     },
+    /// The clipboard's cues as clips, the earliest at `at`, on their tracks.
+    Paste {
+        key: TimelineKey,
+        at: f64,
+    },
+    /// Copy the clips `ids` and take them off (closing the gap with `ripple`).
+    Cut {
+        key: TimelineKey,
+        ids: Vec<CueId>,
+        ripple: bool,
+    },
+    /// Copies of the clips `ids` just after them.
+    Duplicate {
+        key: TimelineKey,
+        ids: Vec<CueId>,
+    },
     SetRate {
         id: CueId,
         rate: Animated,
@@ -552,6 +568,9 @@ impl TimelineAction {
             | A::MoveMarker { .. }
             | A::RenameMarker { .. }
             | A::RemoveMarker { .. }
+            | A::Paste { .. }
+            | A::Cut { .. }
+            | A::Duplicate { .. }
             | A::SetRate { .. }
             | A::NewTimelineList
             | A::NewTimelineGroup
@@ -686,6 +705,20 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
         A::RemoveMarker { key, id } => {
             edit::remove_marker(show, key, id);
         }
+        A::Paste { key, at } => paste_into(show, engine, st, key, at),
+        A::Cut { key, ids, ripple } => {
+            super::apply(Action::Copy, show, engine, st);
+            // As the cue list's cut: what was cut comes back with its ids.
+            let kept = !st.clipboard.is_empty();
+            apply(A::Delete { key, ids, ripple }, show, engine, st);
+            st.clipboard_cut = kept;
+        }
+        A::Duplicate { key, ids } => {
+            let was = before();
+            let made =
+                edit::duplicate_clips(show, key, &ids, &mut |c| engine.cue_duration(&was, c));
+            pick(show, engine, st, &made);
+        }
         A::SetRate { id, rate } => {
             edit::set_rate(show, id, rate);
         }
@@ -795,6 +828,58 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
                 log::warn!("could not save the settings of this computer: {e}");
             }
         }
+    }
+}
+
+/// Paste the clipboard onto the timeline `key` as clips, the earliest at
+/// `at` (the playhead), each on the track it had. A group is refused.
+pub(super) fn paste_into(
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+    key: TimelineKey,
+    at: f64,
+) {
+    if st
+        .clipboard
+        .iter()
+        .any(|c| matches!(c.kind, CueKind::Group(_)))
+    {
+        engine.log("A group can't be pasted onto a timeline: its cues are clips on one clock");
+        return;
+    }
+    let copies = std::mem::take(&mut st.clipboard);
+    let made = edit::paste_clips(
+        show,
+        key,
+        &copies,
+        at,
+        st.clipboard_epoch == st.show_epoch,
+        st.clipboard_cut,
+    );
+    st.clipboard = copies;
+    if made.is_empty() {
+        return;
+    }
+    // Only the first paste of a cut puts the cues back as they were.
+    st.clipboard_cut = false;
+    pick(show, engine, st, &made);
+    let n = made.len();
+    engine.log(format!(
+        "Pasted {n} clip{} at {}",
+        if n == 1 { "" } else { "s" },
+        super::fmt_time(at)
+    ));
+}
+
+/// Make `ids` the selection (the last one selected).
+fn pick(show: &Show, engine: &mut Engine, st: &mut UiState, ids: &[CueId]) {
+    let Some(&last) = ids.last() else {
+        return;
+    };
+    super::select(show, st, engine, Some(last));
+    if ids.len() > 1 {
+        st.select_many(ids.to_vec(), last);
     }
 }
 

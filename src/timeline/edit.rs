@@ -692,6 +692,76 @@ pub fn add_clip(
     add_cue(show, key, cue, at)
 }
 
+/// Move the clips `ids` of a timeline in time so the earliest starts at `at`,
+/// keeping their spacing and tracks (cues pasted or moved in).
+pub fn place_at(show: &mut Show, key: TimelineKey, ids: &[CueId], at: f64) -> bool {
+    if !at.is_finite() {
+        return false;
+    }
+    let earliest = model::members(show, key)
+        .into_iter()
+        .filter(|c| ids.contains(&c.id))
+        .map(start_of)
+        .fold(f64::INFINITY, f64::min);
+    if !earliest.is_finite() {
+        return false;
+    }
+    move_clips(show, key, ids, at.max(0.0) - earliest, None)
+}
+
+/// Paste copies of cues (`Show::copy_cues`) into a timeline as clips, the
+/// earliest at `at` and the others as far after it as they were, each on the
+/// track it had (a display or output the show lacks mapped as `paste_cues`
+/// does, which also aims a fade, stop or control cue at the copy of what it
+/// aimed at). A group isn't pasted into a timeline: nothing is, then. Returns
+/// the new clips.
+pub fn paste_clips(
+    show: &mut Show,
+    key: TimelineKey,
+    cues: &[Cue],
+    at: f64,
+    same_show: bool,
+    keep_ids: bool,
+) -> Vec<CueId> {
+    if !model::is_timeline(show, key)
+        || !at.is_finite()
+        || cues.is_empty()
+        || cues.iter().any(|c| matches!(c.kind, CueKind::Group(_)))
+    {
+        return Vec::new();
+    }
+    let (selected, list) = match key {
+        TimelineKey::Group(g) => match show.cue(g) {
+            Some(c) => (Some(g), c.list),
+            None => return Vec::new(),
+        },
+        TimelineKey::List(n) => (None, n),
+    };
+    let heads = show.paste_cues(cues, selected, list, same_show, keep_ids);
+    if !place_at(show, key, &heads, at) {
+        sort_by_start(show, key);
+    }
+    heads
+}
+
+/// Copies of the clips `ids` of a timeline, just after them: the copies start
+/// where the last of them ends (an open-ended one counts from its start), so
+/// they don't overlap what they copy. Returns the copies.
+pub fn duplicate_clips(show: &mut Show, key: TimelineKey, ids: &[CueId], dur: Dur) -> Vec<CueId> {
+    let clips = model::clips(show, key, dur);
+    let picked: Vec<&model::Clip> = clips.iter().filter(|c| ids.contains(&c.id)).collect();
+    if picked.is_empty() {
+        return Vec::new();
+    }
+    let end = picked
+        .iter()
+        .map(|c| c.start + c.len.unwrap_or(0.0))
+        .fold(0.0, f64::max);
+    let own: Vec<CueId> = picked.iter().map(|c| c.id).collect();
+    let copies = show.copy_cues(&own);
+    paste_clips(show, key, &copies, end, true, false)
+}
+
 /// A control cue doing `action` at `at` on the timeline's cue track.
 pub fn add_control(
     show: &mut Show,
@@ -1669,6 +1739,75 @@ mod tests {
         media(show, u).opacity = 0.5;
         let x = split(show, key, &[u], 4.0, &mut fake_dur)[0];
         assert_eq!(media(show, x).opacity, 0.5);
+    }
+
+    #[test]
+    fn pasted_clips_land_at_the_time_on_their_tracks_with_their_spacing_and_aims() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let v = clip(show, key, CueType::Video, picture(show, 1, 2), 3.0);
+            let a = clip(
+                show,
+                key,
+                CueType::Audio,
+                TrackId::Sound { output: None },
+                5.0,
+            );
+            let fade = add_clip(show, key, CueType::Fade, None, TrackId::Cues, 4.0).unwrap();
+            let i = show.cue_index(fade).unwrap();
+            if let CueKind::Fade(fc) = &mut show.cues[i].kind {
+                fc.target = Some(v);
+            }
+            // Copied in the show's order, which is their starts'.
+            let copies = show.copy_cues(&[v, a, fade]);
+            let made = paste_clips(show, key, &copies, 10.0, true, false);
+            assert_eq!(made.len(), 3);
+            let (v2, f2, a2) = (made[0], made[1], made[2]);
+            assert!(near(start(show, v2), 10.0));
+            assert!(near(start(show, f2), 11.0));
+            assert!(near(start(show, a2), 12.0));
+            let clips = model::clips(show, key, &mut fake_dur);
+            let track = |id| clips.iter().find(|c| c.id == id).unwrap().track;
+            assert_eq!(track(v2), picture(show, 1, 2));
+            assert_eq!(track(a2), TrackId::Sound { output: None });
+            // The copied fade aims at the copy, the old one at the old clip.
+            let aim = |show: &Show, id| match &show.cue(id).unwrap().kind {
+                CueKind::Fade(fc) => fc.target,
+                _ => None,
+            };
+            assert_eq!(aim(show, f2), Some(v2));
+            assert_eq!(aim(show, fade), Some(v));
+            assert!(ids(show, key).contains(&v2));
+            // A group isn't pasted into a timeline.
+            let g = show.make_cue(CueType::Group, None, 0);
+            assert!(paste_clips(show, key, &[g], 0.0, true, false).is_empty());
+            assert!(paste_clips(show, key, &copies, f64::NAN, true, false).is_empty());
+            assert_sound(show);
+        }
+    }
+
+    #[test]
+    fn a_duplicate_comes_right_after_what_it_copies_and_moved_in_cues_go_to_a_time() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let v = clip(show, key, CueType::Video, picture(show, 0, 0), 1.0);
+            let w = clip(show, key, CueType::Video, picture(show, 0, 1), 4.0);
+            // FILE long each: the pair ends at 24 s.
+            let made = duplicate_clips(show, key, &[v, w], &mut fake_dur);
+            assert_eq!(made.len(), 2);
+            assert!(near(start(show, made[0]), 24.0));
+            assert!(near(start(show, made[1]), 27.0));
+            assert!(duplicate_clips(show, key, &[CueId(9999)], &mut fake_dur).is_empty());
+            // Placing keeps the spacing.
+            assert!(place_at(show, key, &[v, w], 2.0));
+            assert!(near(start(show, v), 2.0) && near(start(show, w), 5.0));
+            assert!(!place_at(show, key, &[v, w], f64::INFINITY));
+            assert_sound(show);
+        }
     }
 
     #[test]
