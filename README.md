@@ -261,7 +261,8 @@ stays on the computer until you send it yourself.
   and audio outputs and the gear they reach (the monitor and any stream or
   recording of a display, the audio device with its level); drag from the dot on
   a cue to a display (a picture) or an audio output (its sound) to route it, and
-  click a cue to select it. *Settings* opens in place of the view. Routes
+  click a cue to select it. With timelines set to open as a workspace, a fourth
+  view, *Timeline*, is the timeline workspace (see *Timelines*). *Settings* opens in place of the view. Routes
   can't be changed in show mode. Checked by drawing every view in tests and a
   test that drags routes, and by eye on Windows; not on a Mac or Linux.
 - **Panes you can rearrange and pop out:** the main window is a set of panes
