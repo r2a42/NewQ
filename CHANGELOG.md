@@ -6,6 +6,9 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Hotkeys work while an output window has the keyboard.** A cue's hotkey did nothing if you had
+  clicked on an output window; it now fires the cue there as it does in the main window, and a
+  cue given 0 as its hotkey takes 0 from GO there too.
 - **Shorter tooltips for cues at one place.** Hovering a Cues-track marker that stands for several
   cues gave each cue's long description, often taller than the screen. It now gives one short
   line per cue (number, name, time, what it does), at most eight lines and then "and N more";

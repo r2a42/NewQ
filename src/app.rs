@@ -329,6 +329,8 @@ pub struct App {
     /// The system's screen-change notification observer (Mac only).
     #[cfg(target_os = "macos")]
     screen_watch: Option<objc2::rc::Retained<objc2_foundation::NSObject>>,
+    /// The modifier keys held, as an output window last heard (for its hotkeys).
+    output_mods: winit::keyboard::ModifiersState,
     /// Holding the computer awake while outputs are open.
     show_awake: Option<crate::awake::KeepAwake>,
     awake_refreshed: Instant,
@@ -410,6 +412,7 @@ impl App {
             wake,
             #[cfg(target_os = "macos")]
             screen_watch: None,
+            output_mods: Default::default(),
             show_awake: None,
             awake_refreshed: Instant::now(),
             sleep_watch: crate::awake::SleepWatch::new(),
@@ -2394,40 +2397,61 @@ impl App {
         if event.state != ElementState::Pressed || event.repeat {
             return;
         }
-        let show_mode = self.ui.show_mode;
-        match &event.logical_key {
-            // As in the main window: Space plays and pauses a timeline being
-            // worked on (else GO), 0 is GO.
-            Key::Named(NamedKey::Space) => {
-                ui::space_key(None, &mut self.show, &mut self.engine, &mut self.ui)
-            }
-            Key::Character(c) if c.as_str() == "0" => {
-                ui::go_key(&mut self.show, &mut self.engine, &mut self.ui)
-            }
-            Key::Named(NamedKey::Escape) => self.engine.panic(&self.show),
-            // Show mode: the arrows are a presenter remote's forward and back.
-            Key::Named(NamedKey::ArrowRight | NamedKey::PageDown) if show_mode => {
-                ui::remote_button(
-                    crate::clicker::Button::Go,
-                    &mut self.show,
-                    &mut self.engine,
-                    &mut self.ui,
-                );
-            }
-            Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp) if show_mode => {
-                ui::remote_button(
-                    crate::clicker::Button::Back,
-                    &mut self.show,
-                    &mut self.engine,
-                    &mut self.ui,
-                );
-            }
-            _ => return,
+        let Some(key) = egui_key(&event.logical_key) else {
+            return;
+        };
+        let m = self.output_mods;
+        let mods = egui::Modifiers {
+            alt: m.alt_key(),
+            ctrl: m.control_key(),
+            shift: m.shift_key(),
+            mac_cmd: cfg!(target_os = "macos") && m.super_key(),
+            command: if cfg!(target_os = "macos") {
+                m.super_key()
+            } else {
+                m.control_key()
+            },
+        };
+        // As in the main window (`ui::output_key`): a cue's hotkey, Space, 0,
+        // Esc, and in show mode the arrows.
+        if !ui::output_key(key, mods, &mut self.show, &mut self.engine, &mut self.ui) {
+            return;
         }
         self.ui.selected = self.engine.playhead;
         if let Some(ctl) = &self.control {
             ctl.window.request_redraw();
         }
+    }
+}
+
+/// The egui key of a key pressed in an output window, for `ui::output_key`:
+/// the keys it can act on (a letter or digit, F1 to F12, Space, Esc, the arrows
+/// and Page Up/Down).
+fn egui_key(key: &Key) -> Option<egui::Key> {
+    match key {
+        Key::Character(c) => egui::Key::from_name(&c.to_uppercase()),
+        Key::Named(n) => Some(match n {
+            NamedKey::Space => egui::Key::Space,
+            NamedKey::Escape => egui::Key::Escape,
+            NamedKey::ArrowRight => egui::Key::ArrowRight,
+            NamedKey::ArrowLeft => egui::Key::ArrowLeft,
+            NamedKey::PageDown => egui::Key::PageDown,
+            NamedKey::PageUp => egui::Key::PageUp,
+            NamedKey::F1 => egui::Key::F1,
+            NamedKey::F2 => egui::Key::F2,
+            NamedKey::F3 => egui::Key::F3,
+            NamedKey::F4 => egui::Key::F4,
+            NamedKey::F5 => egui::Key::F5,
+            NamedKey::F6 => egui::Key::F6,
+            NamedKey::F7 => egui::Key::F7,
+            NamedKey::F8 => egui::Key::F8,
+            NamedKey::F9 => egui::Key::F9,
+            NamedKey::F10 => egui::Key::F10,
+            NamedKey::F11 => egui::Key::F11,
+            NamedKey::F12 => egui::Key::F12,
+            _ => return None,
+        }),
+        _ => None,
     }
 }
 
@@ -2744,6 +2768,7 @@ impl App {
                     s.needs_redraw = true;
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => self.output_mods = mods.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_output_key(&event),
             _ => {}
         }

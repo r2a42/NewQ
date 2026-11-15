@@ -357,7 +357,8 @@ The README describes the features; this file is about working on the code.
   instance, which crossfades over the older ones: `apply_entry` only fades out layers started before it),
   and `Engine::go` steps it before it fires anything else; past the last slide the deck lets go
   (`DeckStep::AtEnd`). `ui::remote_button` is the one handler for the presenter remote's buttons and for the
-  show-mode arrow keys (`keyboard`, and `app.rs::handle_output_key` for the output windows).
+  show-mode arrow keys (`keyboard`, and `app.rs::handle_output_key` for the output windows, which
+  maps the winit key to egui's and calls `ui::output_key`; hotkeys in both through `ui::hotkey_cue`).
 - Mac signing: `release.yml` imports a Developer ID certificate into a temporary keychain when the
   secrets `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD` (and, to notarise, `APPLE_API_KEY_P8`,
   `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`) exist; `package_release.sh` then signs ffmpeg, ffprobe

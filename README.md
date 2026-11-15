@@ -832,8 +832,8 @@ stays on the computer until you send it yourself.
   the cue whose number is the note, as before. Tick *On cart* for the cues you
   want as buttons, then *Cue ▸ Show cart* (or *Window ▸ Cart*) for a grid of them: click to fire,
   right-click to stop or fade out. Buttons show the hotkey, fill as the cue
-  plays, and have a green dot when preloaded. Hotkeys don't fire while you're
-  typing in a text box. Copies of a cue don't inherit its hotkey or note.
+  plays, and have a green dot when preloaded. Hotkeys work in the output windows
+  too, and don't fire while you're typing in a text box. Copies of a cue don't inherit its hotkey or note.
 - **Colour and chroma key:** under *Colour and key* in a visual cue's
   inspector, adjust brightness, contrast, saturation and hue, and optionally
   make a colour clear (a green or blue screen) so whatever is under the cue
@@ -1696,7 +1696,9 @@ night is about 3,000 rows.
 | Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
 
-Space, 0 and Esc also work, the same way, while an output window has focus.
+Space, 0, Esc and the cues' hotkeys also work, the same way, while an output window
+has focus (a cue given 0 takes it from GO there too); in show mode, so do the arrows
+and Page Up/Down.
 
 ## Getting FFmpeg
 

@@ -1222,7 +1222,7 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
                 })
                 .collect::<Vec<_>>()
             {
-                if let Some(id) = show.cue_for_hotkey(key.name()) {
+                if let Some(id) = hotkey_cue(show, st, key, egui::Modifiers::NONE) {
                     i.consume_key(egui::Modifiers::NONE, key);
                     i.consume_key(egui::Modifiers::SHIFT, key);
                     actions.push(Action::FireCue(id));
@@ -10113,6 +10113,47 @@ pub fn go_key(show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     apply(Action::Go, show, engine, st);
 }
 
+/// The cue a key fires as its hotkey, wherever the playhead is: the same in
+/// the main window (`keyboard`) and the output windows (`output_key`). None
+/// with Ctrl/Cmd or Alt held, or while a hotkey is being learned. In show and
+/// edit mode alike.
+pub fn hotkey_cue(show: &Show, st: &UiState, key: Key, mods: egui::Modifiers) -> Option<CueId> {
+    if st.capture_hotkey.is_some() || mods.command || mods.alt {
+        return None;
+    }
+    show.cue_for_hotkey(key.name())
+}
+
+/// A key pressed in an output window (`app.rs::handle_output_key`), as in the
+/// main window: a cue's hotkey first (so a cue on 0 beats GO there too), then
+/// Space (`space_key`), 0 (GO), Esc (panic) and, in show mode, the arrows and
+/// Page Up/Down as a presenter remote's buttons. Whether it did something.
+pub fn output_key(
+    key: Key,
+    mods: egui::Modifiers,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+) -> bool {
+    if let Some(id) = hotkey_cue(show, st, key, mods) {
+        apply(Action::FireCue(id), show, engine, st);
+        return true;
+    }
+    match key {
+        Key::Space => space_key(None, show, engine, st),
+        Key::Num0 => go_key(show, engine, st),
+        Key::Escape => engine.panic(show),
+        Key::ArrowRight | Key::PageDown if st.show_mode => {
+            remote_button(Button::Go, show, engine, st)
+        }
+        Key::ArrowLeft | Key::PageUp if st.show_mode => {
+            remote_button(Button::Back, show, engine, st)
+        }
+        _ => return false,
+    }
+    true
+}
+
 pub fn remote_button(button: Button, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     // A pause is let go of or ended the same way whatever is on.
     if !engine.paused && button == Button::Back && engine.deck_step(show, false) != DeckStep::NoDeck
@@ -12268,6 +12309,71 @@ mod tests {
         }
         assert!(is_playing(&e, d));
         assert_eq!(e.playhead, Some(show.cues[0].id));
+    }
+
+    #[test]
+    fn an_output_windows_keys_fire_hotkeys_first_as_the_main_window_does() {
+        use egui::Modifiers as M;
+        for show_mode in [false, true] {
+            let what = format!("show mode {show_mode}");
+            let (mut show, mut e, mut st) = running();
+            st.show_mode = show_mode;
+            let first = show.cues[0].id;
+            let d = number(&show, "4");
+            assert_ne!(d, first);
+            show.set_hotkey(d, Some("Q".into()));
+            // Its hotkey fires the cue, the playhead staying where it is.
+            assert!(output_key(Key::Q, M::NONE, &mut show, &mut e, &mut st));
+            assert!(is_playing(&e, d), "{what}");
+            assert_eq!(e.playhead, Some(first), "{what}");
+            // Shift doesn't matter; Ctrl/Cmd and Alt do, as in the main window.
+            e.stop_all(0.0);
+            assert!(!output_key(Key::Q, M::COMMAND, &mut show, &mut e, &mut st));
+            assert!(!output_key(Key::Q, M::ALT, &mut show, &mut e, &mut st));
+            assert!(!is_playing(&e, d), "{what}");
+            assert!(output_key(Key::Q, M::SHIFT, &mut show, &mut e, &mut st));
+            assert!(is_playing(&e, d), "{what}");
+            e.stop_all(0.0);
+            // Without a hotkey, 0 is GO.
+            assert!(output_key(Key::Num0, M::NONE, &mut show, &mut e, &mut st));
+            assert!(is_playing(&e, first), "{what}: GO");
+            e.stop_all(0.0);
+            e.playhead = Some(first);
+            // A cue on 0 beats GO there.
+            show.set_hotkey(d, Some("0".into()));
+            assert!(output_key(Key::Num0, M::NONE, &mut show, &mut e, &mut st));
+            assert!(is_playing(&e, d), "{what}: the hotkey");
+            assert!(!is_playing(&e, first), "{what}: not GO");
+            assert_eq!(e.playhead, Some(first), "{what}");
+            // The two windows agree, key for key.
+            for (key, mods) in [
+                (Key::Num0, M::NONE),
+                (Key::Num0, M::COMMAND),
+                (Key::W, M::NONE),
+            ] {
+                let main = keys_with(&show, &st, &[(key, mods)]);
+                let fires = matches!(main[..], [Action::FireCue(id)] if id == d);
+                assert_eq!(
+                    hotkey_cue(&show, &st, key, mods).is_some(),
+                    fires,
+                    "{what}: {key:?}"
+                );
+            }
+            // An unbound key does nothing; the arrows are the remote's only in show mode.
+            assert!(!output_key(Key::W, M::NONE, &mut show, &mut e, &mut st));
+            assert_eq!(
+                output_key(Key::ArrowRight, M::NONE, &mut show, &mut e, &mut st),
+                show_mode,
+                "{what}"
+            );
+        }
+        // While a hotkey is being learned, the output window's keys fire no cue.
+        let (mut show, mut e, mut st) = running();
+        let d = number(&show, "4");
+        show.set_hotkey(d, Some("Q".into()));
+        st.capture_hotkey = Some(d);
+        assert!(!output_key(Key::Q, M::NONE, &mut show, &mut e, &mut st));
+        assert!(!is_playing(&e, d));
     }
 
     #[test]
