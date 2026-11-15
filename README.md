@@ -1180,7 +1180,13 @@ are open in the classic interface they take its place.
   and this one fades up from nothing; give it a fade-in transition or a higher
   track).
 - Ctrl+wheel (Cmd on a Mac) zooms around the pointer; the wheel scrolls; *Fit*
-  shows the whole timeline. A thin bar at the right shows there are more tracks
+  shows the whole timeline. **While the timeline runs the view follows the
+  playhead:** when it passes nine tenths of the way across, or is out of sight (a
+  jump, a loop going back, or you scrolled away), the view turns the page so it is
+  a tenth in from the left. You can still scroll and zoom while it runs; nothing is
+  moved while you hold a drag (a clip, an edge, a key, a marker or the scroll bar),
+  and it catches up when you let go. Stopped, paused or parked, the view stays where
+  you put it. A thin bar at the right shows there are more tracks
   than fit; a lane you open is scrolled into view. On a narrow pane the toolbar
   takes two rows. The pane (or the new interface's panel) can be made taller by
   dragging its edge.

@@ -22,6 +22,9 @@ pub(in crate::ui) struct Ctx<'a> {
     pub run: &'a RunView,
     /// Where the playhead is (the run's, or a group playing the old way).
     pub pos: f64,
+    /// The playhead is moving (the run is running or cueing, or a group plays
+    /// the old way): the view keeps it in sight (`follow`).
+    pub moving: bool,
     /// Clips the run has let run free of its clock, and those waiting to fade in.
     pub detached: Vec<CueId>,
     pub waiting: Vec<CueId>,
@@ -90,6 +93,35 @@ fn span(ctx: &Ctx) -> f64 {
         .filter(|t| t.is_finite())
         .fold(0.0, f64::max);
     (end * 1.1).max(10.0)
+}
+
+/// Past this share of the tracks' width (or out of view) a moving playhead
+/// turns the page, which leaves it `FOLLOW_LEAD` of the width in from the left.
+const FOLLOW_EDGE: f32 = 0.9;
+const FOLLOW_LEAD: f32 = 0.1;
+
+/// The sideways scroll that keeps a moving playhead in view (page-follow):
+/// `scroll` and `playhead` (how far from time 0 it is) in points, the tracks
+/// `lane_w` wide over `content_w`. Unchanged while it is still, while
+/// something is `held` (a drag), when all of it fits, or while the playhead is
+/// in view short of the edge; otherwise the page turns, kept within the ends.
+pub(super) fn follow(
+    scroll: f32,
+    lane_w: f32,
+    content_w: f32,
+    playhead: f32,
+    moving: bool,
+    held: bool,
+) -> f32 {
+    let max = (content_w - lane_w).max(0.0);
+    if !moving || held || max <= 0.5 || !playhead.is_finite() {
+        return scroll;
+    }
+    let x = playhead - scroll;
+    if x >= 0.0 && x <= lane_w * FOLLOW_EDGE {
+        return scroll;
+    }
+    (playhead - lane_w * FOLLOW_LEAD).max(0.0).min(max)
 }
 
 /// A time rounded to a hundredth, as the inspector shows it.
@@ -363,6 +395,18 @@ pub(super) fn draw(
     if ed.pps <= 0.0 {
         ed.scroll.x = 0.0;
     }
+    // A moving playhead is kept in sight, unless something is being dragged
+    // (the scroll bar, or a drag of the editor's own in any host: the view is
+    // theirs to share).
+    let held = ed.drag.is_some() || ui.ctx().is_being_dragged(base.with("hscroll"));
+    ed.scroll.x = follow(
+        ed.scroll.x,
+        lane_w,
+        content_w,
+        ctx.pos as f32 * pps,
+        ctx.moving,
+        held,
+    );
     let all_h = rows_height(ctx, &open);
     // A lane just opened comes into view with its clip's track above it.
     if let Some(want) = ed.reveal.take() {
@@ -852,7 +896,7 @@ pub(super) fn draw(
         ));
     }
 
-    scroll_bar(ui, base, &mut st.timeline, lanes, area, content_w);
+    let _hscroll = scroll_bar(ui, base, &mut st.timeline, lanes, area, content_w);
     // More tracks than fit (the wheel scrolls them): a thin bar says where.
     if all_h > lanes.height() + 0.5 {
         let h = (lanes.height() * lanes.height() / all_h).max(12.0);
@@ -889,6 +933,7 @@ pub(super) fn draw(
                 keys: keys_drawn,
                 fades: fade_rects,
                 playhead_x,
+                hscroll: _hscroll,
                 x0: geo.x0,
                 pps: geo.pps,
             },
@@ -1417,7 +1462,7 @@ fn clip_tip(ctx: &Ctx, c: &Clip) -> String {
     s
 }
 
-/// The bar under the tracks that scrolls them sideways.
+/// The bar under the tracks that scrolls them sideways; where its thumb is.
 fn scroll_bar(
     ui: &mut Ui,
     base: egui::Id,
@@ -1425,10 +1470,10 @@ fn scroll_bar(
     lanes: Rect,
     area: Rect,
     content_w: f32,
-) {
+) -> Option<Rect> {
     let lane_w = lanes.width().max(1.0);
     if content_w <= lane_w + 0.5 {
-        return;
+        return None;
     }
     let track = Rect::from_min_max(
         pos2(lanes.left(), lanes.bottom() + 1.0),
@@ -1454,6 +1499,7 @@ fn scroll_bar(
         visuals.widgets.inactive.bg_fill
     };
     p.rect_filled(thumb, 3.0, fill);
+    Some(thumb)
 }
 
 /// The points a drag snaps to (none with snapping off or Alt held).

@@ -6,6 +6,11 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **The timeline view follows a running playhead.** While a timeline runs, its tracks
+  turn the page as the playhead nears the right-hand edge, and come back to it after a
+  jump, a loop going back or a scroll away. Holding a drag keeps the view still until
+  you let go; stopped or paused, the view stays where you put it.
+
 ## 0.23.0
 
 - **Timeline tests in Test mode.** *Timeline short*, *Timeline medium* and *Timeline

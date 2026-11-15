@@ -283,12 +283,13 @@ pub fn editor(
     let run = engine.timeline(show, key);
     // The playhead: the run's, or while the group plays the old way (before
     // the engine runs timelines) where the group has got to.
-    let pos = match (run.state, key) {
+    let (pos, moving) = match (run.state, key) {
         (RunState::Stopped, TimelineKey::Group(g)) => match engine.status(g) {
-            crate::engine::CueStatus::Playing { elapsed, .. } => elapsed,
-            _ => run.pos,
+            crate::engine::CueStatus::Playing { elapsed, .. } => (elapsed, true),
+            _ => (run.pos, false),
         },
-        _ => run.pos,
+        (RunState::Running | RunState::Cueing, _) => (run.pos, true),
+        _ => (run.pos, false),
     };
     // What it shows stays when the selection moves off it. (A list's tab
     // shows its list, whatever the pane follows.)
@@ -303,6 +304,7 @@ pub fn editor(
         tracks: &tracks,
         run: &run,
         pos,
+        moving,
         detached: engine.timeline_detached(key),
         waiting: engine.timeline_waiting(key),
         editable: can_edit(st),
@@ -942,6 +944,8 @@ pub struct TimelineRects {
     /// The fade handles drawn.
     pub fades: Vec<(CueId, Edge, egui::Rect)>,
     pub playhead_x: Option<f32>,
+    /// The sideways scroll bar's thumb (none when it all fits).
+    pub hscroll: Option<egui::Rect>,
     pub x0: f32,
     pub pps: f32,
 }
