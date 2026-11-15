@@ -1045,6 +1045,24 @@ own, +2 it is also shown on two more displays, ⚠ see *If a clip runs out* belo
 waveform. Where a clip comes in over an earlier one on its track, the overlap is
 drawn as a crossfade (an X, "crossfades in 2 s").
 
+**Pane or workspace.** The tracks can open in a **workspace** of their own
+instead: *Settings ▸ General ▸ Timeline editor*, the *Workspace* button at the end
+of the tracks' toolbar, or *as a pane / as a workspace* under *Window ▸ Timeline*
+(a choice of this computer, in both interfaces). The workspace takes the place of
+the cue list and the panes (in the new interface it is the *Timeline* view, next to
+Editor, Operator and Patch) with the tracks across the whole width, the picture of
+a display and the bin on the left, and the inspector of the picked clip on the
+right, its timeline rows (*If it runs out*…) at the top. **◀ Back to cue list**
+puts it away; *Show as a pane* goes back to the pane for good. Double-clicking a
+timeline group, *Window ▸ Timeline* and going to a timeline list's tab open it
+(the tab then keeps its cue rows, and its *Tracks* button opens the workspace). The
+**bin** has new clips (a file to choose, text, shape, camera, live sound, fade,
+send, pause): click one to put it at the playhead, or drag it onto a track to put it
+where you let go. Under them are the files the timeline plays (drag one onto a
+track for another clip of it) and its clips in time order (click to pick one). In
+show mode it edits nothing, as elsewhere; the transport works. While the settings
+are open in the classic interface they take its place.
+
 - Drag a clip to move it in time, or up or down onto another track of its kind
   (a picture onto another layer or display, a sound onto another output); while it
   moves, an outline stays where it was. Ctrl-click and Shift-click pick several, as
@@ -1224,8 +1242,7 @@ display it is fully on, then fades with it. A fade or Stop cue acts on it
 everywhere. Text and shapes are drawn at the size of its own display and stretched
 on the others.
 
-**Not there yet:** a separate timeline workspace (bin, monitor and tracks in one
-view), and OSC commands and feedback for timelines.
+**Not there yet:** OSC commands and feedback for timelines.
 
 A show that uses the timeline control cues (Run, Pause, Stop, Jump timeline) does
 not open in NewQ 0.20.3 or older.

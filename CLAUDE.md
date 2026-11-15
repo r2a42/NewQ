@@ -66,8 +66,8 @@ The README describes the features; this file is about working on the code.
   among `also_on` (`picture_size`); text and shapes are drawn at the home's size. Tests in
   `engine/displays/tests.rs` (text cues, no media); no real displays tried.
   `src/ui/timeline.rs` and `src/ui/timeline/`: the tracks editor (`editor`, hosted as `Pane::Timeline`
-  in the dock, as a bottom panel of the new interface's Editor view, and as a timeline list's tab;
-  `Host` salts its ids); it takes `&Show` and asks for `TimelineAction`s that `apply` makes after the
+  in the dock, as a bottom panel of the new interface's Editor view, as a timeline list's tab, and as
+  the workspace; `Host` salts its ids); it takes `&Show` and asks for `TimelineAction`s that `apply` makes after the
   frame (edits refused in show mode and tests by `edits_the_show`); a drag lives in `EditorState` and is
   asked for once on release (one undo step). `tracks.rs` clips, rows, drags, ghosts, the overlap's
   crossfade mark and the vertical-overflow bar (a lane just opened is scrolled into view,
@@ -97,12 +97,26 @@ The README describes the features; this file is about working on the code.
   GroupCue, Paste, slides, `NewTimelineGroup`). `ui::go_readout` is `list_tab::go_readout` (`go_plan` plus
   the run's next pause or loop); GO on a timeline list keeps the selection; `modern::next_cue` is None
   there and the Operator view adds `operator_state`. Tabs: `+` menu and the tab's right-click
-  (`SetListTimeline`, which then `sync_lists`). The inspector's "Also on" row writes `MediaCue::also_on`
+  (`SetListTimeline`, which then `sync_lists`). Layout B, `workspace.rs` (`Host::Workspace`): chosen by
+  `Prefs::timeline_layout` (`workspace::chosen`; `TimelineAction::SetLayout` saves it and moves an open
+  editor; reached from Settings ▸ General, the Window menu under Timeline and the toolbar's
+  `Workspace`); classic `ui::draw` draws it in `dock_area`'s place while `st.timeline.open` and no
+  docked Settings (`replaces_panes`); the new interface's `View::Timeline` (in the strip only for B;
+  leaving it is `Close`); `Open` goes to it (and `SelectList` into a timeline list does), the tab then
+  keeps its rows (`shows_tracks` false) and its Tracks button opens it; a Timeline pane under B only
+  points to it (`workspace::pointer`). Bar (Back = `Close`, `Show as a pane`), tracks across the
+  bottom (`TRACKS_SHARE`), left column the monitor (its own paint of `PreviewOutput`) and `bin.rs`
+  (new clips click to the playhead or drag a `BinItem` onto a track: `bin::dropped`, called by
+  `tracks.rs` next to `keys::dropped`; the timeline's files; its clips), the inspector in the
+  middle with `inspector_rows` first (`ROWS_ABOVE` skips them inside; edits spread as
+  `ui::inspector`'s, `user_touched`). The inspector's two columns need about 940 pt, which is why
+  the monitor isn't in the middle. Tests in `timeline/tests/workspace.rs` (1280×760, both
+  interfaces). The inspector's "Also on" row writes `MediaCue::also_on`
   (home never in it); `bulk_edit::WHOLE` spreads it as one value and `tidy` drops the target's own
   display. Tests drive it with the mouse (`TimelineRects`, `Draw::Full` for the whole window and undo,
   the list tab's `Win`; cfg(test) notes such as `timeline_clip_text` and `timeline_state`); tried
-  headless under xvfb in both interfaces. Kept `allow(dead_code)`: `Host::Workspace` and `SetLayout`
-  (the workspace, P7) and `Engine::timelines` (OSC feedback, P8).
+  headless under xvfb in both interfaces. Kept `allow(dead_code)`: `Engine::timelines` (OSC
+  feedback, P8).
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.

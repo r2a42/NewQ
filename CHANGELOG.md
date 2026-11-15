@@ -6,6 +6,13 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Timeline workspace.** A timeline can open in a workspace of its own: the tracks
+  across the whole window, the picture, a bin of new clips and the timeline's files
+  and clips, and the inspector with the clip's timeline settings at the top. Choose
+  it, or the pane as before, in Settings ▸ General, the Window menu or the tracks'
+  toolbar; in the new interface it is the Timeline view. *Back to cue list* puts it
+  away.
+
 ## 0.22.0
 
 - **Changelog.** Each release page now starts with what changed in that version.

@@ -1084,3 +1084,69 @@ Left / still wrong:
   like any pause (no section bracket on the ruler).
 - No real displays, audio device or GPU windows: sound by the fake device, pictures through
   `Engine::layers`; the tone cue failed for want of a device in the screenshots.
+
+---
+
+## V. What P7 landed (the workspace, layout B, and the layout setting)
+
+Commits on the P7 worktree branch: "Timeline: the workspace (layout B) and the layout setting" and "Docs:".
+
+As built:
+- **Where:** `src/ui/timeline/workspace.rs` and `src/ui/timeline/bin.rs` (in the timeline module rather than
+  `src/ui/timeline_workspace.rs`: it uses the module's `target`, `editor`, `empty_state`, `inspector_rows`, and
+  reaches `ui`'s `inspector`/`preview_index` as an ancestor's private items).
+- **Setting:** `Prefs::timeline_layout` (unchanged type, unwritten at `Pane`). `TimelineAction::SetLayout` saves it
+  and moves an open editor (classic: an open or popped-out `Pane::Timeline` counts as open; it closes and the
+  workspace opens, or back). Going back to a pane on the active timeline list doesn't open a pane: its tab shows
+  the tracks again (`list_rows = false`). Reached from: Settings ▸ General ▸ "Timeline editor (this computer)"
+  (radios), the Window menu (two radios indented under Timeline, both interfaces), the toolbar's "Workspace"
+  button (hosts Pane and ListTab; pushes SetLayout + Open), the workspace bar's "Show as a pane", and the
+  pointer a Timeline pane shows under B. Not an edit: allowed in show mode.
+- **Open/Close:** `Open` under B: new interface sets `modern_view = View::Timeline`; both close the settings if open.
+  `Close` leaves `View::Timeline` for Editor. `SelectList` into a timeline list under B opens the workspace on it;
+  the tab then keeps its rows (`shows_tracks` false under B) and its "Tracks" button is `Open(Some(list))`.
+  `SetNewLayout` carries an open workspace across interfaces.
+- **Classic:** `ui::draw` draws `workspace::draw` in `dock_area`'s place when `replaces_panes` (classic, B,
+  `timeline.open`, Settings not docked: docked settings take the place back, as they take the cue list's). The
+  transport stays. A docked or popped-out `Pane::Timeline` under B draws `workspace::pointer` (no second editor).
+- **New interface:** `View::Timeline` is in `View::ALL` (the modern test draws it) but the strip shows its tab only
+  under B; clicking it is `Open(None)`, leaving it by another tab is `Close`. The Editor view's bottom panel
+  only under A.
+- **Layout:** bar (◀ Back to cue list = `Close`, name, show-mode note, "Show as a pane"); tracks as a bottom
+  panel across the width (`TRACKS_SHARE` 0.46 of the height at first, resizable); a left column (`SIDE_W` 330)
+  with the program monitor (a compact paint of the chosen `PreviewOutput`, at most 55 % of the column's height,
+  display chooser shares `st.preview_output`) over the bin; the inspector in the middle. Choice where the plan
+  said "monitor in the middle": the inspector's two columns (`ui.columns(2)` in `inspector_one`) need about
+  940 pt and a side panel grows to its content, so at 1280 a middle monitor was squeezed to ~120 pt. Making the
+  inspector one column when narrow would mean splitting that closure in `ui.rs`; not done.
+- **Inspector:** `inspector_rows` (run-out, control timeline fields) are drawn first in the workspace, then the
+  normal inspector with `ROWS_ABOVE` set so they aren't drawn again; an edit there spreads to the other picked
+  cues as the inspector's does (`ui::user_touched` factored out of `ui::inspector`, `spread_edit`).
+- **Bin:** "NEW" (Video…/Image…/Sound… = `PickClip` at the playhead; Text, Shape, Camera, Live sound, Fade, Send,
+  Pause: click = `AddClip`/`AddControl TimelinePause` at the playhead on `list_tab::fitting_track`, drag = a
+  `BinItem` payload); "FILES" (the timeline's distinct files, drag for another clip); "CLIPS" (time order, click =
+  `tracks::click_select`). `bin::dropped` (called in `tracks.rs` after `keys::dropped`) draws a drop line and on
+  release pushes `AddClip` with `keys::fitting_track` at the time under the pointer.
+- cfg(test) notes: `timeline_editors` (hosts drawn per frame), `workspace_buttons`, `bin_items`,
+  `modern_views`, `settings_timeline_layout`, `ws_monitor`, `ws_rows`, `timeline_pointer`. The test `Mouse` has
+  `size`; tests are `timeline/tests/workspace.rs` (8): each layout from a double-click in each interface drawn
+  once, Back; the setting by toolbar, bar, settings page, strip tab, kept in prefs.json and absent at default;
+  bin drag (text onto a track, pause onto the cue track) and click, one undo; a clip drag one undo and the bin
+  picking; show mode; pane/pop-out pointer; a timeline list's tab both interfaces; 1280×760 comfort (ruler
+  > 1000, every track in sight, monitor ≥ 280×150, timeline rows above the tracks); SetLayout in show mode.
+  A frame where a panel first appears is laid out twice (egui's sizing pass): count editors after a settle frame.
+
+Looked at headless (xvfb 1280×760, both interfaces, `XDG_STATE_HOME` in `scratchpad/p7/`): the workspace on a
+group, a clip picked, a text dropped from the bin, Back, the settings row, layout A with its Workspace button and
+the switch from it; the new interface's Timeline view on a group and on a timeline list, the list's tab after
+Back, the Window menu. Fixed from what was seen: "←" isn't in egui's font (now "◀"); "▸" isn't in the small
+font (not used in the hint); the bin's buttons made small so its new items fit under the monitor.
+
+Left / still wrong:
+- The bin is short at 1280×760 (its files and clips scroll under the new items); the column can be dragged wider
+  or the tracks lower.
+- A text or shape from the bin (as from the track menu) is open-ended (∞), not `STILL_LEN` like the list tab's.
+- The monitor shows black under xvfb (nothing drawn there); a real GPU picture in it was not seen.
+- A drag from the bin started by a press and a jump in one input batch (xdotool without steps) is taken by the
+  tracks' rubber band; a real mouse moves in steps.
+- The group inspector's "Open in timeline editor" still shows while it is open in the workspace.
