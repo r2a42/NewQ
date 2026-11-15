@@ -1150,3 +1150,67 @@ Left / still wrong:
 - A drag from the bin started by a press and a jump in one input batch (xdotool without steps) is taken by the
   tracks' rubber band; a real mouse moves in steps.
 - The group inspector's "Open in timeline editor" still shows while it is open in the workspace.
+
+## W. What P8 landed (remote, feedback, export, Test Mode)
+
+Commits "Timeline:" (remote control and feedback; the cue sheet), "Test Mode:" and "Docs:". Files:
+`src/remote.rs`, `src/web.rs`, `src/web_page.html`, `src/feedback.rs`, `src/export.rs`,
+`src/testmode/feature.rs`, small parts of `src/engine/timeline.rs`, `Command::Timeline`'s arm in
+`ui::run_remote` (and a test there), two `&mut self.engine` in `app.rs`. Nothing in `show.rs`,
+`ui/timeline*`, `modern.rs` or `settings.rs`; no show-file field.
+
+Addresses (OSC; `/workspace/<id>` in front allowed; the verb in any case):
+- `/timeline/<t>/run` (`start`) [place] · `go` · `pause` · `resume` (`continue`) · `stop` [fade s] ·
+  `hardStop` (`panic`) · `jump` (`seek`, `marker`) <place> · `leaveLoop` (`devamp`).
+- `<t>`: a timeline list's name (case-blind, `_` = space), else a timeline group's cue number
+  (active list, then main, then any), else `#<cue id>` / `list:<id>`.
+- A place: the first argument (number = seconds; string `75`, `1:15.5`, `1:00:00`, else a marker
+  name) or a fourth address part (`/timeline/Act_1/jump/Interval`).
+- Web: `POST /api/timeline/<t>/<verb>[/<place>]` with the same verbs (`leave_loop`, `hardstop`);
+  the state has `timelines: [{ref, name, list, worked, state, text, pos, length, next_pause,
+  looping, markers}]`; the page draws a card per timeline (Run, Pause, Stop, Leave loop, markers).
+- Feedback: `/newq/go <what> <then>`, `/newq/timeline/<t>/state <word>` and `…/position <s>`
+  (tenths) for every timeline list and every run `Engine::timelines` lists (not stopped, or fading);
+  a group that stops is sent `stopped` once. Words: stopped, stopping, at_end, cueing, running,
+  looping, last_pass, paused, parked (`feedback::state_word`; `state_text` for people).
+
+Choices where the plan was silent:
+- Remote `go` is "what GO would do to this timeline" (`Engine::timeline_go_one`), whichever list is
+  worked: nothing while it runs or cues (logged), at its end nothing; a loop is left. `run` is
+  `timeline_run` (starts, or resumes a pause; "already running" is logged). `resume` only acts on a
+  pause (`timeline_continue`), `leaveLoop` only in a loop (`timeline_leave`).
+- Remote `pause` is the transport's (Everything, live inputs stay live). Remote `stop` with no
+  argument fades `TIMELINE_STOP_FADE`; a second stop cuts (the engine's rule).
+- A remote seek to 0 goes to 0.001 s (the editor's `FIRST_FRAME`, private there): a seek to exactly 0
+  parks with nothing up.
+- `/cue/<group>/…` is unchanged (stop cuts; resume/pause already route to the run). MIDI got no new
+  messages: MSC GO is GO (continues a waiting timeline), MSC RESUME <group number> resumes its run, a
+  note fires a timeline control cue. Tested through `run_remote` with parsed MSC bytes.
+- `Command` lost `Eq` (times are `f64`); nothing needed it.
+- `snapshot`, `Feedback::update` and `web::snapshot_json` take `&mut Engine` (`Engine::timeline`
+  works out lengths).
+- `Engine::timelines` now also lists a stopped run still fading out, sorted (lists, then groups).
+- Cue sheet: three columns (Start, Track, Also on) before Continue, for every show; a timeline clip's
+  Pre-wait cell is empty (it is its start); marker rows ("Marker", name, "on <timeline>", time,
+  "Markers") after the timeline's last clip, sorted by time; the page's count is cues only.
+- Test Mode: two "Timeline" parts (not one): the overlap/free-run/GO crossfade/Stop fade part and the
+  camera/freeze_live/Jump/lead-in/cut part. The timeline actions are **not** folded into
+  `ControlAction::ALL`: the inspector's combo lists `ALL` then `TIMELINE`, so they would show twice
+  (that loop is in `ui.rs`'s inspector, outside P8's region); the plan test now checks both lists
+  are used, and `show.rs`'s "not offered yet" test still holds. Fold them in when the inspector is
+  changed to list `ALL` only.
+
+Tests: `remote.rs` (addresses, places, `find_timeline`/`place_time`, run/pause/resume/GO-does-
+nothing/jump to a marker/stop fade and cut/run from/park on a list, GO and leave-loop on a group and
+a loop), `web.rs` (paths, the state in each state: stopped, running, a group, paused, stopping, at
+end; a command over a real socket), `feedback.rs` (state/position/stopped/`/newq/go` messages; a
+list running says running and a remote GO changes nothing), `ui.rs` (`run_remote` and MSC),
+`export.rs` (clips, pauses, loops, markers, both formats), `feature.rs` (the new checks on made-up
+notes; the plan's timeline cues; the two parts played through an engine, about 25 s).
+
+Still wrong / untried:
+- No MIDI device, no real OSC controller or phone: OSC over loopback UDP, the web over loopback TCP.
+- The page was not looked at in a browser here (only served and its JSON read).
+- `/newq/timeline/<t>/…` uses the name as an address part; two timeline lists of the same name
+  (or a list named like a group's number) share one address, and the remote picks the first.
+- A remote `run` of a running timeline only logs; there is no reply to the sender.

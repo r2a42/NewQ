@@ -115,8 +115,7 @@ The README describes the features; this file is about working on the code.
   (home never in it); `bulk_edit::WHOLE` spreads it as one value and `tidy` drops the target's own
   display. Tests drive it with the mouse (`TimelineRects`, `Draw::Full` for the whole window and undo,
   the list tab's `Win`; cfg(test) notes such as `timeline_clip_text` and `timeline_state`); tried
-  headless under xvfb in both interfaces. Kept `allow(dead_code)`: `Engine::timelines` (OSC
-  feedback, P8).
+  headless under xvfb in both interfaces.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
@@ -249,7 +248,9 @@ The README describes the features; this file is about working on the code.
   `audio::MAX_FADEABLE` crosspoints, kept in `Matrix::keys` order); `mix_voice`
   moves the gains per buffer. Silent crosspoints are kept in the matrix for this.
 - `src/feedback.rs`: OSC feedback to the address in `RemoteSettings::osc_feedback`
-  (`snapshot`/`changes`/`repeat` are pure and tested; `Feedback` paces and sends).
+  (`snapshot`/`changes`/`repeat` are pure and tested; `Feedback` paces and sends). Timelines:
+  `timelines_to_tell` (every timeline list, plus `Engine::timelines`: runs not stopped or still fading),
+  `state_word`/`state_text` (the web remote uses them too), `/newq/go` from `go_text` (`GoPlan::describe`).
 - `timecode::Generator` makes MTC messages; `output::MtcRunner` is its paced thread
   (`ActiveKind::Timecode`, dropped to stop). Send cues' `Program` target runs only
   when `Prefs::allow_scripts` (per computer; `output::set_scripts_allowed`).
@@ -276,7 +277,12 @@ The README describes the features; this file is about working on the code.
   fetched by `full.rs::real_media` when downloads are allowed, else only from the cache) or plain ones; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
   `Check`s); `Runner` plays them one at a time, its clock starting when the part's `lead` cue is started,
   noting `Obs` every 20 ms (what a part fires later is got ready first, `Engine::load_ahead`, so FFmpeg's start
-  time isn't in the part's timings); `judge` (pure, tested on made-up notes) gives each check's `Verdict`. A problem
+  time isn't in the part's timings); `judge` (pure, tested on made-up notes) gives each check's `Verdict`.
+  Two "Timeline" parts (`timeline_parts`; `Obs::clocks` from `Engine::timeline_clock`, checks `ClockStill`,
+  `Frozen`, `Live`, `Never`, `Later`) cover the four timeline actions, both pause kinds (the camera held
+  with `freeze_live`), an overlap and a GO-timed crossfade, a jump to a marker and a lead-in; a test
+  plays just them through an engine (about 25 s). The timeline actions stay out of `ControlAction::ALL`
+  (the inspector would list them twice); the plan test checks `ALL` and `TIMELINE` are used. A problem
   the engine reports in a part (`Engine::take_problems`) fails it unless the part expects it. The copy has
   `own_layers` on (an old show's off makes cues in a together group replace each other: that is tested
   behaviour, not a fault), no streams, no OSC feedback. `full.rs` does what needs the app: `Ask::RecordOn`
@@ -340,20 +346,30 @@ The README describes the features; this file is about working on the code.
   that `Engine::tick` sets from the cue's time, and run per frame in
   `audio.rs::mix_voice`. `render.rs::FrameTimer` and the mixer callback's load
   feed the status-bar warnings.
-- `src/remote.rs`: OSC and MIDI. `src/text.rs`: text cue rendering.
+- `src/remote.rs`: OSC and MIDI. Timelines: `/timeline/<name>/<verb>[/<place>]` parses to
+  `Command::Timeline { timeline, does: TimelineDo }` (`timeline_command`, shared with the web
+  remote's paths; a place is `Place::Time`/`Marker`, from the first argument, `OscValue`, or a fourth
+  part); `run_timeline` (called by `ui::run_remote`) finds it (`find_timeline`: a timeline list's name,
+  squashed, then a timeline group's cue number, then `#<id>`/`list:<n>`) and calls the engine
+  (`timeline_go_one`, `timeline_continue`, `timeline_leave`, `timeline_run_from`, `timeline_seek`, a
+  stop with `TIMELINE_STOP_FADE`). `remote::fixtures` is a timeline show for tests (here, feedback,
+  web, ui). `src/text.rs`: text cue rendering.
   `src/history.rs`: undo (JSON snapshots of the show, bursts merged).
   `src/timecode.rs`: MIDI Time Code decoding and the trigger follower.
   `src/output.rs`: send cues' OSC and MIDI messages and the sender thread.
   `src/projector.rs`: PJLink (commands, MD5 digest, the conversation; tested
   against a fake projector on loopback). Projector and TCP sends run on a
   thread per host from `output.rs`.
-  `src/export.rs`: the cue sheet as CSV or a printable page.
+  `src/export.rs`: the cue sheet as CSV or a printable page (a timeline clip's Start, Track and Also
+  on columns, its pre-wait left empty; marker rows, `Row::marker`, after the timeline's last clip).
   `src/clock.rs`: time-of-day triggers (local time via `jiff`).
   `src/crash.rs`: the log file and crash reports (Windows has no console).
   Reports go to the log folder (`%LOCALAPPDATA%\NewQ` etc.); ask for
   `newq-crash.log` and `newq.log` when a user reports a crash.
   `src/web.rs` and `web_page.html`: the web remote (HTTP on plain `std`
-  sockets, handlers tested as functions and over loopback).
+  sockets, handlers tested as functions and over loopback). `/api/timeline/<ref>/<verb>[/<place>]`
+  (`timeline_command_for`) and the state's `timelines` (`timelines_json`: ref, state, clock, length,
+  next pause, markers), drawn as a card each by the page's `renderTimelines`.
   Displays: the show has `DisplaySlot`s (Display 1, 2…) each assigned to a
   monitor by the user; `show.rs::slot_state` finds the monitor and never picks
   another, `app.rs::route_outputs` places outputs, and `Show::assign_displays`

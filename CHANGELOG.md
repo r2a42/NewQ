@@ -12,6 +12,22 @@ release page, and a release is refused if it has none.
   it, or the pane as before, in Settings ▸ General, the Window menu or the tracks'
   toolbar; in the new interface it is the Timeline view. *Back to cue list* puts it
   away.
+- **Timelines from a remote.** OSC can run, pause, continue, stop (with the Stop
+  cue's 3 s fade, or at once), jump to a time or a marker, and leave a loop on a
+  timeline, named by its list's name or its group's cue number:
+  `/timeline/Act_1/jump/Interval`, `/timeline/5/stop`.
+- **The web remote's timeline transport.** Each timeline list (and a timeline group
+  while it plays) gets a card with its clock, what it is doing, Run, Pause and Stop,
+  Leave loop while it loops, and a button for each marker. The line above GO says
+  when GO will do nothing because a timeline list is running or at its end.
+- **Timelines in OSC feedback.** A controller is told each timeline's state
+  (running, paused, looping, stopping, at its end…) and its clock, and `/newq/go`
+  says what GO will do now.
+- **Timelines on the cue sheet.** A timeline's clips have their start time, track and
+  other displays in columns of their own, and its markers are listed after it.
+- **Test Mode's debug test plays timelines:** two tracks, an overlap crossfade, a
+  pause GO ends, a camera held by a pause, a jump to a marker, a clip waiting for
+  its fade-in, and Stop cues that fade and cut.
 
 ## 0.22.0
 

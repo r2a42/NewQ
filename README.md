@@ -367,7 +367,13 @@ stays on the computer until you send it yourself.
 - **OSC feedback.** *Settings → OSC → Feedback*: give a `host:port` and NewQ sends
   the show's state there as OSC: `/newq/playhead <number> <name>`, `/newq/paused`,
   `/newq/running`, `/newq/cue/<number>/status` (idle, prewait, playing) and
-  `/newq/cue/<number>/progress` (0 to 1), at most ten times a second and only what
+  `/newq/cue/<number>/progress` (0 to 1), `/newq/go <what> <then>` (what GO will do
+  now, as the transport says it: "Continue Act 1", or "Act 1 is running" and "GO does
+  nothing until it pauses"), and for each timeline list (and each timeline group
+  while it runs, pauses or fades out) `/newq/timeline/<list name|group's cue
+  number>/state` (`stopped`, `stopping`, `at_end`, `cueing`, `running`, `looping`,
+  `last_pass`, `paused` or `parked`) and `/newq/timeline/<…>/position` (seconds, in
+  tenths); spaces in a name become `_`. At most ten times a second and only what
   changed, with everything repeated every five seconds so a controller started late
   catches up. For TouchOSC pages, tally lights and other desks. (Only tested here
   against a loopback listener, not a real controller.)
@@ -798,7 +804,17 @@ stays on the computer until you send it yourself.
   `GET /api/state` for the state as JSON, and `POST /api/go`, `/api/panic`,
   `/api/stop_all`, `/api/pause`, `/api/resume`, `/api/next`, `/api/previous`
   and `/api/cue/<number>/fire|go|select|stop|fade`, with `X-NewQ: 1` (and
-  `X-Pin` if set).
+  `X-Pin` if set). Each timeline list, and a timeline group while it plays, has a
+  card of its own under the GO button: its name, clock and length, what it is
+  doing ("Running", "Paused · GO continues", "Looping · GO finishes this pass",
+  "Stopping · fading out", "At its end"), Run, Pause and Stop buttons (Stop fades
+  out over 3 s, as a Stop cue does), *Leave loop* while it loops, and a button for
+  each marker that jumps there; the line above GO says what GO will do, and that it
+  does nothing while a timeline list runs. Programs can use
+  `POST /api/timeline/<timeline>/run|go|pause|resume|stop|hardstop|leave_loop` and
+  `…/jump/<seconds or marker>` (also `…/run/<place>` and `…/stop/<fade seconds>`),
+  where the timeline is a timeline list's name, a timeline group's cue number, or
+  the `ref` the state gives each one (`list:<id>`, `#<cue id>`).
 - **Hotkeys, MIDI notes and the cart:** give a cue its own key in its
   inspector (click *Hotkey*, then press a letter, digit or F-key; P and A are
   taken by the transport). Pressing the key fires just that cue, like the
@@ -844,14 +860,37 @@ stays on the computer until you send it yourself.
     `/cue_id/<id>/…` with a cue's own id. A `/workspace/<id>` in front is
     accepted and ignored. Other arguments are ignored and bundles work.
     (NewQ doesn't send QLab's replies and updates, so a button can fire a cue
-    but won't show its state.)
+    but won't show its state; *OSC feedback* below sends NewQ's own.)
+  - *Timelines over OSC*: `/timeline/<timeline>/…`, where the timeline is a
+    timeline list's name (case doesn't count, and `_` stands for a space) or a
+    timeline group's cue number (in the list being worked first, then the main
+    list), with:
+
+    | Address | Does |
+    |---|---|
+    | `…/run` (or `start`) | runs it from its playhead (a group from its start), or goes on from a pause; with a place, runs from there |
+    | `…/go` | what GO would do to it: run, continue at a pause, leave a loop; nothing while it runs, and nothing to a list at its end |
+    | `…/pause` | stops its clock and holds what plays, as the transport's Pause (live inputs stay live) |
+    | `…/resume` (or `continue`) | goes on from a pause |
+    | `…/stop` | fades it out over 3 s, as a Stop timeline cue does (a number argument is the fade in seconds; a second stop cuts) |
+    | `…/hardStop` (or `panic`) | stops it at once |
+    | `…/jump` (or `seek`, `marker`) | moves its playhead to a place: running, it plays on from there, else it parks there with its picture |
+    | `…/leaveLoop` (or `devamp`) | leaves the loop it is playing, as GO would |
+
+    A place is the first argument (a number of seconds, or a string: `75`,
+    `1:15.5`, or a marker's name) or one more part of the address, for senders
+    that can't send an argument: `/timeline/Act_1/jump/Interval`. A timeline or
+    marker that isn't there is said in the log and nothing is done.
   - *MIDI input*: pick a port and, if you like, a channel. A note-on fires the
     cue whose number is the note number; a program change selects the cue
     with that number; and MIDI Show Control GO (with or without a cue
     number), STOP, RESUME, LOAD (gets the cue ready and puts the playhead on
     it), ALL OFF and RESET drive the transport. On the *MIDI* page *Show control
     device* limits that to messages sent to one device id (and to everyone, 127),
-    for when several machines share a MIDI line.
+    for when several machines share a MIDI line. Timelines: MSC GO goes on with a
+    timeline waiting at its pause as the GO button does, MSC RESUME with a timeline
+    group's number continues it, and a note (or an MSC GO with its number) on a
+    Run, Pause, Stop or Jump timeline control cue does what that cue does.
 - **Audio outputs and channel routing:** on the *Audio outputs* page of the settings,
   add named outputs and put each on any audio device (or the system
   default). Each cue then picks an output and the first device channel its
@@ -959,7 +998,12 @@ stays on the computer until you send it yourself.
   the file `.csv`, as a spreadsheet file (UTF-8 with a byte order mark, so
   Excel reads accents and symbols correctly). Each cue has its number, name,
   type, target, fades, pre-wait, duration, continue mode, whether it is
-  armed, hotkey, MIDI note, timecode and notes.
+  armed, hotkey, MIDI note, timecode and notes. A timeline's clips also have
+  their *Start* on its clock, their *Track* ("V2 · Layer 1", "A1 · Main",
+  "Cues") and the other displays a picture is *Also on* (their pre-wait column is
+  left empty, since on a timeline it is the start); pauses and loops say what they
+  do in the *Target* column, and the timeline's markers follow its last clip as
+  rows of their own ("Marker", the name, its time).
 - **Media manager:** *File ▸ Media…* lists every file the show uses and
   which can't be found, and it opens by itself when a show is opened with
   files missing. *Search a folder for missing files…* looks in a folder (and
@@ -1242,7 +1286,10 @@ display it is fully on, then fades with it. A fade or Stop cue acts on it
 everywhere. Text and shapes are drawn at the size of its own display and stretched
 on the others.
 
-**Not there yet:** OSC commands and feedback for timelines.
+**From a remote:** timelines take OSC (`/timeline/<name>/run`, `pause`, `stop`,
+`jump` and more), the web remote has a transport for each, and OSC feedback tells
+a controller each timeline's state and clock and what GO will do (see *Remote
+control* and *OSC feedback*).
 
 A show that uses the timeline control cues (Run, Pause, Stop, Jump timeline) does
 not open in NewQ 0.20.3 or older.
@@ -1348,6 +1395,7 @@ that NewQ didn't fall over.
 | GO, wait and stop | GO on a picture that continues into a wait, followed after a pre-wait by a stop of everything | the wait lasted its second, the picture was there until the stop and gone after |
 | Send | one OSC message to a socket of its own on 127.0.0.1 | it arrived |
 | Timecode | a timecode cue with no MIDI output | it ran its two seconds and ended |
+| Timeline | a timeline run by a Run cue: titles on one track crossfading where they overlap, a looping clip on another, a pause the clip plays on through, GO, a title crossfading in after it, a Stop cue's fade; then a timeline with the test-pattern camera, a pause that holds live inputs too, GO, a Jump cue to a marker past a title, a title waiting for its fade-in, a Stop cue that cuts | the overlap and GO's crossfade happened, both tracks were up together, the clock stood at each pause while the clip still moved and the camera's picture held, the camera was live again after GO, the jump never played what it passed, the waiting title came in 0.8 s after the other, the fade lasted and the cut didn't |
 | Send out | the first display recorded to a file in the test's folder; the streaming server run on 127.0.0.1 only with the display streamed to it | the recording is read back with FFmpeg and is long enough; the server is asked over RTSP whether the stream is there |
 | Load | four clips with sound and a text at once, twice round | all started and were on screen together; and the usual measurements (stalls, memory, late frames) |
 
