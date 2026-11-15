@@ -1380,8 +1380,9 @@ displays from the *Displays* page of the settings.
 ## Test mode: try this computer before the show
 
 *Help ▸ Test mode…* plays a show of its own to find out how this computer copes, with
-nothing to type: no command line, no files to find. Choose *Short*, *Medium*, *Long* or
-*Debug test* and press Start.
+nothing to type: no command line, no files to find. Choose *Short*, *Medium*, *Long*,
+their timeline versions (*Timeline short*, *Timeline medium*, *Timeline long*) or *Debug
+test* and press Start.
 
 ### The debug test: every kind of cue, and one file to send
 
@@ -1458,6 +1459,38 @@ Windows and macOS and keeps the zip.
 | Short | about a minute | One lap of everything: clips at 24, 30 and 60 fps, a slide show of large pictures, layers with effects and a moving picture, a 5.1 trailer with a downmix. |
 | Medium | 30 minutes to 2 hours (1 by default) | The same lap with a second trailer through sound effects, round and round: the run that finds a slow leak. |
 | Long | 4 to 12 hours (8 by default) | A longer lap with H.265, a 30 MB 10-second clip, six large pictures, more effects and a burst of twenty quick cues, for an overnight run. |
+
+### The timeline tests
+
+*Timeline short*, *Timeline medium* and *Timeline long* (the second row of choices) play
+timelines instead of a run of cues, for the same lengths as Short, Medium and Long, with
+the same downloads (less the 5.1 trailer), displays, sound, mute, memory guard, report
+and zip. The show is a timeline list called *Programme*, which the window's cue list shows
+as its tracks while it plays, and from Medium on a timeline group, *Interval*, in the main
+list after it. Nobody needs to touch anything: where a pause waits for GO, the test
+presses GO after 5 seconds (through the same GO the transport has); it leaves a loop
+after three passes, just after the loop has gone back so every lap is the same length.
+
+| Test | A lap | What it plays |
+|---|---|---|
+| Timeline short | about a minute, once | A title over *Big Buck Bunny* (60 fps) butted to *Sintel* (24 fps), *Jellyfish* (29.97 fps) crossfading over the overlap, the Apollo 11 picture under a caption, the Blue Marble brought up from unseen by a fade cue, a pause GO ends, a closing title and a Stop that fades it all out; the Sintel trailer's sound under it all. |
+| Timeline medium | about 2½ minutes, round and round | All that, plus a third track (a picture in the picture with speed and opacity keyframes), the Sintel trailer split in two (held over the join) and frozen by a pause that holds everything, Curiosity on Mars also on the second display (with two displays ticked; the second shows Earthrise under it), the Jellyfish looping until GO, a Jump to a marker past a part, then the *Interval* group (a still pushing in under a title, a pause, a film). |
+| Timeline long | about 3 minutes, round and round | All that, plus a 25 Mbit/s film under four pictures at once (two H.265) each with an effect, Mars blurring, the trailer's sound through EQ and reverb, Mars and Andromeda in the group, and four seeks a lap while it runs (to a marker and back, twice). |
+
+With two or more displays ticked, the timeline tests give each display its own picture
+instead of mirroring the first. What they measure, on top of the usual figures:
+
+| Finding | Problem when | Tracked when |
+|---|---|---|
+| The timeline's clock against real time, over each stretch it runs on its own (no pause, seek, loop or sleep) | more than 100 ms apart | more than 40 ms |
+| Clips the clock reaches: how long after their place their first frame (or sound) came | more than 0.5 s, or never | more than 0.2 s |
+| Getting clips ready after a start or seek (the clock stands meanwhile) | it ran out of the 2 s NewQ gives it | it took more than 1 s |
+| Lap lengths | a lap more than 2 s (or a fiftieth, if more) off the others | |
+
+The report has a *Timelines* part (how often GO was pressed, loops left, seeks; the
+clock, the clips and the cueing in figures), and `timeline.csv` in the zip has each
+measurement. A clip on a sound device that isn't there isn't judged (the report notes
+there was no working audio output).
 
 **The media.** The first time, Test mode downloads free films and pictures (the
 Blender Foundation's *Big Buck Bunny* and *Sintel* and the *Jellyfish* clip, under

@@ -6,6 +6,14 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Timeline tests in Test mode.** *Timeline short*, *Timeline medium* and *Timeline
+  long* play a timeline list (and from Medium on a timeline group) made like a short
+  programme from the test films and NASA pictures: butted and crossfaded films, stills
+  under captions, a picture a fade cue brings up, pauses (GO is pressed for you), a
+  freezing pause, a loop, a jump, a picture also on a second display, and in the long
+  test heavy films, a mosaic with effects and seeks while it runs. Besides the usual
+  figures they check that the timeline's clock keeps real time, that each clip comes up
+  on time, how long getting clips ready takes, and that laps match.
 - **Timeline workspace.** A timeline can open in a workspace of its own: the tracks
   across the whole window, the picture, a bin of new clips and the timeline's files
   and clips, and the inspector with the clip's timeline settings at the top. Choose

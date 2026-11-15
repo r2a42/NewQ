@@ -1277,3 +1277,47 @@ Still wrong or untried:
   not tested.
 - A classic Timeline pane open on the group still offers "Open in timeline editor".
 - No real phone, OSC controller, MIDI device, displays or audio device; sound by the fake device.
+
+## Y. Test Mode's timeline tests (Timeline short, medium, long)
+
+The owner asked for small, medium and large Test Mode runs of timelines. Commits "Timeline:" (the engine's
+`timeline_clips_up`), "Test Mode:" (findings; the tests) and "Docs:". No show-file field.
+
+As built:
+- **Choice.** `testmode::Flavour { Cues, Timeline }` beside `Level`; the window has a second row, "Timeline
+  short/medium/long". Lengths, downloads (`assets::wanted_for`: the cue test's less the 5.1 trailer), displays, sound,
+  mute, memory guard, analysis, report, zip and `begin_test`/`end_test` are shared; the heavy box is the cue tests' only.
+- **Show** (`plan::build_timeline`): a timeline list "Programme" (`TimelineSettings::for_editor()`, markers) and, from
+  Medium, a timeline group "Interval" in the main list (built first, so `normalize_lists` changes nothing). Catalog
+  films and NASA stills (generated ones when not available), `Fit::Cover`, captions bold with a shadow, stills
+  `RunOut::Hold` (a free-run pause would otherwise end a still whose own time ran out: seen in the first look).
+  Tracks: films 0, insets 1-4, keyframe-lane clip 2, titles 8, a second display's backdrop -1. With two or more
+  displays chosen, `use_displays_as(.., false)` gives each its own picture; "Also on" goes to the second. `own_layers`
+  is on. Every clip starts at 0.5 s or later, so a lap restarted by seek-to-0-and-Play has nothing to cue at 0.
+- **Driver** (`testmode/timeline.rs`): per leg, `switch_list` to the leg's list, seek a list back to 0 if it has run,
+  `go_plan` + `go`; at a pause that waits for GO, GO after `TIMELINE_HOLD` (5 s) (`timeline_continue` if `go_plan`
+  disagrees, logged); a loop is left after `TIMELINE_LOOP_PASSES` (3) passes just after it went back (laps match);
+  Long seeks at set clock times (20->53.5, 58->22, 90->100, 102->92), once each a lap. A leg ends when the run is
+  stopped and not in `Engine::timelines` (its fade over). `launch` doesn't GO a timeline test.
+- **Watch**: per key, per look: drift stretches (Running at both looks, no jump > 0.5 s or backwards; the first look
+  after a start from idle, where the app's dt is 0 by design, is skipped: it read -30 ms); arrivals (an instance whose
+  `due` the Running clock crossed since the last look; late = clock when `up` - due; gone before up and > 0.5 s past
+  due = never); cueing spells (>= 1.95 s = ran out). Dues are per key: judging another timeline's dues against this
+  key's clips made six false "never came up" in the first Medium look.
+- **Bounds** (`analysis.rs`): drift problem > 100 ms, tracked > 40 ms; late problem > 0.5 s or never, tracked > 0.2 s;
+  cueing problem at the limit, tracked > 1 s; laps problem when off the median by more than max(2 s, 2 %).
+
+Fixed from what was seen: the per-key dues above; a loop is only `RunView::looping` once it has gone back, so the
+driver counted one pass short and played four (the Medium lap was 6 s over its plan; now 140.6 s against 140.5); a
+clip whose start the engine put off (its file not ready) is judged by its place, not left out (a flake under load).
+Played at 2x through an engine, video content lags (FFmpeg's readers keep real time): the Short engine test only
+checks that clips come up and the lap's length, which hold. Timeline long played one lap at 1x through an engine in a
+throwaway test: 173.1 s against 170 planned (3.1 s of cueing at four seeks, a jump and the loop), no problems.
+
+Looked at headless (xvfb 1280x760, `XDG_*` in `scratchpad/tm/`): Timeline short generated and downloaded, to the
+end (56 s, passed with the no-sound note); Timeline medium downloaded, twice about 5 min (2 laps) and stopped, the
+user's show back; the second run after the fixes found nothing but the notes.
+
+Still wrong or untried: no sound device here, so sound clips are not judged (they fail to start); real displays,
+two displays and a Mac untried; Timeline long only through the plan tests (not played); the lap overrun check
+uses a lap length worked out by hand in the plan.

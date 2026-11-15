@@ -274,7 +274,16 @@ The README describes the features; this file is about working on the code.
   `gui.rs` is the window (its "Show the test on" ticks are `Prefs::test_displays`;
   `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
   display shows the picture and the others mirror it with a whole-area `part_of`; the
-  main window's own monitor is never offered). The full check (`feature.rs`, chosen as "Debug test" beside
+  main window's own monitor is never offered). Timeline tests: `Flavour::Timeline` beside each `Level`
+  (`Flavour::name`, "Timeline medium"; `assets::wanted_for` drops the 5.1 trailer); `plan::build_timeline` (same
+  `Builder`, `list` set for a timeline list's cues; `use_displays_as(.., false)`, no mirror; `own_layers` on) makes a
+  list "Programme" and from Medium a group "Interval" and a `timeline::Script` (legs, `TIMELINE_HOLD`, loop passes,
+  Long's seeks); `timeline::Driver` plays it lap after lap through `go_plan`/`go` (switching the worked list), GO
+  after the hold at a pause, leaving a loop just after it went back; `timeline::Watch` notes `Stretch`es (clock vs
+  `Instant` while Running; the first tick from idle, dt 0 by `app.rs`'s rule, is skipped), `Arrival`s (a clip the
+  running clock crossed, by `Engine::timeline_clips_up`'s `due`, per key) and `CueSpell`s; `analysis::
+  analyse_timeline` judges them and lap spread; `timeline.csv`, the report's Timelines part. `session::Run::timeline`
+  replaces the first-cue lap logic. Engine test: Timeline short at 2x through an `Engine` (~30 s). The full check (`feature.rs`, chosen as "Debug test" beside
   Short/Medium/Long, `TestMode::debug`, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
   clip in the run folder, cut from the catalog's Sintel trailer and NASA pictures (`feature::Sources`,
   fetched by `full.rs::real_media` when downloads are allowed, else only from the cache) or plain ones; `build` makes a show with every cue kind and a list of `Part`s (acts at times,
