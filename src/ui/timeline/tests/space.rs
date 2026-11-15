@@ -68,9 +68,17 @@ impl Win {
 
     /// Let the engine run `secs` (texts drawn, runs cued), a frame after.
     fn run(&mut self, key: TimelineKey, secs: f64) {
+        // Only the passes that move the clock count: `run_while` ticks by
+        // nothing while a text is being drawn or the run cues, which on a
+        // busy machine is longer than the whole of `secs` in passes.
         let mut left = secs;
-        fixtures::run_while(&mut self.m.e, &self.show, key, 0.05, |_| {
-            left -= 0.05;
+        let show = &self.show;
+        fixtures::run_while(&mut self.m.e, show, key, 0.05, |e| {
+            let busy = e.active.iter().any(|a| !a.started)
+                || e.timeline(show, key).state == RunState::Cueing;
+            if !busy {
+                left -= 0.05;
+            }
             left > 0.0
         });
         self.frame(vec![]);
