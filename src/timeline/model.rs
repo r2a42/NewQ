@@ -286,6 +286,8 @@ pub fn fade_wake(show: &Show, key: TimelineKey, cue: &Cue) -> Option<f64> {
 /// Whether a clip's end is kept by the timeline's clock rather than by its
 /// content (section 2.3): a free-run timeline pause (one that doesn't hold
 /// this clip) or a Pause of this clip lies inside it, start to end inclusive.
+/// A loop pause ("play a section again until GO") doesn't count: the clock
+/// jumps back there rather than standing, so the clip never outlasts its place.
 /// `len` is the clip's length on the timeline (None = open-ended).
 pub fn clocked(show: &Show, key: TimelineKey, cue: &Cue, len: Option<f64>) -> bool {
     if cue.kind.media().is_none() {
@@ -304,6 +306,9 @@ pub fn clocked(show: &Show, key: TimelineKey, cue: &Cue, len: Option<f64>) -> bo
             let inside = t + SAME_TIME >= start && end.is_none_or(|e| t <= e + SAME_TIME);
             inside
                 && match c.action {
+                    // A loop pause never stands the clock (it jumps back),
+                    // so it keeps no clip's end.
+                    ControlAction::TimelinePause if c.is_loop() => false,
                     ControlAction::TimelinePause => {
                         c.timeline.is_none_or(|k| k == key)
                             && match c.freeze {
@@ -1157,6 +1162,13 @@ mod tests {
             c.action = ControlAction::TimelineStop;
         });
         assert!(!is(&show));
+        // A loop pause jumps back rather than standing: the clip keeps its own end.
+        control(&mut show, pause, |c| {
+            c.action = ControlAction::TimelinePause;
+            c.loop_from = Some(TimelinePoint::Time(1.0));
+        });
+        assert!(!is(&show));
+        control(&mut show, pause, |c| c.loop_from = None);
         // A cue that isn't a clip is never clocked.
         control(&mut show, pause, |c| {
             c.action = ControlAction::TimelinePause
