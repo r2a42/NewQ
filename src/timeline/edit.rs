@@ -172,6 +172,10 @@ fn set_track(cue: &mut Cue, to: TrackId) -> bool {
     };
     match to {
         TrackId::Picture { output, layer } => {
+            // A clip moved to a display it was also on now lives there.
+            if let Some(o) = output {
+                m.also_on.retain(|a| *a != o);
+            }
             m.output = output;
             m.layer = layer;
         }
@@ -889,6 +893,151 @@ pub fn set_rate(show: &mut Show, id: CueId, mut rate: Animated) -> bool {
         return false;
     }
     m.rate = rate;
+    true
+}
+
+// ----- Opacity and fades ---------------------------------------------------
+
+/// Set a picture clip's opacity keyframes (`Motion`'s opacity track): with
+/// keys, the track (values kept to 0..1, keys from 0, in order); with none,
+/// the steady opacity `value` and no track. Pictures only.
+pub fn set_opacity(show: &mut Show, id: CueId, mut opacity: Animated) -> bool {
+    opacity.sanitize(1.0);
+    let keep = |v: f32| v.clamp(0.0, 1.0);
+    opacity.value = keep(opacity.value);
+    for k in &mut opacity.keys {
+        k.v = keep(k.v);
+        k.t = k.t.max(0.0);
+    }
+    let Some(c) = cue_mut(show, id) else {
+        return false;
+    };
+    if !model::is_picture(&c.kind) {
+        return false;
+    }
+    let Some(m) = c.kind.media_mut() else {
+        return false;
+    };
+    let (track, steady) = if opacity.is_animated() {
+        // The steady value under keys is never read; keep the first key's.
+        opacity.value = opacity.keys[0].v;
+        (Some(opacity), m.opacity)
+    } else {
+        (None, opacity.value)
+    };
+    if m.motion.opacity == track && m.opacity == steady {
+        return false;
+    }
+    m.motion.opacity = track;
+    m.opacity = steady;
+    true
+}
+
+/// Set how long a clip fades in (`Edge::Left`) or out (`Edge::Right`), in
+/// seconds: never below 0, nor so long that the two fades overlap within the
+/// clip's content (`dur`). A picture that cut in and is given a fade-in now
+/// fades in over what is under it.
+pub fn set_fade(show: &mut Show, id: CueId, edge: Edge, secs: f64, dur: Dur) -> bool {
+    if !secs.is_finite() {
+        return false;
+    }
+    let Some(cue) = show.cue(id) else {
+        return false;
+    };
+    let picture = model::is_picture(&cue.kind);
+    let content = content_len(cue, dur).flatten();
+    let Some(m) = cue_mut(show, id).and_then(|c| c.kind.media_mut()) else {
+        return false;
+    };
+    let other = match edge {
+        Edge::Left => m.fade_out,
+        Edge::Right => m.fade_in,
+    };
+    let mut secs = secs.max(0.0);
+    if let Some(len) = content {
+        secs = secs.min((len - other.max(0.0)).max(0.0));
+    }
+    let secs = (secs * 1000.0).round() / 1000.0;
+    let field = match edge {
+        Edge::Left => &mut m.fade_in,
+        Edge::Right => &mut m.fade_out,
+    };
+    if (*field - secs).abs() < SAME_TIME {
+        return false;
+    }
+    *field = secs;
+    if edge == Edge::Left && picture && secs > 0.0 && m.transition == Transition::Cut {
+        m.transition = Transition::FadeIn;
+    }
+    true
+}
+
+/// Move a picture track above (`up`) or below the next picture track of its
+/// display: the clips on the two swap layers, as do the empty tracks the
+/// timeline keeps. Refused at the top or bottom of the display's tracks.
+pub fn move_track(show: &mut Show, key: TimelineKey, t: TrackId, up: bool) -> bool {
+    let TrackId::Picture { output, layer } = t else {
+        return false;
+    };
+    if !model::is_timeline(show, key) {
+        return false;
+    }
+    let clips = model::clips(show, key, &mut |_| None);
+    let order = model::tracks(show, key, &clips);
+    // Layers of this display, top to bottom (as drawn).
+    let layers: Vec<i32> = order
+        .iter()
+        .filter_map(|o| match *o {
+            TrackId::Picture { output: d, layer } if d == output => Some(layer),
+            _ => None,
+        })
+        .collect();
+    let Some(i) = layers.iter().position(|l| *l == layer) else {
+        return false;
+    };
+    let j = if up { i.checked_sub(1) } else { Some(i + 1) };
+    let Some(&other) = j.and_then(|j| layers.get(j)) else {
+        return false;
+    };
+    let ids: Vec<(CueId, i32)> = model::members(show, key)
+        .into_iter()
+        .filter_map(|c| match model::track_of(c) {
+            TrackId::Picture {
+                output: d,
+                layer: l,
+            } if d == output => Some((c.id, l)),
+            _ => None,
+        })
+        .collect();
+    for (id, l) in ids {
+        let to = if l == layer {
+            other
+        } else if l == other {
+            layer
+        } else {
+            continue;
+        };
+        if let Some(m) = cue_mut(show, id).and_then(|c| c.kind.media_mut()) {
+            m.layer = to;
+        }
+    }
+    if let Some(s) = model::settings_mut(show, key) {
+        for k in &mut s.tracks {
+            if let TrackId::Picture {
+                output: d,
+                layer: l,
+            } = k
+                && *d == output
+            {
+                if *l == layer {
+                    *l = other;
+                } else if *l == other {
+                    *l = layer;
+                }
+            }
+        }
+    }
+    model::settle(show, key);
     true
 }
 
@@ -1803,5 +1952,117 @@ mod tests {
         let mut steady = Animated::new(3.0);
         shift_keys(&mut steady, 4.0);
         assert_eq!(steady, Animated::new(3.0));
+    }
+
+    #[test]
+    fn opacity_keys_are_set_kept_to_0_to_1_and_none_leave_a_steady_opacity() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 0.0);
+        let mut a = Animated::new(1.0);
+        a.set_key(2.0, 3.0);
+        a.set_key(0.0, -1.0);
+        assert!(set_opacity(show, v, a.clone()));
+        let o = media(show, v).motion.opacity.clone().unwrap();
+        let ks: Vec<(f64, f32)> = o.keys.iter().map(|k| (k.t, k.v)).collect();
+        assert_eq!(ks, vec![(0.0, 0.0), (2.0, 1.0)]);
+        assert!(!set_opacity(show, v, a), "the same again");
+        // A first key at 0 rising later is a lead-in the model reads.
+        let mut b = Animated::new(1.0);
+        b.set_key(0.0, 0.0);
+        b.set_key(1.5, 0.0);
+        b.set_key(2.5, 1.0);
+        assert!(set_opacity(show, v, b));
+        assert_eq!(
+            model::lead_in(show, key, show.cue(v).unwrap()),
+            LeadIn::At(1.5)
+        );
+        // No keys: the steady opacity, no track.
+        assert!(set_opacity(show, v, Animated::new(0.6)));
+        assert!(media(show, v).motion.opacity.is_none());
+        assert_eq!(media(show, v).opacity, 0.6);
+        // Only pictures have an opacity.
+        let s = clip(
+            show,
+            key,
+            CueType::Audio,
+            TrackId::Sound { output: None },
+            0.0,
+        );
+        assert!(!set_opacity(show, s, Animated::new(0.5)));
+    }
+
+    #[test]
+    fn fades_are_set_within_the_clip_and_a_cut_picture_then_fades_in() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let v = clip(show, key, CueType::Video, picture(show, 0, 0), 0.0);
+        media(show, v).transition = Transition::Cut;
+        media(show, v).fade_out = 5.0;
+        assert!(set_fade(show, v, Edge::Left, 2.5, &mut fake_dur));
+        assert_eq!(media(show, v).fade_in, 2.5);
+        assert_eq!(media(show, v).transition, Transition::FadeIn);
+        // Never into the fade-out (20 s of file, 5 s of fade-out).
+        assert!(set_fade(show, v, Edge::Left, 30.0, &mut fake_dur));
+        assert_eq!(media(show, v).fade_in, 15.0);
+        assert!(set_fade(show, v, Edge::Right, -1.0, &mut fake_dur));
+        assert_eq!(media(show, v).fade_out, 0.0);
+        assert!(!set_fade(show, v, Edge::Right, 0.0, &mut fake_dur));
+        assert!(!set_fade(show, v, Edge::Right, f64::NAN, &mut fake_dur));
+        // A sound has no transition to change.
+        let s = clip(
+            show,
+            key,
+            CueType::Audio,
+            TrackId::Sound { output: None },
+            0.0,
+        );
+        assert!(set_fade(show, s, Edge::Left, 1.0, &mut fake_dur));
+        assert_eq!(media(show, s).fade_in, 1.0);
+    }
+
+    #[test]
+    fn a_track_moves_above_or_below_the_next_on_its_display() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let (v0, v1) = (picture(show, 0, 0), picture(show, 0, 1));
+        let a = clip(show, key, CueType::Image, v0, 0.0);
+        let b = clip(show, key, CueType::Image, v1, 0.0);
+        let other = clip(show, key, CueType::Image, picture(show, 1, 0), 0.0);
+        // v1 is the top one of its display.
+        assert!(!move_track(show, key, v1, true));
+        assert!(!move_track(show, key, v0, false));
+        assert!(!move_track(show, key, TrackId::Cues, true));
+        assert!(move_track(show, key, v0, true));
+        assert_eq!(model::track_of(show.cue(a).unwrap()), v1);
+        assert_eq!(model::track_of(show.cue(b).unwrap()), v0);
+        assert_eq!(
+            model::track_of(show.cue(other).unwrap()),
+            picture(show, 1, 0),
+            "another display's tracks stay"
+        );
+        // An empty track the timeline keeps moves too.
+        let top = add_track(show, key, true).unwrap();
+        assert_eq!(top, picture(show, 0, 2));
+        assert!(move_track(show, key, top, false));
+        assert_eq!(model::settings(show, key).unwrap().tracks, vec![v1]);
+        assert_eq!(model::track_of(show.cue(a).unwrap()), picture(show, 0, 2));
+        assert_sound(show);
+    }
+
+    #[test]
+    fn a_clip_moved_to_a_display_it_was_also_on_lives_there() {
+        let mut f = fixture();
+        let key = f.group;
+        let show = &mut f.show;
+        let a = clip(show, key, CueType::Image, picture(show, 0, 0), 0.0);
+        let second = display(show, 1).unwrap();
+        media(show, a).also_on = vec![second];
+        assert!(move_clips(show, key, &[a], 0.0, Some(picture(show, 1, 0))));
+        assert_eq!(media(show, a).output, Some(second));
+        assert!(media(show, a).also_on.is_empty());
     }
 }

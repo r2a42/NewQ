@@ -174,7 +174,7 @@ pub fn settle(show: &mut Show, key: TimelineKey) {
 }
 
 /// Cues that put a picture on a display.
-pub(super) fn is_picture(kind: &CueKind) -> bool {
+pub fn is_picture(kind: &CueKind) -> bool {
     matches!(
         kind,
         CueKind::Video(_)
@@ -186,7 +186,7 @@ pub(super) fn is_picture(kind: &CueKind) -> bool {
 }
 
 /// Cues that are only sound.
-pub(super) fn is_sound(kind: &CueKind) -> bool {
+pub fn is_sound(kind: &CueKind) -> bool {
     matches!(kind, CueKind::Audio(_) | CueKind::LiveAudio(_))
 }
 
@@ -379,13 +379,15 @@ pub fn clips(show: &Show, key: TimelineKey, dur: Dur) -> Vec<Clip> {
 
 /// The tracks to draw, top to bottom: pictures by display order then layer
 /// high to low, sounds by output order, the cue track last (always there).
-/// Those of the clips and the ones the settings keep, each once.
+/// Those of the clips (and of their ghosts on the other displays a clip is
+/// also on, `ghosts`) and the ones the settings keep, each once.
 pub fn tracks(show: &Show, key: TimelineKey, clips: &[Clip]) -> Vec<TrackId> {
     let kept = settings(show, key).map_or(&[][..], |s| &s.tracks[..]);
     let mut out: Vec<TrackId> = Vec::new();
     for t in clips
         .iter()
         .map(|c| c.track)
+        .chain(ghosts(clips).into_iter().map(|g| g.1))
         .chain(kept.iter().copied())
         .chain([TrackId::Cues])
     {
@@ -412,6 +414,51 @@ pub fn tracks(show: &Show, key: TimelineKey, clips: &[Clip]) -> Vec<TrackId> {
         TrackId::Cues => (2, 0, 0),
     });
     out
+}
+
+/// Where a clip that is also on other displays (`Clip::also_on`) shows there:
+/// a ghost of it on the same layer's track of each (clip, that track). Its
+/// home display, and a display named twice, give none.
+pub fn ghosts(clips: &[Clip]) -> Vec<(CueId, TrackId)> {
+    let mut out = Vec::new();
+    for c in clips {
+        let TrackId::Picture { output, layer } = c.track else {
+            continue;
+        };
+        for o in &c.also_on {
+            let t = TrackId::Picture {
+                output: Some(*o),
+                layer,
+            };
+            if Some(*o) != output && !out.contains(&(c.id, t)) {
+                out.push((c.id, t));
+            }
+        }
+    }
+    out
+}
+
+/// A clip that waits for its fade-in and enters by a cut while another clip
+/// on its track is still showing then (plan 2.13, 5): the cut takes that one
+/// off at once, and this one fades up from nothing. Returns the clip it cuts.
+pub fn cuts_over(show: &Show, key: TimelineKey, clips: &[Clip], id: CueId) -> Option<CueId> {
+    let c = clips.iter().find(|c| c.id == id)?;
+    let cue = show.cue(id)?;
+    let m = cue.kind.media()?;
+    if !is_picture(&cue.kind) || m.transition != Transition::Cut {
+        return None;
+    }
+    let enters = c.start
+        + match c.lead_in {
+            LeadIn::None => return None,
+            LeadIn::At(v) => v,
+            LeadIn::UntilFaded => fade_wake(show, key, cue)?,
+        };
+    clips
+        .iter()
+        .filter(|o| o.id != id && o.armed && o.track == c.track)
+        .find(|o| o.start < enters - SAME_TIME && o.len.is_none_or(|l| o.start + l > enters))
+        .map(|o| o.id)
 }
 
 /// How long the timeline runs: to the end of its last armed clip. None if
@@ -637,6 +684,64 @@ mod tests {
             "on its home display's track"
         );
         assert_eq!((cl[1].id, cl[1].also_on.len()), (w, 0));
+    }
+
+    #[test]
+    fn a_clip_on_other_displays_has_a_ghost_on_each_and_their_tracks_are_drawn() {
+        let Fixture {
+            mut show, group, ..
+        } = fixture();
+        let d1 = show.outputs[0].id;
+        let d2 = show.add_display();
+        let d3 = show.add_display();
+        let v = add(&mut show, CueType::Video, Some(group), 0, 0.0);
+        let m = media_of(&mut show, v);
+        m.output = Some(d1);
+        m.layer = 2;
+        // Its home and a display named twice give no more ghosts.
+        m.also_on = vec![d3, d1, d3];
+        let key = TimelineKey::Group(group);
+        let cl = clips(&show, key, &mut |_| Some(Some(1.0)));
+        let on = |d| TrackId::Picture {
+            output: Some(d),
+            layer: 2,
+        };
+        assert_eq!(ghosts(&cl), vec![(v, on(d3))]);
+        assert_eq!(tracks(&show, key, &cl), vec![on(d1), on(d3), TrackId::Cues]);
+        let _ = d2;
+    }
+
+    #[test]
+    fn a_waiting_clip_that_cuts_in_over_another_on_its_track_is_found() {
+        let Fixture {
+            mut show, group, ..
+        } = fixture();
+        let key = TimelineKey::Group(group);
+        let under = add(&mut show, CueType::Image, Some(group), 0, 0.0);
+        media_of(&mut show, under).end = Some(10.0);
+        let over = add(&mut show, CueType::Image, Some(group), 0, 2.0);
+        let m = media_of(&mut show, over);
+        m.end = Some(5.0);
+        m.transition = Transition::Cut;
+        m.motion.opacity = Some(keys(&[(0.0, 0.0), (3.0, 0.0), (4.0, 1.0)]));
+        let found = |show: &Show| {
+            let cl = clips(show, key, &mut |c| {
+                Some(c.kind.media().and_then(|m| m.end).or(Some(0.0)))
+            });
+            cuts_over(show, key, &cl, over)
+        };
+        // It enters at 5 s, while the one under it shows until 10 s.
+        assert_eq!(found(&show), Some(under));
+        // Not with a fade-in transition, nor once the other has ended.
+        media_of(&mut show, over).transition = Transition::FadeIn;
+        assert_eq!(found(&show), None);
+        media_of(&mut show, over).transition = Transition::Cut;
+        media_of(&mut show, under).end = Some(4.0);
+        assert_eq!(found(&show), None);
+        // Nor without a lead-in (it shows from its start, as any cut does).
+        media_of(&mut show, under).end = Some(10.0);
+        media_of(&mut show, over).motion.opacity = None;
+        assert_eq!(found(&show), None);
     }
 
     #[test]
