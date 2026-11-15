@@ -788,11 +788,38 @@ pub fn spawn_stderr_drain(
             // Only the tail matters (it holds the error), and a chatty ffmpeg
             // can write a lot over a long show.
             let text = super::read_tail(&mut stderr, 8192);
-            if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
-                log::warn!("ffmpeg: {line}");
-                *error.lock() = Some(line.to_string());
+            match last_complaint(&text) {
+                Some((line, false)) => {
+                    log::warn!("ffmpeg: {line}");
+                    *error.lock() = Some(line.to_string());
+                }
+                Some((line, true)) => log::debug!("ffmpeg: {line}"),
+                None => {}
             }
         });
+}
+
+/// The line of FFmpeg's last words that says what went wrong: the last one
+/// that isn't harmless, else the last (and true: it is harmless).
+fn last_complaint(text: &str) -> Option<(&str, bool)> {
+    let mut lines = text.lines().rev().filter(|l| !l.trim().is_empty());
+    let last = lines.clone().next()?;
+    Some(match lines.find(|l| !harmless(l)) {
+        Some(l) => (l, false),
+        None => (last, true),
+    })
+}
+
+/// What FFmpeg prints as an error about a file that plays perfectly well: not
+/// worth a warning (the Sintel trailer said one of these each time it opened,
+/// 153 times in an hour's test) nor the reason given if the cue fails.
+const HARMLESS: &[&str] = &[
+    // A QuickTime file whose chapter list points at a track it doesn't have.
+    "Referenced QT chapter track not found",
+];
+
+fn harmless(line: &str) -> bool {
+    HARMLESS.iter().any(|h| line.contains(h))
 }
 
 pub struct RgbaImage {
@@ -1241,6 +1268,24 @@ mod tests {
             later.len()
         );
         let _ = std::fs::remove_dir_all(clip.parent().unwrap());
+    }
+
+    #[test]
+    fn a_harmless_complaint_is_not_taken_for_the_error() {
+        assert!(harmless(
+            "[in#0 @ 0x78ec18000] Referenced QT chapter track not found"
+        ));
+        assert!(!harmless(
+            "[in#0 @ 0x78ec18000] Error opening input: No such file"
+        ));
+        assert!(!harmless("Invalid data found when processing input"));
+        // A real error before the harmless line is the one kept.
+        let text = "moov atom not found\n[in#0 @ 0x1] Referenced QT chapter track not found\n\n";
+        assert_eq!(last_complaint(text), Some(("moov atom not found", false)));
+        // Only the harmless line: said, but quietly.
+        let text = "[in#0 @ 0x1] Referenced QT chapter track not found\n";
+        assert_eq!(last_complaint(text), Some((text.trim_end(), true)));
+        assert_eq!(last_complaint("\n  \n"), None);
     }
 
     #[test]

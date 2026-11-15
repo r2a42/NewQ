@@ -6,6 +6,9 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A quieter log.** FFmpeg's "Referenced QT chapter track not found" (said each time a
+  QuickTime file with a broken chapter list opens, harmless) is no longer logged as a warning,
+  nor given as the reason if such a cue fails.
 - **The timeline view follows a running playhead.** While a timeline runs, its tracks
   turn the page as the playhead nears the right-hand edge, and come back to it after a
   jump, a loop going back or a scroll away. Holding a drag keeps the view still until
