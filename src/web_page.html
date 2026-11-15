@@ -35,6 +35,16 @@
   .kind { color:var(--dim); font-size:12px; }
   li button { padding:8px 12px; }
   #pin { display:none; padding:14px; }
+  #timelines { padding:0 10px; }
+  .tl { background:var(--card); border:1px solid var(--line); border-radius:10px; margin:8px 0; padding:8px 10px; }
+  .tl.worked { border-color:var(--head); }
+  .tl .top { display:flex; gap:8px; align-items:baseline; }
+  .tl .tname { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tl .clock { font-variant-numeric:tabular-nums; color:var(--head); }
+  .tl .state { font-size:13px; color:var(--dim); margin:2px 0 6px; }
+  .tl .row button { flex:1; padding:10px 6px; }
+  .tl .marks { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .tl .marks button { padding:6px 10px; font-size:14px; }
 </style>
 </head>
 <body>
@@ -52,6 +62,7 @@
   </div>
 </header>
 <div id="status">Connecting…</div>
+<div id="timelines"></div>
 <ul id="cues"></ul>
 <script>
 const $ = id => document.getElementById(id);
@@ -71,11 +82,47 @@ async function call(path, post) {
   return r;
 }
 const send = path => call(path, true).then(refresh).catch(() => {});
+const clock = t => { if (t === null || t === undefined) return '–'; const m = Math.floor(t / 60);
+  const r = (t - m * 60).toFixed(1); return m + ':' + (r < 10 ? '0' : '') + r; };
+const button = (label, onclick) => { const b = document.createElement('button'); b.textContent = label; b.onclick = onclick; return b; };
+
+// The timeline transport: one card for each timeline list, and for each
+// timeline group while it runs, pauses or fades (the list being worked first).
+function renderTimelines(list) {
+  const box = $('timelines');
+  box.textContent = '';
+  for (const t of list || []) {
+    const at = '/api/timeline/' + encodeURIComponent(t.ref) + '/';
+    const card = document.createElement('div');
+    card.className = 'tl' + (t.worked ? ' worked' : '');
+    const top = document.createElement('div'); top.className = 'top';
+    const name = document.createElement('span'); name.className = 'tname'; name.textContent = t.name;
+    const time = document.createElement('span'); time.className = 'clock';
+    time.textContent = clock(t.pos) + (t.length !== null ? ' / ' + clock(t.length) : '');
+    top.append(name, time);
+    const state = document.createElement('div'); state.className = 'state';
+    state.textContent = t.text + (t.next_pause !== null && t.state !== 'paused' ? ' · next pause ' + clock(t.next_pause) : '');
+    const row = document.createElement('div'); row.className = 'row';
+    row.append(button('▶ Run', () => send(at + 'run')), button('❚❚ Pause', () => send(at + 'pause')),
+               button('■ Stop', () => send(at + 'stop')));
+    if (t.looping) row.append(button('Leave loop', () => send(at + 'leave_loop')));
+    card.append(top, state, row);
+    if (t.markers.length) {
+      const marks = document.createElement('div'); marks.className = 'marks';
+      for (const m of t.markers) marks.append(button('⤳ ' + m.name, () => send(at + 'jump/' + m.time.toFixed(3))));
+      card.append(marks);
+    }
+    box.append(card);
+  }
+}
 
 function render(s) {
   paused = s.paused;
   $('pause').textContent = paused ? 'Resume' : 'Pause';
-  $('standing').textContent = (s.show || 'Show') + ' — standing by' + (s.timecode ? '   ⏱ ' + s.timecode : '');
+  const worked = (s.timelines || []).find(t => t.worked);
+  const standing = worked ? worked.name + ': ' + worked.text + ' ' + clock(worked.pos) : 'standing by';
+  $('standing').textContent = (s.show || 'Show') + ' — ' + standing + (s.timecode ? '   ⏱ ' + s.timecode : '');
+  renderTimelines(s.timelines);
   $('next').textContent = s.go ? s.go : s.next ? s.next.number + '  ' + s.next.name : 'End of cue list';
   const ul = $('cues');
   ul.textContent = '';

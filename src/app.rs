@@ -588,7 +588,7 @@ impl App {
             self.remote.sync(&self.show.remote);
             self.feedback.set_target(&self.show.remote.osc_feedback);
         }
-        self.feedback.update(&self.show, &self.engine, now);
+        self.feedback.update(&self.show, &mut self.engine, now);
         self.ui.feedback_error = self.feedback.error.clone();
         self.ui.remote_status = self.remote.status.clone();
         if self.remote.web_running()
@@ -596,7 +596,7 @@ impl App {
         {
             self.last_web_state = now;
             self.remote
-                .set_web_state(crate::web::snapshot_json(&self.show, &self.engine));
+                .set_web_state(crate::web::snapshot_json(&self.show, &mut self.engine));
         }
         let commands = self.remote.drain();
         if commands.is_empty() {

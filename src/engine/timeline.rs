@@ -578,11 +578,7 @@ impl Engine {
             length,
             on_go,
             parked,
-            fading: state == RunState::Stopped && self.active.iter().any(|a| {
-                a.stopping
-                    && (a.run == Some(instance)
-                        || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == Some(instance)))
-            }),
+            fading: state == RunState::Stopped && self.run_fading(instance),
             looping,
             at_end,
         }
@@ -619,16 +615,31 @@ impl Engine {
             .min_by(f64::total_cmp)
     }
 
-    // For OSC feedback of the runs (P8); only the tests read it so far.
-    #[allow(dead_code)]
-    /// Those not `Stopped`.
+    /// The timelines that are doing something: not `Stopped`, or stopped with
+    /// what they played still fading out (a Stop's fade). For OSC feedback.
     pub fn timelines(&self) -> Vec<TimelineKey> {
-        self.runs
+        let mut out: Vec<TimelineKey> = self
+            .runs
             .map
             .iter()
-            .filter(|(_, r)| r.state != RunState::Stopped)
+            .filter(|(_, r)| r.state != RunState::Stopped || self.run_fading(r.instance))
             .map(|(k, _)| *k)
-            .collect()
+            .collect();
+        // The same order every time (a map has none of its own).
+        out.sort_by_key(|k| match *k {
+            TimelineKey::List(n) => (0, u64::from(n)),
+            TimelineKey::Group(g) => (1, g.0),
+        });
+        out
+    }
+
+    /// Whether what the run `instance` played is still fading out after a Stop.
+    fn run_fading(&self, instance: u64) -> bool {
+        let i = Some(instance);
+        self.active.iter().any(|a| {
+            a.stopping
+                && (a.run == i || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == i))
+        })
     }
 
     /// Run from where it is: Stopped/parked -> cue then run; Paused -> resume; Running -> no-op.
@@ -1179,7 +1190,7 @@ impl Engine {
     }
 
     /// Run from `pos`: cue what is there and run on from it.
-    fn timeline_run_from(&mut self, show: &Show, key: TimelineKey, pos: f64) {
+    pub fn timeline_run_from(&mut self, show: &Show, key: TimelineKey, pos: f64) {
         if self.paused {
             self.set_paused(false);
         }
@@ -2162,6 +2173,69 @@ impl Engine {
             }
         }
         true
+    }
+
+    /// GO aimed at one timeline (a remote's `/timeline/<name>/go`): what GO on
+    /// its list would do to it (`timeline_go_for`), whichever list is being
+    /// worked. A stopped group is fired, a stopped list runs from its playhead,
+    /// a paused run goes on, a loop is left as its cue says; while it runs or
+    /// cues, or a list stands at its end, nothing (and the log says why).
+    pub fn timeline_go_one(&mut self, show: &Show, key: TimelineKey) {
+        if !model::is_timeline(show, key) {
+            self.problem("There is no such timeline");
+            return;
+        }
+        let run = self.runs.map.get(&key);
+        let state = run.map(|r| r.state);
+        let looping = run.and_then(|r| r.looping).is_some_and(|l| !l.last_pass)
+            && matches!(state, Some(RunState::Running | RunState::Cueing));
+        let at_end = run.is_some_and(|r| self.at_end(show, key, r));
+        match state {
+            _ if looping => self.timeline_leave_loop(show, key),
+            Some(RunState::Running) => {
+                self.log("GO: the timeline is running; GO does nothing until it pauses")
+            }
+            Some(RunState::Cueing) => {}
+            Some(RunState::Stopped) if at_end => {
+                self.log("GO: the timeline is at its end; move its playhead to run it again")
+            }
+            _ => {
+                if self.paused {
+                    self.set_paused(false);
+                }
+                self.timeline_run(show, key);
+            }
+        }
+    }
+
+    /// A paused timeline goes on (a remote's resume); anything else is left as
+    /// it is, and the log says so.
+    pub fn timeline_continue(&mut self, show: &Show, key: TimelineKey) {
+        match self.runs.map.get(&key).map(|r| r.state) {
+            Some(RunState::Paused { .. }) => {
+                if self.paused {
+                    self.set_paused(false);
+                }
+                self.timeline_resume(show, key);
+            }
+            _ => self.log("The timeline is not paused"),
+        }
+    }
+
+    /// A loop playing on a timeline is left (a remote's leave-loop), as GO
+    /// would: this pass is the last, or at once when its cue says so.
+    pub fn timeline_leave(&mut self, show: &Show, key: TimelineKey) {
+        let looping = self
+            .runs
+            .map
+            .get(&key)
+            .and_then(|r| r.looping)
+            .is_some_and(|l| !l.last_pass);
+        if looping {
+            self.timeline_leave_loop(show, key);
+        } else {
+            self.log("The timeline is not playing a loop");
+        }
     }
 
     /// A control cue's timeline action (on its own timeline, or the one it

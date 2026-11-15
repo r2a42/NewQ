@@ -5,8 +5,10 @@
 //! network or MIDI hardware. The listeners run on their own threads, queue
 //! commands, and wake the event loop to act on them.
 
-use crate::show::RemoteSettings;
+use crate::engine::Engine;
+use crate::show::{CueId, PauseFreeze, RemoteSettings, Show, TIMELINE_STOP_FADE, TimelineKey};
 use crate::timecode::{self, QuarterFrames, Rate, Timecode};
+use crate::timeline::model;
 use crate::web::WebServer;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::net::UdpSocket;
@@ -16,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// What a remote message asks for. Cues are named by their cue number.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Go,
     /// A button of a presenter-style remote (see `clicker`).
@@ -60,6 +62,86 @@ pub enum Command {
     Timecode(Timecode, Rate),
     /// The timecode source located here (a full frame message).
     TimecodeLocate(Timecode, Rate),
+    /// Something done to a timeline, named as a remote names it: a timeline
+    /// list's name, or a timeline group's cue number (`ui::run_remote` finds it).
+    Timeline {
+        timeline: String,
+        does: TimelineDo,
+    },
+}
+
+/// A place on a timeline, as a remote gives it: seconds, or a marker's name.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    Time(f64),
+    Marker(String),
+}
+
+impl Place {
+    /// A place written out: seconds (`12.5`), minutes and seconds (`1:02.5`,
+    /// `1:00:00`), or else a marker's name. None for nothing at all.
+    pub fn parse(text: &str) -> Option<Place> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        Some(match clock_seconds(t) {
+            Some(secs) => Place::Time(secs),
+            None => Place::Marker(t.to_string()),
+        })
+    }
+
+    fn from_arg(arg: &OscValue) -> Option<Place> {
+        match arg {
+            OscValue::Number(n) if n.is_finite() => Some(Place::Time(*n)),
+            OscValue::Number(_) => None,
+            OscValue::Text(t) => Place::parse(t),
+        }
+    }
+}
+
+/// `12.5`, `1:02.5` or `1:00:00` as seconds; None if it is none of those.
+fn clock_seconds(t: &str) -> Option<f64> {
+    let parts: Vec<&str> = t.split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut total = 0.0;
+    for (i, p) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        // Only digits (and, in the seconds, one point): "1e3" or "inf" is a name.
+        let ok = !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit() || (last && c == '.'))
+            && p.matches('.').count() <= 1
+            && *p != ".";
+        if !ok {
+            return None;
+        }
+        let v: f64 = p.parse().ok()?;
+        total = total * 60.0 + v;
+    }
+    total.is_finite().then_some(total)
+}
+
+/// What a remote asks a timeline to do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TimelineDo {
+    /// Run from its playhead (or go on from a pause), or from a place.
+    Run(Option<Place>),
+    /// What GO does to it: run, continue at a pause, leave a loop, or (while
+    /// it runs, or a list stands at its end) nothing.
+    Go,
+    /// Stop its clock and hold what plays, as the transport's Pause does.
+    Pause,
+    /// Go on from a pause; nothing if it is not paused.
+    Resume,
+    /// Stop, fading out over this many seconds (None: as a timeline Stop cue
+    /// does by default, `TIMELINE_STOP_FADE`; 0: a cut).
+    Stop(Option<f64>),
+    /// Move its playhead: running, it plays on from there; else it parks there.
+    Jump(Place),
+    /// Leave the loop it is playing, as GO would.
+    LeaveLoop,
 }
 
 // ----- OSC ------------------------------------------------------------------
@@ -101,16 +183,33 @@ fn parse_osc_into(packet: &[u8], out: &mut Vec<Command>, depth: u32) {
         return;
     }
     if let Some((address, rest)) = osc_string(packet)
-        && let Some(cmd) = osc_command(address, osc_first_number(rest))
+        && let Some(cmd) = osc_command(address, osc_first_arg(rest).as_ref())
     {
         out.push(cmd);
     }
 }
 
-/// The first argument of an OSC message as a number, if it has one: what
-/// follows the address is a type tag string (`,if`) and then the arguments.
-/// Ints, floats, doubles, 64-bit ints and true and false count.
-fn osc_first_number(rest: &[u8]) -> Option<f64> {
+/// An OSC message's first argument.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OscValue {
+    Number(f64),
+    Text(String),
+}
+
+impl OscValue {
+    /// As a number: a number, or text that is one.
+    fn number(&self) -> Option<f64> {
+        match self {
+            OscValue::Number(n) => Some(*n),
+            OscValue::Text(t) => t.trim().parse().ok(),
+        }
+    }
+}
+
+/// The first argument of an OSC message, if it has one: what follows the
+/// address is a type tag string (`,if`) and then the arguments. Ints, floats,
+/// doubles, 64-bit ints, true and false (as 1 and 0) and strings count.
+fn osc_first_arg(rest: &[u8]) -> Option<OscValue> {
     let (tags, mut data) = osc_string(rest)?;
     let tags = tags.strip_prefix(',')?;
     let first = tags.chars().next()?;
@@ -119,20 +218,17 @@ fn osc_first_number(rest: &[u8]) -> Option<f64> {
         *data = &data[n..];
         Some(bytes)
     };
-    match first {
-        'T' => Some(1.0),
-        'F' => Some(0.0),
-        'i' => Some(f64::from(i32::from_be_bytes(
-            take(4, &mut data)?.try_into().ok()?,
-        ))),
-        'f' => Some(f64::from(f32::from_be_bytes(
-            take(4, &mut data)?.try_into().ok()?,
-        ))),
-        'd' => Some(f64::from_be_bytes(take(8, &mut data)?.try_into().ok()?)),
-        'h' => Some(i64::from_be_bytes(take(8, &mut data)?.try_into().ok()?) as f64),
-        's' => osc_string(data)?.0.trim().parse().ok(),
-        _ => None,
-    }
+    let n = match first {
+        'T' => 1.0,
+        'F' => 0.0,
+        'i' => f64::from(i32::from_be_bytes(take(4, &mut data)?.try_into().ok()?)),
+        'f' => f64::from(f32::from_be_bytes(take(4, &mut data)?.try_into().ok()?)),
+        'd' => f64::from_be_bytes(take(8, &mut data)?.try_into().ok()?),
+        'h' => i64::from_be_bytes(take(8, &mut data)?.try_into().ok()?) as f64,
+        's' => return Some(OscValue::Text(osc_string(data)?.0.to_string())),
+        _ => return None,
+    };
+    Some(OscValue::Number(n))
 }
 
 /// The command for an OSC message, in the shape of QLab's: an optional
@@ -143,7 +239,8 @@ fn osc_first_number(rest: &[u8]) -> Option<f64> {
 /// selected, at the playhead, or every one playing, and `/cue_id/<id>/…`) with
 /// start, go, select, load, stop, hardStop, pause, resume, reset, devamp,
 /// fade, panic, arm, disarm, and armed (with 1 or 0 as its argument).
-pub fn osc_command(address: &str, arg: Option<f64>) -> Option<Command> {
+/// Timelines: `/timeline/<list name|group's cue number>/…` (`timeline_command`).
+pub fn osc_command(address: &str, arg: Option<&OscValue>) -> Option<Command> {
     let mut parts: Vec<&str> = address.split('/').skip(1).collect();
     // Whichever workspace it names is the one that is open.
     if parts.len() >= 3 && parts[0].eq_ignore_ascii_case("workspace") {
@@ -160,6 +257,16 @@ pub fn osc_command(address: &str, arg: Option<f64>) -> Option<Command> {
         ["reset"] => Some(Command::Reset),
         ["cuelist", n, "go"] => n.parse().ok().map(Command::GoList),
         ["cuelist", n, "select"] => n.parse().ok().map(Command::SelectList),
+        // The name as written; a fourth part is the place (for senders that
+        // can't send an argument): `/timeline/Act_1/jump/Interval`.
+        ["timeline", _, verb] | ["timeline", _, verb, _] if !parts[1].is_empty() => {
+            let place = parts.get(3).map(|p| OscValue::Text((*p).to_string()));
+            let does = timeline_command(verb, place.as_ref().or(arg))?;
+            Some(Command::Timeline {
+                timeline: parts[1].to_string(),
+                does,
+            })
+        }
         ["playhead" | "select", "next"] => Some(Command::PlayheadNext),
         ["playhead" | "select", "previous"] => Some(Command::PlayheadPrevious),
         // Cue numbers are matched as written, not lower-cased.
@@ -189,7 +296,7 @@ pub fn osc_command(address: &str, arg: Option<f64>) -> Option<Command> {
                 "devamp" => Some(Command::Devamp(n)),
                 "arm" => Some(Command::Arm(n)),
                 "disarm" => Some(Command::Disarm(n)),
-                "armed" => arg.map(|a| {
+                "armed" => arg.and_then(OscValue::number).map(|a| {
                     if a != 0.0 {
                         Command::Arm(n)
                     } else {
@@ -200,6 +307,164 @@ pub fn osc_command(address: &str, arg: Option<f64>) -> Option<Command> {
             }
         }
         _ => None,
+    }
+}
+
+/// What `/timeline/<name>/<verb>` asks for (`verb` lower-cased): `run` or
+/// `start` (from the place given, if one is), `go`, `pause`, `resume` or
+/// `continue`, `stop` (fading over the seconds given, else as the Stop cue
+/// does), `hardStop` or `panic` (a cut), `jump`, `seek` or `marker` (to the
+/// seconds or marker given), and `leaveLoop` or `devamp`. The web remote's
+/// paths use the same words.
+pub fn timeline_command(verb: &str, arg: Option<&OscValue>) -> Option<TimelineDo> {
+    let place = || arg.and_then(Place::from_arg);
+    Some(match verb {
+        "run" | "start" => TimelineDo::Run(place()),
+        "go" => TimelineDo::Go,
+        "pause" => TimelineDo::Pause,
+        "resume" | "continue" => TimelineDo::Resume,
+        "stop" => TimelineDo::Stop(
+            arg.and_then(OscValue::number)
+                .filter(|f| f.is_finite())
+                .map(|f| f.max(0.0)),
+        ),
+        "hardstop" | "panic" => TimelineDo::Stop(Some(0.0)),
+        "jump" | "seek" | "marker" => TimelineDo::Jump(place()?),
+        "leaveloop" | "leave_loop" | "devamp" => TimelineDo::LeaveLoop,
+        _ => return None,
+    })
+}
+
+// ----- Timelines ------------------------------------------------------------
+
+/// A name as a remote may write it: case and the difference between a space
+/// and an underscore don't count (an OSC address can't hold a space).
+fn squash(s: &str) -> String {
+    s.trim()
+        .chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// The timeline a remote means by `name`: a timeline list of that name, else
+/// the timeline group with that cue number (in the list being worked first,
+/// then the main list, then any), else `#<id>` (a timeline group's own id) or
+/// `list:<n>` (a timeline list by its id), the forms the web remote uses.
+pub fn find_timeline(show: &Show, active_list: u32, name: &str) -> Option<TimelineKey> {
+    let wanted = squash(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    if let Some(l) = show
+        .lists
+        .iter()
+        .find(|l| squash(&l.name) == wanted && model::is_timeline(show, TimelineKey::List(l.id)))
+    {
+        return Some(TimelineKey::List(l.id));
+    }
+    let groups = |list: Option<u32>| {
+        show.cues
+            .iter()
+            .filter(|c| list.is_none_or(|l| c.list == l))
+            .find(|c| {
+                c.number.trim() == name.trim() && model::is_timeline(show, TimelineKey::Group(c.id))
+            })
+            .map(|c| TimelineKey::Group(c.id))
+    };
+    if let Some(k) = groups(Some(active_list))
+        .or_else(|| groups(Some(0)))
+        .or_else(|| groups(None))
+    {
+        return Some(k);
+    }
+    let key = if let Some(id) = name.trim().strip_prefix('#') {
+        TimelineKey::Group(CueId(id.parse().ok()?))
+    } else {
+        TimelineKey::List(wanted.strip_prefix("list:")?.parse().ok()?)
+    };
+    model::is_timeline(show, key).then_some(key)
+}
+
+/// How a remote names a timeline in what it is told (OSC feedback, the web
+/// remote): a list by its name, a group by its cue number.
+pub fn timeline_name(show: &Show, key: TimelineKey) -> String {
+    match key {
+        TimelineKey::List(n) => show.list_name(n),
+        TimelineKey::Group(id) => show.cue(id).map_or_else(String::new, |c| c.number.clone()),
+    }
+}
+
+/// The time on the timeline a remote's place stands for: seconds as given, or
+/// the marker of that name (case and spaces as in `find_timeline`).
+pub fn place_time(show: &Show, key: TimelineKey, place: &Place) -> Option<f64> {
+    match place {
+        Place::Time(t) => t.is_finite().then_some(t.max(0.0)),
+        Place::Marker(name) => {
+            let wanted = squash(name);
+            model::settings(show, key)?
+                .markers
+                .iter()
+                .find(|m| squash(&m.name) == wanted)
+                .map(|m| m.time)
+        }
+    }
+}
+
+/// The time a remote's seek goes to: a seek to exactly 0 parks with nothing up
+/// (`timeline_seek`), so the first frame is asked for, as the editor's ruler does.
+const FIRST_FRAME: f64 = 0.001;
+
+/// Do what a remote asks of the timeline it names; the log says when there is
+/// no such timeline or place, or nothing to do.
+pub fn run_timeline(show: &Show, engine: &mut Engine, timeline: &str, does: &TimelineDo) {
+    let Some(key) = find_timeline(show, engine.active_list, timeline) else {
+        engine.log(format!("Remote: there is no timeline “{timeline}”"));
+        return;
+    };
+    let place = |p: &Place, engine: &mut Engine| {
+        let t = place_time(show, key, p);
+        if t.is_none()
+            && let Place::Marker(m) = p
+        {
+            engine.log(format!(
+                "Remote: the timeline “{}” has no marker “{m}”",
+                model::name(show, key)
+            ));
+        }
+        t
+    };
+    // As GO does, running or going on lets go of the show's pause.
+    let unpause = |engine: &mut Engine| {
+        if engine.paused {
+            engine.set_paused(false);
+        }
+    };
+    match does {
+        TimelineDo::Run(None) => {
+            unpause(engine);
+            engine.timeline_run(show, key);
+        }
+        TimelineDo::Run(Some(p)) => {
+            if let Some(t) = place(p, engine) {
+                engine.timeline_run_from(show, key, t);
+            }
+        }
+        TimelineDo::Go => engine.timeline_go_one(show, key),
+        // As the transport's Pause: everything holds, live inputs stay live.
+        TimelineDo::Pause => {
+            engine.timeline_pause(show, key, PauseFreeze::Everything, &[], false, false)
+        }
+        TimelineDo::Resume => engine.timeline_continue(show, key),
+        TimelineDo::Stop(fade) => {
+            engine.timeline_stop(show, key, fade.unwrap_or(TIMELINE_STOP_FADE))
+        }
+        TimelineDo::Jump(p) => {
+            if let Some(t) = place(p, engine) {
+                engine.timeline_seek(show, key, t.max(FIRST_FRAME), true);
+            }
+        }
+        TimelineDo::LeaveLoop => engine.timeline_leave(show, key),
     }
 }
 
@@ -556,9 +821,124 @@ pub fn midi_inputs() -> Vec<String> {
         .collect()
 }
 
+/// A show with timelines for the remote's tests (here, in `feedback` and in
+/// `web`): texts only, so no media is needed.
+#[cfg(test)]
+pub mod fixtures {
+    use crate::engine::{Engine, RunState};
+    use crate::show::*;
+    use crate::timeline::Marker;
+    use std::time::{Duration, Instant};
+
+    pub fn text(show: &mut Show, end: f64) -> Cue {
+        let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+        if let CueKind::Text(t) = &mut c.kind {
+            t.text = "Hello".into();
+            t.media.transition = Transition::Cut;
+            t.media.fade_in = 0.0;
+            t.media.fade_out = 0.0;
+            t.media.end = Some(end);
+        }
+        c
+    }
+
+    pub fn control(show: &mut Show, c: ControlCue) -> Cue {
+        let mut cue = show.make_cue(CueType::Control, None, show.cues.len());
+        cue.kind = CueKind::Control(c);
+        cue
+    }
+
+    /// A timeline list "Act 1" (a text from 0 to 6 s, a pause at 3 s that lets
+    /// it run on, a text at 4 s; a marker "Middle" at 2 s) and, in the main
+    /// list, a timeline group numbered "5" (a text from 0 to 4 s, a pause at 1 s
+    /// that holds everything). Returns the show, the list and the group.
+    pub fn show() -> (Show, u32, CueId) {
+        let mut show = Show::default();
+        let mut g = show.make_cue(CueType::Group, None, 0);
+        g.number = "5".into();
+        g.name = "Opening".into();
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        let gid = g.id;
+        show.cues.push(g);
+        let mut c = text(&mut show, 4.0);
+        c.parent = Some(gid);
+        show.cues.push(c);
+        let mut p = control(
+            &mut show,
+            ControlCue {
+                action: ControlAction::TimelinePause,
+                freeze: PauseFreeze::Everything,
+                ..Default::default()
+            },
+        );
+        p.parent = Some(gid);
+        p.pre_wait = 1.0;
+        show.cues.push(p);
+        let l = show.add_list("Act 1");
+        show.lists.last_mut().unwrap().timeline = Some(TimelineSettings {
+            markers: vec![Marker {
+                id: 1,
+                time: 2.0,
+                name: "Middle".into(),
+                color: None,
+            }],
+            ..TimelineSettings::default()
+        });
+        let mut bed = text(&mut show, 6.0);
+        bed.list = l;
+        show.cues.push(bed);
+        let mut p = control(
+            &mut show,
+            ControlCue {
+                action: ControlAction::TimelinePause,
+                ..Default::default()
+            },
+        );
+        p.list = l;
+        p.pre_wait = 3.0;
+        show.cues.push(p);
+        let mut after = text(&mut show, 1.0);
+        after.list = l;
+        after.pre_wait = 4.0;
+        show.cues.push(after);
+        show.normalize_lists();
+        (show, l, gid)
+    }
+
+    pub fn engine(show: &Show) -> Engine {
+        let mut e = Engine::for_tests();
+        e.output_sizes.insert(show.outputs[0].id, (64, 36));
+        e
+    }
+
+    /// Tick (by `dt`, or by nothing while a text is still being drawn or the
+    /// run cues) while `cond` holds; at most ten seconds.
+    pub fn run_while(
+        e: &mut Engine,
+        show: &Show,
+        k: TimelineKey,
+        dt: f64,
+        mut cond: impl FnMut(&mut Engine) -> bool,
+    ) {
+        let t0 = Instant::now();
+        while cond(e) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "timed out");
+            let busy = e.active.iter().any(|a| !a.started)
+                || e.timeline(show, k).state == RunState::Cueing;
+            if busy {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            e.tick(show, if busy { 0.0 } else { dt });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::RunState;
 
     /// An OSC message with the given address and no arguments.
     fn osc(address: &str) -> Vec<u8> {
@@ -943,5 +1323,267 @@ mod tests {
             vec![Command::GoCue("2".into())]
         );
         assert!(midi_commands(&to_five, None, Some(9), false, &mut q).is_empty());
+    }
+
+    fn tl(name: &str, does: TimelineDo) -> Vec<Command> {
+        vec![Command::Timeline {
+            timeline: name.into(),
+            does,
+        }]
+    }
+
+    #[test]
+    fn timeline_addresses_map_to_commands() {
+        use TimelineDo::*;
+        let marker = |m: &str| Place::Marker(m.into());
+        let cases = [
+            ("/timeline/Act_1/run", tl("Act_1", Run(None))),
+            ("/timeline/5/start", tl("5", Run(None))),
+            ("/timeline/5/go", tl("5", Go)),
+            ("/timeline/5/pause", tl("5", Pause)),
+            ("/timeline/5/resume", tl("5", Resume)),
+            ("/timeline/5/continue", tl("5", Resume)),
+            ("/timeline/5/stop", tl("5", Stop(None))),
+            ("/timeline/5/hardStop", tl("5", Stop(Some(0.0)))),
+            ("/timeline/5/panic", tl("5", Stop(Some(0.0)))),
+            ("/timeline/5/leaveLoop", tl("5", LeaveLoop)),
+            ("/timeline/5/devamp", tl("5", LeaveLoop)),
+            // The place as one more part of the address.
+            (
+                "/timeline/5/jump/Interval",
+                tl("5", Jump(marker("Interval"))),
+            ),
+            (
+                "/timeline/5/marker/Interval",
+                tl("5", Jump(marker("Interval"))),
+            ),
+            ("/timeline/5/seek/1:02.5", tl("5", Jump(Place::Time(62.5)))),
+            ("/timeline/5/run/12", tl("5", Run(Some(Place::Time(12.0))))),
+            // The workspace in front, the name as written, the verb in any case.
+            ("/workspace/W/timeline/Act 1/PAUSE", tl("Act 1", Pause)),
+        ];
+        for (addr, want) in cases {
+            assert_eq!(parse_osc(&osc(addr)), want, "{addr}");
+        }
+        // The place or the fade as the argument.
+        let f = |v: f32| v.to_be_bytes();
+        assert_eq!(
+            parse_osc(&osc_with("/timeline/5/jump", "f", &f(12.5))),
+            tl("5", Jump(Place::Time(12.5)))
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/timeline/5/jump", "i", &7i32.to_be_bytes())),
+            tl("5", Jump(Place::Time(7.0)))
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/timeline/5/jump", "s", b"Interval\0\0\0\0")),
+            tl("5", Jump(marker("Interval")))
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/timeline/5/start", "s", b"2:00\0\0\0\0")),
+            tl("5", Run(Some(Place::Time(120.0))))
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/timeline/5/stop", "f", &f(1.5))),
+            tl("5", Stop(Some(1.5)))
+        );
+        assert_eq!(
+            parse_osc(&osc_with("/timeline/5/stop", "f", &f(-2.0))),
+            tl("5", Stop(Some(0.0))),
+            "no fade less than none"
+        );
+        // A jump needs a place; nonsense is ignored.
+        for addr in [
+            "/timeline/5/jump",
+            "/timeline/5/dance",
+            "/timeline//run",
+            "/timeline/5",
+            "/timeline/5/jump/a/b",
+        ] {
+            assert!(parse_osc(&osc(addr)).is_empty(), "{addr}");
+        }
+        assert!(parse_osc(&osc_with("/timeline/5/jump", "f", &f(f32::NAN))).is_empty());
+    }
+
+    #[test]
+    fn places_are_seconds_clock_times_or_marker_names() {
+        assert_eq!(Place::parse("12.5"), Some(Place::Time(12.5)));
+        assert_eq!(Place::parse(" 1:02.5 "), Some(Place::Time(62.5)));
+        assert_eq!(Place::parse("1:00:00"), Some(Place::Time(3600.0)));
+        assert_eq!(Place::parse("0"), Some(Place::Time(0.0)));
+        for name in [
+            "Interval", "inf", "1e3", "1:2:3:4", ":5", "1.2.3", "-3", ".",
+        ] {
+            assert_eq!(
+                Place::parse(name),
+                Some(Place::Marker(name.into())),
+                "{name}"
+            );
+        }
+        assert_eq!(Place::parse("  "), None);
+    }
+
+    #[test]
+    fn a_remote_finds_a_timeline_by_list_name_or_group_number() {
+        let (mut show, l, g) = fixtures::show();
+        let list = TimelineKey::List(l);
+        let group = TimelineKey::Group(g);
+        for name in ["Act 1", "act_1", "ACT 1", " Act_1 ", &format!("list:{l}")] {
+            assert_eq!(find_timeline(&show, 0, name), Some(list), "{name}");
+        }
+        assert_eq!(find_timeline(&show, 0, "5"), Some(group));
+        assert_eq!(find_timeline(&show, l, "5"), Some(group), "from any list");
+        assert_eq!(find_timeline(&show, 0, &format!("#{}", g.0)), Some(group));
+        for none in ["", "Act 2", "list:0", "list:99", "#1", "99", "#x"] {
+            assert_eq!(find_timeline(&show, 0, none), None, "{none:?}");
+        }
+        // A list that is not a timeline is none, and the number of a cue that
+        // is not a timeline group neither.
+        let plain = show.add_list("Notes");
+        assert_eq!(find_timeline(&show, 0, "Notes"), None);
+        assert_eq!(find_timeline(&show, 0, &format!("list:{plain}")), None);
+        let first_text = show.children(g)[0].number.clone();
+        assert_eq!(find_timeline(&show, 0, &first_text), None);
+        // How it is named back: a list by its name, a group by its number.
+        assert_eq!(timeline_name(&show, list), "Act 1");
+        assert_eq!(timeline_name(&show, group), "5");
+        // Places: seconds as given (never before 0), markers by name.
+        assert_eq!(place_time(&show, list, &Place::Time(-3.0)), Some(0.0));
+        assert_eq!(
+            place_time(&show, list, &Place::Marker("middle".into())),
+            Some(2.0)
+        );
+        assert_eq!(place_time(&show, list, &Place::Marker("End".into())), None);
+        assert_eq!(
+            place_time(&show, group, &Place::Marker("Middle".into())),
+            None
+        );
+    }
+
+    fn said(e: &Engine, what: &str) -> bool {
+        e.messages.iter().any(|(_, m)| m.contains(what))
+    }
+
+    #[test]
+    fn a_remote_runs_pauses_continues_jumps_and_stops_a_timeline_list() {
+        let (show, l, _) = fixtures::show();
+        let k = TimelineKey::List(l);
+        let mut e = fixtures::engine(&show);
+        let state = |e: &mut Engine| e.timeline(&show, k).state;
+        // Run, while the main list is the one worked.
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Run(None));
+        assert_eq!(state(&mut e), RunState::Running);
+        fixtures::run_while(&mut e, &show, k, 0.05, |e| e.timeline(&show, k).pos < 0.5);
+        // GO aimed at it while it runs does nothing, and says so.
+        let before = e.timeline(&show, k).pos;
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Go);
+        assert_eq!(state(&mut e), RunState::Running);
+        assert_eq!(e.timeline(&show, k).pos, before);
+        assert!(said(&e, "GO does nothing until it pauses"));
+        // Pause holds it; resume (or GO) goes on.
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Pause);
+        assert!(matches!(state(&mut e), RunState::Paused { .. }));
+        e.tick(&show, 0.5);
+        assert_eq!(e.timeline(&show, k).pos, before, "the clock stands");
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Resume);
+        assert_eq!(state(&mut e), RunState::Running);
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Resume);
+        assert!(said(&e, "not paused"));
+        // A jump to a marker, by name, plays on from there.
+        run_timeline(
+            &show,
+            &mut e,
+            "act 1",
+            &TimelineDo::Jump(Place::Marker("MIDDLE".into())),
+        );
+        fixtures::run_while(&mut e, &show, k, 0.0, |e| {
+            e.timeline(&show, k).state == RunState::Cueing
+        });
+        let pos = e.timeline(&show, k).pos;
+        assert!((pos - 2.0).abs() < 0.01, "{pos}");
+        assert_eq!(state(&mut e), RunState::Running);
+        run_timeline(
+            &show,
+            &mut e,
+            "Act_1",
+            &TimelineDo::Jump(Place::Marker("Nowhere".into())),
+        );
+        assert!(said(&e, "has no marker “Nowhere”"));
+        // To its pause at 3 s, where GO aimed at it continues it.
+        fixtures::run_while(&mut e, &show, k, 0.05, |e| {
+            !matches!(e.timeline(&show, k).state, RunState::Paused { .. })
+        });
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Go);
+        assert_eq!(state(&mut e), RunState::Running);
+        // Stop fades (3 s, as the Stop cue), a second Stop cuts.
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Stop(None));
+        let v = e.timeline(&show, k);
+        assert!(v.state == RunState::Stopped && v.fading, "{v:?}");
+        e.tick(&show, crate::show::TIMELINE_STOP_FADE - 0.5);
+        assert!(e.timeline(&show, k).fading, "still fading");
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Stop(None));
+        assert!(!e.is_active(), "cut");
+        // Run from a place; a hard stop cuts at once.
+        run_timeline(
+            &show,
+            &mut e,
+            "Act_1",
+            &TimelineDo::Run(Some(Place::Time(1.0))),
+        );
+        fixtures::run_while(&mut e, &show, k, 0.0, |e| {
+            e.timeline(&show, k).state == RunState::Cueing
+        });
+        assert_eq!(state(&mut e), RunState::Running);
+        assert!((e.timeline(&show, k).pos - 1.0).abs() < 0.01);
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Stop(Some(0.0)));
+        assert!(!e.is_active());
+        // No loop to leave; no such timeline.
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::LeaveLoop);
+        assert!(said(&e, "not playing a loop"));
+        run_timeline(&show, &mut e, "Act 9", &TimelineDo::Run(None));
+        assert!(said(&e, "there is no timeline “Act 9”"));
+        // A jump of a stopped timeline parks it there.
+        run_timeline(&show, &mut e, "Act_1", &TimelineDo::Jump(Place::Time(0.0)));
+        e.tick(&show, 0.0);
+        let v = e.timeline(&show, k);
+        assert!(v.parked && v.pos > 0.0 && v.pos < 0.01, "{v:?}");
+    }
+
+    #[test]
+    fn a_remote_goes_on_with_a_timeline_group_and_leaves_a_loop() {
+        use crate::show::{ControlAction, ControlCue, TimelinePoint};
+        let (mut show, l, g) = fixtures::show();
+        let gk = TimelineKey::Group(g);
+        let mut e = fixtures::engine(&show);
+        // GO aimed at the group fires it; it stops at its pause.
+        run_timeline(&show, &mut e, "5", &TimelineDo::Go);
+        fixtures::run_while(&mut e, &show, gk, 0.05, |e| {
+            !matches!(e.timeline(&show, gk).state, RunState::Paused { .. })
+        });
+        run_timeline(&show, &mut e, "5", &TimelineDo::Go);
+        assert_eq!(e.timeline(&show, gk).state, RunState::Running);
+        run_timeline(&show, &mut e, "5", &TimelineDo::Stop(Some(0.0)));
+        // A loop on the list: leaving it lets this pass be the last.
+        let lp = fixtures::control(
+            &mut show,
+            ControlCue {
+                action: ControlAction::TimelinePause,
+                loop_from: Some(TimelinePoint::Time(0.5)),
+                ..Default::default()
+            },
+        );
+        let lp_id = lp.id;
+        show.cues.push(lp);
+        let c = show.cue_mut(lp_id).unwrap();
+        c.list = l;
+        c.pre_wait = 1.5;
+        show.normalize_lists();
+        let k = TimelineKey::List(l);
+        run_timeline(&show, &mut e, "Act 1", &TimelineDo::Run(None));
+        fixtures::run_while(&mut e, &show, k, 0.05, |e| {
+            e.timeline(&show, k).looping.is_none()
+        });
+        run_timeline(&show, &mut e, "Act 1", &TimelineDo::LeaveLoop);
+        assert!(e.timeline(&show, k).looping.is_some_and(|l| l.last_pass));
     }
 }

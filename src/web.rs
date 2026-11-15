@@ -181,6 +181,9 @@ pub fn command_for(path: &str) -> Option<Command> {
         "previous" => return Some(Command::PlayheadPrevious),
         _ => {}
     }
+    if let Some(rest) = rest.strip_prefix("timeline/") {
+        return timeline_command_for(rest);
+    }
     let rest = rest.strip_prefix("cue/")?;
     let (number, verb) = rest.rsplit_once('/')?;
     let number = percent_decode(number);
@@ -194,6 +197,29 @@ pub fn command_for(path: &str) -> Option<Command> {
         "stop" => Command::Stop(number),
         "fade" => Command::FadeOut(number),
         _ => return None,
+    })
+}
+
+/// `/api/timeline/<timeline>/<verb>[/<place>]`, the part after `timeline/`:
+/// the timeline as a remote names it (the page sends the `ref` its state
+/// gives), and OSC's words (`remote::timeline_command`): run, go, pause,
+/// resume, stop, hardstop, jump (to seconds or a marker's name), leave_loop.
+fn timeline_command_for(rest: &str) -> Option<Command> {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (name, verb, place) = match parts.as_slice() {
+        [name, verb] => (*name, *verb, None),
+        [name, verb, place] => (*name, *verb, Some(percent_decode(place))),
+        _ => return None,
+    };
+    let name = percent_decode(name);
+    if name.trim().is_empty() {
+        return None;
+    }
+    let arg = place.map(crate::remote::OscValue::Text);
+    let does = crate::remote::timeline_command(&verb.to_ascii_lowercase(), arg.as_ref())?;
+    Some(Command::Timeline {
+        timeline: name,
+        does,
     })
 }
 
@@ -296,8 +322,68 @@ pub fn respond(req: &Request, pin: &str, state: &str) -> (Reply, Option<Command>
     }
 }
 
+/// The timelines for the page: every timeline list and every timeline doing
+/// something (as OSC feedback tells them), the one being worked first, each
+/// with its state, clock, length, next pause and markers, and the `ref` the
+/// page sends back in `/api/timeline/<ref>/…`.
+fn timelines_json(show: &Show, engine: &mut Engine) -> String {
+    use crate::feedback::{state_text, state_word, timelines_to_tell};
+    use crate::show::TimelineKey;
+    use crate::timeline::model;
+    use std::fmt::Write as _;
+    let mut keys = timelines_to_tell(show, engine);
+    let worked = TimelineKey::List(engine.active_list);
+    keys.sort_by_key(|k| *k != worked);
+    let opt = |v: Option<f64>| v.map_or("null".to_string(), json_number);
+    let mut out = String::from("[");
+    for (i, key) in keys.into_iter().enumerate() {
+        let v = engine.timeline(show, key);
+        let (reference, list) = match key {
+            TimelineKey::List(n) => (format!("list:{n}"), true),
+            TimelineKey::Group(id) => (format!("#{}", id.0), false),
+        };
+        let mut markers = String::from("[");
+        for (j, m) in model::settings(show, key)
+            .map_or(&[][..], |s| &s.markers[..])
+            .iter()
+            .enumerate()
+        {
+            if j > 0 {
+                markers.push(',');
+            }
+            let _ = write!(
+                markers,
+                r#"{{"name":{},"time":{}}}"#,
+                json_string(&m.name),
+                json_number(m.time)
+            );
+        }
+        markers.push(']');
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"ref":{},"name":{},"list":{list},"worked":{},"state":"{}","text":{},"pos":{},"length":{},"next_pause":{},"looping":{},"markers":{markers}}}"#,
+            json_string(&reference),
+            json_string(&model::name(show, key)),
+            key == worked,
+            state_word(&v),
+            json_string(state_text(&v)),
+            json_number(v.pos),
+            opt(v.length),
+            opt(v.next_pause),
+            v.looping.is_some_and(|l| !l.last_pass),
+        );
+    }
+    out.push(']');
+    out
+}
+
 /// The show's state for the page: the playhead, and a line for every cue.
-pub fn snapshot_json(show: &Show, engine: &Engine) -> String {
+pub fn snapshot_json(show: &Show, engine: &mut Engine) -> String {
+    let timelines = timelines_json(show, engine);
+    let engine = &*engine;
     let next = engine
         .playhead
         .and_then(|id| show.cue_index(id))
@@ -364,7 +450,7 @@ pub fn snapshot_json(show: &Show, engine: &Engine) -> String {
             None => json_string(&what),
         });
     format!(
-        r#"{{"show":{},"paused":{},"next":{next},"go":{go},"timecode":{timecode},"cues":{cues}}}"#,
+        r#"{{"show":{},"paused":{},"next":{next},"go":{go},"timecode":{timecode},"timelines":{timelines},"cues":{cues}}}"#,
         json_string(&show.name),
         engine.paused,
     )
@@ -763,7 +849,8 @@ mod tests {
         engine.playhead = Some(gid);
         engine.go(&show);
         engine.tick(&show, 1.5);
-        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&snapshot_json(&show, &mut engine)).unwrap();
         let name = format!("{} · {}", show.cues[0].number, show.cues[0].name);
         assert_eq!(v["go"], format!("Continue {name}"));
         // The list's next cue is still there, for after it.
@@ -792,7 +879,8 @@ mod tests {
         engine.playhead = Some(ids[1]);
         engine.fire(&show, ids[0]);
         engine.tick(&show, 1.0);
-        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&snapshot_json(&show, &mut engine)).unwrap();
         assert_eq!(v["show"], "Hamlet");
         assert_eq!(v["paused"], false);
         assert_eq!(v["timecode"], serde_json::Value::Null);
@@ -812,7 +900,8 @@ mod tests {
         // Paused, and at the end of the list.
         engine.paused = true;
         engine.playhead = None;
-        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&snapshot_json(&show, &mut engine)).unwrap();
         assert_eq!(v["paused"], true);
         assert_eq!(v["next"], serde_json::Value::Null);
     }
@@ -1147,7 +1236,8 @@ mod tests {
         );
         let mut engine = Engine::for_tests();
         engine.active_list = second;
-        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&snapshot_json(&show, &mut engine)).unwrap();
         // The page shows the second list, and its button must name that cue.
         assert_eq!(v["cues"].as_array().map(Vec::len), Some(1));
         assert_eq!(v["cues"][0]["id"], b_id.0);
@@ -1165,8 +1255,9 @@ mod tests {
             c.name = format!("quote \" tab \t slash \\ <{i}> ü");
             show.cues.push(c);
         }
-        let engine = Engine::for_tests();
-        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let mut engine = Engine::for_tests();
+        let v: serde_json::Value =
+            serde_json::from_str(&snapshot_json(&show, &mut engine)).unwrap();
         assert_eq!(v["show"], show.name.as_str());
         for (i, c) in show.cues.iter().enumerate() {
             assert_eq!(v["cues"][i]["name"], c.name.as_str());
@@ -1174,7 +1265,174 @@ mod tests {
         }
         // No cues is still a list.
         show.cues.clear();
-        let v: serde_json::Value = serde_json::from_str(&snapshot_json(&show, &engine)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&snapshot_json(&show, &mut engine)).unwrap();
         assert_eq!(v["cues"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn timeline_paths_map_to_commands() {
+        use crate::remote::{Place, TimelineDo::*};
+        let tl = |name: &str, does| {
+            Some(Command::Timeline {
+                timeline: name.into(),
+                does,
+            })
+        };
+        let c = command_for;
+        assert_eq!(c("/api/timeline/list:2/run"), tl("list:2", Run(None)));
+        assert_eq!(c("/api/timeline/Act%201/go"), tl("Act 1", Go));
+        assert_eq!(c("/api/timeline/%2342/pause"), tl("#42", Pause));
+        assert_eq!(c("/api/timeline/5/resume"), tl("5", Resume));
+        assert_eq!(c("/api/timeline/5/stop"), tl("5", Stop(None)));
+        assert_eq!(c("/api/timeline/5/stop/1.5"), tl("5", Stop(Some(1.5))));
+        assert_eq!(c("/api/timeline/5/hardstop"), tl("5", Stop(Some(0.0))));
+        assert_eq!(c("/api/timeline/5/leave_loop"), tl("5", LeaveLoop));
+        assert_eq!(
+            c("/api/timeline/5/jump/12.000"),
+            tl("5", Jump(Place::Time(12.0)))
+        );
+        assert_eq!(
+            c("/api/timeline/5/jump/Act%20two"),
+            tl("5", Jump(Place::Marker("Act two".into())))
+        );
+        assert_eq!(
+            c("/api/timeline/a%2Fb/run/0:30"),
+            tl("a/b", Run(Some(Place::Time(30.0))))
+        );
+        for none in [
+            "/api/timeline/5",
+            "/api/timeline/5/jump",
+            "/api/timeline//run",
+            "/api/timeline/5/dance",
+            "/api/timeline/5/jump/1/2",
+            "/api/timeline/",
+        ] {
+            assert_eq!(c(none), None, "{none}");
+        }
+        // A GET of one does nothing, as for every command.
+        let (r, cmd) = respond(&req("GET", "/api/timeline/5/run", &[]), "", "{}");
+        assert_eq!((r.status, cmd), (405, None));
+        let (r, cmd) = respond(
+            &req("POST", "/api/timeline/5/pause", &[("x-newq", "1")]),
+            "",
+            "{}",
+        );
+        assert_eq!((r.status, cmd), (200, tl("5", Pause)));
+    }
+
+    #[test]
+    fn the_state_has_a_transport_for_each_timeline_and_says_what_go_does() {
+        use crate::engine::RunState;
+        use crate::remote::{TimelineDo, fixtures, run_timeline};
+        use crate::show::TimelineKey;
+        let (show, l, g) = fixtures::show();
+        let k = TimelineKey::List(l);
+        let mut e = fixtures::engine(&show);
+        let state = |e: &mut Engine| -> serde_json::Value {
+            serde_json::from_str(&snapshot_json(&show, e)).unwrap()
+        };
+        // Worked from the main list: the list is there, the group (stopped) isn't.
+        let v = state(&mut e);
+        let tls = v["timelines"].as_array().unwrap();
+        assert_eq!(tls.len(), 1, "{v}");
+        assert_eq!(tls[0]["ref"], format!("list:{l}"));
+        assert_eq!(tls[0]["name"], "Act 1");
+        assert_eq!(tls[0]["list"], true);
+        assert_eq!(tls[0]["worked"], false);
+        assert_eq!(tls[0]["state"], "stopped");
+        assert_eq!(tls[0]["pos"], 0.0);
+        assert_eq!(tls[0]["length"], 6.0);
+        assert_eq!(tls[0]["next_pause"], 3.0);
+        assert_eq!(tls[0]["markers"][0]["name"], "Middle");
+        assert_eq!(tls[0]["markers"][0]["time"], 2.0);
+        // Worked, and running: GO does nothing, and the page says so.
+        e.switch_list(&show, l);
+        e.go(&show);
+        fixtures::run_while(&mut e, &show, k, 0.05, |e| e.timeline(&show, k).pos < 0.5);
+        let v = state(&mut e);
+        let t = &v["timelines"][0];
+        assert_eq!(
+            (t["worked"].clone(), t["state"].clone()),
+            (true.into(), "running".into())
+        );
+        assert_eq!(t["text"], "Running");
+        let go = v["go"].as_str().unwrap();
+        assert!(
+            go.contains("Act 1 is running") && go.contains("GO does nothing until it pauses"),
+            "{go}"
+        );
+        // A timeline group doing something is listed after the list being worked.
+        e.fire(&show, g);
+        e.tick(&show, 0.0);
+        let v = state(&mut e);
+        assert_eq!(v["timelines"].as_array().unwrap().len(), 2);
+        assert_eq!(v["timelines"][1]["ref"], format!("#{}", g.0));
+        assert_eq!(v["timelines"][1]["name"], "5 · Opening");
+        assert_eq!(v["timelines"][1]["list"], false);
+        e.timeline_stop(&show, TimelineKey::Group(g), 0.0);
+        // Paused at its pause cue: GO continues it.
+        fixtures::run_while(&mut e, &show, k, 0.05, |e| {
+            !matches!(e.timeline(&show, k).state, RunState::Paused { .. })
+        });
+        let v = state(&mut e);
+        assert_eq!(v["timelines"][0]["state"], "paused");
+        assert_eq!(v["timelines"][0]["text"], "Paused · GO continues");
+        assert!(v["go"].as_str().unwrap().starts_with("Continue Act 1"));
+        // Stopping: fading out, and GO would run it again.
+        run_timeline(&show, &mut e, "Act 1", &TimelineDo::Stop(None));
+        let v = state(&mut e);
+        assert_eq!(v["timelines"][0]["state"], "stopping");
+        assert_eq!(v["timelines"][0]["text"], "Stopping · fading out");
+        assert!(v["go"].as_str().unwrap().starts_with("Run Act 1"));
+        // At its end.
+        run_timeline(&show, &mut e, "Act 1", &TimelineDo::Stop(Some(0.0)));
+        run_timeline(
+            &show,
+            &mut e,
+            "Act 1",
+            &TimelineDo::Run(Some(crate::remote::Place::Time(4.5))),
+        );
+        fixtures::run_while(&mut e, &show, k, 0.05, |e| {
+            e.timeline(&show, k).state != RunState::Stopped
+        });
+        let v = state(&mut e);
+        assert_eq!(v["timelines"][0]["state"], "at_end", "{v}");
+        let go = v["go"].as_str().unwrap();
+        assert!(
+            go.contains("is at its end") && go.contains("does nothing"),
+            "{go}"
+        );
+        // The page has the transport.
+        for needle in ["/api/timeline/", "leave_loop", "renderTimelines", "jump/"] {
+            assert!(PAGE.contains(needle), "page lacks {needle}");
+        }
+    }
+
+    #[test]
+    fn a_timeline_command_arrives_over_a_real_socket() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let server = WebServer::start(
+            0,
+            String::new(),
+            Arc::new(Mutex::new("{}".into())),
+            tx,
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        let r = ask(
+            server.port,
+            "POST /api/timeline/Act%201/jump/Middle HTTP/1.1\r\nX-NewQ: 1\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert!(r.starts_with("HTTP/1.1 200 OK"), "{r}");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(Command::Timeline {
+                timeline: "Act 1".into(),
+                does: crate::remote::TimelineDo::Jump(crate::remote::Place::Marker(
+                    "Middle".into()
+                )),
+            })
+        );
     }
 }

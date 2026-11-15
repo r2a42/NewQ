@@ -10088,6 +10088,9 @@ pub fn run_remote(cmd: Command, show: &mut Show, engine: &mut Engine, st: &mut U
         }
         Command::Timecode(tc, rate) => engine.on_timecode(show, tc, rate),
         Command::TimecodeLocate(tc, rate) => engine.timecode.locate(tc, rate),
+        Command::Timeline { timeline, does } => {
+            crate::remote::run_timeline(show, engine, &timeline, &does)
+        }
         Command::Note(note) => {
             // A note bound to a cue fires it; otherwise it names a cue number.
             let id = show
@@ -12643,7 +12646,7 @@ mod tests {
         apply(Action::AddCue(CueType::Wait), &mut show, &mut e, &mut st);
         apply(Action::SelectList(0), &mut show, &mut e, &mut st);
         // The page lists the cues of the list being worked.
-        let main = crate::web::snapshot_json(&show, &e);
+        let main = crate::web::snapshot_json(&show, &mut e);
         let v: serde_json::Value = serde_json::from_str(&main).unwrap();
         assert_eq!(
             v["cues"].as_array().unwrap().len(),
@@ -12658,6 +12661,43 @@ mod tests {
         assert_ne!(e.active_list, 0);
         run_remote(Command::SelectList(1), &mut show, &mut e, &mut st);
         assert_eq!(e.active_list, 0);
+    }
+
+    #[test]
+    fn a_remote_timeline_command_and_show_control_act_on_the_timeline_they_name() {
+        use crate::engine::RunState;
+        use crate::remote::{TimelineDo, fixtures, parse_midi};
+        let (mut show, l, g) = fixtures::show();
+        let mut e = fixtures::engine(&show);
+        let mut st = UiState::default();
+        let k = TimelineKey::List(l);
+        let tl = |does| Command::Timeline {
+            timeline: "Act_1".into(),
+            does,
+        };
+        run_remote(tl(TimelineDo::Run(None)), &mut show, &mut e, &mut st);
+        assert_eq!(e.timeline(&show, k).state, RunState::Running);
+        run_remote(tl(TimelineDo::Pause), &mut show, &mut e, &mut st);
+        assert!(matches!(
+            e.timeline(&show, k).state,
+            RunState::Paused { .. }
+        ));
+        run_remote(tl(TimelineDo::Stop(Some(0.0))), &mut show, &mut e, &mut st);
+        assert_eq!(e.timeline(&show, k).state, RunState::Stopped);
+        // MIDI Show Control: GO with the group's number fires it; at its pause
+        // RESUME with its number goes on (as /cue/5/resume does).
+        let gk = TimelineKey::Group(g);
+        let msc = |command: u8| vec![0xF0, 0x7F, 0x7F, 0x02, 0x01, command, b'5', 0xF7];
+        for c in parse_midi(&msc(0x01), None) {
+            run_remote(c, &mut show, &mut e, &mut st);
+        }
+        fixtures::run_while(&mut e, &show, gk, 0.05, |e| {
+            !matches!(e.timeline(&show, gk).state, RunState::Paused { .. })
+        });
+        for c in parse_midi(&msc(0x03), None) {
+            run_remote(c, &mut show, &mut e, &mut st);
+        }
+        assert_eq!(e.timeline(&show, gk).state, RunState::Running);
     }
 
     #[test]
