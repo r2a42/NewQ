@@ -524,6 +524,62 @@ fn a_picture_goes_on_a_free_track_and_over_the_others_when_all_are_taken() {
             layer: 0
         }
     );
+    // A still held STILL_LEN from 1 s would run into a clip at 3 s: a layer
+    // above, though the track is free at 1 s itself.
+    let later = edit::add_clip(
+        &mut show,
+        key,
+        CueType::Image,
+        None,
+        TrackId::Picture {
+            output: Some(out),
+            layer: 0,
+        },
+        8.0,
+    )
+    .unwrap();
+    let clips = model::clips(&show, key, none);
+    assert_eq!(
+        fitting_track(&show, key, CueType::Text, 4.0, &clips),
+        TrackId::Picture {
+            output: Some(out),
+            layer: 1
+        },
+        "4 s + {} reaches the clip at 8 s",
+        edit::STILL_LEN
+    );
+    // A video (its length not known yet) only needs the track free where it starts.
+    assert_eq!(
+        fitting_track(&show, key, CueType::Video, 4.0, &clips),
+        TrackId::Picture {
+            output: Some(out),
+            layer: 0
+        }
+    );
+    let i = show.cue_index(later).unwrap();
+    show.cues.remove(i);
+    // A clip also on a second display keeps its layer's track there busy too.
+    let two = show.add_display();
+    let i = show.cue_index(pic).unwrap();
+    show.cues[i].kind.media_mut().unwrap().also_on = vec![two];
+    let clips = model::clips(&show, key, none);
+    assert!(
+        model::tracks(&show, key, &clips).contains(&TrackId::Picture {
+            output: Some(two),
+            layer: 0
+        })
+    );
+    assert_eq!(
+        fitting_track(&show, key, CueType::Text, 1.0, &clips),
+        TrackId::Picture {
+            output: Some(out),
+            layer: 1
+        },
+        "not under the clip's picture on Display 2"
+    );
+    show.cues[i].kind.media_mut().unwrap().also_on.clear();
+    let clips = model::clips(&show, key, none);
+    let clips = model::clips(&show, key, none);
     assert_eq!(
         fitting_track(&show, key, CueType::Audio, 2.0, &clips),
         TrackId::Sound { output: None }

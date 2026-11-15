@@ -172,11 +172,30 @@ pub fn fitting_track(
     let tracks = model::tracks(show, key, clips);
     match natural {
         TrackId::Picture { output, .. } => {
+            // A still, text or shape is held `STILL_LEN`: the track must be
+            // free for all of that, not only at `at` (a file's length isn't
+            // known yet).
+            let span = if matches!(
+                ty,
+                CueType::Image | CueType::Text | CueType::Shape | CueType::Clock | CueType::Timer
+            ) {
+                crate::timeline::edit::STILL_LEN
+            } else {
+                0.0
+            };
+            // The last time a clip may start at and still be in the way.
+            let reach = if span > 0.0 {
+                at + span - 1e-6
+            } else {
+                at + 1e-6
+            };
+            // A clip on several displays takes its layer's track on each.
+            let ghosts = model::ghosts(clips);
             let busy = |t: &TrackId| {
                 clips.iter().any(|c| {
-                    c.track == *t
+                    (c.track == *t || ghosts.contains(&(c.id, *t)))
                         && c.armed
-                        && c.start <= at + 1e-6
+                        && c.start <= reach
                         && c.len.is_none_or(|l| at < c.start + l - 1e-6)
                 })
             };
