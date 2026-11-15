@@ -2758,3 +2758,198 @@ fn a_matrix_crosspoint_fade_waits_at_a_free_run_pause_and_goes_on_after_go() {
         voice(e).is_some_and(|v| v.1 < 1e-4)
     });
 }
+
+// ----- Overlapping clips crossfade (P5, plan 2.9) ---------------------------------
+
+use crate::show::OutputId;
+
+/// A timeline group whose overlapping clips crossfade (or not, `on` false).
+fn overlap_group(show: &mut Show, on: bool) -> CueId {
+    let g = group(show);
+    if let Some(CueKind::Group(gc)) = show.cue_mut(g).map(|c| &mut c.kind) {
+        gc.timeline = Some(TimelineSettings {
+            crossfade_overlaps: on,
+            ..TimelineSettings::default()
+        });
+    }
+    g
+}
+
+/// A text held `end` seconds with a fade-out of its own, curves straight.
+fn faded_text(show: &mut Show, end: f64, fade_out: f64) -> Cue {
+    let mut c = text(show, Some(end));
+    let m = c.kind.media_mut().unwrap();
+    m.fade_out = fade_out;
+    m.curve = Curve::Linear;
+    c
+}
+
+/// Each picture's opacity on `out`, by cue.
+fn levels(e: &Engine, out: OutputId) -> Vec<(CueId, f32)> {
+    e.layers(out)
+        .iter()
+        .map(|l| {
+            let a = e.active.iter().find(|a| a.instance == l.instance).unwrap();
+            (a.cue_id, l.opacity)
+        })
+        .collect()
+}
+
+/// Tick by `dt` to `to` on the run's clock, waiting with 0-ticks (as long as it
+/// takes) whenever a clip of `ids` has been started but has no picture yet.
+fn run_to(e: &mut Engine, show: &Show, k: TimelineKey, dt: f64, to: f64, ids: &[CueId]) {
+    let t0 = Instant::now();
+    while view(e, show, k).pos < to - 1e-9 {
+        assert!(t0.elapsed() < Duration::from_secs(20), "never got to {to}");
+        std::thread::sleep(Duration::from_millis(1));
+        let drawing = ids
+            .iter()
+            .any(|id| active(e, *id).is_some_and(|a| !a.started));
+        let left = to - view(e, show, k).pos;
+        e.tick(show, if drawing { 0.0 } else { dt.min(left) });
+    }
+}
+
+#[test]
+fn overlapping_pictures_crossfade_over_the_overlap_and_the_first_has_no_fade_out_of_its_own() {
+    for on in [true, false] {
+        let mut show = Show::default();
+        let out = show.outputs[0].id;
+        let g = overlap_group(&mut show, on);
+        // 0 to 3 s fading out over 1.5 s of its own; the next from 2 s, a cut.
+        let c = faded_text(&mut show, 3.0, 1.5);
+        let a = child(&mut show, g, c, 0.0);
+        let c = faded_text(&mut show, 3.0, 0.0);
+        let b = child(&mut show, g, c, 2.0);
+        let mut e = Engine::for_tests();
+        e.output_sizes.insert(out, (64, 36));
+        e.fire(&show, g);
+        run_to(&mut e, &show, key(g), 0.05, 1.8, &[a, b]);
+        let first = opacity(&e, a).unwrap();
+        if on {
+            assert_eq!(
+                first, 1.0,
+                "no fade-out of its own before the next comes in"
+            );
+        } else {
+            assert!(first < 0.9, "its own fade-out as before: {first}");
+        }
+        run_to(&mut e, &show, key(g), 0.05, 2.0, &[a, b]);
+        until(&mut e, &show, Some(0.0), "the next drawn", 10, |e| {
+            started(e, b)
+        });
+        e.tick(&show, 0.0);
+        if !on {
+            // A cut: the first goes as the next comes in.
+            assert_eq!(levels(&e, out), vec![(b, 1.0)]);
+            continue;
+        }
+        // Both are up through the overlap, the first going down as the next comes up.
+        let mut seen = Vec::new();
+        for _ in 0..9 {
+            e.tick(&show, 0.1);
+            let l = levels(&e, out);
+            assert_eq!(l.len(), 2, "both up: {l:?}");
+            let of = |id| l.iter().find(|x| x.0 == id).unwrap().1;
+            let (la, lb) = (of(a), of(b));
+            assert!((la + lb - 1.0).abs() < 0.02, "they cross: {l:?}");
+            seen.push(la);
+        }
+        assert!(seen.windows(2).all(|w| w[1] < w[0]), "{seen:?}");
+        assert!((seen[4] - 0.5).abs() < 0.02, "half way at 2.5 s: {seen:?}");
+        e.tick(&show, 0.15);
+        assert_eq!(levels(&e, out), vec![(b, 1.0)], "the first gone at its end");
+    }
+}
+
+#[test]
+fn an_overlap_crossfade_held_by_a_free_run_pause_runs_from_the_go() {
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let g = overlap_group(&mut show, true);
+    let c = faded_text(&mut show, 4.0, 0.5);
+    let a = child(&mut show, g, c, 0.0);
+    // The stage manager's hold: a pause at the next clip's start.
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    child(&mut show, g, p, 2.0);
+    let c = faded_text(&mut show, 3.0, 0.0);
+    let b = child(&mut show, g, c, 2.0);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(out, (64, 36));
+    e.fire(&show, g);
+    run_to(&mut e, &show, key(g), 0.05, 2.0, &[a, b]);
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(2.0));
+    // A while: nothing moves.
+    ticks(&mut e, &show, 0.25, 4);
+    assert_eq!(levels(&e, out), vec![(a, 1.0)]);
+    e.go(&show);
+    until(&mut e, &show, Some(0.0), "the next drawn", 10, |e| {
+        started(e, b)
+    });
+    e.tick(&show, 0.0);
+    // The overlap is 2 s (the first's slot runs to 4 s): half way after 1 s.
+    e.tick(&show, 1.0);
+    let l = levels(&e, out);
+    assert_eq!(l.len(), 2, "{l:?}");
+    assert!(
+        (l[0].1 - 0.5).abs() < 0.02 && (l[1].1 - 0.5).abs() < 0.02,
+        "{l:?}"
+    );
+    e.tick(&show, 1.05);
+    assert_eq!(levels(&e, out), vec![(b, 1.0)]);
+}
+
+#[test]
+fn overlapping_sounds_crossfade_and_a_seek_into_the_overlap_finds_both_part_way() {
+    let Some((mut e, wav)) = with_media("tone_5s.wav") else {
+        return;
+    };
+    e.audio = AudioOut::with_playing_device();
+    let mut show = Show::default();
+    let g = overlap_group(&mut show, true);
+    let c = file(&mut show, CueType::Audio, wav.clone(), 3.0);
+    let a = child(&mut show, g, c, 0.0);
+    let c = file(&mut show, CueType::Audio, wav, 3.0);
+    let b = child(&mut show, g, c, 2.0);
+    for cue in [a, b] {
+        media_of(&mut show, cue).curve = Curve::Linear;
+    }
+    // The chase's view of 2.5 s: both fading, half way across.
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first sound", 10, |e| {
+        started(e, a)
+    });
+    e.timeline_seek(&show, key(g), 2.5, true);
+    until(&mut e, &show, Some(0.0), "both cued", 10, |e| {
+        started(e, a) && started(e, b)
+    });
+    let (va, vb) = (
+        active(&e, a).unwrap().volume.value,
+        active(&e, b).unwrap().volume.value,
+    );
+    let mid = MIN_DB / 2.0;
+    assert!(
+        (va - mid).abs() < 1.0 && (vb - mid).abs() < 1.0,
+        "{va} {vb}"
+    );
+    assert!(active(&e, a).unwrap().volume.ramping() && active(&e, a).unwrap().stopping);
+    // Played through from the top: the same at 2.5 s.
+    e.stop_all(0.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first sound", 10, |e| {
+        started(e, a)
+    });
+    e.tick(&show, 2.0);
+    until(&mut e, &show, Some(0.0), "the second sound", 10, |e| {
+        started(e, b)
+    });
+    e.tick(&show, 0.5);
+    let (va, vb) = (
+        active(&e, a).unwrap().volume.value,
+        active(&e, b).unwrap().volume.value,
+    );
+    assert!(
+        (va - mid).abs() < 1.0 && (vb - mid).abs() < 1.0,
+        "{va} {vb}"
+    );
+}

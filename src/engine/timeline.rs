@@ -45,6 +45,13 @@
 //! has stopped or gone. Content that runs out while such a fade waits stays on
 //! its last frame (or silent) for it.
 //!
+//! Overlapping clips crossfade on a timeline with `crossfade_overlaps` (plan
+//! 2.9): a clip coming in over an earlier one on its track (a picture's layer
+//! on a display they share, a sound's output) crossfades over the overlap
+//! (`chase::overlap`), on the displays they share, and the earlier one has no
+//! fade-out of its own (`ActiveCue::crossed_by`). Like every ramp a run starts,
+//! the crossfade follows the clock.
+//!
 //! A clip at opacity 0 (or a sound at silence) on a timeline with
 //! `start_on_fade_in` waits, unseen, for its fade-in (`model::lead_in`): its
 //! content starts from its in point when its opacity keys rise (at its lead-in,
@@ -401,12 +408,14 @@ fn fade_away(a: &mut ActiveCue, m: &MediaCue, secs: f64, clock: Option<(u64, f64
 /// begins that long before the clock reaches the end, and it ends there; neither
 /// while the clock stands (a pause right at the fade-out's start holds it).
 /// Content that has run ahead of the clock and will run out first, set to end
-/// (`RunOut::End`), fades out to finish as it runs out. Returns whether it is over.
+/// (`RunOut::End`), fades out to finish as it runs out. `own_fade_out`: false for
+/// a clip a later one crossfades over (that takes it out). Returns whether it is over.
 pub(super) fn clock_end(
     a: &mut ActiveCue,
     m: &MediaCue,
     on_clock: Option<f64>,
     clock: Option<(u64, f64)>,
+    own_fade_out: bool,
 ) -> bool {
     let moving = clock.is_some();
     if a.detached
@@ -424,7 +433,7 @@ pub(super) fn clock_end(
     let Some(left) = on_clock.filter(|_| moving) else {
         return false;
     };
-    if !a.auto_faded && m.fade_out > 0.0 && left <= m.fade_out {
+    if own_fade_out && !a.auto_faded && m.fade_out > 0.0 && left <= m.fade_out {
         fade_away(a, m, left, clock);
     }
     // A video holding its last frame for good (no fade-out) keeps it, as it would
@@ -901,6 +910,20 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// The earlier clips of its timeline a clip starting now crossfades over,
+    /// and for how long (`chase::overlap`; only with `crossfade_overlaps`).
+    pub(super) fn timeline_overlap(&mut self, show: &Show, cue: &Cue) -> Option<chase::Overlap> {
+        let key = model::key_of(show, cue.id)?;
+        chase::overlap(show, key, cue, &mut |c| self.cue_duration(show, c))
+    }
+
+    /// The later clip of its timeline that crossfades over a clip starting now
+    /// on all its displays, if one does (`chase::crossed_by`).
+    pub(super) fn timeline_crossed_by(&mut self, show: &Show, cue: &Cue) -> Option<CueId> {
+        let key = model::key_of(show, cue.id)?;
+        chase::crossed_by(show, key, cue, &mut |c| self.cue_duration(show, c))
     }
 
     /// A media cue the run `run` is starting: where its own time is 0 on the run's

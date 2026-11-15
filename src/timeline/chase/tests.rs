@@ -668,3 +668,78 @@ fn a_shared_clip_crossfaded_off_its_last_display_fades_its_sound_with_the_longer
     assert_eq!(a.leaving.len(), 2);
     assert!(passed(&t.chase(4.5), shared));
 }
+
+#[test]
+fn overlapping_clips_crossfade_over_the_overlap_when_the_timeline_says_and_per_display() {
+    let mut t = T::new(false);
+    let a = t.video(0.0, 4.0);
+    let b = t.video(3.0, 4.0);
+    // Off: a cut at 3 s, as before.
+    assert!(passed(&t.chase(3.5), a));
+    if let CueKind::Group(g) = &mut t.show.cue_mut(t.g).unwrap().kind {
+        g.timeline = Some(TimelineSettings {
+            crossfade_overlaps: true,
+            ..TimelineSettings::default()
+        });
+    }
+    let k = t.key();
+    let ov = overlap(&t.show, k, t.show.cue(b).unwrap(), &mut fake_dur).unwrap();
+    assert!(near(ov.secs, 1.0) && ov.over == vec![a]);
+    assert_eq!(
+        crossed_by(&t.show, k, t.show.cue(a).unwrap(), &mut fake_dur),
+        Some(b)
+    );
+    // Half way: the first going, the next coming, both over the 1 s left.
+    let ch = t.chase(3.5);
+    let (now, to, left, _) = alive(&ch, a).unwrap().opacity.unwrap();
+    assert!((now - 0.5).abs() < 1e-6 && to == 0.0 && near(left, 0.5));
+    let (now, to, _, _) = alive(&ch, b).unwrap().opacity.unwrap();
+    assert!((now - 0.5).abs() < 1e-6 && to == 1.0);
+    assert!(passed(&t.chase(4.1), a));
+    // Another layer, or a clip inside the first, does not overlap it.
+    let c = t.video(1.0, 1.0);
+    t.m(c).layer = 3;
+    let d = t.video(1.0, 1.0);
+    assert!(overlap(&t.show, k, t.show.cue(c).unwrap(), &mut fake_dur).is_none());
+    assert!(overlap(&t.show, k, t.show.cue(d).unwrap(), &mut fake_dur).is_none());
+    // On two displays, crossed on one: its own fade-out stays (not crossed
+    // everywhere) and it leaves that display alone.
+    let mut t = T::new(false);
+    let d2 = t.show.add_display();
+    if let CueKind::Group(g) = &mut t.show.cue_mut(t.g).unwrap().kind {
+        g.timeline = Some(TimelineSettings {
+            crossfade_overlaps: true,
+            ..TimelineSettings::default()
+        });
+    }
+    let shared = t.video(0.0, 4.0);
+    t.m(shared).also_on = vec![d2];
+    let b = t.video(3.0, 4.0);
+    t.m(b).output = Some(d2);
+    let k = t.key();
+    assert!(overlap(&t.show, k, t.show.cue(b).unwrap(), &mut fake_dur).is_some());
+    assert_eq!(
+        crossed_by(&t.show, k, t.show.cue(shared).unwrap(), &mut fake_dur),
+        None
+    );
+    let a = alive(&t.chase(3.5), shared).unwrap().clone();
+    assert!(a.opacity.is_none() && a.leaving.len() == 1 && a.leaving[0].0 == d2);
+}
+
+#[test]
+fn overlapping_sounds_fade_across_in_the_chase() {
+    let mut t = T::new(false);
+    if let CueKind::Group(g) = &mut t.show.cue_mut(t.g).unwrap().kind {
+        g.timeline = Some(TimelineSettings {
+            crossfade_overlaps: true,
+            ..TimelineSettings::default()
+        });
+    }
+    let a = t.clip(CueType::Audio, 0.0, 3.0);
+    let b = t.clip(CueType::Audio, 2.0, 3.0);
+    let ch = t.chase(2.5);
+    let (_, to, left, _) = alive(&ch, a).unwrap().volume_db.unwrap();
+    assert!(to == MIN_DB && near(left, 0.5));
+    let (_, to, left, _) = alive(&ch, b).unwrap().volume_db.unwrap();
+    assert!(to == 0.0 && near(left, 0.5));
+}

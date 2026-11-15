@@ -572,6 +572,9 @@ pub struct ActiveCue {
     /// cue on several (`MediaCue::also_on`) is replaced on one of them alone
     /// (`displays.rs`). Empty: on `output()` alone.
     screens: Vec<displays::Screen>,
+    /// A timeline's clip that a later clip crossfades over (`crossfade_overlaps`):
+    /// that one, while it is to come or playing; this has no fade-out of its own.
+    crossed_by: Option<CueId>,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -2550,6 +2553,7 @@ impl Engine {
             clock_time: 0.0,
             fade_from: None,
             screens: dips.into_iter().map(displays::Screen::on).collect(),
+            crossed_by: None,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2633,11 +2637,22 @@ impl Engine {
             clock_time: 0.0,
             fade_from: None,
             screens: Vec::new(),
+            crossed_by: None,
         };
         // A timeline's clip: its keyframes follow its run's clock from here.
         if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
             active.clip_zero = Some(zero);
             active.clock_time = t;
+        }
+        // Overlapping clips crossfade (`crossfade_overlaps`): over the earlier
+        // clips on its track for the overlap, and a clip crossed so has no
+        // fade-out of its own. (A seek's clips come in as the chase says.)
+        let overlap = match at.run {
+            Some(_) if at.chase.is_none() => self.timeline_overlap(show, original),
+            _ => None,
+        };
+        if at.run.is_some() {
+            active.crossed_by = self.timeline_crossed_by(show, original);
         }
         active.extra_hold = self.started_early.remove(&cue.id).unwrap_or(0.0);
         let mut ok = true;
@@ -2840,6 +2855,31 @@ impl Engine {
                                 (m.fade_in, m.fade_in)
                             }
                             (None, _) => (m.fade_in, m.fade_in),
+                        };
+                        let (fade_op, fade_vol) = match &overlap {
+                            Some(o) if reveal.is_none() => {
+                                if active.is_visual() {
+                                    active.entry = Some(EntryAction::Crossfade {
+                                        time: o.secs,
+                                        curve: m.curve,
+                                    });
+                                } else {
+                                    // A sound fades the ones it crosses out under it.
+                                    let clock = self.run_clock(at.run);
+                                    for a in &mut self.active {
+                                        if a.run == at.run
+                                            && o.over.contains(&a.cue_id)
+                                            && !a.stopping
+                                            && !a.is_matte()
+                                        {
+                                            a.fade_out_and_stop(o.secs, m.curve);
+                                            a.follow(clock);
+                                        }
+                                    }
+                                }
+                                (o.secs, o.secs)
+                            }
+                            _ => (fade_op, fade_vol),
                         };
                         // Its opacity keyframes where it starts, so it doesn't show at
                         // its base opacity first (a lead-in starts where they are 0).
@@ -3591,8 +3631,11 @@ impl Engine {
                 }
                 // Automatic fade-out before the media ends (a clip whose end its
                 // timeline's clock keeps fades by the clock instead, below).
+                // Crossed by a later clip of its timeline: the crossfade takes it out.
+                let crossed = a.crossed_by.is_some_and(|b| running.contains(&b));
                 if let Some(d) = a.duration
                     && !a.clocked
+                    && !crossed
                     && m.fade_out > 0.0
                     && !cue
                         .and_then(|c| crossfade_into_next(show, c))
@@ -3621,7 +3664,7 @@ impl Engine {
                     // (A clip held on its own still ends when its clock gets there.)
                     let moving = !show_paused && a.run.is_some_and(|r| moving.contains(&r));
                     let clock = on_clock_of(a.run).filter(|_| moving);
-                    completed |= timeline::clock_end(a, m, on_clock, clock);
+                    completed |= timeline::clock_end(a, m, on_clock, clock, !crossed);
                 }
             }
 

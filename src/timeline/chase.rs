@@ -14,6 +14,9 @@
 //!   is replaced on the displays the one coming in is on, and only there: it
 //!   stays on the others, and is over once it is on none (`Alive::off`,
 //!   `Alive::leaving`). Its sound fades with its last display.
+//! - With the timeline's `crossfade_overlaps`, a clip that comes in over an
+//!   earlier one on its track (`overlap`) crossfades over the overlap instead of
+//!   its own transition (a dip keeps its dip); sounds on one output fade across.
 //! - A clip is over at its start, lead-in and length (`Dur`, the content's).
 //!   A video that holds its last frame (with no fade-out) stays, on that frame.
 //! - Fade cues move the levels of what they reach from where they are; a stop
@@ -364,6 +367,104 @@ fn geometry_from(v: [Option<f32>; 5]) -> GeometryTarget {
     }
 }
 
+/// A clip coming in over earlier clips on its track (`overlap`): how long the
+/// crossfade is, and the clips it crosses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overlap {
+    pub secs: f64,
+    pub over: Vec<CueId>,
+}
+
+/// A clip's lead-in as its timeline plays it (0 if it never comes in by itself).
+fn lead_of(show: &Show, key: TimelineKey, cue: &Cue) -> f64 {
+    match model::lead_in(show, key, cue) {
+        LeadIn::None => 0.0,
+        LeadIn::At(v) => v.max(0.0),
+        LeadIn::UntilFaded => model::fade_wake(show, key, cue).unwrap_or(0.0),
+    }
+}
+
+fn is_sound(kind: &CueKind) -> bool {
+    matches!(kind, CueKind::Audio(_) | CueKind::LiveAudio(_))
+}
+
+/// Whether two clips are on one track for crossfading: pictures on the same
+/// layer of a display they share, or sounds on the same audio output.
+pub fn same_track(show: &Show, a: &Cue, b: &Cue) -> bool {
+    let (Some(ma), Some(mb)) = (a.kind.media(), b.kind.media()) else {
+        return false;
+    };
+    if is_picture(&a.kind) && is_picture(&b.kind) {
+        let on = mb.displays(show);
+        ma.layer == mb.layer && ma.displays(show).iter().any(|o| on.contains(o))
+    } else {
+        is_sound(&a.kind) && is_sound(&b.kind) && ma.audio_output == mb.audio_output
+    }
+}
+
+/// With the timeline's `crossfade_overlaps` (plan 2.9): the earlier clips on
+/// `cue`'s track whose slot ends after it comes in (and no later than it ends),
+/// which it crossfades over, for as long as the longest of those overlaps. A
+/// picture that dips keeps its dip, and clips that come in together at the
+/// same time don't overlap. None: the setting is off, or nothing overlaps.
+pub fn overlap(show: &Show, key: TimelineKey, cue: &Cue, dur: Dur) -> Option<Overlap> {
+    if !model::settings(show, key).is_some_and(|s| s.crossfade_overlaps) || !cue.armed {
+        return None;
+    }
+    let m = cue.kind.media()?;
+    if is_picture(&cue.kind) && m.transition.dip_color().is_some() {
+        return None;
+    }
+    let len = |c: &Cue, dur: &mut dyn FnMut(&Cue) -> Option<Option<f64>>| match dur(c) {
+        Some(Some(d)) if d.is_finite() => Some(d.max(0.0)),
+        _ => None,
+    };
+    let entry = start_of(cue) + lead_of(show, key, cue);
+    let end = len(cue, &mut *dur).map(|l| entry + l);
+    let mut out = Overlap {
+        secs: 0.0,
+        over: Vec::new(),
+    };
+    for o in model::members(show, key) {
+        if o.id == cue.id || !o.armed || !same_track(show, o, cue) {
+            continue;
+        }
+        let comes = start_of(o) + lead_of(show, key, o);
+        if comes >= entry - SAME_TIME {
+            continue;
+        }
+        let Some(ends) = len(o, &mut *dur).map(|l| comes + l) else {
+            continue;
+        };
+        if ends > entry + SAME_TIME && end.is_none_or(|e| ends <= e + SAME_TIME) {
+            out.secs = out.secs.max(ends - entry);
+            out.over.push(o.id);
+        }
+    }
+    (!out.over.is_empty()).then_some(out)
+}
+
+/// Whether a later clip crosses `cue` (`overlap`) on all of its displays (a
+/// sound: on its output): it then has no fade-out of its own, the crossfade
+/// takes it out.
+pub fn crossed_by(show: &Show, key: TimelineKey, cue: &Cue, dur: Dur) -> Option<CueId> {
+    if !model::settings(show, key).is_some_and(|s| s.crossfade_overlaps) {
+        return None;
+    }
+    let mine = cue.kind.media()?.displays(show);
+    model::members(show, key)
+        .into_iter()
+        .filter(|b| b.id != cue.id)
+        .find(|b| {
+            let covers = !is_picture(&cue.kind)
+                || b.kind
+                    .media()
+                    .is_some_and(|m| mine.iter().all(|o| m.displays(show).contains(o)));
+            covers && overlap(show, key, b, &mut *dur).is_some_and(|o| o.over.contains(&cue.id))
+        })
+        .map(|b| b.id)
+}
+
 /// Something that happens on the timeline, in the order it happens.
 enum Event<'a> {
     /// A clip comes in (its index).
@@ -485,7 +586,7 @@ pub fn chase(show: &Show, key: TimelineKey, pos: f64, dur: Dur) -> Chase {
 
     for ((t, ..), ev) in events {
         match ev {
-            Event::Enter(i) => enter(show, &mut clips, i, t, dur),
+            Event::Enter(i) => enter(show, key, &mut clips, i, t, dur),
             Event::Fade(f) => {
                 for c in clips.iter_mut() {
                     if !c.aimed(f.target) {
@@ -649,10 +750,13 @@ pub fn chase(show: &Show, key: TimelineKey, pos: f64, dur: Dur) -> Chase {
 }
 
 /// The clip `i` comes in at `t`: what it replaces goes, and its own fade-in starts.
-fn enter(show: &Show, clips: &mut [Clip], i: usize, t: f64, dur: Dur) {
+fn enter(show: &Show, key: TimelineKey, clips: &mut [Clip], i: usize, t: f64, dur: Dur) {
     if clips[i].cancelled {
         return;
     }
+    // Over an earlier clip on its track, with `crossfade_overlaps`: a
+    // crossfade over the overlap, whatever its own transition says.
+    let ov = overlap(show, key, clips[i].cue, &mut *dur);
     clips[i].len = match dur(clips[i].cue) {
         Some(Some(d)) if d.is_finite() => Some(d.max(0.0)),
         // Open-ended, or not known yet (it is started, and ends by itself).
@@ -663,8 +767,11 @@ fn enter(show: &Show, clips: &mut [Clip], i: usize, t: f64, dur: Dur) {
         let (layer, dip, top) = (m.layer, clips[i].dip, clips[i].at_top);
         // Its displays: what it replaces, it replaces on these alone.
         let here: Vec<OutputId> = clips[i].screens.iter().map(|s| s.output).collect();
-        let crossfade = (m.transition == Transition::Crossfade).then_some(m.fade_in.max(0.0));
-        let cut = m.transition == Transition::Cut || crossfade == Some(0.0);
+        let crossfade = match &ov {
+            Some(o) => Some(o.secs),
+            None => (m.transition == Transition::Crossfade).then_some(m.fade_in.max(0.0)),
+        };
+        let cut = ov.is_none() && (m.transition == Transition::Cut || crossfade == Some(0.0));
         for (j, o) in clips.iter_mut().enumerate() {
             if j == i || !o.picture || !o.up_at(t) || !o.showing(t).iter().any(|d| here.contains(d))
             {
@@ -686,11 +793,21 @@ fn enter(show: &Show, clips: &mut [Clip], i: usize, t: f64, dur: Dur) {
             }
         }
     }
+    // A sound over earlier sounds on its output: they fade out under it.
+    if let Some(o) = ov.as_ref().filter(|_| !clips[i].picture) {
+        for c in clips.iter_mut() {
+            if o.over.contains(&c.cue.id) && c.up_at(t) {
+                c.fades_out(t, o.secs, m.curve);
+            }
+        }
+    }
     let c = &mut clips[i];
     c.entered = true;
     // Its own transition: (seconds for opacity, for volume).
     let half = (m.fade_in / 2.0).max(0.0);
-    let (fade_op, fade_vol) = if c.dip {
+    let (fade_op, fade_vol) = if let Some(o) = &ov {
+        (o.secs, o.secs)
+    } else if c.dip {
         (0.0, half)
     } else if c.picture && m.transition == Transition::Cut {
         (0.0, 0.0)
