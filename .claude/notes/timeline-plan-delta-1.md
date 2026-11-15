@@ -1270,8 +1270,8 @@ inspector, the Do menu, the new interface's Timeline view on the group and on th
 paused and looping, layout A's group panel; the web page at phone size.
 
 Still wrong or untried:
-- A text "Also on" Display 2 that runs out in a free-run pause (by design, ⚠) leaves no picture but stays in
-  the active list until the clock reaches its end; the panel says 0:00.0 left meanwhile.
+- A text that runs out in a free-run pause (by design, ⚠: "Act Two" in the look's show) left no picture but
+  stayed in the active list, saying 0:00.0 left, for some seconds; not looked into.
 - The Do menu is a scrolling combo: the timeline actions are below the fold at 1280×760.
 - A remote seek during a playhead drag on the ruler is overridden by the drag's release (the last hand wins);
   not tested.
