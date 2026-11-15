@@ -39,9 +39,28 @@ release page, and a release is refused if it has none.
 - **Double-clicking a timeline group** in the cue list opens its tracks instead of
   firing it (GO and *Fire* still start it). Other cues still fire on a
   double-click.
-- **Not yet:** timeline cue lists (a tab of their own), automatic crossfades where
-  clips overlap, adding clips, splitting and tracks from the editor, and one clip on
-  several displays.
+- **Not yet:** timeline cue lists (a tab of their own) and automatic crossfades
+  where clips overlap.
+- **Split, delete and ripple delete in the tracks editor.** Ctrl+K (Cmd+K) or
+  *✂ Split* cuts clips in two at the playhead; Delete takes clips off, and
+  Shift+Delete (or Delete with *Ripple* on) closes the gap they leave. A sound
+  split in two may click at the join; the status bar says so.
+- **Add clips, cues and tracks from the tracks editor:** right-click an empty spot
+  of a track for a new clip there, drop files on a track, use the cue track's +
+  for a pause, stop, fade, send or wait cue at the playhead, and *+ Track* for an
+  empty track. Right-click a track's name to remove an empty one or move a picture
+  track above or below the next.
+- **Pick clips with a rubber band**, trim several at once, and drag the square at
+  a clip's corner to set its fade-in or fade-out.
+- **Speed and opacity lanes under a clip** in the tracks editor: add, drag and
+  remove keyframes where the clip is, and see its length follow its speed. Speed
+  keys follow the clip's content; opacity keys follow the timeline's clock and
+  wait at a pause.
+- **A clip shown on several displays** carries a "+N" badge, with a ghost of it
+  on each other display's track.
+- **The tracks editor warns** of a clip that nothing fades up (it never starts)
+  and of one that cuts in over the clip under it as it fades up; sound clips show
+  their waveform.
 - **A show that uses the new timeline cues (Run, Pause, Stop or Jump timeline)
   will not open in NewQ 0.20.3 or older.**
 

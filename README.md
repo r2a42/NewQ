@@ -1006,12 +1006,65 @@ the cue list (it can be popped out like the others); in the new interface it is 
 panel above the inspector (*Close timeline* puts it away). Each clip is a bar from
 its start to its end, with ramps for its fade-in and fade-out, and badges: 🔁 it
 loops, ⏩ its speed is keyframed, 🔊 a video with sound, ∞ it has no end of its
-own, ⚠ see *If a clip runs out* below. A dimmed bar is disarmed.
+own, +2 it is also shown on two more displays, ⚠ see *If a clip runs out* below
+(and the warnings further down). A dimmed bar is disarmed. A sound clip shows its
+waveform.
 
-- Drag a clip to move it in time; drag the selection to move them all (Ctrl-click
-  and Shift-click pick several, as in the cue list); drag a clip's end to trim it.
-  Moves snap to clip edges, fade-outs, markers and the playhead (the *Snap* button,
-  or hold Alt while dragging to place freely). Each move or trim is one undo step.
+- Drag a clip to move it in time, or up or down onto another track of its kind
+  (a picture onto another layer or display, a sound onto another output); while it
+  moves, an outline stays where it was. Ctrl-click and Shift-click pick several, as
+  in the cue list, or drag a **rubber band** over the empty part of the tracks
+  (Ctrl or Shift held adds to what is picked); dragging one of the picked clips
+  moves them all. Drag a clip's end to trim it (with several picked, their ends
+  move as far). Drag the small square at a clip's top corner to set how long it
+  fades in or out (a picture that cut in then fades in). Moves snap to clip edges,
+  fade-outs, markers and the playhead (the *Snap* button, or hold Alt while
+  dragging to place freely). Each move or trim is one undo step.
+- **Split:** Ctrl+K (Cmd+K on a Mac), the toolbar's *✂ Split* or the clip's menu
+  cuts the picked clips (with none picked, every clip under the playhead) in two at
+  the playhead; *Split here* in the menu cuts at the spot you right-clicked. The
+  second half takes up where the first stops (its content, speed and keyframes); a
+  fade cue stays aimed at the first half, and the second starts visible. A sound
+  split in two may click or leave a tiny gap at the join, since each half starts on
+  its own (the status bar says so). A looping clip isn't split.
+- **Delete:** Delete (or the clip's menu) takes the picked clips off and leaves
+  their gap; **Shift+Delete**, *Ripple delete*, or Delete with the toolbar's
+  *Ripple* on, moves the later clips on their tracks up to close it (and the
+  markers too when every track rippled). The keys act on the editor you last
+  clicked in, or the one under the pointer; with cues that aren't clips of the
+  timeline picked, Delete deletes cues as in the cue list.
+- **Adding clips:** right-click an empty spot of a track for a new clip there: a
+  video, image or sound file (a file dialog), a text, a shape, a camera or live
+  sound. Files dropped on a track become clips where they are let go (a sound
+  dropped on a picture track goes to a sound track). The *Cues* track's **+** adds
+  a pause, a Stop timeline, a fade, a send or a wait cue at the playhead; its
+  right-click menu adds them where you click.
+- **Tracks:** *+ Track* in the toolbar adds an empty picture track (a layer above
+  the top one) or sound track. Right-click a track's name (or an empty spot on it)
+  to remove it when it is empty, or to move a picture track up or down: its clips
+  and the next track's swap layers, so they go on top or underneath.
+- **Speed and opacity lanes:** tick *Speed lane* or *Opacity lane* in a clip's
+  menu for a lane under it: the keyframe line across the clip, with the value at
+  the playhead (and for speed, the clip's length) in the lane's name. Double-click
+  to add a key, drag a key to move it (the clip's bar follows as you drag: faster
+  is shorter; keys at 0 before the opacity rises are its lead-in), right-click a
+  key to take it out; the last one going leaves a steady value. The × closes the
+  lane. Both are drawn on the timeline's own time, but they follow different
+  things: **speed keys follow the clip's content** (through a free-run pause the
+  content plays on, and so do they), **opacity keys follow the timeline's clock**
+  (at a pause they stand still, so a ramp after a pause cue waits for GO). A clip's
+  own fade-in and fade-out stay the slopes at its ends.
+- **A clip on several displays** (its *Also on* displays) lives on its home
+  display's track with a "+N" badge (hover for the displays), and a hatched ghost
+  of it is drawn on the same layer's track of each other display; clicking a ghost
+  picks the clip. Dragging the clip onto another display's track makes that its
+  home.
+- **Warnings (⚠):** a clip left to end if a pause in it outlasts it (*If a clip
+  runs out*); a clip at opacity 0 that no fade cue raises ("waits for a fade cue":
+  it never starts); and a clip that waits for its fade-in and enters by a Cut over
+  another clip on its track ("cuts the clip under it": the one under goes at once
+  and this one fades up from nothing; give it a fade-in transition or a higher
+  track).
 - Ctrl+wheel (Cmd on a Mac) zooms around the pointer; the wheel scrolls; *Fit*
   shows the whole timeline. A thin bar at the right shows there are more tracks
   than fit.
@@ -1019,7 +1072,8 @@ own, ⚠ see *If a clip runs out* below. A dimmed bar is disarmed.
   double-click it to rename it, right-click for *Add Pause cue here*, *Jump here*
   and *Remove marker*.
 - Right-click a clip for *Pause before this clip comes in*, *Pause before this clip
-  fades out*, *Freeze clip* and *Resume clip*.
+  fades out*, *Split at the playhead*, *Split here*, *Delete*, *Ripple delete*, its
+  lanes, *Freeze clip* and *Resume clip*.
 - Editing is locked in show mode and while a test runs; Run, Pause and Stop still
   work.
 
@@ -1090,9 +1144,8 @@ while the clip's content plays on. Its speed keyframes follow its content.
 
 **Not there yet:** a cue list that is a timeline (a Timeline tab of its own),
 automatic crossfades between overlapping clips (give the later clip a Crossfade
-transition; the group's *Overlapping clips crossfade* is greyed until then), adding
-clips and tracks, splitting and ripple delete from the editor, a speed lane, one
-clip on several displays, and a separate timeline workspace.
+transition; the group's *Overlapping clips crossfade* is greyed until then), and a
+separate timeline workspace.
 
 A show that uses the timeline control cues (Run, Pause, Stop, Jump timeline) does
 not open in NewQ 0.20.3 or older.
@@ -1391,6 +1444,8 @@ night is about 3,000 rows.
 | Double-click a timeline group | Open it in the tracks editor            |
 | Ctrl+wheel (tracks editor) | Zoom around the pointer                    |
 | Alt while dragging (tracks editor) | Place freely, without snapping     |
+| Ctrl+K (tracks editor) | Split the picked clips (or those under the playhead) at the playhead |
+| Del / Shift+Del (tracks editor) | Delete the picked clips / ripple delete (close the gap) |
 | Ctrl+Shift+S          | Save as                                         |
 
 Space and Esc also work while an output window has focus.

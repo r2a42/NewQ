@@ -849,3 +849,103 @@ Left / not tried:
   edit for list timelines.
 - Overlap of a clip with a lead-in counts from where it comes in (start + lead-in); a dip is never
   overlapped; the earlier clip's run-out fade still applies if its content ends during a pause.
+
+---
+
+## S. What P6 landed (the tracks editor's tools, the speed and opacity lanes)
+
+Commits "Timeline:" (edits and read model; the editor's tools and lanes; look fixes) and one "Docs:". Files:
+`src/timeline/edit.rs`, `src/timeline/model.rs`, `src/ui/timeline.rs`, `src/ui/timeline/{tracks,toolbar,tests}.rs`
+and new `src/ui/timeline/{lanes,menus,keys}.rs`. Nothing in `ui.rs`, `modern.rs`, `dock.rs` or the engine;
+`editor(..)`'s signature is unchanged.
+
+Edits and read model (pure, tested in `edit.rs`/`model.rs`):
+- `edit::set_fade(show, id, Edge, secs, dur)` (kept within the content, never into the other fade; a Cut
+  picture given a fade-in becomes FadeIn), `edit::set_opacity(show, id, Animated)` (keys kept to 0..1; no
+  keys = steady `opacity`, track None), `edit::move_track(show, key, track, up)` (picture tracks only: swaps
+  the layers of its clips and the next track's on the same display, and of kept empty tracks).
+- `set_track` (moves): a clip moved onto a display in its `also_on` takes it out of the list (delta C, P6).
+- `model::ghosts(clips) -> Vec<(CueId, TrackId)>`; `model::tracks` now includes the ghosts' tracks (so the
+  other display's same-layer row exists; `add_track`/`move_clips` see it too). `model::cuts_over(show, key,
+  clips, id) -> Option<CueId>` (plan 2.13, 5). `is_picture`/`is_sound` are `pub`.
+
+`TimelineAction` added: `MoveTrack { key, track, up }`, `PickClip { key, ty, track, at }` (file dialog on a
+thread, `EditorState::pick`; its answer comes back as `AddClip`), `SetFade { id, edge, secs }`, `SetOpacity
+{ id, opacity }` (edits), `SelectClips { ids, add }`, `ShowLane { id, lane, on }` (view). The
+`allow(dead_code)` on `Split`, `Delete`, `AddClip`, `AddTrack`, `RemoveTrack`, `SetRate` and
+`EditorState::ripple` are gone. `apply`'s `Delete` now stops the removed cues (as the cue list's does) and
+lets go of the multi-selection; `Split` logs "Split n clip(s)", with "a sound split in two may click or gap
+a little at the join" when a half is a video or sound (2.13, 7), or "Nothing to split there".
+
+`Drag` gained `Trim { .., from, others }` (the selection's other clips' edges move as far; one `Trim` per
+clip on release, one frame = one undo step), `Fade`, `Band` and `Key { id, lane, keys, i, grab, v0 }`.
+
+The tools as built:
+- Split: Ctrl/Cmd+K, toolbar *✂ Split*, clip menu *Split at the playhead* and *Split here* (the right-clicked
+  time). What splits (`keys::split_ids`): the picked clips of this timeline, else every clip the playhead is
+  inside. No razor/blade tool (the plan has none).
+- Delete / ripple: Delete, Shift+Delete, toolbar *Ripple* toggle, clip menu. **How keys reach the editor:**
+  `ui::keyboard` runs before anything is drawn and already turned Delete (with or without Shift: egui's
+  `matches_logically` ignores Shift) into `Action::Delete`. `keys::handle` (called by `editor` after the
+  tracks) replaces that action in the shared `actions` vec with `TimelineAction::Delete` when the editor
+  holds the keys (`EditorState::focus` = last pressed inside the editor, or the pointer over it) and every
+  picked cue is one of its clips; otherwise the cue list's Delete stands (e.g. the group itself picked).
+  Ctrl+K is not a key `keyboard` reads, and hotkeys never fire with Ctrl/Cmd, so nothing collides.
+- New clips: right-click an empty spot of a track (`EditorState::menu_at`): picture tracks Video…/Image…
+  (dialog), Text, Shape, Camera; sound tracks Sound file… (dialog), Live sound; the cue track Pause, Stop
+  timeline, Fade, Send, Wait. The cue track's header has a "+" with those at the playhead. Files dropped on
+  a track become `AddClip`s there (`keys::dropped`: `Action::AddFiles` is removed from the frame's actions;
+  a kind that doesn't fit the track goes to the first track of its kind, or a new one) — several files all
+  start at the drop point.
+- Tracks: toolbar *+ Track* (picture/sound); a track's header (or empty spot) menu: add, *Move track up/down*
+  (picture), *Remove this track* (empty and not Cues). No drag-to-reorder of tracks.
+- Rubber band on the empty part of the tracks (Ctrl/Cmd or Shift adds). It also works in show mode
+  (selection only). Drag between tracks already existed; it now leaves an outline where the clip was.
+- Fade handles: a square at each top corner where the fade ends; drag sets it (`SetFade` on release).
+- Waveform on sound (`Audio`) clips, at every host height (from `Engine::waveforms`; steady speed or the
+  speed map, after any lead-in). A video's own sound isn't drawn.
+- Warnings: "waits for a fade cue" now carries ⚠, and `cuts_over` adds ⚠ "cuts the clip under it" with a
+  tooltip saying what to do.
+- Copy/paste/duplicate of clips: not added (the plan doesn't list them); Ctrl+C/X/V/D act on the picked
+  cues as in the cue list (a duplicate lands at the same time, on the same track).
+
+Lanes (`lanes.rs`, `EditorState::lanes: Vec<(CueId, Lane)>`, opened from the clip menu, closed with the
+header's ×, dropped when the clip goes):
+- A lane is a row (`LANE_H` 44) under its clip's track, spanning the clip; the header shows the value at the
+  playhead, then (speed) the clip's length and its name. Speed is drawn on a doubling scale (0.25×..4×, 1× in
+  the middle, snapped within 4 %), opacity straight (snapped to 0 under 5 % and to 1 over 95 %, since a key a
+  pixel off 0 would end a lead-in). A key dragged only along the lane (less than 6 px up or down) keeps its
+  value; its time snaps as clips do.
+- Double-click adds a key (a steady value first becomes a key at 0), drag moves one, right-click removes
+  one (`ui::remove_key`: the last going leaves the value steady). Each asks for one `SetRate`/`SetOpacity`.
+- While a key is dragged, `editor` draws from a clone of the show with the keys in (`lanes::preview`), so the
+  bar's length (speed, via `Engine::cue_duration`, whose speed-map cache is keyed by the keys) and the hatched
+  lead-in (opacity) follow live.
+- Both lanes use the timeline's time axis (a key at `t` is at the clip's start + `t`); the hover text says
+  that speed keys follow the content and opacity keys the clock (L2). The integrated fade-in/out stays the
+  bar's slopes and handles.
+
+Several displays: "+N" badge (hover lists the displays), a hatched, outlined ghost on each other display's
+same-layer track; a click on it picks the clip; it isn't draggable (a drag there is a rubber band). Dragging
+the clip itself to another display's track changes its home (and drops that display from `also_on`).
+The editor doesn't show or edit `also_on` (P4's inspector row).
+
+Not done / left:
+- The plan's "Waveform … at `Host::Workspace` heights": drawn in every host instead (no workspace yet).
+- *Overlapping clips crossfade* stays greyed (P5).
+- Look (headless, 1280×760 window, screenshots in the session scratchpad `p6/`): in the new interface's
+  250-high panel, and in the classic pane at its default height, opening lanes pushes the lower tracks out
+  of view (the wheel scrolls them; the overflow bar shows it). A dragged key's "time · value" label can sit
+  over the next key. The fade handle squares can cover part of a short clip's badges. The toolbar is now one
+  row (`ui.horizontal`, was wrapped): the state and GO texts are cut short rather than pushing the tracks
+  down; on a narrow pane the zoom buttons can be cut off.
+- Tests (`ui/timeline/tests.rs`, P6 sections): Ctrl+K split in the whole window and one undo (a hotkey K
+  doesn't fire); toolbar and menu split; Shift+Delete, Delete and the Ripple toggle in the whole window
+  with undo; Delete with the group picked stays the list's; menu delete/ripple; rubber band; an empty spot's
+  menu adds a Text there; track remove/move; the cue track's "+"; a fade handle with undo; trimming a
+  selection; lanes opened and closed; the speed lane (double-click, a drag that shortens the bar while
+  dragging, removing both keys) on the real 10 s test clip; the opacity lane moving the lead-in's end; the
+  ghost; dropped files; the file dialog's answer; show mode; value snapping.
+
+Wanted from the engine: nothing for these tools. (For P9: the ghosts assume a clip on several displays is
+on the same layer on each, as delta A4 says.)

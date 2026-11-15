@@ -23,8 +23,9 @@ The README describes the features; this file is about working on the code.
   (`clips` with each clip's lead-in and `clocked`, `tracks`, `lead_in`, `fade_wake`, `key_of`, `members`
   is structural only; `Dur` is the engine's `cue_duration`, and only its Group arm adds the lead-in);
   `edit.rs` pure edits that say what they changed (move, trim, split, ripple delete, add clip/control/
-  pause-before/track/marker; `split` leaves fade cues on the first half and makes the second visible,
-  `starts_visible`); `snap.rs`; `chase.rs` works out what plays at a time (seek, parking, Jump), pure, its
+  pause-before/track/marker, `set_fade`, `set_opacity`, `move_track` (swaps the layers of two picture
+  tracks); `split` leaves fade cues on the first half and makes the second visible, `starts_visible`; a
+  move onto a display in `also_on` takes it out of the list); `snap.rs`; `chase.rs` works out what plays at a time (seek, parking, Jump), pure, its
   own tests. `src/engine/timeline.rs`: a `Run` per timeline in `Runs.map` (clock `pos`, `RunState`
   Stopped/Cueing/Running/Paused, `RunView` for the UI, `pub use`d by `engine.rs`); waiting clips are
   `PendingCue`s tagged with the run; at equal times control cues go first (`model::due_order`), so a
@@ -51,11 +52,20 @@ The README describes the features; this file is about working on the code.
   (a ruler tap or drag seeks on release; locked in show mode for a group); `toolbar.rs` transport and
   read-outs (`state_text` from `RunState` and `RunView.parked`; the state text comes last so the
   buttons don't move);
-  `control.rs` the inspector rows (`inspector_rows` at the end of the inspector). Double-clicking a
+  `control.rs` the inspector rows (`inspector_rows` at the end of the inspector); `menus.rs` the clip,
+  track and cue-track "+" menus; `lanes.rs` the speed and opacity keyframe lanes under a clip
+  (`EditorState::lanes`; a key drag is drawn from a copy of the show with the keys in, `lanes::preview`,
+  so the bar's length and lead-in follow; both on the timeline's time axis, speed keys following the
+  content and opacity keys the clock, ruling L2); `keys.rs` Ctrl/Cmd+K (split at the playhead), Delete
+  and Shift+Delete (ripple), dropped files and the new-clip file dialog. `ui::keyboard` runs before
+  anything is drawn, so the editor that holds the keys (`EditorState::focus`, last clicked, or hovered)
+  swaps the `Action::Delete` it already made for its own `TimelineAction::Delete` when every picked cue
+  is one of its clips, and an `Action::AddFiles` for `AddClip`s when the files were let go over a track.
+  A clip on several displays (`MediaCue::also_on`) has a "+N" badge and ghosts (`model::ghosts`, whose
+  tracks `model::tracks` includes); `model::cuts_over` is the Cut-over-a-clip warning. Double-clicking a
   timeline group's row opens it rather than firing it. Tests drive it with the mouse (`TimelineRects`,
   `Draw::Full` for the whole window and undo); tried headless under xvfb in both interfaces. Variants and
-  hosts kept `allow(dead_code)` are for the tools still to come (split, ripple, add clip/track, speed lane:
-  P6; list tab: P4; workspace: P7).
+  hosts kept `allow(dead_code)` are for what is still to come (list tab: P4; workspace: P7).
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
