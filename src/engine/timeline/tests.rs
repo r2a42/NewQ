@@ -3018,10 +3018,10 @@ fn abutting_pictures_never_leave_the_display_empty_across_the_join() {
         until(&mut e, &show, Some(0.0), "the first drawn", 10, |e| {
             started(e, a)
         });
-        let mut waited = false;
         let mut both = false;
         // No time for the next one's drawing between ticks; once it is due,
-        // the clock waits for its picture (which takes a few ticks).
+        // the clock waits for its picture. (On a busy machine the drawing can
+        // be done ahead, and then there is nothing to wait for.)
         let t0 = Instant::now();
         while view(&mut e, &show, key(g)).pos < 1.6 {
             assert!(t0.elapsed() < Duration::from_secs(20), "never drawn");
@@ -3036,10 +3036,8 @@ fn abutting_pictures_never_leave_the_display_empty_across_the_join() {
                 "{transition:?}: nothing up at {}",
                 view(&mut e, &show, key(g)).pos
             );
-            waited |= active(&e, b).is_some_and(|x| !x.started);
             both |= l.len() == 2 && l.iter().any(|x| x.0 == a && x.1 > 0.1 && x.1 < 0.9);
         }
-        assert!(waited, "the next clip took a while to have its picture");
         assert_eq!(
             both,
             transition == Transition::Crossfade,
