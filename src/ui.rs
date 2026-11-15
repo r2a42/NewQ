@@ -7555,7 +7555,7 @@ fn inspector_one(
                             ui.end_row();
                         }
                     });
-                ui.label(RichText::new(c.action.description()).weak());
+                ui.label(RichText::new(c.description()).weak());
                 // A cue still called what its action was follows it.
                 if before != c.action && cue_name == before.label() {
                     new_name = Some(c.action.label().to_string());

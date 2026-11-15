@@ -768,6 +768,33 @@ fn control_rows(action: ControlAction, freeze: PauseFreeze) -> Vec<&'static str>
 }
 
 #[test]
+fn a_loop_pause_inspector_asks_about_the_loop_not_what_it_holds() {
+    let mut f = fixture();
+    let mut cue: Cue = f.show.make_cue(CueType::Control, None, f.show.cues.len());
+    cue.parent = Some(f.group);
+    cue.pre_wait = 3.0;
+    if let CueKind::Control(c) = &mut cue.kind {
+        c.action = ControlAction::TimelinePause;
+        c.freeze = PauseFreeze::Clips;
+        c.loop_from = Some(crate::show::TimelinePoint::Time(1.0));
+        assert!(c.description().contains("again and again"));
+        assert_ne!(c.description(), c.action.description());
+    }
+    f.st.selected = Some(cue.id);
+    f.show.cues.push(cue);
+    let mut m = Mouse::new();
+    m.draw = Draw::Inspector;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let rows = m.rows();
+    for row in ["timeline", "loop", "loop_from", "leave_at_once"] {
+        assert!(rows.contains(&row), "{row} missing: {rows:?}");
+    }
+    for row in ["freeze", "clips", "freeze_live"] {
+        assert!(!rows.contains(&row), "{row} shown for a loop: {rows:?}");
+    }
+}
+
+#[test]
 fn the_control_inspector_shows_what_a_timeline_action_needs() {
     let start = control_rows(ControlAction::Start, PauseFreeze::Nothing);
     assert!(start.contains(&"cue_picker") && !start.contains(&"freeze"));

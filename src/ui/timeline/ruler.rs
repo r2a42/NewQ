@@ -1,7 +1,7 @@
 //! The ruler: times along the top, the playhead's handle, and the markers as
 //! flags (dragged, renamed, and a menu with "Add Pause cue here").
 
-use super::tracks::{Ctx, Geo, MARKER};
+use super::tracks::{Ctx, Geo, LOOP, MARKER};
 use super::*;
 use egui::{Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 
@@ -43,6 +43,25 @@ pub(super) fn draw(
     let visuals = ui.visuals().clone();
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, visuals.faint_bg_color);
+    // Each looped section, under the ticks: shaded, with a bracket along the
+    // bottom from where it starts to its loop pause.
+    for (_id, from, to) in super::tracks::loop_sections(ctx) {
+        let (a, b) = (geo.x(from), geo.x(to));
+        let band = Rect::from_x_y_ranges(a..=b, rect.y_range());
+        painter.rect_filled(band, 0.0, LOOP.gamma_multiply(0.14));
+        let y = rect.bottom() - 2.0;
+        painter.hline(a..=b, y, Stroke::new(2.0, LOOP));
+        painter.vline(a, (y - 6.0)..=y, Stroke::new(2.0, LOOP));
+        painter.vline(b, (y - 6.0)..=y, Stroke::new(2.0, LOOP));
+        #[cfg(test)]
+        ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<(CueId, Rect)>>(egui::Id::new((
+                "timeline_loop_ruler",
+                ctx.host,
+            )))
+            .push((_id, band))
+        });
+    }
     let weak = visuals.weak_text_color();
     for &(t, major) in ticks {
         let x = geo.x(t);

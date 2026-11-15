@@ -97,8 +97,42 @@ fn hundredth(t: f64) -> f64 {
     (t * 100.0).round() / 100.0
 }
 
-/// The colour of a clip, by its kind (a pause cue stands out).
+/// The colour of a loop pause and of the section it plays again.
+pub(super) const LOOP: Color32 = Color32::from_rgb(64, 150, 214);
+
+/// Each loop pause of the timeline (`ControlCue::is_loop`) with the section it
+/// plays again: (the pause, where the section starts, the pause's time). A
+/// section that starts at or after its pause, or at a marker that has gone,
+/// has nothing to show.
+pub(super) fn loop_sections(ctx: &Ctx) -> Vec<(CueId, f64, f64)> {
+    ctx.clips
+        .iter()
+        .filter_map(|c| {
+            let q = ctx.show.cue(c.id)?;
+            let CueKind::Control(k) = &q.kind else {
+                return None;
+            };
+            if !k.is_loop() {
+                return None;
+            }
+            let from = model::resolve(ctx.show, ctx.key, k.loop_from?)?;
+            (from < c.start).then_some((c.id, from, c.start))
+        })
+        .collect()
+}
+
+/// Whether the clip is a loop pause.
+fn is_loop_pause(show: &Show, c: &Clip) -> bool {
+    show.cue(c.id)
+        .is_some_and(|q| matches!(&q.kind, CueKind::Control(k) if k.is_loop()))
+}
+
+/// The colour of a clip, by its kind (a pause cue stands out, a loop pause
+/// in the loop's colour).
 fn kind_color(show: &Show, c: &Clip) -> Color32 {
+    if is_loop_pause(show, c) {
+        return LOOP;
+    }
     let pause = show.cue(c.id).is_some_and(|q| {
         matches!(&q.kind, CueKind::Control(k)
             if matches!(k.action, ControlAction::TimelinePause | ControlAction::Pause))
@@ -433,6 +467,38 @@ pub(super) fn draw(
             ui.close();
         }
     });
+
+    // A loop pause's section, on the cue track under the clips: a band from
+    // where it starts to the pause, with an arrow back.
+    if let Some((_, row)) = rows.iter().find(|(t, _)| *t == TrackId::Cues) {
+        for (_id, from, to) in loop_sections(ctx) {
+            let band = Rect::from_min_max(
+                pos2(geo.x(from), row.top() + 2.0),
+                pos2(geo.x(to), row.bottom() - 2.0),
+            );
+            lane_painter.rect_filled(band, 2.0, LOOP.gamma_multiply(0.16));
+            let y = row.bottom() - 6.0;
+            lane_painter.hline(band.x_range(), y, Stroke::new(1.5, LOOP));
+            lane_painter.vline(band.left(), (y - 6.0)..=y, Stroke::new(1.5, LOOP));
+            // The arrow head at the start: the timeline goes back there.
+            lane_painter.line_segment(
+                [pos2(band.left(), y), pos2(band.left() + 5.0, y - 3.5)],
+                Stroke::new(1.5, LOOP),
+            );
+            lane_painter.line_segment(
+                [pos2(band.left(), y), pos2(band.left() + 5.0, y + 3.5)],
+                Stroke::new(1.5, LOOP),
+            );
+            #[cfg(test)]
+            ui.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(CueId, Rect)>>(egui::Id::new((
+                    "timeline_loop_bands",
+                    ctx.host,
+                )))
+                .push((_id, band))
+            });
+        }
+    }
 
     let mut clip_rects: Vec<(CueId, Rect)> = Vec::new();
     #[cfg(test)]
@@ -1206,7 +1272,7 @@ fn draw_clip(
     if !c.also_on.is_empty() {
         badges.push(format!("+{}", c.also_on.len()));
     }
-    if c.loops {
+    if c.loops || is_loop_pause(ctx.show, c) {
         badges.push("🔁".into());
     }
     if c.speed_keys {

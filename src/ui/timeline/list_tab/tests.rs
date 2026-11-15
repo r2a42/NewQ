@@ -1080,6 +1080,72 @@ fn a_loop_on_a_timeline_list_is_said_in_the_toolbar_and_the_transport() {
 }
 
 #[test]
+fn a_loop_pause_is_marked_with_its_section_on_the_ruler_and_the_cue_track() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let i = f
+        .show
+        .cues
+        .iter()
+        .position(|c| matches!(c.kind, CueKind::Control(_)))
+        .unwrap();
+    let pause = f.show.cues[i].id;
+    let at = f.show.cues[i].pre_wait;
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    let bands = |w: &mut Win, f: &mut Fixture| {
+        w.ctx.data_mut(|d| {
+            for name in ["timeline_loop_ruler", "timeline_loop_bands"] {
+                d.remove::<Vec<(CueId, Rect)>>(egui::Id::new((name, Host::ListTab)));
+            }
+        });
+        w.frame(&mut f.show, &mut f.st);
+        (
+            w.get_host::<Vec<(CueId, Rect)>>("timeline_loop_ruler")
+                .unwrap_or_default(),
+            w.get_host::<Vec<(CueId, Rect)>>("timeline_loop_bands")
+                .unwrap_or_default(),
+        )
+    };
+    // A plain pause: no section, no loop badge.
+    assert_eq!(bands(&mut w, &mut f), (vec![], vec![]));
+    assert!(!w.clip_text(&mut f.show, &mut f.st, pause).contains('🔁'));
+    // Looping from 0.5 s: the section from there to the pause, on both.
+    if let CueKind::Control(ctl) = &mut f.show.cues[i].kind {
+        ctl.loop_from = Some(crate::show::TimelinePoint::Time(0.5));
+    }
+    let (ruler, track) = bands(&mut w, &mut f);
+    let r = w.rects(Host::ListTab).unwrap();
+    for (what, marks) in [("ruler", &ruler), ("cue track", &track)] {
+        assert_eq!(marks.len(), 1, "{what}: {marks:?}");
+        let (id, band) = marks[0];
+        assert_eq!(id, pause, "{what}");
+        assert!(
+            (band.left() - (r.x0 + 0.5 * r.pps)).abs() < 1.5,
+            "{what}: {band:?}"
+        );
+        assert!(
+            (band.right() - (r.x0 + at as f32 * r.pps)).abs() < 1.5,
+            "{what}: {band:?}"
+        );
+    }
+    assert!(
+        ruler[0].1.top() >= r.ruler.top() - 0.5 && ruler[0].1.bottom() <= r.ruler.bottom() + 0.5
+    );
+    let cues = r.tracks.iter().find(|t| t.0 == TrackId::Cues).unwrap().1;
+    assert!(
+        cues.contains_rect(track[0].1.shrink(0.5)),
+        "{cues:?} {:?}",
+        track[0].1
+    );
+    assert!(w.clip_text(&mut f.show, &mut f.st, pause).contains('🔁'));
+    // A section that would start after its pause marks nothing.
+    if let CueKind::Control(ctl) = &mut f.show.cues[i].kind {
+        ctl.loop_from = Some(crate::show::TimelinePoint::Time(at + 1.0));
+    }
+    assert_eq!(bands(&mut w, &mut f), (vec![], vec![]));
+}
+
+#[test]
 fn with_the_timeline_pane_open_a_timeline_list_opens_on_its_rows_and_the_pane_has_the_tracks() {
     let mut f = fixture();
     let mut w = Win::new();

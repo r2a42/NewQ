@@ -1227,7 +1227,10 @@ intro, a looping middle, the ending). Tick *On GO: Leave the loop at once* to go
 on the moment GO is pressed instead. The toolbar says *Looping · GO continues*,
 then *Looping · last pass, then on*. The jump back is not sample-accurate (the
 clips are started again, or jumped, at the section's start): for a bed of sound
-that must not break, set the sound clip itself to loop.
+that must not break, set the sound clip itself to loop. A loop pause is blue on the
+Cues track with 🔁, and its section is shaded on the ruler and the Cues track, with an
+arrow back to where it starts; since the clock never stops there, its inspector
+doesn't ask what it holds.
 
 The other timeline control cues: **Run timeline** (from its playhead, or from a
 point you choose), **Stop timeline** (fades out what it plays over its *Fade out*

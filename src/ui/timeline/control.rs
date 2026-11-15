@@ -165,26 +165,30 @@ pub fn control_fields(ui: &mut Ui, show: &Show, cue_id: CueId, c: &mut ControlCu
                     ui.end_row();
                 }
                 ControlAction::TimelinePause => {
-                    note_row(ui, "freeze");
-                    ui.label("Holds");
-                    let label = FREEZE_CHOICES
-                        .iter()
-                        .find(|f| f.0 == c.freeze)
-                        .map_or("", |f| f.1);
-                    egui::ComboBox::from_id_salt(("control_freeze", cue_id.0))
-                        .selected_text(label)
-                        .show_ui(ui, |ui| {
-                            for (f, name, tip) in FREEZE_CHOICES {
-                                ui.selectable_value(&mut c.freeze, f, name)
-                                    .on_hover_text(tip);
-                            }
-                        });
-                    ui.end_row();
-                    if c.freeze == PauseFreeze::Clips {
-                        note_row(ui, "clips");
-                        ui.label("Clips");
-                        ui.vertical(|ui| clip_ticks(ui, show, key, cue_id, &mut c.clips));
+                    // A loop pause never stands the clock, so it holds nothing.
+                    let holds = !c.is_loop();
+                    if holds {
+                        note_row(ui, "freeze");
+                        ui.label("Holds");
+                        let label = FREEZE_CHOICES
+                            .iter()
+                            .find(|f| f.0 == c.freeze)
+                            .map_or("", |f| f.1);
+                        egui::ComboBox::from_id_salt(("control_freeze", cue_id.0))
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                for (f, name, tip) in FREEZE_CHOICES {
+                                    ui.selectable_value(&mut c.freeze, f, name)
+                                        .on_hover_text(tip);
+                                }
+                            });
                         ui.end_row();
+                        if c.freeze == PauseFreeze::Clips {
+                            note_row(ui, "clips");
+                            ui.label("Clips");
+                            ui.vertical(|ui| clip_ticks(ui, show, key, cue_id, &mut c.clips));
+                            ui.end_row();
+                        }
                     }
                     note_row(ui, "loop");
                     ui.label("Loop");
@@ -217,7 +221,7 @@ pub fn control_fields(ui: &mut Ui, show: &Show, cue_id: CueId, c: &mut ControlCu
                             );
                         ui.end_row();
                     }
-                    if c.freeze != PauseFreeze::Nothing {
+                    if holds && c.freeze != PauseFreeze::Nothing {
                         note_row(ui, "freeze_live");
                         ui.label("Live inputs");
                         ui.checkbox(&mut c.freeze_live, "Live inputs freeze too")

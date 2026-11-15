@@ -2437,6 +2437,18 @@ impl ControlCue {
         self.action == ControlAction::TimelinePause && self.loop_from.is_some()
     }
 
+    /// What the cue does, for the inspector: its action's description, but a
+    /// loop pause says what a loop does (it never stops the clock).
+    pub fn description(&self) -> &'static str {
+        if self.is_loop() {
+            "Play a section of the timeline again and again: reaching this cue, the \
+             timeline goes back to where the section starts, round and round, until GO. \
+             The clock never stops, so nothing holds"
+        } else {
+            self.action.description()
+        }
+    }
+
     /// The fade of a timeline Stop (`fade`, or `TIMELINE_STOP_FADE`), in seconds.
     pub fn stop_fade(&self) -> f64 {
         match self.fade {
