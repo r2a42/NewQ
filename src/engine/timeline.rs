@@ -161,6 +161,14 @@ struct Run {
     /// The clips a seek without the picture left unstarted: they are started
     /// when the run goes on.
     unstarted: Vec<Alive>,
+    /// What the run before a seek played (instances, no longer its run's),
+    /// kept up until this one is cued, and since when: its new clips are not
+    /// seen until then, so the picture changes all at once (`timeline_settle`).
+    outgoing: Vec<u64>,
+    outgoing_since: Option<Instant>,
+    /// Clips alive on both sides of the seek, jumped where they are (decoders
+    /// swapped once they have a frame): seen all along.
+    carried: Vec<u64>,
 }
 
 impl Run {
@@ -175,6 +183,9 @@ impl Run {
             parked: false,
             cue_since: None,
             unstarted: Vec::new(),
+            outgoing: Vec::new(),
+            outgoing_since: None,
+            carried: Vec::new(),
         }
     }
 
@@ -185,6 +196,9 @@ impl Run {
         self.parked = false;
         self.cue_since = None;
         self.unstarted.clear();
+        self.outgoing.clear();
+        self.outgoing_since = None;
+        self.carried.clear();
     }
 }
 
@@ -237,6 +251,16 @@ impl Runs {
         self.map
             .values()
             .filter(|r| r.state == RunState::Running)
+            .map(|r| r.instance)
+            .collect()
+    }
+
+    /// The runs (instances) whose new clips are not seen yet: a seek's, while
+    /// what it replaces stays up.
+    pub(super) fn hiding(&self) -> Vec<u64> {
+        self.map
+            .values()
+            .filter(|r| !r.outgoing.is_empty())
             .map(|r| r.instance)
             .collect()
     }
@@ -670,10 +694,14 @@ impl Engine {
             .map(|a| a.instance)
     }
 
-    /// Put the run of `key` at `pos` (plan 2.6): what it had playing or waiting
-    /// goes, the clips alive at `pos` are started held, part way in, and the rest
-    /// wait for the clock. `then` says whether it then cues and runs, or parks.
-    /// False if there is nothing there or after it to run (it stays stopped there).
+    /// Put the run of `key` at `pos` (plan 2.6): what it had waiting goes, the
+    /// clips alive at `pos` are started held, part way in, and the rest wait for
+    /// the clock. `then` says whether it then cues and runs, or parks. With the
+    /// picture, a clip alive on both sides is jumped where it is (`Seek`, its
+    /// decoders swapped once they have a frame), and what else the run played
+    /// stays up until the new clips are cued, unseen till then, so the picture
+    /// never shows them half built (`timeline_settle`). False if there is
+    /// nothing there or after it to run (it stays stopped there).
     fn timeline_place(&mut self, show: &Show, key: TimelineKey, pos: f64, then: Then) -> bool {
         let pos = if pos.is_finite() { pos.max(0.0) } else { 0.0 };
         let instance = match key {
@@ -695,15 +723,22 @@ impl Engine {
             TimelineKey::List(_) => self.alloc_instance(),
         };
         self.runs.placed += 1;
-        if let Some(old) = self.runs.map.remove(&key) {
-            // Run again while a Stop's fade is going: that goes on under what
-            // comes in (which replaces it on its layer as it always would).
-            self.clear_clips(old.instance, old.state == RunState::Stopped);
+        let old = self.runs.map.remove(&key);
+        // An earlier seek's clips, kept up for it, go now.
+        if let Some(old) = &old {
+            self.drop_outgoing(old);
         }
-        self.clear_clips(instance, false);
+        // Run again while a Stop's fade is going: that goes on under what comes
+        // in (which replaces it on its layer as it always would).
+        let fading = old.as_ref().is_some_and(|o| o.state == RunState::Stopped);
+        let mut olds = vec![instance];
+        olds.extend(old.as_ref().map(|o| o.instance).filter(|i| *i != instance));
         let ch = chase::chase(show, key, pos, &mut |c| self.cue_duration(show, c));
         let run = then == Then::Run;
         if run && ch.alive.is_empty() && ch.upcoming.is_empty() {
+            for &i in &olds {
+                self.clear_clips(i, fading);
+            }
             self.runs
                 .map
                 .insert(key, Run::new(instance, RunState::Stopped, pos));
@@ -713,11 +748,56 @@ impl Engine {
             }
             return false;
         }
-        self.push_upcoming(show, instance, pos, &ch.upcoming);
         let picture = match then {
             Then::Run => true,
             Then::Park { picture } => picture,
         };
+        // What it was waiting to start never starts.
+        self.pending.retain(|p| {
+            !olds
+                .iter()
+                .any(|i| p.run == Some(*i) || p.start.run == Some(*i))
+        });
+        // Clips alive on both sides: jumped where they are.
+        let mut alive = ch.alive.clone();
+        let mut carried: Vec<(u64, Alive)> = Vec::new();
+        if picture {
+            alive.retain(|x| match self.carriable(show, &olds, x) {
+                Some(i) => {
+                    carried.push((i, x.clone()));
+                    false
+                }
+                None => true,
+            });
+        }
+        // The rest of what it played: kept up (pictures and sounds) until the new
+        // clips are cued, or gone at once.
+        let mut outgoing = Vec::new();
+        let mut gone = Vec::new();
+        for a in &mut self.active {
+            let theirs = a.run.is_some_and(|r| olds.contains(&r))
+                || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run.is_some_and(|r| olds.contains(&r)));
+            if !theirs || carried.iter().any(|c| c.0 == a.instance) || (fading && a.stopping) {
+                continue;
+            }
+            if picture
+                && matches!(
+                    a.kind,
+                    ActiveKind::Video(_) | ActiveKind::Image(_) | ActiveKind::Audio(_)
+                )
+            {
+                // No longer a clip of a run: it plays on by itself meanwhile,
+                // replacing nothing.
+                a.run = None;
+                a.entry = None;
+                a.follow(None);
+                outgoing.push(a.instance);
+            } else {
+                gone.push(a.instance);
+            }
+        }
+        self.active.retain(|a| !gone.contains(&a.instance));
+        self.push_upcoming(show, instance, pos, &ch.upcoming);
         let mut r = Run::new(
             instance,
             if run {
@@ -735,15 +815,199 @@ impl Engine {
         if !picture {
             r.unstarted = ch.alive.clone();
         }
+        r.outgoing_since = (!outgoing.is_empty()).then(Instant::now);
+        r.outgoing = outgoing;
+        r.carried = carried.iter().map(|c| c.0).collect();
         self.runs.map.insert(key, r);
+        for (i, x) in carried {
+            if !self.timeline_carry(show, key, instance, i, &x, pos) {
+                // It couldn't be jumped: started afresh.
+                if let Some(r) = self.runs.map.get_mut(&key) {
+                    r.carried.retain(|c| *c != i);
+                    r.outgoing.push(i);
+                    r.outgoing_since.get_or_insert_with(Instant::now);
+                }
+                if let Some(a) = self.active.iter_mut().find(|a| a.instance == i) {
+                    a.run = None;
+                    a.entry = None;
+                    a.follow(None);
+                }
+                alive.push(x);
+            }
+        }
         if picture {
-            self.start_alive(show, instance, ch.alive);
+            self.start_alive(show, instance, alive);
         }
         self.refresh_waits();
         if run && self.run_cued(instance) {
             self.timeline_release(show, key);
         }
+        self.timeline_settle();
         true
+    }
+
+    /// The clip playing for `x` in the run (one of `olds`) before a seek, if it
+    /// can be jumped where it is: a file playing, not on its way out, not on its
+    /// last frame or jumping already, nor landed on its last frame.
+    fn carriable(&self, show: &Show, olds: &[u64], x: &Alive) -> Option<u64> {
+        if x.at_last_frame
+            || !matches!(
+                show.cue(x.id).map(|c| &c.kind),
+                Some(CueKind::Video(_) | CueKind::Audio(_))
+            )
+        {
+            return None;
+        }
+        self.active
+            .iter()
+            .filter(|a| a.cue_id == x.id && a.run.is_some_and(|r| olds.contains(&r)))
+            .filter(|a| matches!(a.kind, ActiveKind::Video(_) | ActiveKind::Audio(_)))
+            .find(|a| a.started && !a.stopping && !a.held && a.seeking.is_none())
+            .map(|a| a.instance)
+    }
+
+    /// Jump the playing clip `inst` to where the chase found it (`x`), as a clip
+    /// of the run `instance` now at `pos`: its decoders for there are started
+    /// (or what a jump got ready is taken) and swapped in once they have a frame,
+    /// its levels set as the chase says, and it is held until the run goes on, as
+    /// a seek's clip is. False if it couldn't be.
+    fn timeline_carry(
+        &mut self,
+        show: &Show,
+        key: TimelineKey,
+        instance: u64,
+        inst: u64,
+        x: &Alive,
+        pos: f64,
+    ) -> bool {
+        let Some(cue) = show.cue(x.id) else {
+            return false;
+        };
+        let timing = self.timeline_clip(show, cue, x.lead);
+        let played = timing.looped.clone().unwrap_or_else(|| cue.clone());
+        let Some(m) = played.kind.file_media() else {
+            return false;
+        };
+        let info = match self.probe.get(self.ff.as_ref(), &m.file) {
+            crate::media::ProbeState::Ready(info) => info.clone(),
+            _ => return false,
+        };
+        let p = match self.take_prepared(&played, x.from, x.lead) {
+            Some(p) => p,
+            None => match self.prepare_from(&played, &info, x.from, x.lead) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::debug!("cue {} could not be jumped: {e}", cue.number);
+                    return false;
+                }
+            },
+        };
+        let (player, voice) = match p.kind {
+            super::PreparedKind::Video { player, voice } => (Some(player), voice),
+            super::PreparedKind::Audio(voice) => (None, Some(voice)),
+            _ => return false,
+        };
+        let crossed = self.timeline_crossed_by(show, cue);
+        let clock = self.run_clock(Some(instance));
+        let paused = self.paused;
+        let Some(m) = cue.kind.media() else {
+            return false;
+        };
+        let Some(a) = self.active.iter_mut().find(|a| a.instance == inst) else {
+            return false;
+        };
+        a.seeking = Some(super::Seek {
+            player,
+            voice,
+            base: x.from,
+            file_from: p.file_from,
+            spawned_at: Instant::now(),
+            duration: Some(p.duration.map(|d| d + x.from)),
+        });
+        a.pass_len = p.pass_len;
+        a.speed = p.speed;
+        a.lead = x.lead;
+        a.run = Some(instance);
+        a.together = Some(instance);
+        a.entry = None;
+        let zero = zero_of(cue);
+        a.clip_zero = Some(zero);
+        a.clock_time = (pos - zero).max(0.0);
+        a.clocked = timing.clocked;
+        a.ends_at = timing.ends_at;
+        a.detached = false;
+        a.held = false;
+        a.joined = false;
+        a.crossed_by = crossed;
+        // Its levels as playing there gives them.
+        a.faded = false;
+        a.auto_faded = false;
+        a.relevel = false;
+        a.live_transform = None;
+        a.opacity = Param::new(m.motion.opacity_at(m.opacity, a.key_time()));
+        a.volume = Param::new(m.volume_db);
+        if a.is_visual() {
+            a.screens = m
+                .displays(show)
+                .into_iter()
+                .map(super::displays::Screen::on)
+                .collect();
+        }
+        chase_levels(a, m, x);
+        a.follow(clock);
+        // Held until the run lets it go (one frozen by a Pause of its own, until
+        // its Resume).
+        a.freeze(false, paused);
+        if x.frozen || x.detached {
+            detach(a);
+        }
+        if !x.frozen
+            && let Some(r) = self.runs.map.get_mut(&key)
+        {
+            r.frozen.push(inst);
+        }
+        true
+    }
+
+    /// What a run before a seek played, kept up for it (`Run::outgoing`), goes.
+    fn drop_outgoing(&mut self, run: &Run) {
+        if !run.outgoing.is_empty() {
+            self.active.retain(|a| !run.outgoing.contains(&a.instance));
+        }
+    }
+
+    /// A seek's clips have all come (or have had `CUE_LIMIT`): what they
+    /// replace goes, and they are seen.
+    fn timeline_settle(&mut self) {
+        let due: Vec<TimelineKey> = self
+            .runs
+            .map
+            .iter()
+            .filter(|(_, r)| !r.outgoing.is_empty())
+            .filter(|(_, r)| {
+                self.run_cued(r.instance)
+                    || r.outgoing_since.is_none_or(|s| s.elapsed() >= CUE_LIMIT)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        for key in due {
+            if let Some(r) = self.runs.map.get_mut(&key) {
+                let gone = std::mem::take(&mut r.outgoing);
+                r.outgoing_since = None;
+                r.carried.clear();
+                self.active.retain(|a| !gone.contains(&a.instance));
+            }
+        }
+    }
+
+    /// A clip a seek has started that is not to be seen yet: its run's new set
+    /// is still being cued, what it replaces still up.
+    pub(super) fn timeline_unseen(&self, a: &ActiveCue) -> bool {
+        a.run.is_some_and(|r| {
+            self.runs.by_instance(r).is_some_and(|(_, run)| {
+                !run.outgoing.is_empty() && !run.carried.contains(&a.instance)
+            })
+        })
     }
 
     /// Start a seek's clips, held, each as the chase found it.
@@ -776,7 +1040,7 @@ impl Engine {
             && self
                 .active
                 .iter()
-                .all(|a| a.run != i || a.started || a.is_matte())
+                .all(|a| a.run != i || (a.started && a.seeking.is_none()) || a.is_matte())
     }
 
     /// A cueing run goes: its clips are let go together and its clock runs.
@@ -795,6 +1059,13 @@ impl Engine {
             if frozen.contains(&a.instance) {
                 a.unfreeze(paused);
             }
+        }
+        // (Not every clip may have come, if it had `CUE_LIMIT`: what is up goes on.)
+        if let Some(run) = self.runs.map.get_mut(&key) {
+            let gone = std::mem::take(&mut run.outgoing);
+            run.outgoing_since = None;
+            run.carried.clear();
+            self.active.retain(|a| !gone.contains(&a.instance));
         }
         self.timeline_step(show, key, 0.0);
     }
@@ -1056,6 +1327,7 @@ impl Engine {
     /// A run is over or replaced: what it was waiting to start never starts, and
     /// what its pause froze is let go.
     fn cancel_run(&mut self, run: &Run) {
+        self.drop_outgoing(run);
         let i = run.instance;
         self.pending
             .retain(|p| p.run != Some(i) && p.start.run != Some(i));
@@ -1133,6 +1405,7 @@ impl Engine {
     /// cueing goes once its clips are ready, or have had `CUE_LIMIT`.
     pub(super) fn timeline_tick(&mut self, show: &Show, dt: f64) {
         self.runs.jumps = 0;
+        self.timeline_settle();
         if self.paused {
             return;
         }
@@ -1177,6 +1450,8 @@ impl Engine {
     /// After each tick: a timeline group's time is its clock's; a run whose group
     /// has gone, or a list's whose clips are all done, is stopped where it is.
     pub(super) fn timeline_after_tick(&mut self, show: &Show) {
+        // A seek's clips that have come this tick are seen at once.
+        self.timeline_settle();
         // Clips waiting for a fade cue that their run will no longer reach never start.
         if self.pending.iter().any(|p| p.waits_for_fade) {
             let fades: HashSet<u64> = self

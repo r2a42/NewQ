@@ -1992,7 +1992,7 @@ fn jump_cues_go_to_a_time_a_marker_or_a_clip_and_one_to_its_own_place_does_not_s
     e.active_list = l;
     e.go(&show);
     e.tick(&show, 1.5);
-    assert!(active(&e, early).is_none() && active(&e, late).is_some());
+    assert!(active(&e, late).is_some());
     assert!((elapsed(&e, late) - 0.5).abs() < 1e-9);
     until(&mut e, &show, Some(0.0), "the text cued", 10, |e| {
         e.runs
@@ -2000,6 +2000,8 @@ fn jump_cues_go_to_a_time_a_marker_or_a_clip_and_one_to_its_own_place_does_not_s
             .get(&k)
             .is_some_and(|r| r.state == RunState::Running)
     });
+    // What it played before stayed up until then (P5's smooth seek).
+    assert!(active(&e, early).is_none());
     // To a marker, and to a clip's start.
     for (at, pos) in [
         (TimelinePoint::Marker(1), 12.0),
@@ -3148,4 +3150,112 @@ fn a_jump_the_clock_nears_has_what_it_lands_in_ready_and_its_first_frame_comes_a
     }
     assert!(started(&e, late));
     assert_eq!(shown(&e, late), Some(frame_at(&mut e, &show, late, 2.0)));
+}
+
+// ----- A smooth seek (P5) ----------------------------------------------------------
+
+#[test]
+fn a_seek_keeps_what_was_up_until_the_new_clips_are_cued_then_changes_all_at_once() {
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let g = group(&mut show);
+    let c = faded_text(&mut show, 3.0, 0.0);
+    let a = child(&mut show, g, c, 0.0);
+    let mut c = faded_text(&mut show, 5.0, 0.0);
+    c.kind.media_mut().unwrap().layer = 1;
+    let b = child(&mut show, g, c, 4.0);
+    let c = faded_text(&mut show, 5.0, 0.0);
+    let d = child(&mut show, g, c, 4.0);
+    let mut e = Engine::for_tests();
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first drawn", 10, |e| {
+        started(e, a)
+    });
+    e.tick(&show, 1.0);
+    for (to, running) in [(5.0, true), (1.0, true), (6.0, false)] {
+        // Running: it cues there; paused: it parks there.
+        if !running {
+            e.timeline_pause(&show, key(g), PauseFreeze::Everything, &[], false, true);
+        }
+        e.timeline_seek(&show, key(g), to, true);
+        let new: Vec<CueId> = if to > 4.0 { vec![d, b] } else { vec![a] };
+        let t0 = Instant::now();
+        // Drawing at full size: no time for it between the first ticks.
+        let mut n = 0;
+        loop {
+            assert!(t0.elapsed() < Duration::from_secs(20), "never cued");
+            let l: Vec<CueId> = levels(&e, out).into_iter().map(|x| x.0).collect();
+            assert!(!l.is_empty(), "nothing up after the seek to {to}");
+            let ready = new.iter().all(|id| started(&e, *id));
+            if l.iter().any(|id| new.contains(id)) {
+                // Once anything new is seen, all of it is, and only it.
+                assert_eq!(l.len(), new.len(), "{to}: {l:?}");
+                assert!(new.iter().all(|id| l.contains(id)), "{to}: {l:?}");
+                break;
+            }
+            // Seen on the tick the last has come.
+            assert!(!ready, "{to}: cued but not seen: {l:?}");
+            n += 1;
+            if n > 2 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            e.tick(&show, 0.0);
+        }
+        assert!(
+            n > 0,
+            "the new clips took a moment (the old stayed meanwhile)"
+        );
+        if running {
+            until(&mut e, &show, Some(0.0), "running", 10, |e| {
+                e.runs
+                    .map
+                    .get(&key(g))
+                    .is_some_and(|r| r.state == RunState::Running)
+            });
+        }
+    }
+}
+
+#[test]
+fn a_video_alive_on_both_sides_of_a_seek_is_jumped_where_it_is() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Video, clip, 9.0);
+    let v = child(&mut show, g, c, 0.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the video", 10, |e| started(e, v));
+    ticks(&mut e, &show, 0.1, 5);
+    let before = instance(&e, v);
+    e.timeline_seek(&show, key(g), 5.0, true);
+    assert_eq!(state(&mut e, &show, key(g)), RunState::Cueing);
+    // The same cue, jumping: up all the while, its new decoders swapped in.
+    assert!(active(&e, v).is_some_and(|a| a.seeking() && a.hold));
+    until(&mut e, &show, Some(0.0), "running", 10, |e| {
+        assert_eq!(e.layers(out).len(), 1, "up all the while");
+        e.runs
+            .map
+            .get(&key(g))
+            .is_some_and(|r| r.state == RunState::Running)
+    });
+    let a = active(&e, v).unwrap();
+    assert_eq!(a.instance, before, "not started again");
+    assert!(!a.seeking() && !a.hold && (a.file_from - 5.0).abs() < 1e-6);
+    assert!((a.elapsed - 5.0).abs() < 1e-6);
+    assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 5.0)));
+    ticks(&mut e, &show, 0.1, 3);
+    assert!(elapsed(&e, v) > 5.0 && view(&mut e, &show, key(g)).pos > 5.0);
+    // A seek back while it is held at a pause of the transport: the same.
+    e.timeline_pause(&show, key(g), PauseFreeze::Everything, &[], false, true);
+    e.timeline_seek(&show, key(g), 2.0, true);
+    until(&mut e, &show, Some(0.0), "the jump", 10, |e| {
+        active(e, v).is_some_and(|a| !a.seeking())
+    });
+    assert_eq!(instance(&e, v), before);
+    assert!(parked(&mut e, &show, key(g)) && active(&e, v).unwrap().hold);
+    assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 2.0)));
 }

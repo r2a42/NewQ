@@ -588,6 +588,9 @@ struct Seek {
     base: f64,
     file_from: f64,
     spawned_at: Instant,
+    /// Its length from there, when that changes with the jump (a timeline's
+    /// clip jumped where it is by a seek of its timeline).
+    duration: Option<Option<f64>>,
 }
 
 impl ActiveCue {
@@ -2004,6 +2007,7 @@ impl Engine {
                 base: to,
                 file_from,
                 spawned_at: Instant::now(),
+                duration: None,
             });
         }
         Ok(())
@@ -3317,6 +3321,9 @@ impl Engine {
         // Pictures of a timeline that the next clip on their track abuts: they
         // stay up until it comes in, so the join never shows nothing.
         let joining = self.timeline_joins(show);
+        // Runs whose new clips wait unseen while the ones they replace stay up
+        // (a seek): those come in only once they are all cued.
+        let unseen = self.runs.hiding();
         self.active.retain_mut(|a| {
             let joins = joining.contains(&a.instance);
             let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
@@ -3356,7 +3363,6 @@ impl Engine {
                 _ => dt,
             };
             let mut completed = false;
-            let was_started = a.started;
             let (audio_lead, video_lag) = (a.audio_lead, a.video_lag);
             if a.started {
                 a.age += dt;
@@ -3612,8 +3618,8 @@ impl Engine {
             if a.started && !show_paused {
                 a.step_screens(dt, &steps);
             }
-            if !was_started
-                && a.started
+            if a.started
+                && !a.run.is_some_and(|r| unseen.contains(&r))
                 && let Some(e) = a.entry.take()
             {
                 entries.push((a.instance, e));
@@ -4214,8 +4220,9 @@ impl Engine {
     pub fn layers(&self, output: OutputId) -> Vec<LayerRef<'_>> {
         let mut layers: Vec<(i32, LayerRef)> = Vec::new();
         for a in &self.active {
-            // Held back until its delay has passed.
-            if !a.started || a.age < a.video_lag {
+            // Held back until its delay has passed, or (a seek's new clip) until
+            // its run is cued, what it replaces staying up meanwhile.
+            if !a.started || a.age < a.video_lag || self.timeline_unseen(a) {
                 continue;
             }
             let Some(level) = a.level_on(output) else {
@@ -4359,6 +4366,9 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
     a.seek_base = s.base;
     a.elapsed = s.base;
     a.file_from = s.file_from;
+    if let Some(d) = s.duration {
+        a.duration = d;
+    }
     a.restart_auto_fade();
     note
 }
