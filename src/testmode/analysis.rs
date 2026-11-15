@@ -397,10 +397,385 @@ pub fn analyse(
     out
 }
 
+// ----- Timelines -------------------------------------------------------------------
+
+/// A timeline's clock, run against the real time it should keep: more than this
+/// apart over one stretch of running is a problem (a little over two frames at
+/// 25 a second, where sound and picture are seen to part).
+pub const DRIFT_PROBLEM: f64 = 0.1;
+/// ...and more than this is tracked (a frame).
+pub const DRIFT_WATCH: f64 = 0.04;
+/// A clip whose first frame (or sound) came more than this after its place on
+/// the clock was late enough to be seen as a late cue.
+pub const LATE_PROBLEM: f64 = 0.5;
+/// ...and more than this is tracked (five frames).
+pub const LATE_WATCH: f64 = 0.2;
+/// Getting a timeline's clips ready after a seek or start taking longer than
+/// this is tracked; reaching the engine's limit (`CUE_LIMIT`) is a problem.
+pub const CUEING_SLOW: f64 = 1.0;
+/// Laps of a timeline may differ from their median by this much, or this part
+/// of it if more: they are timed by its clock, and only getting clips ready
+/// (up to two seconds a seek) and GO's moment move them.
+pub const LAP_SPREAD_SECS: f64 = 2.0;
+pub const LAP_SPREAD_PART: f64 = 0.02;
+
+/// A stretch of a timeline's clock running on its own (no pause, seek, loop or
+/// sleep in it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stretch {
+    /// Seconds into the test it began.
+    pub at: f64,
+    /// Its length in real time.
+    pub secs: f64,
+    /// The clock less the real time over it: + ahead, - behind.
+    pub drift: f64,
+}
+
+/// A clip the clock reached while running, and when it came up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arrival {
+    pub at: f64,
+    pub name: String,
+    /// Seconds on the clock after its place that its first frame or sound came;
+    /// None: it never came up.
+    pub late: Option<f64>,
+}
+
+/// A time a timeline stood still getting its clips ready (`RunState::Cueing`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CueSpell {
+    pub at: f64,
+    pub lap: usize,
+    pub secs: f64,
+    /// It ran out of time (the engine's limit) and went on without them all.
+    pub gave_up: bool,
+}
+
+/// What a timeline test noted about its timelines (see `testmode::timeline`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TimelineNotes {
+    pub stretches: Vec<Stretch>,
+    pub arrivals: Vec<Arrival>,
+    pub cueing: Vec<CueSpell>,
+}
+
+fn secs_text(s: f64) -> String {
+    if s.abs() < 1.0 {
+        format!("{:.0} ms", s * 1000.0)
+    } else {
+        format!("{s:.1} s")
+    }
+}
+
+/// What the timeline notes and the laps say, on top of `analyse`.
+pub fn analyse_timeline(n: &TimelineNotes, laps: &[f64]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let clock = |t: f64| super::session::clock(std::time::Duration::from_secs_f64(t.max(0.0)));
+
+    // 1. The clock against the real time.
+    if let Some(worst) = n
+        .stretches
+        .iter()
+        .max_by(|a, b| a.drift.abs().total_cmp(&b.drift.abs()))
+    {
+        let side = if worst.drift > 0.0 {
+            "ahead of"
+        } else {
+            "behind"
+        };
+        let words = format!(
+            "the timeline's clock ran {} {side} the real time over {} of running ({} into the test)",
+            secs_text(worst.drift.abs()),
+            secs_text(worst.secs),
+            clock(worst.at)
+        );
+        if worst.drift.abs() > DRIFT_PROBLEM {
+            out.push(problem(format!(
+                "At worst {words}. Its clips start by that clock, so they come out of step with sound and anything else timed by the real clock."
+            )));
+        } else if worst.drift.abs() > DRIFT_WATCH {
+            out.push(watch(format!(
+                "Tracking: at worst {words}. Under {} it isn't seen.",
+                secs_text(DRIFT_PROBLEM)
+            )));
+        }
+    }
+
+    // 2. Clips that came up late, or never.
+    let never: Vec<&Arrival> = n.arrivals.iter().filter(|a| a.late.is_none()).collect();
+    if let Some(first) = never.first() {
+        out.push(problem(format!(
+            "{} clip{} the timeline reached never came up (the first: {}, {} into the test).",
+            never.len(),
+            if never.len() == 1 { "" } else { "s" },
+            first.name,
+            clock(first.at)
+        )));
+    }
+    let came: Vec<(&Arrival, f64)> = n
+        .arrivals
+        .iter()
+        .filter_map(|a| a.late.map(|l| (a, l)))
+        .collect();
+    if let Some((worst, late)) = came.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+        let over = |bound: f64| came.iter().filter(|(_, l)| *l > bound).count();
+        let words = format!(
+            "of the {} clips the timeline reached came up more than {} after their place on its clock (the latest: {}, {} late, {} into the test)",
+            came.len(),
+            secs_text(if *late > LATE_PROBLEM {
+                LATE_PROBLEM
+            } else {
+                LATE_WATCH
+            }),
+            worst.name,
+            secs_text(*late),
+            clock(worst.at)
+        );
+        if *late > LATE_PROBLEM {
+            out.push(problem(format!(
+                "{} {words}: the audience sees a late cue.",
+                over(LATE_PROBLEM)
+            )));
+        } else if *late > LATE_WATCH {
+            out.push(watch(format!("Tracking: {} {words}.", over(LATE_WATCH))));
+        }
+    }
+
+    // 3. Standing still to get clips ready.
+    let gave_up: Vec<&CueSpell> = n.cueing.iter().filter(|c| c.gave_up).collect();
+    if let Some(first) = gave_up.first() {
+        out.push(problem(format!(
+            "{} time{} the timeline's clips were not all ready within the time it gives them after a start or seek, and it ran on without them (the first in lap {}, {} into the test).",
+            gave_up.len(),
+            if gave_up.len() == 1 { "" } else { "s" },
+            first.lap.max(1),
+            clock(first.at)
+        )));
+    } else if let Some(slow) = n
+        .cueing
+        .iter()
+        .filter(|c| c.secs > CUEING_SLOW)
+        .max_by(|a, b| a.secs.total_cmp(&b.secs))
+    {
+        out.push(watch(format!(
+            "Tracking: getting the timeline's clips ready after a start or seek took up to {} (lap {}); the clock stands meanwhile.",
+            secs_text(slow.secs),
+            slow.lap.max(1)
+        )));
+    }
+
+    // 4. Laps the same length.
+    if laps.len() >= 2 {
+        let mut sorted = laps.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let median = sorted[sorted.len() / 2];
+        let bound = LAP_SPREAD_SECS.max(median * LAP_SPREAD_PART);
+        let odd: Vec<(usize, f64)> = laps
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| (**l - median).abs() > bound)
+            .map(|(i, l)| (i + 1, *l))
+            .collect();
+        if let Some(&(i, l)) = odd.first() {
+            out.push(problem(format!(
+                "{} of {} laps differed from the usual {median:.1} s by more than {bound:.1} s (the first: lap {i}, {l:.1} s). The timeline's clock times its laps, so they should match.",
+                odd.len(),
+                laps.len()
+            )));
+        }
+    }
+    out
+}
+
+/// The timeline part of the report: what was measured, found or not.
+pub fn timeline_summary(n: &TimelineNotes) -> Vec<String> {
+    let mut out = Vec::new();
+    match n
+        .stretches
+        .iter()
+        .max_by(|a, b| a.drift.abs().total_cmp(&b.drift.abs()))
+    {
+        Some(w) => out.push(format!(
+            "Clock against real time: {} stretches of running, {} in all; at worst {:+.0} ms over {}.",
+            n.stretches.len(),
+            secs_text(n.stretches.iter().map(|s| s.secs).sum()),
+            w.drift * 1000.0,
+            secs_text(w.secs)
+        )),
+        None => out.push("Clock against real time: no stretch of running was measured.".into()),
+    }
+    let came: Vec<f64> = n.arrivals.iter().filter_map(|a| a.late).collect();
+    let never = n.arrivals.len() - came.len();
+    if came.is_empty() && never == 0 {
+        out.push("Clips on time: none was measured.".into());
+    } else {
+        let worst = came.iter().copied().fold(0.0, f64::max);
+        let mean = came.iter().sum::<f64>() / came.len().max(1) as f64;
+        out.push(format!(
+            "Clips on time: {} came up, on average {:.0} ms after their place, at worst {:.0} ms; {never} never did.",
+            came.len(),
+            mean * 1000.0,
+            worst * 1000.0
+        ));
+    }
+    let total: f64 = n.cueing.iter().map(|c| c.secs).sum();
+    let longest = n.cueing.iter().map(|c| c.secs).fold(0.0, f64::max);
+    out.push(format!(
+        "Getting clips ready: {} times, {} in all, the longest {}; {} ran out of time.",
+        n.cueing.len(),
+        secs_text(total),
+        secs_text(longest),
+        n.cueing.iter().filter(|c| c.gave_up).count()
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stats::Inputs;
+
+    fn stretch(secs: f64, drift: f64) -> Stretch {
+        Stretch {
+            at: 10.0,
+            secs,
+            drift,
+        }
+    }
+
+    fn arrival(name: &str, late: Option<f64>) -> Arrival {
+        Arrival {
+            at: 20.0,
+            name: name.into(),
+            late,
+        }
+    }
+
+    #[test]
+    fn a_clock_that_keeps_time_passes_and_one_that_drifts_is_tracked_then_a_problem() {
+        let mut n = TimelineNotes {
+            stretches: vec![stretch(30.0, 0.008), stretch(12.0, -0.015)],
+            ..Default::default()
+        };
+        assert!(analyse_timeline(&n, &[]).is_empty());
+        n.stretches.push(stretch(40.0, -0.06));
+        let f = analyse_timeline(&n, &[]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].severity, Severity::Watch);
+        assert!(f[0].text.contains("60 ms behind"), "{}", f[0].text);
+        assert_eq!(Verdict::of(&f), Verdict::Passed, "tracking doesn't count");
+        n.stretches.push(stretch(50.0, 0.25));
+        let f = analyse_timeline(&n, &[]);
+        assert_eq!(f[0].severity, Severity::Problem);
+        assert!(
+            f[0].text.contains("250 ms ahead of") && f[0].text.contains("50.0 s"),
+            "{}",
+            f[0].text
+        );
+    }
+
+    #[test]
+    fn late_clips_are_tracked_then_a_problem_and_one_that_never_came_is_named() {
+        let mut n = TimelineNotes {
+            arrivals: vec![arrival("Sintel", Some(0.03)), arrival("Title", Some(0.0))],
+            ..Default::default()
+        };
+        assert!(analyse_timeline(&n, &[]).is_empty());
+        n.arrivals.push(arrival("Jellyfish", Some(0.3)));
+        let f = analyse_timeline(&n, &[]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Watch);
+        assert!(
+            f[0].text.contains("1 of the 3") && f[0].text.contains("Jellyfish, 300 ms late"),
+            "{}",
+            f[0].text
+        );
+        n.arrivals.push(arrival("Big Buck Bunny", Some(1.4)));
+        n.arrivals.push(arrival("Blue Marble", None));
+        let f = analyse_timeline(&n, &[]);
+        assert!(f.iter().all(|x| x.severity == Severity::Problem), "{f:?}");
+        assert!(
+            f.iter()
+                .any(|x| x.text.contains("never came up") && x.text.contains("Blue Marble")),
+            "{f:?}"
+        );
+        assert!(
+            f.iter()
+                .any(|x| x.text.contains("1 of the 4") && x.text.contains("1.4 s late")),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn cueing_that_runs_out_of_time_is_a_problem_and_slow_cueing_is_tracked() {
+        let spell = |secs: f64, gave_up: bool| CueSpell {
+            at: 5.0,
+            lap: 2,
+            secs,
+            gave_up,
+        };
+        let mut n = TimelineNotes {
+            cueing: vec![spell(0.2, false), spell(0.4, false)],
+            ..Default::default()
+        };
+        assert!(analyse_timeline(&n, &[]).is_empty());
+        n.cueing.push(spell(1.6, false));
+        let f = analyse_timeline(&n, &[]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Watch);
+        assert!(
+            f[0].text.contains("1.6 s") && f[0].text.contains("lap 2"),
+            "{}",
+            f[0].text
+        );
+        n.cueing.push(spell(2.0, true));
+        let f = analyse_timeline(&n, &[]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Problem);
+        assert!(
+            f[0].text.starts_with("1 time the timeline's clips"),
+            "{}",
+            f[0].text
+        );
+    }
+
+    #[test]
+    fn laps_of_a_timeline_should_match_and_one_that_does_not_is_a_problem() {
+        let n = TimelineNotes::default();
+        // One lap: nothing to compare.
+        assert!(analyse_timeline(&n, &[150.0]).is_empty());
+        // Within two seconds of each other: the same.
+        assert!(analyse_timeline(&n, &[150.0, 151.2, 149.6, 150.4]).is_empty());
+        // A long lap's bound is a fiftieth of it: 6 s at 300 s.
+        assert!(analyse_timeline(&n, &[300.0, 305.0, 297.0]).is_empty());
+        let f = analyse_timeline(&n, &[150.0, 150.3, 157.0, 150.1]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Problem);
+        assert!(
+            f[0].text.contains("lap 3, 157.0 s") && f[0].text.contains("150.3 s"),
+            "{}",
+            f[0].text
+        );
+    }
+
+    #[test]
+    fn the_timeline_summary_says_what_was_measured() {
+        let n = TimelineNotes {
+            stretches: vec![stretch(30.0, 0.008), stretch(10.0, -0.02)],
+            arrivals: vec![arrival("A", Some(0.02)), arrival("B", None)],
+            cueing: vec![CueSpell {
+                at: 1.0,
+                lap: 1,
+                secs: 0.5,
+                gave_up: false,
+            }],
+        };
+        let s = timeline_summary(&n).join("\n");
+        assert!(s.contains("2 stretches") && s.contains("-20 ms"), "{s}");
+        assert!(s.contains("1 came up") && s.contains("1 never"), "{s}");
+        assert!(s.contains("1 times") && s.contains("0 ran out"), "{s}");
+        assert!(timeline_summary(&TimelineNotes::default())[0].contains("no stretch"));
+    }
 
     fn sample(i: u64, rss: u64) -> Sample {
         Sample {
