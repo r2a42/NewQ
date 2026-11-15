@@ -27,7 +27,7 @@ The README describes the features; this file is about working on the code.
   pause-before/track/marker, `set_fade`, `set_opacity`, `move_track` (swaps the layers of two picture
   tracks), `place_at`, `paste_clips`, `duplicate_clips`; `split` leaves fade cues on the first half and
   makes the second visible, `starts_visible`; a move onto a display in `also_on` takes it out of the
-  list); `snap.rs`; `chase.rs` works out what plays at a time (seek, parking, Jump; `overlap` and
+  list; `add_clip` gives a new still, text, shape, clock or timer `STILL_LEN`, wherever it is made); `snap.rs`; `chase.rs` works out what plays at a time (seek, parking, Jump; `overlap` and
   `crossed_by` for overlap crossfades, per display), pure, its own tests.
   `src/engine/timeline.rs`: a `Run` per timeline in `Runs.map` (clock `pos`, `RunState`
   Stopped/Cueing/Running/Paused, `RunView` for the UI, `pub use`d by `engine.rs`); waiting clips are
@@ -92,7 +92,7 @@ The README describes the features; this file is about working on the code.
   `EditorState::list_rows` (set on going to the tab while the classic Timeline pane is open, so the pane
   shows the tracks); the pane otherwise says the tracks are in the tab. `add_cue`/`AddFiles` on the active
   timeline list go to `list_tab::add_clips` (at the run's `pos`, in turn where lengths are known,
-  `fitting_track`, stills/text/shapes held `STILL_LEN`); a paste there or a `MoveToList` into a timeline
+  `fitting_track`); a paste there or a `MoveToList` into a timeline
   list lands at its playhead (`edit::place_at`); groups are refused there (`NO_GROUPS`: MoveToList,
   GroupCue, Paste, slides, `NewTimelineGroup`). `ui::go_readout` is `list_tab::go_readout` (`go_plan` plus
   the run's next pause or loop); GO on a timeline list keeps the selection; `modern::next_cue` is None

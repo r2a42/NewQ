@@ -8,9 +8,6 @@ use super::*;
 use crate::engine::{GoPlan, TimelineGo};
 use crate::show::{Cue, CueKind};
 
-/// How long a still, a text or a shape added to a timeline list is held.
-pub const STILL_LEN: f64 = 5.0;
-
 /// Why a group can't go into a timeline list.
 pub const NO_GROUPS: &str = "A timeline list can't hold groups: its cues are clips on one clock";
 
@@ -139,17 +136,6 @@ pub fn add_clips(
             continue;
         };
         added.push(id);
-        // A still, a text or a shape would hold for ever and fill its track:
-        // on a timeline it gets a length to trim.
-        if matches!(
-            ty,
-            CueType::Image | CueType::Text | CueType::Shape | CueType::Clock | CueType::Timer
-        ) && let Some(i) = show.cue_index(id)
-            && let Some(m) = show.cues[i].kind.media_mut()
-            && m.end.is_none()
-        {
-            m.end = Some(STILL_LEN);
-        }
         // The next one after this one, if its length is known yet (a file not
         // looked at yet has none: the next goes at the same time, on another track).
         if let Some(len) = show

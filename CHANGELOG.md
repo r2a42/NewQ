@@ -12,6 +12,9 @@ release page, and a release is refused if it has none.
   it, or the pane as before, in Settings ▸ General, the Window menu or the tracks'
   toolbar; in the new interface it is the Timeline view. *Back to cue list* puts it
   away.
+- **New stills, texts and shapes on a timeline last 5 seconds** wherever they are
+  made (the tracks' menus, a picture dropped on a track, the workspace's bin), as
+  they already did in a timeline list, instead of holding for ever.
 - **Timelines from a remote.** OSC can run, pause, continue, stop (with the Stop
   cue's 3 s fade, or at once), jump to a time or a marker, and leave a loop on a
   timeline, named by its list's name or its group's cue number:

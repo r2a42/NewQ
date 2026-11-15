@@ -19,6 +19,12 @@ use std::path::PathBuf;
 /// The shortest a clip (its content, after any lead-in) can be made.
 pub const MIN_LEN: f64 = 0.05;
 
+/// How long a new still, text, shape, clock or timer clip is held: one with no
+/// end of its own would hold for ever and fill its track, so on a timeline it
+/// gets a length to trim (wherever it is made: the list tab, the bin, the
+/// track menu, a dropped picture).
+pub const STILL_LEN: f64 = 5.0;
+
 /// Times closer than this are the same time.
 const SAME_TIME: f64 = 1e-6;
 
@@ -689,6 +695,14 @@ pub fn add_clip(
         return None;
     }
     set_track(&mut cue, track);
+    if matches!(
+        ty,
+        CueType::Image | CueType::Text | CueType::Shape | CueType::Clock | CueType::Timer
+    ) && let Some(m) = cue.kind.media_mut()
+        && m.end.is_none()
+    {
+        m.end = Some(STILL_LEN);
+    }
     add_cue(show, key, cue, at)
 }
 
@@ -1332,6 +1346,32 @@ mod tests {
     }
 
     #[test]
+    fn a_new_still_text_or_shape_clip_is_held_for_still_len() {
+        for n in 0..2 {
+            let mut f = fixture();
+            let key = keys(&f)[n];
+            let show = &mut f.show;
+            let v1 = picture(show, 0, 0);
+            for ty in [
+                CueType::Image,
+                CueType::Text,
+                CueType::Shape,
+                CueType::Clock,
+                CueType::Timer,
+            ] {
+                let id = add_clip(show, key, ty, None, v1, 1.0).unwrap();
+                assert_eq!(media(show, id).end, Some(STILL_LEN), "{ty:?}");
+                assert_eq!(len(show, key, id), Some(STILL_LEN), "{ty:?}");
+            }
+            // A video, a camera and a sound keep their own end (or none).
+            let v = add_clip(show, key, CueType::Video, None, v1, 1.0).unwrap();
+            assert_eq!(media(show, v).end, None);
+            let cam = add_clip(show, key, CueType::Camera, None, v1, 1.0).unwrap();
+            assert_eq!(media(show, cam).end, None);
+        }
+    }
+
+    #[test]
     fn clips_are_added_on_their_tracks_in_order_of_their_starts() {
         for n in 0..2 {
             let mut f = fixture();
@@ -1517,6 +1557,7 @@ mod tests {
         let key = f.list;
         let show = &mut f.show;
         let img = clip(show, key, CueType::Image, picture(show, 0, 0), 1.0);
+        media(show, img).end = None;
         assert_eq!(len(show, key, img), None, "open-ended");
         assert!(trim(show, img, Edge::Right, 4.0, &mut fake_dur));
         assert_eq!(media(show, img).end, Some(3.0));
@@ -1624,6 +1665,7 @@ mod tests {
         );
         // Open-ended stays open-ended.
         let open = clip(show, key, CueType::Text, picture(show, 0, 2), 0.0);
+        media(show, open).end = None;
         let o2 = split(show, key, &[open], 5.0, &mut fake_dur)[0];
         assert_eq!(
             (media(show, open).end, media(show, o2).end),
@@ -1886,6 +1928,7 @@ mod tests {
             assert!(model::clocked(show, key, show.cue(v).unwrap(), c.len));
             // Without a length there is no fade-out to pause before.
             let img = clip(show, key, CueType::Image, picture(show, 0, 1), 0.0);
+            media(show, img).end = None;
             let none = add_pause_before(show, key, img, PauseBefore::ClipFadeOut, &mut fake_dur);
             assert!(none.is_none());
             assert_sound(show);

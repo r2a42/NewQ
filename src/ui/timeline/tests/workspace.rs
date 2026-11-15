@@ -285,6 +285,9 @@ fn a_bin_item_dragged_onto_a_track_becomes_a_clip_there_in_one_undo_step() {
         let clips = clips_of(&f.show, key);
         let clip = clips.iter().find(|c| c.id == made.id).unwrap();
         assert_eq!(clip.track, picture_track(&f.show), "on the track let go on");
+        // Held for a length to trim, as in a timeline list's tab, not for ever.
+        assert_eq!(made.kind.media().unwrap().end, Some(edit::STILL_LEN));
+        assert_eq!(clip.len, Some(edit::STILL_LEN));
         // One step back takes it off again.
         super::super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
         assert_eq!(f.show.cues.len(), before);
@@ -306,10 +309,9 @@ fn a_bin_item_dragged_onto_a_track_becomes_a_clip_there_in_one_undo_step() {
         let shape = bin_item(&m, "Shape");
         press(&mut m, &mut f, shape.center());
         assert_eq!(f.show.cues.len(), n + 1);
-        assert!(matches!(
-            f.show.cue(f.st.selected.unwrap()).unwrap().kind,
-            CueKind::Shape(_)
-        ));
+        let shape = f.show.cue(f.st.selected.unwrap()).unwrap();
+        assert!(matches!(shape.kind, CueKind::Shape(_)));
+        assert_eq!(shape.kind.media().unwrap().end, Some(edit::STILL_LEN));
     }
 }
 
