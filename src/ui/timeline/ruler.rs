@@ -155,6 +155,8 @@ pub(super) fn draw(
     let mut whole: Vec<(Rect, Color32, String, bool)> = Vec::new();
     #[cfg(test)]
     let mut notes: Vec<(Vec<u64>, Rect, String)> = Vec::new();
+    #[cfg(test)]
+    let mut tips: Vec<(Vec<u64>, String)> = Vec::new();
     let mut on_a_flag = false;
     for (_, chip) in &plan {
         let super::tracks::Chip::Lead { members, limit, .. } = chip else {
@@ -222,10 +224,10 @@ pub(super) fn draw(
                 .filter_map(|id| marker(*id))
                 .map(|m| format!("{} · {}", m.name, fmt_time(m.time)))
                 .collect();
-            format!(
-                "{n} markers here (zoom in to part them; a click picks each in turn):\n\n{}\n\n\
-                 Drag to move the one shown; double-click to rename it; right-click for more.",
-                lines.join("\n")
+            super::tracks::several_tip(
+                &format!("{n} markers here (zoom in to part them; a click picks each in turn):"),
+                &lines,
+                "Drag to move the one shown; double-click to rename it; right-click for more.",
             )
         } else {
             format!(
@@ -234,6 +236,8 @@ pub(super) fn draw(
                 fmt_time(m.time)
             )
         };
+        #[cfg(test)]
+        tips.push((members.clone(), tip.clone()));
         let r = ui
             .interact(hit, ui.id().with(("marker", members[0])), sense)
             .on_hover_text(tip);
@@ -340,7 +344,10 @@ pub(super) fn draw(
         painter.galley(pos2(full.left() + 4.0, full.top()), g, Color32::BLACK);
     }
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_marker_flags", host)), notes));
+    ui.data_mut(|d| {
+        d.insert_temp(egui::Id::new(("timeline_marker_flags", host)), notes);
+        d.insert_temp(egui::Id::new(("timeline_marker_tips", host)), tips);
+    });
 
     // A marker's name being typed, over its flag.
     let renaming = match &st.timeline.renaming {

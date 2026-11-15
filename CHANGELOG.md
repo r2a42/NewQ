@@ -6,6 +6,10 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Shorter tooltips for cues at one place.** Hovering a Cues-track marker that stands for several
+  cues gave each cue's long description, often taller than the screen. It now gives one short
+  line per cue (number, name, time, what it does), at most eight lines and then "and N more";
+  one cue's marker still has the whole description. Ruler flags of several markers do the same.
 - **Timeline markers at the same time no longer hide each other.** Markers at one time (or too
   close to tell apart) are one flag on the ruler with a count, "×2 Chorus", as cues are on the
   Cues track. Its tooltip lists them, each click picks the next, and a drag moves the one it

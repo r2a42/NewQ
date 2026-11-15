@@ -480,14 +480,77 @@ fn cue_labels(ui: &Ui, p: &egui::Painter, host: Host, labels: &[CueLabel]) {
     ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_cue_labels", host)), notes));
 }
 
-/// A chip's tooltip: each of its cues' number, name, time and what it does.
-fn chip_tip(ctx: &Ctx, members: &[CueId]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for id in members {
-        let (Some(q), Some(c)) = (ctx.show.cue(*id), ctx.clips.iter().find(|c| c.id == *id)) else {
-            continue;
-        };
-        let mut s = format!(
+/// The most lines a tooltip of a chip (or flag) of several lists.
+pub(super) const TIP_LINES: usize = 8;
+
+/// A tooltip for several things at one place: `head`, one line each (at most
+/// `TIP_LINES`, then "and N more") and `foot`.
+pub(super) fn several_tip(head: &str, lines: &[String], foot: &str) -> String {
+    let mut s = format!("{head}\n");
+    let shown = if lines.len() > TIP_LINES {
+        TIP_LINES - 1
+    } else {
+        lines.len()
+    };
+    for l in &lines[..shown] {
+        s += &format!("\n{l}");
+    }
+    if lines.len() > shown {
+        s += &format!("\nand {} more", lines.len() - shown);
+    }
+    s += &format!("\n\n{foot}");
+    s
+}
+
+/// What a cue does, in a few words, for a line of a chip of several: a
+/// control cue's row text, else its type.
+fn short_does(show: &Show, q: &crate::show::Cue, c: &Clip) -> String {
+    let what = match &q.kind {
+        CueKind::Control(k) => describe_control(show, q, k),
+        _ => String::new(),
+    };
+    if what.is_empty() {
+        c.ty.label().to_string()
+    } else {
+        what
+    }
+}
+
+/// A chip's tooltip: for one cue its number, name, time and what it does in
+/// full; for several, a line each (number · name · time · what it does).
+pub(super) fn chip_tip(ctx: &Ctx, members: &[CueId]) -> String {
+    let foot = "Drag to move; right-click for more.";
+    let found = |id: &CueId| {
+        ctx.show
+            .cue(*id)
+            .zip(ctx.clips.iter().find(|c| c.id == *id))
+    };
+    if members.len() > 1 {
+        let lines: Vec<String> = members
+            .iter()
+            .filter_map(found)
+            .map(|(q, c)| {
+                format!(
+                    "{} · {} · {} · {}",
+                    q.number,
+                    c.name,
+                    fmt_time(c.start),
+                    short_does(ctx.show, q, c)
+                )
+            })
+            .collect();
+        return several_tip(
+            &format!(
+                "{} cues here (zoom in to part them; a click picks each in turn):",
+                members.len()
+            ),
+            &lines,
+            foot,
+        );
+    }
+    let mut s = String::new();
+    if let Some((q, c)) = members.first().and_then(found) {
+        s = format!(
             "{} · {}\nAt {} · {}",
             q.number,
             c.name,
@@ -501,18 +564,8 @@ fn chip_tip(ctx: &Ctx, members: &[CueId]) -> String {
             }
             s += &format!("\n{}", k.description());
         }
-        parts.push(s);
     }
-    let mut s = if members.len() > 1 {
-        format!(
-            "{} cues here (zoom in to part them; a click picks each in turn):\n\n{}",
-            members.len(),
-            parts.join("\n\n")
-        )
-    } else {
-        parts.join("")
-    };
-    s += "\nDrag to move; right-click for more.";
+    s += &format!("\n{foot}");
     s
 }
 
@@ -789,6 +842,8 @@ pub(super) fn draw(
     let mut labels: Vec<CueLabel> = Vec::new();
     #[cfg(test)]
     let mut chip_notes: Vec<(Vec<CueId>, Rect)> = Vec::new();
+    #[cfg(test)]
+    let mut chip_tips: Vec<(Vec<CueId>, String)> = Vec::new();
     for lead in ctx.clips {
         let (start, len, track) = shown_at(drag_now.as_ref(), lead);
         let Some((_, row)) = rows.iter().find(|(t, _)| *t == track) else {
@@ -852,6 +907,7 @@ pub(super) fn draw(
         #[cfg(test)]
         if chip_w.is_some() {
             chip_notes.push((members.clone(), rect));
+            chip_tips.push((members.clone(), chip_tip(ctx, &members)));
         }
         let hit = rect.intersect(lanes);
         if hit.width() <= 0.0 || hit.height() <= 0.0 {
@@ -1070,7 +1126,10 @@ pub(super) fn draw(
 
     cue_labels(ui, &lane_painter, ctx.host, &labels);
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_cue_chips", ctx.host)), chip_notes));
+    ui.data_mut(|d| {
+        d.insert_temp(egui::Id::new(("timeline_cue_chips", ctx.host)), chip_notes);
+        d.insert_temp(egui::Id::new(("timeline_chip_tips", ctx.host)), chip_tips);
+    });
 
     // Ghosts: a clip on other displays shows, outlined, on the same layer's
     // track of each; clicking one picks the clip.

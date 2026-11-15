@@ -150,3 +150,54 @@ fn the_markers_are_grouped_by_the_cues_tracks_rule() {
     assert_eq!(get(8), tracks::Chip::Under);
     assert!(matches!(get(9), tracks::Chip::Lead { members, .. } if members == vec![9]));
 }
+
+fn tip_of(m: &Mouse, id: u64) -> String {
+    m.ctx
+        .data(|d| {
+            d.get_temp::<Vec<(Vec<u64>, String)>>(egui::Id::new((
+                "timeline_marker_tips",
+                Host::Pane,
+            )))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(ids, _)| ids.contains(&id))
+        .expect("a flag")
+        .1
+}
+
+#[test]
+fn a_flag_of_several_markers_lists_them_a_line_each_up_to_eight() {
+    let mut f = markers_fixture();
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let tip = tip_of(&m, 1);
+    let lines: Vec<&str> = tip.lines().collect();
+    assert!(lines[0].starts_with("3 markers here"), "{tip}");
+    let t = crate::ui::fmt_time;
+    for line in [
+        format!("Chorus · {}", t(5.0)),
+        format!("Bridge · {}", t(5.0)),
+        format!("Coda · {}", t(5.05)),
+    ] {
+        assert!(lines.contains(&line.as_str()), "{line:?} in {tip}");
+    }
+    assert!(tip_of(&m, 4).starts_with("Outro at "), "one: as before");
+    // Twelve at one time: seven and "and 5 more".
+    let key = TimelineKey::Group(f.group);
+    let s = model::settings_mut(&mut f.show, key).unwrap();
+    for id in 10..19 {
+        s.markers.push(Marker {
+            id,
+            time: 5.0,
+            name: format!("Mark {id}"),
+            color: None,
+        });
+    }
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let tip = tip_of(&m, 1);
+    let lines: Vec<&str> = tip.lines().collect();
+    assert!(lines[0].starts_with("12 markers here"), "{tip}");
+    assert!(lines.contains(&"and 5 more"), "{tip}");
+    assert_eq!(lines.len(), 1 + 1 + 7 + 1 + 1 + 1, "{tip}");
+}

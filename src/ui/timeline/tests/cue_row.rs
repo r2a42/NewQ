@@ -273,3 +273,64 @@ fn the_rule_narrows_chips_to_the_next_and_groups_those_nearer_than_a_chip() {
     assert!(matches!(get(5), tracks::Chip::Lead { limit: 318.0, .. }));
     assert!(plan.iter().all(|(i, _)| *i != id(4)));
 }
+
+fn chip_tips(m: &Mouse) -> Vec<(Vec<CueId>, String)> {
+    m.ctx
+        .data(|d| d.get_temp(egui::Id::new(("timeline_chip_tips", Host::Pane))))
+        .unwrap_or_default()
+}
+
+fn tip_of(m: &Mouse, id: CueId) -> String {
+    chip_tips(m)
+        .into_iter()
+        .find(|(ids, _)| ids.contains(&id))
+        .expect("a chip")
+        .1
+}
+
+#[test]
+fn a_chip_of_several_cues_has_a_short_line_each_and_one_cues_chip_the_whole_story() {
+    let Row {
+        mut f,
+        same,
+        spread,
+        ..
+    } = row();
+    // Ten more at 56 s: past eight lines, the rest are counted.
+    let many: Vec<CueId> = (0..10)
+        .map(|n| pause(&mut f, &format!("Cue light {n}"), 56.0))
+        .collect();
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let long = match &f.show.cue(same[0]).unwrap().kind {
+        CueKind::Control(c) => c.description(),
+        _ => unreachable!(),
+    };
+    // Two at one time: a line each, number · name · time · what it does.
+    let tip = tip_of(&m, same[0]);
+    let lines: Vec<&str> = tip.lines().collect();
+    assert!(lines[0].starts_with("2 cues here"), "{tip}");
+    for id in same {
+        let q = f.show.cue(id).unwrap();
+        let line = format!(
+            "{} · {} · {} · Pause timeline · content runs on",
+            q.number,
+            q.name,
+            crate::ui::fmt_time(20.0)
+        );
+        assert!(lines.contains(&line.as_str()), "{line:?} in {tip}");
+    }
+    assert!(!tip.contains(long), "no long description: {tip}");
+    assert_eq!(lines.len(), 1 + 1 + 2 + 1 + 1, "{tip}");
+    // One cue's chip: the whole description.
+    let one = tip_of(&m, spread[0]);
+    assert!(one.contains(long) && one.contains("At "), "{one}");
+    // Ten: seven lines and "and 3 more".
+    let tip = tip_of(&m, many[0]);
+    let lines: Vec<&str> = tip.lines().collect();
+    assert!(lines[0].starts_with("10 cues here"), "{tip}");
+    let cues = lines.iter().filter(|l| l.contains("Cue light")).count();
+    assert_eq!(cues, super::tracks::TIP_LINES - 1, "{tip}");
+    assert!(lines.contains(&"and 3 more"), "{tip}");
+    assert!(lines.len() <= super::tracks::TIP_LINES + 4, "{tip}");
+}

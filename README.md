@@ -1212,8 +1212,10 @@ are open in the classic interface they take its place.
   does; the cue under the pointer and the picked ones show their names whole, on
   top. Cues closer together than a marker's width (or at the very same time) are
   one marker with a second one peeping out behind it and "×2" before the name: its
-  tooltip lists them all, and each click on it picks the next of them (zoom in to
-  part them, unless they are at the same time).
+  tooltip gives a short line for each (number, name, time and what it does; past
+  eight, the rest are counted), and each click on it picks the next of them (zoom in to
+  part them, unless they are at the same time). A marker flag of several on the
+  ruler lists its markers the same way.
 - Right-click a clip for *Pause before this clip comes in*, *Pause before this clip
   fades out*, *Split at the playhead*, *Split here*, *Delete*, *Ripple delete*, its
   lanes, *Freeze clip* and *Resume clip*.
