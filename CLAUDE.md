@@ -291,7 +291,8 @@ The README describes the features; this file is about working on the code.
   hardware decoding comparison (a 4K clip made from the downloaded film, four looping
   tiles played with `video::set_hw_decode` off then on; a cue with a plain cut
   transition takes the place of the layers before it, so tiles use `FadeIn`),
-  `gui.rs` is the window (its "Show the test on" ticks are `Prefs::test_displays`;
+  `gui.rs` is the window (the test chosen is `Prefs::test_pick`, chosen again on opening,
+  `TestMode::choose_pick`; its "Show the test on" ticks are `Prefs::test_displays`;
   `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
   display shows the picture and the others mirror it with a whole-area `part_of`; the
   main window's own monitor is never offered). Timeline tests: `Flavour::Timeline` beside each `Level`

@@ -50,6 +50,9 @@ pub struct Prefs {
     /// Test Mode runs with the sound off (everything still mixed).
     #[serde(default, skip_serializing_if = "is_false")]
     pub test_muted: bool,
+    /// The test last chosen in Test Mode's window, chosen again when it opens.
+    #[serde(default, skip_serializing_if = "TestPick::is_default")]
+    pub test_pick: TestPick,
     /// The new interface (editor, operator and patch views) in place of the panes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub new_layout: bool,
@@ -62,6 +65,33 @@ pub struct Prefs {
     /// How the timeline editor's view keeps a running playhead in sight.
     #[serde(default, skip_serializing_if = "TimelineFollow::is_page")]
     pub timeline_follow: TimelineFollow,
+}
+
+/// A test chosen in Test Mode's window: a level of a flavour, or the debug test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestPick {
+    pub level: crate::testmode::Level,
+    #[serde(default)]
+    pub flavour: crate::testmode::Flavour,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub debug: bool,
+}
+
+impl Default for TestPick {
+    /// What the window starts with: the short cue test.
+    fn default() -> TestPick {
+        TestPick {
+            level: crate::testmode::Level::Short,
+            flavour: crate::testmode::Flavour::Cues,
+            debug: false,
+        }
+    }
+}
+
+impl TestPick {
+    fn is_default(&self) -> bool {
+        *self == TestPick::default()
+    }
 }
 
 /// Where the timeline editor is shown.
@@ -153,6 +183,11 @@ mod tests {
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,
             timeline_follow: TimelineFollow::Centre,
+            test_pick: TestPick {
+                level: crate::testmode::Level::Medium,
+                flavour: crate::testmode::Flavour::Timeline,
+                debug: false,
+            },
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
@@ -197,6 +232,21 @@ mod tests {
         assert_eq!(Prefs::load(&dir).log_level, crate::logging::LogLevel::Trace);
         std::fs::write(dir.join(FILE), "{\"log_level\":\"chatty\"}").unwrap();
         assert_eq!(Prefs::load(&dir), Prefs::default());
+        // The test chosen in Test Mode: its words in the file, read back.
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"test_pick\":{\"level\":\"Medium\",\"flavour\":\"Timeline\"}")
+        );
+        std::fs::write(
+            dir.join(FILE),
+            "{\"test_pick\":{\"level\":\"Long\",\"debug\":true}}",
+        )
+        .unwrap();
+        let pick = Prefs::load(&dir).test_pick;
+        assert_eq!(pick.level, crate::testmode::Level::Long);
+        assert_eq!(pick.flavour, crate::testmode::Flavour::Cues);
+        assert!(pick.debug);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

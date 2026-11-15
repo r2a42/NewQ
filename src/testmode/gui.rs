@@ -60,12 +60,15 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
     test.open = open;
     let heavy = test.heavy;
+    let pick = test.pick();
     st.test = test;
     if selected != st.prefs.test_displays
         || sound != (st.prefs.test_sound.clone(), st.prefs.test_muted)
         || heavy != st.prefs.test_heavy
+        || pick != st.prefs.test_pick
     {
         st.prefs.test_heavy = heavy;
+        st.prefs.test_pick = pick;
         st.prefs.test_displays = selected;
         (st.prefs.test_sound, st.prefs.test_muted) = sound;
         if let Some(dir) = &st.layout_dir
@@ -748,18 +751,33 @@ fn choose(ui: &mut egui::Ui, test: &mut super::TestMode) {
         ui.horizontal(|ui| {
             for level in Level::ALL {
                 let selected = !test.debug && test.level == level && test.flavour == flavour;
-                if ui.selectable_label(selected, flavour.name(level)).clicked() {
+                let r = ui.selectable_label(selected, flavour.name(level));
+                #[cfg(test)]
+                note_choice(ui, flavour.name(level), &r);
+                if r.clicked() {
                     test.choose(level, flavour);
                 }
             }
             if flavour == Flavour::Cues {
                 ui.separator();
-                if ui.selectable_label(test.debug, "Debug test").clicked() {
+                let r = ui.selectable_label(test.debug, "Debug test");
+                #[cfg(test)]
+                note_choice(ui, "Debug test".into(), &r);
+                if r.clicked() {
                     test.debug = true;
                 }
             }
         });
     }
+}
+
+/// For the tests: where each choice of test is, and whether it is the one chosen.
+#[cfg(test)]
+fn note_choice(ui: &egui::Ui, name: String, r: &egui::Response) {
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(String, egui::Rect)>>(egui::Id::new("test_choices"))
+            .push((name, r.rect))
+    });
 }
 
 fn spark(ui: &mut egui::Ui, label: &str, values: &[f32], now: String) {
@@ -1146,6 +1164,75 @@ fn hitches_line(h: &super::hitches::Hitches) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn the_test_chosen_in_the_window_is_kept_for_this_computer() {
+        let dir = std::env::temp_dir().join(format!("newq_test_pick_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = egui::Context::default();
+        let engine = Engine::for_tests();
+        let mut st = UiState::default();
+        st.layout_dir = Some(dir.clone());
+        st.test.open = true;
+        let mut t = 1.0;
+        let mut frame = |events: Vec<egui::Event>, st: &mut UiState| {
+            ctx.data_mut(|d| d.remove::<Vec<(String, egui::Rect)>>(egui::Id::new("test_choices")));
+            t += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 760.0),
+                )),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| window(ui.ctx(), &engine, st));
+            out.textures_delta.clear();
+            ctx.data(|d| d.get_temp::<Vec<(String, egui::Rect)>>(egui::Id::new("test_choices")))
+                .unwrap_or_default()
+        };
+        frame(vec![], &mut st);
+        let mut click = |name: &str, st: &mut UiState| {
+            let at = frame(vec![], st)
+                .into_iter()
+                .find(|c| c.0 == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .1
+                .center();
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(vec![egui::Event::PointerMoved(at)], st);
+            frame(vec![button(true)], st);
+            frame(vec![button(false)], st);
+        };
+        click("Timeline medium", &mut st);
+        assert_eq!(
+            (st.test.level, st.test.flavour),
+            (Level::Medium, Flavour::Timeline)
+        );
+        let saved = crate::prefs::Prefs::load(&dir).test_pick;
+        assert_eq!(saved, st.test.pick(), "saved at once");
+        assert_eq!(
+            (saved.level, saved.flavour, saved.debug),
+            (Level::Medium, Flavour::Timeline, false)
+        );
+        click("Debug test", &mut st);
+        assert!(crate::prefs::Prefs::load(&dir).test_pick.debug);
+        // Back to the first: the default, and not written.
+        click("Short", &mut st);
+        assert_eq!(
+            crate::prefs::Prefs::load(&dir).test_pick,
+            Default::default()
+        );
+        let text = std::fs::read_to_string(dir.join("prefs.json")).unwrap();
+        assert!(!text.contains("test_pick"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_planned_length_in_the_progress_text_never_changes() {

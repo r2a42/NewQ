@@ -20,9 +20,10 @@ pub mod selftest;
 pub mod session;
 pub mod timeline;
 
+use serde::{Deserialize, Serialize};
 pub use session::TestMode;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Level {
     Short,
     Medium,
@@ -50,7 +51,7 @@ impl Level {
 }
 
 /// What a test plays: a lap of cues, or timelines.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Flavour {
     #[default]
     Cues,

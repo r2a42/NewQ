@@ -1416,7 +1416,7 @@ displays from the *Displays* page of the settings.
 *Help ▸ Test mode…* plays a show of its own to find out how this computer copes, with
 nothing to type: no command line, no files to find. Choose *Short*, *Medium*, *Long*,
 their timeline versions (*Timeline short*, *Timeline medium*, *Timeline long*) or *Debug
-test* and press Start.
+test* and press Start. The window remembers the test you chose last on this computer.
 
 ### The debug test: every kind of cue, and one file to send
 

@@ -634,6 +634,24 @@ impl TestMode {
         self.set_level(level);
     }
 
+    /// The test chosen, as this computer keeps it (`Prefs::test_pick`).
+    pub fn pick(&self) -> crate::prefs::TestPick {
+        crate::prefs::TestPick {
+            level: self.level,
+            flavour: self.flavour,
+            debug: self.debug,
+        }
+    }
+
+    /// Choose `pick` again (the window opening), unless a test is under way.
+    pub fn choose_pick(&mut self, pick: crate::prefs::TestPick) {
+        if self.busy() || self.pick() == pick {
+            return;
+        }
+        self.choose(pick.level, pick.flavour);
+        self.debug = pick.debug;
+    }
+
     /// Begin: make the media ready (downloading what is missing).
     pub fn start(
         &mut self,

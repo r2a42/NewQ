@@ -11042,7 +11042,13 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::ToggleAbout => st.show_about = !st.show_about,
-        Action::ToggleTestMode => st.test.open = !st.test.open,
+        Action::ToggleTestMode => {
+            st.test.open = !st.test.open;
+            // Opened: the test last chosen on this computer is chosen again.
+            if st.test.open {
+                st.test.choose_pick(st.prefs.test_pick);
+            }
+        }
         Action::ToggleStats => st.stats_open = !st.stats_open,
         Action::MakeSyncClip => match engine.ff.clone() {
             None => st.sync_note = "ffmpeg wasn't found, so there's no clip to make.".into(),
@@ -12461,6 +12467,31 @@ mod tests {
                 actions.len()
             );
         }
+    }
+
+    #[test]
+    fn test_mode_opens_on_the_test_last_chosen_on_this_computer() {
+        use crate::testmode::{Flavour, Level};
+        let (mut show, mut e, mut st) = running();
+        assert_eq!(st.test.level, Level::Short);
+        st.prefs.test_pick = crate::prefs::TestPick {
+            level: Level::Long,
+            flavour: Flavour::Timeline,
+            debug: false,
+        };
+        apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
+        assert!(st.test.open);
+        assert_eq!(
+            (st.test.level, st.test.flavour),
+            (Level::Long, Flavour::Timeline)
+        );
+        assert!(!st.test.debug);
+        assert_eq!(st.test.minutes, Level::Long.default_minutes());
+        apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
+        // The debug test, as chosen.
+        st.prefs.test_pick.debug = true;
+        apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
+        assert!(st.test.debug);
     }
 
     #[test]
