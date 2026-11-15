@@ -10,6 +10,9 @@ release page, and a release is refused if it has none.
   turn the page as the playhead nears the right-hand edge, and come back to it after a
   jump, a loop going back or a scroll away. Holding a drag keeps the view still until
   you let go; stopped or paused, the view stays where you put it.
+- **Or keep the playhead in the middle.** Settings ▸ General ▸ *Timeline editor* now
+  chooses how the view follows a running timeline: turning the page, or keeping the
+  playhead centred with the tracks creeping under it. Kept for this computer.
 - **Tidier Cues track and marker flags when zoomed out.** Cue names no longer run over
   each other: each is cut short to fit before the next cue, or left out, and hovering a
   cue shows its whole name, number, time and what it does. The picked or hovered cue's

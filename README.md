@@ -1186,7 +1186,11 @@ are open in the classic interface they take its place.
   a tenth in from the left. You can still scroll and zoom while it runs; nothing is
   moved while you hold a drag (a clip, an edge, a key, a marker or the scroll bar),
   and it catches up when you let go. Stopped, paused or parked, the view stays where
-  you put it. A thin bar at the right shows there are more tracks
+  you put it. Settings ▸ General ▸ *Timeline editor* can instead keep the playhead in
+  the middle while it runs, the tracks creeping under it (near the start and the end
+  the view stops and the playhead moves off the middle; a scroll of yours while it
+  runs is undone, a zoom works around the playhead). The choice is kept for this
+  computer. A thin bar at the right shows there are more tracks
   than fit; a lane you open is scrolled into view. On a narrow pane the toolbar
   takes two rows. The pane (or the new interface's panel) can be made taller by
   dragging its edge.

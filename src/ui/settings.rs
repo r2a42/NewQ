@@ -384,7 +384,9 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
         );
     });
     section(ui, "Timeline editor (this computer)", |ui| {
-        timeline_layout(ui, st, actions)
+        timeline_layout(ui, st, actions);
+        ui.add_space(6.0);
+        timeline_follow(ui, st, actions);
     });
     section(ui, "Recovery and logs", |ui| {
         ui.label(format!(
@@ -411,6 +413,36 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
         ui.add_space(4.0);
         log_detail(ui, st);
     });
+}
+
+/// How the timeline editor's view keeps a running playhead in sight.
+fn timeline_follow(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    use super::timeline::TimelineFollow as F;
+    ui.label("While a timeline runs, its view:");
+    for (follow, words) in [
+        (F::Page, "Turns the page as the playhead nears the edge"),
+        (F::Centre, "Keeps the playhead in the middle"),
+    ] {
+        let r = ui.radio(st.prefs.timeline_follow == follow, words);
+        #[cfg(test)]
+        ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
+                "settings_timeline_follow",
+            ))
+            .push((follow == F::Centre, r.rect))
+        });
+        if r.clicked() && st.prefs.timeline_follow != follow {
+            actions.push(Action::Timeline(
+                super::timeline::TimelineAction::SetFollow(follow),
+            ));
+        }
+    }
+    hint(
+        ui,
+        "Either way you can scroll and zoom while it runs (in the middle, it comes back to the \
+         playhead), nothing moves while you hold a drag, and a stopped or paused timeline stays \
+         where you put it.",
+    );
 }
 
 /// Where the timeline editor opens: a pane or a workspace of its own, in

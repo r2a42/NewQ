@@ -89,6 +89,7 @@ impl Mouse {
             d.remove::<Vec<(String, Rect)>>(egui::Id::new("bin_items"));
             d.remove::<Vec<(super::super::modern::View, Rect)>>(egui::Id::new("modern_views"));
             d.remove::<Vec<(bool, Rect)>>(egui::Id::new("settings_timeline_layout"));
+            d.remove::<Vec<(bool, Rect)>>(egui::Id::new("settings_timeline_follow"));
             d.remove::<Vec<(CueId, Rect)>>(egui::Id::new("cue_rows"));
             d.remove::<bool>(egui::Id::new("timeline_pointer"));
         });

@@ -59,6 +59,9 @@ pub struct Prefs {
     /// Where the timeline editor goes: a pane, or a workspace of its own.
     #[serde(default, skip_serializing_if = "TimelineLayout::is_pane")]
     pub timeline_layout: TimelineLayout,
+    /// How the timeline editor's view keeps a running playhead in sight.
+    #[serde(default, skip_serializing_if = "TimelineFollow::is_page")]
+    pub timeline_follow: TimelineFollow,
 }
 
 /// Where the timeline editor is shown.
@@ -74,6 +77,22 @@ pub enum TimelineLayout {
 impl TimelineLayout {
     fn is_pane(&self) -> bool {
         *self == TimelineLayout::Pane
+    }
+}
+
+/// How the timeline editor's view follows the playhead while the run moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineFollow {
+    /// Turn the page as it nears the right-hand edge.
+    #[default]
+    Page,
+    /// Keep it in the middle, the tracks creeping under it.
+    Centre,
+}
+
+impl TimelineFollow {
+    fn is_page(&self) -> bool {
+        *self == TimelineFollow::Page
     }
 }
 
@@ -133,6 +152,7 @@ mod tests {
             new_layout: true,
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,
+            timeline_follow: TimelineFollow::Centre,
         };
         p.save(&dir).unwrap();
         assert_eq!(Prefs::load(&dir), p);
@@ -156,6 +176,11 @@ mod tests {
             serde_json::to_string(&p)
                 .unwrap()
                 .contains("\"timeline_layout\":\"Workspace\"")
+        );
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"timeline_follow\":\"Centre\"")
         );
         // The level is a word in the file, and one this version doesn't know
         // (from a newer one) gives the defaults, not a failure to start.

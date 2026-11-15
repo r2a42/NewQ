@@ -7,6 +7,7 @@
 use super::lanes::{self, LANE_H};
 use super::*;
 use super::{keys, menus, ruler};
+use crate::prefs::TimelineFollow;
 use crate::show::{CueKind, RunOut};
 use crate::timeline::model::{Clip, LeadIn};
 use crate::timeline::snap::{self, SnapPoints};
@@ -111,11 +112,12 @@ fn span(ctx: &Ctx) -> f64 {
 const FOLLOW_EDGE: f32 = 0.9;
 const FOLLOW_LEAD: f32 = 0.1;
 
-/// The sideways scroll that keeps a moving playhead in view (page-follow):
-/// `scroll` and `playhead` (how far from time 0 it is) in points, the tracks
-/// `lane_w` wide over `content_w`. Unchanged while it is still, while
-/// something is `held` (a drag), when all of it fits, or while the playhead is
-/// in view short of the edge; otherwise the page turns, kept within the ends.
+/// The sideways scroll that keeps a moving playhead in view: `scroll` and
+/// `playhead` (how far from time 0 it is) in points, the tracks `lane_w` wide
+/// over `content_w`. Unchanged while it is still, while something is `held` (a
+/// drag), or when all of it fits. `Page`: unchanged while the playhead is in
+/// view short of the edge, else the page turns. `Centre`: the playhead in the
+/// middle, always (a scroll of the user's is undone). Kept within the ends.
 pub(super) fn follow(
     scroll: f32,
     lane_w: f32,
@@ -123,16 +125,23 @@ pub(super) fn follow(
     playhead: f32,
     moving: bool,
     held: bool,
+    mode: TimelineFollow,
 ) -> f32 {
     let max = (content_w - lane_w).max(0.0);
     if !moving || held || max <= 0.5 || !playhead.is_finite() {
         return scroll;
     }
-    let x = playhead - scroll;
-    if x >= 0.0 && x <= lane_w * FOLLOW_EDGE {
-        return scroll;
-    }
-    (playhead - lane_w * FOLLOW_LEAD).max(0.0).min(max)
+    let want = match mode {
+        TimelineFollow::Page => {
+            let x = playhead - scroll;
+            if x >= 0.0 && x <= lane_w * FOLLOW_EDGE {
+                return scroll;
+            }
+            playhead - lane_w * FOLLOW_LEAD
+        }
+        TimelineFollow::Centre => playhead - lane_w / 2.0,
+    };
+    want.max(0.0).min(max)
 }
 
 /// A time rounded to a hundredth, as the inspector shows it.
@@ -603,6 +612,7 @@ pub(super) fn draw(
         ctx.pos as f32 * pps,
         ctx.moving,
         held,
+        st.prefs.timeline_follow,
     );
     let all_h = rows_height(ctx, &open);
     // A lane just opened comes into view with its clip's track above it.

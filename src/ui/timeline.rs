@@ -26,7 +26,7 @@ pub use control::{clip_fields, control_fields, describe_control, settings_fields
 
 use super::{Action, Pane, UiState, cue_label, fmt_time};
 use crate::engine::{Engine, RunState, RunView};
-pub use crate::prefs::TimelineLayout;
+pub use crate::prefs::{TimelineFollow, TimelineLayout};
 use crate::show::{Animated, ControlAction, CueId, CueKind, CueType, PauseFreeze, Show};
 use crate::timeline::edit::{self, Edge, PauseBefore};
 use crate::timeline::{TimelineKey, TimelinePoint, TrackId, model};
@@ -565,6 +565,8 @@ pub enum TimelineAction {
     /// Where the editor opens on this computer: a pane or the workspace (an
     /// editor already open moves there).
     SetLayout(TimelineLayout),
+    /// How the view keeps a running playhead in sight, on this computer.
+    SetFollow(TimelineFollow),
 }
 
 impl TimelineAction {
@@ -607,7 +609,8 @@ impl TimelineAction {
             | A::ShowLane { .. }
             | A::Open(_)
             | A::Close
-            | A::SetLayout(_) => false,
+            | A::SetLayout(_)
+            | A::SetFollow(_) => false,
         }
     }
 }
@@ -847,6 +850,14 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
                 }
             } else {
                 st.layout.close(Pane::Timeline);
+            }
+        }
+        A::SetFollow(follow) => {
+            st.prefs.timeline_follow = follow;
+            if let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
             }
         }
         // Kept for this computer; an editor that is open moves to the new place.

@@ -1,8 +1,12 @@
 //! A moving playhead is kept in view (`tracks::follow`): the rule on its own,
 //! then the editor with a run going.
 
-use super::tracks::follow;
 use super::*;
+use crate::prefs::{Prefs, TimelineFollow};
+
+fn follow(scroll: f32, w: f32, content: f32, at: f32, moving: bool, held: bool) -> f32 {
+    super::tracks::follow(scroll, w, content, at, moving, held, TimelineFollow::Page)
+}
 
 #[test]
 fn the_rule_pages_past_the_edge_or_out_of_view_and_only_while_moving() {
@@ -242,5 +246,171 @@ fn fit_never_moves() {
         m.frame(&mut f.show, &mut f.st, vec![]);
         assert_eq!(f.st.timeline.scroll.x, 0.0);
         assert!(share(&m).is_some());
+    }
+}
+
+#[test]
+fn centred_the_playhead_stays_in_the_middle_but_the_ends_hold_the_view() {
+    let f = |scroll, at, moving, held| {
+        super::tracks::follow(
+            scroll,
+            1000.0,
+            4000.0,
+            at,
+            moving,
+            held,
+            TimelineFollow::Centre,
+        )
+    };
+    // Mid-timeline: in the middle, wherever the view was (a jump re-centres,
+    // a scroll of the user's is undone).
+    assert_eq!(f(0.0, 1500.0, true, false), 1000.0);
+    assert_eq!(f(2500.0, 1500.0, true, false), 1000.0);
+    assert_eq!(f(1000.0, 1501.0, true, false), 1001.0);
+    // Near the ends the view stops and the playhead leaves the middle.
+    assert_eq!(f(500.0, 200.0, true, false), 0.0);
+    assert_eq!(f(500.0, 3900.0, true, false), 3000.0);
+    // Held, still, or all of it fits: nothing.
+    assert_eq!(f(2500.0, 1500.0, true, true), 2500.0);
+    assert_eq!(f(2500.0, 1500.0, false, false), 2500.0);
+    assert_eq!(
+        super::tracks::follow(
+            0.0,
+            1000.0,
+            1000.0,
+            700.0,
+            true,
+            false,
+            TimelineFollow::Centre
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn centred_a_run_creeps_under_the_playhead_and_a_drag_held_waits() {
+    let mut f = long_fixture();
+    f.st.prefs.timeline_follow = TimelineFollow::Centre;
+    let (mut f, mut m, key) = running_with(f);
+    run_on(&mut f, &mut m, 15.0);
+    let at = share(&m).unwrap();
+    assert!((at - 0.5).abs() < 0.01, "{at}");
+    // A scroll away comes straight back.
+    f.st.timeline.scroll.x = 0.0;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert!((share(&m).unwrap() - 0.5).abs() < 0.01);
+    // A jump back near the start: the view stops at it.
+    m.e.timeline_pause(&f.show, key, PauseFreeze::Everything, &[], false, false);
+    m.e.timeline_seek(&f.show, key, 1.0, true);
+    m.e.timeline_run(&f.show, key);
+    run_on(&mut f, &mut m, 1.0);
+    assert_eq!(f.st.timeline.scroll.x, 0.0);
+    assert!(share(&m).unwrap() < 0.2);
+    // The scroll bar held: left alone, then centred on release.
+    run_on(&mut f, &mut m, 20.0);
+    let thumb = m.rects().unwrap().hscroll.unwrap();
+    let a = thumb.center();
+    m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(a)]);
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![button(a, true, PointerButton::Primary)],
+    );
+    for i in 1..=6 {
+        m.e.tick(&f.show, 0.1);
+        let p = a - vec2(60.0 * i as f32, 0.0);
+        m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(p)]);
+    }
+    assert!(
+        share(&m).is_none_or(|s| s > 0.6),
+        "left where it was dragged"
+    );
+    let p = a - vec2(360.0, 0.0);
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![button(p, false, PointerButton::Primary)],
+    );
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert!((share(&m).unwrap() - 0.5).abs() < 0.01);
+}
+
+/// The General page's radio for following centred (`true`) or by pages.
+fn follow_radio(m: &Mouse, centre: bool) -> Rect {
+    let all: Vec<(bool, Rect)> = m
+        .ctx
+        .data(|d| d.get_temp(egui::Id::new("settings_timeline_follow")))
+        .expect("the General page has the choice");
+    all.iter().find(|r| r.0 == centre).unwrap().1
+}
+
+#[test]
+fn the_setting_on_the_general_page_changes_an_open_editor_at_once_in_both_interfaces() {
+    for modern in [true, false] {
+        let dir =
+            std::env::temp_dir().join(format!("newq_follow_prefs_{}_{modern}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut f = long_fixture();
+        f.st.layout_dir = Some(dir.clone());
+        f.st.prefs.new_layout = modern;
+        f.st.timeline.pps = 40.0;
+        let key = TimelineKey::Group(f.group);
+        let mut m = Mouse::new();
+        m.draw = Draw::Full;
+        let ui = |a, f: &mut Fixture, m: &mut Mouse| {
+            super::super::super::apply(a, &mut f.show, &mut m.e, &mut f.st)
+        };
+        ui(Action::Timeline(TimelineAction::Open(None)), &mut f, &mut m);
+        for page in [false, true] {
+            ui(
+                Action::OpenSettings(super::super::super::SettingsPage::General),
+                &mut f,
+                &mut m,
+            );
+            m.frame(&mut f.show, &mut f.st, vec![]);
+            let want = if page {
+                TimelineFollow::Page
+            } else {
+                TimelineFollow::Centre
+            };
+            if modern {
+                let r = follow_radio(&m, !page);
+                m.click(&mut f.show, &mut f.st, r.center(), PointerButton::Primary);
+            } else {
+                // The classic window's settings page shares the height with
+                // the panes, and the section is below its fold: what its radio asks.
+                assert!(follow_radio(&m, !page).width() > 0.0);
+                ui(
+                    Action::Timeline(TimelineAction::SetFollow(want)),
+                    &mut f,
+                    &mut m,
+                );
+            }
+            assert_eq!(f.st.prefs.timeline_follow, want);
+            if !page {
+                assert_eq!(Prefs::load(&dir).timeline_follow, TimelineFollow::Centre);
+            }
+            ui(Action::CloseSettings, &mut f, &mut m);
+            m.frame(&mut f.show, &mut f.st, vec![]);
+            m.e.timeline_stop(&f.show, key, 0.0);
+            m.e.timeline_seek(&f.show, key, 0.0, false);
+            f.st.timeline.scroll.x = 0.0;
+            m.e.timeline_run(&f.show, key);
+            let w = lane_w(&m);
+            let visible = f64::from(w / 40.0);
+            // Half-way across the view: centred, the view has begun to move.
+            run_on(&mut f, &mut m, visible * 0.7);
+            let at = share(&m).unwrap();
+            if page {
+                assert!(f.st.timeline.scroll.x == 0.0 && at > 0.6, "{at}");
+            } else {
+                assert!((at - 0.5).abs() < 0.02, "{at}");
+            }
+        }
+        // Kept for this computer (and at its default, not written).
+        assert_eq!(Prefs::load(&dir).timeline_follow, TimelineFollow::Page);
+        let text = std::fs::read_to_string(dir.join("prefs.json")).unwrap();
+        assert!(!text.contains("timeline_follow"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
