@@ -1049,6 +1049,11 @@ fn a_loop_on_a_timeline_list_is_said_in_the_toolbar_and_the_transport() {
     }
     act(Action::SelectList(f.list), &mut f, &mut w);
     act(Action::Go, &mut f, &mut w);
+    w.e.tick(&f.show, 0.2);
+    w.frame(&mut f.show, &mut f.st);
+    let (what, then) = readout(&w).unwrap();
+    assert!(what.starts_with("RUNNING · loops back in 0:00.8"), "{what}");
+    assert_eq!(then.as_deref(), Some("GO does nothing until it loops"));
     let mut back = false;
     let mut last = 0.0;
     for _ in 0..30 {
@@ -1072,4 +1077,28 @@ fn a_loop_on_a_timeline_list_is_said_in_the_toolbar_and_the_transport() {
     w.frame(&mut f.show, &mut f.st);
     let state = w.get_host::<String>("timeline_state").unwrap();
     assert!(state.contains("last pass"), "{state}");
+}
+
+#[test]
+fn with_the_timeline_pane_open_a_timeline_list_opens_on_its_rows_and_the_pane_has_the_tracks() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    act(Action::Timeline(TimelineAction::Open(None)), &mut f, &mut w);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    assert!(f.st.timeline.list_rows);
+    w.frame(&mut f.show, &mut f.st);
+    assert!(w.rects(Host::ListTab).is_none(), "the tab shows rows");
+    assert!(w.rects(Host::Pane).is_some(), "the pane shows the tracks");
+    // Tracks in the tab, if asked for: the pane then says where they are.
+    let tracks = w.tab_button("tracks").unwrap();
+    w.click(&mut f.show, &mut f.st, tracks.center());
+    w.frame(&mut f.show, &mut f.st);
+    assert!(w.rects(Host::ListTab).is_some());
+    assert_eq!(w.get::<bool>("timeline_in_tab"), Some(true));
+    // Without the pane, the tab opens on its tracks as before.
+    act(Action::Timeline(TimelineAction::Close), &mut f, &mut w);
+    act(Action::SelectList(0), &mut f, &mut w);
+    f.st.timeline.list_rows = false;
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    assert!(!f.st.timeline.list_rows);
 }

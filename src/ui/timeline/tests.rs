@@ -1620,6 +1620,11 @@ fn the_cue_tracks_plus_adds_a_pause_at_the_playhead() {
 fn a_fade_handle_dragged_sets_the_fade_and_one_undo_takes_it_back() {
     let mut f = fixture();
     let mut m = in_window(&mut f);
+    // The handles show on the clip under the pointer (or a picked one) only.
+    assert!(m.rects().unwrap().fades.iter().all(|g| g.0 != f.b));
+    let b = f.b;
+    hover(&mut m, &mut f, b);
+    m.frame(&mut f.show, &mut f.st, vec![]);
     let r = m.rects().unwrap();
     let grip = r
         .fades
@@ -2236,4 +2241,78 @@ fn a_paste_with_a_cue_outside_picked_or_in_show_mode_is_not_the_editors() {
         }
         .edits_the_show()
     );
+}
+
+#[test]
+fn a_lane_opened_under_a_track_out_of_view_is_scrolled_into_view() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    // Many empty picture tracks above A's: A's track is at the bottom.
+    for _ in 0..14 {
+        made(
+            &mut m,
+            &mut f,
+            vec![Action::Timeline(TimelineAction::AddTrack {
+                key,
+                picture: true,
+            })],
+        );
+    }
+    let r = m.rects().unwrap();
+    let a_row = r
+        .tracks
+        .iter()
+        .find(|t| t.0 == model::track_of(f.show.cue(f.a).unwrap()))
+        .unwrap()
+        .1;
+    let bottom = r.tracks.iter().map(|t| t.1.bottom()).fold(0.0, f32::max);
+    assert!(bottom > 520.0, "the tracks overflow the pane: {bottom}");
+    let lane = Action::Timeline(TimelineAction::ShowLane {
+        id: f.a,
+        lane: Lane::Opacity,
+        on: true,
+    });
+    made(&mut m, &mut f, vec![lane]);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let lane = lane_rect(&m, f.a, Lane::Opacity);
+    assert!(lane.bottom() <= 520.0, "the lane is in view: {lane:?}");
+    let r = m.rects().unwrap();
+    let now = r
+        .tracks
+        .iter()
+        .find(|t| t.0 == model::track_of(f.show.cue(f.a).unwrap()))
+        .unwrap()
+        .1;
+    assert!(now.top() >= r.ruler.bottom() - 0.5, "and its clip's track");
+    assert!(now.top() < a_row.top(), "scrolled");
+}
+
+#[test]
+fn on_a_narrow_pane_the_toolbar_takes_two_rows_and_no_button_is_cut_off() {
+    let mut f = fixture();
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let names = [
+        "run",
+        "pause",
+        "stop",
+        "marker",
+        "split",
+        "ripple",
+        "add_track",
+    ];
+    let at: Vec<Rect> = names.iter().map(|n| m.button_at(n)).collect();
+    for (n, r) in names.iter().zip(&at) {
+        assert!(r.right() <= 1000.0, "{n} is cut off: {r:?}");
+    }
+    // The tools are on a row of their own, under the transport.
+    assert!(
+        at[3].top() > at[0].bottom() - 1.0,
+        "{:?} {:?}",
+        at[3],
+        at[0]
+    );
+    let r = m.rects().unwrap();
+    assert!(r.ruler.top() >= at[3].bottom());
 }

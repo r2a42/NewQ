@@ -64,6 +64,8 @@ pub struct EditorState {
     shown_pps: f32,
     /// The keyframe lanes open under clips, in the order opened.
     lanes: Vec<(CueId, Lane)>,
+    /// A lane just opened, to scroll into view on the next draw.
+    reveal: Option<(CueId, Lane)>,
     /// The editor that was clicked last, which the keys act on.
     focus: Option<Host>,
     /// Where on which track an empty spot was right-clicked, for its menu.
@@ -98,6 +100,7 @@ impl Default for EditorState {
             renaming: None,
             shown_pps: 0.0,
             lanes: Vec::new(),
+            reveal: None,
             focus: None,
             menu_at: None,
             pick: None,
@@ -797,6 +800,7 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
             st.timeline.lanes.retain(|l| *l != (id, lane));
             if on {
                 st.timeline.lanes.push((id, lane));
+                st.timeline.reveal = Some((id, lane));
             }
         }
         A::Open(key) => {

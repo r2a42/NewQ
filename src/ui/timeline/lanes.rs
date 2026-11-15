@@ -348,6 +348,7 @@ pub(super) fn draw(
     };
     p.add(egui::Shape::line(line, Stroke::new(1.5, color)));
     let hover = resp.hover_pos();
+    let mut label: Option<(usize, Pos2, String)> = None;
     for (i, k) in a.keys.iter().enumerate() {
         let ctr = pos2(x(k.t), y(k.v));
         keys_drawn.push((c.id, lane, ctr));
@@ -366,20 +367,37 @@ pub(super) fn draw(
             Stroke::new(1.5, if hot { Color32::WHITE } else { color }),
         ));
         if held {
-            // Beside the key, on the side of the lane away from it.
-            let (y, align) = if ctr.y > rect.center().y {
-                (rect.top() + 2.0, egui::Align2::LEFT_TOP)
-            } else {
-                (rect.bottom() - 2.0, egui::Align2::LEFT_BOTTOM)
-            };
-            p.text(
-                pos2(ctr.x + 10.0, y),
-                align,
-                format!("{} · {}", fmt_time(k.t), lane.text(k.v)),
-                FontId::proportional(10.0),
-                Color32::WHITE,
-            );
+            label = Some((i, ctr, format!("{} · {}", fmt_time(k.t), lane.text(k.v))));
         }
+    }
+    // The held key's time and value, drawn over everything on a dark chip:
+    // on the side of the lane away from the key, and on the side of the key
+    // away from the next one when that one is close.
+    if let Some((i, ctr, text)) = label {
+        let galley = p.layout_no_wrap(text, FontId::proportional(10.0), Color32::WHITE);
+        let size = galley.size();
+        let y = if ctr.y > rect.center().y {
+            rect.top() + 2.0
+        } else {
+            rect.bottom() - 2.0 - size.y
+        };
+        let next_close = a
+            .keys
+            .get(i + 1)
+            .is_some_and(|n| x(n.t) - ctr.x < size.x + 24.0);
+        let left = next_close && ctr.x - 10.0 - size.x >= rect.left();
+        let x0 = if left {
+            ctr.x - 10.0 - size.x
+        } else {
+            ctr.x + 10.0
+        };
+        let at = pos2(x0, y);
+        p.rect_filled(
+            Rect::from_min_size(at, size).expand(2.0),
+            3.0,
+            Color32::from_black_alpha(190),
+        );
+        p.galley(at, galley, Color32::WHITE);
     }
     if !a.is_animated() && span.width() > 120.0 {
         p.text(

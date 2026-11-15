@@ -10272,6 +10272,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::Select(id) => select(show, st, engine, Some(id)),
         Action::SelectList(list) => {
+            // Into a timeline list with the Timeline pane open (the panes):
+            // its rows in the tab and its tracks in the pane, rather than the
+            // tracks squeezed into the tab and the pane saying they are there.
+            if list != engine.active_list
+                && !st.prefs.new_layout
+                && st.layout.is_open(Pane::Timeline)
+                && timeline::list_tab::is_timeline_list(show, list)
+            {
+                st.timeline.list_rows = true;
+            }
             engine.switch_list(show, list);
             st.selected = engine.playhead;
             st.scroll_to_selected = true;

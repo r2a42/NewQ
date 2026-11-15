@@ -234,7 +234,20 @@ pub fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<St
     let run = engine.timeline(show, key);
     match does {
         TimelineGo::Running => {
+            // A loop pause ahead comes before the next pause or the end it is
+            // before: GO means something there.
+            let next_loop = model::members(show, key)
+                .into_iter()
+                .filter(|c| c.armed && c.pre_wait.is_finite() && c.pre_wait >= run.pos)
+                .filter(|c| matches!(&c.kind, CueKind::Control(ctl) if ctl.is_loop()))
+                .map(|c| c.pre_wait)
+                .min_by(f64::total_cmp)
+                .filter(|l| run.next_pause.is_none_or(|p| *l < p));
             let (what, then) = match (run.next_pause, run.length) {
+                _ if let Some(l) = next_loop => (
+                    format!("RUNNING · loops back in {}", fmt_time(l - run.pos)),
+                    "GO does nothing until it loops",
+                ),
                 (Some(p), _) if p >= run.pos => (
                     format!("RUNNING · next pause in {}", fmt_time(p - run.pos)),
                     "GO does nothing until it pauses",

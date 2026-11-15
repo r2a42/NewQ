@@ -330,6 +330,24 @@ pub(super) fn draw(
         ed.scroll.x = 0.0;
     }
     let all_h = rows_height(ctx, &open);
+    // A lane just opened comes into view with its clip's track above it.
+    if let Some(want) = ed.reveal.take() {
+        let (rows, lane_rows) = layout(ctx, &open, lanes, 0.0);
+        if let Some(&(_, _, lane)) = lane_rows.iter().find(|l| (l.0, l.1) == want) {
+            let bottom = lane.bottom() - lanes.top();
+            let top = rows
+                .iter()
+                .rfind(|(_, r)| r.bottom() <= lane.top() + 0.5)
+                .map_or(lane.top(), |(_, r)| r.top())
+                - lanes.top();
+            if bottom - ed.scroll.y > lanes.height() {
+                ed.scroll.y = bottom - lanes.height();
+            }
+            if top < ed.scroll.y {
+                ed.scroll.y = top;
+            }
+        }
+    }
     ed.scroll.y = ed.scroll.y.max(0.0).min((all_h - lanes.height()).max(0.0));
     ed.shown_pps = pps;
     let geo = Geo {
@@ -560,8 +578,12 @@ pub(super) fn draw(
                 }
             }
         }
-        // The fade handles: a square at the top where each fade ends.
+        // The fade handles: a square at the top where each fade ends, shown
+        // (and grabbed) only on a clip under the pointer or picked, so that
+        // they don't cover the badges of the others.
+        let fading_this = matches!(&drag_now, Some(Drag::Fade { id, .. }) if *id == c.id);
         if ctx.editable
+            && (selected || fading_this || ui.rect_contains_pointer(rect.intersect(lanes)))
             && rect.width() > 30.0
             && c.len.is_some()
             && ctx.show.cue(c.id).is_some_and(|q| q.kind.media().is_some())
