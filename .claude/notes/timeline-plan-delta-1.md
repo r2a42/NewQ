@@ -1214,3 +1214,66 @@ Still wrong / untried:
 - `/newq/timeline/<t>/…` uses the name as an address part; two timeline lists of the same name
   (or a list named like a group's number) share one address, and the remote picks the first.
 - A remote `run` of a running timeline only logs; there is no reply to the sender.
+
+## X. What I3 landed (integration 3: P7 and P8 together)
+
+Commits on `claude/beautiful-fermi-9owexf` after the P7/P8 merge, each "Timeline:", "Test Mode:" or "Docs:".
+Full suite (`NEWQ_REQUIRE_MEDIA=1`): 1142 passed, 5 ignored; fmt and clippy clean.
+
+Changed:
+- **Docs.** README, CHANGELOG, CLAUDE.md and V/W read together: no repeats or contradictions found beyond
+  the new interface's paragraph (it listed three views; the Timeline view is now named). U's
+  `allow(dead_code)` list is history: none of those allows is left. W's "FIRST_FRAME, private there" and
+  "not folded into ALL" are superseded below.
+- **STILL_LEN everywhere.** `edit::add_clip` gives a new image, text, shape, clock or timer with no end
+  `edit::STILL_LEN` (moved from `list_tab`), so the bin, the track menu, a picture dropped on a track and the
+  list tab agree. `list_tab::fitting_track` now wants the track free for the whole hold of such a clip, and
+  counts a clip's ghosts ("Also on") as its own: the headless look showed a bin text landing under a clip's
+  picture on Display 2, and one that cut a clip starting 2 s later.
+- **"Open in timeline editor"** gives way to "Its tracks are open in the timeline editor." while
+  `workspace::showing` (the workspace in either interface, or the new interface's Editor view with its
+  timeline panel) is on that group. A classic Timeline pane keeps the button (it may be a tab behind another).
+- **The bin** is three shelves (`bin::Shelf`: New, Files n, Clips n; one shown, kept for the session in egui
+  memory) under a monitor that is a resizable top panel (`monitor_height`: the picture's height, at most 60 %
+  of the column; `BIN_MIN` below). At 1280×760 every new item, four files and five of seven clip rows are in
+  sight (the comfort test checks it); the monitor keeps its 16:9 picture.
+- **Loop pauses** (`tracks::loop_sections`, `LOOP` colour): the section is shaded on the Cues track with an
+  arrow back to its start and on the ruler with a bracket along its foot (no words there: the tick labels
+  fill the ruler); the pause is blue with 🔁. Its inspector hides Holds, Clips and Live inputs (the engine's
+  `timeline_loop` ignores them) and says what a loop does (`ControlCue::description`).
+- **Elapsed after a loop**: correct by design, nothing to fix there. The Operator view's big number is the
+  time *left* (10 s clip − 6.9 s = 0:03.1), and `elapsed`, `key_time` and the bar all follow the clock after
+  the jump (two tests pin it). What *was* off, found looking: a clip across a pause set to Hold or Loop when its
+  content runs out lasts until the clock ends it, but the panels counted its own time. `ActiveCue::
+  panel_times(show)` shows such a clip on the clock (standing at a pause); one set to End keeps its own time,
+  since in a free-run pause its content always runs out first (tried the clock for it too: a test card read
+  8 s left a moment before it ended).
+- **Seams.** `engine::FIRST_FRAME` (engine/timeline.rs) is the one "seek to the start" constant. `ControlAction
+  ::ALL` is every action with the four timeline ones last (`TIMELINE` is that tail); the inspector's menu
+  lists `ALL` once with a separator before them. Names: `find_timeline` takes a reference first (`list:<id>`,
+  `#<id>`, `cue_id:<id>`), then of `timelines_named` a list before a group, the first tab first, a group in the
+  worked list, then main, then any; a shared name puts a warning in the status bar naming the one used and
+  its reference. Feedback's address part is `remote::timeline_address`: the name while it is one timeline's
+  alone (sanitised for OSC), else `list:<id>` / `cue_id:<id>` (`#` can't be in an OSC address). A remote jump
+  and run between frames during a clip drag in the workspace: tested, nothing lost or doubled, one undo step.
+- **Web page** in Chromium (Playwright, 390×844, app under xvfb, `scratchpad/i3/web.js`): cards, Run, Pause,
+  a marker, a loop, Stop and its fade, the group's card by `#id`: right, no console errors. Fixed: Leave loop
+  is its own whole-width row (four buttons wrapped "Pause"), and "next pause" is only added while it is ahead.
+- **Test Mode timing.** Bounds a second or more from the event and still short of the alternative: see the
+  commit. Self-test three times: 26 passed, 0 failed, 3 not run each (113 s, 118 s with eight busy loops on
+  four cores, 113 s).
+
+Looked at headless (xvfb 1280×760, `XDG_STATE_HOME` in `scratchpad/i3/`, both interfaces, A and B): the
+workspace on a group with "Its tracks are open…", the bin's shelves and a dragged line, a bin text on a new
+layer for 5 s, the workspace on a list with a loop band, the list tab's loop band and the loop pause's
+inspector, the Do menu, the new interface's Timeline view on the group and on the list, the Operator view
+paused and looping, layout A's group panel; the web page at phone size.
+
+Still wrong or untried:
+- A text "Also on" Display 2 that runs out in a free-run pause (by design, ⚠) leaves no picture but stays in
+  the active list until the clock reaches its end; the panel says 0:00.0 left meanwhile.
+- The Do menu is a scrolling combo: the timeline actions are below the fold at 1280×760.
+- A remote seek during a playhead drag on the ruler is overridden by the drag's release (the last hand wins);
+  not tested.
+- A classic Timeline pane open on the group still offers "Open in timeline editor".
+- No real phone, OSC controller, MIDI device, displays or audio device; sound by the fake device.
