@@ -590,3 +590,106 @@ fn the_group_inspector_offers_to_open_the_editor_only_where_it_is_not_open_on_it
         assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(true), "{what}");
     }
 }
+
+/// A remote command arrives between frames (as `app.rs` hands them to
+/// `ui::run_remote`) while the workspace is open on its timeline and a clip is
+/// being dragged: the remote's seek and run happen once, the drag lands once
+/// on release as one undo step, and neither undoes the other.
+#[test]
+fn a_remote_command_during_a_drag_in_the_workspace_is_made_once_and_the_drag_lands_once() {
+    use crate::remote::{Command, Place, TimelineDo};
+    for modern in [false, true] {
+        let what = format!("modern {modern}");
+        let mut f = fixture();
+        let mut m = window(&mut f, modern, TimelineLayout::Workspace);
+        let g = f.group;
+        open_by_row(&mut m, &mut f, g);
+        let key = TimelineKey::Group(g);
+        let name = format!("#{}", g.0);
+        let remote = |cmd: Command, m: &mut Mouse, f: &mut Fixture| {
+            super::super::super::run_remote(cmd, &mut f.show, &mut m.e, &mut f.st);
+        };
+        let before = f.show.cue(f.b).unwrap().pre_wait;
+        let r = rects_in(&m, Host::Workspace);
+        let from = r.clips.iter().find(|c| c.0 == f.b).unwrap().1.center();
+        let to = from + vec2(1.5 * r.pps, 0.0);
+        m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(from)]);
+        m.frame(
+            &mut f.show,
+            &mut f.st,
+            vec![button(from, true, PointerButton::Primary)],
+        );
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 8.0);
+            m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(p)]);
+        }
+        assert!(f.st.timeline.drag.is_some(), "{what}: dragging");
+        // Mid-drag: a remote parks the timeline at 3 s.
+        remote(
+            Command::Timeline {
+                timeline: name.clone(),
+                does: TimelineDo::Jump(Place::Time(3.0)),
+            },
+            &mut m,
+            &mut f,
+        );
+        let parked = m.e.timeline(&f.show, key);
+        assert!((parked.pos - 3.0).abs() < 1e-6, "{what}: {}", parked.pos);
+        for i in 5..=7 {
+            let p = from + (to - from) * (i as f32 / 8.0);
+            m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(p)]);
+        }
+        assert!(f.st.timeline.drag.is_some(), "{what}: still dragging");
+        assert_eq!(
+            f.show.cue(f.b).unwrap().pre_wait,
+            before,
+            "{what}: nothing moved before the release"
+        );
+        // Then runs it, still mid-drag.
+        remote(
+            Command::Timeline {
+                timeline: name.clone(),
+                does: TimelineDo::Run(None),
+            },
+            &mut m,
+            &mut f,
+        );
+        assert!(
+            matches!(
+                m.e.timeline(&f.show, key).state,
+                crate::engine::RunState::Running | crate::engine::RunState::Cueing
+            ),
+            "{what}: {:?}",
+            m.e.timeline(&f.show, key).state
+        );
+        m.frame(
+            &mut f.show,
+            &mut f.st,
+            vec![
+                Event::PointerMoved(to),
+                button(to, false, PointerButton::Primary),
+            ],
+        );
+        settle(&mut m, &mut f);
+        assert!(f.st.timeline.drag.is_none(), "{what}");
+        let moved = f.show.cue(f.b).unwrap().pre_wait;
+        assert!(
+            (moved - before - 1.5).abs() < 0.3,
+            "{what}: moved once: {before} -> {moved}"
+        );
+        // More frames move it no further.
+        settle(&mut m, &mut f);
+        assert_eq!(f.show.cue(f.b).unwrap().pre_wait, moved, "{what}");
+        // One undo step takes the move back, and leaves the run running.
+        super::super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+        assert_eq!(f.show.cue(f.b).unwrap().pre_wait, before, "{what}");
+        assert_ne!(
+            m.e.timeline(&f.show, key).state,
+            crate::engine::RunState::Stopped,
+            "{what}: the undo doesn't stop the run"
+        );
+        // A second undo has nothing of the drag's or the remote's to take.
+        super::super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+        assert_eq!(f.show.cue(f.b).unwrap().pre_wait, before, "{what}");
+    }
+}
