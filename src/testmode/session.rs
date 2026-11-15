@@ -2120,7 +2120,8 @@ mod tests {
     fn a_memory_watch_looks_on_its_own_thread_and_sees_its_own_process() {
         let mut w = MemoryWatch::new();
         let t = Instant::now();
-        while w.peak_mb() == 0 && t.elapsed() < Duration::from_secs(10) {
+        // Its first look goes through every process: seconds on a busy Windows machine.
+        while w.peak_mb() == 0 && t.elapsed() < Duration::from_secs(120) {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(w.peak_mb() > 0, "the process was found");

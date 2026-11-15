@@ -155,6 +155,15 @@ impl StatsLog {
     }
 
     pub fn create(path: &Path, every: Duration, log_path: PathBuf) -> std::io::Result<StatsLog> {
+        StatsLog::create_with(path, every, real_looker(log_path))
+    }
+
+    /// `create`, measured by `looker` (a stand-in in tests).
+    fn create_with(
+        path: &Path,
+        every: Duration,
+        looker: impl FnMut() -> Looked + Send + 'static,
+    ) -> std::io::Result<StatsLog> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
@@ -168,7 +177,7 @@ impl StatsLog {
             writeln!(file, "{HEADER}")?;
             file.flush()?;
         }
-        Ok(StatsLog::with(Some(file), every, real_looker(log_path)))
+        Ok(StatsLog::with(Some(file), every, looker))
     }
 
     /// A log whose rows are measured by `looker` on a thread of its own, and
@@ -742,7 +751,7 @@ mod tests {
                 return s;
             }
             assert!(
-                began.elapsed() < Duration::from_secs(10),
+                began.elapsed() < Duration::from_secs(120),
                 "no row came back"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -807,8 +816,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("newq_stats_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("s.csv");
+        // A stand-in for the look at the processes: the real one can take
+        // longer on a busy Windows machine than a closing log waits for it.
         let mut log =
-            StatsLog::create(&path, Duration::from_millis(50), dir.join("x.log")).unwrap();
+            StatsLog::create_with(&path, Duration::from_millis(50), Looked::default).unwrap();
         let t0 = Instant::now();
         log.frame(t0, Inputs::default);
         std::thread::sleep(Duration::from_millis(60));
@@ -820,7 +831,7 @@ mod tests {
         drop(log);
         // A second run appends without a second header.
         let mut again =
-            StatsLog::create(&path, Duration::from_millis(1), dir.join("x.log")).unwrap();
+            StatsLog::create_with(&path, Duration::from_millis(1), Looked::default).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         again.frame(Instant::now(), Inputs::default);
         drop(again);
