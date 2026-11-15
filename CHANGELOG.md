@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.23.1
+
 - **Test Mode remembers the test you chose.** The window opens on the test last picked on this
   computer (a level, its timeline version, or the debug test) rather than always on Short.
 - **The timeline editor's settings are easy to reach.** In the classic interface with a Timeline
