@@ -170,6 +170,18 @@ pub enum TimelineGo {
     AtEnd,
 }
 
+/// A clip a timeline's run plays (`Engine::timeline_clips_up`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipUp {
+    pub cue: CueId,
+    pub instance: u64,
+    /// Where on the clock its content was due to begin: its start (half way
+    /// into a dip) plus its lead-in.
+    pub due: f64,
+    /// It has its first frame (or its sound has begun).
+    pub up: bool,
+}
+
 /// One timeline's run.
 struct Run {
     /// Its instance number: the group's own, or one taken for a list's run. Its
@@ -2475,6 +2487,33 @@ impl Engine {
             .filter(|a| a.run == Some(run.instance) && a.detached && !a.stopping)
             .filter(|a| !matches!(a.kind, ActiveKind::Matte(_)))
             .map(|a| a.cue_id)
+            .collect()
+    }
+
+    /// The pictures and sounds a timeline's run has started and still plays, for
+    /// Test Mode's check that clips come up on time: where on the clock each was
+    /// due to begin and whether it has its first frame (or sound) yet.
+    pub fn timeline_clips_up(&self, key: TimelineKey) -> Vec<ClipUp> {
+        let Some(run) = self.runs.map.get(&key) else {
+            return Vec::new();
+        };
+        self.active
+            .iter()
+            .filter(|a| a.run == Some(run.instance) && !a.stopping)
+            .filter(|a| {
+                matches!(
+                    a.kind,
+                    ActiveKind::Video(_) | ActiveKind::Image(_) | ActiveKind::Audio(_)
+                )
+            })
+            .filter_map(|a| {
+                Some(ClipUp {
+                    cue: a.cue_id,
+                    instance: a.instance,
+                    due: a.clip_zero? + a.lead.max(0.0),
+                    up: a.started && a.seeking.is_none(),
+                })
+            })
             .collect()
     }
 

@@ -3855,3 +3855,40 @@ fn said(e: &Engine, show: &Show) -> (Option<crate::engine::TimelineGo>, String) 
     let (what, then) = plan.describe(show).unwrap();
     (does, format!("{what} / {}", then.unwrap_or_default()))
 }
+
+#[test]
+fn the_clips_up_say_where_each_was_due_and_whether_it_has_come() {
+    // A text at 1 s and one at 2 s that waits 0.5 s for its opacity keys: due at
+    // 1 s and 2.5 s by the clock; a text is up once it has been drawn.
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    show.lists.last_mut().unwrap().timeline = Some(TimelineSettings::for_editor());
+    let a = text(&mut show, Some(4.0));
+    let a = top(&mut show, a, l, 1.0);
+    let mut b = text(&mut show, Some(4.0));
+    if let CueKind::Text(t) = &mut b.kind {
+        let mut rise = crate::show::Animated::new(0.0);
+        rise.set_key(0.0, 0.0);
+        rise.set_key(0.5, 0.0);
+        rise.set_key(1.0, 1.0);
+        t.media.motion.opacity = Some(rise);
+        // On a track of its own: on the first's it would crossfade it away.
+        t.media.layer = 1;
+    }
+    let b = top(&mut show, b, l, 2.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    assert!(e.timeline_clips_up(k).is_empty(), "no run yet");
+    e.timeline_run(&show, k);
+    until(&mut e, &show, Some(0.02), "both texts up", 10, |e| {
+        e.timeline_clips_up(k).iter().filter(|c| c.up).count() == 2
+    });
+    let up = e.timeline_clips_up(k);
+    let due = |id| up.iter().find(|c| c.cue == id).unwrap().due;
+    assert!((due(a) - 1.0).abs() < 1e-6, "{up:?}");
+    assert!((due(b) - 2.5).abs() < 1e-6, "{up:?}");
+    assert!(up.iter().all(|c| c.instance != 0));
+    // A clip that is no timeline's is not among them.
+    assert!(e.timeline_clips_up(TimelineKey::List(99)).is_empty());
+}
