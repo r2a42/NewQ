@@ -266,6 +266,16 @@ pub fn wanted(level: Level) -> Vec<&'static Asset> {
         .collect()
 }
 
+/// The assets a test uses: a timeline test plays the cue test's films and
+/// pictures but not the 5.1 trailer (its matrix is the cue test's business).
+pub fn wanted_for(level: Level, flavour: super::Flavour) -> Vec<&'static Asset> {
+    let mut v = wanted(level);
+    if flavour == super::Flavour::Timeline {
+        v.retain(|a| a.id != "bbb_trailer");
+    }
+    v
+}
+
 /// Bytes to download for the files of `assets` that aren't in the cache yet.
 pub fn download_size(dir: &Path, assets: &[&Asset]) -> u64 {
     assets

@@ -728,6 +728,7 @@ pub fn could_not_start(folder: &Path, log_dir: &Path, why: &str) -> Done {
     let _ = std::fs::create_dir_all(folder);
     let _ = std::fs::write(folder.join("report.txt"), &report);
     Done {
+        flavour: super::Flavour::Cues,
         compare: None,
         level: super::Level::Short,
         full: Some(Vec::new()),
@@ -914,6 +915,7 @@ pub fn finish(
         super::bundle::TIDY,
     );
     Done {
+        flavour: super::Flavour::Cues,
         compare: None,
         level: super::Level::Short,
         full: Some(feature::by_kind(&results)),

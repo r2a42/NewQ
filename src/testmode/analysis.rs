@@ -460,6 +460,8 @@ pub struct TimelineNotes {
 }
 
 fn secs_text(s: f64) -> String {
+    // (An empty sum is -0.)
+    let s = s + 0.0;
     if s.abs() < 1.0 {
         format!("{:.0} ms", s * 1000.0)
     } else {
@@ -599,7 +601,7 @@ pub fn timeline_summary(n: &TimelineNotes) -> Vec<String> {
             "Clock against real time: {} stretches of running, {} in all; at worst {:+.0} ms over {}.",
             n.stretches.len(),
             secs_text(n.stretches.iter().map(|s| s.secs).sum()),
-            w.drift * 1000.0,
+            (w.drift * 1000.0).round() + 0.0,
             secs_text(w.secs)
         )),
         None => out.push("Clock against real time: no stretch of running was measured.".into()),

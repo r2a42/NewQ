@@ -30,6 +30,8 @@ pub struct Built {
     pub notes: Vec<String>,
     /// The ids of the media the show asks for, found or not.
     pub used: Vec<&'static str>,
+    /// A timeline test: what the session's driver does in a lap.
+    pub timeline: Option<super::timeline::Script>,
 }
 
 struct Builder<'a> {
@@ -38,6 +40,8 @@ struct Builder<'a> {
     audio: Option<AudioOutputId>,
     notes: Vec<String>,
     used: Vec<&'static str>,
+    /// The cue list new cues go in.
+    list: u32,
 }
 
 fn follow(c: &mut Cue) {
@@ -60,6 +64,7 @@ impl<'a> Builder<'a> {
         let mut c = self.show.make_cue(ty, file, self.show.cues.len());
         c.name = name.into();
         c.parent = parent;
+        c.list = self.list;
         if let Some(m) = c.kind.media_mut()
             && matches!(ty, CueType::Video | CueType::Audio)
         {
@@ -246,6 +251,12 @@ pub(super) fn use_sound(show: &mut Show, sound: &SoundChoice) {
 /// With none chosen the show keeps the displays it has. Done before the cues
 /// are made, since a new cue is sent to the show's first display.
 pub(super) fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
+    use_displays_as(show, displays, true);
+}
+
+/// `use_displays`; with `mirror` false each display after the first has a
+/// picture of its own (the timeline tests show clips "also on" it).
+fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirror: bool) {
     let Some(first) = displays.first() else {
         return;
     };
@@ -261,6 +272,9 @@ pub(super) fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
     for d in &displays[1..] {
         let id = show.add_display();
         assign(show, id, d);
+        if !mirror {
+            continue;
+        }
         if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
             o.part_of = Some(crate::show::PartOf {
                 display: main,
@@ -291,6 +305,7 @@ pub fn build_decode(
         audio: None,
         notes: Vec::new(),
         used: Vec::new(),
+        list: 0,
     };
     // Each tile starts the next straight away (a group would work out its own
     // length from its children, which the loops make meaningless here).
@@ -333,6 +348,7 @@ pub fn build_decode(
         cues,
         notes: b.notes,
         used: b.used,
+        timeline: None,
     }
 }
 
@@ -377,6 +393,7 @@ pub fn build_with(
         audio,
         notes: Vec::new(),
         used: Vec::new(),
+        list: 0,
     };
     let (short, long) = (level == Level::Short, level == Level::Long);
     // Seconds of picture from each 10 s clip in the frame-rate section, and
@@ -798,6 +815,701 @@ pub fn build_with(
         cues,
         notes: b.notes,
         used: b.used,
+        timeline: None,
+    }
+}
+
+// ----- The timeline tests --------------------------------------------------------------
+
+/// The tracks of the timeline tests: films and stills, two picture-in-picture
+/// tracks, more for the long test's mosaic, titles on top, and a still under
+/// everything on a second display.
+const FILMS: i32 = 0;
+const INSET: i32 = 1;
+const LANES: i32 = 2;
+const TITLES: i32 = 8;
+const BACKDROP: i32 = -1;
+
+/// Seconds a pause waits for GO before the session presses it.
+pub const TIMELINE_HOLD: f64 = 5.0;
+/// Passes a loop pause plays before the session leaves it.
+pub const TIMELINE_LOOP_PASSES: u32 = 3;
+
+/// A timeline test being built: where its clips go and what its lap takes.
+struct Tl {
+    /// The group the clips are children of (None: the list's own).
+    parent: Option<CueId>,
+    /// The display of the second picture, if the test has one.
+    second: Option<crate::show::OutputId>,
+}
+
+impl Builder<'_> {
+    /// A stretch of a film on the timeline: `len` seconds from `from` into it
+    /// (less if the file is shorter), filling the display.
+    #[allow(clippy::too_many_arguments)]
+    fn film(
+        &mut self,
+        tl: &Tl,
+        id: &str,
+        name: &str,
+        at: f64,
+        from: f64,
+        len: f64,
+        layer: i32,
+        tweak: impl FnOnce(&mut MediaCue),
+    ) -> Option<CueId> {
+        let parent = tl.parent;
+        self.video(id, name, parent, |c, r| {
+            c.pre_wait = at;
+            let m = media(c);
+            let len = len.min(r.duration.max(1.0));
+            let from = from.min((r.duration - len).max(0.0));
+            m.start = from;
+            m.end = Some(from + len);
+            m.fit = Fit::Cover;
+            m.layer = layer;
+            m.transition = Transition::Cut;
+            m.fade_in = 0.0;
+            m.fade_out = 0.0;
+            m.volume_db = -12.0;
+            tweak(m);
+        })
+    }
+
+    /// A picture held `len` seconds on the timeline, filling the display.
+    #[allow(clippy::too_many_arguments)]
+    fn still(
+        &mut self,
+        tl: &Tl,
+        id: &str,
+        name: &str,
+        at: f64,
+        len: f64,
+        layer: i32,
+        tweak: impl FnOnce(&mut MediaCue),
+    ) -> Option<CueId> {
+        let r = self.have(id, Kind::Image)?;
+        Some(
+            self.cue(CueType::Image, Some(r.path), name, tl.parent, |c| {
+                c.pre_wait = at;
+                let m = media(c);
+                m.end = Some(len);
+                m.fit = Fit::Cover;
+                m.layer = layer;
+                m.transition = Transition::Cut;
+                m.fade_in = 0.0;
+                m.fade_out = 0.0;
+                tweak(m);
+            }),
+        )
+    }
+
+    /// Words for the audience: `big` centred, else a caption low down.
+    fn words(&mut self, tl: &Tl, text: &str, at: f64, len: Option<f64>, big: bool) -> CueId {
+        let t = text.to_string();
+        self.cue(
+            CueType::Text,
+            None,
+            &format!("Title: {text}"),
+            tl.parent,
+            |c| {
+                c.pre_wait = at;
+                if let CueKind::Text(tc) = &mut c.kind {
+                    tc.text = t;
+                    tc.bold = true;
+                    tc.shadow = true;
+                    tc.size = if big { 0.085 } else { 0.055 };
+                    tc.valign = if big {
+                        TextVAlign::Middle
+                    } else {
+                        TextVAlign::Bottom
+                    };
+                    tc.media.end = len;
+                    tc.media.layer = TITLES;
+                    tc.media.transition = Transition::FadeIn;
+                    tc.media.fade_in = 1.0;
+                    tc.media.fade_out = 1.0;
+                }
+            },
+        )
+    }
+
+    /// A control cue on the timeline at `at`.
+    fn on_clock(
+        &mut self,
+        tl: &Tl,
+        name: &str,
+        at: f64,
+        tweak: impl FnOnce(&mut ControlCue),
+    ) -> CueId {
+        self.cue(CueType::Control, None, name, tl.parent, |c| {
+            c.pre_wait = at;
+            if let CueKind::Control(k) = &mut c.kind {
+                tweak(k);
+            }
+        })
+    }
+
+    /// The sound of the Sintel trailer under a part of the timeline.
+    fn bed(
+        &mut self,
+        tl: &Tl,
+        name: &str,
+        at: f64,
+        from: f64,
+        len: f64,
+        tweak: impl FnOnce(&mut MediaCue),
+    ) -> Option<CueId> {
+        self.audio("sintel_sound", name, tl.parent, |c, r| {
+            c.pre_wait = at;
+            let m = media(c);
+            let from = from.min((r.duration - 1.0).max(0.0));
+            m.start = from;
+            m.end = Some((from + len).min(r.duration.max(from + 1.0)));
+            m.fade_in = 2.0;
+            m.fade_out = 3.0;
+            m.volume_db = -8.0;
+            // Through a pause the content runs on, and may run out first.
+            m.run_out = crate::timeline::RunOut::Hold;
+            tweak(m);
+        })
+    }
+
+    fn timeline_settings(markers: &[(u64, f64, &str)]) -> crate::timeline::TimelineSettings {
+        crate::timeline::TimelineSettings {
+            markers: markers
+                .iter()
+                .map(|&(id, time, name)| crate::timeline::Marker {
+                    id,
+                    time,
+                    name: name.into(),
+                    color: None,
+                })
+                .collect(),
+            ..crate::timeline::TimelineSettings::for_editor()
+        }
+    }
+}
+
+/// A picture made small and put to one side.
+fn inset(m: &mut MediaCue, scale: f32, x: f32, y: f32) {
+    m.fit = Fit::Contain;
+    m.transform.scale_x = scale;
+    m.transform.scale_y = scale;
+    m.transform.x = x;
+    m.transform.y = y;
+}
+
+/// A slow push in on a still, over `secs`.
+fn push_in(m: &mut MediaCue, secs: f64) {
+    let mut a = Animated::new(1.0);
+    a.set_key(0.0, 1.0);
+    a.set_key(secs, 1.12);
+    m.motion.scale_x = Some(a.clone());
+    m.motion.scale_y = Some(a);
+}
+
+/// The timeline test for `level`, built from `original`'s settings: a timeline
+/// list that plays like a short programme (films butted and crossfaded, stills
+/// under titles, a picture brought up by a fade cue, a pause GO ends, and from
+/// Medium on a third track with speed and opacity keyframes, a picture "also
+/// on" a second display, a freezing pause over a playing film, a split join, a
+/// loop, a jump to a marker; Long adds the heavy films, a mosaic of five with
+/// effects, and seeks while it runs), then (Medium and Long) a timeline group
+/// in the main list. The session's driver plays it (`Built::timeline`).
+pub fn build_timeline(
+    original: &Show,
+    level: Level,
+    res: &HashMap<&'static str, Resolved>,
+    displays: &[DisplayChoice],
+    sound: &SoundChoice,
+) -> Built {
+    use crate::show::{PauseFreeze, TimelineKey, TimelinePoint};
+    let mut show = original.clone();
+    show.cues.clear();
+    show.lists.clear();
+    show.main_list_name = None;
+    use_displays_as(&mut show, displays, false);
+    use_sound(&mut show, sound);
+    // Tracks are layers: each replaces only its own (an old show's setting
+    // would make every clip replace the whole display).
+    show.own_layers = true;
+    let title = super::Flavour::Timeline.name(level);
+    show.name = format!("Test Mode: {title}");
+    let audio = show.audio_outputs.first().map(|a| a.id);
+    let pictures: Vec<crate::show::OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| !o.is_sub_display() && o.part_of.is_none())
+        .map(|o| o.id)
+        .collect();
+    let mut b = Builder {
+        show,
+        res,
+        audio,
+        notes: Vec::new(),
+        used: Vec::new(),
+        list: 0,
+    };
+    let (short, long) = (level == Level::Short, level == Level::Long);
+    let hold = TIMELINE_HOLD;
+    let mut legs = Vec::new();
+    let mut lap = 0.0;
+
+    // The group in the main list first (the main list's cues come first).
+    let group = (!short).then(|| {
+        let g = b.cue(CueType::Group, None, "Interval", None, |c| {
+            if let CueKind::Group(g) = &mut c.kind {
+                g.mode = GroupMode::Timeline;
+                g.timeline = Some(Builder::timeline_settings(&[]));
+            }
+        });
+        let tl = Tl {
+            parent: Some(g),
+            second: None,
+        };
+        b.still(
+            &tl,
+            "bluemarble",
+            "The Blue Marble",
+            0.5,
+            12.0,
+            FILMS,
+            |m| {
+                m.transition = Transition::FadeIn;
+                m.fade_in = 1.5;
+                push_in(m, 12.0);
+            },
+        );
+        b.words(&tl, "Interval", 1.0, Some(5.0), true);
+        b.on_clock(&tl, "Pause: wait for GO", 6.0, |k| {
+            k.action = ControlAction::TimelinePause;
+        });
+        let mut end = 12.5;
+        if long {
+            b.still(&tl, "mars", "Mars", 12.5, 8.0, FILMS, |m| push_in(m, 8.0));
+            b.still(
+                &tl,
+                "andromeda",
+                "The Andromeda galaxy",
+                20.5,
+                8.0,
+                FILMS,
+                |m| push_in(m, 8.0),
+            );
+            end = 28.5;
+        }
+        b.film(&tl, "bbb_60", "Big Buck Bunny", end, 1.0, 8.0, FILMS, |m| {
+            m.fade_out = 1.0;
+        });
+        b.words(&tl, "Part two", end + 0.5, Some(5.0), true);
+        lap += end + 8.0 + hold;
+        g
+    });
+    legs.extend(group.map(TimelineKey::Group));
+
+    // The timeline list.
+    let list = b.show.add_list("Programme");
+    b.list = list;
+    let key = TimelineKey::List(list);
+    let tl = Tl {
+        parent: None,
+        second: pictures.get(1).copied(),
+    };
+    legs.insert(0, key);
+    let mut markers: Vec<(u64, f64, &str)> = vec![(1, 37.5, "Second half")];
+
+    // 1. A title over three films at 60, 24 and 29.97 frames a second: the
+    // first two butted (one held over the join), the third crossfading over
+    // the overlap; a still under a caption, and a picture a fade cue brings up.
+    b.words(
+        &tl,
+        &format!("NewQ Test Mode · {title}"),
+        0.5,
+        Some(5.0),
+        true,
+    );
+    b.film(
+        &tl,
+        "bbb_60",
+        "Big Buck Bunny (60 fps)",
+        0.5,
+        0.0,
+        9.0,
+        FILMS,
+        |m| {
+            m.transition = Transition::FadeIn;
+            m.fade_in = 1.5;
+        },
+    );
+    b.film(
+        &tl,
+        "sintel_24",
+        "Sintel (24 fps)",
+        9.5,
+        0.5,
+        9.0,
+        FILMS,
+        |_| {},
+    );
+    b.film(
+        &tl,
+        "jelly_30",
+        "Jellyfish (29.97 fps)",
+        16.5,
+        0.0,
+        9.0,
+        FILMS,
+        |_| {},
+    );
+    b.still(&tl, "apollo11", "Apollo 11", 25.5, 12.0, FILMS, |m| {
+        push_in(m, 12.0)
+    });
+    b.words(&tl, "Apollo 11 · July 1969", 26.5, Some(7.0), false);
+    if let Some(earth) = b.still(
+        &tl,
+        "bluemarble",
+        "The Earth from Apollo 17",
+        28.5,
+        13.0,
+        INSET,
+        |m| {
+            inset(m, 0.36, 0.27, -0.22);
+            // Unseen until the fade cue brings it up.
+            m.opacity = 0.0;
+        },
+    ) {
+        b.cue(CueType::Fade, None, "Fade: bring up the Earth", None, |c| {
+            c.pre_wait = 29.5;
+            if let CueKind::Fade(f) = &mut c.kind {
+                f.target = Some(earth);
+                f.duration = 2.0;
+                f.curve = Curve::SCurve;
+                f.opacity = Some(1.0);
+                f.volume_db = None;
+                f.stop_target = false;
+            }
+        });
+    }
+    if !short {
+        // The third track: a film inset with its speed and opacity keyframed.
+        b.film(
+            &tl,
+            "bbb_60",
+            "Big Buck Bunny, slowing",
+            4.5,
+            2.0,
+            7.0,
+            LANES,
+            |m| {
+                inset(m, 0.3, -0.31, 0.27);
+                m.rate.set_key(0.0, 1.0);
+                m.rate.set_key(4.0, 0.5);
+                m.rate.set_key(8.0, 1.0);
+                let mut o = Animated::new(0.0);
+                o.set_key(0.0, 0.0);
+                o.set_key(1.5, 1.0);
+                o.set_key(7.0, 1.0);
+                o.set_key(8.5, 0.0);
+                m.motion.opacity = Some(o);
+            },
+        );
+    }
+    // The pause: the clock stands (the pictures stay) until GO.
+    b.on_clock(&tl, "Pause: wait for GO", 34.0, |k| {
+        k.action = ControlAction::TimelinePause;
+    });
+    lap += hold;
+    let bed_len = if short { 47.0 } else { 36.0 };
+    b.bed(&tl, "Sound: the Sintel trailer", 0.5, 0.0, bed_len, |_| {});
+
+    let end = if short {
+        b.film(
+            &tl,
+            "bbb_60",
+            "Big Buck Bunny, again",
+            37.5,
+            1.0,
+            9.0,
+            FILMS,
+            |_| {},
+        );
+        b.words(&tl, "Thank you for watching", 43.5, None, true);
+        48.0
+    } else {
+        // 2. A film with its own sound, split in two (a join), held by a pause
+        // that freezes it; a still shown on the second display too.
+        let trailer = |b: &mut Builder, name: &str, at: f64, from: f64| {
+            b.film(&tl, "sintel_trailer", name, at, from, 8.0, FILMS, |m| {
+                m.volume_db = -8.0;
+            })
+        };
+        trailer(&mut b, "The Sintel trailer", 37.5, 15.0);
+        // The second half goes on from where the first stops.
+        let from2 = b
+            .show
+            .cues
+            .last()
+            .and_then(|c| c.kind.media())
+            .and_then(|m| m.end)
+            .unwrap_or(23.0);
+        trailer(&mut b, "The Sintel trailer, second half", 45.5, from2);
+        b.words(&tl, "Sintel · Blender Foundation", 38.5, Some(5.0), false);
+        b.on_clock(&tl, "Pause: hold everything", 42.0, |k| {
+            k.action = ControlAction::TimelinePause;
+            k.freeze = PauseFreeze::Everything;
+        });
+        lap += hold;
+        let second = tl.second;
+        b.still(
+            &tl,
+            "curiosity",
+            "Curiosity on Mars",
+            53.5,
+            10.0,
+            FILMS,
+            |m| {
+                m.also_on = second.into_iter().collect();
+                push_in(m, 10.0);
+            },
+        );
+        b.words(&tl, "Curiosity on Mars", 54.5, Some(7.0), false);
+        if tl.second.is_none() {
+            b.notes.push(
+                "Only one display: the picture shown on a second display too was shown on one"
+                    .into(),
+            );
+        }
+        markers.push((2, 53.5, "Mars"));
+
+        // 3. A loop played round until GO, then a jump past a part.
+        b.film(
+            &tl,
+            "jelly_30",
+            "Jellyfish, round and round",
+            63.5,
+            0.0,
+            9.0,
+            FILMS,
+            |_| {},
+        );
+        b.words(&tl, "The Pacific", 64.5, Some(5.0), false);
+        b.on_clock(&tl, "Loop: until GO", 70.0, |k| {
+            k.action = ControlAction::TimelinePause;
+            k.loop_from = Some(TimelinePoint::Time(64.0));
+        });
+        lap += f64::from(TIMELINE_LOOP_PASSES) * 6.0;
+        markers.push((3, 64.0, "Loop"));
+        b.film(
+            &tl,
+            "bbb_60",
+            "Big Buck Bunny, cut short",
+            72.5,
+            0.0,
+            9.0,
+            FILMS,
+            |_| {},
+        );
+        b.on_clock(&tl, "Jump: past the next part", 74.0, |k| {
+            k.action = ControlAction::TimelineJump;
+            k.at = Some(TimelinePoint::Marker(4));
+        });
+        b.film(
+            &tl,
+            "sintel_24",
+            "Sintel, jumped over",
+            76.0,
+            0.0,
+            8.0,
+            INSET,
+            |m| {
+                inset(m, 0.4, 0.0, 0.0);
+            },
+        );
+        markers.push((4, 84.0, "After the jump"));
+        lap -= 10.0;
+        let at = if long {
+            // 4. The heavy part: a 25 Mbit/s film under four insets at once
+            // (two H.265), each with effects, then a large picture blurring.
+            b.film(
+                &tl,
+                "sintel_hi",
+                "Sintel, 25 Mbit/s",
+                84.0,
+                0.0,
+                9.5,
+                FILMS,
+                |m| {
+                    m.transition = Transition::FadeIn;
+                    m.fade_in = 1.0;
+                },
+            );
+            b.still(&tl, "mars", "Mars, blurring", 93.5, 10.5, FILMS, |m| {
+                m.effects.push(blur_ramp(18.0, 10.5));
+            });
+            let corners = [
+                (
+                    "bbb_hevc",
+                    "Big Buck Bunny, H.265",
+                    -0.25,
+                    -0.25,
+                    EffectKind::Sharpen,
+                ),
+                (
+                    "jelly_hevc",
+                    "Jellyfish, H.265, negative",
+                    0.25,
+                    -0.25,
+                    EffectKind::Negative,
+                ),
+                (
+                    "bbb_60",
+                    "Big Buck Bunny, pixelated",
+                    -0.25,
+                    0.25,
+                    EffectKind::Pixelate,
+                ),
+                (
+                    "jelly_30",
+                    "Jellyfish, vignette",
+                    0.25,
+                    0.25,
+                    EffectKind::Vignette,
+                ),
+            ];
+            for (i, (id, name, x, y, fx)) in corners.into_iter().enumerate() {
+                for round in 0..2 {
+                    let start = 85.0 + f64::from(round) * 9.5;
+                    b.film(
+                        &tl,
+                        id,
+                        &format!("{name} ({})", round + 1),
+                        start,
+                        f64::from(round),
+                        9.0,
+                        INSET + i as i32,
+                        |m| {
+                            inset(m, 0.4, x, y);
+                            m.transition = Transition::FadeIn;
+                            m.fade_in = 0.5;
+                            m.fade_out = 0.5;
+                            let mut e = Effect::new(fx);
+                            if fx == EffectKind::Pixelate {
+                                e.p[0].set_key(0.0, 2.0);
+                                e.p[0].set_key(4.5, 30.0);
+                                e.p[0].set_key(9.0, 2.0);
+                            }
+                            m.effects.push(e);
+                        },
+                    );
+                }
+            }
+            b.bed(
+                &tl,
+                "Sound: the Sintel trailer, through EQ and reverb",
+                84.0,
+                20.0,
+                20.0,
+                |m| {
+                    m.effects.push(Effect::new(EffectKind::Eq));
+                    m.effects.push(Effect::new(EffectKind::Reverb));
+                },
+            );
+            b.words(&tl, "Mosaic", 85.0, Some(5.0), true);
+            markers.push((5, 92.0, "Mosaic, middle"));
+            markers.push((6, 100.0, "Mosaic, end"));
+            104.0
+        } else {
+            b.film(
+                &tl,
+                "sintel_24",
+                "Sintel, after the jump",
+                84.0,
+                0.5,
+                9.0,
+                FILMS,
+                |m| {
+                    m.transition = Transition::FadeIn;
+                    m.fade_in = 1.0;
+                },
+            );
+            b.bed(
+                &tl,
+                "Sound: the Sintel trailer, closing",
+                84.0,
+                20.0,
+                10.0,
+                |_| {},
+            );
+            93.0
+        };
+        b.words(&tl, "Thank you for watching", at - 4.0, None, true);
+        // The second display's picture, under all of it.
+        if let Some(d2) = tl.second {
+            b.still(
+                &tl,
+                "earthrise",
+                "Earthrise (second display)",
+                0.5,
+                at - 0.5,
+                BACKDROP,
+                |m| {
+                    m.output = Some(d2);
+                    m.transition = Transition::FadeIn;
+                    m.fade_in = 2.0;
+                },
+            );
+        } else {
+            // One display: Earthrise as a picture in the picture at the end.
+            b.still(&tl, "earthrise", "Earthrise", at - 5.0, 5.5, INSET, |m| {
+                inset(m, 0.32, 0.29, -0.24);
+                m.transition = Transition::FadeIn;
+                m.fade_in = 1.0;
+            });
+        }
+        at + 1.0
+    };
+    // The end: a Stop that fades the timeline out.
+    b.on_clock(&tl, "Stop: fade out the timeline", end, |k| {
+        k.action = ControlAction::TimelineStop;
+    });
+    lap += end + crate::show::TIMELINE_STOP_FADE;
+    if let Some(l) = b.show.lists.iter_mut().find(|l| l.id == list) {
+        l.timeline = Some(Builder::timeline_settings(&markers));
+    }
+
+    // The long test seeks while the list runs: to a marker and back, twice.
+    let seeks = if long {
+        vec![(20.0, 53.5), (58.0, 22.0), (90.0, 100.0), (102.0, 92.0)]
+    } else {
+        Vec::new()
+    };
+    for (from, to) in &seeks {
+        lap += from - to;
+    }
+    let script = super::timeline::Script {
+        legs,
+        hold,
+        loop_passes: if short { 0 } else { TIMELINE_LOOP_PASSES },
+        seeks,
+    };
+    let first = b
+        .show
+        .cues
+        .iter()
+        .find(|c| c.list == list)
+        .map(|c| c.id)
+        .unwrap_or(CueId(0));
+    let cues = b.show.cues.len();
+    Built {
+        show: b.show,
+        first,
+        repeats: !short,
+        lap_secs: lap,
+        cues,
+        notes: b.notes,
+        used: b.used,
+        timeline: Some(script),
     }
 }
 
@@ -1231,5 +1943,214 @@ mod tests {
         assert!(e.is_active());
         e.stop_all(0.0);
         show.cues.clear();
+    }
+
+    // ----- The timeline tests ------------------------------------------------------
+
+    fn timeline(level: Level, res: &HashMap<&'static str, Resolved>, d: &[DisplayChoice]) -> Built {
+        build_timeline(&Show::default(), level, res, d, &SoundChoice::default())
+    }
+
+    #[test]
+    fn each_timeline_test_is_a_valid_timeline_list_and_its_group_and_they_grow() {
+        use crate::show::{TimelineKey, TimelinePoint};
+        use crate::timeline::model;
+        let original = Show::default();
+        let mut laps = Vec::new();
+        for level in Level::ALL {
+            for displays in [vec![], vec![choice("Left", 1), choice("Right", 2)]] {
+                let built = timeline(level, &all(), &displays);
+                let show = &built.show;
+                let what = format!("{level:?} with {} displays", displays.len());
+                assert!(
+                    built.notes.iter().all(|n| n.contains("Only one display")),
+                    "{what}: {:?}",
+                    built.notes
+                );
+                // The lists are as a loaded show would have them.
+                let mut again = show.clone();
+                again.normalize_lists();
+                assert_eq!(
+                    serde_json::to_string(&again).unwrap(),
+                    serde_json::to_string(show).unwrap(),
+                    "{what}"
+                );
+                // One timeline list, never the main one.
+                let lists: Vec<_> = show.lists.iter().filter(|l| l.timeline.is_some()).collect();
+                assert_eq!(lists.len(), 1, "{what}");
+                let list = lists[0].id;
+                assert_ne!(list, 0);
+                let key = TimelineKey::List(list);
+                assert!(model::is_timeline(show, key));
+                // No group in it, and its cues are all its top-level clips.
+                for c in show.cues.iter().filter(|c| c.list == list) {
+                    assert!(c.parent.is_none(), "{what}: {}", c.name);
+                    assert!(!matches!(c.kind, CueKind::Group(_)), "{what}: {}", c.name);
+                    assert_eq!(model::key_of(show, c.id), Some(key), "{}", c.name);
+                }
+                // The main list holds the timeline group and its clips alone.
+                let main: Vec<&Cue> = show
+                    .cues
+                    .iter()
+                    .filter(|c| c.list == 0 && c.parent.is_none())
+                    .collect();
+                let script = built.timeline.as_ref().expect("a script");
+                if level == Level::Short {
+                    assert!(main.is_empty(), "{what}");
+                    assert_eq!(script.legs, vec![key]);
+                } else {
+                    assert_eq!(main.len(), 1, "{what}");
+                    let g = main[0].id;
+                    assert!(model::is_timeline(show, TimelineKey::Group(g)));
+                    assert_eq!(script.legs, vec![key, TimelineKey::Group(g)]);
+                    assert!(show.children(g).len() >= 4);
+                }
+                assert_eq!(built.repeats, level != Level::Short);
+                // Every timeline action finds its timeline and its place.
+                let mut actions = Vec::new();
+                for c in &show.cues {
+                    match &c.kind {
+                        CueKind::Control(k) if ControlAction::TIMELINE.contains(&k.action) => {
+                            actions.push(k.action);
+                            let on = k.timeline.or_else(|| model::key_of(show, c.id));
+                            let on =
+                                on.unwrap_or_else(|| panic!("{what}: {} has no timeline", c.name));
+                            assert!(model::is_timeline(show, on));
+                            for p in [k.at, k.loop_from].into_iter().flatten() {
+                                assert!(
+                                    model::resolve(show, on, p).is_some(),
+                                    "{what}: {}",
+                                    c.name
+                                );
+                            }
+                        }
+                        CueKind::Fade(f) => {
+                            let t = f.target.and_then(|t| show.cue(t)).expect("a fade's target");
+                            assert_eq!(model::key_of(show, t.id), model::key_of(show, c.id));
+                        }
+                        _ => {}
+                    }
+                    if let Some(m) = c.kind.media() {
+                        for o in m.also_on.iter().chain(m.output.iter()) {
+                            assert!(show.outputs.iter().any(|x| x.id == *o), "{}", c.name);
+                        }
+                    }
+                }
+                assert!(actions.contains(&ControlAction::TimelinePause), "{what}");
+                assert!(actions.contains(&ControlAction::TimelineStop), "{what}");
+                if level != Level::Short {
+                    assert!(actions.contains(&ControlAction::TimelineJump), "{what}");
+                    let looping = show
+                        .cues
+                        .iter()
+                        .any(|c| matches!(&c.kind, CueKind::Control(k) if k.is_loop()));
+                    assert!(looping, "{what}");
+                }
+                // A marker to jump to; the seeks stay on the timeline.
+                let settings = lists[0].timeline.as_ref().unwrap();
+                assert!(!settings.markers.is_empty());
+                assert!(settings.crossfade_overlaps && settings.start_on_fade_in);
+                for (when, to) in &script.seeks {
+                    assert!(*when > 0.0 && *to > 0.0, "{what}");
+                    assert!(
+                        model::resolve(show, key, TimelinePoint::Time(*to)).is_some(),
+                        "{what}"
+                    );
+                }
+                assert_eq!(script.seeks.is_empty(), level != Level::Long);
+                // Pictures also on the second display, when there is one.
+                let also = show
+                    .cues
+                    .iter()
+                    .filter_map(|c| c.kind.media())
+                    .any(|m| !m.also_on.is_empty());
+                assert_eq!(also, level != Level::Short && displays.len() == 2, "{what}");
+                if displays.is_empty() {
+                    // The user's own displays are kept.
+                    assert_eq!(show.outputs.len(), original.outputs.len());
+                    assert_eq!(show.outputs[0].id, original.outputs[0].id);
+                } else {
+                    // Each display its own picture: no mirror.
+                    assert_eq!(show.outputs.len(), 2);
+                    assert!(show.outputs.iter().all(|o| o.part_of.is_none()));
+                }
+                assert!(show.own_layers, "tracks are layers");
+                // It saves and loads like any show.
+                let dir = std::env::temp_dir()
+                    .join(format!("newq_tlplan_{level:?}_{}", std::process::id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("t.newq");
+                show.save(&path).unwrap();
+                assert_eq!(Show::load(&path).unwrap().cues.len(), built.cues);
+                let _ = std::fs::remove_dir_all(dir);
+                if displays.is_empty() {
+                    laps.push((built.cues, built.lap_secs));
+                }
+            }
+        }
+        assert!(laps[0].0 < laps[1].0 && laps[1].0 < laps[2].0, "{laps:?}");
+        assert!((45.0..=90.0).contains(&laps[0].1), "{laps:?}");
+        assert!((100.0..=250.0).contains(&laps[1].1), "{laps:?}");
+        assert!((laps[1].1..=350.0).contains(&laps[2].1), "{laps:?}");
+    }
+
+    #[test]
+    fn each_timeline_test_downloads_exactly_the_media_its_show_asks_for() {
+        for level in Level::ALL {
+            let two = [choice("Left", 1), choice("Right", 2)];
+            for d in [&two[..], &[]] {
+                let built = timeline(level, &HashMap::new(), d);
+                let wanted: Vec<&str> =
+                    crate::testmode::assets::wanted_for(level, crate::testmode::Flavour::Timeline)
+                        .iter()
+                        .map(|a| a.id)
+                        .collect();
+                for id in &built.used {
+                    assert!(
+                        wanted.contains(id),
+                        "{level:?} asks for {id}, which it does not download"
+                    );
+                }
+                for id in &wanted {
+                    let source_of_used = built
+                        .used
+                        .iter()
+                        .any(|u| find(u).and_then(|a| a.from) == Some(*id));
+                    assert!(
+                        built.used.contains(id) || source_of_used,
+                        "{level:?} downloads {id}, which its show never uses"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_timeline_test_goes_on_without_missing_media() {
+        let mut res = all();
+        res.remove("sintel_24");
+        res.remove("apollo11");
+        let built = timeline(Level::Medium, &res, &[]);
+        assert!(
+            built.notes.iter().any(|n| n.contains("Sintel")),
+            "{:?}",
+            built.notes
+        );
+        assert!(
+            built
+                .show
+                .cues
+                .iter()
+                .all(|c| c.kind.media().is_none_or(|m| {
+                    m.file.as_os_str().is_empty()
+                        || !m.file.ends_with("sintel_24") && !m.file.ends_with("apollo11")
+                }))
+        );
+        // Nothing at all: titles, the pause and the Stop still make a timeline.
+        let none = timeline(Level::Short, &HashMap::new(), &[]);
+        assert!(!none.notes.is_empty());
+        assert!(none.show.cues.iter().any(
+            |c| matches!(&c.kind, CueKind::Control(k) if k.action == ControlAction::TimelineStop)
+        ));
     }
 }

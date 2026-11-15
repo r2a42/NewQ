@@ -11,7 +11,7 @@ use super::analysis::{Finding, Severity, Verdict, analyse};
 use super::assets::{self, Asset, Fetch, Resolved, Source};
 use super::decode::{Compare, CompareResult};
 use super::plan::{DisplayChoice, SoundChoice};
-use super::{Level, plan};
+use super::{Flavour, Level, plan};
 use crate::awake::{KeepAwake, SleepWatch};
 use crate::engine::{CueStatus, Engine};
 use crate::media::ffmpeg::Ffmpeg;
@@ -28,6 +28,8 @@ pub struct TestMode {
     /// The window is showing.
     pub open: bool,
     pub level: Level,
+    /// Cue tests or timeline tests.
+    pub flavour: Flavour,
     /// How long the Medium and Long tests run, in minutes.
     pub minutes: u32,
     /// Download the real media (otherwise it is made on this computer).
@@ -48,6 +50,7 @@ impl Default for TestMode {
         TestMode {
             open: false,
             level: Level::Short,
+            flavour: Flavour::Cues,
             minutes: Level::Short.default_minutes(),
             download: true,
             decode_secs: super::decode::TRIAL_SECS,
@@ -81,6 +84,7 @@ pub struct Prep {
     /// A heavier lap for the graphics card (see `plan::build_with`).
     pub heavy: bool,
     pub level: Level,
+    pub flavour: Flavour,
     pub minutes: u32,
     pub wanted: Vec<&'static Asset>,
     log_dir: PathBuf,
@@ -89,6 +93,7 @@ pub struct Prep {
 /// A test under way.
 pub struct Run {
     pub level: Level,
+    pub flavour: Flavour,
     /// The heavier lap: late frames are an answer, not a fault.
     pub heavy: bool,
     pub started: Instant,
@@ -130,6 +135,75 @@ pub struct Run {
     /// Samples of the frozen program copied into the folder (see `freeze`).
     freeze_files: Vec<String>,
     memory: MemoryWatch,
+    /// A timeline test's driver and what it watches.
+    pub timeline: Option<Box<TimelineRun>>,
+}
+
+/// A timeline test's part of a run (see `testmode::timeline`).
+pub struct TimelineRun {
+    pub driver: super::timeline::Driver,
+    pub watch: super::timeline::Watch,
+    csv: Option<std::io::BufWriter<std::fs::File>>,
+    /// How many of each of the watch's notes are in the file.
+    written: (usize, usize, usize),
+}
+
+impl TimelineRun {
+    fn new(script: super::timeline::Script, repeats: bool, folder: &Path) -> TimelineRun {
+        let mut csv = std::fs::File::create(folder.join("timeline.csv"))
+            .ok()
+            .map(std::io::BufWriter::new);
+        if let Some(f) = &mut csv {
+            let _ = writeln!(f, "t_s,what,lap,value_s,detail");
+        }
+        TimelineRun {
+            driver: super::timeline::Driver::new(script, repeats),
+            watch: super::timeline::Watch::default(),
+            csv,
+            written: (0, 0, 0),
+        }
+    }
+
+    /// The watch's new notes into `timeline.csv`.
+    fn write(&mut self) {
+        let Some(f) = &mut self.csv else {
+            return;
+        };
+        let n = &self.watch.notes;
+        let lap = self.driver.laps;
+        for s in &n.stretches[self.written.0..] {
+            let _ = writeln!(
+                f,
+                "{:.3},clock_drift,{lap},{:.4},over {:.1} s of running",
+                s.at, s.drift, s.secs
+            );
+        }
+        for a in &n.arrivals[self.written.1..] {
+            let value = a.late.map_or("never".to_string(), |l| format!("{l:.4}"));
+            let _ = writeln!(
+                f,
+                "{:.3},clip_late,{lap},{value},\"{}\"",
+                a.at,
+                a.name.replace('"', "'")
+            );
+        }
+        for c in &n.cueing[self.written.2..] {
+            let _ = writeln!(
+                f,
+                "{:.3},cueing,{},{:.3},{}",
+                c.at,
+                c.lap,
+                c.secs,
+                if c.gave_up {
+                    "ran out of time"
+                } else {
+                    "ready"
+                }
+            );
+        }
+        self.written = (n.stretches.len(), n.arrivals.len(), n.cueing.len());
+        let _ = f.flush();
+    }
 }
 
 /// What a test may use of the computer's memory before it is stopped: half of
@@ -358,6 +432,7 @@ impl Run {
 /// A test that has ended and put the show back.
 pub struct Done {
     pub compare: Option<CompareResult>,
+    pub flavour: Flavour,
     /// It was the full check: how each kind of cue came out (passed, failed, not run).
     pub full: Option<Vec<(&'static str, usize, usize, usize)>>,
     /// The one zip of everything, being made or made (see `bundle`).
@@ -439,6 +514,24 @@ impl Level {
     }
 }
 
+impl Flavour {
+    /// What the window says of a test.
+    pub fn summary(self, level: Level) -> &'static str {
+        match (self, level) {
+            (Flavour::Cues, l) => l.summary(),
+            (Flavour::Timeline, Level::Short) => {
+                "About a minute. One run of a timeline: films at three frame rates butted and crossfaded with a sound track under them, a still under a caption, a picture a fade cue brings up, a pause that GO ends (pressed for you), and a Stop that fades it all out."
+            }
+            (Flavour::Timeline, Level::Medium) => {
+                "About an hour. A longer timeline and a timeline group, round and round: a third track with speed and opacity keyframes, a picture also on a second display, a pause that freezes a film, a loop left after three passes, a jump to a marker."
+            }
+            (Flavour::Timeline, Level::Long) => {
+                "Overnight. The medium timeline with H.265 and a 25 Mbit/s film, a mosaic of five films with effects, very large pictures, and seeks to a marker and back while it runs."
+            }
+        }
+    }
+}
+
 pub fn clock(d: Duration) -> String {
     let s = d.as_secs();
     if s >= 3600 {
@@ -488,6 +581,13 @@ impl TestMode {
         }
     }
 
+    /// Choose a test: its level and flavour.
+    pub fn choose(&mut self, level: Level, flavour: Flavour) {
+        self.debug = false;
+        self.flavour = flavour;
+        self.set_level(level);
+    }
+
     /// Begin: make the media ready (downloading what is missing).
     pub fn start(
         &mut self,
@@ -500,7 +600,7 @@ impl TestMode {
         if self.busy() {
             return;
         }
-        let wanted = assets::wanted(self.level);
+        let wanted = assets::wanted_for(self.level, self.flavour);
         let fetch = assets::start(
             ff,
             assets::cache_dir(log_dir),
@@ -513,8 +613,9 @@ impl TestMode {
             compare: false,
             displays,
             sound,
-            heavy,
+            heavy: heavy && self.flavour == Flavour::Cues,
             level: self.level,
+            flavour: self.flavour,
             minutes: self.minutes,
             wanted,
             log_dir: log_dir.to_path_buf(),
@@ -561,6 +662,7 @@ impl TestMode {
             sound: SoundChoice::default(),
             heavy: false,
             level: self.level,
+            flavour: Flavour::Cues,
             minutes: 0,
             wanted,
             log_dir: log_dir.to_path_buf(),
@@ -759,8 +861,12 @@ pub(super) fn unix_now() -> i64 {
 }
 
 /// The folder a run's files go in.
-pub fn run_folder(log_dir: &Path, level: Level, secs: i64) -> PathBuf {
-    run_folder_named(log_dir, &level.label().to_lowercase(), secs)
+pub fn run_folder(log_dir: &Path, level: Level, flavour: Flavour, secs: i64) -> PathBuf {
+    run_folder_named(
+        log_dir,
+        &flavour.name(level).to_lowercase().replace(' ', "-"),
+        secs,
+    )
 }
 
 pub(super) fn run_folder_named(log_dir: &Path, name: &str, secs: i64) -> PathBuf {
@@ -782,6 +888,7 @@ fn compare_done(
     let verdict = Verdict::of(&findings);
     Done {
         full: None,
+        flavour: Flavour::Cues,
         bundle: super::bundle::Bundle::start(
             folder.clone(),
             crate::crash::log_dir(),
@@ -820,15 +927,21 @@ fn launch(
         return Err(why.to_string());
     }
     let resolved = prep.fetch.status.lock().resolved.clone();
-    let built = plan::build_with(
-        show,
-        prep.level,
-        &resolved,
-        &prep.displays,
-        &prep.sound,
-        prep.heavy,
-    );
-    let folder = run_folder(&prep.log_dir, prep.level, unix_now());
+    let built = match prep.flavour {
+        Flavour::Cues => plan::build_with(
+            show,
+            prep.level,
+            &resolved,
+            &prep.displays,
+            &prep.sound,
+            prep.heavy,
+        ),
+        Flavour::Timeline => {
+            plan::build_timeline(show, prep.level, &resolved, &prep.displays, &prep.sound)
+        }
+    };
+    let name = prep.flavour.name(prep.level);
+    let folder = run_folder(&prep.log_dir, prep.level, prep.flavour, unix_now());
     std::fs::create_dir_all(&folder).map_err(|e| {
         format!(
             "Can't make the folder for the test's log files ({}): {e}. Nothing was changed.",
@@ -881,7 +994,7 @@ fn launch(
     engine.log(format!("Test mode: the sound {}", prep.sound.describe()));
     engine.log(format!(
         "Test mode: {} test begins ({} cues from {} media files, a lap should take {:.0} s)",
-        prep.level.label(),
+        name,
         built.cues,
         built.used.len(),
         built.lap_secs
@@ -895,9 +1008,18 @@ fn launch(
         },
         awake.how()
     ));
-    engine.go(show);
+    let timeline = built
+        .timeline
+        .clone()
+        .map(|script| Box::new(TimelineRun::new(script, built.repeats, &folder)));
+    // A timeline test is started by its driver, at its first look.
+    if timeline.is_none() {
+        engine.go(show);
+    }
     Ok(Run {
         level: prep.level,
+        flavour: prep.flavour,
+        timeline,
         heavy: prep.heavy,
         started: Instant::now(),
         planned,
@@ -935,6 +1057,52 @@ fn launch(
 }
 
 impl Run {
+    /// What has been found so far (`hours` into the run).
+    fn judge(&self, hours: f64) -> Vec<Finding> {
+        let clean = self.clean_laps();
+        let mut f = super::analysis::for_load(
+            analyse(&self.history, &clean, self.lap_secs, &self.messages, hours),
+            self.heavy,
+        );
+        if let Some(tl) = &self.timeline {
+            f.extend(super::analysis::analyse_timeline(&tl.watch.notes, &clean));
+        }
+        f
+    }
+
+    /// A lap has begun, `t` seconds into the test.
+    fn lap_began(&mut self, t: f64) {
+        self.lap_started_at = Some(t);
+        self.lap_starts.push(t);
+        self.overrun_logged = false;
+    }
+
+    /// The lap under way has ended, `t` seconds into the test.
+    fn lap_ended(&mut self, t: f64) {
+        let Some(prev) = self.lap_started_at.take() else {
+            return;
+        };
+        let took = t - prev;
+        self.laps.push(took);
+        if let Some(f) = &mut self.lap_file {
+            let _ = writeln!(
+                f,
+                "{},{prev:.1},{took:.1},{:.1}",
+                self.laps.len(),
+                self.lap_secs
+            );
+            let _ = f.flush();
+        }
+        if self.lap_secs > 0.0 && took > self.lap_secs * 1.25 + 3.0 {
+            let line = format!(
+                "Lap {} took {took:.0} s; it should take {:.0} s",
+                self.laps.len(),
+                self.lap_secs
+            );
+            self.log_at(t, &line);
+        }
+    }
+
     /// One look at the test. Returns why it should end, if it should.
     fn tick(&mut self, show: &Show, engine: &mut Engine, now: Instant) -> Option<End> {
         let elapsed = now.duration_since(self.started);
@@ -948,37 +1116,43 @@ impl Run {
                 clock(gap)
             );
             self.log_at(t, &line);
+            if let Some(tl) = &mut self.timeline {
+                tl.watch.slept();
+            }
         }
-        // A lap begins whenever the first cue starts.
-        let playing = matches!(engine.status(self.first), CueStatus::Playing { .. });
-        if playing && !self.first_playing {
+        let mut stuck = None;
+        let mut lap_over = false;
+        if let Some(mut tl) = self.timeline.take() {
+            // A timeline test: its driver plays it and says when laps begin and end.
             let t = elapsed.as_secs_f64();
-            if let Some(prev) = self.lap_started_at {
-                let took = t - prev;
-                self.laps.push(took);
-                if let Some(f) = &mut self.lap_file {
-                    let _ = writeln!(
-                        f,
-                        "{},{prev:.1},{took:.1},{:.1}",
-                        self.laps.len(),
-                        self.lap_secs
-                    );
-                    let _ = f.flush();
-                }
-                if self.lap_secs > 0.0 && took > self.lap_secs * 1.25 + 3.0 {
-                    let line = format!(
-                        "Lap {} took {took:.0} s; it should take {:.0} s",
-                        self.laps.len(),
-                        self.lap_secs
-                    );
-                    self.log_at(t, &line);
+            for h in tl.driver.tick(show, engine, now) {
+                match h {
+                    super::timeline::Happened::LapBegan => self.lap_began(t),
+                    super::timeline::Happened::LapEnded => {
+                        self.lap_ended(t);
+                        lap_over = true;
+                    }
+                    super::timeline::Happened::Said(line) => self.log_at(t, &line),
+                    super::timeline::Happened::Stuck(why) => stuck = Some(why),
                 }
             }
-            self.lap_started_at = Some(t);
-            self.lap_starts.push(t);
-            self.overrun_logged = false;
+            let keys = tl.driver.script.legs.clone();
+            let lap = tl.driver.laps;
+            tl.watch.tick(show, engine, &keys, now, t, lap);
+            tl.write();
+            self.timeline = Some(tl);
+        } else {
+            // A lap begins whenever the first cue starts.
+            let playing = matches!(engine.status(self.first), CueStatus::Playing { .. });
+            if playing && !self.first_playing {
+                let t = elapsed.as_secs_f64();
+                if self.lap_started_at.is_some() {
+                    self.lap_ended(t);
+                }
+                self.lap_began(t);
+            }
+            self.first_playing = playing;
         }
-        self.first_playing = playing;
         // A lap that is running long: what is playing now is what holds it up.
         if let Some(began) = self.lap_started_at
             && self.lap_secs > 0.0
@@ -1033,16 +1207,7 @@ impl Run {
         // What has been found so far, for the window.
         if now.duration_since(self.last_analysis) > Duration::from_secs(5) {
             self.last_analysis = now;
-            self.findings = super::analysis::for_load(
-                analyse(
-                    &self.history,
-                    &self.clean_laps(),
-                    self.lap_secs,
-                    &self.messages,
-                    elapsed.as_secs_f64() / 3600.0,
-                ),
-                self.heavy,
-            );
+            self.findings = self.judge(elapsed.as_secs_f64() / 3600.0);
             let t = elapsed.as_secs_f64();
             for line in self.finding_log.update(t, &self.findings) {
                 self.log_at(t, &line);
@@ -1070,6 +1235,26 @@ impl Run {
         }
         if self.stop {
             return Some(End::Stopped);
+        }
+        if let Some(why) = stuck {
+            return Some(End::Failed(why));
+        }
+        if self.timeline.is_some() {
+            if !self.repeats && lap_over {
+                return Some(End::Finished);
+            }
+            if self.planned.is_some_and(|p| elapsed >= p) {
+                return Some(End::Finished);
+            }
+            // A lap that has gone on far too long.
+            if let Some(began) = self.lap_started_at
+                && elapsed.as_secs_f64() - began > self.lap_secs * 3.0 + 60.0
+            {
+                return Some(End::Failed(
+                    "a lap took more than three times as long as it should".into(),
+                ));
+            }
+            return None;
         }
         let active = engine.is_active();
         if active {
@@ -1146,10 +1331,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     }
     let hours = elapsed.as_secs_f64() / 3600.0;
     let clean = run.clean_laps();
-    let mut findings = super::analysis::for_load(
-        analyse(&run.history, &clean, run.lap_secs, &run.messages, hours),
-        run.heavy,
-    );
+    let mut findings = run.judge(hours);
     if !run.sleeps.is_empty() {
         let total: f64 = run.sleeps.iter().map(|(_, g)| g).sum();
         findings.insert(
@@ -1281,6 +1463,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     Done {
         compare: None,
         full: None,
+        flavour: run.flavour,
         bundle: super::bundle::Bundle::start(
             run.folder.clone(),
             run.log_path
@@ -1360,7 +1543,7 @@ fn compose(
         &mut out,
         &format!(
             "Test: {} ({}), ran {}. Ended: {}.",
-            run.level.label(),
+            run.flavour.name(run.level),
             match &run.planned {
                 Some(p) => format!("{} planned", clock(*p)),
                 None => "one lap".into(),
@@ -1407,6 +1590,27 @@ fn compose(
         &mut out,
         &format!("  {}", lap_summary(&run.laps, run.lap_secs)),
     );
+    if let Some(tl) = &run.timeline {
+        line(&mut out, "");
+        line(&mut out, "Timelines");
+        line(&mut out, "---------");
+        line(
+            &mut out,
+            &format!(
+                "  Played by pressing GO {} time{} at pauses (after {:.0} s each), leaving {} loop{} and seeking {} time{}.",
+                tl.driver.presses,
+                if tl.driver.presses == 1 { "" } else { "s" },
+                tl.driver.script.hold,
+                tl.driver.leaves,
+                if tl.driver.leaves == 1 { "" } else { "s" },
+                tl.driver.seeks,
+                if tl.driver.seeks == 1 { "" } else { "s" },
+            ),
+        );
+        for l in super::analysis::timeline_summary(&tl.watch.notes) {
+            line(&mut out, &format!("  {l}"));
+        }
+    }
     line(&mut out, "");
     line(&mut out, "Measurements");
     line(&mut out, "------------");
@@ -1461,6 +1665,15 @@ fn compose(
         ("media-credits.txt", "where the media came from"),
     ] {
         line(&mut out, &format!("  {f:22} {what}"));
+    }
+    if run.timeline.is_some() {
+        line(
+            &mut out,
+            &format!(
+                "  {:22} the timelines' clock, clips and cueing, as measured",
+                "timeline.csv"
+            ),
+        );
     }
     for f in &run.freeze_files {
         line(
@@ -1875,10 +2088,19 @@ mod tests {
 
     #[test]
     fn folders_are_named_by_time_and_level() {
-        let p = run_folder(Path::new("/logs"), Level::Medium, 86_400 + 3_661);
+        let p = run_folder(
+            Path::new("/logs"),
+            Level::Medium,
+            Flavour::Cues,
+            86_400 + 3_661,
+        );
         assert_eq!(
             p,
             PathBuf::from("/logs/test-mode/runs/1970-01-02_01-01-01_medium")
+        );
+        assert_eq!(
+            run_folder(Path::new("/l"), Level::Long, Flavour::Timeline, 0),
+            PathBuf::from("/l/test-mode/runs/1970-01-01_00-00-00_timeline-long")
         );
         assert_eq!(clock(Duration::from_secs(3725)), "1:02:05");
         assert_eq!(clock(Duration::from_secs(65)), "1:05");
@@ -1981,6 +2203,122 @@ mod tests {
             "{}",
             d.report
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stopping_a_timeline_test_while_preparing_changes_nothing() {
+        let Some(ff) = Ffmpeg::locate() else { return };
+        let dir = std::env::temp_dir().join(format!("newq_tm_tlcancel_{}", std::process::id()));
+        let mut test = TestMode {
+            download: false,
+            ..Default::default()
+        };
+        test.choose(Level::Medium, Flavour::Timeline);
+        let (mut show, mut engine, mut st) =
+            (Show::default(), Engine::for_tests(), UiState::default());
+        let before = serde_json::to_string(&show).unwrap();
+        test.start(ff, &dir, Vec::new(), SoundChoice::default(), false);
+        let View::Preparing(p) = test.view() else {
+            panic!("not preparing")
+        };
+        assert_eq!(p.flavour, Flavour::Timeline);
+        assert!(p.wanted.iter().all(|a| a.id != "bbb_trailer"));
+        test.stop();
+        assert!(wait_for(
+            || {
+                test.update(&mut show, &mut engine, &mut st);
+                !test.busy()
+            },
+            60
+        ));
+        assert!(!st.test_locked);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A timeline test stopped part way through its lap: the show comes back as
+    /// it was, the run's files are there with the timeline's own, and the
+    /// report says it was stopped.
+    #[test]
+    fn a_timeline_test_stopped_part_way_gives_the_show_back() {
+        let Some(ff) = Ffmpeg::locate() else {
+            assert!(std::env::var("NEWQ_REQUIRE_MEDIA").is_err(), "no ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("newq_tm_tlstop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut show = Show::default();
+        let c = show.make_cue(crate::show::CueType::Wait, None, 0);
+        show.cues.push(c);
+        let l = show.add_list("Mine");
+        show.lists.last_mut().unwrap().timeline = Some(Default::default());
+        let before = serde_json::to_string(&show).unwrap();
+        let mut engine = Engine::for_tests();
+        engine.ff = Some(ff.clone());
+        let mut st = UiState::default();
+        let mut test = TestMode {
+            download: false,
+            ..Default::default()
+        };
+        test.choose(Level::Short, Flavour::Timeline);
+        let sound = SoundChoice {
+            device: None,
+            muted: true,
+        };
+        test.start(ff, &dir, Vec::new(), sound, false);
+        let mut last = Instant::now();
+        let mut running_since = None;
+        let mut saw_timeline_list = false;
+        let ok = wait_for(
+            || {
+                let now = Instant::now();
+                engine.tick(&show, now.duration_since(last).as_secs_f64());
+                last = now;
+                test.update(&mut show, &mut engine, &mut st);
+                if let View::Running(r) = test.view() {
+                    let since = *running_since.get_or_insert(now);
+                    saw_timeline_list |= engine.active_list != 0
+                        && show
+                            .lists
+                            .iter()
+                            .any(|x| x.id == engine.active_list && x.timeline.is_some());
+                    assert!(st.test_locked);
+                    assert!(r.timeline.is_some());
+                    if now.duration_since(since) > Duration::from_secs(8) {
+                        test.stop();
+                    }
+                }
+                matches!(test.view(), View::Done(_))
+            },
+            300,
+        );
+        let View::Done(d) = test.view() else {
+            panic!("the test did not end (ok={ok})");
+        };
+        assert!(saw_timeline_list, "the timeline list was worked");
+        assert_eq!(d.ended, End::Stopped);
+        assert_eq!(d.flavour, Flavour::Timeline);
+        assert!(!st.test_locked);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        assert_eq!(engine.active_list, 0, "the lists are as they were");
+        assert!(!crate::media::audio::is_muted());
+        assert!(
+            d.report.contains("Test: Timeline short") && d.report.contains("stopped by you"),
+            "{}",
+            d.report
+        );
+        assert!(
+            d.report.contains("Timelines") && d.report.contains("Clips on time"),
+            "{}",
+            d.report
+        );
+        for f in ["report.txt", "timeline.csv", "events.log", "laps.csv"] {
+            assert!(d.folder.join(f).exists(), "{f} missing");
+        }
+        let events = std::fs::read_to_string(d.folder.join("events.log")).unwrap();
+        assert!(events.contains("Test mode: lap 1, GO"), "{events}");
+        let _ = l;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

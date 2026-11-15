@@ -1,11 +1,11 @@
 //! The Test Mode window: choose a test, watch the media being made ready,
 //! watch the test run, and read what it found.
 
-use super::Level;
 use super::analysis::{Severity, Verdict};
 use super::assets::{self, State};
 use super::plan::{DisplayChoice, SoundChoice};
 use super::session::{End, Run, View, clock, open_folder};
+use super::{Flavour, Level};
 use crate::engine::Engine;
 use crate::ui::UiState;
 use egui::{Color32, RichText};
@@ -212,7 +212,13 @@ fn body(
         }
         View::Preparing(p) => {
             let st = p.fetch.status.lock();
-            ui.label(RichText::new(format!("Getting the {} test ready", p.level.label())).strong());
+            ui.label(
+                RichText::new(format!(
+                    "Getting the {} test ready",
+                    p.flavour.name(p.level)
+                ))
+                .strong(),
+            );
             let total: u64 = st.items.iter().map(|i| i.bytes).sum();
             let done: u64 = st
                 .items
@@ -385,7 +391,7 @@ fn body(
                     ui.label(RichText::new(word).size(22.0).strong().color(colour));
                     ui.label(format!(
                         "{} test, {}, {} lap{}",
-                        d.level.label(),
+                        d.flavour.name(d.level),
                         clock(d.elapsed),
                         d.laps,
                         if d.laps == 1 { "" } else { "s" }
@@ -623,7 +629,7 @@ fn level_section(
     devices: &[String],
     sound: &mut (Option<String>, bool),
 ) {
-    ui.label(RichText::new(test.level.summary()).weak());
+    ui.label(RichText::new(test.flavour.summary(test.level)).weak());
     let lengths = test.level.lengths();
     if !lengths.is_empty() {
         ui.horizontal(|ui| {
@@ -637,7 +643,7 @@ fn level_section(
                 });
         });
     }
-    let wanted = assets::wanted(test.level);
+    let wanted = assets::wanted_for(test.level, test.flavour);
     let dir = assets::cache_dir(log_dir);
     let need = assets::download_size(&dir, &wanted);
     ui.add_space(4.0);
@@ -675,9 +681,21 @@ fn level_section(
     ui.separator();
     sound_section(ui, devices, sound);
     ui.separator();
-    ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
-        .on_hover_text("Adds three whole-screen layers blended one over another, each with effects, to every lap.");
-    if test.heavy {
+    if test.flavour == Flavour::Cues {
+        ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
+            .on_hover_text("Adds three whole-screen layers blended one over another, each with effects, to every lap.");
+    } else {
+        ui.label(
+            RichText::new(format!(
+                "Where a pause waits for GO, the test presses it after {:.0} s; it leaves a loop after {} passes. Your hands aren't needed.",
+                super::plan::TIMELINE_HOLD,
+                super::plan::TIMELINE_LOOP_PASSES
+            ))
+            .weak()
+            .small(),
+        );
+    }
+    if test.heavy && test.flavour == Flavour::Cues {
         ui.label(
             RichText::new("Three more full-screen films are blended over the others, with effects, and the lap is no longer. Late frames then show where this computer's limit is; they are reported as a note, not a fault. Same downloads.")
                 .weak()
@@ -722,19 +740,22 @@ fn minutes_text(m: u32) -> String {
 }
 
 fn choose(ui: &mut egui::Ui, test: &mut super::TestMode) {
-    ui.horizontal(|ui| {
-        for level in Level::ALL {
-            let selected = !test.debug && test.level == level;
-            if ui.selectable_label(selected, level.label()).clicked() {
-                test.debug = false;
-                test.set_level(level);
+    for flavour in Flavour::ALL {
+        ui.horizontal(|ui| {
+            for level in Level::ALL {
+                let selected = !test.debug && test.level == level && test.flavour == flavour;
+                if ui.selectable_label(selected, flavour.name(level)).clicked() {
+                    test.choose(level, flavour);
+                }
             }
-        }
-        ui.separator();
-        if ui.selectable_label(test.debug, "Debug test").clicked() {
-            test.debug = true;
-        }
-    });
+            if flavour == Flavour::Cues {
+                ui.separator();
+                if ui.selectable_label(test.debug, "Debug test").clicked() {
+                    test.debug = true;
+                }
+            }
+        });
+    }
 }
 
 fn spark(ui: &mut egui::Ui, label: &str, values: &[f32], now: String) {
@@ -773,7 +794,7 @@ fn progress_text(elapsed: std::time::Duration, planned: std::time::Duration) -> 
 }
 
 fn running(ui: &mut egui::Ui, r: &Run) {
-    ui.label(RichText::new(format!("{} test running", r.level.label())).strong());
+    ui.label(RichText::new(format!("{} test running", r.flavour.name(r.level))).strong());
     match (r.progress(), r.planned) {
         (Some(p), Some(planned)) => {
             // The planned length itself, not worked back from the progress:
@@ -789,6 +810,21 @@ fn running(ui: &mut egui::Ui, r: &Run) {
         r.laps.len(),
         r.lap_secs
     ));
+    if let Some(tl) = &r.timeline {
+        let d = &tl.driver;
+        ui.label(format!(
+            "GO pressed for you {} time{} at pauses, {} loop{} left, {} seek{}",
+            d.presses,
+            if d.presses == 1 { "" } else { "s" },
+            d.leaves,
+            if d.leaves == 1 { "" } else { "s" },
+            d.seeks,
+            if d.seeks == 1 { "" } else { "s" },
+        ));
+        for l in super::analysis::timeline_summary(&tl.watch.notes) {
+            ui.label(RichText::new(l).weak().small());
+        }
+    }
     let tail = |f: &dyn Fn(&crate::stats::Sample) -> f32| -> Vec<f32> {
         let n = r.history.len();
         r.history[n.saturating_sub(120)..].iter().map(f).collect()
