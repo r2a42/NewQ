@@ -589,6 +589,24 @@ fn the_group_inspector_offers_to_open_the_editor_only_where_it_is_not_open_on_it
         settle(&mut m, &mut f);
         assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(true), "{what}");
     }
+    // The new interface's Editor view with its timeline panel on the group: the same.
+    let mut f = fixture();
+    let mut m = window(&mut f, true, TimelineLayout::Pane);
+    let g = f.group;
+    open_by_row(&mut m, &mut f, g);
+    assert_eq!(editors(&m), vec![Host::Pane]);
+    m.ctx
+        .data_mut(|d| d.remove::<bool>(egui::Id::new("open_in_editor")));
+    settle(&mut m, &mut f);
+    assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(false));
+    super::super::super::apply(
+        Action::Timeline(TimelineAction::Close),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    settle(&mut m, &mut f);
+    assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(true));
 }
 
 /// A remote command arrives between frames (as `app.rs` hands them to

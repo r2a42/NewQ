@@ -18,11 +18,18 @@ pub fn replaces_panes(st: &UiState) -> bool {
     !st.prefs.new_layout && chosen(st) && st.timeline.open && !st.layout.is_docked(Pane::Settings)
 }
 
-/// The timeline the workspace is on screen with now, if it is (in the panes'
-/// place, or as the new interface's Timeline view).
+/// The timeline whose tracks are surely on screen now, if any: the workspace
+/// (in the panes' place, or as the new interface's Timeline view), or the
+/// new interface's Editor view with its timeline panel. (A classic Timeline
+/// pane may be a tab behind another, so it doesn't count.)
 pub fn showing(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey> {
+    use super::super::modern::View;
     let on_screen = if st.prefs.new_layout {
-        chosen(st) && st.modern_view == super::super::modern::View::Timeline
+        if chosen(st) {
+            st.modern_view == View::Timeline
+        } else {
+            st.modern_view == View::Editor && st.timeline.open
+        }
     } else {
         replaces_panes(st)
     };

@@ -7150,7 +7150,7 @@ fn inspector_one(
         ui.label(RichText::new("Select a cue to edit it.").weak());
         return;
     };
-    // The timeline the workspace is open on (a group's "Open" button is moot there).
+    // The timeline whose tracks are on screen (a group's "Open" button is moot there).
     let open_on = timeline::workspace::showing(show, engine, st);
     let ws_chosen = timeline::workspace::chosen(st);
     let media_cues: Vec<(CueId, String)> = show
@@ -7680,9 +7680,10 @@ fn inspector_one(
                     }
                     let key = crate::timeline::TimelineKey::Group(cue_id);
                     if open_on == Some(key) {
-                        // The workspace is on this group already: its tracks
-                        // are under the inspector.
-                        ui.label(RichText::new("Its tracks are below.").weak());
+                        // The editor is on this group already, beside the inspector.
+                        ui.label(
+                            RichText::new("Its tracks are open in the timeline editor.").weak(),
+                        );
                         #[cfg(test)]
                         ui.data_mut(|d| d.insert_temp(egui::Id::new("open_in_editor"), false));
                     } else {
