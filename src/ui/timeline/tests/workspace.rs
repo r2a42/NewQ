@@ -711,3 +711,141 @@ fn a_remote_command_during_a_drag_in_the_workspace_is_made_once_and_the_drag_lan
         assert_eq!(f.show.cue(f.b).unwrap().pre_wait, before, "{what}");
     }
 }
+
+/// The playhead is being dragged on the ruler when something else moves the
+/// run (a remote's jump, run, GO or pause, between frames as `app.rs` hands
+/// them over): the drag gives way. Its ghost playhead goes at once, and its
+/// release asks for nothing, so the remote's place and state stand. With
+/// nothing in between, the release parks the run where it was let go.
+#[test]
+fn a_remote_command_during_a_playhead_drag_cancels_the_drag() {
+    use crate::engine::RunState;
+    use crate::remote::{Command, Place, TimelineDo};
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Meanwhile {
+        Nothing,
+        Jump,
+        Run,
+        Go,
+        Pause,
+    }
+    for modern in [false, true] {
+        for meanwhile in [
+            Meanwhile::Nothing,
+            Meanwhile::Jump,
+            Meanwhile::Run,
+            Meanwhile::Go,
+            Meanwhile::Pause,
+        ] {
+            let what = format!("modern {modern}, {meanwhile:?}");
+            let mut f = fixture();
+            let mut m = window(&mut f, modern, TimelineLayout::Workspace);
+            let g = f.group;
+            open_by_row(&mut m, &mut f, g);
+            let key = TimelineKey::Group(g);
+            let name = format!("#{}", g.0);
+            let remote = |does: TimelineDo, m: &mut Mouse, f: &mut Fixture| {
+                let cmd = Command::Timeline {
+                    timeline: name.clone(),
+                    does,
+                };
+                super::super::super::run_remote(cmd, &mut f.show, &mut m.e, &mut f.st);
+            };
+            if meanwhile == Meanwhile::Pause {
+                // Running before the drag begins.
+                remote(TimelineDo::Run(None), &mut m, &mut f);
+                settle(&mut m, &mut f);
+            }
+            let r = rects_in(&m, Host::Workspace);
+            let at = |t: f64| pos2(r.x0 + t as f32 * r.pps, r.ruler.center().y);
+            let (from, to) = (at(1.0), at(2.5));
+            m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(from)]);
+            m.frame(
+                &mut f.show,
+                &mut f.st,
+                vec![button(from, true, PointerButton::Primary)],
+            );
+            for i in 1..=4 {
+                let p = from + (to - from) * (i as f32 / 8.0);
+                m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(p)]);
+            }
+            assert!(
+                matches!(
+                    f.st.timeline.drag,
+                    Some((_, Drag::Playhead { pos: Some(_), .. }))
+                ),
+                "{what}: dragging the playhead"
+            );
+            match meanwhile {
+                Meanwhile::Nothing => {}
+                Meanwhile::Jump => remote(TimelineDo::Jump(Place::Time(6.0)), &mut m, &mut f),
+                Meanwhile::Run => remote(TimelineDo::Run(None), &mut m, &mut f),
+                Meanwhile::Go => remote(TimelineDo::Go, &mut m, &mut f),
+                Meanwhile::Pause => remote(TimelineDo::Pause, &mut m, &mut f),
+            }
+            let after = m.e.timeline(&f.show, key);
+            for i in 5..=8 {
+                let p = from + (to - from) * (i as f32 / 8.0);
+                m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(p)]);
+            }
+            // (What a frame draws is where the drag was as it began.)
+            m.frame(&mut f.show, &mut f.st, vec![]);
+            let r = rects_in(&m, Host::Workspace);
+            let ghost = r.playhead_x.expect("a playhead drawn");
+            if meanwhile == Meanwhile::Nothing {
+                assert!(
+                    (ghost - to.x).abs() < 2.0,
+                    "{what}: the ghost follows: {ghost} {}",
+                    to.x
+                );
+            } else {
+                assert!(
+                    matches!(
+                        f.st.timeline.drag,
+                        Some((_, Drag::Playhead { pos: None, .. }))
+                    ),
+                    "{what}: the drag gave way"
+                );
+                let run_x = r.x0 + m.e.timeline(&f.show, key).pos as f32 * r.pps;
+                assert!(
+                    (ghost - run_x).abs() < 2.0,
+                    "{what}: the ghost is gone ({ghost} vs the run's {run_x})"
+                );
+            }
+            m.frame(
+                &mut f.show,
+                &mut f.st,
+                vec![
+                    Event::PointerMoved(to),
+                    button(to, false, PointerButton::Primary),
+                ],
+            );
+            settle(&mut m, &mut f);
+            assert!(f.st.timeline.drag.is_none(), "{what}");
+            // And a press held on after the cancel doesn't start another drag
+            // (checked above by `pos: None` lasting to the release).
+            let v = m.e.timeline(&f.show, key);
+            match meanwhile {
+                Meanwhile::Nothing => {
+                    assert!(v.parked && (v.pos - 2.5).abs() < 0.1, "{what}: {v:?}")
+                }
+                Meanwhile::Jump => {
+                    assert!(v.parked && (v.pos - 6.0).abs() < 1e-6, "{what}: {v:?}")
+                }
+                Meanwhile::Run | Meanwhile::Go => {
+                    assert!(
+                        matches!(v.state, RunState::Running | RunState::Cueing) && v.pos < 1.0,
+                        "{what}: still running from the top: {v:?}"
+                    )
+                }
+                Meanwhile::Pause => {
+                    assert!(
+                        matches!(v.state, RunState::Paused { .. })
+                            && (v.pos - after.pos).abs() < 1e-6,
+                        "{what}: paused where the remote paused it: {v:?}"
+                    )
+                }
+            }
+        }
+    }
+}

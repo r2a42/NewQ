@@ -109,7 +109,13 @@ pub(super) fn draw(
             let pos = ui
                 .input(|i| i.pointer.interact_pos())
                 .map_or(ctx.pos, |p| geo.t(p.x).max(0.0));
-            st.timeline.drag = Some((host, Drag::Playhead { pos }));
+            st.timeline.drag = Some((
+                host,
+                Drag::Playhead {
+                    pos: Some(pos),
+                    mark: ctx.run.mark,
+                },
+            ));
         } else if resp.clicked()
             && st.timeline.drag_in(host).is_none()
             && let Some(p) = resp.interact_pointer_pos()

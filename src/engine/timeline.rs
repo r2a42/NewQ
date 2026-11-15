@@ -147,6 +147,20 @@ pub struct RunView {
     /// A timeline list stopped at its end (played to it, or run from a place
     /// with nothing after it): GO does nothing (`TimelineGo::AtEnd`).
     pub at_end: bool,
+    /// Changes when the run is begun, put at a new place (a seek, a jump, a
+    /// loop going back), stopped, paused or let go on: not as its clock runs.
+    pub mark: RunMark,
+}
+
+/// What `RunView::mark` compares: a playhead drag on the ruler that sees it
+/// change while held is cancelled, so it never undoes a remote's seek or GO.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunMark {
+    instance: Option<u64>,
+    placed: u64,
+    /// 0 stopped, 1 cueing or running (one becomes the other by itself), 2 paused.
+    state: u8,
+    parked: bool,
 }
 
 /// What GO does to a timeline (`Engine::go_plan`, which `timeline_go` follows).
@@ -218,6 +232,8 @@ struct Run {
     looping: Option<Looping>,
     /// Stopped at its end (a list): see `RunView::at_end`.
     at_end: bool,
+    /// `Runs::placed` when it was begun or put at a new place (`RunView::mark`).
+    placed: u64,
 }
 
 impl Run {
@@ -237,6 +253,7 @@ impl Run {
             carried: Vec::new(),
             looping: None,
             at_end: false,
+            placed: 0,
         }
     }
 
@@ -569,6 +586,7 @@ impl Engine {
                 fading: false,
                 looping: None,
                 at_end: false,
+                mark: RunMark::default(),
             };
         };
         let (state, pos, instance, parked) = (run.state, run.pos, run.instance, run.parked);
@@ -588,6 +606,16 @@ impl Engine {
         let on_go = matches!(state, RunState::Paused { .. })
             .then(|| self.on_go_of(show, instance))
             .flatten();
+        let mark = RunMark {
+            instance: Some(instance),
+            placed: run.placed,
+            state: match state {
+                RunState::Stopped => 0,
+                RunState::Cueing | RunState::Running => 1,
+                RunState::Paused { .. } => 2,
+            },
+            parked,
+        };
         RunView {
             key,
             state,
@@ -599,6 +627,7 @@ impl Engine {
             fading: state == RunState::Stopped && self.run_fading(instance),
             looping,
             at_end,
+            mark,
         }
     }
 
@@ -718,9 +747,9 @@ impl Engine {
         // Nothing has come in at the top: no length is asked for.
         let ch = chase::chase(show, key, 0.0, &mut |_| None);
         self.push_upcoming(show, instance, 0.0, &ch.upcoming);
-        self.runs
-            .map
-            .insert(key, Run::new(instance, RunState::Running, 0.0));
+        let mut r = Run::new(instance, RunState::Running, 0.0);
+        r.placed = self.runs.placed;
+        self.runs.map.insert(key, r);
     }
 
     /// What a run waits to start, waiting for its clock (or a fade cue).
@@ -835,6 +864,7 @@ impl Engine {
             }
             let mut stopped = Run::new(instance, RunState::Stopped, pos);
             stopped.at_end = matches!(key, TimelineKey::List(_));
+            stopped.placed = self.runs.placed;
             self.runs.map.insert(key, stopped);
             // A group with nothing left to play is over.
             if matches!(key, TimelineKey::Group(_)) {
@@ -905,6 +935,7 @@ impl Engine {
             pos,
         );
         r.parked = !run;
+        r.placed = self.runs.placed;
         r.cue_since = run.then(Instant::now);
         if !picture {
             r.unstarted = ch.alive.clone();

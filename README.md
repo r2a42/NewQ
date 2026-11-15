@@ -1305,7 +1305,9 @@ ready, and the toolbar says *Parked*. The picture changes all at once: what was 
 stays (a video on the same clip is jumped where it is) until everything at the new
 place is ready. A Jump cue does the same, and what it lands in is got ready ahead
 of it. *Run* or GO plays on from there. (A click at
-the very start shows the first frame.) In show mode the ruler of a timeline group
+the very start shows the first frame.) If something else moves, runs, stops or pauses
+the timeline while you hold the playhead (a remote, a key, a cue, GO), your drag gives
+way: its playhead goes, and letting go does nothing. In show mode the ruler of a timeline group
 is locked, since parking puts its picture on the outputs; the ruler of the timeline
 list you are working on stays free, as the operator's way to cue it.
 

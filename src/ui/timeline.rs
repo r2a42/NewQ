@@ -161,8 +161,14 @@ enum Drag {
         grab: egui::Pos2,
         v0: f32,
     },
-    /// The playhead on the ruler, not yet let go.
-    Playhead { pos: f64 },
+    /// The playhead on the ruler, not yet let go, and the run's `RunView::mark`
+    /// when it was taken. Anything else that moves, starts, stops or pauses the
+    /// run meanwhile (a remote, a key, a cue) cancels it (`pos` None): its
+    /// release then asks for nothing.
+    Playhead {
+        pos: Option<f64>,
+        mark: crate::engine::RunMark,
+    },
     /// A marker, now at `to`.
     Marker { id: u64, to: f64, grab: f64 },
 }

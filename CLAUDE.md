@@ -79,7 +79,8 @@ The README describes the features; this file is about working on the code.
   track's no-time cues are `tracks::chips`, narrowed to the next, those nearer than `MIN_CHIP` one chip
   whose click picks each in turn, names `fitted` to the next and drawn whole on top when hovered or
   picked, `cue_labels`; the ruler's flags are cut to the next the same way); `ruler.rs` ticks, markers,
-  the playhead (a ruler tap or drag seeks on release; locked in show mode for a group); `toolbar.rs`
+  the playhead (a ruler tap or drag seeks on release; a drag is cancelled when the run's
+  `RunView::mark` changes meanwhile, `Drag::Playhead { pos: None }`; locked in show mode for a group); `toolbar.rs`
   transport and read-outs (`state_text` from `RunState` and `RunView.parked`; two rows under
   `ONE_ROW_W`; the state text comes last on its row so the buttons don't move); `control.rs` the
   inspector rows (`inspector_rows` at the end of the inspector, `settings_fields`); `menus.rs` the clip,

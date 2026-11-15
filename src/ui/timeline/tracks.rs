@@ -1180,7 +1180,7 @@ pub(super) fn draw(
     // The ruler, its markers and the playhead.
     let marker_rects = ruler::draw(ui, ctx, st, geo, ruler_rect, &ticks, actions);
     let shown = match st.timeline.drag_in(ctx.host) {
-        Some(Drag::Playhead { pos }) => *pos,
+        Some(Drag::Playhead { pos: Some(pos), .. }) => *pos,
         _ => ctx.pos,
     };
     let px = geo.x(shown);
@@ -1862,6 +1862,13 @@ fn follow_drag(
     });
     let tolerance = f64::from(SNAP_PX / geo.pps.max(1e-6));
     let clip = |id: CueId| ctx.clips.iter().find(|c| c.id == id);
+    // The run was moved, started, stopped or paused by something else while
+    // the playhead was held: the drag gives way to it.
+    if let Drag::Playhead { pos, mark } = drag
+        && *mark != ctx.run.mark
+    {
+        *pos = None;
+    }
     if let Some(p) = pointer {
         let t = geo.t(p.x);
         match drag {
@@ -1915,9 +1922,11 @@ fn follow_drag(
                 }
             }
             Drag::Band { to, .. } => *to = p,
-            Drag::Playhead { pos } => {
-                let pts = points(ctx, markers, &[], snapping);
-                *pos = snapped(t.max(0.0), &pts, tolerance).max(0.0);
+            Drag::Playhead { pos, .. } => {
+                if let Some(pos) = pos {
+                    let pts = points(ctx, markers, &[], snapping);
+                    *pos = snapped(t.max(0.0), &pts, tolerance).max(0.0);
+                }
             }
             Drag::Marker { id, to, grab } => {
                 let others: Vec<_> = markers.iter().filter(|m| m.id != *id).cloned().collect();
@@ -1991,8 +2000,10 @@ fn follow_drag(
                 done.push(TimelineAction::SelectClips { ids, add });
             }
         }
-        Drag::Playhead { pos } => {
-            if !ctx.ruler_locked {
+        Drag::Playhead { pos, .. } => {
+            if let Some(pos) = pos
+                && !ctx.ruler_locked
+            {
                 done.push(TimelineAction::Seek { key, pos });
             }
         }
