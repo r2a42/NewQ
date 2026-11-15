@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.22.0
+
 - **Changelog.** Each release page now starts with what changed in that version.
 
 Timelines:
