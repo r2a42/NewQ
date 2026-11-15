@@ -3259,3 +3259,86 @@ fn a_video_alive_on_both_sides_of_a_seek_is_jumped_where_it_is() {
     assert!(parked(&mut e, &show, key(g)) && active(&e, v).unwrap().hold);
     assert_eq!(shown(&e, v), Some(frame_at(&mut e, &show, v, 2.0)));
 }
+
+// ----- Going round again when it runs out (P5, plan 2.4) ---------------------------
+
+#[test]
+fn a_clip_that_leaves_the_clock_at_run_time_set_to_loop_goes_round_from_its_in_point() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let g = group(&mut show);
+    // A one-second clip with no pause in it: not clocked, not played as a loop.
+    let c = file(&mut show, CueType::Video, clip, 1.0);
+    let v = child(&mut show, g, c, 0.0);
+    media_of(&mut show, v).run_out = RunOut::Loop;
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the video", 10, |e| started(e, v));
+    ticks(&mut e, &show, 0.05, 6);
+    assert!(active(&e, v).is_some_and(|a| !a.clocked && a.pass_len.is_none()));
+    // Paused from elsewhere (the editor, another list's cue), content running on.
+    e.timeline_pause(&show, key(g), PauseFreeze::Nothing, &[], false, true);
+    assert!(active(&e, v).is_some_and(|a| a.detached && a.clocked));
+    let (mut rounds, mut last, mut ready_before) = (0, elapsed(&e, v), false);
+    let mut frame = shown(&e, v);
+    let t0 = Instant::now();
+    while rounds < 2 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "it never went round twice"
+        );
+        ready_before |= rounds == 0 && e.prepared.iter().any(|p| p.cue_id == v && p.at_in_point());
+        e.tick(&show, 0.05);
+        std::thread::sleep(Duration::from_millis(3));
+        assert_eq!(e.layers(out).len(), 1, "up all the while");
+        let now = elapsed(&e, v);
+        if now < last - 0.5 {
+            rounds += 1;
+            // From its in point: off its last frame, the file from its start.
+            assert!(now < 0.2, "{now}");
+            assert!(shown(&e, v) != frame && active(&e, v).unwrap().file_from == 0.0);
+            assert!(!active(&e, v).unwrap().held);
+        }
+        last = now;
+        frame = shown(&e, v);
+    }
+    assert!(ready_before, "got ready as its end neared");
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(0.3));
+    // GO: the clock ends it where its slot ends, 0.7 s on.
+    e.go(&show);
+    e.tick(&show, 0.65);
+    assert!(active(&e, v).is_some());
+    e.tick(&show, 0.1);
+    e.tick(&show, 0.0);
+    assert!(active(&e, v).is_none());
+}
+
+#[test]
+fn a_clip_with_a_keyframed_speed_set_to_loop_goes_round_through_a_free_run_pause() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let (mut show, g, v) = run_out_show(CueType::Video, clip, 1.0, 0.0, 0.5, RunOut::Loop, None);
+    media_of(&mut show, v).rate = ramp(&[(0.0, 1.0), (0.4, 2.0)]);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the video", 10, |e| started(e, v));
+    let a = active(&e, v).unwrap();
+    assert!(
+        a.clocked && a.speed.is_some() && a.loops_forever(),
+        "played as a loop"
+    );
+    until(&mut e, &show, Some(0.05), "three passes", 20, |e| {
+        active(e, v).is_some_and(|a| a.pass_number() >= Some(3))
+    });
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(0.5));
+    let a = active(&e, v).unwrap();
+    assert!(!a.held && !a.stopping && a.opacity.value == 1.0);
+    e.go(&show);
+    until(&mut e, &show, Some(0.05), "the clock to end it", 10, |e| {
+        active(e, v).is_none()
+    });
+}

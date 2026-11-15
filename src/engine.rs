@@ -3324,6 +3324,8 @@ impl Engine {
         // Runs whose new clips wait unseen while the ones they replace stay up
         // (a seek): those come in only once they are all cued.
         let unseen = self.runs.hiding();
+        // Clips gone round to their in point (`RunOut::Loop`, detached at run time).
+        let mut restarts: Vec<u64> = Vec::new();
         self.active.retain_mut(|a| {
             let joins = joining.contains(&a.instance);
             let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
@@ -3351,6 +3353,16 @@ impl Engine {
             let keep = on_clock.is_some_and(|l| l > timeline::SAME_TIME)
                 && media.is_some_and(|m| m.run_out != RunOut::End);
             let clock_ends = a.clocked && cue.is_some_and(|c| holds(&c.kind));
+            // Its content ran out ahead of its clock, which keeps it: set to loop
+            // but not played as one (it left the clock at run time), it goes round
+            // again from its in point (got ready as its end neared).
+            let goes_round = keep
+                && a.detached
+                && a.pass_len.is_none()
+                && a.seeking.is_none()
+                && !a.stopping
+                && media.is_some_and(|m| m.run_out == RunOut::Loop)
+                && cue.is_some_and(|c| matches!(c.kind, CueKind::Video(_) | CueKind::Audio(_)));
             // A fade of its timeline's waits while the clock stands: content that
             // runs out meanwhile stays (on its last frame, or silent) for it.
             let levels_wait = a.levels_wait(&steps);
@@ -3438,7 +3450,11 @@ impl Engine {
                                     cue.map(|c| c.number.as_str()).unwrap_or("?")
                                 ));
                             }
-                            if levels_wait
+                            if goes_round && !levels_wait {
+                                // On its last frame until the next pass is there.
+                                a.held = true;
+                                restarts.push(a.instance);
+                            } else if levels_wait
                                 || ((keep || joins || media.is_some_and(|m| m.hold_last_frame))
                                     && !a.stopping)
                             {
@@ -3557,8 +3573,12 @@ impl Engine {
                             a.duration = Some(a.seek_base + at + vo.tail_len());
                         }
                         if vo.finished() {
-                            // Out of sound before its timeline moves on: silence.
-                            if keep || levels_wait {
+                            // Out of sound before its timeline moves on: silence
+                            // (or round again).
+                            if goes_round && !levels_wait && !a.held {
+                                a.held = true;
+                                restarts.push(a.instance);
+                            } else if keep || levels_wait {
                                 a.held = true;
                             } else {
                                 completed = true;
@@ -3780,6 +3800,9 @@ impl Engine {
         for (instance, e) in entries {
             self.apply_entry(instance, e);
         }
+        for instance in restarts {
+            self.timeline_go_round(show, instance);
+        }
         for (id, matte, half, at) in midpoints {
             self.start_with(show, id, Some((matte, half)), at);
         }
@@ -3941,6 +3964,13 @@ impl Engine {
         // way in (`jumps`), the rest as at their in points.
         let (land, jumps) = self.timeline_jump_wanted(show);
         for id in land {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
+        // A timeline's clip that goes round again when its content runs out
+        // (`RunOut::Loop`, detached at run time), as its end nears.
+        for id in self.timeline_round_wanted(show) {
             if !wanted.contains(&id) {
                 wanted.push(id);
             }
@@ -4366,6 +4396,8 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
     a.seek_base = s.base;
     a.elapsed = s.base;
     a.file_from = s.file_from;
+    // (A clip gone round again from its last frame.)
+    a.held = false;
     if let Some(d) = s.duration {
         a.duration = d;
     }

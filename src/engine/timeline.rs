@@ -1284,11 +1284,97 @@ impl Engine {
     /// The clip time a clip about to be got ready is to follow its keyframed
     /// speed from: a timeline's clip waiting out its lead-in, from its lead-in.
     pub(super) fn timeline_preload_t0(&self, id: CueId) -> f64 {
-        self.pending
+        match self
+            .pending
             .iter()
             .find(|p| p.cue_id == id && p.run.is_some())
-            .filter(|p| (p.start.from - p.start.lead).abs() < 1e-9)
-            .map_or(0.0, |p| p.start.lead)
+        {
+            Some(p) if (p.start.from - p.start.lead).abs() < 1e-9 => p.start.lead,
+            Some(_) => 0.0,
+            // One going round again (`timeline_go_round`), from its lead-in.
+            None => self
+                .active
+                .iter()
+                .find(|a| a.cue_id == id && a.detached && a.run.is_some())
+                .map_or(0.0, |a| a.lead),
+        }
+    }
+
+    /// A clip whose content ran out ahead of its clock, set to loop but not
+    /// played as one (it left the clock at run time: plan 2.4), goes round again
+    /// from its in point: its decoders for there (got ready as its end neared,
+    /// `timeline_round_wanted`) are swapped in once they have a frame, its last
+    /// frame shown meanwhile. If they can't be started, it holds, as before.
+    pub(super) fn timeline_go_round(&mut self, show: &Show, instance: u64) {
+        let Some(a) = self.active.iter().find(|a| a.instance == instance) else {
+            return;
+        };
+        let (id, lead) = (a.cue_id, a.lead);
+        let Some(cue) = show.cue(id).cloned() else {
+            return;
+        };
+        let Some(file) = cue.kind.file_media().map(|m| m.file.clone()) else {
+            return;
+        };
+        let p = match self.take_prepared(&cue, lead, lead) {
+            Some(p) => p,
+            None => {
+                let info = match self.probe.get(self.ff.as_ref(), &file) {
+                    crate::media::ProbeState::Ready(info) => info.clone(),
+                    _ => return,
+                };
+                match self.prepare_from(&cue, &info, lead, lead) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::debug!("cue {} could not go round again: {e}", cue.number);
+                        return;
+                    }
+                }
+            }
+        };
+        let (player, voice) = match p.kind {
+            super::PreparedKind::Video { player, voice } => (Some(player), voice),
+            super::PreparedKind::Audio(voice) => (None, Some(voice)),
+            _ => return,
+        };
+        if let Some(a) = self.active.iter_mut().find(|a| a.instance == instance) {
+            log::debug!("cue {} goes round again", cue.number);
+            a.seeking = Some(super::Seek {
+                player,
+                voice,
+                base: lead,
+                file_from: 0.0,
+                spawned_at: Instant::now(),
+                duration: Some(p.duration.map(|d| d + lead)),
+            });
+        }
+    }
+
+    /// The clips that will go round again (`timeline_go_round`) within
+    /// `PRELOAD_HORIZON`: their content is to run out before their clock's end.
+    pub(super) fn timeline_round_wanted(&self, show: &Show) -> Vec<CueId> {
+        let clocks = self.runs.clocks();
+        self.active
+            .iter()
+            .filter(|a| a.detached && a.clocked && a.started && a.pass_len.is_none())
+            .filter(|a| !a.stopping && a.seeking.is_none())
+            .filter(|a| {
+                let (Some(d), Some(end), Some(pos)) =
+                    (a.duration, a.ends_at, a.run.and_then(|r| clocks.get(&r)))
+                else {
+                    return false;
+                };
+                let left = d - a.elapsed;
+                left <= PRELOAD_HORIZON && left < end - pos
+            })
+            .filter(|a| {
+                show.cue(a.cue_id).is_some_and(|c| {
+                    matches!(c.kind, CueKind::Video(_) | CueKind::Audio(_))
+                        && c.kind.media().is_some_and(|m| m.run_out == RunOut::Loop)
+                })
+            })
+            .map(|a| a.cue_id)
+            .collect()
     }
 
     /// A clip started part way in (`at.part_way()`): past the end of its content
