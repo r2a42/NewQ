@@ -1,10 +1,12 @@
 //! The editor's body: the ruler with its markers, the track headers, the
-//! tracks with their clips, the playhead and the scroll bar; and the drags
-//! (clips, their edges, the playhead, markers), shown as they go and asked for
-//! when they are let go.
+//! tracks with their clips (and the ghosts of clips also on other displays),
+//! the keyframe lanes under clips, the playhead and the scroll bar; and the
+//! drags (clips, their edges and fade handles, a rubber band, the playhead,
+//! markers, lane keys), shown as they go and asked for when they are let go.
 
-use super::ruler;
+use super::lanes::{self, LANE_H};
 use super::*;
+use super::{keys, menus, ruler};
 use crate::show::{CueKind, RunOut};
 use crate::timeline::model::{Clip, LeadIn};
 use crate::timeline::snap::{self, SnapPoints};
@@ -37,6 +39,8 @@ const CUES_ROW_H: f32 = 28.0;
 const SCROLL_H: f32 = 9.0;
 /// How wide the grip at each end of a clip is.
 const EDGE_W: f32 = 6.0;
+/// The side of a fade handle's square.
+const FADE_GRIP: f32 = 9.0;
 const MIN_PPS: f32 = 0.05;
 const MAX_PPS: f32 = 4000.0;
 /// How far past its start a clip of unknown or no end is drawn, at least.
@@ -51,6 +55,7 @@ pub(super) const MARKER: Color32 = Color32::from_rgb(232, 184, 48);
 const WARN: Color32 = Color32::from_rgb(240, 175, 60);
 /// The hatching of a clip the run is waiting on to fade in.
 const WAITING: Color32 = Color32::from_rgba_premultiplied(120, 190, 255, 200);
+const BAND: Color32 = Color32::from_rgb(120, 170, 255);
 
 /// Screen x of a time and back.
 #[derive(Clone, Copy, Debug)]
@@ -165,35 +170,103 @@ pub(super) fn fades_if_held(show: &Show, c: &Clip) -> bool {
             .is_some_and(|m| m.run_out == RunOut::End)
 }
 
-/// Where each track's row is, top to bottom, scrolled.
-fn rows(ctx: &Ctx, lanes: Rect, scroll_y: f32) -> Vec<(TrackId, Rect)> {
-    let mut y = lanes.top() - scroll_y;
-    ctx.tracks
-        .iter()
-        .map(|&t| {
-            let h = if t == TrackId::Cues {
-                CUES_ROW_H
-            } else {
-                ROW_H
-            };
-            let r = Rect::from_min_max(pos2(lanes.left(), y), pos2(lanes.right(), y + h));
-            y += h;
-            (t, r)
-        })
+/// The lanes open under the clips of a track, in the order they were opened.
+fn lanes_on(ctx: &Ctx, open: &[(CueId, Lane)], t: TrackId) -> Vec<(CueId, Lane)> {
+    open.iter()
+        .copied()
+        .filter(|(id, _)| ctx.clips.iter().any(|c| c.id == *id && c.track == t))
         .collect()
 }
 
-fn rows_height(ctx: &Ctx) -> f32 {
+fn row_h(t: TrackId) -> f32 {
+    if t == TrackId::Cues {
+        CUES_ROW_H
+    } else {
+        ROW_H
+    }
+}
+
+/// A lane open under a clip, and where it is drawn.
+type LaneRow = (CueId, Lane, Rect);
+
+/// Where each track's bar row is, top to bottom, scrolled, and the lanes open
+/// under each.
+fn layout(
+    ctx: &Ctx,
+    open: &[(CueId, Lane)],
+    area: Rect,
+    scroll_y: f32,
+) -> (Vec<(TrackId, Rect)>, Vec<LaneRow>) {
+    let mut y = area.top() - scroll_y;
+    let mut bars = Vec::new();
+    let mut lanes = Vec::new();
+    for &t in ctx.tracks {
+        let h = row_h(t);
+        bars.push((
+            t,
+            Rect::from_min_max(pos2(area.left(), y), pos2(area.right(), y + h)),
+        ));
+        y += h;
+        for (id, lane) in lanes_on(ctx, open, t) {
+            lanes.push((
+                id,
+                lane,
+                Rect::from_min_max(pos2(area.left(), y), pos2(area.right(), y + LANE_H)),
+            ));
+            y += LANE_H;
+        }
+    }
+    (bars, lanes)
+}
+
+fn rows_height(ctx: &Ctx, open: &[(CueId, Lane)]) -> f32 {
     ctx.tracks
         .iter()
-        .map(|t| {
-            if *t == TrackId::Cues {
-                CUES_ROW_H
-            } else {
-                ROW_H
-            }
-        })
+        .map(|&t| row_h(t) + LANE_H * lanes_on(ctx, open, t).len() as f32)
         .sum()
+}
+
+/// Where a clip is drawn while a drag moves or trims it: (start, length, track).
+fn shown_at(drag: Option<&Drag>, c: &Clip) -> (f64, Option<f64>, TrackId) {
+    let (mut start, mut len, mut track) = (c.start, c.len, c.track);
+    match drag {
+        Some(Drag::Clips { ids, dt, to, .. }) if ids.contains(&c.id) => {
+            start += dt;
+            if ids.first() == Some(&c.id)
+                && let Some(t) = to
+            {
+                track = *t;
+            }
+        }
+        Some(Drag::Trim {
+            id,
+            edge,
+            to,
+            from,
+            others,
+        }) if *id == c.id || others.contains(&c.id) => {
+            // The others' edges move as far as the held one's has.
+            let by = to - from;
+            match (edge, *id == c.id) {
+                (Edge::Left, true) => {
+                    len = len.map(|l| l + start - to);
+                    start = *to;
+                }
+                (Edge::Right, true) => len = Some(to - start),
+                (Edge::Left, false) if c.trim_left => {
+                    let s = (start + by).max(0.0);
+                    len = len.map(|l| (l + start - s).max(MIN_LEN));
+                    start = s;
+                }
+                (Edge::Right, false) if c.trim_right => {
+                    len = len.map(|l| (l + by).max(MIN_LEN));
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    (start, len, track)
 }
 
 /// The ruler, the tracks, the clips and the playhead, in what is left of `ui`.
@@ -228,6 +301,7 @@ pub(super) fn draw(
     let base = ui.id().with("tracks");
     let span = span(ctx);
     let lane_w = lanes.width().max(1.0);
+    let open = st.timeline.lanes.clone();
 
     // Zoom and scroll.
     let ed = &mut st.timeline;
@@ -255,17 +329,14 @@ pub(super) fn draw(
     if ed.pps <= 0.0 {
         ed.scroll.x = 0.0;
     }
-    ed.scroll.y = ed
-        .scroll
-        .y
-        .max(0.0)
-        .min((rows_height(ctx) - lanes.height()).max(0.0));
+    let all_h = rows_height(ctx, &open);
+    ed.scroll.y = ed.scroll.y.max(0.0).min((all_h - lanes.height()).max(0.0));
     ed.shown_pps = pps;
     let geo = Geo {
         x0: lanes.left() - ed.scroll.x,
         pps,
     };
-    let rows = rows(ctx, lanes, ed.scroll.y);
+    let (rows, lane_rows) = layout(ctx, &open, lanes, ed.scroll.y);
 
     let painter = ui.painter_at(area);
     let visuals = ui.visuals().clone();
@@ -280,6 +351,15 @@ pub(super) fn draw(
                 .extreme_bg_color
                 .lerp_to_gamma(Color32::WHITE, shade),
         );
+    }
+    for (_, _, r) in &lane_rows {
+        lane_painter.rect_filled(*r, 0.0, visuals.extreme_bg_color.gamma_multiply(0.8));
+    }
+    for r in rows
+        .iter()
+        .map(|r| r.1)
+        .chain(lane_rows.iter().map(|l| l.2))
+    {
         lane_painter.hline(
             lanes.x_range(),
             r.bottom(),
@@ -301,33 +381,70 @@ pub(super) fn draw(
     let snapping = st.timeline.snap && !ui.input(|i| i.modifiers.alt);
     let markers: &[crate::timeline::Marker] =
         model::settings(ctx.show, ctx.key).map_or(&[], |s| &s.markers);
-    #[cfg(test)]
-    let mut clip_rects = Vec::new();
 
-    for c in ctx.clips {
-        let drag = st.timeline.drag_in(ctx.host).cloned();
-        let (mut start, mut len, mut track) = (c.start, c.len, c.track);
-        match &drag {
-            Some(Drag::Clips { ids, dt, to, .. }) if ids.contains(&c.id) => {
-                start += dt;
-                if ids.first() == Some(&c.id)
-                    && let Some(t) = to
-                {
-                    track = *t;
-                }
-            }
-            Some(Drag::Trim { id, edge, to }) if *id == c.id => match edge {
-                Edge::Left => {
-                    len = len.map(|l| l + start - to);
-                    start = *to;
-                }
-                Edge::Right => len = Some(to - start),
+    // The empty parts of the tracks: a rubber band picks clips, a right-click
+    // offers what can go there. (First, so the clips drawn over it win.)
+    let bg = ui.interact(lanes, base.with("bg"), Sense::click_and_drag());
+    if bg.drag_started()
+        && st.timeline.drag_in(ctx.host).is_none()
+        && let Some(from) = ui.input(|i| i.pointer.press_origin())
+    {
+        let m = ui.input(|i| i.modifiers);
+        st.timeline.drag = Some((
+            ctx.host,
+            Drag::Band {
+                from,
+                to: from,
+                add: m.command || m.shift,
             },
-            _ => {}
+        ));
+    }
+    if bg.secondary_clicked()
+        && let Some(p) = bg.interact_pointer_pos()
+        && let Some(&(t, _)) = rows.iter().find(|(_, r)| r.y_range().contains(p.y))
+    {
+        st.timeline.menu_at = Some((ctx.host, t, geo.t(p.x).max(0.0)));
+    }
+    let menu_at = match st.timeline.menu_at {
+        Some((h, t, at)) if h == ctx.host => Some((t, at)),
+        _ => None,
+    };
+    bg.context_menu(|ui| match menu_at {
+        Some((t, at)) => menus::track(ui, ctx, t, at, actions),
+        None => {
+            ui.close();
         }
+    });
+
+    let mut clip_rects: Vec<(CueId, Rect)> = Vec::new();
+    #[cfg(test)]
+    let mut fade_rects: Vec<(CueId, Edge, Rect)> = Vec::new();
+    let drag_now = st.timeline.drag_in(ctx.host).cloned();
+    for c in ctx.clips {
+        let (start, len, track) = shown_at(drag_now.as_ref(), c);
         let Some((_, row)) = rows.iter().find(|(t, _)| *t == track) else {
             continue;
         };
+        // Where it was, outlined, while it is moved somewhere else.
+        if let Some(Drag::Clips { ids, .. }) = &drag_now
+            && ids.contains(&c.id)
+            && let Some((_, home)) = rows.iter().find(|(t, _)| *t == c.track)
+        {
+            let was = Rect::from_min_max(
+                pos2(geo.x(c.start), home.top() + 3.0),
+                pos2(
+                    geo.x(c.start + c.len.unwrap_or(OPEN_TAIL))
+                        .max(geo.x(c.start) + 9.0),
+                    home.bottom() - 3.0,
+                ),
+            );
+            lane_painter.rect_stroke(
+                was,
+                3.0,
+                Stroke::new(1.0, Color32::from_white_alpha(90)),
+                egui::StrokeKind::Inside,
+            );
+        }
         let left = geo.x(start);
         let right = match len {
             Some(l) => geo.x(start + l),
@@ -337,14 +454,13 @@ pub(super) fn draw(
             pos2(left, row.top() + 3.0),
             pos2(right.max(left + 9.0), row.bottom() - 3.0),
         );
-        #[cfg(test)]
         clip_rects.push((c.id, rect));
         let hit = rect.intersect(lanes);
         if hit.width() <= 0.0 || hit.height() <= 0.0 {
             continue;
         }
         let selected = picked.contains(&c.id);
-        draw_clip(&lane_painter, ctx, c, rect, geo, start, selected);
+        draw_clip(&lane_painter, ctx, engine, c, rect, geo, start, selected);
 
         let sense = if ctx.editable {
             Sense::click_and_drag()
@@ -353,14 +469,7 @@ pub(super) fn draw(
         };
         let resp = ui.interact(hit, base.with(("clip", c.id.0)), sense);
         if resp.clicked() {
-            let m = ui.input(|i| i.modifiers);
-            actions.push(if m.command {
-                Action::ToggleSelect(c.id)
-            } else if m.shift {
-                Action::SelectRange(c.id)
-            } else {
-                Action::Select(c.id)
-            });
+            actions.push(click_select(ui, c.id));
         }
         if ctx.editable && resp.drag_started() {
             // Dragging a clip of the selection takes the selection's clips with it.
@@ -390,8 +499,16 @@ pub(super) fn draw(
                 },
             ));
         }
+        let at = resp
+            .interact_pointer_pos()
+            .filter(|_| resp.secondary_clicked())
+            .map(|p| geo.t(p.x));
+        if let Some(t) = at {
+            ui.data_mut(|d| d.insert_temp(base.with(("menu_t", c.id.0)), t));
+        }
+        let menu_t: Option<f64> = ui.data(|d| d.get_temp(base.with(("menu_t", c.id.0))));
         let resp = resp.on_hover_text(clip_tip(ctx, c));
-        resp.context_menu(|ui| clip_menu(ui, ctx, engine, c, actions));
+        resp.context_menu(|ui| menus::clip(ui, ctx, engine, c, &picked, menu_t, &open, actions));
 
         // The grips at its ends.
         if ctx.editable && rect.width() > EDGE_W * 3.0 {
@@ -420,11 +537,177 @@ pub(super) fn draw(
                         Edge::Left => c.start,
                         Edge::Right => c.start + c.len.unwrap_or(0.0),
                     };
-                    st.timeline.drag = Some((ctx.host, Drag::Trim { id: c.id, edge, to }));
+                    // A clip of the selection trims the selection's clips with it.
+                    let others = if selected {
+                        picked
+                            .iter()
+                            .copied()
+                            .filter(|id| *id != c.id && ctx.clips.iter().any(|k| k.id == *id))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    st.timeline.drag = Some((
+                        ctx.host,
+                        Drag::Trim {
+                            id: c.id,
+                            edge,
+                            to,
+                            from: to,
+                            others,
+                        },
+                    ));
+                }
+            }
+        }
+        // The fade handles: a square at the top where each fade ends.
+        if ctx.editable
+            && rect.width() > 30.0
+            && c.len.is_some()
+            && ctx.show.cue(c.id).is_some_and(|q| q.kind.media().is_some())
+        {
+            let (lead, never) = lead_of(ctx, c);
+            let from = if never { start } else { start + lead };
+            let (fi, fo) = match &drag_now {
+                Some(Drag::Fade { id, edge, secs }) if *id == c.id => match edge {
+                    Edge::Left => (*secs, c.fade_out),
+                    Edge::Right => (c.fade_in, *secs),
+                },
+                _ => (c.fade_in, c.fade_out),
+            };
+            let end = start + len.unwrap_or(0.0);
+            for (edge, x) in [
+                (Edge::Left, geo.x(from + fi)),
+                (Edge::Right, geo.x(end - fo)),
+            ] {
+                let x = x.max(rect.left() + FADE_GRIP).min(rect.right() - FADE_GRIP);
+                let grip = Rect::from_center_size(
+                    pos2(x, rect.top() + FADE_GRIP / 2.0 + 1.0),
+                    vec2(FADE_GRIP, FADE_GRIP),
+                );
+                if !lanes.contains_rect(grip) {
+                    continue;
+                }
+                #[cfg(test)]
+                fade_rects.push((c.id, edge, grip));
+                let r = ui
+                    .interact(
+                        grip,
+                        base.with(("fade", c.id.0, edge == Edge::Left)),
+                        Sense::drag(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                    .on_hover_text(match edge {
+                        Edge::Left => "Drag to set how long it fades in",
+                        Edge::Right => "Drag to set how long it fades out",
+                    });
+                let hot = r.hovered() || r.dragged();
+                lane_painter.rect_filled(
+                    grip.shrink(1.5),
+                    1.5,
+                    if hot {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_white_alpha(150)
+                    },
+                );
+                if r.drag_started() {
+                    let secs = match edge {
+                        Edge::Left => c.fade_in,
+                        Edge::Right => c.fade_out,
+                    };
+                    st.timeline.drag = Some((
+                        ctx.host,
+                        Drag::Fade {
+                            id: c.id,
+                            edge,
+                            secs,
+                        },
+                    ));
                 }
             }
         }
     }
+
+    // Ghosts: a clip on other displays shows, outlined, on the same layer's
+    // track of each; clicking one picks the clip.
+    #[cfg(test)]
+    let mut ghost_rects: Vec<(CueId, Rect)> = Vec::new();
+    for (id, track) in model::ghosts(ctx.clips) {
+        let (Some(c), Some((_, row))) = (
+            ctx.clips.iter().find(|c| c.id == id),
+            rows.iter().find(|(t, _)| *t == track),
+        ) else {
+            continue;
+        };
+        let left = geo.x(c.start);
+        let right = geo.x(c.start + c.len.unwrap_or(OPEN_TAIL));
+        let rect = Rect::from_min_max(
+            pos2(left, row.top() + 3.0),
+            pos2(right.max(left + 9.0), row.bottom() - 3.0),
+        );
+        #[cfg(test)]
+        ghost_rects.push((id, rect));
+        let hit = rect.intersect(lanes);
+        if hit.width() <= 0.0 || hit.height() <= 0.0 {
+            continue;
+        }
+        let color = kind_color(ctx.show, c);
+        lane_painter.rect_filled(rect, 3.0, color.gamma_multiply(0.18));
+        hatch(&lane_painter, rect, color.gamma_multiply(0.35));
+        lane_painter.rect_stroke(
+            rect,
+            3.0,
+            Stroke::new(
+                if picked.contains(&id) { 2.0 } else { 1.0 },
+                color.gamma_multiply(1.4),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        lane_painter.with_clip_rect(hit).text(
+            pos2(rect.left() + 5.0, rect.top() + 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("{} (also here)", c.name),
+            FontId::proportional(11.0),
+            Color32::from_white_alpha(170),
+        );
+        let home = model::track_label(ctx.show, c.track);
+        let r = ui
+            .interact(
+                hit,
+                base.with(("ghost", id.0, format!("{track:?}"))),
+                Sense::click(),
+            )
+            .on_hover_text(format!(
+                "{} is also shown on this display; it lives on {home}. Click to pick it; its \
+                 displays are set in the inspector.",
+                c.name
+            ));
+        if r.clicked() {
+            actions.push(click_select(ui, id));
+        }
+    }
+
+    // The keyframe lanes under their clips.
+    let mut keys_drawn = Vec::new();
+    for (id, lane, r) in &lane_rows {
+        if let Some(c) = ctx.clips.iter().find(|c| c.id == *id) {
+            lanes::draw(
+                ui,
+                ctx,
+                st,
+                geo,
+                *r,
+                lanes,
+                c,
+                *lane,
+                actions,
+                &mut keys_drawn,
+            );
+        }
+    }
+    #[cfg(not(test))]
+    let _ = &keys_drawn;
 
     // Markers through the tracks.
     for m in markers {
@@ -447,29 +730,14 @@ pub(super) fn draw(
         }
     }
 
-    // Track headers.
-    let head_painter = painter.with_clip_rect(heads);
-    head_painter.rect_filled(heads, 0.0, visuals.panel_fill);
-    for (t, r) in &rows {
-        let r = Rect::from_min_max(pos2(heads.left(), r.top()), pos2(heads.right(), r.bottom()));
-        head_painter.hline(
-            heads.x_range(),
-            r.bottom(),
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
-        );
-        head_painter.text(
-            pos2(r.left() + 8.0, r.center().y),
-            egui::Align2::LEFT_CENTER,
-            model::track_label(ctx.show, *t),
-            FontId::proportional(12.0),
-            visuals.text_color(),
-        );
+    // A rubber band being drawn.
+    if let Some(Drag::Band { from, to, .. }) = st.timeline.drag_in(ctx.host) {
+        let band = Rect::from_two_pos(*from, *to);
+        lane_painter.rect_filled(band, 0.0, BAND.gamma_multiply(0.15));
+        lane_painter.rect_stroke(band, 0.0, Stroke::new(1.0, BAND), egui::StrokeKind::Inside);
     }
-    head_painter.vline(
-        heads.right(),
-        heads.y_range(),
-        Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
-    );
+
+    track_heads(ui, ctx, heads, &rows, &lane_rows, base, actions);
 
     // The ruler, its markers and the playhead.
     let marker_rects = ruler::draw(ui, ctx, st, geo, ruler_rect, &ticks, actions);
@@ -498,7 +766,6 @@ pub(super) fn draw(
 
     scroll_bar(ui, base, &mut st.timeline, lanes, area, content_w);
     // More tracks than fit (the wheel scrolls them): a thin bar says where.
-    let all_h = rows_height(ctx);
     if all_h > lanes.height() + 0.5 {
         let h = (lanes.height() * lanes.height() / all_h).max(12.0);
         let top = lanes.top()
@@ -506,7 +773,18 @@ pub(super) fn draw(
         let thumb = Rect::from_min_size(pos2(lanes.right() - 5.0, top), vec2(4.0, h));
         painter.rect_filled(thumb, 2.0, visuals.weak_text_color().gamma_multiply(0.8));
     }
-    follow_drag(ui, ctx, st, geo, &rows, markers, snapping, actions);
+    keys::dropped(ui, ctx, geo, &rows, actions);
+    follow_drag(
+        ui,
+        ctx,
+        st,
+        geo,
+        &rows,
+        &clip_rects,
+        markers,
+        snapping,
+        actions,
+    );
 
     #[cfg(test)]
     ui.data_mut(|d| {
@@ -517,6 +795,10 @@ pub(super) fn draw(
                 clips: clip_rects,
                 tracks: rows.clone(),
                 markers: marker_rects,
+                ghosts: ghost_rects,
+                lanes: lane_rows.clone(),
+                keys: keys_drawn,
+                fades: fade_rects,
                 playhead_x,
                 x0: geo.x0,
                 pps: geo.pps,
@@ -527,10 +809,143 @@ pub(super) fn draw(
     let _ = marker_rects;
 }
 
-/// One clip: its colour, label and badges, fades, lead-in and warnings.
+/// What a click on a clip (or its ghost) asks: pick it, add it to the
+/// selection (Ctrl/Cmd), or a run of them (Shift).
+fn click_select(ui: &Ui, id: CueId) -> Action {
+    let m = ui.input(|i| i.modifiers);
+    if m.command {
+        Action::ToggleSelect(id)
+    } else if m.shift {
+        Action::SelectRange(id)
+    } else {
+        Action::Select(id)
+    }
+}
+
+/// The track headers: each track's name (a right-click for its menu, the cue
+/// track's "+" for a cue at the playhead), and each lane's with its read-out.
+#[allow(clippy::too_many_arguments)]
+fn track_heads(
+    ui: &mut Ui,
+    ctx: &Ctx,
+    heads: Rect,
+    rows: &[(TrackId, Rect)],
+    lane_rows: &[(CueId, Lane, Rect)],
+    base: egui::Id,
+    actions: &mut Vec<Action>,
+) {
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter().with_clip_rect(heads);
+    painter.rect_filled(heads, 0.0, visuals.panel_fill);
+    for (t, r) in rows {
+        let r = Rect::from_min_max(pos2(heads.left(), r.top()), pos2(heads.right(), r.bottom()));
+        painter.hline(
+            heads.x_range(),
+            r.bottom(),
+            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        );
+        painter.text(
+            pos2(r.left() + 8.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+            model::track_label(ctx.show, *t),
+            FontId::proportional(12.0),
+            visuals.text_color(),
+        );
+        let hit = r.intersect(heads);
+        if hit.height() <= 0.0 {
+            continue;
+        }
+        let head = ui
+            .interact(hit, base.with(("head", format!("{t:?}"))), Sense::click())
+            .on_hover_text("Right-click for this track's menu");
+        let t = *t;
+        head.context_menu(|ui| menus::track(ui, ctx, t, ctx.pos, actions));
+        if t == TrackId::Cues {
+            let plus = Rect::from_center_size(
+                pos2(r.right() - 14.0, r.center().y),
+                vec2(20.0, (r.height() - 6.0).min(20.0)),
+            );
+            if heads.contains_rect(plus) {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(plus));
+                let resp = child
+                    .add_enabled_ui(ctx.editable, |ui| {
+                        ui.menu_button("+", |ui| menus::cue_plus(ui, ctx, actions))
+                    })
+                    .inner
+                    .response
+                    .on_hover_text("Add a pause, stop, fade, send or wait cue at the playhead");
+                super::toolbar::note(ui, ctx.host, "cue_plus", &resp);
+            }
+        }
+    }
+    for (id, lane, r) in lane_rows {
+        let r = Rect::from_min_max(pos2(heads.left(), r.top()), pos2(heads.right(), r.bottom()));
+        if r.intersect(heads).height() <= 0.0 {
+            continue;
+        }
+        painter.hline(
+            heads.x_range(),
+            r.bottom(),
+            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        );
+        let Some(c) = ctx.clips.iter().find(|c| c.id == *id) else {
+            continue;
+        };
+        painter.text(
+            pos2(r.left() + 14.0, r.top() + 6.0),
+            egui::Align2::LEFT_TOP,
+            lanes::readout(ctx, c, *lane),
+            FontId::proportional(11.0),
+            visuals.text_color(),
+        );
+        painter.text(
+            pos2(r.left() + 14.0, r.bottom() - 5.0),
+            egui::Align2::LEFT_BOTTOM,
+            &c.name,
+            FontId::proportional(10.0),
+            visuals.weak_text_color(),
+        );
+        let close =
+            Rect::from_center_size(pos2(r.right() - 11.0, r.top() + 11.0), vec2(16.0, 16.0));
+        let resp = ui
+            .interact(
+                close.intersect(heads),
+                base.with(("close_lane", id.0, *lane)),
+                Sense::click(),
+            )
+            .on_hover_text(format!("Close the {} lane", lane.label().to_lowercase()));
+        painter.text(
+            close.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            FontId::proportional(13.0),
+            if resp.hovered() {
+                visuals.strong_text_color()
+            } else {
+                visuals.weak_text_color()
+            },
+        );
+        if resp.clicked() {
+            actions.push(Action::Timeline(TimelineAction::ShowLane {
+                id: *id,
+                lane: *lane,
+                on: false,
+            }));
+        }
+    }
+    painter.vline(
+        heads.right(),
+        heads.y_range(),
+        Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+    );
+}
+
+/// One clip: its colour, label and badges, fades, lead-in, waveform and warnings.
+#[allow(clippy::too_many_arguments)]
 fn draw_clip(
     p: &egui::Painter,
     ctx: &Ctx,
+    engine: &mut Engine,
     c: &Clip,
     rect: Rect,
     geo: Geo,
@@ -552,6 +967,9 @@ fn draw_clip(
     let inner = p.with_clip_rect(rect.intersect(p.clip_rect()));
     // The lead-in: waiting, unseen, for its fade-in.
     let (lead, never) = lead_of(ctx, c);
+    if c.ty == CueType::Audio {
+        waveform(&inner, ctx, engine, c, rect, geo, start + lead);
+    }
     if never {
         hatch(&inner, rect, Color32::from_white_alpha(70));
     } else if lead > 0.0 {
@@ -663,6 +1081,7 @@ fn draw_clip(
             text,
         )
     };
+    let cuts = model::cuts_over(ctx.show, ctx.key, ctx.clips, c.id).is_some();
     let mut notes: Vec<&str> = Vec::new();
     if ctx.waiting.contains(&c.id) {
         notes.push("waiting to fade in");
@@ -670,6 +1089,9 @@ fn draw_clip(
         notes.push("waits for a fade cue");
     } else if lead > 0.0 {
         notes.push("waits to fade in");
+    }
+    if cuts {
+        notes.push("cuts the clip under it");
     }
     if ctx.detached.contains(&c.id) {
         notes.push("free-running");
@@ -688,7 +1110,7 @@ fn draw_clip(
     }
     // Badges after the name (the clip's far end may be under the next one).
     let mut x = name_rect.right() + 6.0;
-    if fades_if_held(ctx.show, c) {
+    if fades_if_held(ctx.show, c) || never || cuts {
         x = inner
             .text(
                 pos2(x, rect.top() + 3.0),
@@ -700,19 +1122,22 @@ fn draw_clip(
             .right()
             + 4.0;
     }
-    let mut badges: Vec<&str> = Vec::new();
+    let mut badges: Vec<String> = Vec::new();
+    if !c.also_on.is_empty() {
+        badges.push(format!("+{}", c.also_on.len()));
+    }
     if c.loops {
-        badges.push("🔁");
+        badges.push("🔁".into());
     }
     if c.speed_keys {
-        badges.push("⏩");
+        badges.push("⏩".into());
     }
     if c.ty == CueType::Video && c.has_sound {
-        badges.push("🔊");
+        badges.push("🔊".into());
     }
     // Open-ended, or its length isn't known yet.
     if c.len.is_none() {
-        badges.push("∞");
+        badges.push("∞".into());
     }
     let badges = badges.join(" ");
     if !badges.is_empty() {
@@ -732,6 +1157,55 @@ fn draw_clip(
     p.rect_stroke(rect, 3.0, outline, egui::StrokeKind::Inside);
 }
 
+/// A sound file's loudness drawn faintly across its clip, from where its
+/// content starts (`from`, after any lead-in). Read on a thread the first
+/// time (`Engine::waveforms`); nothing is drawn until it is.
+fn waveform(
+    p: &egui::Painter,
+    ctx: &Ctx,
+    engine: &mut Engine,
+    c: &Clip,
+    rect: Rect,
+    geo: Geo,
+    from: f64,
+) {
+    let Some(m) = ctx.show.cue(c.id).and_then(|q| q.kind.media()) else {
+        return;
+    };
+    if m.file.as_os_str().is_empty() || rect.height() < 20.0 {
+        return;
+    }
+    let ff = engine.ff.clone();
+    let wave = match engine.waveforms.get(ff.as_ref(), &m.file, None) {
+        crate::media::waveform::WaveState::Ready(w) => w.clone(),
+        _ => return,
+    };
+    let map = m.speed_map();
+    let file_at = |t: f64| {
+        let t = (t - from).max(0.0);
+        m.start
+            + match &map {
+                Some(map) => map.media_at(t),
+                None => t * m.speed(),
+            }
+    };
+    let mid = rect.center().y + 4.0;
+    let half = rect.height() / 2.0 - 8.0;
+    let left = geo.x(from).max(rect.left()).max(p.clip_rect().left());
+    let right = rect.right().min(p.clip_rect().right());
+    let mut x = left;
+    while x < right {
+        let (a, b) = (file_at(geo.t(x)), file_at(geo.t(x + 1.0)));
+        let peak = wave.peak_between(a, b).sqrt();
+        let h = (peak * half).max(0.5);
+        p.line_segment(
+            [pos2(x + 0.5, mid - h), pos2(x + 0.5, mid + h)],
+            Stroke::new(1.0, Color32::from_white_alpha(70)),
+        );
+        x += 1.0;
+    }
+}
+
 /// The clip's tooltip: what it is, when, and what to look out for.
 fn clip_tip(ctx: &Ctx, c: &Clip) -> String {
     let mut s = format!("{}\nStarts at {}", c.name, fmt_time(c.start));
@@ -743,13 +1217,34 @@ fn clip_tip(ctx: &Ctx, c: &Clip) -> String {
         None => {}
     }
     s += &format!("\nTrack: {}", model::track_label(ctx.show, c.track));
+    if !c.also_on.is_empty() {
+        let names: Vec<String> = c
+            .also_on
+            .iter()
+            .map(|o| {
+                ctx.show.output(*o).map_or_else(
+                    || "a display the show no longer has".into(),
+                    |d| d.name.clone(),
+                )
+            })
+            .collect();
+        s += &format!("\nAlso on: {}", names.join(", "));
+    }
     let (lead, never) = lead_of(ctx, c);
     if never {
-        s += "\nAt opacity 0 and no fade cue raises it: it waits for one and never starts.";
+        s += "\n⚠ At opacity 0 and no fade cue raises it: it waits for one and never starts.";
     } else if lead > 0.0 {
         s += &format!(
             "\nWaits, unseen, {} for its fade-in; its content starts then.",
             fmt_time(lead)
+        );
+    }
+    if let Some(under) = model::cuts_over(ctx.show, ctx.key, ctx.clips, c.id) {
+        let name = ctx.show.cue(under).map_or("", |q| q.name.as_str());
+        s += &format!(
+            "\n⚠ It cuts in as it begins to show: {name} under it on this track goes at once and \
+             this one fades up from nothing. Give it a fade-in transition, or put it on a track \
+             above, to fade up over {name}."
         );
     }
     if ctx.waiting.contains(&c.id) {
@@ -762,62 +1257,9 @@ fn clip_tip(ctx: &Ctx, c: &Clip) -> String {
         s += "\n⚠ A pause lies inside this clip: it will fade out if the pause outlasts it. \
               Choose Loop or Hold under \u{201c}If it runs out\u{201d} in the inspector to keep it up.";
     }
-    s += "\nDrag to move; drag an end to trim; right-click for more.";
+    s +=
+        "\nDrag to move; drag an end to trim, a corner square to set a fade; right-click for more.";
     s
-}
-
-/// A clip's right-click menu.
-fn clip_menu(ui: &mut Ui, ctx: &Ctx, engine: &Engine, c: &Clip, actions: &mut Vec<Action>) {
-    let key = ctx.key;
-    let media = ctx.show.cue(c.id).is_some_and(|q| q.kind.media().is_some());
-    ui.add_enabled_ui(ctx.editable, |ui| {
-        let r = ui
-            .button("Pause before this clip comes in")
-            .on_hover_text("A pause cue at its start: GO brings it in");
-        super::toolbar::note(ui, ctx.host, "pause_in", &r);
-        if r.clicked() {
-            actions.push(Action::Timeline(TimelineAction::AddPauseBefore {
-                key,
-                clip: c.id,
-                what: PauseBefore::ClipIn,
-            }));
-            ui.close();
-        }
-        if ui
-            .add_enabled(
-                media && c.len.is_some(),
-                egui::Button::new("Pause before this clip fades out"),
-            )
-            .on_hover_text("A pause cue where its fade-out starts: GO lets it fade out")
-            .clicked()
-        {
-            actions.push(Action::Timeline(TimelineAction::AddPauseBefore {
-                key,
-                clip: c.id,
-                what: PauseBefore::ClipFadeOut,
-            }));
-            ui.close();
-        }
-    });
-    ui.separator();
-    let playing = matches!(
-        engine.status(c.id),
-        crate::engine::CueStatus::Playing { .. }
-    );
-    ui.add_enabled_ui(media && playing, |ui| {
-        if ui
-            .button("Freeze clip")
-            .on_hover_text("Hold this clip where it is while the timeline carries on")
-            .clicked()
-        {
-            actions.push(Action::Timeline(TimelineAction::FreezeClip(c.id, true)));
-            ui.close();
-        }
-        if ui.button("Resume clip").clicked() {
-            actions.push(Action::Timeline(TimelineAction::FreezeClip(c.id, false)));
-            ui.close();
-        }
-    });
 }
 
 /// The bar under the tracks that scrolls them sideways.
@@ -860,7 +1302,7 @@ fn scroll_bar(
 }
 
 /// The points a drag snaps to (none with snapping off or Alt held).
-fn points(
+pub(super) fn points(
     ctx: &Ctx,
     markers: &[crate::timeline::Marker],
     moving: &[CueId],
@@ -874,7 +1316,7 @@ fn points(
 }
 
 /// `t` snapped, or else to a hundredth.
-fn snapped(t: f64, pts: &SnapPoints, tolerance: f64) -> f64 {
+pub(super) fn snapped(t: f64, pts: &SnapPoints, tolerance: f64) -> f64 {
     match snap::snap(t, pts, tolerance) {
         (s, Some(_)) => s,
         _ => hundredth(t),
@@ -890,6 +1332,7 @@ fn follow_drag(
     st: &mut UiState,
     geo: Geo,
     rows: &[(TrackId, Rect)],
+    clip_rects: &[(CueId, Rect)],
     markers: &[crate::timeline::Marker],
     snapping: bool,
     actions: &mut Vec<Action>,
@@ -934,7 +1377,7 @@ fn follow_drag(
                         .filter(|t| *t != anchor.track && same_kind(*t, anchor.track));
                 }
             }
-            Drag::Trim { id, edge, to } => {
+            Drag::Trim { id, edge, to, .. } => {
                 if let Some(c) = clip(*id) {
                     let pts = points(ctx, markers, &[*id], snapping);
                     let s = snapped(t, &pts, tolerance);
@@ -947,6 +1390,21 @@ fn follow_drag(
                     };
                 }
             }
+            Drag::Fade { id, edge, secs } => {
+                if let Some(c) = clip(*id) {
+                    let pts = points(ctx, markers, &[], snapping);
+                    let s = snapped(t, &pts, tolerance);
+                    let (lead, never) = lead_of(ctx, c);
+                    let from = if never { c.start } else { c.start + lead };
+                    let end = c.start + c.len.unwrap_or(0.0);
+                    let room = (end - from).max(0.0);
+                    *secs = hundredth(match edge {
+                        Edge::Left => (s - from).max(0.0).min((room - c.fade_out).max(0.0)),
+                        Edge::Right => (end - s).max(0.0).min((room - c.fade_in).max(0.0)),
+                    });
+                }
+            }
+            Drag::Band { to, .. } => *to = p,
             Drag::Playhead { pos } => {
                 let pts = points(ctx, markers, &[], snapping);
                 *pos = snapped(t.max(0.0), &pts, tolerance).max(0.0);
@@ -956,33 +1414,95 @@ fn follow_drag(
                 let pts = points(ctx, &others, &[], snapping);
                 *to = snapped((t - *grab).max(0.0), &pts, tolerance).max(0.0);
             }
+            // The lane moves its key as it draws (`lanes::draw`).
+            Drag::Key { .. } => {}
         }
     }
     if !(released || !down) {
         return;
     }
     let key = ctx.key;
-    let done = match drag.clone() {
-        Drag::Clips { ids, dt, to, .. } => (ctx.editable && (dt.abs() > 1e-9 || to.is_some()))
-            .then_some(TimelineAction::MoveClips { key, ids, dt, to }),
-        Drag::Trim { id, edge, to } => clip(id)
-            .filter(|c| {
+    let mut done: Vec<TimelineAction> = Vec::new();
+    match drag.clone() {
+        Drag::Clips { ids, dt, to, .. } => {
+            if ctx.editable && (dt.abs() > 1e-9 || to.is_some()) {
+                done.push(TimelineAction::MoveClips { key, ids, dt, to });
+            }
+        }
+        Drag::Trim {
+            id,
+            edge,
+            to,
+            from: was,
+            others,
+        } => {
+            if ctx.editable && clip(id).is_some() && (to - was).abs() > 1e-9 {
+                done.push(TimelineAction::Trim { id, edge, to });
+                // The others' edges move as far (where they can be trimmed).
+                for o in others.iter().filter_map(|&o| clip(o)) {
+                    let allowed = match edge {
+                        Edge::Left => o.trim_left,
+                        Edge::Right => o.trim_right && o.len.is_some(),
+                    };
+                    if !allowed {
+                        continue;
+                    }
+                    let from = match edge {
+                        Edge::Left => o.start,
+                        Edge::Right => o.start + o.len.unwrap_or(0.0),
+                    };
+                    done.push(TimelineAction::Trim {
+                        id: o.id,
+                        edge,
+                        to: (from + to - was).max(0.0),
+                    });
+                }
+            }
+        }
+        Drag::Fade { id, edge, secs } => {
+            if let Some(c) = clip(id) {
                 let was = match edge {
-                    Edge::Left => c.start,
-                    Edge::Right => c.start + c.len.unwrap_or(0.0),
+                    Edge::Left => c.fade_in,
+                    Edge::Right => c.fade_out,
                 };
-                ctx.editable && (to - was).abs() > 1e-9
-            })
-            .map(|_| TimelineAction::Trim { id, edge, to }),
-        Drag::Playhead { pos } => (!ctx.ruler_locked).then_some(TimelineAction::Seek { key, pos }),
-        Drag::Marker { id, to, .. } => markers
-            .iter()
-            .find(|m| m.id == id)
-            .filter(|m| ctx.editable && (m.time - to).abs() > 1e-9)
-            .map(|_| TimelineAction::MoveMarker { key, id, to }),
-    };
+                if ctx.editable && (secs - was).abs() > 1e-9 {
+                    done.push(TimelineAction::SetFade { id, edge, secs });
+                }
+            }
+        }
+        Drag::Band { from, to, add } => {
+            let band = Rect::from_two_pos(from, to);
+            let ids: Vec<CueId> = clip_rects
+                .iter()
+                .filter(|(_, r)| r.intersects(band))
+                .map(|(id, _)| *id)
+                .collect();
+            if !ids.is_empty() {
+                done.push(TimelineAction::SelectClips { ids, add });
+            }
+        }
+        Drag::Playhead { pos } => {
+            if !ctx.ruler_locked {
+                done.push(TimelineAction::Seek { key, pos });
+            }
+        }
+        Drag::Marker { id, to, .. } => {
+            if markers
+                .iter()
+                .any(|m| m.id == id && ctx.editable && (m.time - to).abs() > 1e-9)
+            {
+                done.push(TimelineAction::MoveMarker { key, id, to });
+            }
+        }
+        // Asked for as it is (an unmoved key changes nothing in `apply`).
+        Drag::Key { id, lane, keys, .. } => {
+            if ctx.editable {
+                done.push(lanes::ask(id, lane, keys));
+            }
+        }
+    }
     st.timeline.drag = None;
-    if let Some(a) = done {
+    for a in done {
         actions.push(Action::Timeline(a));
     }
 }

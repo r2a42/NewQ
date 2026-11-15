@@ -107,7 +107,58 @@ pub(super) fn draw(
         if r.clicked() {
             push(actions, TimelineAction::AddMarker { key, at: ctx.pos });
         }
+        let ids = super::keys::split_ids(ctx, st);
+        let r = ui
+            .add_enabled(ctx.editable && !ids.is_empty(), egui::Button::new("✂ Split"))
+            .on_hover_text(super::menus::SPLIT_TIP)
+            .on_disabled_hover_text(
+                "Put the playhead inside a clip (and pick clips to split only those) to split there",
+            );
+        note(ui, host, "split", &r);
+        if r.clicked() {
+            push(
+                actions,
+                TimelineAction::Split {
+                    key,
+                    ids,
+                    at: ctx.pos,
+                },
+            );
+        }
+        let ed = &mut st.timeline;
+        let r = ui.selectable_label(ed.ripple, "Ripple").on_hover_text(
+            "Deleting a clip moves the later clips on its track up to close the gap \
+             (Shift+Delete ripples either way)",
+        );
+        note(ui, host, "ripple", &r);
+        if r.clicked() {
+            ed.ripple = !ed.ripple;
+        }
+        let r = ui
+            .add_enabled_ui(ctx.editable, |ui| {
+                ui.menu_button("+ Track", |ui| {
+                    if ui.button("Picture track").clicked() {
+                        push(actions, TimelineAction::AddTrack { key, picture: true });
+                        ui.close();
+                    }
+                    if ui.button("Sound track").clicked() {
+                        push(
+                            actions,
+                            TimelineAction::AddTrack {
+                                key,
+                                picture: false,
+                            },
+                        );
+                        ui.close();
+                    }
+                })
+            })
+            .inner
+            .response
+            .on_hover_text("Add an empty track (right-click a track for more)");
+        note(ui, host, "add_track", &r);
         ui.separator();
+        let ed = &mut st.timeline;
         let now = if ed.shown_pps > 0.0 { ed.shown_pps } else { 50.0 };
         if ui.button("−").on_hover_text("Zoom out (Ctrl + wheel)").clicked() {
             ed.pps = (now / 1.5).max(0.05);

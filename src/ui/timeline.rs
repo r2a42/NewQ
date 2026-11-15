@@ -10,6 +10,9 @@
 //! so it is one undo step.
 
 mod control;
+mod keys;
+mod lanes;
+mod menus;
 mod ruler;
 mod toolbar;
 mod tracks;
@@ -19,7 +22,7 @@ pub use control::{clip_fields, control_fields, describe_control, settings_fields
 use super::{Action, Pane, UiState, cue_label, fmt_time};
 use crate::engine::{Engine, RunState, RunView};
 pub use crate::prefs::TimelineLayout;
-use crate::show::{Animated, ControlAction, CueId, CueType, PauseFreeze, Show};
+use crate::show::{Animated, ControlAction, CueId, CueKind, CueType, PauseFreeze, Show};
 use crate::timeline::edit::{self, Edge, PauseBefore};
 use crate::timeline::{TimelineKey, TimelinePoint, TrackId, model};
 use egui::{RichText, Ui, Vec2};
@@ -47,8 +50,8 @@ pub struct EditorState {
     pub pps: f32,
     pub scroll: Vec2,
     pub snap: bool,
-    // The toolbar's ripple toggle (P6).
-    #[allow(dead_code)]
+    /// Deleting a clip closes the gap it leaves on its track (the toolbar's
+    /// Ripple; Shift+Delete ripples either way).
     pub ripple: bool,
     /// What is being dragged, and in which host.
     drag: Option<(Host, Drag)>,
@@ -56,7 +59,26 @@ pub struct EditorState {
     renaming: Option<(Host, u64, String)>,
     /// The zoom last drawn (what "fit" came to), for the zoom buttons.
     shown_pps: f32,
+    /// The keyframe lanes open under clips, in the order opened.
+    lanes: Vec<(CueId, Lane)>,
+    /// The editor that was clicked last, which the keys act on.
+    focus: Option<Host>,
+    /// Where on which track an empty spot was right-clicked, for its menu.
+    menu_at: Option<(Host, TrackId, f64)>,
+    /// A file being chosen for a new clip, answered by the dialog's thread.
+    pick: Option<std::sync::mpsc::Receiver<Picked>>,
 }
+
+/// A keyframe lane under a clip: its speed (keys that follow its content) or
+/// its opacity (keys that follow the timeline's clock).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Lane {
+    Speed,
+    Opacity,
+}
+
+/// A file chosen for a new clip: where it goes, and the file (None: cancelled).
+type Picked = (TimelineKey, CueType, TrackId, f64, Option<PathBuf>);
 
 impl Default for EditorState {
     fn default() -> EditorState {
@@ -71,6 +93,10 @@ impl Default for EditorState {
             drag: None,
             renaming: None,
             shown_pps: 0.0,
+            lanes: Vec::new(),
+            focus: None,
+            menu_at: None,
+            pick: None,
         }
     }
 }
@@ -87,8 +113,32 @@ enum Drag {
         dt: f64,
         to: Option<TrackId>,
     },
-    /// An edge of a clip, now at `to` (a time on the timeline).
-    Trim { id: CueId, edge: Edge, to: f64 },
+    /// An edge of a clip, now at `to` (a time on the timeline); the other
+    /// clips of the selection (`others`) have that edge moved as far.
+    Trim {
+        id: CueId,
+        edge: Edge,
+        to: f64,
+        /// Where the held edge was when the drag began.
+        from: f64,
+        others: Vec<CueId>,
+    },
+    /// A clip's fade-in (`Edge::Left`) or fade-out handle, now `secs` long.
+    Fade { id: CueId, edge: Edge, secs: f64 },
+    /// A rubber band over the tracks, from where it was pressed; `add` keeps
+    /// the selection there was (Ctrl/Cmd or Shift held).
+    Band {
+        from: egui::Pos2,
+        to: egui::Pos2,
+        add: bool,
+    },
+    /// A key on a lane: the lane's keys as they are now and which is held.
+    Key {
+        id: CueId,
+        lane: Lane,
+        keys: Animated,
+        i: usize,
+    },
     /// The playhead on the ruler, not yet let go.
     Playhead { pos: f64 },
     /// A marker, now at `to`.
@@ -101,6 +151,7 @@ impl EditorState {
     pub fn let_go(&mut self) {
         self.drag = None;
         self.renaming = None;
+        self.menu_at = None;
     }
 
     /// The drag in progress in `host`.
@@ -201,6 +252,14 @@ pub fn editor(
     host: Host,
     actions: &mut Vec<Action>,
 ) {
+    // A lane's keys being dragged are shown on a copy of the show with them
+    // in, so the clip's length (speed) and lead-in (opacity) follow them.
+    let preview = lanes::preview(show, st.timeline.drag_in(host));
+    let show = preview.as_ref().unwrap_or(show);
+    // Lanes of clips that have gone (deleted, undone) are let go.
+    st.timeline
+        .lanes
+        .retain(|(id, lane)| show.cue(*id).is_some_and(|c| lanes::has(c, *lane)));
     let clips = model::clips(show, key, &mut |c| engine.cue_duration(show, c));
     let tracks = model::tracks(show, key, &clips);
     let run = engine.timeline(show, key);
@@ -230,10 +289,25 @@ pub fn editor(
         // ruler: parking puts picture on the real outputs (plan 2.7).
         ruler_locked: st.show_mode && key != TimelineKey::List(engine.active_list),
     };
+    // The keys go to the editor last clicked in, or the one under the pointer.
+    let whole = ui.available_rect_before_wrap();
+    if ui.input(|i| i.pointer.primary_pressed() || i.pointer.secondary_pressed()) {
+        let inside = ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| whole.contains(p));
+        if inside {
+            st.timeline.focus = Some(host);
+        } else if st.timeline.focus == Some(host) {
+            st.timeline.focus = None;
+        }
+    }
+    let hovered = ui.rect_contains_pointer(whole);
     ui.push_id(("timeline_editor", host), |ui| {
+        keys::picked(st, actions);
         toolbar::draw(ui, &ctx, engine, st, actions);
         ui.separator();
         tracks::draw(ui, &ctx, engine, st, actions);
+        keys::handle(ui, &ctx, st, hovered, actions);
     });
 }
 
@@ -293,19 +367,16 @@ pub enum TimelineAction {
         edge: Edge,
         to: f64,
     },
-    #[allow(dead_code)]
     Split {
         key: TimelineKey,
         ids: Vec<CueId>,
         at: f64,
     },
-    #[allow(dead_code)]
     Delete {
         key: TimelineKey,
         ids: Vec<CueId>,
         ripple: bool,
     },
-    #[allow(dead_code)]
     AddClip {
         key: TimelineKey,
         ty: CueType,
@@ -323,15 +394,38 @@ pub enum TimelineAction {
         clip: CueId,
         what: PauseBefore,
     },
-    #[allow(dead_code)]
     AddTrack {
         key: TimelineKey,
         picture: bool,
     },
-    #[allow(dead_code)]
     RemoveTrack {
         key: TimelineKey,
         track: TrackId,
+    },
+    /// A picture track above (`up`) or below the next of its display.
+    MoveTrack {
+        key: TimelineKey,
+        track: TrackId,
+        up: bool,
+    },
+    /// Choose a file for a new clip of `ty` at `at` on `track` (a dialog;
+    /// its answer comes back as an `AddClip`).
+    PickClip {
+        key: TimelineKey,
+        ty: CueType,
+        track: TrackId,
+        at: f64,
+    },
+    /// A clip's fade-in (`Edge::Left`) or fade-out, in seconds.
+    SetFade {
+        id: CueId,
+        edge: Edge,
+        secs: f64,
+    },
+    /// A picture clip's opacity keys (none: a steady opacity of `value`).
+    SetOpacity {
+        id: CueId,
+        opacity: Animated,
     },
     AddMarker {
         key: TimelineKey,
@@ -351,7 +445,6 @@ pub enum TimelineAction {
         key: TimelineKey,
         id: u64,
     },
-    #[allow(dead_code)]
     SetRate {
         id: CueId,
         rate: Animated,
@@ -379,6 +472,17 @@ pub enum TimelineAction {
     },
     FreezeClip(CueId, bool),
     // view
+    /// Pick these clips (a rubber band); `add` keeps those already picked.
+    SelectClips {
+        ids: Vec<CueId>,
+        add: bool,
+    },
+    /// Open or close a keyframe lane under a clip.
+    ShowLane {
+        id: CueId,
+        lane: Lane,
+        on: bool,
+    },
     Open(Option<TimelineKey>),
     Close,
     #[allow(dead_code)]
@@ -399,6 +503,10 @@ impl TimelineAction {
             | A::AddPauseBefore { .. }
             | A::AddTrack { .. }
             | A::RemoveTrack { .. }
+            | A::MoveTrack { .. }
+            | A::PickClip { .. }
+            | A::SetFade { .. }
+            | A::SetOpacity { .. }
             | A::AddMarker { .. }
             | A::MoveMarker { .. }
             | A::RenameMarker { .. }
@@ -413,6 +521,8 @@ impl TimelineAction {
             | A::Seek { .. }
             | A::JumpToMarker { .. }
             | A::FreezeClip(..)
+            | A::SelectClips { .. }
+            | A::ShowLane { .. }
             | A::Open(_)
             | A::Close
             | A::SetLayout(_) => false,
@@ -448,15 +558,36 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
         }
         A::Split { key, ids, at } => {
             let was = before();
-            edit::split(show, key, &ids, at, &mut |c| engine.cue_duration(&was, c));
+            let made = edit::split(show, key, &ids, at, &mut |c| engine.cue_duration(&was, c));
+            // Clips start on the engine's tick (plan 2.13, 7): a sound cut in
+            // two may click or leave a tiny gap where its halves meet.
+            let sound = made
+                .iter()
+                .filter_map(|id| show.cue(*id))
+                .any(|c| matches!(c.kind, CueKind::Audio(_) | CueKind::Video(_)));
+            let n = made.len();
+            let s = if n == 1 { "" } else { "s" };
+            if n == 0 {
+                engine.log("Nothing to split there: put the playhead inside a clip");
+            } else if sound {
+                engine.log(format!(
+                    "Split {n} clip{s}: a sound split in two may click or gap a little at the join"
+                ));
+            } else {
+                engine.log(format!("Split {n} clip{s}"));
+            }
         }
         A::Delete { key, ids, ripple } => {
             let was = before();
             let gone = edit::delete(show, key, &ids, ripple, &mut |c| {
                 engine.cue_duration(&was, c)
             });
+            for id in &gone {
+                engine.stop_cue(*id, 0.0);
+            }
             if st.selected.is_some_and(|s| gone.contains(&s)) {
                 st.selected = None;
+                st.forget_multi();
             }
         }
         A::AddClip {
@@ -488,6 +619,17 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
         }
         A::RemoveTrack { key, track } => {
             edit::remove_track(show, key, track);
+        }
+        A::MoveTrack { key, track, up } => {
+            edit::move_track(show, key, track, up);
+        }
+        A::PickClip { key, ty, track, at } => keys::pick_file(st, key, ty, track, at),
+        A::SetFade { id, edge, secs } => {
+            let was = before();
+            edit::set_fade(show, id, edge, secs, &mut |c| engine.cue_duration(&was, c));
+        }
+        A::SetOpacity { id, opacity } => {
+            edit::set_opacity(show, id, opacity);
         }
         A::AddMarker { key, at } => {
             let n = model::settings(show, key).map_or(0, |s| s.markers.len()) + 1;
@@ -546,6 +688,26 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
             };
             engine.control_target(show, action, id, "the timeline editor");
         }
+        A::SelectClips { ids, add } => {
+            let mut all = if add { st.selection(show) } else { Vec::new() };
+            for id in ids {
+                if !all.contains(&id) {
+                    all.push(id);
+                }
+            }
+            if let Some(&first) = all.first() {
+                super::select(show, st, engine, Some(first));
+                if all.len() > 1 {
+                    st.select_many(all, first);
+                }
+            }
+        }
+        A::ShowLane { id, lane, on } => {
+            st.timeline.lanes.retain(|l| *l != (id, lane));
+            if on {
+                st.timeline.lanes.push((id, lane));
+            }
+        }
         A::Open(key) => {
             st.timeline.open = true;
             if key.is_some() {
@@ -585,6 +747,13 @@ pub struct TimelineRects {
     pub clips: Vec<(CueId, egui::Rect)>,
     pub tracks: Vec<(TrackId, egui::Rect)>,
     pub markers: Vec<(u64, egui::Rect)>,
+    /// The ghosts of clips on the other displays they are also on.
+    pub ghosts: Vec<(CueId, egui::Rect)>,
+    /// The keyframe lanes open, and the lane's keys' centres.
+    pub lanes: Vec<(CueId, Lane, egui::Rect)>,
+    pub keys: Vec<(CueId, Lane, egui::Pos2)>,
+    /// The fade handles drawn.
+    pub fades: Vec<(CueId, Edge, egui::Rect)>,
     pub playhead_x: Option<f32>,
     pub x0: f32,
     pub pps: f32,

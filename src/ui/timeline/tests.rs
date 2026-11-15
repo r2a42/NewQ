@@ -708,10 +708,18 @@ fn show_mode_refuses_edit_drags_and_keeps_the_transport() {
         a.center(),
         a.center() + vec2(90.0, 0.0),
     );
-    assert!(frames.iter().all(|f| timeline_actions(f).is_empty()));
+    // (A drag over a clip that can't move is a rubber band: it only picks.)
+    let edits = |frames: &[Vec<Action>]| {
+        frames
+            .iter()
+            .flat_map(|f| timeline_actions(f))
+            .filter(|a| a.edits_the_show())
+            .count()
+    };
+    assert_eq!(edits(&frames), 0);
     let grip = pos2(a.right() - 1.0, a.center().y);
     let frames = m.drag(&mut f.show, &mut f.st, grip, grip + vec2(50.0, 0.0));
-    assert!(frames.iter().all(|f| timeline_actions(f).is_empty()));
+    assert_eq!(edits(&frames), 0);
     for (name, want) in [
         ("run", TimelineAction::Run(key)),
         ("pause", TimelineAction::Pause(key)),
@@ -1230,4 +1238,849 @@ fn the_toolbar_buttons_stay_put_as_the_run_state_text_changes() {
         RunState::Paused { .. }
     ));
     assert_eq!(at(&mut m, &mut f), stopped, "paused, with what GO does");
+}
+
+// ----- The tools: split, delete and ripple, adding, tracks, bands, fades -----
+
+/// A key pressed and let go, with `modifiers` held.
+fn key_press(key: egui::Key, modifiers: Modifiers) -> Vec<Event> {
+    [true, false]
+        .into_iter()
+        .map(|pressed| Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        })
+        .collect()
+}
+
+/// The whole window with the Timeline pane open on the fixture's group.
+fn in_window(f: &mut Fixture) -> Mouse {
+    let mut m = Mouse::new();
+    m.draw = Draw::Full;
+    super::super::apply(
+        Action::Timeline(TimelineAction::Open(None)),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    m
+}
+
+/// Pick a clip with a click (made as the app makes it).
+fn pick(m: &mut Mouse, f: &mut Fixture, id: CueId) {
+    let r = m.clip(&mut f.show, &mut f.st, id);
+    let actions = m.click(&mut f.show, &mut f.st, r.center(), PointerButton::Primary);
+    for a in actions {
+        super::super::apply(a, &mut f.show, &mut m.e, &mut f.st);
+    }
+    m.frame(&mut f.show, &mut f.st, vec![]);
+}
+
+fn starts(show: &Show, ids: &[CueId]) -> Vec<f64> {
+    ids.iter()
+        .map(|id| show.cue(*id).unwrap().pre_wait)
+        .collect()
+}
+
+#[test]
+fn ctrl_k_splits_the_picked_clip_at_the_playhead_and_one_undo_joins_it_again() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    // A hotkey K elsewhere in the show must not fire.
+    let mut hot = f.show.make_cue(CueType::Wait, None, f.show.cues.len());
+    hot.hotkey = Some("K".into());
+    let hot_id = hot.id;
+    f.show.cues.push(hot);
+    let mut m = in_window(&mut f);
+    let a = f.a;
+    pick(&mut m, &mut f, a);
+    assert_eq!(f.st.selected, Some(f.a));
+    super::super::apply(
+        Action::Timeline(TimelineAction::Seek { key, pos: 2.5 }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    let before = model::members(&f.show, key).len();
+    let a = m.clip(&mut f.show, &mut f.st, f.a);
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![Event::PointerMoved(a.center())],
+    );
+    m.mods = Modifiers::COMMAND;
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        key_press(egui::Key::K, Modifiers::COMMAND),
+    );
+    m.mods = Modifiers::NONE;
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    assert_eq!(
+        model::members(&f.show, key).len(),
+        before + 1,
+        "split in two"
+    );
+    assert_eq!(
+        f.show.cue(f.a).unwrap().kind.media().unwrap().end,
+        Some(2.5),
+        "the first half ends at the playhead"
+    );
+    assert!(!playing(&m.e, hot_id), "the hotkey K didn't fire");
+    super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+    assert_eq!(model::members(&f.show, key).len(), before);
+    assert_eq!(
+        f.show.cue(f.a).unwrap().kind.media().unwrap().end,
+        Some(4.0)
+    );
+}
+
+#[test]
+fn split_comes_from_the_toolbar_and_the_clip_menu_with_the_sound_warning() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    m.e.timeline_seek(&f.show, key, 7.0, false);
+    // No clip picked (the group is): the toolbar splits what is under the
+    // playhead (B).
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let at = m.button_at("split").center();
+    let got = timeline_actions(&m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+    assert_eq!(
+        got,
+        vec![TimelineAction::Split {
+            key,
+            ids: vec![f.b],
+            at: 7.0
+        }]
+    );
+    // The clip menu: where it was right-clicked.
+    let b = m.clip(&mut f.show, &mut f.st, f.b);
+    let spot = pos2(b.left() + b.width() * 0.75, b.center().y);
+    m.click(&mut f.show, &mut f.st, spot, PointerButton::Secondary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let item = m.button_at("split_here").center();
+    let got = timeline_actions(&m.click(&mut f.show, &mut f.st, item, PointerButton::Primary));
+    match got.as_slice() {
+        [TimelineAction::Split { ids, at, .. }] => {
+            assert_eq!(ids, &vec![f.b]);
+            assert!((at - 9.0).abs() < 0.2, "{at}");
+        }
+        other => panic!("wanted one Split, got {other:?}"),
+    }
+    // A sound split says it may click at the join.
+    let i = f.show.cue_index(f.b).unwrap();
+    let mut sound = crate::show::MediaCue::new("x.wav".into(), None);
+    sound.end = Some(4.0);
+    f.show.cues[i].kind = CueKind::Audio(sound);
+    let mut e = Engine::for_tests();
+    super::super::apply(
+        Action::Timeline(TimelineAction::Split {
+            key,
+            ids: vec![f.b],
+            at: 7.0,
+        }),
+        &mut f.show,
+        &mut e,
+        &mut f.st,
+    );
+    let said: Vec<String> = e.messages.iter().map(|m| m.1.clone()).collect();
+    let said = said.join("\n");
+    assert!(said.contains("may click"), "{said}");
+}
+
+#[test]
+fn shift_delete_ripples_the_picked_clip_and_plain_delete_leaves_the_gap() {
+    for (shift, toggle, ripples) in [
+        (true, false, true),
+        (false, false, false),
+        (false, true, true),
+    ] {
+        let mut f = fixture();
+        let key = TimelineKey::Group(f.group);
+        f.st.timeline.ripple = toggle;
+        let mut m = in_window(&mut f);
+        let a = f.a;
+        pick(&mut m, &mut f, a);
+        let a = m.clip(&mut f.show, &mut f.st, f.a);
+        m.frame(
+            &mut f.show,
+            &mut f.st,
+            vec![Event::PointerMoved(a.center())],
+        );
+        let mods = if shift {
+            Modifiers::SHIFT
+        } else {
+            Modifiers::NONE
+        };
+        m.mods = mods;
+        m.frame(&mut f.show, &mut f.st, key_press(egui::Key::Delete, mods));
+        m.mods = Modifiers::NONE;
+        m.frame(&mut f.show, &mut f.st, vec![]);
+        assert!(f.show.cue(f.a).is_none(), "A is gone");
+        assert_eq!(model::key_of(&f.show, f.b), Some(key));
+        // B (6 s) was on A's track: rippled up by A's 4 s, or left.
+        let want = if ripples { 2.0 } else { 6.0 };
+        assert_eq!(starts(&f.show, &[f.b, f.c]), vec![want, 2.0]);
+        super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+        assert!(f.show.cue(f.a).is_some());
+        assert_eq!(starts(&f.show, &[f.b]), vec![6.0]);
+    }
+}
+
+#[test]
+fn delete_of_a_selection_that_is_not_all_clips_is_the_cue_lists() {
+    let mut f = fixture();
+    let mut m = in_window(&mut f);
+    // The group itself picked: Delete removes the group, as the list does.
+    f.st.selected = Some(f.group);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![Event::PointerMoved(r.tracks[0].1.center())],
+    );
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        key_press(egui::Key::Delete, Modifiers::NONE),
+    );
+    assert!(f.show.cue(f.group).is_none());
+}
+
+#[test]
+fn the_clip_menu_deletes_and_ripple_deletes_the_clip() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    for (item, ripple) in [("delete", false), ("ripple_delete", true)] {
+        let a = m.clip(&mut f.show, &mut f.st, f.a);
+        m.click(&mut f.show, &mut f.st, a.center(), PointerButton::Secondary);
+        m.frame(&mut f.show, &mut f.st, vec![]);
+        let at = m.button_at(item).center();
+        let got = timeline_actions(&m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+        assert_eq!(
+            got,
+            vec![TimelineAction::Delete {
+                key,
+                ids: vec![f.a],
+                ripple
+            }]
+        );
+    }
+}
+
+#[test]
+fn a_rubber_band_over_empty_track_picks_the_clips_it_touches() {
+    let mut f = fixture();
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    // From the empty end of the top track (after C) down and back over C and A.
+    let top = r.tracks[0].1;
+    let from = pos2(r.x0 + 5.5 * r.pps, top.top() + 2.0);
+    let to = pos2(r.x0 + 1.0 * r.pps, r.tracks[1].1.center().y);
+    let frames = m.drag(&mut f.show, &mut f.st, from, to);
+    let got = timeline_actions(frames.last().unwrap());
+    match got.as_slice() {
+        [TimelineAction::SelectClips { ids, add: false }] => {
+            let mut ids = ids.clone();
+            ids.sort();
+            let mut want = vec![f.a, f.c];
+            want.sort();
+            assert_eq!(ids, want);
+        }
+        other => panic!("wanted one SelectClips, got {other:?}"),
+    }
+    for a in frames.into_iter().flatten() {
+        super::super::apply(a, &mut f.show, &mut m.e, &mut f.st);
+    }
+    assert_eq!(f.st.selection(&f.show), vec![f.a, f.c]);
+}
+
+#[test]
+fn an_empty_spot_of_a_track_offers_new_clips_there_and_the_tracks() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    let (track, row) = r.tracks[0];
+    let spot = pos2(r.x0 + 7.0 * r.pps, row.center().y);
+    m.click(&mut f.show, &mut f.st, spot, PointerButton::Secondary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let at = m.button_at("Text").center();
+    let got = timeline_actions(&m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+    match got.as_slice() {
+        [
+            TimelineAction::AddClip {
+                key: k,
+                ty: CueType::Text,
+                file: None,
+                track: t,
+                at,
+            },
+        ] => {
+            assert_eq!((*k, *t), (key, track));
+            assert!((at - 7.0).abs() < 0.1, "{at}");
+        }
+        other => panic!("wanted one AddClip, got {other:?}"),
+    }
+    // Made: a text on that track at that time, picked.
+    for a in got {
+        super::super::apply(Action::Timeline(a), &mut f.show, &mut m.e, &mut f.st);
+    }
+    let new = f.st.selected.unwrap();
+    assert_eq!(model::key_of(&f.show, new), Some(key));
+    assert_eq!(model::track_of(f.show.cue(new).unwrap()), track);
+    // The top track can't go up.
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let spot = pos2(r.x0 + 1.0 * r.pps, row.center().y);
+    m.click(&mut f.show, &mut f.st, spot, PointerButton::Secondary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let up = m.button_at("track_up");
+    let got =
+        timeline_actions(&m.click(&mut f.show, &mut f.st, up.center(), PointerButton::Primary));
+    assert!(got.is_empty(), "the top track can't go up: {got:?}");
+}
+
+#[test]
+fn tracks_are_added_removed_from_their_header_and_moved() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    super::super::apply(
+        Action::Timeline(TimelineAction::AddTrack { key, picture: true }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    assert_eq!(r.tracks.len(), 4);
+    let (empty, row) = r.tracks[0];
+    let head = pos2(row.left() - 40.0, row.center().y);
+    m.click(&mut f.show, &mut f.st, head, PointerButton::Secondary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let at = m.button_at("remove_track").center();
+    let got = timeline_actions(&m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+    assert_eq!(got, vec![TimelineAction::RemoveTrack { key, track: empty }]);
+    // A track with clips can't go.
+    let (busy, row) = r.tracks[1];
+    let head = pos2(row.left() - 40.0, row.center().y);
+    m.click(&mut f.show, &mut f.st, head, PointerButton::Secondary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let at = m.button_at("remove_track").center();
+    let got = timeline_actions(&m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+    assert!(got.is_empty(), "{busy:?}: {got:?}");
+    // Layer 0's track moves above layer 1's: their clips swap layers.
+    let output = f.show.outputs.first().map(|o| o.id);
+    super::super::apply(
+        Action::Timeline(TimelineAction::MoveTrack {
+            key,
+            track: TrackId::Picture { output, layer: 0 },
+            up: true,
+        }),
+        &mut f.show,
+        &mut m.e,
+        &mut f.st,
+    );
+    let layer = |id| f.show.cue(id).unwrap().kind.media().unwrap().layer;
+    assert_eq!((layer(f.a), layer(f.c)), (1, 0));
+}
+
+#[test]
+fn the_cue_tracks_plus_adds_a_pause_at_the_playhead() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    m.e.timeline_seek(&f.show, key, 3.0, false);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let plus = m.button_at("cue_plus").center();
+    m.click(&mut f.show, &mut f.st, plus, PointerButton::Primary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let at = m.button_at("add_pause").center();
+    let got = timeline_actions(&m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+    assert_eq!(
+        got,
+        vec![TimelineAction::AddControl {
+            key,
+            action: ControlAction::TimelinePause,
+            at: 3.0
+        }]
+    );
+}
+
+#[test]
+fn a_fade_handle_dragged_sets_the_fade_and_one_undo_takes_it_back() {
+    let mut f = fixture();
+    let mut m = in_window(&mut f);
+    let r = m.rects().unwrap();
+    let grip = r
+        .fades
+        .iter()
+        .find(|g| g.0 == f.b && g.1 == Edge::Left)
+        .expect("B's fade-in handle")
+        .2;
+    m.drag(
+        &mut f.show,
+        &mut f.st,
+        grip.center(),
+        grip.center() + vec2(1.5 * r.pps, 0.0),
+    );
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let fade = f.show.cue(f.b).unwrap().kind.media().unwrap().fade_in;
+    assert!((fade - 1.5).abs() < 0.3, "{fade}");
+    super::super::apply(Action::Undo, &mut f.show, &mut m.e, &mut f.st);
+    assert_eq!(f.show.cue(f.b).unwrap().kind.media().unwrap().fade_in, 0.0);
+}
+
+#[test]
+fn trimming_a_clip_of_the_selection_trims_the_others_as_far() {
+    let mut f = fixture();
+    let mut m = Mouse::new();
+    f.st.select_many(vec![f.a, f.c], f.a);
+    let a = m.clip(&mut f.show, &mut f.st, f.a);
+    let pps = m.rects().unwrap().pps;
+    let grip = pos2(a.right() - 1.0, a.center().y + 6.0);
+    let frames = m.drag(&mut f.show, &mut f.st, grip, grip + vec2(0.5 * pps, 0.0));
+    let got = timeline_actions(frames.last().unwrap());
+    match got.as_slice() {
+        [
+            TimelineAction::Trim {
+                id: x,
+                edge: Edge::Right,
+                to: ta,
+            },
+            TimelineAction::Trim {
+                id: y,
+                edge: Edge::Right,
+                to: tc,
+            },
+        ] => {
+            assert_eq!((*x, *y), (f.a, f.c));
+            // A ended at 4, C at 5: both moved as far.
+            assert!(((ta - 4.0) - (tc - 5.0)).abs() < 1e-9, "{ta} {tc}");
+            assert!(*ta > 4.0);
+        }
+        other => panic!("wanted two Trims, got {other:?}"),
+    }
+}
+
+// ----- The speed and opacity lanes -----
+
+fn clip_len(e: &mut Engine, show: &Show, key: TimelineKey, id: CueId) -> Option<f64> {
+    model::clips(show, key, &mut |c| e.cue_duration(show, c))
+        .into_iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.len)
+}
+
+/// The fixture with A made a video of the 10 s test clip, its length known.
+fn with_video() -> Option<(Fixture, Mouse)> {
+    let (ff, file) = crate::media::test_media("testsrc_10s.mp4")?;
+    let mut f = fixture();
+    let i = f.show.cue_index(f.a).unwrap();
+    let output = f.show.outputs.first().map(|o| o.id);
+    f.show.cues[i].kind = CueKind::Video(crate::show::MediaCue::new(file, output));
+    let mut m = Mouse::new();
+    m.e.ff = Some(ff);
+    let key = TimelineKey::Group(f.group);
+    let t0 = std::time::Instant::now();
+    while clip_len(&mut m.e, &f.show, key, f.a).is_none() {
+        assert!(t0.elapsed().as_secs() < 30, "the clip's length never came");
+        m.e.tick(&f.show, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Some((f, m))
+}
+
+fn lane_rect(m: &Mouse, id: CueId, lane: Lane) -> Rect {
+    m.rects()
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.0 == id && l.1 == lane)
+        .expect("the lane is open")
+        .2
+}
+
+fn lane_keys(m: &Mouse, id: CueId, lane: Lane) -> Vec<Pos2> {
+    m.rects()
+        .unwrap()
+        .keys
+        .iter()
+        .filter(|k| k.0 == id && k.1 == lane)
+        .map(|k| k.2)
+        .collect()
+}
+
+/// Make what was asked for, and draw a frame.
+fn made(m: &mut Mouse, f: &mut Fixture, actions: Vec<Action>) {
+    for a in actions {
+        super::super::apply(a, &mut f.show, &mut m.e, &mut f.st);
+    }
+    m.frame(&mut f.show, &mut f.st, vec![]);
+}
+
+#[test]
+fn the_clip_menu_opens_a_clips_lanes_and_the_header_closes_them() {
+    let mut f = fixture();
+    let mut m = Mouse::new();
+    let c = m.clip(&mut f.show, &mut f.st, f.c);
+    m.click(&mut f.show, &mut f.st, c.center(), PointerButton::Secondary);
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    // An image has an opacity lane and no speed lane.
+    let buttons: Vec<(&'static str, Rect)> = m
+        .ctx
+        .data(|d| d.get_temp(egui::Id::new(("timeline_buttons", Host::Pane))))
+        .unwrap_or_default();
+    assert!(!buttons.iter().any(|b| b.0 == "speed_lane"));
+    let item = m.button_at("opacity_lane").center();
+    let got = m.click(&mut f.show, &mut f.st, item, PointerButton::Primary);
+    assert_eq!(
+        timeline_actions(&got),
+        vec![TimelineAction::ShowLane {
+            id: f.c,
+            lane: Lane::Opacity,
+            on: true
+        }]
+    );
+    made(&mut m, &mut f, got);
+    let lane = lane_rect(&m, f.c, Lane::Opacity);
+    // Under C's track; the tracks below make room for it.
+    let r = m.rects().unwrap();
+    assert!((lane.top() - r.tracks[0].1.bottom()).abs() < 0.5);
+    assert!(r.tracks[1].1.top() >= lane.bottom() - 0.5);
+    let close = pos2(lane.left() - 11.0, lane.top() + 11.0);
+    let got = m.click(&mut f.show, &mut f.st, close, PointerButton::Primary);
+    assert_eq!(
+        timeline_actions(&got),
+        vec![TimelineAction::ShowLane {
+            id: f.c,
+            lane: Lane::Opacity,
+            on: false
+        }]
+    );
+    made(&mut m, &mut f, got);
+    assert!(m.rects().unwrap().lanes.is_empty());
+}
+
+#[test]
+fn the_speed_lane_adds_moves_and_removes_keys_and_the_clip_follows_the_speed() {
+    let Some((mut f, mut m)) = with_video() else {
+        return;
+    };
+    let key = TimelineKey::Group(f.group);
+    let a = f.a;
+    made(
+        &mut m,
+        &mut f,
+        vec![Action::Timeline(TimelineAction::ShowLane {
+            id: a,
+            lane: Lane::Speed,
+            on: true,
+        })],
+    );
+    let full = m.clip(&mut f.show, &mut f.st, f.a).width();
+    let lane = lane_rect(&m, f.a, Lane::Speed);
+    let r = m.rects().unwrap();
+    // A double-click at 5 s at normal speed (the middle): keys at 0 and 5.
+    let at = pos2(r.x0 + 5.0 * r.pps, lane.center().y);
+    let mut got = m.click(&mut f.show, &mut f.st, at, PointerButton::Primary);
+    got.extend(m.click(&mut f.show, &mut f.st, at, PointerButton::Primary));
+    let asked = timeline_actions(&got);
+    match asked.as_slice() {
+        [TimelineAction::SetRate { id, rate }] => {
+            assert_eq!(*id, f.a);
+            let ks: Vec<(f64, f32)> = rate.keys.iter().map(|k| (k.t, k.v)).collect();
+            assert_eq!(ks.len(), 2, "{ks:?}");
+            assert_eq!(ks[0], (0.0, 1.0));
+            assert!((ks[1].0 - 5.0).abs() < 0.1 && ks[1].1 == 1.0, "{ks:?}");
+        }
+        other => panic!("wanted one SetRate, got {other:?}"),
+    }
+    made(&mut m, &mut f, got);
+    assert!((m.clip(&mut f.show, &mut f.st, f.a).width() - full).abs() < 1.0);
+    // Drag the key at 5 s up: faster from there, so the clip is shorter, and
+    // already while it is dragged.
+    let k = lane_keys(&m, f.a, Lane::Speed)[1];
+    let up = pos2(k.x, lane.top() + 8.0);
+    let mut frames = vec![
+        m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(k)]),
+        m.frame(
+            &mut f.show,
+            &mut f.st,
+            vec![button(k, true, PointerButton::Primary)],
+        ),
+    ];
+    for i in 1..=6 {
+        let p = k + (up - k) * (i as f32 / 6.0);
+        frames.push(m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(p)]));
+    }
+    let dragging = m
+        .rects()
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.0 == f.a)
+        .unwrap()
+        .1;
+    assert!(
+        dragging.width() < full - 20.0,
+        "{} vs {full}",
+        dragging.width()
+    );
+    assert!(frames.iter().all(|f| timeline_actions(f).is_empty()));
+    let last = m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![button(up, false, PointerButton::Primary)],
+    );
+    made(&mut m, &mut f, last);
+    let rate = f.show.cue(f.a).unwrap().kind.media().unwrap().rate.clone();
+    assert!(rate.keys[1].v > 2.5, "{rate:?}");
+    let short = m.clip(&mut f.show, &mut f.st, f.a).width();
+    assert!(short < full - 20.0);
+    assert!(clip_len(&mut m.e, &f.show, key, f.a).unwrap() < 9.0);
+    // Right-click each key away: the last going leaves a steady speed.
+    for _ in 0..2 {
+        let k = lane_keys(&m, f.a, Lane::Speed)[0];
+        let got = m.click(&mut f.show, &mut f.st, k, PointerButton::Secondary);
+        made(&mut m, &mut f, got);
+    }
+    let rate = f.show.cue(f.a).unwrap().kind.media().unwrap().rate.clone();
+    assert!(!rate.is_animated(), "{rate:?}");
+    assert!(lane_keys(&m, f.a, Lane::Speed).is_empty());
+}
+
+#[test]
+fn the_opacity_lane_moves_the_end_of_the_lead_in_with_the_rising_key() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let i = f.show.cue_index(f.c).unwrap();
+    let k = |t, v| Keyframe {
+        t,
+        v,
+        curve: Default::default(),
+    };
+    f.show.cues[i].kind.media_mut().unwrap().motion.opacity = Some(Animated {
+        value: 1.0,
+        keys: vec![k(0.0, 0.0), k(1.5, 0.0), k(2.5, 1.0)],
+    });
+    let mut m = Mouse::new();
+    let c = f.c;
+    made(
+        &mut m,
+        &mut f,
+        vec![Action::Timeline(TimelineAction::ShowLane {
+            id: c,
+            lane: Lane::Opacity,
+            on: true,
+        })],
+    );
+    let pps = m.rects().unwrap().pps;
+    let before = m.clip(&mut f.show, &mut f.st, f.c).width();
+    assert!((before - 4.5 * pps).abs() < 0.5);
+    // The key the rise starts from, 0.5 s later.
+    let keys = lane_keys(&m, f.c, Lane::Opacity);
+    assert_eq!(keys.len(), 3);
+    let from = keys[1];
+    let to = from + vec2(0.5 * pps, 0.0);
+    let frames = m.drag(&mut f.show, &mut f.st, from, to);
+    let asked = timeline_actions(frames.last().unwrap());
+    match asked.as_slice() {
+        [TimelineAction::SetOpacity { id, opacity }] => {
+            assert_eq!(*id, f.c);
+            assert!((opacity.keys[1].t - 2.0).abs() < 0.05, "{opacity:?}");
+            assert_eq!(opacity.keys[1].v, 0.0);
+        }
+        other => panic!("wanted one SetOpacity, got {other:?}"),
+    }
+    made(&mut m, &mut f, frames.into_iter().flatten().collect());
+    let c = f.show.cue(f.c).unwrap();
+    match model::lead_in(&f.show, key, c) {
+        model::LeadIn::At(v) => assert!((v - 2.0).abs() < 0.05, "{v}"),
+        other => panic!("{other:?}"),
+    }
+    let after = m.clip(&mut f.show, &mut f.st, f.c).width();
+    assert!((after - 5.0 * pps).abs() < 1.0, "{after} vs {}", 5.0 * pps);
+}
+
+// ----- A clip on several displays -----
+
+#[test]
+fn a_clip_also_on_another_display_has_a_ghost_there_that_picks_it_and_doesnt_drag() {
+    let mut f = fixture();
+    let d2 = f.show.add_display();
+    let i = f.show.cue_index(f.a).unwrap();
+    f.show.cues[i].kind.media_mut().unwrap().also_on = vec![d2];
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    let ghost_track = TrackId::Picture {
+        output: Some(d2),
+        layer: 0,
+    };
+    let row = r
+        .tracks
+        .iter()
+        .find(|t| t.0 == ghost_track)
+        .expect("its track")
+        .1;
+    let ghost = r.ghosts.iter().find(|g| g.0 == f.a).expect("the ghost").1;
+    assert!(row.contains(ghost.center()));
+    let home = r.clips.iter().find(|c| c.0 == f.a).unwrap().1;
+    assert!((ghost.left() - home.left()).abs() < 0.5);
+    assert!((ghost.width() - home.width()).abs() < 0.5);
+    // A click picks the clip; a drag moves nothing.
+    let got = m.click(
+        &mut f.show,
+        &mut f.st,
+        ghost.center(),
+        PointerButton::Primary,
+    );
+    assert!(
+        got.iter()
+            .any(|a| matches!(a, Action::Select(id) if *id == f.a))
+    );
+    let frames = m.drag(
+        &mut f.show,
+        &mut f.st,
+        ghost.center(),
+        ghost.center() + vec2(60.0, 0.0),
+    );
+    assert!(
+        frames
+            .iter()
+            .flat_map(|f| timeline_actions(f))
+            .all(|a| !matches!(a, TimelineAction::MoveClips { .. }))
+    );
+}
+
+// ----- What comes from outside: dropped files, a chosen file -----
+
+/// A file let go over the window.
+#[derive(Debug)]
+struct Dropped(std::path::PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn a_file_dropped_on_a_track_becomes_a_clip_there() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let mut m = Mouse::new();
+    m.frame(&mut f.show, &mut f.st, vec![]);
+    let r = m.rects().unwrap();
+    let (track, row) = r.tracks[1];
+    let at = pos2(r.x0 + 4.5 * r.pps, row.center().y);
+    m.frame(&mut f.show, &mut f.st, vec![Event::PointerMoved(at)]);
+    m.t += 1.0 / 60.0;
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 520.0))),
+        time: Some(m.t),
+        dropped_files: vec![
+            std::sync::Arc::new(Dropped("still.png".into())),
+            std::sync::Arc::new(Dropped("song.wav".into())),
+        ],
+        ..Default::default()
+    };
+    let mut actions = vec![Action::AddFiles(vec![
+        "still.png".into(),
+        "song.wav".into(),
+    ])];
+    let (show, st, e) = (&mut f.show, &mut f.st, &mut m.e);
+    let mut out = m.ctx.run_ui(input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| pane(ui, show, e, st, &mut actions));
+    });
+    out.textures_delta.clear();
+    assert!(!actions.iter().any(|a| matches!(a, Action::AddFiles(_))));
+    let got = timeline_actions(&actions);
+    match got.as_slice() {
+        [
+            TimelineAction::AddClip {
+                key: k1,
+                ty: CueType::Image,
+                track: t1,
+                at: a1,
+                ..
+            },
+            TimelineAction::AddClip {
+                ty: CueType::Audio,
+                track: TrackId::Sound { .. },
+                ..
+            },
+        ] => {
+            assert_eq!((*k1, *t1), (key, track));
+            assert!((a1 - 4.5).abs() < 0.1);
+        }
+        other => panic!("wanted two AddClips, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_file_chosen_in_the_dialog_comes_back_as_a_new_clip() {
+    let mut f = fixture();
+    let key = TimelineKey::Group(f.group);
+    let (tx, rx) = std::sync::mpsc::channel();
+    f.st.timeline.pick = Some(rx);
+    let track = TrackId::Cues;
+    tx.send((key, CueType::Video, track, 2.0, Some("clip.mp4".into())))
+        .unwrap();
+    let mut m = Mouse::new();
+    let got = timeline_actions(&m.frame(&mut f.show, &mut f.st, vec![]));
+    assert_eq!(
+        got,
+        vec![TimelineAction::AddClip {
+            key,
+            ty: CueType::Video,
+            file: Some("clip.mp4".into()),
+            track,
+            at: 2.0
+        }]
+    );
+    assert!(f.st.timeline.pick.is_none());
+}
+
+#[test]
+fn show_mode_splits_nothing_from_the_editor() {
+    let mut f = fixture();
+    f.st.show_mode = true;
+    let mut m = Mouse::new();
+    let a = m.clip(&mut f.show, &mut f.st, f.a);
+    m.frame(
+        &mut f.show,
+        &mut f.st,
+        vec![Event::PointerMoved(a.center())],
+    );
+    m.mods = Modifiers::COMMAND;
+    let got = m.frame(
+        &mut f.show,
+        &mut f.st,
+        key_press(egui::Key::K, Modifiers::COMMAND),
+    );
+    m.mods = Modifiers::NONE;
+    assert!(timeline_actions(&got).is_empty());
+    assert!(
+        TimelineAction::Split {
+            key: TimelineKey::Group(f.group),
+            ids: vec![],
+            at: 0.0
+        }
+        .edits_the_show()
+    );
 }
