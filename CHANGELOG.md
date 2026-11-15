@@ -6,6 +6,10 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A text or picture that runs out during a timeline pause goes.** On a timeline paused by a
+  free-run pause, a text, still or shape whose own time ran out faded away but stayed in the
+  active list at 0:00.0 until GO. It now leaves as soon as it has faded out; one set to hold
+  stays up, in full, as before.
 - **Test Mode reports sound dropouts.** Each time the sound device says it ran out of sound to
   play (a buffer underrun: a click or gap you can hear), the test notes when, counts it in the
   window and in `stats.csv`, and the report says so: tracked if it happened at all, a problem

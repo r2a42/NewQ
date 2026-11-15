@@ -3609,7 +3609,14 @@ impl Engine {
                             live.pending = Some(draw_text_on_thread(now, live.size));
                         }
                     }
-                    if a.duration.is_some_and(|d| a.elapsed >= d) && !clock_ends {
+                    // A clocked one whose time ran on through a free-run pause
+                    // (`detached`) and is set to end has faded out by now
+                    // (`clock_end`): it ends, rather than waiting, unseen, for the clock.
+                    // (One a later clip crosses is taken out by that crossfade.)
+                    let ran_out = a.detached
+                        && media.is_some_and(|m| m.run_out == RunOut::End)
+                        && !a.crossed_by.is_some_and(|b| running.contains(&b));
+                    if a.duration.is_some_and(|d| a.elapsed >= d) && (!clock_ends || ran_out) {
                         // (One the next clip crossfades over stays for that.)
                         if (joins && !a.stopping) || (a.joined && a.stopping) {
                             a.joined = true;

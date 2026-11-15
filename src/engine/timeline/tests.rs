@@ -1128,6 +1128,57 @@ fn a_sound_that_runs_out_during_a_free_run_pause_ends_loops_or_holds_as_it_is_se
     }
 }
 
+#[test]
+fn a_text_that_runs_out_during_a_free_run_pause_leaves_at_once_or_holds_as_it_is_set_to() {
+    for run_out in [RunOut::End, RunOut::Hold] {
+        // A 1.5 s text from 0, fading out over its last 0.5 s, the clock paused at 0.5.
+        let mut show = Show::default();
+        let g = group(&mut show);
+        let c = text(&mut show, Some(1.5));
+        let clip = child(&mut show, g, c, 0.0);
+        let m = media_of(&mut show, clip);
+        m.fade_out = 0.5;
+        m.run_out = run_out;
+        let p = pause(&mut show, PauseFreeze::Nothing);
+        child(&mut show, g, p, 0.5);
+        let mut e = Engine::for_tests();
+        e.fire(&show, g);
+        until(&mut e, &show, Some(0.0), "the text", 10, |e| {
+            active(e, clip).is_some_and(|a| a.started)
+        });
+        // Well past its own end, the clock still standing at the pause.
+        let (began, part) = watch_fade(&mut e, &show, clip, 0.05, 2.5);
+        assert_eq!(paused_at(&mut e, &show, key(g)), Some(0.5), "{run_out:?}");
+        match run_out {
+            RunOut::End => {
+                let began = began.expect("it faded");
+                assert!(part && (0.95..1.15).contains(&began), "{began}");
+                // Its picture is gone, and so is it: not left in the active
+                // list at 0:00.0 until the clock moves on.
+                assert!(
+                    active(&e, clip).is_none(),
+                    "ended as its content did: {:?}",
+                    active(&e, clip).map(|a| (
+                        a.elapsed,
+                        a.duration,
+                        a.detached,
+                        a.clocked,
+                        a.opacity.value
+                    ))
+                );
+            }
+            _ => {
+                let a = active(&e, clip).expect("held");
+                assert!(began.is_none() && a.opacity.value == 1.0, "shown in full");
+                // GO: the clock ends it a second later.
+                e.go(&show);
+                ticks(&mut e, &show, 0.05, 30);
+                assert!(active(&e, clip).is_none(), "ended by the clock");
+            }
+        }
+    }
+}
+
 // ----- Live inputs -------------------------------------------------------------
 
 fn camera(show: &mut Show) -> Cue {
