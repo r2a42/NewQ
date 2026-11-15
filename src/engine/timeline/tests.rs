@@ -2953,3 +2953,107 @@ fn overlapping_sounds_crossfade_and_a_seek_into_the_overlap_finds_both_part_way(
         "{va} {vb}"
     );
 }
+
+// ----- Gapless joins (P5) ---------------------------------------------------------
+
+/// A timeline group with a text from 0 to 1 s and the next abutting it from
+/// 1 s, by `transition` over `fade` seconds; both drawn at full size, so the
+/// next takes a few ticks to have its picture.
+fn joined_texts(transition: Transition, fade: f64) -> (Show, CueId, CueId, CueId) {
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = faded_text(&mut show, 1.0, 0.0);
+    let a = child(&mut show, g, c, 0.0);
+    let mut c = faded_text(&mut show, 1.0, 0.0);
+    let m = c.kind.media_mut().unwrap();
+    m.transition = transition;
+    m.fade_in = fade;
+    let b = child(&mut show, g, c, 1.0);
+    (show, g, a, b)
+}
+
+#[test]
+fn abutting_pictures_never_leave_the_display_empty_across_the_join() {
+    for (transition, fade) in [(Transition::Cut, 0.0), (Transition::Crossfade, 0.5)] {
+        let (show, g, a, b) = joined_texts(transition, fade);
+        let out = show.outputs[0].id;
+        let mut e = Engine::for_tests();
+        e.fire(&show, g);
+        until(&mut e, &show, Some(0.0), "the first drawn", 10, |e| {
+            started(e, a)
+        });
+        let mut waited = false;
+        let mut both = false;
+        // No time for the next one's drawing between ticks; once it is due,
+        // the clock waits for its picture (which takes a few ticks).
+        let t0 = Instant::now();
+        while view(&mut e, &show, key(g)).pos < 1.6 {
+            assert!(t0.elapsed() < Duration::from_secs(20), "never drawn");
+            let drawing = active(&e, b).is_some_and(|x| !x.started);
+            if drawing {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            e.tick(&show, if drawing { 0.0 } else { 0.01 });
+            let l = levels(&e, out);
+            assert!(
+                !l.is_empty(),
+                "{transition:?}: nothing up at {}",
+                view(&mut e, &show, key(g)).pos
+            );
+            waited |= active(&e, b).is_some_and(|x| !x.started);
+            both |= l.len() == 2 && l.iter().any(|x| x.0 == a && x.1 > 0.1 && x.1 < 0.9);
+        }
+        assert!(waited, "the next clip took a while to have its picture");
+        assert_eq!(
+            both,
+            transition == Transition::Crossfade,
+            "crossfaded over the first"
+        );
+        assert_eq!(levels(&e, out), vec![(b, 1.0)]);
+    }
+}
+
+#[test]
+fn a_picture_held_for_a_join_goes_when_the_next_clip_is_not_coming() {
+    let (mut show, g, a, b) = joined_texts(Transition::Cut, 0.0);
+    let out = show.outputs[0].id;
+    let mut e = Engine::for_tests();
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first drawn", 10, |e| {
+        started(e, a)
+    });
+    e.tick(&show, 0.95);
+    // Disarmed while it waits: it is cancelled and the first goes at its end.
+    show.cue_mut(b).unwrap().armed = false;
+    e.pending.retain(|p| p.cue_id != b);
+    e.tick(&show, 0.1);
+    assert!(levels(&e, out).is_empty() && active(&e, a).is_none());
+}
+
+#[test]
+fn abutting_videos_never_leave_the_display_empty_across_the_join() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let out = show.outputs[0].id;
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Video, clip.clone(), 1.0);
+    let a = child(&mut show, g, c, 0.0);
+    let c = file(&mut show, CueType::Video, clip, 1.0);
+    let b = child(&mut show, g, c, 1.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first video", 10, |e| {
+        started(e, a)
+    });
+    let t0 = Instant::now();
+    while view(&mut e, &show, key(g)).pos < 1.5 {
+        assert!(t0.elapsed() < Duration::from_secs(20), "never started");
+        let starting = active(&e, b).is_some_and(|x| !x.started);
+        std::thread::sleep(Duration::from_millis(if starting { 2 } else { 0 }));
+        e.tick(&show, if starting { 0.0 } else { 0.01 });
+        assert!(!e.layers(out).is_empty(), "nothing up");
+    }
+    assert_eq!(levels(&e, out), vec![(b, 1.0)]);
+}

@@ -575,6 +575,9 @@ pub struct ActiveCue {
     /// A timeline's clip that a later clip crossfades over (`crossfade_overlaps`):
     /// that one, while it is to come or playing; this has no fade-out of its own.
     crossed_by: Option<CueId>,
+    /// Held on its last frame (or past its time) for the clip that abuts it on
+    /// its track, until that one comes in (`Engine::timeline_joins`).
+    joined: bool,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -2554,6 +2557,7 @@ impl Engine {
             fade_from: None,
             screens: dips.into_iter().map(displays::Screen::on).collect(),
             crossed_by: None,
+            joined: false,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2638,6 +2642,7 @@ impl Engine {
             fade_from: None,
             screens: Vec::new(),
             crossed_by: None,
+            joined: false,
         };
         // A timeline's clip: its keyframes follow its run's clock from here.
         if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
@@ -3278,7 +3283,11 @@ impl Engine {
         // so they wait while it stands (ruling L2).
         let steps = self.runs.steps(&before, dt);
         let on_clock_of = |run: Option<u64>| run.and_then(|r| clocks.get(&r).map(|p| (r, *p)));
+        // Pictures of a timeline that the next clip on their track abuts: they
+        // stay up until it comes in, so the join never shows nothing.
+        let joining = self.timeline_joins(show);
         self.active.retain_mut(|a| {
+            let joins = joining.contains(&a.instance);
             let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
             // A cue held by a control cue stands still while the rest go on.
             let paused = paused || a.hold;
@@ -3393,9 +3402,13 @@ impl Engine {
                                 ));
                             }
                             if levels_wait
-                                || ((keep || media.is_some_and(|m| m.hold_last_frame))
+                                || ((keep || joins || media.is_some_and(|m| m.hold_last_frame))
                                     && !a.stopping)
                             {
+                                a.joined = joins
+                                    && !levels_wait
+                                    && !keep
+                                    && !media.is_some_and(|m| m.hold_last_frame);
                                 a.held = true;
                                 completed_follow(a, cue, &mut follow);
                             } else {
@@ -3476,7 +3489,12 @@ impl Engine {
                         }
                     }
                     if a.duration.is_some_and(|d| a.elapsed >= d) && !clock_ends {
-                        completed = true;
+                        // (One the next clip crossfades over stays for that.)
+                        if (joins && !a.stopping) || (a.joined && a.stopping) {
+                            a.joined = true;
+                        } else {
+                            completed = true;
+                        }
                     }
                 }
                 ActiveKind::Audio(vo) => {
@@ -3664,7 +3682,13 @@ impl Engine {
                     // (A clip held on its own still ends when its clock gets there.)
                     let moving = !show_paused && a.run.is_some_and(|r| moving.contains(&r));
                     let clock = on_clock_of(a.run).filter(|_| moving);
-                    completed |= timeline::clock_end(a, m, on_clock, clock, !crossed);
+                    if timeline::clock_end(a, m, on_clock, clock, !crossed) {
+                        if joins {
+                            a.joined = true;
+                        } else {
+                            completed = true;
+                        }
+                    }
                 }
             }
 
@@ -3695,6 +3719,10 @@ impl Engine {
             }
             if a.stopping && !a.opacity.ramping() && !a.volume.ramping() {
                 return false;
+            }
+            // Held for the clip that abuts it, which isn't coming after all.
+            if a.joined && !joins && !a.stopping {
+                completed = true;
             }
             // Replaced on the last of its displays.
             if a.gone_everywhere() {

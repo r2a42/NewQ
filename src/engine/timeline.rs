@@ -83,6 +83,9 @@ const CUE_LIMIT: Duration = Duration::from_secs(2);
 /// A guard: jumps (and runs from a place) one frame may make; more is a loop
 /// of jumps that would never let the frame end.
 const MAX_JUMPS: u32 = 8;
+/// A clip that starts no later than this after the end of the one before it on
+/// its track abuts it: the one before is kept up until it comes in.
+const JOIN_GAP: f64 = 0.05;
 /// A video that holds its last frame, started at its end, is started this long
 /// before it so that it has a frame to hold.
 const LAST_FRAME: f64 = 0.2;
@@ -910,6 +913,57 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Gapless joins (plan 2.6, problem 8): the pictures of a running (or
+    /// cueing) run whose slot the next clip on their track abuts (it starts no
+    /// later than `JOIN_GAP` after their end) and that hasn't come in yet (it
+    /// waits for the clock, for its file, or for its first frame). They are
+    /// kept up, on their last frame, until it replaces them; a clip whose run
+    /// stands at a pause there ends as it would.
+    pub(super) fn timeline_joins(&self, show: &Show) -> HashSet<u64> {
+        let mut out = HashSet::new();
+        for a in &self.active {
+            let (Some(r), Some(end)) = (a.run, a.ends_at) else {
+                continue;
+            };
+            if !a.is_visual() || a.stopping {
+                continue;
+            }
+            let goes = self
+                .runs
+                .by_instance(r)
+                .is_some_and(|(_, run)| matches!(run.state, RunState::Running | RunState::Cueing));
+            let Some(cue) = show.cue(a.cue_id).filter(|_| goes) else {
+                continue;
+            };
+            let abuts = |id: CueId, at: f64| {
+                at <= end + JOIN_GAP
+                    && id != a.cue_id
+                    && show
+                        .cue(id)
+                        .is_some_and(|b| chase::same_track(show, cue, b))
+            };
+            let coming = self.pending.iter().any(|p| {
+                (p.run == Some(r) && !p.waits_for_fade && abuts(p.cue_id, p.at))
+                    || (p.run.is_none()
+                        && p.start.run == Some(r)
+                        && show
+                            .cue(p.cue_id)
+                            .is_some_and(|c| abuts(c.id, start_of(c) + p.start.lead)))
+            }) || self.active.iter().any(|b| {
+                b.run == Some(r)
+                    && !b.started
+                    && b.instance > a.instance
+                    && show
+                        .cue(b.cue_id)
+                        .is_some_and(|c| abuts(c.id, start_of(c) + b.lead))
+            });
+            if coming {
+                out.insert(a.instance);
+            }
+        }
+        out
     }
 
     /// The earlier clips of its timeline a clip starting now crossfades over,
