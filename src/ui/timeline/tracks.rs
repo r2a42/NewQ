@@ -61,7 +61,7 @@ const CHIP_W: f32 = 9.0;
 const MIN_CHIP: f32 = 4.0;
 /// The room a chip's name leaves before the next cue, and the least room
 /// worth a name (about four letters); with less, only the chip is drawn.
-const LABEL_GAP: f32 = 4.0;
+pub(super) const LABEL_GAP: f32 = 4.0;
 pub(super) const MIN_LABEL_W: f32 = 24.0;
 const LABEL_FONT: f32 = 11.0;
 
@@ -312,14 +312,15 @@ fn rows_height(ctx: &Ctx, open: &[(CueId, Lane)]) -> f32 {
         .sum()
 }
 
-/// How a cue that takes no time is drawn on the Cues track.
+/// How a cue that takes no time is drawn on the Cues track (or a marker's
+/// flag on the ruler, `I` its id: the same grouping).
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Chip {
+pub(super) enum Chip<I = CueId> {
     /// A chip of `width`, for these cues (more than one when they are at the
     /// same place or nearer than `MIN_CHIP`: drawn as one, a click picking
     /// each in turn), its name allowed up to `limit` (screen x).
     Lead {
-        members: Vec<CueId>,
+        members: Vec<I>,
         width: f32,
         limit: f32,
     },
@@ -330,13 +331,17 @@ pub(super) enum Chip {
 /// The chips of the Cues track: each cue that takes no time, at screen x
 /// `left` (`(id, left, instant)`, clips that take time with `instant` false,
 /// in the clips' order), the row ending at `right`. A chip is narrowed to
-/// the next cue's place, and its name may reach just short of it.
-pub(super) fn chips(items: &[(CueId, f32, bool)], right: f32) -> Vec<(CueId, Chip)> {
+/// the next cue's place, and its name may reach just short of it. The ruler's
+/// marker flags are grouped by it too (`ruler::draw`).
+pub(super) fn chips<I: Copy + PartialEq>(
+    items: &[(I, f32, bool)],
+    right: f32,
+) -> Vec<(I, Chip<I>)> {
     let mut order: Vec<usize> = (0..items.len()).collect();
     // Stable: cues at one place keep the clips' order.
     order.sort_by(|&a, &b| items[a].1.total_cmp(&items[b].1));
-    let mut leads: Vec<(usize, Vec<CueId>)> = Vec::new();
-    let mut out: Vec<(CueId, Chip)> = Vec::new();
+    let mut leads: Vec<(usize, Vec<I>)> = Vec::new();
+    let mut out: Vec<(I, Chip<I>)> = Vec::new();
     for &i in &order {
         let (id, left, instant) = items[i];
         if !instant {

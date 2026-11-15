@@ -78,7 +78,9 @@ The README describes the features; this file is about working on the code.
   scroll; `TimelineAction::SetFollow`, Settings ▸ General), not while a drag or the scroll bar is held; the Cues
   track's no-time cues are `tracks::chips`, narrowed to the next, those nearer than `MIN_CHIP` one chip
   whose click picks each in turn, names `fitted` to the next and drawn whole on top when hovered or
-  picked, `cue_labels`; the ruler's flags are cut to the next the same way); `ruler.rs` ticks, markers,
+  picked, `cue_labels`; the ruler's flags are cut to the next the same way); `ruler.rs` ticks, markers (grouped
+  into one "×N" flag by the Cues track's `tracks::chips`, generic over the id; a click picks each in
+  turn, `EditorState::marker_pick`),
   the playhead (a ruler tap or drag seeks on release; a drag is cancelled when the run's
   `RunView::mark` changes meanwhile, `Drag::Playhead { pos: None }`; locked in show mode for a group); `toolbar.rs`
   transport and read-outs (`state_text` from `RunState` and `RunView.parked`; two rows under

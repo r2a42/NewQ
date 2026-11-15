@@ -63,6 +63,9 @@ pub struct EditorState {
     /// While the dock is drawn (it is out of `UiState::layout` meanwhile):
     /// whether a Timeline pane is in sight (`dock::Layout::in_front`).
     pub pane_in_front: Option<bool>,
+    /// The marker last clicked on the ruler (of that timeline): drawn whole on
+    /// top, and the one a flag of several at one place shows and acts on.
+    marker_pick: Option<(TimelineKey, u64)>,
     /// What is being dragged, and in which host.
     drag: Option<(Host, Drag)>,
     /// A marker whose name is being typed, and the name so far.
@@ -109,6 +112,7 @@ impl Default for EditorState {
             list_rows: false,
             ripple: false,
             pane_in_front: None,
+            marker_pick: None,
             drag: None,
             renaming: None,
             shown_pps: 0.0,

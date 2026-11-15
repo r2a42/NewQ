@@ -6,6 +6,10 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Timeline markers at the same time no longer hide each other.** Markers at one time (or too
+  close to tell apart) are one flag on the ruler with a count, "×2 Chorus", as cues are on the
+  Cues track. Its tooltip lists them, each click picks the next, and a drag moves the one it
+  shows; the one hovered or picked is drawn whole on top.
 - **A timeline group's inspector knows its Timeline pane is open.** With the tracks editor as a
   pane in the classic interface, the group's inspector offered *Open in timeline editor* even
   while the pane showed its tracks. It now says the tracks are open; if the pane is a tab hidden

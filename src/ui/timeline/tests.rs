@@ -2367,5 +2367,6 @@ fn on_a_narrow_pane_the_toolbar_takes_two_rows_and_no_button_is_cut_off() {
 
 mod cue_row;
 mod follow;
+mod markers;
 mod space;
 mod workspace;

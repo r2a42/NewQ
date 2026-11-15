@@ -129,41 +129,83 @@ pub(super) fn draw(
         }
     }
 
-    // The markers' flags, on top of the ruler.
+    // The markers' flags, on top of the ruler. Those at one place (or nearer
+    // than a few points) are one flag, as cues are one chip on the Cues track
+    // (`tracks::chips`): "×N", the picked one (else the first) shown and acted
+    // on, a click picking each in turn.
     let markers = model::settings(ctx.show, key).map_or(&[][..], |s| &s.markers[..]);
     let mut rects = Vec::new();
-    let at = |m: &crate::timeline::Marker| match st.timeline.drag_in(host) {
-        Some(Drag::Marker { id, to, .. }) if *id == m.id => *to,
+    let dragged = match st.timeline.drag_in(host) {
+        Some(Drag::Marker { id, to, .. }) => Some((*id, *to)),
+        _ => None,
+    };
+    let at = |m: &crate::timeline::Marker| match dragged {
+        Some((id, to)) if id == m.id => to,
         _ => m.time,
     };
-    let xs: Vec<f32> = markers.iter().map(|m| geo.x(at(m))).collect();
-    // The flag under the pointer is drawn again, whole, over its neighbours.
-    let mut whole: Option<(Rect, Color32, String)> = None;
-    for (i, m) in markers.iter().enumerate() {
-        let x = xs[i];
+    let picked = st
+        .timeline
+        .marker_pick
+        .filter(|(k, id)| *k == key && markers.iter().any(|m| m.id == *id))
+        .map(|(_, id)| id);
+    let items: Vec<(u64, f32, bool)> = markers.iter().map(|m| (m.id, geo.x(at(m)), true)).collect();
+    let plan = super::tracks::chips(&items, rect.right());
+    let marker = |id: u64| markers.iter().find(|m| m.id == id);
+    // Drawn again, whole, over their neighbours: the hovered (or dragged) and the picked.
+    let mut whole: Vec<(Rect, Color32, String, bool)> = Vec::new();
+    #[cfg(test)]
+    let mut notes: Vec<(Vec<u64>, Rect, String)> = Vec::new();
+    let mut on_a_flag = false;
+    for (_, chip) in &plan {
+        let super::tracks::Chip::Lead { members, limit, .. } = chip else {
+            continue;
+        };
+        // The one it shows: dragged, else picked, else the first.
+        let Some(m) = members
+            .iter()
+            .find(|id| dragged.is_some_and(|(d, _)| d == **id))
+            .or_else(|| members.iter().find(|id| picked == Some(**id)))
+            .or(members.first())
+            .and_then(|id| marker(*id))
+        else {
+            continue;
+        };
+        let x = geo.x(at(m));
+        let n = members.len();
         let color = m.color.map_or(MARKER, |c| {
             let [r, g, b] = c.rgb();
             Color32::from_rgb(r, g, b)
         });
+        let name = if n > 1 {
+            format!("×{n} {}", m.name)
+        } else {
+            m.name.clone()
+        };
         // As a cue's name on the Cues track: up to the next flag, cut short
         // with "…", or no name at all where there is no room for one.
-        let next = xs
-            .iter()
-            .filter(|o| **o > x + 0.01)
-            .fold(f32::INFINITY, |a, b| a.min(*b));
+        let next = limit + super::tracks::LABEL_GAP;
         let room = (next - FLAG_GAP).min(rect.right()) - x - 8.0;
         let galley =
-            super::tracks::fitted(&painter, &m.name, 10.0, room, Color32::from_rgb(20, 20, 20));
+            super::tracks::fitted(&painter, &name, 10.0, room, Color32::from_rgb(20, 20, 20));
         let w = galley
             .as_ref()
             .map_or(FLAG_MIN_W.min((next - x - 1.0).max(3.0)), |g| {
                 g.size().x + 8.0
             });
         let flag = Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(w, 13.0));
-        rects.push((m.id, flag));
+        for id in members {
+            rects.push((*id, flag));
+        }
+        #[cfg(test)]
+        notes.push((members.clone(), flag, name.clone()));
         let hit = flag.intersect(rect);
         if hit.width() <= 0.0 {
             continue;
+        }
+        if n > 1 {
+            // More than one here: a second flag peeps out from behind.
+            let behind = flag.translate(vec2(2.0, -1.0));
+            painter.rect_filled(behind, 2.0, color.gamma_multiply(0.6));
         }
         painter.rect_filled(flag, 2.0, color);
         if let Some(galley) = galley {
@@ -174,21 +216,46 @@ pub(super) fn draw(
         } else {
             Sense::click()
         };
-        let r = ui
-            .interact(hit, ui.id().with(("marker", m.id)), sense)
-            .on_hover_text(format!(
+        let tip = if n > 1 {
+            let lines: Vec<String> = members
+                .iter()
+                .filter_map(|id| marker(*id))
+                .map(|m| format!("{} · {}", m.name, fmt_time(m.time)))
+                .collect();
+            format!(
+                "{n} markers here (zoom in to part them; a click picks each in turn):\n\n{}\n\n\
+                 Drag to move the one shown; double-click to rename it; right-click for more.",
+                lines.join("\n")
+            )
+        } else {
+            format!(
                 "{} at {}. Drag to move it; double-click to rename; right-click for more.",
                 m.name,
                 fmt_time(m.time)
-            ));
-        if r.hovered() || r.dragged() {
-            whole = Some((flag, color, m.name.clone()));
+            )
+        };
+        let r = ui
+            .interact(hit, ui.id().with(("marker", members[0])), sense)
+            .on_hover_text(tip);
+        on_a_flag |= r.contains_pointer();
+        let is_picked = picked == Some(m.id);
+        if r.hovered() || r.dragged() || is_picked {
+            whole.push((flag, color, name.clone(), is_picked));
+        }
+        if r.clicked() {
+            // A flag of several picks each in turn.
+            let to = match members.iter().position(|id| *id == m.id) {
+                Some(i) if n > 1 && is_picked => members[(i + 1) % n],
+                _ => m.id,
+            };
+            st.timeline.marker_pick = Some((key, to));
         }
         if ctx.editable && r.drag_started() {
             // Where on the flag it was taken, so the marker doesn't jump to the pointer.
             let grab = ui
                 .input(|i| i.pointer.press_origin())
                 .map_or(0.0, |p| geo.t(p.x) - m.time);
+            st.timeline.marker_pick = Some((key, m.id));
             st.timeline.drag = Some((
                 host,
                 Drag::Marker {
@@ -244,13 +311,36 @@ pub(super) fn draw(
             }
         });
     }
+    // A press anywhere else lets go of the picked marker.
+    if !on_a_flag
+        && ui.input(|i| i.pointer.primary_pressed())
+        && st.timeline.marker_pick.is_some_and(|(k, _)| k == key)
+    {
+        st.timeline.marker_pick = None;
+    }
 
-    if let Some((flag, color, name)) = whole {
+    // The picked one first, so the hovered is on top of it.
+    whole.sort_by_key(|w| !w.3);
+    #[cfg(test)]
+    let whole_names: Vec<String> = whole.iter().map(|w| w.2.clone()).collect();
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_marker_whole", host)), whole_names));
+    for (flag, color, name, picked) in whole {
         let g = painter.layout_no_wrap(name, FontId::proportional(10.0), Color32::BLACK);
         let full = Rect::from_min_size(flag.min, vec2(g.size().x + 8.0, 13.0));
         painter.rect_filled(full, 2.0, color);
+        if picked {
+            painter.rect_stroke(
+                full,
+                2.0,
+                Stroke::new(1.0, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
         painter.galley(pos2(full.left() + 4.0, full.top()), g, Color32::BLACK);
     }
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_marker_flags", host)), notes));
 
     // A marker's name being typed, over its flag.
     let renaming = match &st.timeline.renaming {

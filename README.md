@@ -1202,7 +1202,10 @@ are open in the classic interface they take its place.
 - **Markers:** *+ Marker* adds one at the playhead. Drag its flag to move it,
   double-click it to rename it, right-click for *Add Pause cue here*, *Jump here*
   and *Remove marker*. A flag's name is cut short ("…") where the next flag is
-  close, and hovering it shows it whole.
+  close, and hovering it (or clicking it) shows it whole. Markers at the same time,
+  or too close to tell apart, are one flag with a count ("×3 Chorus"): its tooltip
+  lists them, and each click picks the next one, which the flag then shows and a drag
+  moves.
 - **The Cues track zoomed out:** each cue's name gets the room up to the next cue
   and is cut short with "…" to fit, or left out where there is too little room (the
   marker stays). Hover a cue's marker for its whole name, number, time and what it
