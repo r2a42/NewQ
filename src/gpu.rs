@@ -2556,4 +2556,205 @@ mod tests {
             assert!((got - want).abs() <= 3.0, "({x},{y}) {got} vs {want}");
         }
     }
+
+    /// A target `size` square to composite into, and a way to read it back.
+    struct Target {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+        size: u32,
+    }
+
+    impl Target {
+        fn new(gpu: &Gpu, size: u32) -> Target {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("target"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            Target {
+                texture,
+                view,
+                size,
+            }
+        }
+
+        /// The middle pixel, once everything submitted is done.
+        fn middle(&self, gpu: &Gpu) -> [u8; 4] {
+            let row = self.size * 4;
+            let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback"),
+                size: u64::from(row * self.size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            encoder.copy_texture_to_buffer(
+                self.texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(self.size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.size,
+                    height: self.size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.submit([encoder.finish()]);
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll");
+            let data = slice.get_mapped_range().expect("mapped");
+            let at = ((self.size / 2 * self.size + self.size / 2) * 4) as usize;
+            [data[at], data[at + 1], data[at + 2], data[at + 3]]
+        }
+    }
+
+    /// One cue playing on two displays (`MediaCue::also_on`, P9) is one engine
+    /// layer on each, with its level there: drawn as the app draws it (a
+    /// texture per instance, uploaded once, each window with a slot of its
+    /// own), both windows' pictures are right from the one upload. With one
+    /// slot for both, the second window's uniforms would be the first's too.
+    #[test]
+    fn one_instance_on_two_displays_is_uploaded_once_and_drawn_in_both_windows() {
+        use crate::engine::{Engine, LayerSource};
+        use crate::show::{CueKind, CueType, Show, Transition};
+        use std::collections::HashMap;
+        let Some(gpu) = test_gpu() else { return };
+        // The engine: a text on displays 1 and 2, and one coming in on display 2
+        // alone over 2 s, half way across.
+        let mut show = Show::default();
+        let (d1, d2) = (show.outputs[0].id, show.add_display());
+        let text = |show: &mut Show, transition, fade, home, also: Vec<_>| {
+            let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+            if let CueKind::Text(t) = &mut c.kind {
+                t.text = "A".into();
+                t.media.transition = transition;
+                t.media.fade_in = fade;
+                t.media.fade_out = 0.0;
+                t.media.curve = crate::show::Curve::Linear;
+                t.media.output = Some(home);
+                t.media.also_on = also;
+            }
+            let id = c.id;
+            show.cues.push(c);
+            id
+        };
+        let shared = text(&mut show, Transition::Cut, 0.0, d1, vec![d2]);
+        let late = text(&mut show, Transition::Crossfade, 2.0, d2, vec![]);
+        let mut e = Engine::for_tests();
+        let drawn = |e: &mut Engine| {
+            let t0 = std::time::Instant::now();
+            while !e.active.iter().all(|a| a.started) {
+                assert!(t0.elapsed().as_secs() < 10, "never drawn");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                e.tick(&show, 0.0);
+            }
+        };
+        e.fire(&show, shared);
+        drawn(&mut e);
+        e.fire(&show, late);
+        drawn(&mut e);
+        e.tick(&show, 0.0);
+        e.tick(&show, 1.0);
+        let instance_of = |id| e.active.iter().find(|a| a.cue_id == id).unwrap().instance;
+        let (a, b) = (instance_of(shared), instance_of(late));
+        let on = |o| {
+            e.layers(o)
+                .iter()
+                .map(|l| {
+                    assert!(matches!(l.source, LayerSource::Image(..)));
+                    (l.instance, l.opacity)
+                })
+                .collect::<Vec<_>>()
+        };
+        let (one, two) = (on(d1), on(d2));
+        assert_eq!(one, vec![(a, 1.0)]);
+        assert_eq!(two.len(), 2);
+        assert!(two[0].0 == a && (two[0].1 - 0.5).abs() < 0.02, "{two:?}");
+        assert!(two[1].0 == b && (two[1].1 - 0.5).abs() < 0.02, "{two:?}");
+        // The app's way: a texture per instance (here each its own solid
+        // colour), uploaded when first met, whichever window meets it.
+        const SIZE: u32 = 64;
+        let mut textures: HashMap<u64, LayerTexture> = HashMap::new();
+        let mut uploads: HashMap<u64, u32> = HashMap::new();
+        let colour = |i: u64| {
+            if i == a {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            }
+        };
+        for (i, _) in one.iter().chain(&two) {
+            textures.entry(*i).or_insert_with(|| {
+                let t = LayerTexture::new_rgba(&gpu, SIZE, SIZE);
+                t.upload_rgba(&gpu.queue, &colour(*i).repeat((SIZE * SIZE) as usize));
+                *uploads.entry(*i).or_default() += 1;
+                t
+            });
+        }
+        assert_eq!(uploads.get(&a), Some(&1), "uploaded once for both windows");
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let pipeline = gpu.compositor.pipeline(&gpu.device, format);
+        let draw = |layers: &[(u64, f32)], slot: Slot, target: &Target| {
+            let groups = [DrawGroup {
+                layers: layers
+                    .iter()
+                    .map(|(i, opacity)| DrawLayer {
+                        texture: &textures[i],
+                        opacity: *opacity,
+                        fit: Fit::Stretch,
+                        transform: LayerTransform::default(),
+                        color: ColorAdjust::default(),
+                        fx: VideoFx::default(),
+                    })
+                    .collect(),
+                geometry: identity_geometry(SIZE),
+            }];
+            gpu.composite(&pipeline, slot, &target.view, &groups, None)
+        };
+        let near = |got: [u8; 4], want: [f32; 3]| {
+            got.iter()
+                .zip(want)
+                .all(|(g, w)| (f32::from(*g) - w).abs() <= 4.0)
+        };
+        for same_slot in [false, true] {
+            let (t1, t2) = (Target::new(&gpu, SIZE), Target::new(&gpu, SIZE));
+            // Both windows' frames go in one submit, as the render threads'
+            // can meet on the queue.
+            let first = draw(&one, Slot::Window(0), &t1);
+            let second = draw(&two, Slot::Window(if same_slot { 0 } else { 1 }), &t2);
+            gpu.submit([first, second]);
+            let (p1, p2) = (t1.middle(&gpu), t2.middle(&gpu));
+            // Display 2: red at half, blue at half over it.
+            let mixed = [63.75, 0.0, 127.5];
+            assert!(near(p2, mixed), "display 2: {p2:?}");
+            if same_slot {
+                assert!(
+                    !near(p1, [255.0, 0.0, 0.0]),
+                    "one slot for both is not enough"
+                );
+            } else {
+                assert!(near(p1, [255.0, 0.0, 0.0]), "display 1: {p1:?}");
+            }
+        }
+    }
 }
