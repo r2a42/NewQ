@@ -756,3 +756,96 @@ Left / not tried:
 - The inspector's "Also on" row (P4) and the editor's badge and ghosts (P6) are not P9's.
 - A cue held by a control cue that leaves its last full display unfreezes to fade its sound (as
   `fade_out_and_stop` does).
+
+## T. What P5 landed (engine II: crossfades, joins, jumps, loops)
+
+Seven commits, each "Timeline: …": `src/engine.rs`, `src/engine/timeline.rs` (and its tests),
+`src/timeline/chase.rs` (and its tests), a small local part of `src/show.rs` (two `ControlCue` fields),
+one arm in `src/ui/timeline/toolbar.rs`, the loop rows in `src/ui/timeline/control.rs`, and a test in
+`src/gpu.rs`. No new show-file field but the two below.
+
+As built:
+- **Overlap crossfades** (`crossfade_overlaps`): `chase::overlap(show, key, cue, dur) -> Option<Overlap
+  { secs, over }>` (earlier armed clips on the same track: pictures on the same layer of a display they
+  share, sounds on one `audio_output`; their slot (start + lead-in + length) ends after the clip comes in
+  and no later than it ends; `secs` the longest such overlap) and `chase::crossed_by` (a later clip that
+  crosses this one on *all* its displays). `chase::same_track` is pub. Engine: `start_with` asks
+  `timeline_overlap` for a run's clip not started by a seek; a picture's entry becomes `Crossfade { secs }`
+  (fade-in `secs` too), a sound fades the crossed sounds out (`fade_out_and_stop`, tagged to the run) and
+  itself in. `ActiveCue::crossed_by` switches off the clip's own fade-out (the content-driven one, and
+  `clock_end`'s, which gained `own_fade_out`) while that clip is to come or playing. Per display through
+  `apply_entry` as P9 left it. A clip that dips keeps its dip; one wholly inside an earlier one doesn't
+  overlap it. The chase does the same in `enter`, so a seek into an overlap matches playing there.
+- **Gapless joins:** `Engine::timeline_joins` (`JOIN_GAP` = 50 ms): a picture of a Running or Cueing run
+  whose slot the next clip on its track abuts (pending on the run, waiting for its file, or started without
+  its first frame) is kept up: a video on its last frame (`held`), a still past its time. `ActiveCue::joined`
+  marks one held only for that; if the next is not coming after all it goes at once. One the next crossfades
+  over stays for the crossfade. Not while the run stands at a pause at the join (it ends as set).
+- **Preloaded jumps:** `Prepared` has `shift`, `lead`, `at_in_point()`, `fits(shift, lead)`;
+  `take_prepared(cue, shift, lead)` (`start_with` always asks it now). `Engine::timeline_jump_wanted`:
+  for each Jump, Run-with-a-place and loop pause pending within `PRELOAD_HORIZON` of a run's clock, the
+  chase at its target; files part way in are got ready there (`update_preload`'s `jumps`, kept by
+  `fits`), the rest (and files at their in point) join `wanted`. At most `MAX_PRELOAD_CHILDREN`.
+  Also fixed: `timeline_step` stops after a start that re-placed its run (`Runs::placed`), which a jump
+  whose clips were ready at once ran into (the old step went on to its old target).
+- **Smooth seek** (`timeline_place`, with the picture): a file clip of the run alive on both sides
+  (`carriable`: playing, not stopping, held or seeking) is jumped in place (`timeline_carry`: the cue's
+  `Seek`, now with a `duration`, or a jump's prepared decoders; levels from the chase; held with the
+  rest). Everything else the run played (pictures and sounds) is `Run::outgoing`: no longer the run's
+  (`run = None`, no entry, ramps untagged), up until the new clips are cued; the new ones are unseen
+  (`timeline_unseen` in `layers()`, their entries deferred: `Runs::hiding`) until then.
+  `timeline_settle` (start and end of each tick, place, release; `CUE_LIMIT` at most) drops the old.
+  `run_cued` also waits for seeking to end. A park without the picture lets go at once, as before; a
+  stop, a run from the top or a re-place drops the outgoing at once (`cancel_run`, `drop_outgoing`).
+- **Loop when detached:** `timeline_go_round` and `timeline_round_wanted`: a clocked, detached file clip
+  with `run_out == Loop` not played as a loop, whose content runs out before its clock's end, is got ready
+  at its in point within the horizon and swapped in (`Seek`, `apply_seek` clears `held`) when it runs out,
+  pass after pass; it holds if the decoders can't start. `timeline_preload_t0` gives its lead-in.
+- **Loop this section (L3):** `ControlCue::loop_from: Option<TimelinePoint>` and `leave_at_once: bool`
+  (both `#[serde(default)]`, unwritten at default; `remap_timeline` maps `loop_from` like `at`);
+  `ControlCue::is_loop()` (a `TimelinePause` with `loop_from`). Engine: `Looping { cue, from, to,
+  at_once, last_pass }` on the run and in `RunView::looping`; `timeline_loop` (reached by the clock:
+  jumps back with `timeline_place(.., from, Then::Run)` unless the pass is the last, which clears it and
+  lets the step go on); `TimelineGo::LeaveLoop { at_once }` from `timeline_go_for` (list and group, while
+  Running or Cueing and not on the last pass; a pause inside the section still answers Resume first);
+  `timeline_leave_loop` (default: `last_pass`; at once: to `to`, where the cue counts as passed).
+  `GoPlan::describe`: "Finish this pass and continue …" (then "the loop plays to its end once more, then
+  goes on"), "Leave the loop and continue …". `timeline_place` keeps `looping` only for a place inside
+  `[from, to)`. `is_pause_of` leaves loops out (so `next_pause` doesn't name one). Toolbar: "Looping ·
+  GO continues" / "Looping · GO leaves the loop" / "Looping · last pass, then on". Inspector (pause cue):
+  "Loop: Play a section again until GO", "Section from" (the point picker), "On GO: Leave the loop at
+  once"; the cue-list text "· loops from 0:01.0 until GO[, which leaves at once]".
+- **GPU:** `gpu.rs` test `one_instance_on_two_displays_is_uploaded_once_and_drawn_in_both_windows`
+  (engine layers of a shared text, one texture per instance uploaded once, two composites on
+  `Slot::Window(0)`/`(1)` in one submit; with one slot for both the first window is wrong).
+- Camera freeze: already P2a's (`freeze_live`), nothing new.
+
+Behaviour to know (for the README and the owner):
+- A loop's jump is not sample-accurate: the clock loses the rest of the tick it reached the cue in and
+  stands while the section is cued (a tick or two with what is got ready). Clips alive at both ends of the
+  section are jumped, others started again.
+- `model::clocked` counts a loop pause as a free-run pause, so a clip spanning one is "clocked" (and a
+  clocked clip set to Loop is played as a loop). Harmless (the clock never stands at a loop), but the
+  editor marks such a clip clocked. `model.rs` was left alone (another agent's).
+- A seek's old picture runs on (not frozen) for the moment of cueing; a carried clip's swap can show its
+  new frame a tick before the rest.
+- The "Overlapping clips crossfade" checkbox in `ui/timeline/control.rs` (`settings_fields`) is still
+  greyed with "not working yet": it can be un-greyed now.
+
+Tests: `engine/timeline/tests.rs` P5 sections (overlaps: pictures crossing and no own fade-out, off as
+before; held by a free-run pause and run from GO; sounds and a seek into the overlap; joins: texts by cut
+and crossfade, videos, one not coming; a jump got ready and its first frame within two ticks; a seek
+keeping the old picture until the new is cued, running and parked; a video jumped in place running and
+parked; a detached clip going round from its in point, got ready first; a keyframed-speed loop through a
+free-run pause; loops: three rounds, GO finishes the pass and carries on without a stop, leave at once, a
+pause inside, seeks in and out, a Stop's fade, a video's way back got ready and back within three ticks,
+GO on a list timeline). `chase/tests.rs` (2), `show.rs` (old pause loads, default not written, round
+trip), `gpu.rs` (1).
+
+Left / not tried:
+- No audio device, no displays: sound by the fake device, pictures through `Engine::layers`, the GPU test
+  headless with no app windows.
+- A list timeline's GO read-out while looping goes through the same `timeline_go_for` the other agent may
+  edit for list timelines.
+- Overlap of a clip with a lead-in counts from where it comes in (start + lead-in); a dip is never
+  overlapped; the earlier clip's run-out fade still applies if its content ends during a pause.
