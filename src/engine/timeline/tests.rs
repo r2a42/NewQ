@@ -1563,7 +1563,14 @@ fn a_still_a_text_and_a_camera_under_the_playhead_are_up_with_their_time_counted
     assert_eq!((elapsed(&e, still), elapsed(&e, cam)), (2.0, 1.0));
     // Run: the still ends at its time (5 s after its start), the camera's run at 10.
     e.timeline_run(&show, key(g));
-    ticks(&mut e, &show, 0.0, 2);
+    // Running from a park cues first, and the clock stands until the clips
+    // are up: wait for that rather than for a count of ticks.
+    until(&mut e, &show, Some(0.0), "running", 10, |e| {
+        e.runs
+            .map
+            .get(&key(g))
+            .is_some_and(|r| r.state == RunState::Running)
+    });
     ticks(&mut e, &show, 0.5, 7);
     assert!(active(&e, still).is_none() && active(&e, cam).is_some());
     // Past a still's time it is not started at all.
