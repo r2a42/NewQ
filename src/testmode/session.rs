@@ -240,6 +240,8 @@ struct MemorySeen {
     peak: AtomicU64,
     /// How many times it has looked at NewQ's own memory.
     looks: AtomicU64,
+    /// How many times it has gone through every process for the children.
+    child_looks: AtomicU64,
 }
 
 impl MemoryWatch {
@@ -265,6 +267,7 @@ impl MemoryWatch {
                             .map(|p| p.memory() >> 20)
                             .sum();
                         seen2.children.store(children, Ordering::Relaxed);
+                        seen2.child_looks.fetch_add(1, Ordering::Release);
                     } else {
                         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[me]), true);
                     }
@@ -2081,7 +2084,7 @@ mod tests {
                 "-i",
                 "testsrc2=size=3840x2160:rate=30",
                 "-t",
-                "30",
+                "600",
                 "-f",
                 "null",
                 "-",
@@ -2091,17 +2094,25 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1500));
         let mut w = MemoryWatch::new();
         w.limit_mb = u64::MAX;
+        // Going through every process takes seconds on a busy Windows machine
+        // (it is why the watch has a thread of its own), so this waits for
+        // looks that were finished, not for a time: three of them at most.
         let t = Instant::now();
-        while w.children_mb() <= 5 && t.elapsed() < Duration::from_secs(10) {
+        while w.children_mb() <= 5
+            && w.seen.child_looks.load(Ordering::Acquire) < 3
+            && t.elapsed() < Duration::from_secs(180)
+        {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(w.over(Instant::now()), None);
         let counted = w.children_mb();
+        let looks = w.seen.child_looks.load(Ordering::Acquire);
+        let waited = t.elapsed();
         let _ = child.kill();
         let _ = child.wait();
         assert!(
             counted > 5,
-            "the child's memory was not counted: {counted} MB"
+            "the child's memory was not counted: {counted} MB after {looks} looks in {waited:?}"
         );
     }
 
