@@ -6,6 +6,9 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A control cue's "Do" menu shows every action.** The menu scrolled, so the timeline actions
+  (Run, Pause, Stop and Jump a timeline) were out of sight below the others on a smaller
+  screen. It now has two columns, the actions on a cue and those on a timeline, all in sight.
 - **Dragging the playhead no longer undoes a remote.** If a remote, a key, a cue or GO moved,
   ran, stopped or paused a timeline while you were dragging its playhead on the ruler, letting
   go put the playhead back where you dragged it. Now your drag gives way: its playhead goes at

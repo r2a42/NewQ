@@ -92,6 +92,9 @@ impl Mouse {
             d.remove::<Vec<(bool, Rect)>>(egui::Id::new("settings_timeline_follow"));
             d.remove::<Vec<(CueId, Rect)>>(egui::Id::new("cue_rows"));
             d.remove::<bool>(egui::Id::new("timeline_pointer"));
+            d.remove::<Vec<(crate::show::ControlAction, Rect, Rect)>>(egui::Id::new(
+                "control_action_rows",
+            ));
         });
         let mut out = self.ctx.run_ui(input, |ui| match draw {
             Draw::Pane => {

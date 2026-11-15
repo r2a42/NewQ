@@ -7542,19 +7542,55 @@ fn inspector_one(
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Do");
-                        egui::ComboBox::from_id_salt("control_action")
+                        // Two columns, the cue actions and the timeline ones, so
+                        // every action is in sight without scrolling (one column
+                        // was taller than egui lets a combo be, and hid the last).
+                        let combo = egui::ComboBox::from_id_salt("control_action")
                             .selected_text(c.action.label())
+                            .height(ui.ctx().content_rect().height())
                             .show_ui(ui, |ui| {
-                                for a in ControlAction::ALL {
-                                    // The timeline actions act on a timeline,
-                                    // not a cue: a line before them.
-                                    if a == ControlAction::TIMELINE[0] {
-                                        ui.separator();
+                                let n = ControlAction::ALL.len() - ControlAction::TIMELINE.len();
+                                let (cues, timelines) = ControlAction::ALL.split_at(n);
+                                ui.horizontal_top(|ui| {
+                                    for (i, (head, actions)) in
+                                        [("On a cue", cues), ("On a timeline", timelines)]
+                                            .into_iter()
+                                            .enumerate()
+                                    {
+                                        if i > 0 {
+                                            ui.separator();
+                                        }
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new(head).weak().small());
+                                            for &a in actions {
+                                                let _r = ui
+                                                    .selectable_value(&mut c.action, a, a.label())
+                                                    .on_hover_text(a.description());
+                                                // For the tests: each action's row, and what is seen of the popup.
+                                                #[cfg(test)]
+                                                ui.data_mut(|d| {
+                                                    d.get_temp_mut_or_default::<Vec<(
+                                                            ControlAction,
+                                                            egui::Rect,
+                                                            egui::Rect,
+                                                        )>>(
+                                                            egui::Id::new("control_action_rows")
+                                                        )
+                                                        .push((a, _r.rect, ui.clip_rect()))
+                                                });
+                                            }
+                                        });
                                     }
-                                    ui.selectable_value(&mut c.action, a, a.label())
-                                        .on_hover_text(a.description());
-                                }
+                                });
                             });
+                        #[cfg(test)]
+                        ui.data_mut(|d| {
+                            d.insert_temp(
+                                egui::Id::new("control_action_combo"),
+                                combo.response.rect,
+                            )
+                        });
+                        let _ = combo;
                         ui.end_row();
                         if c.action.needs_target() {
                             #[cfg(test)]

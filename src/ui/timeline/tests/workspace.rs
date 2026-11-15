@@ -849,3 +849,40 @@ fn a_remote_command_during_a_playhead_drag_cancels_the_drag() {
         }
     }
 }
+
+/// A control cue's "Do" menu open at 1280×760 in both interfaces: every
+/// action, the timeline ones after the line included, is on the screen and
+/// seen in the menu, with no scrolling.
+#[test]
+fn every_action_of_the_do_menu_is_in_sight_without_scrolling() {
+    use crate::show::ControlAction;
+    for modern in [false, true] {
+        let what = format!("modern {modern}");
+        let mut f = fixture();
+        let mut cue = f.show.make_cue(CueType::Control, None, f.show.cues.len());
+        cue.name = "Do it".into();
+        let id = cue.id;
+        f.show.cues.push(cue);
+        f.st.selected = Some(id);
+        let mut m = window(&mut f, modern, TimelineLayout::Pane);
+        // The app's own sizes (its rows are taller than egui's).
+        super::super::super::setup_style(&m.ctx);
+        settle(&mut m, &mut f);
+        let combo: Rect = noted(&m, "control_action_combo")
+            .unwrap_or_else(|| panic!("{what}: the Do menu's button is drawn"));
+        press(&mut m, &mut f, combo.center());
+        // A popup is placed by its size, which it has only after a frame or two.
+        settle(&mut m, &mut f);
+        let rows: Vec<(ControlAction, Rect, Rect)> =
+            noted(&m, "control_action_rows").unwrap_or_default();
+        let screen = Rect::from_min_size(Pos2::ZERO, SIZE);
+        let shown: Vec<_> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(shown, ControlAction::ALL.to_vec(), "{what}: all listed");
+        for (a, r, clip) in &rows {
+            assert!(
+                screen.contains_rect(*r) && clip.contains_rect(*r),
+                "{what}: {a:?} at {r:?} is out of sight (seen: {clip:?})"
+            );
+        }
+    }
+}
