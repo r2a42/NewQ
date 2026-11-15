@@ -1741,18 +1741,24 @@ fn timeline_parts(b: &mut Builder, parts: &mut Vec<Part>, clip: &Path) {
             "Timeline",
             "runs clips on two tracks with an overlap crossfade, stands at a pause \
              the clip plays on through until GO, crossfades on GO and fades out on Stop",
-            12.0,
+            13.0,
         );
+        // Times leave room for a slow machine (a run cueing a clip stands its
+        // clock; a stall of a second moves the engine and the part's clock
+        // together, but lands between two looks): each bound is a second or
+        // more from where it should happen, and still short of what would
+        // happen if the thing checked had not (the pause, GO's crossfade, the
+        // Stop's three-second fade from 8 s).
         p.lead = Some(a);
         p.acts = vec![
             (0.0, Act::Fire(run)),
             (5.5, Act::Go),
-            (7.5, Act::Fire(stop)),
+            (8.0, Act::Fire(stop)),
         ];
         p.checks = vec![
-            Check::Started { cue: v, by: 3.0 },
+            Check::Started { cue: v, by: 4.0 },
             Check::Overlap { a, b: over },
-            Check::EndedBy { cue: a, by: 3.8 },
+            Check::EndedBy { cue: a, by: 4.5 },
             Check::Together {
                 cues: vec![over, v],
             },
@@ -1772,20 +1778,21 @@ fn timeline_parts(b: &mut Builder, parts: &mut Vec<Part>, clip: &Path) {
             },
             Check::Started {
                 cue: after,
-                by: 7.2,
+                by: 7.8,
             },
             Check::Overlap { a: over, b: after },
-            Check::EndedBy { cue: over, by: 8.0 },
+            // Crossfaded out by GO's title, well before the Stop's fade ends.
+            Check::EndedBy { cue: over, by: 9.2 },
             // Still there 1.5 s into the Stop's fade, gone once it is over.
             Check::NotBefore {
                 cue: after,
-                before: 9.0,
+                before: 9.5,
             },
             Check::EndedBy {
                 cue: after,
-                by: 11.5,
+                by: 12.5,
             },
-            Check::EndedBy { cue: v, by: 11.5 },
+            Check::EndedBy { cue: v, by: 12.5 },
         ];
         parts.push(p);
     }
@@ -1839,8 +1846,9 @@ fn timeline_parts(b: &mut Builder, parts: &mut Vec<Part>, clip: &Path) {
                 }
             },
         );
-        // Between where the jump is made and where it goes: never reached.
-        let passed = timeline_text(b, g, "Timeline: jumped over", 4.5, Some(1.0), 1);
+        // Between where the jump is made (the clock at about 3.7 s) and where
+        // it goes: never reached, even if the jump comes a second late.
+        let passed = timeline_text(b, g, "Timeline: jumped over", 4.9, Some(1.0), 1);
         let there = timeline_text(b, g, "Timeline: where the jump lands", 6.2, None, 1);
         // Starts with it but is unseen (opacity 0) for 0.8 s: it waits that
         // long for its fade-in before its content starts.
@@ -1874,7 +1882,7 @@ fn timeline_parts(b: &mut Builder, parts: &mut Vec<Part>, clip: &Path) {
             "Timeline",
             "holds a live camera at a pause that freezes live inputs, lets it go live on GO, \
              jumps to a marker past a clip, and waits a clip for its fade-in",
-            10.8,
+            12.0,
         );
         p.lead = Some(lead);
         p.acts = vec![
@@ -1908,20 +1916,22 @@ fn timeline_parts(b: &mut Builder, parts: &mut Vec<Part>, clip: &Path) {
                 cue: there,
                 by: 8.5,
             },
+            // 0.8 s on the clock; a look that a stall delays can see both at once.
             Check::Later {
                 a: there,
                 b: waits,
-                secs: 0.6,
+                secs: 0.5,
             },
+            // The cut at 9.5 s: gone long before a fade would have let them go.
             Check::EndedBy {
                 cue: there,
-                by: 10.2,
+                by: 11.0,
             },
             Check::EndedBy {
                 cue: waits,
-                by: 10.2,
+                by: 11.0,
             },
-            Check::EndedBy { cue: cam, by: 10.2 },
+            Check::EndedBy { cue: cam, by: 11.0 },
         ];
         parts.push(p);
     }
