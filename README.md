@@ -998,6 +998,35 @@ to it as to any group (a cue added while the group is selected goes inside). A
 group made this way has *Clips at opacity 0 wait for their fade-in* ticked (see
 below); a group from an older show has it off and plays as it always did.
 
+**A timeline cue list.** A whole cue list can be a timeline, with a tab of its
+own: *Cue ▸ New timeline*, or **+ ▸ New timeline** at the end of the list tabs.
+Right-click another list's tab for *Make this list a timeline* (a list with groups
+in it can't be one; its cues become clips at their pre-waits) and *Make it a plain
+cue list* to go back. The main list is always a plain cue list.
+
+- Its tab (🎞) shows the tracks editor in the cue list's place, full size, in both
+  interfaces. *Cue rows* above it shows the same cues as rows, to number, name and
+  arm them (with the Timeline pane open, the tracks are then under the rows);
+  *Tracks* goes back.
+- Cues added while it is the tab you are working on become clips at its playhead:
+  files dropped on the window, and cues from the Cue menu. Several files go one
+  after the other where their lengths are known. A picture goes on the top picture
+  track with nothing on it at the playhead, or on a new layer above the others, so
+  nothing is replaced; a sound on the first sound track; fades, stops and control
+  cues on the Cues track. A still, a text or a shape is held for 5 seconds (trim it
+  to the length you want). Groups don't go into a timeline list (moving, pasting or
+  making one there is refused).
+- **GO** on it runs the timeline from its playhead, carries it on at a pause cue,
+  and does nothing while it runs or once it has played to its end; it never fires
+  anything in another list. The transport says so: *Run …*, *RUNNING · next pause
+  in 0:12.0* (or *ends in …*) with *GO does nothing until it pauses*, *Continue …*
+  and what comes in next, *… is at its end*. The new interface's header says the
+  same, and its Operator view adds the run's state and clock. Pause (P) and Stop
+  All work as everywhere; Stop All leaves the playhead where it was.
+- In a show with *A picture replaces only what is on its own layer* off (one from
+  NewQ 0.18.0 or older), the tab says that the tracks don't keep pictures over each
+  other and offers to turn it on; nothing changes until you click it.
+
 **The tracks editor.** Double-click a timeline group in the cue list (or click
 *Open in timeline editor* in its inspector, or *Window ▸ Timeline*) to see its
 tracks: a row per display and layer ("V1 · Layer 0"), a row per audio output
@@ -1136,7 +1165,8 @@ when it fades in* in its inspector.
 is **parked** there, with the picture at that moment on the displays and the sound
 ready, and the toolbar says *Parked*. *Run* or GO plays on from there. (A click at
 the very start shows the first frame.) In show mode the ruler of a timeline group
-is locked, since parking puts its picture on the outputs.
+is locked, since parking puts its picture on the outputs; the ruler of the timeline
+list you are working on stays free, as the operator's way to cue it.
 
 **Keyframes on a timeline.** A clip's opacity, position and effect keyframes follow
 the timeline's clock, so they stand still at a pause and go on from the GO, even
@@ -1146,6 +1176,18 @@ while the clip's content plays on. Its speed keyframes follow its content.
 automatic crossfades between overlapping clips (give the later clip a Crossfade
 transition; the group's *Overlapping clips crossfade* is greyed until then), and a
 separate timeline workspace.
+
+**A picture on several displays.** *Also on* in the inspector of a picture, video,
+text, shape or camera cue (with more than one display) ticks the other displays it
+is shown on too, besides its own *Output*: the same picture, effects, position and
+keyframes, on the same layer. The cue list shows it as "Display 1 +2". Picking
+several cues and ticking a display gives them all the same choice (a cue's own
+display is left out of it). This arrives with this version.
+
+**Not there yet:** automatic crossfades between overlapping clips (give the later
+clip a Crossfade transition; the group's *Overlapping clips crossfade* is greyed
+until then), adding clips and tracks, splitting and ripple delete from the editor,
+a speed lane, and a separate timeline workspace.
 
 A show that uses the timeline control cues (Run, Pause, Stop, Jump timeline) does
 not open in NewQ 0.20.3 or older.

@@ -66,6 +66,20 @@ The README describes the features; this file is about working on the code.
   timeline group's row opens it rather than firing it. Tests drive it with the mouse (`TimelineRects`,
   `Draw::Full` for the whole window and undo); tried headless under xvfb in both interfaces. Variants and
   hosts kept `allow(dead_code)` are for what is still to come (list tab: P4; workspace: P7).
+
+  `Draw::Full` for the whole window and undo); tried headless under xvfb in both interfaces. `list_tab.rs`: a timeline
+  list's tab: `cue_list` calls `list_tab::draw` after the tabs, which draws the editor (`Host::ListTab`, it
+  doesn't pin) in place of the rows unless `EditorState::list_rows`; the pane then says the tracks are in
+  the tab. `add_cue`/`AddFiles` on the active timeline list go to `list_tab::add_clips` (at the run's
+  `pos`, in turn where lengths are known, `fitting_track`, stills/text/shapes held `STILL_LEN`); groups are
+  refused there (`NO_GROUPS`: MoveToList, GroupCue, Paste, slides, `NewTimelineGroup`). `ui::go_readout`
+  is `list_tab::go_readout` (`go_plan` plus the run's next pause and "at its end"); GO on a timeline list
+  keeps the selection; `modern::next_cue` is None there and the Operator view adds `operator_state`.
+  Tabs: `+` menu and the tab's right-click (`SetListTimeline`, which then `sync_lists`). The inspector's
+  "Also on" row writes `MediaCue::also_on` (home never in it); `bulk_edit::WHOLE` spreads it as one value
+  and `tidy` drops the target's own display. Variants and
+  hosts kept `allow(dead_code)` are for the tools still to come (split, ripple, add clip/track, speed lane:
+  P6; workspace: P7).
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.

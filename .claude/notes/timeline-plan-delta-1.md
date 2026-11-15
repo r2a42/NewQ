@@ -949,3 +949,59 @@ Not done / left:
 
 Wanted from the engine: nothing for these tools. (For P9: the ghosts assume a clip on several displays is
 on the same layer on each, as delta A4 says.)
+
+## R. What P4 landed (the standalone Timeline tab, and "Also on")
+
+Two code commits ("Timeline: the inspector's \"Also on\" row…", "Timeline: a cue list can be a timeline, with a
+tab of its own") and one "Docs:". Full suite: 1027 passed, 5 ignored. No engine file touched: `go_plan` and
+`timeline_go_for` already covered a timeline list (`TimelineGo::Start/Resume/Play/Running/Cueing`).
+
+As built:
+- `src/ui/timeline/list_tab.rs` (+ `list_tab/tests.rs`, 14 tests, whole-window mouse driving in both
+  interfaces): `active(show, engine)`, `is_timeline_list`, `shows_tracks`, `draw` (the Tracks / Cue rows
+  switch, the own_layers offer, then `editor(.., Host::ListTab, ..)`), `add_clips`, `fitting_track`,
+  `go_readout`, `operator_state`, `refuses`, `NO_GROUPS`, `STILL_LEN` (5 s).
+- `EditorState::list_rows` (the tab shows rows). `editor` does not set `pinned` for `Host::ListTab`. `pane`
+  says "The tracks of … are in its tab" (and, classic only, "Close this pane") when the target is the active
+  list and its tab shows tracks.
+- `TimelineAction::NewTimelineList`/`SetListTimeline` are reached from the tabs' `+` menu, the Cue menu and
+  a tab's right-click (not the main list's). `SetListTimeline` now calls `engine.sync_lists` (a run of a list
+  that stops being a timeline is let go). New `TimelineAction::UseOwnLayers` (an edit).
+- Refused on a timeline list (`NO_GROUPS` logged): `MoveToList` of a group into one, `GroupCue` of a cue in
+  one, `Paste` of a clipboard holding a group, `AskSlides(None)`/`AskDeck(None)`, `AddCue(Group)` (in
+  `add_clips`), `NewTimelineGroup`.
+- `add_cue` and `AddFiles` on the active timeline list go to `add_clips`: at `engine.timeline(..).pos`; each
+  next one at the previous one's end when `cue_duration` knows it (an unprobed video does not: the next
+  goes at the same time on another track); picture: first picture track (tracks order, top layer first) with
+  no armed clip under `at`, else a layer above the highest on the first picture track's display, else (no
+  picture track yet) the cue's own display at layer 0; sound: first sound track; others: Cues. A still, text,
+  shape, clock or timer with no `end` gets `STILL_LEN`. The last added is selected.
+- Read-outs: `ui::go_readout` is `list_tab::go_readout`: the engine's `describe`, but `Running` reads
+  "RUNNING · next pause in m:ss.s" (or "RUNNING · ends in …") with "GO does nothing until it pauses/ends",
+  and a Stopped run at its length (pos > 0) reads "… is at its end" / "GO does nothing: move its playhead to
+  run it again". The engine's `describe` (web remote) is unchanged: it still says "… is running" and "Run …"
+  at the end (P8 may want the same words there).
+- `Action::Go` keeps the selection on a timeline list. `modern::next_cue` is None on one (no THEN list of
+  playhead cues); the Operator view adds "TIMELINE · name · state · pos / length".
+- Show mode: unchanged rule (`ruler_locked` unless the key is the active list); tested on the tab.
+- "Also on": `media_inspector` row after Output when the show has more than one display (home left out, and
+  taken out of `also_on` if it gets in); `cue_target_text` "Display 1 +2" (`outputs_text`).
+  `bulk_edit::WHOLE = ["also_on"]` spreads the list as one value (it used to spread item-wise only when the
+  length was unchanged, i.e. never for a tick); `tidy` drops the target's home and clears a sound's.
+
+Looked at headless (1500×900, both interfaces; `scratchpad/p4/`): the tab stopped, running ("RUNNING · next
+pause in 0:01.4"), waiting at the pause ("Continue Opening / then crossfade to 13 · Bars"), the Operator view
+at the pause, show mode, the cue rows ("Display 1 +1"), the Also on row. Fixed from what was seen: the
+classic Timeline pane left open took the cue list's room to say "the tracks are in its tab" (now a "Close
+this pane" button).
+
+Left / for others:
+- P6: the "+N" badge and ghosts for `also_on` clips (the tab shows none yet); the toolbar's own add-clip /
+  add-track; the track header labels are cut short at 124 pt ("Display 1 · V2 · Layer 1").
+- P9: the engine honouring `also_on` (until then the row writes a field nothing reads).
+- P8: web remote and OSC feedback words for a running timeline list (`GoPlan::describe`), the remote's
+  "next" (the playhead cue, meaningless on a timeline list).
+- Engine (not needed for P4, nice to have): a `TimelineGo::AtEnd` so `go_plan` itself says GO does nothing
+  at the end (the UI works it out from `RunView`).
+- Paste of plain cues into a timeline list keeps their pre-waits as their start (not the playhead).
+- The machine's `prefs.json` was left on the classic interface by the screenshots.

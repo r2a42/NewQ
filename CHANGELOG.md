@@ -61,6 +61,18 @@ release page, and a release is refused if it has none.
 - **The tracks editor warns** of a clip that nothing fades up (it never starts)
   and of one that cuts in over the clip under it as it fades up; sound clips show
   their waveform.
+
+- **Timeline cue lists.** *Cue ▸ New timeline* (or *+ ▸ New timeline* by the list
+  tabs) makes a cue list that is a timeline, with a tab of its own showing its
+  tracks in the cue list's place; right-click a list's tab to make it a timeline or
+  a plain list again. Files dropped on it and cues added to it become clips at its
+  playhead. GO runs it, carries it on at a pause and does nothing while it runs,
+  and the transport says so ("RUNNING · next pause in 0:12.0").
+- **A picture on several displays.** A picture, video, text, shape or camera cue
+  has an *Also on* row in its inspector to show it on other displays too; the cue
+  list shows "Display 1 +2".
+- **Not yet:** automatic crossfades where clips overlap, adding clips, splitting
+  and tracks from the editor.
 - **A show that uses the new timeline cues (Run, Pause, Stop or Jump timeline)
   will not open in NewQ 0.20.3 or older.**
 
