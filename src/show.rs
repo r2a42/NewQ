@@ -2035,7 +2035,8 @@ pub struct MediaCue {
     #[serde(default, skip_serializing_if = "is_false")]
     pub runs_unseen: bool,
     /// Further displays this cue is shown on, besides `output` (its home).
-    /// Empty = only `output`. (Kept, not yet shown on them.)
+    /// Empty = only `output`. One instance plays, drawn on each of them
+    /// (`displays`); what enters on one of them replaces it there only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_on: Vec<OutputId>,
     /// Legacy (pre-transition) crossfade flag, migrated on load.
@@ -2154,10 +2155,23 @@ impl MediaCue {
         (self.loop_count > 0).then_some(self.loop_count)
     }
 
+    /// The displays its picture is on: its home (`output`), then each of
+    /// `also_on` this show has (one that is the home, or listed twice, counts once).
+    pub fn displays(&self, show: &Show) -> Vec<OutputId> {
+        let mut on: Vec<OutputId> = self.output.into_iter().collect();
+        for o in &self.also_on {
+            if show.output(*o).is_some() && !on.contains(o) {
+                on.push(*o);
+            }
+        }
+        on
+    }
+
     /// Whether a decoder started for `other` would do for this cue too: the
     /// same file, the same slice of it, looped the same way, fitted and
     /// routed the same way. Levels, fades, geometry and colour don't change
-    /// what is decoded, so editing them leaves a preload alone.
+    /// what is decoded, so editing them leaves a preload alone. Nor does
+    /// `also_on`: where it changes the decode size, the preload's size says so.
     pub fn decodes_like(&self, other: &MediaCue) -> bool {
         self.file == other.file
             && self.fit == other.fit

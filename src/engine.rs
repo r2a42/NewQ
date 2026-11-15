@@ -1,6 +1,7 @@
 //! Playback engine: fires cues, runs pre-waits, continues, fades and stops,
 //! and owns the decoders for everything that is playing.
 
+mod displays;
 mod timeline;
 
 // For the timeline editor, which names a run's state (`ui/timeline.rs`).
@@ -165,6 +166,12 @@ impl Param {
     }
     pub fn ramping(&self) -> bool {
         self.ramp.is_some()
+    }
+    /// Seconds its ramp has to go (0 with none).
+    fn left(&self) -> f64 {
+        self.ramp
+            .as_ref()
+            .map_or(0.0, |r| (r.duration - r.t).max(0.0))
     }
 }
 
@@ -561,6 +568,10 @@ pub struct ActiveCue {
     /// own time is the clock's from there, so one begun part way through a tick
     /// counts only the rest of it.
     fade_from: Option<f64>,
+    /// A picture's (or a dip's matte's) displays, each with its own state: a
+    /// cue on several (`MediaCue::also_on`) is replaced on one of them alone
+    /// (`displays.rs`). Empty: on `output()` alone.
+    screens: Vec<displays::Screen>,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -737,6 +748,11 @@ impl ActiveCue {
         if let Some(lt) = &mut self.live_transform {
             lt.follow(clock);
         }
+        for s in &mut self.screens {
+            if let Some(p) = &mut s.exit {
+                p.follow(clock);
+            }
+        }
     }
     /// Whether a ramp of its levels waits for a clock that stands.
     fn levels_wait(&self, clocks: &ClockSteps) -> bool {
@@ -803,12 +819,17 @@ fn crossfade_into_next(show: &Show, cue: &Cue) -> Option<(CueId, f64)> {
     }
     let m = next.kind.media()?;
     // Only a picture is faded by the next picture's crossfade, and only one on the
-    // same display and layer: anything else has to fade itself out.
+    // same displays and layer: anything else has to fade itself out.
     let here = cue.kind.media()?;
     let picture = |k: &CueKind| !matches!(k.cue_type(), CueType::Audio | CueType::LiveAudio);
+    let displays = |m: &MediaCue| {
+        let mut d = m.displays(show);
+        d.sort_by_key(|o| o.0);
+        d
+    };
     (picture(&cue.kind)
         && picture(&next.kind)
-        && here.output == m.output
+        && displays(here) == displays(m)
         && here.layer == m.layer
         && m.transition == Transition::Crossfade
         && m.fade_in > 0.0)
@@ -1994,6 +2015,20 @@ impl Engine {
             .unwrap_or(DEFAULT_OUTPUT_SIZE)
     }
 
+    /// The size a picture is decoded at: its home display's, or the largest
+    /// open window of its further displays (`also_on`) if that is larger, so it
+    /// is sharp on the biggest. (A text or shape is drawn at its home display's
+    /// size and stretched on the others.)
+    fn picture_size(&self, m: &MediaCue) -> (u32, u32) {
+        let area = |s: (u32, u32)| s.0 as u64 * s.1 as u64;
+        m.also_on
+            .iter()
+            .filter_map(|o| self.output_sizes.get(o).copied())
+            .fold(self.output_size(m.output), |a, b| {
+                if area(b) > area(a) { b } else { a }
+            })
+    }
+
     /// The format a camera is opened with: its own, or for Automatic the one the
     /// device was found to offer (never waited for: see `camera::resolve_format`).
     fn camera_format(&self, c: &CameraCue) -> CaptureFormat {
@@ -2015,7 +2050,7 @@ impl Engine {
         if let CueKind::Camera(c) = &cue.kind {
             return Some(PrepSig {
                 media: c.media.clone(),
-                size: self.output_size(c.media.output),
+                size: self.picture_size(&c.media),
                 camera: Some((
                     c.device.clone(),
                     c.width,
@@ -2031,7 +2066,11 @@ impl Engine {
         let m = cue.kind.file_media()?;
         Some(PrepSig {
             media: m.clone(),
-            size: self.output_size(m.output),
+            size: if matches!(cue.kind, CueKind::Audio(_)) {
+                self.output_size(m.output)
+            } else {
+                self.picture_size(m)
+            },
             camera: None,
         })
     }
@@ -2437,10 +2476,19 @@ impl Engine {
         let half = (m.fade_in / 2.0).max(0.0);
         // (A timeline's dip waits while its clock stands.)
         let run = self.run_clock(at.run);
+        // A matte on each display of the cue.
+        let dips = m.displays(show);
         // Outgoing content stays visible under the matte; its sound fades
-        // out, and it is removed once the matte is opaque.
+        // out, and it is removed once the matte is opaque. (Content also on
+        // displays the dip isn't on stays there, and is taken from these at
+        // the reveal.)
         for other in &mut self.active {
-            if other.is_layer() && other.output() == m.output && !other.stopping {
+            let showing = other.showing();
+            if other.is_layer()
+                && !showing.is_empty()
+                && showing.iter().all(|o| dips.contains(o))
+                && !other.stopping
+            {
                 other.volume.ramp_to(MIN_DB, half, m.curve);
                 let v = other.opacity.value;
                 other.opacity.ramp_to(v, half, m.curve);
@@ -2501,6 +2549,7 @@ impl Engine {
             clip_zero: None,
             clock_time: 0.0,
             fade_from: None,
+            screens: dips.into_iter().map(displays::Screen::on).collect(),
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2583,6 +2632,7 @@ impl Engine {
             clip_zero: None,
             clock_time: 0.0,
             fade_from: None,
+            screens: Vec::new(),
         };
         // A timeline's clip: its keyframes follow its run's clock from here.
         if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
@@ -2750,6 +2800,14 @@ impl Engine {
                                 },
                             }),
                         };
+                        // A picture is on each of its displays.
+                        if active.is_visual() {
+                            active.screens = m
+                                .displays(show)
+                                .into_iter()
+                                .map(displays::Screen::on)
+                                .collect();
+                        }
                         let transition = if active.is_visual() {
                             m.transition
                         } else {
@@ -2975,7 +3033,6 @@ impl Engine {
             if let Some((matte, time)) = reveal {
                 self.apply_entry(
                     0,
-                    None,
                     EntryAction::Reveal {
                         matte,
                         time,
@@ -2998,8 +3055,10 @@ impl Engine {
         }
     }
 
-    /// Run a cue's entry action once its first frame is on screen.
-    fn apply_entry(&mut self, instance: u64, output: Option<OutputId>, e: EntryAction) {
+    /// Run a cue's entry action once its first frame is on screen. What it
+    /// replaces, it replaces on its own displays alone: a cue also on others
+    /// stays on those (`displays.rs`).
+    fn apply_entry(&mut self, instance: u64, e: EntryAction) {
         // A cut or crossfade whose cue has already gone (another cue's entry on the
         // same tick replaced it) replaces nothing: with no cue of its own left on
         // the display, it would clear the display.
@@ -3022,29 +3081,35 @@ impl Engine {
                 .find(|a| a.instance == instance)
                 .and_then(|a| a.run),
         );
-        // A picture replaces only what is on its own layer of the display (and a
+        // A picture replaces only what is on its own layer of its displays (and a
         // dip's matte, which covers every layer): the other layers stay.
         let entering = self.active.iter().find(|a| a.instance == instance);
         let layer = entering.and_then(|a| a.layer_no());
+        let here = entering.map(|a| a.showing()).unwrap_or_default();
         // A show from before layers were kept apart: everything on the display.
         let own_layer = entering.is_some_and(|a| a.own_layer);
-        let replaced = |o: &ActiveCue| {
-            o.is_layer()
-                && o.output() == output
-                && (!own_layer || o.is_matte() || o.layer_no() == layer)
-        };
+        let replaced =
+            |o: &ActiveCue| o.is_layer() && (!own_layer || o.is_matte() || o.layer_no() == layer);
         match e {
-            EntryAction::Cut => self
-                .active
-                .retain(|o| o.instance == instance || brother(o) || !replaced(o)),
+            EntryAction::Cut => {
+                let mut gone = Vec::new();
+                for o in &mut self.active {
+                    if o.instance != instance
+                        && !brother(o)
+                        && replaced(o)
+                        && !o.cut_from(&here, run)
+                    {
+                        gone.push(o.instance);
+                    }
+                }
+                self.active.retain(|o| !gone.contains(&o.instance));
+            }
             EntryAction::Crossfade { time, curve } => {
                 for o in &mut self.active {
                     // What was there before it: a slide started after this one (a
                     // quick second GO) is not for this one to fade away.
                     if o.instance < instance && replaced(o) && !o.stopping && !brother(o) {
-                        o.fade_out_and_stop(time, curve);
-                        o.opacity.follow(run);
-                        o.volume.follow(run);
+                        o.crossfade_from(&here, time, curve, run);
                     }
                 }
             }
@@ -3053,13 +3118,20 @@ impl Engine {
                     .active
                     .iter()
                     .find(|a| a.instance == matte)
-                    .and_then(|a| a.output());
-                self.active.retain(|o| {
-                    o.instance == instance
-                        || o.instance == matte
-                        || brother(o)
-                        || !(o.is_layer() && o.output() == out)
-                });
+                    .map(|a| a.showing())
+                    .unwrap_or_default();
+                let mut gone = Vec::new();
+                for o in &mut self.active {
+                    if o.instance != instance
+                        && o.instance != matte
+                        && !brother(o)
+                        && o.is_layer()
+                        && !o.cut_from(&out, run)
+                    {
+                        gone.push(o.instance);
+                    }
+                }
+                self.active.retain(|o| !gone.contains(&o.instance));
                 if let Some(m) = self.active.iter_mut().find(|a| a.instance == matte) {
                     m.opacity.ramp_to(0.0, time, curve);
                     m.opacity.follow(run);
@@ -3446,11 +3518,16 @@ impl Engine {
                     lt.step(dt, &steps);
                 }
             }
+            // Leaving one of its displays alone: that goes on while a control
+            // cue holds it (the other displays keep it, held).
+            if a.started && !show_paused {
+                a.step_screens(dt, &steps);
+            }
             if !was_started
                 && a.started
                 && let Some(e) = a.entry.take()
             {
-                entries.push((a.instance, a.output(), e));
+                entries.push((a.instance, e));
             }
 
             if let Some(m) = media {
@@ -3466,6 +3543,7 @@ impl Engine {
                 match &mut a.kind {
                     ActiveKind::Video(v) => {
                         v.output = m.output;
+                        displays::sync(&mut a.screens, &m.displays(show));
                         v.fit = m.fit;
                         // A camera runs for the time set, which can be changed while it is up.
                         if v.player.is_live() && !a.stopping {
@@ -3480,6 +3558,7 @@ impl Engine {
                     }
                     ActiveKind::Image(i) => {
                         i.output = m.output;
+                        displays::sync(&mut a.screens, &m.displays(show));
                         // Text and shapes are drawn at the display's size, never fitted.
                         if matches!(cue.map(|c| &c.kind), Some(CueKind::Image(_))) {
                             i.fit = m.fit;
@@ -3574,6 +3653,10 @@ impl Engine {
             if a.stopping && !a.opacity.ramping() && !a.volume.ramping() {
                 return false;
             }
+            // Replaced on the last of its displays.
+            if a.gone_everywhere() {
+                return false;
+            }
             if a.auto_faded && a.held && !a.opacity.ramping() {
                 return false;
             }
@@ -3586,8 +3669,8 @@ impl Engine {
         for m in messages {
             self.problem(m);
         }
-        for (instance, output, e) in entries {
-            self.apply_entry(instance, output, e);
+        for (instance, e) in entries {
+            self.apply_entry(instance, e);
         }
         for (id, matte, half, at) in midpoints {
             self.start_with(show, id, Some((matte, half)), at);
@@ -3962,7 +4045,8 @@ impl Engine {
             .sum()
     }
 
-    /// Visual layers on an output, bottom to top.
+    /// Visual layers on an output, bottom to top. A cue on several displays is
+    /// on each of them with its one instance, at its level on that display.
     pub fn layers(&self, output: OutputId) -> Vec<LayerRef<'_>> {
         let mut layers: Vec<(i32, LayerRef)> = Vec::new();
         for a in &self.active {
@@ -3970,8 +4054,11 @@ impl Engine {
             if !a.started || a.age < a.video_lag {
                 continue;
             }
+            let Some(level) = a.level_on(output) else {
+                continue;
+            };
             let (layer, fit, transform, color, fx, source) = match &a.kind {
-                ActiveKind::Video(v) if v.output == Some(output) => (
+                ActiveKind::Video(v) => (
                     v.layer,
                     v.fit,
                     v.transform,
@@ -3979,7 +4066,7 @@ impl Engine {
                     v.fx,
                     LayerSource::Video(&v.player),
                 ),
-                ActiveKind::Image(i) if i.output == Some(output) => match &i.image {
+                ActiveKind::Image(i) => match &i.image {
                     Some(img) => (
                         i.layer,
                         i.fit,
@@ -3991,7 +4078,7 @@ impl Engine {
                     None => continue,
                 },
                 // Mattes cover everything on the output.
-                ActiveKind::Matte(m) if m.output == Some(output) => (
+                ActiveKind::Matte(m) => (
                     i32::MAX,
                     Fit::Stretch,
                     LayerTransform::default(),
@@ -4005,7 +4092,7 @@ impl Engine {
                 layer,
                 LayerRef {
                     instance: a.instance,
-                    opacity: a.opacity.value.clamp(0.0, 1.0),
+                    opacity: a.opacity.value.clamp(0.0, 1.0) * level.clamp(0.0, 1.0),
                     fit,
                     transform,
                     color,
@@ -5314,10 +5401,9 @@ mod tests {
         // Two cuts on one tick: the first replaced the second's cue, and then the
         // second's entry runs with its cue gone.
         let gone = e.next_instance + 100;
-        e.apply_entry(gone, Some(out), EntryAction::Cut);
+        e.apply_entry(gone, EntryAction::Cut);
         e.apply_entry(
             gone,
-            Some(out),
             EntryAction::Crossfade {
                 time: 0.5,
                 curve: Curve::default(),

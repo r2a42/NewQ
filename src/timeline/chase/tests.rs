@@ -609,3 +609,62 @@ fn a_geometry_fade_starts_from_where_the_motion_keys_have_the_picture_by_the_clo
     assert_eq!(again.now.x, g.now.x);
     assert_eq!(again.now.y, g.now.y);
 }
+
+#[test]
+fn a_clip_on_two_displays_is_replaced_on_one_alone_and_passes_when_on_none() {
+    let mut t = T::new(false);
+    let (d1, d2) = (t.out(), t.show.add_display());
+    let shared = t.video(0.0, 30.0);
+    t.m(shared).also_on = vec![d2];
+    // On display 2 alone, crossfading in over 2 s at 1 s.
+    let b = t.video(1.0, 30.0);
+    t.m(b).output = Some(d2);
+    t.m(b).transition = Transition::Crossfade;
+    t.m(b).fade_in = 2.0;
+    let ch = t.chase(2.0);
+    let a = alive(&ch, shared).unwrap();
+    assert!(a.off.is_empty() && a.stop_after.is_none() && a.opacity.is_none());
+    assert_eq!(a.leaving.len(), 1);
+    let (o, (now, to, left, _)) = a.leaving[0];
+    assert!(o == d2 && (now - 0.5).abs() < 1e-6 && to == 0.0 && near(left, 1.0));
+    let a = alive(&t.chase(3.5), shared).unwrap().clone();
+    assert_eq!((a.off, a.leaving), (vec![d2], vec![]));
+    // A cut on display 1 too: on no display, it has passed.
+    let c = t.video(4.0, 30.0);
+    t.m(c).output = Some(d1);
+    let ch = t.chase(4.5);
+    assert!(passed(&ch, shared) && alive(&ch, b).is_some() && alive(&ch, c).is_some());
+    // A higher layer on display 2 changes nothing on it.
+    let mut t2 = T::new(false);
+    let d2 = t2.show.add_display();
+    let shared = t2.video(0.0, 30.0);
+    t2.m(shared).also_on = vec![d2];
+    let h = t2.video(1.0, 30.0);
+    t2.m(h).output = Some(d2);
+    t2.m(h).layer = 2;
+    let a = alive(&t2.chase(2.0), shared).unwrap().clone();
+    assert!(a.off.is_empty() && a.leaving.is_empty());
+}
+
+#[test]
+fn a_shared_clip_crossfaded_off_its_last_display_fades_its_sound_with_the_longer_fade() {
+    let mut t = T::new(false);
+    let (d1, d2) = (t.out(), t.show.add_display());
+    let shared = t.video(0.0, 30.0);
+    t.m(shared).also_on = vec![d2];
+    let b = t.video(1.0, 30.0);
+    t.m(b).output = Some(d2);
+    t.m(b).transition = Transition::Crossfade;
+    t.m(b).fade_in = 3.0;
+    let c = t.video(2.0, 30.0);
+    t.m(c).output = Some(d1);
+    t.m(c).transition = Transition::Crossfade;
+    t.m(c).fade_in = 1.0;
+    let a = alive(&t.chase(2.5), shared).unwrap().clone();
+    // Gone with display 2's fade, at 4 s.
+    assert!(a.stop_after.is_some_and(|s| near(s, 1.5)));
+    let (_, to, left, _) = a.volume_db.unwrap();
+    assert!(to == MIN_DB && near(left, 1.5));
+    assert_eq!(a.leaving.len(), 2);
+    assert!(passed(&t.chase(4.5), shared));
+}

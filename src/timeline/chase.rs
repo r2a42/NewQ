@@ -10,7 +10,10 @@
 //! - A picture coming in replaces the pictures on its display and layer (any
 //!   layer, for a show from before layers were kept apart; everything, for a
 //!   dip): a cut at once, a crossfade over its fade. Clips that start together
-//!   at 0 don't replace each other.
+//!   at 0 don't replace each other. A picture on several displays (`also_on`)
+//!   is replaced on the displays the one coming in is on, and only there: it
+//!   stays on the others, and is over once it is on none (`Alive::off`,
+//!   `Alive::leaving`). Its sound fades with its last display.
 //! - A clip is over at its start, lead-in and length (`Dur`, the content's).
 //!   A video that holds its last frame (with no fade-out) stays, on that frame.
 //! - Fade cues move the levels of what they reach from where they are; a stop
@@ -34,8 +37,8 @@
 use super::TimelineKey;
 use super::model::{self, Dur, LeadIn};
 use crate::show::{
-    ControlAction, Cue, CueId, CueKind, Curve, FadeCue, GeometryTarget, MIN_DB, MediaCue, Show,
-    StopCue, Transition,
+    ControlAction, Cue, CueId, CueKind, Curve, FadeCue, GeometryTarget, MIN_DB, MediaCue, OutputId,
+    Show, StopCue, Transition,
 };
 
 /// Times closer than this are the same time.
@@ -80,6 +83,11 @@ pub struct Alive {
     /// A fade-and-stop (a crossfade out, a fade cue that stops) in progress: it
     /// is gone this many seconds from now.
     pub stop_after: Option<f64>,
+    /// A picture on several displays: those it has been replaced on (it is no
+    /// longer drawn there), and those it is fading out of alone, with its level
+    /// there (1 to 0).
+    pub off: Vec<OutputId>,
+    pub leaving: Vec<(OutputId, Level)>,
 }
 
 /// A clip still to come: at a time, or (`at` None) waiting for a fade cue.
@@ -147,6 +155,16 @@ impl Track {
     }
 }
 
+/// A picture's state on one of its displays.
+#[derive(Clone, Copy, Debug)]
+struct Shown {
+    output: OutputId,
+    /// When it left this display alone (or will have, once its fade there ends).
+    gone: Option<f64>,
+    /// Its fade out of this display alone.
+    exit: Option<Track>,
+}
+
 /// One clip as the chase plays it.
 struct Clip<'a> {
     cue: &'a Cue,
@@ -175,9 +193,87 @@ struct Clip<'a> {
     frozen_since: Option<f64>,
     frozen_for: f64,
     detached: bool,
+    /// A picture's displays (its home first), each with its own state.
+    screens: Vec<Shown>,
 }
 
 impl Clip<'_> {
+    /// The displays it is drawn on at `t` (leaving some of them or not).
+    fn showing(&self, t: f64) -> Vec<OutputId> {
+        self.screens
+            .iter()
+            .filter(|s| s.gone.is_none_or(|g| g > t + SAME_TIME))
+            .map(|s| s.output)
+            .collect()
+    }
+
+    /// The displays it is fully on.
+    fn full(&self) -> Vec<OutputId> {
+        self.screens
+            .iter()
+            .filter(|s| s.gone.is_none())
+            .map(|s| s.output)
+            .collect()
+    }
+
+    /// A picture coming in on the displays `on` cuts it from those at `t`
+    /// (a cut, or a dip): off all of them, it is gone.
+    fn cut_from(&mut self, on: &[OutputId], t: f64) {
+        let showing = self.showing(t);
+        let hit = showing.iter().filter(|o| on.contains(o)).count();
+        if hit == 0 {
+            return;
+        }
+        if hit == showing.len() {
+            self.gone = Some(t);
+            return;
+        }
+        for s in &mut self.screens {
+            if on.contains(&s.output) && showing.contains(&s.output) {
+                s.gone = Some(t);
+                s.exit = None;
+            }
+        }
+        self.leave_sound(t, Curve::Linear);
+    }
+
+    /// A picture coming in on the displays `on` crossfades over it there:
+    /// off all of them, it fades out as any clip does; off some, it fades out
+    /// of those alone.
+    fn crossfade_from(&mut self, on: &[OutputId], t: f64, secs: f64, curve: Curve) {
+        let full = self.full();
+        let hit: Vec<OutputId> = full.iter().copied().filter(|o| on.contains(o)).collect();
+        if hit.is_empty() {
+            return;
+        }
+        let leaving = full.len() != self.showing(t).len();
+        if hit.len() == full.len() && !leaving {
+            self.fades_out(t, secs, curve);
+            return;
+        }
+        let secs = secs.max(0.0);
+        for s in &mut self.screens {
+            if hit.contains(&s.output) {
+                s.gone = Some(t + secs);
+                s.exit = (secs > 0.0).then(|| Track::new(1.0, 0.0, t, secs, curve));
+            }
+        }
+        self.leave_sound(t, curve);
+    }
+
+    /// No longer fully on any display, only leaving some: its sound fades with
+    /// the longest of those, and it is gone when they are done.
+    fn leave_sound(&mut self, t: f64, curve: Curve) {
+        if !self.full().is_empty() {
+            return;
+        }
+        let end = self.screens.iter().filter_map(|s| s.gone).fold(t, f64::max);
+        let o = self.opacity_at(t);
+        self.opacity = Some(Track::new(o, o, t, end - t, Curve::Linear));
+        self.volume = Some(Track::new(self.volume_at(t), MIN_DB, t, end - t, curve));
+        self.gone = Some(end);
+    }
+
     /// Its opacity at `t`: a ramp's, else the cue's own (with its keyframes).
     fn opacity_at(&self, t: f64) -> f32 {
         match self.opacity {
@@ -361,6 +457,18 @@ pub fn chase(show: &Show, key: TimelineKey, pos: f64, dur: Dur) -> Chase {
             frozen_since: None,
             frozen_for: 0.0,
             detached: false,
+            screens: if picture {
+                m.displays(show)
+                    .into_iter()
+                    .map(|output| Shown {
+                        output,
+                        gone: None,
+                        exit: None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         });
         if start + lead <= pos + SAME_TIME && entry <= pos + SAME_TIME {
             // One woken by a fade comes in just before that fade is applied.
@@ -519,6 +627,18 @@ pub fn chase(show: &Show, key: TimelineKey, pos: f64, dur: Dur) -> Chase {
             faded: c.faded,
             geometry,
             stop_after: c.gone.map(|g| g - pos),
+            off: c
+                .screens
+                .iter()
+                .filter(|s| s.gone.is_some_and(|g| g <= pos + SAME_TIME))
+                .map(|s| s.output)
+                .collect(),
+            leaving: c
+                .screens
+                .iter()
+                .filter(|s| s.gone.is_some_and(|g| g > pos + SAME_TIME))
+                .filter_map(|s| s.exit.map(|e| (s.output, e.level(pos))))
+                .collect(),
         });
     }
     out.upcoming.sort_by(|a, b| {
@@ -540,26 +660,29 @@ fn enter(show: &Show, clips: &mut [Clip], i: usize, t: f64, dur: Dur) {
     };
     let m = clips[i].m;
     if clips[i].picture {
-        let (output, layer, dip, top) = (m.output, m.layer, clips[i].dip, clips[i].at_top);
+        let (layer, dip, top) = (m.layer, clips[i].dip, clips[i].at_top);
+        // Its displays: what it replaces, it replaces on these alone.
+        let here: Vec<OutputId> = clips[i].screens.iter().map(|s| s.output).collect();
         let crossfade = (m.transition == Transition::Crossfade).then_some(m.fade_in.max(0.0));
         let cut = m.transition == Transition::Cut || crossfade == Some(0.0);
         for (j, o) in clips.iter_mut().enumerate() {
-            if j == i || !o.picture || !o.up_at(t) || o.m.output != output {
+            if j == i || !o.picture || !o.up_at(t) || !o.showing(t).iter().any(|d| here.contains(d))
+            {
                 continue;
             }
             let brothers = show.own_layers && top && o.at_top;
             if dip {
                 // A dip clears the display.
-                o.gone = Some(t);
+                o.cut_from(&here, t);
                 continue;
             }
             if brothers || (show.own_layers && o.m.layer != layer) {
                 continue;
             }
             if cut {
-                o.gone = Some(t);
+                o.cut_from(&here, t);
             } else if let Some(secs) = crossfade {
-                o.fades_out(t, secs, m.curve);
+                o.crossfade_from(&here, t, secs, m.curve);
             }
         }
     }

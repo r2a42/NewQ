@@ -322,6 +322,21 @@ pub(super) fn chase_levels(a: &mut ActiveCue, m: &MediaCue, ch: &Alive) {
         }
         a.live_transform = Some(lt);
     }
+    // A picture on several displays: off the ones it was replaced on, fading
+    // out of some alone.
+    for s in &mut a.screens {
+        if ch.off.contains(&s.output) {
+            s.gone = true;
+        } else if let Some(&(_, (now, to, left, curve))) =
+            ch.leaving.iter().find(|(o, _)| *o == s.output)
+        {
+            let mut exit = Param::new(now);
+            exit.ramp_to(to, left, curve);
+            let going = exit.ramping();
+            s.gone = !going && to <= 0.0;
+            s.exit = going.then_some(exit);
+        }
+    }
     if let Some(left) = ch.stop_after {
         if !a.opacity.ramping() {
             let v = a.opacity.value;
