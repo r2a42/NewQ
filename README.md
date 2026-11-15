@@ -1192,7 +1192,16 @@ are open in the classic interface they take its place.
   dragging its edge.
 - **Markers:** *+ Marker* adds one at the playhead. Drag its flag to move it,
   double-click it to rename it, right-click for *Add Pause cue here*, *Jump here*
-  and *Remove marker*.
+  and *Remove marker*. A flag's name is cut short ("…") where the next flag is
+  close, and hovering it shows it whole.
+- **The Cues track zoomed out:** each cue's name gets the room up to the next cue
+  and is cut short with "…" to fit, or left out where there is too little room (the
+  marker stays). Hover a cue's marker for its whole name, number, time and what it
+  does; the cue under the pointer and the picked ones show their names whole, on
+  top. Cues closer together than a marker's width (or at the very same time) are
+  one marker with a second one peeping out behind it and "×2" before the name: its
+  tooltip lists them all, and each click on it picks the next of them (zoom in to
+  part them, unless they are at the same time).
 - Right-click a clip for *Pause before this clip comes in*, *Pause before this clip
   fades out*, *Split at the playhead*, *Split here*, *Delete*, *Ripple delete*, its
   lanes, *Freeze clip* and *Resume clip*.

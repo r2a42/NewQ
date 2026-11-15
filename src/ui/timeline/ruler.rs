@@ -5,6 +5,11 @@ use super::tracks::{Ctx, Geo, LOOP, MARKER};
 use super::*;
 use egui::{Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 
+/// A marker's flag stops this short of the next; with no room for a name it
+/// is a tab this wide (or narrower, to stay clear of the next).
+const FLAG_GAP: f32 = 3.0;
+const FLAG_MIN_W: f32 = 8.0;
+
 /// The times to mark between screen x `left` and `right`: (time, a labelled one).
 pub(super) fn ticks(geo: Geo, left: f32, right: f32) -> Vec<(f64, bool)> {
     let (from, to) = (geo.t(left).max(0.0), geo.t(right));
@@ -121,30 +126,43 @@ pub(super) fn draw(
     // The markers' flags, on top of the ruler.
     let markers = model::settings(ctx.show, key).map_or(&[][..], |s| &s.markers[..]);
     let mut rects = Vec::new();
-    for m in markers {
-        let t = match st.timeline.drag_in(host) {
-            Some(Drag::Marker { id, to, .. }) if *id == m.id => *to,
-            _ => m.time,
-        };
-        let x = geo.x(t);
+    let at = |m: &crate::timeline::Marker| match st.timeline.drag_in(host) {
+        Some(Drag::Marker { id, to, .. }) if *id == m.id => *to,
+        _ => m.time,
+    };
+    let xs: Vec<f32> = markers.iter().map(|m| geo.x(at(m))).collect();
+    // The flag under the pointer is drawn again, whole, over its neighbours.
+    let mut whole: Option<(Rect, Color32, String)> = None;
+    for (i, m) in markers.iter().enumerate() {
+        let x = xs[i];
         let color = m.color.map_or(MARKER, |c| {
             let [r, g, b] = c.rgb();
             Color32::from_rgb(r, g, b)
         });
-        let galley = painter.layout_no_wrap(
-            m.name.clone(),
-            FontId::proportional(10.0),
-            Color32::from_rgb(20, 20, 20),
-        );
-        let flag =
-            Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(galley.size().x + 8.0, 13.0));
+        // As a cue's name on the Cues track: up to the next flag, cut short
+        // with "…", or no name at all where there is no room for one.
+        let next = xs
+            .iter()
+            .filter(|o| **o > x + 0.01)
+            .fold(f32::INFINITY, |a, b| a.min(*b));
+        let room = (next - FLAG_GAP).min(rect.right()) - x - 8.0;
+        let galley =
+            super::tracks::fitted(&painter, &m.name, 10.0, room, Color32::from_rgb(20, 20, 20));
+        let w = galley
+            .as_ref()
+            .map_or(FLAG_MIN_W.min((next - x - 1.0).max(3.0)), |g| {
+                g.size().x + 8.0
+            });
+        let flag = Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(w, 13.0));
         rects.push((m.id, flag));
         let hit = flag.intersect(rect);
         if hit.width() <= 0.0 {
             continue;
         }
         painter.rect_filled(flag, 2.0, color);
-        painter.galley(pos2(flag.left() + 4.0, flag.top()), galley, Color32::BLACK);
+        if let Some(galley) = galley {
+            painter.galley(pos2(flag.left() + 4.0, flag.top()), galley, Color32::BLACK);
+        }
         let sense = if ctx.editable {
             Sense::click_and_drag()
         } else {
@@ -157,6 +175,9 @@ pub(super) fn draw(
                 m.name,
                 fmt_time(m.time)
             ));
+        if r.hovered() || r.dragged() {
+            whole = Some((flag, color, m.name.clone()));
+        }
         if ctx.editable && r.drag_started() {
             // Where on the flag it was taken, so the marker doesn't jump to the pointer.
             let grab = ui
@@ -216,6 +237,13 @@ pub(super) fn draw(
                 ui.close();
             }
         });
+    }
+
+    if let Some((flag, color, name)) = whole {
+        let g = painter.layout_no_wrap(name, FontId::proportional(10.0), Color32::BLACK);
+        let full = Rect::from_min_size(flag.min, vec2(g.size().x + 8.0, 13.0));
+        painter.rect_filled(full, 2.0, color);
+        painter.galley(pos2(full.left() + 4.0, full.top()), g, Color32::BLACK);
     }
 
     // A marker's name being typed, over its flag.

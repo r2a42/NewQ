@@ -10,6 +10,11 @@ release page, and a release is refused if it has none.
   turn the page as the playhead nears the right-hand edge, and come back to it after a
   jump, a loop going back or a scroll away. Holding a drag keeps the view still until
   you let go; stopped or paused, the view stays where you put it.
+- **Tidier Cues track and marker flags when zoomed out.** Cue names no longer run over
+  each other: each is cut short to fit before the next cue, or left out, and hovering a
+  cue shows its whole name, number, time and what it does. The picked or hovered cue's
+  name is shown whole. Cues at the same time (or too close to tell apart) are one marker
+  marked "×2", and each click on it picks the next of them.
 
 ## 0.23.0
 

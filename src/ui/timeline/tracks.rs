@@ -53,6 +53,17 @@ const MIN_LEN: f64 = 0.05;
 /// How near, in points, a dragged time snaps.
 const SNAP_PX: f32 = 8.0;
 
+/// A cue that takes no time is a chip this wide on the Cues track, narrower
+/// when the next one is nearer (but never under `MIN_CHIP`); cues nearer to
+/// each other than `MIN_CHIP` are one chip (`chips`).
+const CHIP_W: f32 = 9.0;
+const MIN_CHIP: f32 = 4.0;
+/// The room a chip's name leaves before the next cue, and the least room
+/// worth a name (about four letters); with less, only the chip is drawn.
+const LABEL_GAP: f32 = 4.0;
+pub(super) const MIN_LABEL_W: f32 = 24.0;
+const LABEL_FONT: f32 = 11.0;
+
 pub(super) const PLAYHEAD: Color32 = Color32::from_rgb(235, 85, 70);
 pub(super) const MARKER: Color32 = Color32::from_rgb(232, 184, 48);
 const WARN: Color32 = Color32::from_rgb(240, 175, 60);
@@ -290,6 +301,192 @@ fn rows_height(ctx: &Ctx, open: &[(CueId, Lane)]) -> f32 {
         .iter()
         .map(|&t| row_h(t) + LANE_H * lanes_on(ctx, open, t).len() as f32)
         .sum()
+}
+
+/// How a cue that takes no time is drawn on the Cues track.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Chip {
+    /// A chip of `width`, for these cues (more than one when they are at the
+    /// same place or nearer than `MIN_CHIP`: drawn as one, a click picking
+    /// each in turn), its name allowed up to `limit` (screen x).
+    Lead {
+        members: Vec<CueId>,
+        width: f32,
+        limit: f32,
+    },
+    /// Drawn (and picked) as one of a `Lead`'s members.
+    Under,
+}
+
+/// The chips of the Cues track: each cue that takes no time, at screen x
+/// `left` (`(id, left, instant)`, clips that take time with `instant` false,
+/// in the clips' order), the row ending at `right`. A chip is narrowed to
+/// the next cue's place, and its name may reach just short of it.
+pub(super) fn chips(items: &[(CueId, f32, bool)], right: f32) -> Vec<(CueId, Chip)> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    // Stable: cues at one place keep the clips' order.
+    order.sort_by(|&a, &b| items[a].1.total_cmp(&items[b].1));
+    let mut leads: Vec<(usize, Vec<CueId>)> = Vec::new();
+    let mut out: Vec<(CueId, Chip)> = Vec::new();
+    for &i in &order {
+        let (id, left, instant) = items[i];
+        if !instant {
+            continue;
+        }
+        match leads.last_mut() {
+            Some((l, members)) if left - items[*l].1 < MIN_CHIP => {
+                members.push(id);
+                out.push((id, Chip::Under));
+            }
+            _ => leads.push((i, vec![id])),
+        }
+    }
+    for (l, members) in leads {
+        let (id, left, _) = items[l];
+        let next = items
+            .iter()
+            .filter(|(o, x, _)| !members.contains(o) && *x > left + 0.01)
+            .map(|(_, x, _)| *x)
+            .fold(f32::INFINITY, f32::min);
+        let width = (next - left).clamp(MIN_CHIP, CHIP_W);
+        let limit = (next - LABEL_GAP).min(right - 2.0);
+        out.push((
+            id,
+            Chip::Lead {
+                members,
+                width,
+                limit,
+            },
+        ));
+    }
+    out
+}
+
+/// A cue's name laid out to fit `room` points: whole if it fits, cut short
+/// with "…" if at least `MIN_LABEL_W` is there, else nothing.
+pub(super) fn fitted(
+    painter: &egui::Painter,
+    text: &str,
+    size: f32,
+    room: f32,
+    color: Color32,
+) -> Option<std::sync::Arc<egui::Galley>> {
+    let whole = painter.layout_no_wrap(text.to_string(), FontId::proportional(size), color);
+    if whole.size().x <= room {
+        return Some(whole);
+    }
+    if room < MIN_LABEL_W {
+        return None;
+    }
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_string(),
+        egui::TextFormat::simple(FontId::proportional(size), color),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    Some(painter.layout_job(job))
+}
+
+/// A chip's name, drawn after all the chips (`cue_labels`).
+struct CueLabel {
+    id: CueId,
+    /// Where it starts (left, middle) and the x it must stop short of.
+    at: egui::Pos2,
+    limit: f32,
+    text: String,
+    color: Color32,
+    /// Hovered or picked: drawn whole, on top, on a background.
+    whole: bool,
+}
+
+/// What the tests see of a chip's name: the cue, where it was drawn, the
+/// text shown, and whether it was drawn whole on top.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub struct LabelNote {
+    pub id: CueId,
+    pub rect: Rect,
+    pub text: String,
+    /// Cut short with "…".
+    pub cut: bool,
+    pub whole: bool,
+}
+
+/// The names beside the Cues track's chips, each in the room up to the next
+/// (cut short, or left out), then the hovered and picked ones whole on top.
+fn cue_labels(ui: &Ui, p: &egui::Painter, host: Host, labels: &[CueLabel]) {
+    #[cfg(test)]
+    let mut notes: Vec<LabelNote> = Vec::new();
+    #[cfg(not(test))]
+    let _ = host;
+    let bg = ui.visuals().extreme_bg_color;
+    let edge = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    for whole in [false, true] {
+        for l in labels.iter().filter(|l| l.whole == whole) {
+            let galley = if whole {
+                Some(p.layout_no_wrap(l.text.clone(), FontId::proportional(LABEL_FONT), l.color))
+            } else {
+                fitted(p, &l.text, LABEL_FONT, l.limit - l.at.x, l.color)
+            };
+            let Some(galley) = galley else {
+                continue;
+            };
+            let rect = egui::Align2::LEFT_CENTER.anchor_size(l.at, galley.size());
+            if whole {
+                let back = rect.expand2(vec2(3.0, 1.0));
+                p.rect_filled(back, 3.0, bg.gamma_multiply(0.94));
+                p.rect_stroke(back, 3.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+            }
+            #[cfg(test)]
+            notes.push(LabelNote {
+                id: l.id,
+                rect,
+                text: galley.text().to_string(),
+                cut: galley.elided,
+                whole,
+            });
+            #[cfg(not(test))]
+            let _ = l.id;
+            p.galley(rect.min, galley, l.color);
+        }
+    }
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_cue_labels", host)), notes));
+}
+
+/// A chip's tooltip: each of its cues' number, name, time and what it does.
+fn chip_tip(ctx: &Ctx, members: &[CueId]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for id in members {
+        let (Some(q), Some(c)) = (ctx.show.cue(*id), ctx.clips.iter().find(|c| c.id == *id)) else {
+            continue;
+        };
+        let mut s = format!(
+            "{} · {}\nAt {} · {}",
+            q.number,
+            c.name,
+            fmt_time(c.start),
+            c.ty.label()
+        );
+        if let CueKind::Control(k) = &q.kind {
+            let what = describe_control(ctx.show, q, k);
+            if !what.is_empty() {
+                s += &format!("\n{what}");
+            }
+            s += &format!("\n{}", k.description());
+        }
+        parts.push(s);
+    }
+    let mut s = if members.len() > 1 {
+        format!(
+            "{} cues here (zoom in to part them; a click picks each in turn):\n\n{}",
+            members.len(),
+            parts.join("\n\n")
+        )
+    } else {
+        parts.join("")
+    };
+    s += "\nDrag to move; right-click for more.";
+    s
 }
 
 /// Where a clip is drawn while a drag moves or trims it: (start, length, track).
@@ -548,11 +745,47 @@ pub(super) fn draw(
     #[cfg(test)]
     let mut fade_rects: Vec<(CueId, Edge, Rect)> = Vec::new();
     let drag_now = st.timeline.drag_in(ctx.host).cloned();
-    for c in ctx.clips {
-        let (start, len, track) = shown_at(drag_now.as_ref(), c);
+    // The Cues track's chips (cues that take no time), worked out together:
+    // each is narrowed to the next, and those at one place are one chip.
+    let chip_plan = {
+        let items: Vec<(CueId, f32, bool)> = ctx
+            .clips
+            .iter()
+            .filter_map(|c| {
+                let (start, len, track) = shown_at(drag_now.as_ref(), c);
+                (track == TrackId::Cues).then(|| (c.id, geo.x(start), instant(len)))
+            })
+            .collect();
+        chips(&items, lanes.right())
+    };
+    let mut labels: Vec<CueLabel> = Vec::new();
+    #[cfg(test)]
+    let mut chip_notes: Vec<(Vec<CueId>, Rect)> = Vec::new();
+    for lead in ctx.clips {
+        let (start, len, track) = shown_at(drag_now.as_ref(), lead);
         let Some((_, row)) = rows.iter().find(|(t, _)| *t == track) else {
             continue;
         };
+        let chip = chip_plan
+            .iter()
+            .find(|(id, _)| *id == lead.id)
+            .map(|(_, ch)| ch);
+        let (members, chip_w, limit) = match chip {
+            // Drawn and picked with the chip it is part of.
+            Some(Chip::Under) => continue,
+            Some(Chip::Lead {
+                members,
+                width,
+                limit,
+            }) => (members.clone(), Some(*width), *limit),
+            None => (vec![lead.id], None, 0.0),
+        };
+        // The cue a chip of several shows and acts on: the one picked, else the first.
+        let c = members
+            .iter()
+            .find(|id| picked.contains(id))
+            .and_then(|id| ctx.clips.iter().find(|k| k.id == *id))
+            .unwrap_or(lead);
         // Where it was, outlined, while it is moved somewhere else.
         if let Some(Drag::Clips { ids, .. }) = &drag_now
             && ids.contains(&c.id)
@@ -580,14 +813,34 @@ pub(super) fn draw(
         };
         let rect = Rect::from_min_max(
             pos2(left, row.top() + 3.0),
-            pos2(right.max(left + 9.0), row.bottom() - 3.0),
+            pos2(
+                right.max(left + chip_w.unwrap_or(CHIP_W)),
+                row.bottom() - 3.0,
+            ),
         );
-        clip_rects.push((c.id, rect));
+        for id in &members {
+            clip_rects.push((*id, rect));
+        }
+        #[cfg(test)]
+        if chip_w.is_some() {
+            chip_notes.push((members.clone(), rect));
+        }
         let hit = rect.intersect(lanes);
         if hit.width() <= 0.0 || hit.height() <= 0.0 {
             continue;
         }
         let selected = picked.contains(&c.id);
+        if members.len() > 1 {
+            // More than one here: a second chip peeps out from behind.
+            let behind = rect.translate(vec2(2.0, -2.0));
+            lane_painter.rect_filled(behind, 3.0, kind_color(ctx.show, c).gamma_multiply(0.6));
+            lane_painter.rect_stroke(
+                behind,
+                3.0,
+                Stroke::new(1.0, Color32::from_black_alpha(120)),
+                egui::StrokeKind::Inside,
+            );
+        }
         draw_clip(&lane_painter, ctx, engine, c, rect, geo, start, selected);
 
         let sense = if ctx.editable {
@@ -595,9 +848,31 @@ pub(super) fn draw(
         } else {
             Sense::click()
         };
-        let resp = ui.interact(hit, base.with(("clip", c.id.0)), sense);
+        let resp = ui.interact(hit, base.with(("clip", lead.id.0)), sense);
         if resp.clicked() {
-            actions.push(click_select(ui, c.id));
+            // A chip of several picks each in turn.
+            let target = match members.iter().position(|id| *id == c.id) {
+                Some(i) if members.len() > 1 && selected => members[(i + 1) % members.len()],
+                _ => c.id,
+            };
+            actions.push(click_select(ui, target));
+        }
+        if chip_w.is_some() {
+            let n = members.len();
+            let name = shown_name(c);
+            labels.push(CueLabel {
+                id: c.id,
+                at: pos2(rect.right() + 4.0, rect.center().y),
+                limit,
+                text: if n > 1 { format!("×{n} {name}") } else { name },
+                color: if c.armed {
+                    Color32::WHITE
+                } else {
+                    Color32::from_white_alpha(140)
+                }
+                .gamma_multiply(0.85),
+                whole: selected || resp.hovered(),
+            });
         }
         if ctx.editable && resp.drag_started() {
             // Dragging a clip of the selection takes the selection's clips with it.
@@ -635,7 +910,11 @@ pub(super) fn draw(
             ui.data_mut(|d| d.insert_temp(base.with(("menu_t", c.id.0)), t));
         }
         let menu_t: Option<f64> = ui.data(|d| d.get_temp(base.with(("menu_t", c.id.0))));
-        let resp = resp.on_hover_text(clip_tip(ctx, c));
+        let resp = resp.on_hover_text(if chip_w.is_some() {
+            chip_tip(ctx, &members)
+        } else {
+            clip_tip(ctx, c)
+        });
         resp.context_menu(|ui| menus::clip(ui, ctx, engine, c, &picked, menu_t, &open, actions));
 
         // The grips at its ends.
@@ -760,6 +1039,10 @@ pub(super) fn draw(
             }
         }
     }
+
+    cue_labels(ui, &lane_painter, ctx.host, &labels);
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_cue_chips", ctx.host)), chip_notes));
 
     // Ghosts: a clip on other displays shows, outlined, on the same layer's
     // track of each; clicking one picks the clip.
@@ -1101,6 +1384,20 @@ fn track_heads(
     );
 }
 
+/// Whether a clip of this length takes no time (a chip on the Cues track).
+fn instant(len: Option<f64>) -> bool {
+    len.is_some_and(|l| l <= 0.0)
+}
+
+/// A clip's name as drawn ("Control" for a control cue with none).
+fn shown_name(c: &Clip) -> String {
+    if c.ty == CueType::Control && c.name.is_empty() {
+        "Control".into()
+    } else {
+        c.name.clone()
+    }
+}
+
 /// One clip: its colour, label and badges, fades, lead-in, waveform and warnings.
 #[allow(clippy::too_many_arguments)]
 fn draw_clip(
@@ -1244,26 +1541,15 @@ fn draw_clip(
     } else {
         Color32::from_white_alpha(140)
     };
-    let mut name = c.name.clone();
-    if c.ty == CueType::Control && name.is_empty() {
-        name = "Control".into();
-    }
     // A cue that takes no time (a pause, a control or stop cue) is a narrow
-    // chip with its name beside it.
-    let instant = c.len.is_some_and(|l| l <= 0.0);
-    let name_rect = if instant {
-        p.text(
-            pos2(rect.right() + 4.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            FontId::proportional(11.0),
-            text.gamma_multiply(0.85),
-        )
+    // chip with its name beside it, drawn with the others' (`cue_labels`).
+    let name_rect = if instant(c.len) {
+        rect
     } else {
         inner.text(
             pos2(rect.left() + 5.0, rect.top() + 3.0),
             egui::Align2::LEFT_TOP,
-            name,
+            shown_name(c),
             FontId::proportional(11.0),
             text,
         )

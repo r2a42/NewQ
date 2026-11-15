@@ -2355,5 +2355,6 @@ fn on_a_narrow_pane_the_toolbar_takes_two_rows_and_no_button_is_cut_off() {
     assert!(r.ruler.top() >= at[3].bottom());
 }
 
+mod cue_row;
 mod follow;
 mod workspace;

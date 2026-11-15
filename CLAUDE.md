@@ -74,7 +74,10 @@ The README describes the features; this file is about working on the code.
   crossfade mark, a loop pause's section (`loop_sections`, shaded on the Cues track and the ruler) and the
   vertical-overflow bar (a lane just opened is scrolled into view,
   `EditorState::reveal`; fade handles only on the hovered or picked clip; a moving run's playhead is
-  kept in view by `tracks::follow`, page-follow, not while a drag or the scroll bar is held); `ruler.rs` ticks, markers,
+  kept in view by `tracks::follow`, page-follow, not while a drag or the scroll bar is held; the Cues
+  track's no-time cues are `tracks::chips`, narrowed to the next, those nearer than `MIN_CHIP` one chip
+  whose click picks each in turn, names `fitted` to the next and drawn whole on top when hovered or
+  picked, `cue_labels`; the ruler's flags are cut to the next the same way); `ruler.rs` ticks, markers,
   the playhead (a ruler tap or drag seeks on release; locked in show mode for a group); `toolbar.rs`
   transport and read-outs (`state_text` from `RunState` and `RunView.parked`; two rows under
   `ONE_ROW_W`; the state text comes last on its row so the buttons don't move); `control.rs` the
