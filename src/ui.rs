@@ -862,10 +862,11 @@ fn cue_label(c: &Cue) -> String {
 }
 
 /// What GO will do when that is not firing the next cue: carry a timeline on
-/// that waits for it, or the next slide (`Engine::go_plan`, which GO follows):
-/// what it does and, when known, what comes next on it.
-fn go_readout(show: &Show, engine: &Engine) -> Option<(String, Option<String>)> {
-    engine.go_plan(show).describe(show)
+/// that waits for it, run (or not) the timeline list being worked, or the next
+/// slide (`Engine::go_plan`, which GO follows): what it does and, when known,
+/// what comes next on it.
+fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<String>)> {
+    timeline::list_tab::go_readout(show, engine)
 }
 
 pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
@@ -1777,6 +1778,16 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 actions.push(Action::AddList);
             }
             if ui
+                .add_enabled(!st.show_mode, egui::Button::new("🎞 New timeline"))
+                .on_hover_text(
+                    "A cue list of the timeline type, in a tab of its own: its cues are clips \
+                     on tracks, on one clock, and GO runs it",
+                )
+                .clicked()
+            {
+                actions.push(Action::Timeline(timeline::TimelineAction::NewTimelineList));
+            }
+            if ui
                 .button(if st.layout.is_open(Pane::Cart) {
                     "Hide cart"
                 } else {
@@ -1895,7 +1906,13 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
     });
 }
 
-fn transport(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState, actions: &mut Vec<Action>) {
+fn transport(
+    ui: &mut Ui,
+    show: &Show,
+    engine: &mut Engine,
+    st: &UiState,
+    actions: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
         let go = egui::Button::new(
             RichText::new("GO")
@@ -1906,9 +1923,14 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState, actions: &
         .fill(GO_GREEN)
         .corner_radius(CornerRadius::same(8))
         .min_size(Vec2::new(150.0, 76.0));
+        let on_timeline = timeline::list_tab::active(show, engine).is_some();
         if ui
             .add(go)
-            .on_hover_text("Fire the cue at the playhead (Space)")
+            .on_hover_text(if on_timeline {
+                "Run the timeline, or carry it on from a pause (Space)"
+            } else {
+                "Fire the cue at the playhead (Space)"
+            })
             .clicked()
         {
             actions.push(Action::Go);
@@ -1927,6 +1949,13 @@ fn transport(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState, actions: &
             };
             ui.label(RichText::new(standing).small().weak());
             if let Some((what, then)) = go_readout(show, engine) {
+                #[cfg(test)]
+                ui.data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::new("transport_readout"),
+                        (what.clone(), then.clone()),
+                    )
+                });
                 ui.label(RichText::new(what).size(24.0).strong().color(PLAYHEAD));
                 if let Some(then) = then {
                     ui.label(RichText::new(then).italics());
@@ -2265,7 +2294,18 @@ fn cue_list_tabs(
         for (n, id) in show.list_ids().into_iter().enumerate() {
             let name = show.list_name(id);
             let here = engine.active_list == id;
-            let resp = ui.selectable_label(here, &name);
+            let is_timeline = timeline::list_tab::is_timeline_list(show, id);
+            let resp = if is_timeline {
+                ui.selectable_label(here, format!("🎞 {name}"))
+                    .on_hover_text("A timeline: its cues are clips on one clock")
+            } else {
+                ui.selectable_label(here, &name)
+            };
+            #[cfg(test)]
+            ui.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(u32, egui::Rect)>>(egui::Id::new("list_tabs"))
+                    .push((id, resp.rect))
+            });
             if resp.clicked() && !here {
                 actions.push(Action::SelectList(id));
             }
@@ -2284,6 +2324,36 @@ fn cue_list_tabs(
                     actions.push(Action::GoList(n as u32 + 1));
                     ui.close();
                 }
+                // The main list is never a timeline; another can become one
+                // (if it holds no groups) and go back.
+                if id != 0 {
+                    let (label, hover) = if is_timeline {
+                        (
+                            "Make it a plain cue list",
+                            "Its cues stay, with their pre-waits; GO fires them one by one again",
+                        )
+                    } else {
+                        (
+                            "Make this list a timeline",
+                            "Its cues become clips on one clock, each starting at its pre-wait; \
+                             GO runs it. A list with groups in it can't be one.",
+                        )
+                    };
+                    let r = ui
+                        .add_enabled(!st.show_mode, egui::Button::new(label))
+                        .on_hover_text(hover);
+                    #[cfg(test)]
+                    ui.data_mut(|d| d.insert_temp(egui::Id::new("list_tab_convert"), r.rect));
+                    if r.clicked() {
+                        actions.push(Action::Timeline(
+                            timeline::TimelineAction::SetListTimeline {
+                                list: id,
+                                on: !is_timeline,
+                            },
+                        ));
+                        ui.close();
+                    }
+                }
                 if id != 0
                     && ui
                         .add_enabled(!st.show_mode, egui::Button::new("Delete list and its cues"))
@@ -2294,13 +2364,30 @@ fn cue_list_tabs(
                 }
             });
         }
-        if ui
-            .add_enabled(!st.show_mode, egui::Button::new("+").small())
-            .on_hover_text("New cue list")
-            .clicked()
-        {
-            actions.push(Action::AddList);
-        }
+        ui.add_enabled_ui(!st.show_mode, |ui| {
+            let r = ui
+                .menu_button("+", |ui| {
+                    if ui.button("New cue list").clicked() {
+                        actions.push(Action::AddList);
+                        ui.close();
+                    }
+                    let r = ui
+                        .button("🎞 New timeline")
+                        .on_hover_text("A list whose cues are clips on tracks, on one clock");
+                    #[cfg(test)]
+                    ui.data_mut(|d| d.insert_temp(egui::Id::new("list_tab_new_timeline"), r.rect));
+                    if r.clicked() {
+                        actions.push(Action::Timeline(timeline::TimelineAction::NewTimelineList));
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text("New cue list or timeline");
+            #[cfg(test)]
+            ui.data_mut(|d| d.insert_temp(egui::Id::new("list_tab_plus"), r.rect));
+            #[cfg(not(test))]
+            let _ = r;
+        });
     });
 }
 
@@ -2324,7 +2411,13 @@ fn cue_list(
         return;
     }
     if !show.lists.is_empty() {
+        #[cfg(test)]
+        ui.data_mut(|d| d.remove::<Vec<(u32, egui::Rect)>>(egui::Id::new("list_tabs")));
         cue_list_tabs(ui, show, engine, st, actions);
+    }
+    // A timeline list: its tracks in place of the rows (unless its rows are asked for).
+    if timeline::list_tab::draw(ui, show, engine, st, actions) {
+        return;
     }
     // The search box: only the cues that match show.
     ui.horizontal(|ui| {
@@ -10074,6 +10167,11 @@ fn add_cue(
     ty: CueType,
     file: Option<PathBuf>,
 ) {
+    // On a timeline list: a clip at its playhead.
+    if let Some(key) = timeline::list_tab::active(show, engine) {
+        timeline::list_tab::add_clips(show, engine, st, key, vec![(ty, file)]);
+        return;
+    }
     let slot = show.insert_slot(st.selected, ty == CueType::Group, engine.active_list);
     let cue = show.make_cue(ty, file, slot.at);
     select_new(show, st, engine, slot.parent, cue.id);
@@ -10158,9 +10256,13 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     match action {
         Action::Timeline(a) => timeline::apply(a, show, engine, st),
         Action::Go => {
+            // On a timeline list the playhead means nothing: what is picked stays.
+            let on_timeline = timeline::list_tab::active(show, engine).is_some();
             engine.go(show);
-            st.selected = engine.playhead;
-            st.scroll_to_selected = true;
+            if !on_timeline {
+                st.selected = engine.playhead;
+                st.scroll_to_selected = true;
+            }
         }
         Action::Remote(button) => remote_button(button, show, engine, st),
         Action::Panic => engine.panic(show),
@@ -10195,6 +10297,13 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             if st.selected.is_some_and(|id| show.cue(id).is_none()) {
                 st.selected = engine.playhead;
             }
+        }
+        Action::MoveToList(id, list)
+            if show
+                .cue(show.top_id(id))
+                .is_some_and(|c| timeline::list_tab::refuses(show, list, c)) =>
+        {
+            engine.log(timeline::list_tab::NO_GROUPS);
         }
         Action::MoveToList(id, list) => {
             if let Some(i) = show.cue_index(id)
@@ -10256,6 +10365,12 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         },
         Action::AddCueFile(ty, file) => add_cue(show, st, engine, ty, Some(file)),
         Action::AskFile(purpose) => start_dialog(st, show, purpose),
+        // A slide show is a group: not on a timeline list.
+        Action::AskSlides(None) | Action::AskDeck(None)
+            if timeline::list_tab::active(show, engine).is_some() =>
+        {
+            engine.log(timeline::list_tab::NO_GROUPS);
+        }
         Action::AskSlides(group) => start_slide_dialog(st, group),
         Action::AskDeck(group) => start_deck_dialog(st, engine.active_list, group),
         Action::ImportSlides(group, (anchor, list), name, slides, advance) => {
@@ -10366,6 +10481,22 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::AddFiles(files) => {
+            // On a timeline list's tab: clips at its playhead, one after another.
+            if let Some(key) = timeline::list_tab::active(show, engine)
+                && !files
+                    .iter()
+                    .any(|f| f.extension().is_some_and(|e| e == SHOW_EXTENSION))
+            {
+                let mut cues = Vec::new();
+                for f in files {
+                    match guess_cue_type(&f) {
+                        Some(ty) => cues.push((ty, Some(f))),
+                        None => engine.log(format!("Unsupported file type: {}", f.display())),
+                    }
+                }
+                timeline::list_tab::add_clips(show, engine, st, key, cues);
+                return;
+            }
             for f in files {
                 if f.extension().is_some_and(|e| e == SHOW_EXTENSION) {
                     if confirm_discard(show, st) {
@@ -10421,6 +10552,15 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             let kept = !st.clipboard.is_empty();
             apply(Action::Delete, show, engine, st);
             st.clipboard_cut = kept;
+        }
+        Action::Paste
+            if timeline::list_tab::active(show, engine).is_some()
+                && st
+                    .clipboard
+                    .iter()
+                    .any(|c| matches!(c.kind, CueKind::Group(_))) =>
+        {
+            engine.log(timeline::list_tab::NO_GROUPS);
         }
         Action::Paste => {
             let copies = std::mem::take(&mut st.clipboard);
@@ -10889,6 +11029,13 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     select(show, st, engine, Some(id));
                 }
             }
+        }
+        Action::GroupCue(id)
+            if show
+                .cue(id)
+                .is_some_and(|c| timeline::list_tab::is_timeline_list(show, c.list)) =>
+        {
+            engine.log(timeline::list_tab::NO_GROUPS);
         }
         Action::GroupCue(id) => {
             // Several picked cues go into one new group.

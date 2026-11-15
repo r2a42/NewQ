@@ -1,8 +1,8 @@
 //! The timeline editor: one component (`editor`) with its toolbar, ruler,
 //! markers, tracks, clips and playhead, hosted as a pane (`pane`: the dock's
-//! Timeline pane, and the bottom panel of the new interface's Editor view), and
-//! later as a cue list's tab or a workspace; and the timeline rows of the
-//! inspector (`control`).
+//! Timeline pane, and the bottom panel of the new interface's Editor view), as
+//! a timeline list's tab (`list_tab`), and later as a workspace; and the
+//! timeline rows of the inspector (`control`).
 //!
 //! The editor never changes the show while it draws: what it is asked to do
 //! comes back as `TimelineAction`s, which `apply` makes after the frame. A drag
@@ -12,6 +12,7 @@
 mod control;
 mod keys;
 mod lanes;
+pub mod list_tab;
 mod menus;
 mod ruler;
 mod toolbar;
@@ -33,9 +34,9 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Host {
     Pane,
-    // A list's tab (P4) and the workspace (P7).
-    #[allow(dead_code)]
+    /// A timeline list's tab, in the cue list's place.
     ListTab,
+    // The workspace (P7).
     #[allow(dead_code)]
     Workspace,
 }
@@ -50,6 +51,8 @@ pub struct EditorState {
     pub pps: f32,
     pub scroll: Vec2,
     pub snap: bool,
+    /// A timeline list's tab shows its cue rows instead of its tracks.
+    pub list_rows: bool,
     /// Deleting a clip closes the gap it leaves on its track (the toolbar's
     /// Ripple; Shift+Delete ripples either way).
     pub ripple: bool,
@@ -89,6 +92,7 @@ impl Default for EditorState {
             scroll: Vec2::ZERO,
             // Snapping is what an editor is expected to do; Alt turns it off for a drag.
             snap: true,
+            list_rows: false,
             ripple: false,
             drag: None,
             renaming: None,
@@ -276,8 +280,11 @@ pub fn editor(
         },
         _ => run.pos,
     };
-    // What it shows stays when the selection moves off it.
-    st.timeline.pinned = Some(key);
+    // What it shows stays when the selection moves off it. (A list's tab
+    // shows its list, whatever the pane follows.)
+    if host != Host::ListTab {
+        st.timeline.pinned = Some(key);
+    }
     let ctx = tracks::Ctx {
         show,
         key,
@@ -324,6 +331,35 @@ pub fn pane(
     actions: &mut Vec<Action>,
 ) {
     match target(show, engine, st) {
+        // The list's own tab has its tracks already: say so rather than draw
+        // them twice.
+        Some(key)
+            if Some(key) == list_tab::active(show, engine)
+                && list_tab::shows_tracks(show, engine, st) =>
+        {
+            #[cfg(test)]
+            ui.data_mut(|d| d.insert_temp(egui::Id::new("timeline_in_tab"), true));
+            ui.add_space(8.0);
+            ui.label(format!(
+                "The tracks of {} are in its tab, in the cue list's place.",
+                timeline_name(show, key)
+            ));
+            ui.label(
+                RichText::new(
+                    "Pick \u{201c}Cue rows\u{201d} there to see its cues as rows, with the tracks here.",
+                )
+                .weak(),
+            );
+            // In the panes it would only take room from the cue list's tab.
+            if !st.prefs.new_layout
+                && ui
+                    .button("Close this pane")
+                    .on_hover_text("Window ▸ Timeline brings it back")
+                    .clicked()
+            {
+                actions.push(Action::Timeline(TimelineAction::Close));
+            }
+        }
         Some(key) => editor(ui, show, engine, st, key, Host::Pane, actions),
         None => empty_state(ui, st, actions),
     }
@@ -453,14 +489,15 @@ pub enum TimelineAction {
         id: CueId,
         rate: Animated,
     },
-    #[allow(dead_code)]
     NewTimelineList,
     NewTimelineGroup,
-    #[allow(dead_code)]
     SetListTimeline {
         list: u32,
         on: bool,
     },
+    /// Turn on the show's "a picture replaces only what is on its own layer"
+    /// (offered by a timeline list's tab, never done unasked).
+    UseOwnLayers,
     // transport (allowed in show mode)
     Run(TimelineKey),
     Pause(TimelineKey),
@@ -518,7 +555,8 @@ impl TimelineAction {
             | A::SetRate { .. }
             | A::NewTimelineList
             | A::NewTimelineGroup
-            | A::SetListTimeline { .. } => true,
+            | A::SetListTimeline { .. }
+            | A::UseOwnLayers => true,
             A::Run(_)
             | A::Pause(_)
             | A::Stop(_)
@@ -655,6 +693,16 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
             let n = show.lists.iter().filter(|l| l.timeline.is_some()).count() + 1;
             let id = edit::new_timeline_list(show, &format!("Timeline {n}"));
             super::apply(Action::SelectList(id), show, engine, st);
+            st.timeline.list_rows = false;
+            if !show.own_layers {
+                engine.log(
+                    "New timeline: this show replaces everything on a display; its tab offers \
+                     to keep pictures on their own layers",
+                );
+            }
+        }
+        A::NewTimelineGroup if list_tab::is_timeline_list(show, engine.active_list) => {
+            engine.log(list_tab::NO_GROUPS);
         }
         A::NewTimelineGroup => {
             let slot = show.insert_slot(st.selected, true, engine.active_list);
@@ -666,9 +714,17 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
             st.timeline.pinned = Some(TimelineKey::Group(id));
         }
         A::SetListTimeline { list, on } => {
-            if let Err(e) = edit::set_list_timeline(show, list, on) {
-                engine.log(e);
+            match edit::set_list_timeline(show, list, on) {
+                Ok(()) if on => st.timeline.list_rows = false,
+                Ok(()) => {}
+                Err(e) => engine.log(e),
             }
+            // A run of a list that is no longer a timeline is let go.
+            engine.sync_lists(show);
+        }
+        A::UseOwnLayers => {
+            show.own_layers = true;
+            engine.log("A picture now replaces only what is on its own layer of its display");
         }
         A::Run(key) => engine.timeline_run(show, key),
         // The editor's Pause holds everything (as the transport's Pause does)

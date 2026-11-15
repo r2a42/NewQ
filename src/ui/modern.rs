@@ -45,8 +45,12 @@ impl View {
 /// How wide the header's "what GO does next" read-out is.
 const HEADER_NEXT_WIDTH: f32 = 260.0;
 
-/// The cue GO would fire: the first armed one at or after the playhead.
+/// The cue GO would fire: the first armed one at or after the playhead. None
+/// on a timeline list, where GO runs the timeline and the playhead means nothing.
 fn next_cue<'a>(show: &'a Show, engine: &Engine) -> Option<&'a Cue> {
+    if timeline::list_tab::active(show, engine).is_some() {
+        return None;
+    }
     let at = engine.playhead.and_then(|id| show.cue_index(id))?;
     show.armed_top_from(at).map(|i| &show.cues[i])
 }
@@ -97,7 +101,13 @@ pub fn draw(
 }
 
 /// The strip across the top: the views, GO and what it will fire, Stop all.
-fn strip(ui: &mut Ui, show: &Show, engine: &Engine, st: &mut UiState, actions: &mut Vec<Action>) {
+fn strip(
+    ui: &mut Ui,
+    show: &Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
         if !st.settings_open() && st.modern_view != View::Operator {
             let go = egui::Button::new(
@@ -109,9 +119,14 @@ fn strip(ui: &mut Ui, show: &Show, engine: &Engine, st: &mut UiState, actions: &
             .fill(GO_GREEN)
             .corner_radius(CornerRadius::same(8))
             .min_size(Vec2::new(90.0, 44.0));
+            let on_timeline = timeline::list_tab::active(show, engine).is_some();
             if ui
                 .add(go)
-                .on_hover_text("Fire the cue at the playhead (Space)")
+                .on_hover_text(if on_timeline {
+                    "Run the timeline, or carry it on from a pause (Space)"
+                } else {
+                    "Fire the cue at the playhead (Space)"
+                })
                 .clicked()
             {
                 actions.push(Action::Go);
@@ -143,6 +158,8 @@ fn strip(ui: &mut Ui, show: &Show, engine: &Engine, st: &mut UiState, actions: &
                         "End of cue list".into(),
                     ),
                 };
+                #[cfg(test)]
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("strip_readout"), hover.clone()));
                 ui.add(egui::Label::new(text).truncate())
                     .on_hover_text(hover);
             });
@@ -307,6 +324,7 @@ fn operator(
                 if let Some(then) = then {
                     ui.label(RichText::new(then).size(18.0).italics());
                 }
+                timeline::list_tab::operator_state(ui, show, engine);
             }
             Some(c) => {
                 ui.label(
