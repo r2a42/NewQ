@@ -699,6 +699,90 @@ fn added(show: &Show, before: &[CueId]) -> Vec<crate::show::Cue> {
         .collect()
 }
 
+/// A file let go with the pointer at `at` (the pointer is there a frame first).
+fn drop_at(w: &mut Win, f: &mut Fixture, at: Pos2, file: &str) {
+    w.frame_with(
+        &mut f.show,
+        &mut f.st,
+        vec![Event::PointerMoved(at)],
+        vec![],
+    );
+    let d: DroppedFileHandle = std::sync::Arc::new(Dropped(file.into()));
+    w.frame_with(&mut f.show, &mut f.st, vec![], vec![d]);
+}
+
+#[test]
+fn a_file_dropped_on_a_track_of_the_tab_is_one_clip_where_it_was_let_go() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let key = TimelineKey::List(f.list);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    act(
+        Action::Timeline(TimelineAction::Seek { key, pos: 0.5 }),
+        &mut f,
+        &mut w,
+    );
+    act(
+        Action::Timeline(TimelineAction::AddTrack { key, picture: true }),
+        &mut f,
+        &mut w,
+    );
+    w.frame(&mut f.show, &mut f.st);
+    let r = w.rects(Host::ListTab).unwrap();
+    let (track, row) = *r
+        .tracks
+        .iter()
+        .find(|t| matches!(t.0, TrackId::Picture { .. }))
+        .expect("a picture track");
+    let before: Vec<CueId> = f.show.cues.iter().map(|c| c.id).collect();
+    drop_at(
+        &mut w,
+        &mut f,
+        pos2(r.x0 + 2.0 * r.pps, row.center().y),
+        "still.png",
+    );
+    let new = added(&f.show, &before);
+    assert_eq!(new.len(), 1, "one clip, not one from each");
+    assert!((new[0].pre_wait - 2.0).abs() < 0.1, "{}", new[0].pre_wait);
+    assert_eq!(model::track_of(&new[0]), track);
+    assert_eq!(new[0].list, f.list);
+}
+
+#[test]
+fn a_file_dropped_on_the_tab_off_the_tracks_is_one_clip_at_the_playhead() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let key = TimelineKey::List(f.list);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    act(
+        Action::Timeline(TimelineAction::Seek { key, pos: 0.5 }),
+        &mut f,
+        &mut w,
+    );
+    w.frame(&mut f.show, &mut f.st);
+    let r = w.rects(Host::ListTab).unwrap();
+    let before: Vec<CueId> = f.show.cues.iter().map(|c| c.id).collect();
+    // Over the ruler: not a track.
+    drop_at(&mut w, &mut f, r.ruler.center(), "still.png");
+    let new = added(&f.show, &before);
+    assert_eq!(new.len(), 1);
+    assert!((new[0].pre_wait - 0.5).abs() < 1e-6, "{}", new[0].pre_wait);
+    assert_eq!(new[0].list, f.list);
+}
+
+#[test]
+fn a_file_dropped_on_a_plain_cue_list_is_one_cue_in_it() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    w.frame(&mut f.show, &mut f.st);
+    let rows = w.get::<Vec<(CueId, Rect)>>("cue_rows").unwrap();
+    let before: Vec<CueId> = f.show.cues.iter().map(|c| c.id).collect();
+    drop_at(&mut w, &mut f, rows[0].1.center(), "still.png");
+    let new = added(&f.show, &before);
+    assert_eq!(new.len(), 1);
+    assert_eq!((new[0].list, new[0].parent), (0, None));
+}
+
 #[test]
 fn cues_pasted_or_moved_into_a_timeline_list_go_to_its_playhead() {
     let mut f = fixture();
