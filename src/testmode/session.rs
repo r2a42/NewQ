@@ -21,6 +21,8 @@ use crate::ui::{TestStash, UiState};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Everything Test Mode keeps (a field of the interface state).
@@ -216,16 +218,24 @@ pub fn memory_limit_mb(ram_mb: u64) -> u64 {
 /// Watches the memory of NewQ and of the FFmpeg processes it started: NewQ's
 /// own once a second, much more often than the log's rows (a runaway can fill
 /// the memory between two of those), and the children every few seconds (finding
-/// them means looking at every process, which costs more).
+/// them means looking at every process, which costs more). The looking is done
+/// on a thread of its own: on Windows, going through every process took up to
+/// 3 s at times, and done by the main loop that was the show stopping.
 pub(super) struct MemoryWatch {
-    sys: sysinfo::System,
-    me: sysinfo::Pid,
     limit_mb: u64,
     pub(super) ram_mb: u64,
-    last: Instant,
-    last_children: Instant,
-    children_mb: u64,
-    peak_mb: u64,
+    seen: Arc<MemorySeen>,
+    stop: Arc<AtomicBool>,
+}
+
+/// What the watching thread has seen, in MB.
+#[derive(Default)]
+struct MemorySeen {
+    own: AtomicU64,
+    children: AtomicU64,
+    peak: AtomicU64,
+    /// How many times it has looked at NewQ's own memory.
+    looks: AtomicU64,
 }
 
 impl MemoryWatch {
@@ -233,43 +243,75 @@ impl MemoryWatch {
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
         let ram_mb = sys.total_memory() >> 20;
+        let seen = Arc::new(MemorySeen::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (seen2, stop2) = (seen.clone(), stop.clone());
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let _ = std::thread::Builder::new()
+            .name("memory-watch".into())
+            .spawn(move || {
+                let mut n = 0u64;
+                while !stop2.load(Ordering::Relaxed) {
+                    if n.is_multiple_of(3) {
+                        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                        let children = sys
+                            .processes()
+                            .values()
+                            .filter(|p| p.thread_kind().is_none() && p.parent() == Some(me))
+                            .map(|p| p.memory() >> 20)
+                            .sum();
+                        seen2.children.store(children, Ordering::Relaxed);
+                    } else {
+                        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[me]), true);
+                    }
+                    if let Some(p) = sys.process(me) {
+                        let mb = p.memory() >> 20;
+                        seen2.own.store(mb, Ordering::Relaxed);
+                        seen2.peak.fetch_max(mb, Ordering::Relaxed);
+                        seen2.looks.fetch_add(1, Ordering::Release);
+                    }
+                    n += 1;
+                    for _ in 0..20 {
+                        if stop2.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            });
         MemoryWatch {
-            sys,
-            me: sysinfo::Pid::from_u32(std::process::id()),
             limit_mb: memory_limit_mb(ram_mb),
             ram_mb,
-            last: Instant::now(),
-            last_children: Instant::now(),
-            children_mb: 0,
-            peak_mb: 0,
+            seen,
+            stop,
         }
     }
 
-    /// The memory of NewQ and its children in MB, if it is over the limit.
-    pub(super) fn over(&mut self, now: Instant) -> Option<u64> {
-        if now.duration_since(self.last) < Duration::from_secs(1) {
+    /// The memory of NewQ and its children in MB, if it is over the limit, as
+    /// last seen. Never waits.
+    pub(super) fn over(&mut self, _now: Instant) -> Option<u64> {
+        if self.seen.looks.load(Ordering::Acquire) == 0 {
             return None;
         }
-        self.last = now;
-        if now.duration_since(self.last_children) >= Duration::from_secs(3) {
-            self.last_children = now;
-            self.sys
-                .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-            self.children_mb = self
-                .sys
-                .processes()
-                .values()
-                .filter(|p| p.thread_kind().is_none() && p.parent() == Some(self.me))
-                .map(|p| p.memory() >> 20)
-                .sum();
-        } else {
-            self.sys
-                .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.me]), true);
-        }
-        let mb = self.sys.process(self.me)?.memory() >> 20;
-        self.peak_mb = self.peak_mb.max(mb);
-        let total = mb + self.children_mb;
+        let total =
+            self.seen.own.load(Ordering::Relaxed) + self.seen.children.load(Ordering::Relaxed);
         (total > self.limit_mb).then_some(total)
+    }
+
+    /// The most NewQ's own memory has been, in MB.
+    pub(super) fn peak_mb(&self) -> u64 {
+        self.seen.peak.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn children_mb(&self) -> u64 {
+        self.seen.children.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for MemoryWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1387,7 +1429,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
         .map(|x| x.rss_mb)
         .max()
         .unwrap_or(0)
-        .max(run.memory.peak_mb);
+        .max(run.memory.peak_mb());
     if run.memory.ram_mb > 0 && peak * 4 > run.memory.ram_mb && !matches!(end, End::Failed(_)) {
         findings.push(Finding {
             severity: Severity::Problem,
@@ -2003,10 +2045,13 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(1500));
         let mut w = MemoryWatch::new();
-        let t = Instant::now();
         w.limit_mb = u64::MAX;
-        let _ = w.over(t + Duration::from_secs(4));
-        let counted = w.children_mb;
+        let t = Instant::now();
+        while w.children_mb() <= 5 && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(w.over(Instant::now()), None);
+        let counted = w.children_mb();
         let _ = child.kill();
         let _ = child.wait();
         assert!(
@@ -2016,14 +2061,18 @@ mod tests {
     }
 
     #[test]
-    fn a_memory_watch_looks_once_a_second_and_sees_its_own_process() {
+    fn a_memory_watch_looks_on_its_own_thread_and_sees_its_own_process() {
         let mut w = MemoryWatch::new();
         let t = Instant::now();
-        assert_eq!(w.over(t), None, "too soon to look again");
-        assert!(w.over(t + Duration::from_secs(2)).is_none() || w.limit_mb < 2048);
-        assert!(w.peak_mb > 0, "the process was found");
+        while w.peak_mb() == 0 && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(w.peak_mb() > 0, "the process was found");
+        assert!(w.over(Instant::now()).is_none() || w.limit_mb < 2048);
         w.limit_mb = 1;
-        assert!(w.over(t + Duration::from_secs(4)).is_some());
+        let began = Instant::now();
+        assert!(w.over(Instant::now()).is_some());
+        assert!(began.elapsed() < Duration::from_millis(20), "over() waited");
     }
 
     /// The comparison, offline: makes its 4K clip, plays both trials briefly,

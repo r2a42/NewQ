@@ -6,6 +6,11 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Test Mode no longer holds the show up while it measures.** Looking at NewQ's and
+  FFmpeg's memory and processor use is done on a thread of its own, and so is writing the
+  measurements file. On Windows that look sometimes took up to 3 seconds, and the show
+  (and its timing) stopped meanwhile: clips came up late and laps ran long because of the
+  test, not the show. The same goes for the Statistics window and `NEWQ_STATS`.
 - **A quieter log.** FFmpeg's "Referenced QT chapter track not found" (said each time a
   QuickTime file with a broken chapter list opens, harmless) is no longer logged as a warning,
   nor given as the reason if such a cue fails.

@@ -48,16 +48,73 @@ pub struct Sample {
 }
 
 pub struct StatsLog {
-    /// Where the rows are written; none for a sampler that only keeps the numbers.
-    file: Option<std::io::BufWriter<std::fs::File>>,
-    sys: System,
-    me: Pid,
+    /// Asks the sampling thread for a row.
+    jobs: Option<crossbeam_channel::Sender<Job>>,
+    /// Its rows, as they are finished.
+    rows: crossbeam_channel::Receiver<Sample>,
+    /// Set when the thread has written its last row and gone.
+    done: crossbeam_channel::Receiver<()>,
+    /// A row has been asked for and not yet come back.
+    asked: bool,
     every: Duration,
     started: Instant,
     last_row: Instant,
     last_frame: Instant,
     stall: Duration,
-    log_path: PathBuf,
+}
+
+/// What the main loop knew when it asked for a row.
+struct Job {
+    when: i64,
+    uptime: u64,
+    inputs: Inputs,
+    stall: u64,
+}
+
+/// What looking at the processes found: the slow part of a row, done on the
+/// sampling thread (on Windows, going through every process took up to 3 s at
+/// times in an hour's test, and the show stopped while the main loop did it).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Looked {
+    pub rss: u64,
+    pub cpu: f32,
+    pub commit: Option<u64>,
+    pub children: usize,
+    pub children_rss: u64,
+    pub children_cpu: f32,
+    pub open: Option<usize>,
+    pub threads: Option<usize>,
+    pub log_kb: u64,
+}
+
+/// Look at this process and its children (the FFmpegs), and the log's size.
+pub fn look(sys: &mut System, me: Pid, log_path: &Path) -> Looked {
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let mut l = Looked::default();
+    for (pid, p) in sys.processes() {
+        // On Linux each thread is listed as a process, with the whole
+        // process's memory: they are not children.
+        if p.thread_kind().is_some() {
+            continue;
+        }
+        if *pid == me {
+            l.rss = p.memory();
+            l.cpu = p.cpu_usage();
+            // Only Windows' figure means committed memory; elsewhere it is
+            // the whole address space, which says nothing.
+            if cfg!(windows) {
+                l.commit = Some(p.virtual_memory());
+            }
+        } else if p.parent() == Some(me) {
+            l.children += 1;
+            l.children_rss += p.memory();
+            l.children_cpu += p.cpu_usage();
+        }
+    }
+    l.log_kb = std::fs::metadata(log_path).map_or(0, |m| m.len() / 1024);
+    l.open = open_files();
+    l.threads = threads();
+    l
 }
 
 impl StatsLog {
@@ -92,18 +149,7 @@ impl StatsLog {
 
     /// A sampler that writes nothing: the statistics window's.
     pub fn in_memory(every: Duration, log_path: PathBuf) -> StatsLog {
-        let now = Instant::now();
-        StatsLog {
-            file: None,
-            sys: System::new(),
-            me: Pid::from_u32(std::process::id()),
-            every,
-            started: now,
-            last_row: now,
-            last_frame: now,
-            stall: Duration::ZERO,
-            log_path,
-        }
+        StatsLog::with(None, every, real_looker(log_path))
     }
 
     pub fn create(path: &Path, every: Duration, log_path: PathBuf) -> std::io::Result<StatsLog> {
@@ -118,94 +164,121 @@ impl StatsLog {
         let mut file = std::io::BufWriter::new(file);
         if new {
             writeln!(file, "{HEADER}")?;
+            file.flush()?;
         }
+        Ok(StatsLog::with(Some(file), every, real_looker(log_path)))
+    }
+
+    /// A log whose rows are measured by `looker` on a thread of its own, and
+    /// written there to `file` if there is one: the main loop only asks.
+    pub fn with(
+        file: Option<std::io::BufWriter<std::fs::File>>,
+        every: Duration,
+        mut looker: impl FnMut() -> Looked + Send + 'static,
+    ) -> StatsLog {
+        let (jobs, job_rx) = crossbeam_channel::unbounded::<Job>();
+        let (row_tx, rows) = crossbeam_channel::unbounded();
+        let (done_tx, done) = crossbeam_channel::bounded(1);
+        let mut file = file;
+        let _ = std::thread::Builder::new()
+            .name("stats-sampler".into())
+            .spawn(move || {
+                for job in job_rx {
+                    let l = looker();
+                    let sample = Sample {
+                        uptime_s: job.uptime,
+                        rss_mb: l.rss >> 20,
+                        cpu_pct: l.cpu,
+                        ffmpeg: l.children,
+                        ffmpeg_cpu_pct: l.children_cpu,
+                        ffmpeg_rss_mb: l.children_rss >> 20,
+                        fds: l.open,
+                        threads: l.threads,
+                        inputs: job.inputs,
+                        stall_ms: job.stall,
+                        gpu_mb: crate::gpu::gpu_allocated_mb(),
+                        commit_mb: l.commit.map(|c| c >> 20),
+                    };
+                    if let Some(f) = &mut file {
+                        let _ = writeln!(f, "{}", row_of(job.when, &sample, &l));
+                        let _ = f.flush();
+                    }
+                    if row_tx.send(sample).is_err() {
+                        break;
+                    }
+                }
+                let _ = done_tx.send(());
+            });
         let now = Instant::now();
-        Ok(StatsLog {
-            file: Some(file),
-            sys: System::new(),
-            me: Pid::from_u32(std::process::id()),
+        StatsLog {
+            jobs: Some(jobs),
+            rows,
+            done,
+            asked: false,
             every,
             started: now,
             last_row: now,
             last_frame: now,
             stall: Duration::ZERO,
-            log_path,
-        })
+        }
     }
 
-    /// Called each time round the main loop; writes a row when one is due.
-    /// Returns the row, if one was written.
+    /// Called each time round the main loop: asks for a row when one is due
+    /// and gives back a row that has been finished, if one has. Never waits.
     pub fn frame(&mut self, now: Instant, inputs: impl FnOnce() -> Inputs) -> Option<Sample> {
         self.stall = self.stall.max(now.duration_since(self.last_frame));
         self.last_frame = now;
-        if now.duration_since(self.last_row) < self.every {
-            return None;
+        // One row at a time: a slow look is not asked for again meanwhile.
+        if !self.asked
+            && now.duration_since(self.last_row) >= self.every
+            && let Some(jobs) = &self.jobs
+        {
+            self.last_row = now;
+            let job = Job {
+                when: unix_now(),
+                uptime: now.duration_since(self.started).as_secs(),
+                inputs: inputs(),
+                stall: self.stall.as_millis() as u64,
+            };
+            self.stall = Duration::ZERO;
+            self.asked = jobs.send(job).is_ok();
         }
-        self.last_row = now;
-        self.sys.refresh_processes(ProcessesToUpdate::All, true);
-        let (mut rss, mut cpu) = (0u64, 0.0f32);
-        let mut commit: Option<u64> = None;
-        let (mut n, mut f_rss, mut f_cpu) = (0usize, 0u64, 0.0f32);
-        for (pid, p) in self.sys.processes() {
-            // On Linux each thread is listed as a process, with the whole
-            // process's memory: they are not children.
-            if p.thread_kind().is_some() {
-                continue;
-            }
-            if *pid == self.me {
-                rss = p.memory();
-                cpu = p.cpu_usage();
-                // Only Windows' figure means committed memory; elsewhere it is
-                // the whole address space, which says nothing.
-                if cfg!(windows) {
-                    commit = Some(p.virtual_memory());
-                }
-            } else if p.parent() == Some(self.me) {
-                n += 1;
-                f_rss += p.memory();
-                f_cpu += p.cpu_usage();
-            }
+        let row = self.rows.try_recv().ok();
+        if row.is_some() {
+            self.asked = false;
         }
-        let log_kb = std::fs::metadata(&self.log_path).map_or(0, |m| m.len() / 1024);
-        let uptime = now.duration_since(self.started).as_secs();
-        let (open, thr) = (open_files(), threads());
-        let inputs = inputs();
-        let gpu_mb = crate::gpu::gpu_allocated_mb();
-        let stall = self.stall.as_millis() as u64;
-        let line = self.file.is_some().then(|| {
-            row(
-                unix_now(),
-                uptime,
-                [rss, f_rss],
-                [cpu, f_cpu],
-                n,
-                [open, thr],
-                inputs,
-                stall,
-                log_kb,
-                [gpu_mb, commit.map(|c| c >> 20)],
-            )
-        });
-        self.stall = Duration::ZERO;
-        if let (Some(file), Some(line)) = (&mut self.file, line) {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-        }
-        Some(Sample {
-            uptime_s: uptime,
-            rss_mb: rss >> 20,
-            cpu_pct: cpu,
-            ffmpeg: n,
-            ffmpeg_cpu_pct: f_cpu,
-            ffmpeg_rss_mb: f_rss >> 20,
-            fds: open,
-            threads: thr,
-            inputs,
-            stall_ms: stall,
-            gpu_mb,
-            commit_mb: commit.map(|c| c >> 20),
-        })
+        row
     }
+}
+
+impl Drop for StatsLog {
+    /// The last row asked for is written (a test's report reads the file),
+    /// waiting a moment for it at most.
+    fn drop(&mut self) {
+        self.jobs = None;
+        let _ = self.done.recv_timeout(Duration::from_secs(2));
+    }
+}
+
+fn real_looker(log_path: PathBuf) -> impl FnMut() -> Looked + Send + 'static {
+    let mut sys = System::new();
+    let me = Pid::from_u32(std::process::id());
+    move || look(&mut sys, me, &log_path)
+}
+
+fn row_of(when: i64, s: &Sample, l: &Looked) -> String {
+    row(
+        when,
+        s.uptime_s,
+        [l.rss, l.children_rss],
+        [l.cpu, l.children_cpu],
+        l.children,
+        [l.open, l.threads],
+        s.inputs,
+        s.stall_ms,
+        l.log_kb,
+        [s.gpu_mb, s.commit_mb],
+    )
 }
 
 fn unix_now() -> i64 {
@@ -605,11 +678,55 @@ mod tests {
         let mut log = StatsLog::in_memory(Duration::from_millis(50), PathBuf::from("none.log"));
         let t = Instant::now();
         assert!(log.frame(t, Inputs::default).is_none());
-        let s = log
-            .frame(t + Duration::from_millis(80), Inputs::default)
-            .expect("a sample once the interval has passed");
+        let s = wait_for_row(&mut log, t + Duration::from_millis(80));
         assert!(s.rss_mb > 0);
         assert!(s.stall_ms >= 80);
+    }
+
+    /// Frames from `t` on until a row comes back.
+    fn wait_for_row(log: &mut StatsLog, t: Instant) -> Sample {
+        let began = Instant::now();
+        loop {
+            if let Some(s) = log.frame(t + began.elapsed(), Inputs::default) {
+                return s;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "no row came back"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Looking at the processes can take seconds (Windows, in an hour's test):
+    /// the main loop must not wait for it.
+    #[test]
+    fn a_slow_look_at_the_processes_does_not_hold_up_the_frame() {
+        let mut log = StatsLog::with(None, Duration::from_millis(10), || {
+            std::thread::sleep(Duration::from_millis(600));
+            Looked {
+                rss: 7 << 20,
+                ..Looked::default()
+            }
+        });
+        let t0 = Instant::now();
+        let mut row = None;
+        let mut slowest = Duration::ZERO;
+        while row.is_none() && t0.elapsed() < Duration::from_secs(10) {
+            let began = Instant::now();
+            row = log.frame(Instant::now() + Duration::from_millis(20), Inputs::default);
+            slowest = slowest.max(began.elapsed());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(row.expect("the row came back").rss_mb, 7);
+        assert!(
+            t0.elapsed() >= Duration::from_millis(550),
+            "it was not slow"
+        );
+        assert!(
+            slowest < Duration::from_millis(100),
+            "a frame waited {slowest:?}"
+        );
     }
 
     #[test]
@@ -648,6 +765,7 @@ mod tests {
             playing: 4,
             ..Inputs::default()
         });
+        // Dropped with the row asked for and not back: it is written all the same.
         drop(log);
         // A second run appends without a second header.
         let mut again =

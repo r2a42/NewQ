@@ -273,7 +273,9 @@ The README describes the features; this file is about working on the code.
   the Short/Medium/Long shows from the user's show (keeping its outputs), `session.rs`
   runs one (`TestMode::update` each frame from `app.rs`; always restores via
   `UiState::begin_test/end_test`, writes the run folder, never lets autosave run while
-  `test_locked`), `analysis.rs` turns samples into findings (pure, tested; growth is judged on per-window
+  `test_locked`; nothing slow on the main thread: `MemoryWatch` looks on its own thread, `StatsLog` (also the
+  Statistics window's and `NEWQ_STATS`) asks its `stats-sampler` thread for a row and never waits, `StatsLog::with`
+  takes a stand-in `Looked`; a Windows hour had sysinfo's process list take up to 3 s), `analysis.rs` turns samples into findings (pure, tested; growth is judged on per-window
   peaks, middle third against last third by medians, so a warm-up step that levels off is only a
   `Severity::Watch` "tracking", which doesn't count against the verdict; `session::FindingLog`
   writes every finding the window shows, and when it goes, to `events.log` and the report), `decode.rs` is the
