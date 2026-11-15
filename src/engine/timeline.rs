@@ -633,6 +633,12 @@ impl Engine {
         out
     }
 
+    /// Where a timeline's clock is and what its run is doing, if it has a run:
+    /// a light look for Test Mode's notes (`timeline` works out more).
+    pub fn timeline_clock(&self, key: TimelineKey) -> Option<(RunState, f64)> {
+        self.runs.map.get(&key).map(|r| (r.state, r.pos))
+    }
+
     /// Whether what the run `instance` played is still fading out after a Stop.
     fn run_fading(&self, instance: u64) -> bool {
         let i = Some(instance);

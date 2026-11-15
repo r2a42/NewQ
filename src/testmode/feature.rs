@@ -303,6 +303,20 @@ pub enum Check {
     Recorded,
     /// The streaming server ran and the stream to it stayed up.
     Served,
+    /// The timeline's clock stood still between `from` and `to` (a pause held it).
+    ClockStill {
+        key: TimelineKey,
+        from: f64,
+        to: f64,
+    },
+    /// Its picture did not change between `from` and `to` (it was frozen there).
+    Frozen { cue: CueId, from: f64, to: f64 },
+    /// Its picture changed between `from` and `to` (it was live, or playing).
+    Live { cue: CueId, from: f64, to: f64 },
+    /// It never played at all in the part (a jump went past it).
+    Never { cue: CueId },
+    /// `b` started at least `secs` after `a` did.
+    Later { a: CueId, b: CueId, secs: f64 },
 }
 
 /// One part of the check: what it tries, what it does and what must be so.
@@ -1122,6 +1136,9 @@ pub fn build(original: &Show, media_files: &Media, hosting: Result<(), String>) 
         parts.push(p);
     }
 
+    // ----- Timelines -----
+    timeline_parts(&mut b, &mut parts, clip);
+
     // ----- Transitions -----
     {
         let a = b.cue(
@@ -1609,6 +1626,307 @@ pub fn build(original: &Show, media_files: &Media, hosting: Result<(), String>) 
     }
 }
 
+/// A text clip of the timeline group `g`, at `at` seconds on its clock, on
+/// `layer`, held `end` seconds (None: until something takes it off).
+fn timeline_text(
+    b: &mut Builder,
+    g: CueId,
+    name: &str,
+    at: f64,
+    end: Option<f64>,
+    layer: i32,
+) -> CueId {
+    b.cue(CueType::Text, None, name, Some(g), |c| {
+        c.pre_wait = at;
+        if let CueKind::Text(tc) = &mut c.kind {
+            tc.text = name.into();
+            tc.media.end = end;
+            tc.media.layer = layer;
+        }
+    })
+}
+
+/// A control cue at the top of the list doing `action` to the timeline `key`.
+fn timeline_control(
+    b: &mut Builder,
+    name: &str,
+    key: TimelineKey,
+    tweak: impl FnOnce(&mut ControlCue),
+) -> CueId {
+    b.cue(CueType::Control, None, name, None, |c| {
+        if let CueKind::Control(k) = &mut c.kind {
+            k.timeline = Some(key);
+            tweak(k);
+        }
+    })
+}
+
+/// The timeline parts: the four timeline actions (Run, Pause, Stop, Jump), a
+/// free-run pause and a freezing one (a live camera held with it), an overlap
+/// crossfade and one GO times, a clip waiting for its fade-in, and a seek to a
+/// marker. Each part's clock starts with a text at 0 on its timeline, so the
+/// timeline's clock and the part's keep together until a pause; the video and
+/// the camera are given time to start.
+fn timeline_parts(b: &mut Builder, parts: &mut Vec<Part>, clip: &Path) {
+    {
+        let g = b.cue(
+            CueType::Group,
+            None,
+            "Timeline: two tracks, a pause GO ends, a Stop that fades",
+            None,
+            |c| {
+                if let CueKind::Group(g) = &mut c.kind {
+                    g.mode = GroupMode::Timeline;
+                    g.timeline = Some(TimelineSettings::for_editor());
+                }
+            },
+        );
+        let key = TimelineKey::Group(g);
+        let a = timeline_text(b, g, "Timeline: first title", 0.0, Some(3.0), 0);
+        let v = b.cue(
+            CueType::Video,
+            Some(clip),
+            "Timeline: a clip round and round, on a track of its own",
+            Some(g),
+            |c| {
+                let m = media!(c);
+                m.layer = 1;
+                m.loop_media = true;
+                m.loop_count = 0;
+                m.volume_db = -24.0;
+                m.transform.scale_x = 0.5;
+                m.transform.scale_y = 0.5;
+                m.transform.x = 0.25;
+            },
+        );
+        // Comes in over the first while it is still up: they crossfade over the overlap.
+        let over = timeline_text(b, g, "Timeline: second title", 2.0, None, 0);
+        b.cue(
+            CueType::Control,
+            None,
+            "Timeline: a pause the content runs on through",
+            Some(g),
+            |c| {
+                c.pre_wait = 3.5;
+                if let CueKind::Control(k) = &mut c.kind {
+                    k.action = ControlAction::TimelinePause;
+                    k.freeze = PauseFreeze::Nothing;
+                }
+            },
+        );
+        // After the pause: GO brings it in, crossfading over the second title.
+        let after = b.cue(
+            CueType::Text,
+            None,
+            "Timeline: third title, after GO",
+            Some(g),
+            |c| {
+                c.pre_wait = 4.0;
+                if let CueKind::Text(tc) = &mut c.kind {
+                    tc.text = "after GO".into();
+                    tc.media.layer = 0;
+                    tc.media.transition = Transition::Crossfade;
+                    tc.media.fade_in = 1.0;
+                }
+            },
+        );
+        let run = timeline_control(b, "Timeline: run it", key, |k| {
+            k.action = ControlAction::TimelineRun;
+        });
+        // The Stop cue's own fade: the default, three seconds.
+        let stop = timeline_control(b, "Timeline: stop it, fading", key, |k| {
+            k.action = ControlAction::TimelineStop;
+        });
+        let mut p = Part::new(
+            "Timeline",
+            "runs clips on two tracks with an overlap crossfade, stands at a pause \
+             the clip plays on through until GO, crossfades on GO and fades out on Stop",
+            12.0,
+        );
+        p.lead = Some(a);
+        p.acts = vec![
+            (0.0, Act::Fire(run)),
+            (5.5, Act::Go),
+            (7.5, Act::Fire(stop)),
+        ];
+        p.checks = vec![
+            Check::Started { cue: v, by: 3.0 },
+            Check::Overlap { a, b: over },
+            Check::EndedBy { cue: a, by: 3.8 },
+            Check::Together {
+                cues: vec![over, v],
+            },
+            Check::ClockStill {
+                key,
+                from: 4.2,
+                to: 5.3,
+            },
+            Check::Live {
+                cue: v,
+                from: 4.2,
+                to: 5.3,
+            },
+            Check::IdleAt {
+                cue: after,
+                at: 5.3,
+            },
+            Check::Started {
+                cue: after,
+                by: 7.2,
+            },
+            Check::Overlap { a: over, b: after },
+            Check::EndedBy { cue: over, by: 8.0 },
+            // Still there 1.5 s into the Stop's fade, gone once it is over.
+            Check::NotBefore {
+                cue: after,
+                before: 9.0,
+            },
+            Check::EndedBy {
+                cue: after,
+                by: 11.5,
+            },
+            Check::EndedBy { cue: v, by: 11.5 },
+        ];
+        parts.push(p);
+    }
+    {
+        let g = b.cue(
+            CueType::Group,
+            None,
+            "Timeline: a camera held by a pause, and a jump",
+            None,
+            |c| {
+                if let CueKind::Group(g) = &mut c.kind {
+                    g.mode = GroupMode::Timeline;
+                    g.timeline = Some(TimelineSettings {
+                        markers: vec![crate::timeline::Marker {
+                            id: 1,
+                            time: 6.0,
+                            name: "Jump here".into(),
+                            color: None,
+                        }],
+                        ..TimelineSettings::for_editor()
+                    });
+                }
+            },
+        );
+        let key = TimelineKey::Group(g);
+        let lead = timeline_text(b, g, "Timeline: opening words", 0.0, Some(2.0), 1);
+        let cam = b.cue(
+            CueType::Camera,
+            None,
+            "Timeline: the test pattern, live",
+            Some(g),
+            |c| {
+                if let CueKind::Camera(cc) = &mut c.kind {
+                    cc.device = TEST_PATTERN_DEVICE.into();
+                    cc.media.layer = 0;
+                    cc.media.end = None;
+                }
+            },
+        );
+        b.cue(
+            CueType::Control,
+            None,
+            "Timeline: a pause that holds everything, the camera too",
+            Some(g),
+            |c| {
+                c.pre_wait = 3.0;
+                if let CueKind::Control(k) = &mut c.kind {
+                    k.action = ControlAction::TimelinePause;
+                    k.freeze = PauseFreeze::Everything;
+                    k.freeze_live = true;
+                }
+            },
+        );
+        // Between where the jump is made and where it goes: never reached.
+        let passed = timeline_text(b, g, "Timeline: jumped over", 4.5, Some(1.0), 1);
+        let there = timeline_text(b, g, "Timeline: where the jump lands", 6.2, None, 1);
+        // Starts with it but is unseen (opacity 0) for 0.8 s: it waits that
+        // long for its fade-in before its content starts.
+        let waits = b.cue(
+            CueType::Text,
+            None,
+            "Timeline: waits for its fade-in",
+            Some(g),
+            |c| {
+                c.pre_wait = 6.2;
+                if let CueKind::Text(tc) = &mut c.kind {
+                    tc.text = "fading in".into();
+                    tc.media.layer = 2;
+                    let mut rise = Animated::new(0.0);
+                    rise.set_key(0.0, 0.0);
+                    rise.set_key(0.8, 0.0);
+                    rise.set_key(1.3, 1.0);
+                    tc.media.motion.opacity = Some(rise);
+                }
+            },
+        );
+        let jump = timeline_control(b, "Timeline: jump to the marker", key, |k| {
+            k.action = ControlAction::TimelineJump;
+            k.at = Some(TimelinePoint::Marker(1));
+        });
+        let stop = timeline_control(b, "Timeline: stop it at once", key, |k| {
+            k.action = ControlAction::TimelineStop;
+            k.fade = Some(0.0);
+        });
+        let mut p = Part::new(
+            "Timeline",
+            "holds a live camera at a pause that freezes live inputs, lets it go live on GO, \
+             jumps to a marker past a clip, and waits a clip for its fade-in",
+            10.8,
+        );
+        p.lead = Some(lead);
+        p.acts = vec![
+            (0.0, Act::Fire(g)),
+            (4.8, Act::Go),
+            (5.5, Act::Fire(jump)),
+            (9.5, Act::Fire(stop)),
+        ];
+        p.checks = vec![
+            Check::Picture {
+                cue: cam,
+                opacity: 0.95,
+            },
+            Check::ClockStill {
+                key,
+                from: 3.4,
+                to: 4.4,
+            },
+            Check::Frozen {
+                cue: cam,
+                from: 3.4,
+                to: 4.4,
+            },
+            Check::Live {
+                cue: cam,
+                from: 5.0,
+                to: 5.4,
+            },
+            Check::Never { cue: passed },
+            Check::Started {
+                cue: there,
+                by: 8.5,
+            },
+            Check::Later {
+                a: there,
+                b: waits,
+                secs: 0.6,
+            },
+            Check::EndedBy {
+                cue: there,
+                by: 10.2,
+            },
+            Check::EndedBy {
+                cue: waits,
+                by: 10.2,
+            },
+            Check::EndedBy { cue: cam, by: 10.2 },
+        ];
+        parts.push(p);
+    }
+}
+
 /// Seconds between parts, for the last one's FFmpegs and fades to be gone.
 const GAP: f64 = 0.4;
 
@@ -1665,6 +1983,8 @@ pub struct Obs {
     pub disarmed: Vec<CueId>,
     /// The cues that were got ready ahead of time.
     pub ready: Vec<CueId>,
+    /// The timelines doing something, and where their clocks were.
+    pub clocks: Vec<(TimelineKey, f64)>,
 }
 
 /// Note what the engine is doing now.
@@ -1725,6 +2045,11 @@ pub fn observe(show: &Show, engine: &Engine, t: f64) -> Obs {
             .iter()
             .filter(|c| engine.is_prepared(c.id))
             .map(|c| c.id)
+            .collect(),
+        clocks: engine
+            .timelines()
+            .into_iter()
+            .filter_map(|k| engine.timeline_clock(k).map(|(_, pos)| (k, pos)))
             .collect(),
     }
 }
@@ -2124,7 +2449,91 @@ pub fn judge(check: &Check, obs: &[Obs], ctx: &Context, show: &Show) -> Verdict 
             .served
             .clone()
             .unwrap_or_else(|| NotChecked(NOT_LOOKED_AT.into())),
+        Check::ClockStill { key, from, to } => {
+            let clock = |t: f64| {
+                near(obs, t).and_then(|o| o.clocks.iter().find(|c| c.0 == *key).map(|c| c.1))
+            };
+            let what = timeline_label(show, *key);
+            match (clock(*from), clock(*to)) {
+                (Some(a), Some(b)) if (b - a).abs() < 0.05 => Ok(format!(
+                    "{what}'s clock stood at {a:.1} s from {from:.1} to {to:.1} s"
+                )),
+                (Some(a), Some(b)) => Failed(format!(
+                    "{what}'s clock went from {a:.1} to {b:.1} s while it should have stood"
+                )),
+                _ => Failed(format!(
+                    "{what} was not running from {from:.1} to {to:.1} s"
+                )),
+            }
+        }
+        Check::Frozen { cue, from, to } | Check::Live { cue, from, to } => {
+            let frame = |t: f64| {
+                near(obs, t)
+                    .and_then(|o| of(o, *cue))
+                    .filter(|c| c.layer.is_some())
+                    .map(|c| c.frame)
+            };
+            let (Some(a), Some(b)) = (frame(*from), frame(*to)) else {
+                return Failed(format!(
+                    "{} had no picture on its display from {from:.1} to {to:.1} s",
+                    name(show, *cue)
+                ));
+            };
+            match check {
+                Check::Frozen { .. } if a == b => Ok(format!(
+                    "{} held its picture from {from:.1} to {to:.1} s",
+                    name(show, *cue)
+                )),
+                Check::Frozen { .. } => Failed(format!(
+                    "{}'s picture changed from {from:.1} to {to:.1} s while it should have held",
+                    name(show, *cue)
+                )),
+                _ if a != b => Ok(format!(
+                    "{}'s picture was moving from {from:.1} to {to:.1} s",
+                    name(show, *cue)
+                )),
+                _ => Failed(format!(
+                    "{}'s picture did not change from {from:.1} to {to:.1} s",
+                    name(show, *cue)
+                )),
+            }
+        }
+        Check::Never { cue } => match obs.iter().find(|o| of(o, *cue).is_some()) {
+            None => Ok(format!("{} was never played", name(show, *cue))),
+            Some(o) => Failed(format!(
+                "{} was playing at {:.1} s, though it should have been passed over",
+                name(show, *cue),
+                o.t
+            )),
+        },
+        Check::Later { a, b, secs } => match (first_started(obs, *a), first_started(obs, *b)) {
+            (Some(ta), Some(tb)) if tb - ta >= *secs => Ok(format!(
+                "{} came {:.1} s after {}",
+                name(show, *b),
+                tb - ta,
+                name(show, *a)
+            )),
+            (Some(ta), Some(tb)) => Failed(format!(
+                "{} came only {:.1} s after {} (it should wait at least {secs:.1} s)",
+                name(show, *b),
+                tb - ta,
+                name(show, *a)
+            )),
+            _ => Failed(format!(
+                "{} and {} did not both play",
+                name(show, *a),
+                name(show, *b)
+            )),
+        },
     }
+}
+
+/// A timeline, for the report: its group's name, or its list's.
+fn timeline_label(show: &Show, key: TimelineKey) -> String {
+    format!(
+        "\u{201c}{}\u{201d}",
+        crate::timeline::model::name(show, key)
+    )
 }
 
 // ----- Running the parts -------------------------------------------------------------
@@ -3142,8 +3551,11 @@ mod tests {
             !has(&|k| matches!(k, CueKind::LiveAudio(_))),
             "no microphone is opened"
         );
-        // Every control action is used.
-        for action in ControlAction::ALL {
+        // Every control action is used, the timeline ones too.
+        for action in ControlAction::ALL
+            .into_iter()
+            .chain(ControlAction::TIMELINE)
+        {
             assert!(
                 has(&|k| matches!(k, CueKind::Control(c) if c.action == action)),
                 "{action:?}"
@@ -3415,6 +3827,216 @@ mod tests {
         assert_eq!((v.width, v.height), (640, 360), "the test pattern");
         assert!(clip.has_audio);
         assert_eq!(media.stills.len(), 3, "plain pictures for want of three");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_timelines_clock_frozen_and_live_pictures_and_cues_passed_over_are_judged() {
+        let key = TimelineKey::Group(CueId(9));
+        // A clock that runs to 1 s, stands until 2 s, then runs on; cue 1's
+        // picture changes until 1 s, holds until 2 s, then changes again.
+        let obs: Vec<Obs> = (0..150)
+            .map(|n| {
+                let t = f64::from(n) * 0.02;
+                let pos = if t < 1.0 {
+                    t
+                } else if t < 2.0 {
+                    1.0
+                } else {
+                    t - 1.0
+                };
+                let mut c = playing(1, t);
+                c.frame = (pos * 30.0) as u64 + 1;
+                let mut o = note(t, vec![c]);
+                o.clocks = vec![(key, pos)];
+                o
+            })
+            .collect();
+        let ctx = Context::default();
+        let still = |from, to| Check::ClockStill { key, from, to };
+        assert!(ok(&still(1.2, 1.8), &obs, &ctx));
+        assert!(failed(&still(0.2, 0.8), &obs, &ctx));
+        assert!(failed(&still(1.5, 2.5), &obs, &ctx));
+        // Another timeline was not running at all.
+        let other = Check::ClockStill {
+            key: TimelineKey::List(2),
+            from: 1.2,
+            to: 1.8,
+        };
+        assert!(failed(&other, &obs, &ctx));
+        let cue = CueId(1);
+        assert!(ok(
+            &Check::Frozen {
+                cue,
+                from: 1.2,
+                to: 1.8
+            },
+            &obs,
+            &ctx
+        ));
+        assert!(failed(
+            &Check::Frozen {
+                cue,
+                from: 0.2,
+                to: 0.8
+            },
+            &obs,
+            &ctx
+        ));
+        assert!(ok(
+            &Check::Live {
+                cue,
+                from: 2.2,
+                to: 2.6
+            },
+            &obs,
+            &ctx
+        ));
+        assert!(failed(
+            &Check::Live {
+                cue,
+                from: 1.2,
+                to: 1.8
+            },
+            &obs,
+            &ctx
+        ));
+        // No picture: neither frozen nor live.
+        let mut dark = obs.clone();
+        for o in &mut dark {
+            o.cues[0].layer = None;
+        }
+        assert!(failed(
+            &Check::Frozen {
+                cue,
+                from: 1.2,
+                to: 1.8
+            },
+            &dark,
+            &ctx
+        ));
+        assert!(failed(
+            &Check::Live {
+                cue,
+                from: 2.2,
+                to: 2.6
+            },
+            &dark,
+            &ctx
+        ));
+        // Passed over: never seen at all.
+        assert!(ok(&Check::Never { cue: CueId(2) }, &obs, &ctx));
+        assert!(failed(&Check::Never { cue }, &obs, &ctx));
+        // One starting a while after another.
+        let both: Vec<Obs> = (0..100)
+            .map(|n| {
+                let t = f64::from(n) * 0.02;
+                let mut cues = vec![playing(1, t)];
+                if t >= 0.9 {
+                    cues.push(playing(2, t - 0.9));
+                }
+                note(t, cues)
+            })
+            .collect();
+        let later = |secs| Check::Later {
+            a: CueId(1),
+            b: CueId(2),
+            secs,
+        };
+        assert!(ok(&later(0.6), &both, &ctx));
+        assert!(failed(&later(1.2), &both, &ctx));
+        assert!(failed(&later(0.0), &obs, &ctx), "the second never played");
+    }
+
+    #[test]
+    fn the_timeline_parts_use_every_timeline_action_on_timelines_that_exist() {
+        let plan = build(&Show::default(), &media_for_plan(), Err("no".into()));
+        let parts: Vec<&Part> = plan.parts.iter().filter(|p| p.kind == "Timeline").collect();
+        assert_eq!(parts.len(), 2);
+        for action in ControlAction::TIMELINE {
+            assert!(
+                plan.show.cues.iter().any(|c| matches!(&c.kind,
+                    CueKind::Control(k) if k.action == action)),
+                "{action:?}"
+            );
+        }
+        // Both kinds of pause, the freezing one holding live inputs too.
+        let pauses: Vec<&ControlCue> = plan
+            .show
+            .cues
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CueKind::Control(k) if k.action == ControlAction::TimelinePause => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert!(pauses.iter().any(|k| k.freeze == PauseFreeze::Nothing));
+        assert!(
+            pauses
+                .iter()
+                .any(|k| k.freeze == PauseFreeze::Everything && k.freeze_live)
+        );
+        for p in parts {
+            for check in &p.checks {
+                if let Check::ClockStill { key, .. } = check {
+                    assert!(crate::timeline::model::is_timeline(&plan.show, *key));
+                }
+            }
+            // The control cues name a timeline there is.
+            for (_, act) in &p.acts {
+                if let Act::Fire(id) = act
+                    && let Some(CueKind::Control(k)) = plan.show.cue(*id).map(|c| &c.kind)
+                {
+                    let key = k.timeline.expect("it names its timeline");
+                    assert!(crate::timeline::model::is_timeline(&plan.show, key));
+                }
+            }
+        }
+    }
+
+    /// The timeline parts played through an engine with the silent mixer, as
+    /// `newq --self-test` plays them (about 25 s).
+    #[test]
+    fn the_timeline_parts_pass_when_played_through_the_engine() {
+        use crate::media::audio::AudioOut;
+        let Some((ff, _)) = crate::media::test_media("tone_5s.wav") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("newq_timeline_check_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cancel = AtomicBool::new(false);
+        let media = make_media(&ff, &dir, &cancel, &Sources::default()).expect("the media is made");
+        let plan = build(&Show::default(), &media, Err("no server here".into()));
+        let parts: Vec<Part> = plan
+            .parts
+            .into_iter()
+            .filter(|p| p.kind == "Timeline")
+            .collect();
+        let show = plan.show;
+        let mut engine = Engine::new();
+        engine.ff = Some(ff);
+        engine.audio = AudioOut::silent();
+        let mut runner = Runner::new(parts, None, false);
+        let began = Instant::now();
+        let mut last = began;
+        loop {
+            let now = Instant::now();
+            let dt = now.duration_since(last).as_secs_f64();
+            last = now;
+            engine.tick(&show, dt);
+            let problems = engine.take_problems();
+            if runner.tick(&show, &mut engine, now, problems) {
+                break;
+            }
+            assert!(began.elapsed() < Duration::from_secs(120), "never finished");
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        engine.stop_all(0.0);
+        let text = account(&runner.results);
+        assert_eq!(runner.results.len(), 2, "{text}");
+        for r in &runner.results {
+            assert_eq!(r.outcome, Outcome::Passed, "{text}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
