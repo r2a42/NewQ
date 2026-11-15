@@ -653,6 +653,34 @@ impl ActiveCue {
         }
     }
 
+    /// What the active panels show of it: (how far in, how long). A timeline
+    /// clip whose end the clock keeps (`clocked`: a pause lies in it) and
+    /// which is set to hold its last frame or loop when its content runs out
+    /// (`RunOut::Hold`/`Loop`) lasts until the clock reaches its slot's end, so
+    /// it is shown on that clock: its place in its slot and the slot's length,
+    /// standing at a pause as its end does. One set to end (`RunOut::End`) ends
+    /// when its content does if that comes first (it runs on through a
+    /// free-run pause), so it is shown by its own time, as anything else is.
+    pub fn panel_times(&self, show: &Show) -> (f64, Option<f64>) {
+        if self.on_the_clock(show)
+            && let (Some(zero), Some(end)) = (self.clip_zero, self.ends_at)
+        {
+            return (self.clock_time, Some((end - zero).max(0.0)));
+        }
+        (self.elapsed, self.duration)
+    }
+
+    /// Whether the panels show it on its timeline's clock (`panel_times`).
+    pub fn on_the_clock(&self, show: &Show) -> bool {
+        self.clocked
+            && self.clip_zero.is_some()
+            && self.ends_at.is_some()
+            && show
+                .cue(self.cue_id)
+                .and_then(|c| c.kind.media())
+                .is_some_and(|m| m.run_out != crate::timeline::RunOut::End)
+    }
+
     /// Whether this is a loop that never ends, whose bar shows the pass.
     pub fn loops_forever(&self) -> bool {
         self.pass_len.is_some() && self.duration.is_none()

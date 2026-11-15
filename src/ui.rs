@@ -4047,12 +4047,14 @@ fn active_panel(
                 }
             });
         });
-        let mut text = match a.duration {
+        // A timeline clip whose end the clock keeps is shown on that clock.
+        let (elapsed, duration) = a.panel_times(show);
+        let mut text = match duration {
             Some(d) => format!(
                 "{} / {}  (-{})",
-                fmt_time(a.elapsed),
+                fmt_time(elapsed),
                 fmt_time(d),
-                fmt_time(d - a.elapsed)
+                fmt_time((d - elapsed).max(0.0))
             ),
             None => match (a.pass_len, a.pass_number()) {
                 // A loop that never ends: where it is in this pass.
@@ -4062,7 +4064,7 @@ fn active_panel(
                     fmt_time(len),
                     fmt_time(a.elapsed)
                 ),
-                _ => format!("{} / ∞", fmt_time(a.elapsed)),
+                _ => format!("{} / ∞", fmt_time(elapsed)),
             },
         };
         if !a.started {
@@ -4073,12 +4075,10 @@ fn active_panel(
             text.push_str("  fading out");
         }
         let fill = if a.stopping { PREWAIT } else { PLAYING };
-        match a.scrub_length(show) {
+        match a.scrub_length(show).filter(|_| !a.on_the_clock(show)) {
             Some(length) => progress_scrubber(ui, a, length, text, fill, &scrubbable, st, actions),
             None => {
-                let frac = a
-                    .duration
-                    .map_or(1.0, |d| (a.elapsed / d.max(1e-6)).clamp(0.0, 1.0));
+                let frac = duration.map_or(1.0, |d| (elapsed / d.max(1e-6)).clamp(0.0, 1.0));
                 ui.add(egui::ProgressBar::new(frac as f32).text(text).fill(fill));
             }
         }

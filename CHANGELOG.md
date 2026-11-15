@@ -18,6 +18,9 @@ release page, and a release is refused if it has none.
 - **A looping pause looks like one.** The section it plays again is shaded on the
   timeline's ruler and Cues track with an arrow back to its start, the cue is blue
   with 🔁, and its inspector says what a loop does instead of asking what it holds.
+- **Time left of a held timeline clip.** A clip set to hold its last frame or loop
+  until the timeline moves on shows, in the Active list and the Operator view, the
+  time left on the timeline's clock (standing still at a pause) rather than its own.
 - **Timelines from a remote.** OSC can run, pause, continue, stop (with the Stop
   cue's 3 s fade, or at once), jump to a time or a marker, and leave a loop on a
   timeline, named by its list's name or its group's cue number:

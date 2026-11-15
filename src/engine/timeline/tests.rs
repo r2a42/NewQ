@@ -3634,6 +3634,62 @@ fn a_loops_way_back_is_got_ready_and_comes_round_within_a_tick_or_two() {
     }
 }
 
+/// A clip across a pause that lets content run on, set to hold (or loop)
+/// when its content runs out, ends by the clock: the active panels show it on
+/// the clock, standing while the pause does (its own time runs on) and going
+/// on after GO. Set to end, it ends when its content does, so it is shown by
+/// its own time, as a clip off any timeline is.
+#[test]
+fn a_clip_that_lasts_until_the_clock_ends_it_is_shown_on_the_clock_in_the_panels() {
+    for run_out in [RunOut::Hold, RunOut::End] {
+        let mut show = Show::default();
+        let g = group(&mut show);
+        let mut c = faded_text(&mut show, 6.0, 0.0);
+        c.kind.media_mut().unwrap().run_out = run_out;
+        let bed = child(&mut show, g, c, 0.0);
+        let p = pause(&mut show, PauseFreeze::Nothing);
+        child(&mut show, g, p, 2.0);
+        let k = key(g);
+        let mut e = Engine::for_tests();
+        e.output_sizes.insert(show.outputs[0].id, (64, 36));
+        e.fire(&show, g);
+        run_while(&mut e, &show, k, 0.1, |e| {
+            !matches!(view(e, &show, k).state, RunState::Paused { .. })
+        });
+        for _ in 0..10 {
+            e.tick(&show, 0.1);
+        }
+        let a = active(&e, bed).unwrap();
+        assert!(a.elapsed > 2.9, "its own time runs on: {}", a.elapsed);
+        if run_out == RunOut::Hold {
+            assert!(a.on_the_clock(&show));
+            assert_eq!(a.panel_times(&show), (2.0, Some(6.0)), "the panel stands");
+            e.go(&show);
+            run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 3.0);
+            let (at, _) = active(&e, bed).unwrap().panel_times(&show);
+            assert!((at - 3.0).abs() < 0.11, "{at}");
+        } else {
+            assert!(!a.on_the_clock(&show));
+            assert_eq!(a.panel_times(&show), (a.elapsed, a.duration));
+        }
+    }
+    // A clip off any timeline: its own times.
+    let mut show = Show::default();
+    let c = faded_text(&mut show, 2.0, 0.0);
+    let alone = top(&mut show, c, 0, 0.0);
+    let mut e = Engine::for_tests();
+    e.fire(&show, alone);
+    let t0 = Instant::now();
+    while active(&e, alone).is_none_or(|a| a.elapsed < 0.5) {
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(1));
+        e.tick(&show, 0.05);
+    }
+    let a = active(&e, alone).unwrap();
+    assert!(!a.on_the_clock(&show));
+    assert_eq!(a.panel_times(&show), (a.elapsed, a.duration));
+}
+
 /// The active panel's numbers (`elapsed`, and what is left of `duration`)
 /// and its bar follow the clip's place on the clock after a loop goes back,
 /// as they do before it: a clip from 0 s at clock 2.5 s says 0:02.5.

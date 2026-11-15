@@ -421,10 +421,12 @@ fn running(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>)
             .cue(a.cue_id)
             .map(cue_label)
             .unwrap_or_else(|| "(deleted cue)".into());
-        let (shown, frac) = match a.duration {
+        // Time left (a timeline clip whose end the clock keeps: on that clock).
+        let (elapsed, duration) = a.panel_times(show);
+        let (shown, frac) = match duration {
             Some(d) => (
-                fmt_time((d - a.elapsed).max(0.0)),
-                (a.elapsed / d.max(1e-6)).clamp(0.0, 1.0),
+                fmt_time((d - elapsed).max(0.0)),
+                (elapsed / d.max(1e-6)).clamp(0.0, 1.0),
             ),
             None => (
                 "∞".to_string(),
