@@ -181,6 +181,8 @@ pub(super) fn draw(
         // cut short rather than wrapped onto a row of its own.
         ui.separator();
         let state = state_text(ctx.run, ctx.pos);
+        #[cfg(test)]
+        ui.data_mut(|d| d.insert_temp(egui::Id::new(("timeline_state", host)), state.clone()));
         ui.add(egui::Label::new(RichText::new(&state).weak()).truncate())
             .on_hover_text(state);
         if matches!(ctx.run.state, RunState::Paused { .. })

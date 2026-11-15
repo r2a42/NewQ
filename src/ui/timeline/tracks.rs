@@ -1167,6 +1167,15 @@ fn draw_clip(
         badges.push("∞".into());
     }
     let badges = badges.join(" ");
+    // For the tests: what the clip says of itself (badges, then its notes).
+    #[cfg(test)]
+    p.ctx().data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(CueId, String)>>(egui::Id::new((
+            "timeline_clip_text",
+            ctx.host,
+        )))
+        .push((c.id, format!("{badges} | {}", notes.join(" · "))))
+    });
     if !badges.is_empty() {
         inner.text(
             pos2(x, rect.top() + 3.0),

@@ -3627,3 +3627,100 @@ fn go_on_a_timeline_list_that_loops_finishes_the_pass() {
     assert_eq!(jumps_back(&seen), 0);
     assert!(view(&mut e, &show, k).looping.is_none());
 }
+
+// ----- What GO says on a timeline list, in each state (I2) ----------------------
+
+#[test]
+fn go_plan_reads_out_a_timeline_list_in_each_state_and_does_nothing_at_its_end() {
+    use crate::engine::TimelineGo;
+    let mut show = Show::default();
+    let l = timeline_list(&mut show);
+    let c = faded_text(&mut show, 6.0, 0.0);
+    let bed = top(&mut show, c, l, 0.0);
+    let p = pause(&mut show, PauseFreeze::Nothing);
+    top(&mut show, p, l, 1.0);
+    let lp = loop_pause(&mut show, TimelinePoint::Time(2.0), false);
+    top(&mut show, lp, l, 3.0);
+    let k = TimelineKey::List(l);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    e.active_list = l;
+    // Stopped, never run.
+    let (does, text) = said(&e, &show);
+    assert_eq!(does, Some(TimelineGo::Start), "{text}");
+    assert!(text.starts_with("Run Timeline"), "{text}");
+    // Running.
+    e.go(&show);
+    e.tick(&show, 0.0);
+    let (does, text) = said(&e, &show);
+    assert_eq!(does, Some(TimelineGo::Running), "{text}");
+    assert!(
+        text.contains("is running") && text.contains("does nothing"),
+        "{text}"
+    );
+    // At the pause.
+    run_while(&mut e, &show, k, 0.1, |e| {
+        !matches!(view(e, &show, k).state, RunState::Paused { .. })
+    });
+    let (does, text) = said(&e, &show);
+    assert_eq!(does, Some(TimelineGo::Resume), "{text}");
+    assert!(text.starts_with("Continue Timeline"), "{text}");
+    // Looping.
+    e.go(&show);
+    rounds(&mut e, &show, k, 1);
+    let (does, text) = said(&e, &show);
+    assert_eq!(
+        does,
+        Some(TimelineGo::LeaveLoop { at_once: false }),
+        "{text}"
+    );
+    assert!(text.starts_with("Finish this pass"), "{text}");
+    // Parked by a seek of the stopped timeline.
+    e.timeline_stop(&show, k, 0.0);
+    e.timeline_seek(&show, k, 0.5, true);
+    e.tick(&show, 0.0);
+    let (does, text) = said(&e, &show);
+    assert_eq!(does, Some(TimelineGo::Play), "{text}");
+    assert!(text.contains("from its playhead"), "{text}");
+    // Stopping (a Stop's fade): GO runs it again from where it stands.
+    e.timeline_run(&show, k);
+    run_while(&mut e, &show, k, 0.05, |e| {
+        view(e, &show, k).state != RunState::Running
+    });
+    e.timeline_stop(&show, k, 2.0);
+    assert!(view(&mut e, &show, k).fading);
+    let (does, text) = said(&e, &show);
+    assert_eq!(does, Some(TimelineGo::Start), "{text}");
+    // Played to its end: a seek past the loop, then run out.
+    e.timeline_stop(&show, k, 0.0);
+    e.timeline_seek(&show, k, 3.5, true);
+    e.timeline_run(&show, k);
+    run_while(&mut e, &show, k, 0.1, |e| {
+        view(e, &show, k).state != RunState::Stopped
+    });
+    assert!(active(&e, bed).is_none());
+    assert!(view(&mut e, &show, k).at_end);
+    let (does, text) = said(&e, &show);
+    assert_eq!(does, Some(TimelineGo::AtEnd), "{text}");
+    assert!(
+        text.contains("is at its end") && text.contains("does nothing"),
+        "{text}"
+    );
+    e.go(&show);
+    assert_eq!(state(&mut e, &show, k), RunState::Stopped, "GO did nothing");
+    // A clip added after the playhead: it can run again.
+    let late = super::tests::text(&mut show, Some(1.0));
+    top(&mut show, late, l, 9.0);
+    assert_eq!(said(&e, &show).0, Some(TimelineGo::Start));
+}
+
+/// What GO does and the words for it (`GoPlan::describe`, the web remote's too).
+fn said(e: &Engine, show: &Show) -> (Option<crate::engine::TimelineGo>, String) {
+    let plan = e.go_plan(show);
+    let does = match plan {
+        crate::engine::GoPlan::Timeline { does, .. } => Some(does),
+        _ => None,
+    };
+    let (what, then) = plan.describe(show).unwrap();
+    (does, format!("{what} / {}", then.unwrap_or_default()))
+}

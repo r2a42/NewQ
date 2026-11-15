@@ -820,3 +820,256 @@ fn cues_pasted_or_moved_into_a_timeline_list_go_to_its_playhead() {
     act(Action::MoveToList(y, plain), &mut f, &mut w);
     assert_eq!(f.show.cue(y).unwrap().pre_wait, 24.0);
 }
+
+// ----- The tab with the editor's tools, marks and displays (I2's cross tests) -----
+
+/// A text clip on the list `list` at `at`, held `secs`, on layer `layer`.
+fn text_clip(show: &mut Show, list: u32, at: f64, secs: f64, layer: i32) -> CueId {
+    let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+    c.list = list;
+    c.pre_wait = at;
+    if let Some(m) = c.kind.media_mut() {
+        m.end = Some(secs);
+        m.layer = layer;
+        m.fade_in = 0.0;
+        m.fade_out = 0.0;
+    }
+    let id = c.id;
+    show.cues.push(c);
+    show.normalize_lists();
+    id
+}
+
+impl Win {
+    fn keys(&mut self, show: &mut Show, st: &mut UiState, key: egui::Key, mods: egui::Modifiers) {
+        let ev = |pressed| Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: mods,
+        };
+        self.frame_with(
+            show,
+            st,
+            vec![Event::ModifiersChanged(mods), ev(true), ev(false)],
+            vec![],
+        );
+        self.frame_with(
+            show,
+            st,
+            vec![Event::ModifiersChanged(egui::Modifiers::NONE)],
+            vec![],
+        );
+    }
+
+    fn clip_rect(&mut self, show: &mut Show, st: &mut UiState, id: CueId) -> Rect {
+        self.frame(show, st);
+        let r = self.rects(Host::ListTab).expect("the tab draws the tracks");
+        r.clips
+            .iter()
+            .find(|c| c.0 == id)
+            .expect("the clip is drawn")
+            .1
+    }
+
+    fn button(&self, name: &str) -> Rect {
+        self.get_host::<Vec<(&'static str, Rect)>>("timeline_buttons")
+            .unwrap_or_default()
+            .into_iter()
+            .find(|b| b.0 == name)
+            .unwrap_or_else(|| panic!("no {name} button"))
+            .1
+    }
+
+    fn get_host<T: Clone + Send + Sync + 'static>(&self, name: &'static str) -> Option<T> {
+        self.ctx
+            .data(|d| d.get_temp::<T>(egui::Id::new((name, Host::ListTab))))
+    }
+
+    /// The clips' own words (badges | notes), drawn in a fresh frame.
+    fn clip_text(&mut self, show: &mut Show, st: &mut UiState, id: CueId) -> String {
+        self.ctx.data_mut(|d| {
+            d.remove::<Vec<(CueId, String)>>(egui::Id::new(("timeline_clip_text", Host::ListTab)))
+        });
+        self.frame(show, st);
+        self.get_host::<Vec<(CueId, String)>>("timeline_clip_text")
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|c| c.0 == id)
+            .map(|c| c.1)
+            .unwrap_or_default()
+    }
+}
+
+#[test]
+fn the_tab_splits_ripple_deletes_adds_clips_and_opens_lanes() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let key = TimelineKey::List(f.list);
+    let a = text_clip(&mut f.show, f.list, 0.0, 4.0, 3);
+    let b = text_clip(&mut f.show, f.list, 6.0, 4.0, 3);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    act(
+        Action::Timeline(TimelineAction::Seek { key, pos: 2.0 }),
+        &mut f,
+        &mut w,
+    );
+    // Split: pick A, Ctrl+K.
+    let r = w.clip_rect(&mut f.show, &mut f.st, a);
+    w.click(&mut f.show, &mut f.st, r.center());
+    assert_eq!(f.st.selected, Some(a));
+    let n = model::members(&f.show, key).len();
+    w.keys(
+        &mut f.show,
+        &mut f.st,
+        egui::Key::K,
+        egui::Modifiers::COMMAND,
+    );
+    assert_eq!(model::members(&f.show, key).len(), n + 1, "split in two");
+    assert_eq!(f.show.cue(a).unwrap().kind.media().unwrap().end, Some(2.0));
+    // Ripple delete of A's first half: B comes up by 2 s.
+    let r = w.clip_rect(&mut f.show, &mut f.st, a);
+    w.click(&mut f.show, &mut f.st, r.center());
+    w.keys(
+        &mut f.show,
+        &mut f.st,
+        egui::Key::Delete,
+        egui::Modifiers::SHIFT,
+    );
+    assert!(f.show.cue(a).is_none());
+    assert_eq!(f.show.cue(b).unwrap().pre_wait, 4.0, "rippled");
+    // An empty spot of A's track offers a new text there.
+    w.frame(&mut f.show, &mut f.st);
+    let r = w.rects(Host::ListTab).unwrap();
+    let track = model::track_of(f.show.cue(b).unwrap());
+    let row = r.tracks.iter().find(|t| t.0 == track).unwrap().1;
+    // (A's second half came up to 0–2 s, B to 4–8 s.)
+    let spot = pos2(r.x0 + 3.0 * r.pps, row.center().y);
+    w.click_with(&mut f.show, &mut f.st, spot, PointerButton::Secondary);
+    let item = w.button("Text");
+    let before: Vec<CueId> = f.show.cues.iter().map(|c| c.id).collect();
+    w.click(&mut f.show, &mut f.st, item.center());
+    let new = added(&f.show, &before);
+    assert_eq!(new.len(), 1);
+    assert_eq!((new[0].list, model::track_of(&new[0])), (f.list, track));
+    assert!((new[0].pre_wait - 3.0).abs() < 0.2, "{}", new[0].pre_wait);
+    // B's menu opens its opacity lane.
+    let r = w.clip_rect(&mut f.show, &mut f.st, b);
+    w.click_with(&mut f.show, &mut f.st, r.center(), PointerButton::Secondary);
+    let item = w.button("opacity_lane");
+    w.click(&mut f.show, &mut f.st, item.center());
+    w.frame(&mut f.show, &mut f.st);
+    let lanes = w.rects(Host::ListTab).unwrap().lanes;
+    assert!(lanes.iter().any(|l| l.0 == b), "{lanes:?}");
+}
+
+#[test]
+fn the_tab_hatches_a_clip_waiting_to_fade_in_and_one_free_running() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let key = TimelineKey::List(f.list);
+    // Through the free-run pause at 1 s: free-running there.
+    let through = text_clip(&mut f.show, f.list, 0.0, 5.0, 1);
+    // Unseen from 0.5 s until its opacity rises at 0.8 s.
+    let late = text_clip(&mut f.show, f.list, 0.5, 4.0, 2);
+    let i = f.show.cue_index(late).unwrap();
+    let m = f.show.cues[i].kind.media_mut().unwrap();
+    let mut op = crate::show::Animated::new(1.0);
+    op.set_key(0.0, 0.0);
+    op.set_key(0.3, 0.0);
+    op.set_key(0.6, 1.0);
+    m.motion.opacity = Some(op);
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    act(Action::Go, &mut f, &mut w);
+    w.e.output_sizes.insert(f.show.outputs[0].id, (64, 36));
+    w.e.tick(&f.show, 0.6);
+    assert!(w.e.timeline_waiting(key).contains(&late));
+    let said = w.clip_text(&mut f.show, &mut f.st, late);
+    assert!(said.contains("waiting to fade in"), "{said}");
+    for _ in 0..6 {
+        w.e.tick(&f.show, 0.2);
+    }
+    assert!(matches!(
+        w.e.timeline(&f.show, key).state,
+        RunState::Paused { .. }
+    ));
+    assert!(w.e.timeline_detached(key).contains(&through));
+    let said = w.clip_text(&mut f.show, &mut f.st, through);
+    assert!(said.contains("free-running"), "{said}");
+}
+
+#[test]
+fn a_clip_also_on_a_second_display_has_a_badge_and_a_ghost_on_the_tab() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let d2 = f.show.add_display();
+    let a = text_clip(&mut f.show, f.list, 0.0, 4.0, 0);
+    let i = f.show.cue_index(a).unwrap();
+    f.show.cues[i].kind.media_mut().unwrap().also_on = vec![d2];
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    let said = w.clip_text(&mut f.show, &mut f.st, a);
+    assert!(said.starts_with("+1"), "{said}");
+    let r = w.rects(Host::ListTab).unwrap();
+    let ghost = r.ghosts.iter().find(|g| g.0 == a).expect("a ghost").1;
+    let ghost_track = r
+        .tracks
+        .iter()
+        .find(|t| t.1.contains(ghost.center()))
+        .unwrap()
+        .0;
+    assert_eq!(
+        ghost_track,
+        TrackId::Picture {
+            output: Some(d2),
+            layer: 0
+        }
+    );
+    // A click on the ghost picks the clip.
+    f.st.selected = None;
+    w.click(&mut f.show, &mut f.st, ghost.center());
+    assert_eq!(f.st.selected, Some(a));
+}
+
+#[test]
+fn a_loop_on_a_timeline_list_is_said_in_the_toolbar_and_the_transport() {
+    let mut f = fixture();
+    let mut w = Win::new();
+    let key = TimelineKey::List(f.list);
+    // The pause at 1 s loops the section from 0.5 s, until GO.
+    let i = f
+        .show
+        .cues
+        .iter()
+        .position(|c| matches!(c.kind, CueKind::Control(_)))
+        .unwrap();
+    if let CueKind::Control(ctl) = &mut f.show.cues[i].kind {
+        ctl.loop_from = Some(crate::show::TimelinePoint::Time(0.5));
+    }
+    act(Action::SelectList(f.list), &mut f, &mut w);
+    act(Action::Go, &mut f, &mut w);
+    let mut back = false;
+    let mut last = 0.0;
+    for _ in 0..30 {
+        w.e.tick(&f.show, 0.1);
+        let pos = w.e.timeline(&f.show, key).pos;
+        back |= pos < last - 1e-9;
+        last = pos;
+    }
+    assert!(back, "it went round");
+    w.frame(&mut f.show, &mut f.st);
+    let state = w.get_host::<String>("timeline_state").unwrap();
+    assert!(state.starts_with("Looping"), "{state}");
+    let (what, then) = readout(&w).unwrap();
+    assert!(
+        what.starts_with("Finish this pass and continue Timeline 1"),
+        "{what}"
+    );
+    assert!(then.unwrap().contains("once more"));
+    // GO: the last pass.
+    act(Action::Go, &mut f, &mut w);
+    w.frame(&mut f.show, &mut f.st);
+    let state = w.get_host::<String>("timeline_state").unwrap();
+    assert!(state.contains("last pass"), "{state}");
+}

@@ -138,6 +138,9 @@ pub struct RunView {
     pub fading: bool,
     /// Playing a section round and round until GO (a loop pause).
     pub looping: Option<Looping>,
+    /// A timeline list stopped at its end (played to it, or run from a place
+    /// with nothing after it): GO does nothing (`TimelineGo::AtEnd`).
+    pub at_end: bool,
 }
 
 /// What GO does to a timeline (`Engine::go_plan`, which `timeline_go` follows).
@@ -156,6 +159,9 @@ pub enum TimelineGo {
     /// A run playing a section round and round (a loop pause): GO lets this
     /// pass finish and carries on past the cue, or (`at_once`) leaves at once.
     LeaveLoop { at_once: bool },
+    /// A timeline list that has played to its end: GO does nothing until its
+    /// playhead is moved.
+    AtEnd,
 }
 
 /// One timeline's run.
@@ -192,6 +198,8 @@ struct Run {
     carried: Vec<u64>,
     /// Playing a section round and round (a loop pause).
     looping: Option<Looping>,
+    /// Stopped at its end (a list): see `RunView::at_end`.
+    at_end: bool,
 }
 
 impl Run {
@@ -210,6 +218,7 @@ impl Run {
             outgoing_since: None,
             carried: Vec::new(),
             looping: None,
+            at_end: false,
         }
     }
 
@@ -541,10 +550,12 @@ impl Engine {
                 parked: false,
                 fading: false,
                 looping: None,
+                at_end: false,
             };
         };
         let (state, pos, instance, parked) = (run.state, run.pos, run.instance, run.parked);
         let looping = run.looping;
+        let at_end = self.at_end(show, key, run);
         let waiting = |p: &&PendingCue| p.run == Some(instance);
         let next_pause = if state == RunState::Stopped {
             self.next_pause_from(show, key, pos)
@@ -573,7 +584,19 @@ impl Engine {
                         || matches!(&a.kind, ActiveKind::Matte(m) if m.start.run == Some(instance)))
             }),
             looping,
+            at_end,
         }
+    }
+
+    /// Whether a run is a timeline list's stopped at its end: it played to it
+    /// (or was run from a place with nothing after it), and no clip has been
+    /// put after its playhead since.
+    fn at_end(&self, show: &Show, key: TimelineKey, run: &Run) -> bool {
+        run.at_end
+            && run.state == RunState::Stopped
+            && !model::members(show, key)
+                .into_iter()
+                .any(|c| c.armed && start_of(c) > run.pos + SAME_TIME)
     }
 
     /// The first thing the clock of the run `instance` will reach that is not a
@@ -775,9 +798,9 @@ impl Engine {
             for &i in &olds {
                 self.clear_clips(i, fading);
             }
-            self.runs
-                .map
-                .insert(key, Run::new(instance, RunState::Stopped, pos));
+            let mut stopped = Run::new(instance, RunState::Stopped, pos);
+            stopped.at_end = matches!(key, TimelineKey::List(_));
+            self.runs.map.insert(key, stopped);
             // A group with nothing left to play is over.
             if matches!(key, TimelineKey::Group(_)) {
                 self.active.retain(|a| a.instance != instance);
@@ -1621,6 +1644,9 @@ impl Engine {
                 self.timeline_stopped(instance);
                 if matches!(key, TimelineKey::List(_)) {
                     log::debug!("a timeline list has played to its end");
+                    if let Some(run) = self.runs.map.get_mut(&key) {
+                        run.at_end = true;
+                    }
                 }
             }
         }
@@ -2078,6 +2104,11 @@ impl Engine {
                 (None, Some(RunState::Paused { .. })) => {
                     run.map_or((TimelineGo::Resume, None), goes_on)
                 }
+                (None, Some(RunState::Stopped))
+                    if run.is_some_and(|r| self.at_end(show, key, r)) =>
+                {
+                    (TimelineGo::AtEnd, None)
+                }
                 (None, Some(RunState::Stopped) | None) => (TimelineGo::Start, None),
             };
             return Some((key, does, then));
@@ -2113,6 +2144,9 @@ impl Engine {
                 self.log("GO: the timeline is running; GO does nothing until it pauses")
             }
             TimelineGo::Cueing => {}
+            TimelineGo::AtEnd => {
+                self.log("GO: the timeline is at its end; move its playhead to run it again")
+            }
             TimelineGo::LeaveLoop { .. } => self.timeline_leave_loop(show, key),
             TimelineGo::Start | TimelineGo::Resume | TimelineGo::Play => {
                 if let TimelineKey::Group(g) = key

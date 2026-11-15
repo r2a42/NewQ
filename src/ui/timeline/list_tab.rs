@@ -224,8 +224,7 @@ pub fn fitting_track(
 }
 
 /// The transports' GO read-out (`Engine::go_plan`, which GO follows), with
-/// what only a timeline's run knows: a running timeline list's next pause, and
-/// one that has played to its end.
+/// what only a timeline's run knows: a running timeline list's next pause.
 pub fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<String>)> {
     let plan = engine.go_plan(show);
     let said = plan.describe(show)?;
@@ -248,19 +247,8 @@ pub fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<St
             };
             Some((what, Some(then.into())))
         }
-        TimelineGo::Start if at_end(&run) => Some((
-            format!("{} is at its end", model::name(show, key)),
-            Some("GO does nothing: move its playhead to run it again".into()),
-        )),
         _ => Some(said),
     }
-}
-
-/// A timeline that has played to its end (where GO does nothing).
-fn at_end(run: &RunView) -> bool {
-    run.state == RunState::Stopped
-        && run.pos > 0.0
-        && run.length.is_some_and(|l| run.pos >= l - 1e-3)
 }
 
 /// The Operator view's line for a timeline list being worked: how its run is
@@ -271,7 +259,7 @@ pub fn operator_state(ui: &mut Ui, show: &Show, engine: &mut Engine) {
     };
     let run = engine.timeline(show, key);
     let length = run.length.map_or("–:––.–".to_string(), fmt_time);
-    let state = if at_end(&run) {
+    let state = if run.at_end {
         "At its end".to_string()
     } else {
         toolbar::state_text(&run, run.pos)
