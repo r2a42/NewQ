@@ -194,6 +194,9 @@ pub struct Runs {
     map: HashMap<TimelineKey, Run>,
     /// Jumps made this frame (`MAX_JUMPS`).
     jumps: u32,
+    /// Counts the times a run has been put at a new place (`timeline_place`):
+    /// a clock step that started a jump stops there.
+    placed: u64,
 }
 
 /// What a run placed at a new time does there.
@@ -444,6 +447,21 @@ pub(super) fn clock_end(
     left <= SAME_TIME && !(a.held && m.hold_last_frame && !a.auto_faded)
 }
 
+/// Where the control cue `cue` on the timeline `key` puts a timeline, if it is
+/// a jump: a Jump, or a Run from a place (the timeline it names, at the time).
+fn jump_of(show: &Show, key: TimelineKey, cue: &Cue) -> Option<(TimelineKey, f64)> {
+    let CueKind::Control(c) = &cue.kind else {
+        return None;
+    };
+    let goes = c.timeline.unwrap_or(key);
+    match c.action {
+        ControlAction::TimelineJump | ControlAction::TimelineRun => {
+            Some((goes, model::resolve(show, goes, c.at?)?))
+        }
+        _ => None,
+    }
+}
+
 /// Whether `cue` is a timeline pause of the timeline `key` (it is one of its cues).
 fn is_pause_of(cue: &Cue, key: TimelineKey) -> bool {
     matches!(&cue.kind, CueKind::Control(c)
@@ -572,6 +590,7 @@ impl Engine {
     /// its clock. An earlier run of it gives up what it was still waiting to
     /// start (and a parked one its clips).
     pub(super) fn timeline_begin(&mut self, show: &Show, key: TimelineKey, instance: u64) {
+        self.runs.placed += 1;
         if let Some(old) = self.runs.map.remove(&key) {
             if old.parked {
                 self.clear_clips(old.instance, false);
@@ -675,6 +694,7 @@ impl Engine {
             }
             TimelineKey::List(_) => self.alloc_instance(),
         };
+        self.runs.placed += 1;
         if let Some(old) = self.runs.map.remove(&key) {
             // Run again while a Stop's fade is going: that goes on under what
             // comes in (which replaces it on its layer as it always would).
@@ -1065,6 +1085,7 @@ impl Engine {
             return;
         }
         let instance = run.instance;
+        let placed = self.runs.placed;
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         let target = run.pos + dt;
         let order = |p: &PendingCue| {
@@ -1098,7 +1119,9 @@ impl Engine {
                 r.pos = r.pos.max(p.at);
             }
             self.start_at(show, p.cue_id, p.start);
-            if !self.still_running(key, instance) {
+            // Stopped, paused, or put somewhere else (a jump, which has run on
+            // from there itself if it could).
+            if !self.still_running(key, instance) || self.runs.placed != placed {
                 self.refresh_waits();
                 return;
             }
@@ -1318,6 +1341,60 @@ impl Engine {
             }
         }
         out
+    }
+
+    /// What a run's jump lands in, got ready ahead of it (plan 2.6, problem 6):
+    /// for each Jump cue, and Run cue with a place, that a run's clock is within
+    /// `PRELOAD_HORIZON` of, the clips the chase finds alive where it goes.
+    /// Files part way in as (cue, clip time, lead-in), for `prepare_from`; the
+    /// rest (and a file landed in at its in point) as cues to get ready as usual.
+    /// At most `MAX_PRELOAD_CHILDREN` in all.
+    pub(super) fn timeline_jump_wanted(
+        &mut self,
+        show: &Show,
+    ) -> (Vec<CueId>, Vec<(CueId, f64, f64)>) {
+        let mut targets: Vec<(TimelineKey, f64)> = Vec::new();
+        for (key, run) in &self.runs.map {
+            if run.state == RunState::Stopped {
+                continue;
+            }
+            for p in &self.pending {
+                if p.run != Some(run.instance) || p.at - run.pos > PRELOAD_HORIZON {
+                    continue;
+                }
+                let Some(cue) = show.cue(p.cue_id).filter(|c| c.armed) else {
+                    continue;
+                };
+                if let Some(t) = jump_of(show, *key, cue)
+                    && !targets.contains(&t)
+                {
+                    targets.push(t);
+                }
+            }
+        }
+        let (mut land, mut part) = (Vec::new(), Vec::new());
+        for (key, t) in targets {
+            let ch = chase::chase(show, key, t, &mut |c| self.cue_duration(show, c));
+            for x in ch.alive {
+                if land.len() + part.len() >= super::MAX_PRELOAD_CHILDREN {
+                    break;
+                }
+                let Some(cue) = show.cue(x.id).filter(|c| c.kind.preloads()) else {
+                    continue;
+                };
+                let file = matches!(cue.kind, CueKind::Video(_) | CueKind::Audio(_));
+                if file && (x.from - x.lead).abs() > 1e-9 {
+                    // (One that holds its last frame starts a moment before
+                    // its end: it is not got ready.)
+                    if !x.at_last_frame {
+                        part.push((x.id, x.from, x.lead));
+                    }
+                } else if !land.contains(&x.id) {
+                    land.push(x.id);
+                }
+            }
+        }
+        (land, part)
     }
 
     /// How a cue plays as a clip of its timeline: whether its clock keeps its

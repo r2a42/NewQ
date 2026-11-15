@@ -907,6 +907,29 @@ struct Prepared {
     t0: f64,
     /// Seconds into the file past the in point at which the decoders begin.
     file_from: f64,
+    /// The clip time it was got ready for (`prepare_from`'s `shift`) and the
+    /// lead-in that counts from: a timeline's jump has the clips it lands in
+    /// got ready part way in (`Engine::timeline_jump_wanted`).
+    shift: f64,
+    lead: f64,
+}
+
+impl Prepared {
+    /// Got ready to play from its in point (where its content begins).
+    fn at_in_point(&self) -> bool {
+        (self.shift - self.lead).abs() < 1e-9
+    }
+
+    /// Whether it does for a start at clip time `shift` with lead-in `lead`:
+    /// from the in point, any got ready so (with a keyframed speed, followed from
+    /// the same time); part way in, one got ready for just that place.
+    fn fits(&self, shift: f64, lead: f64) -> bool {
+        if (shift - lead).abs() < 1e-9 {
+            self.at_in_point() && (self.speed.is_none() || (self.t0 - shift).abs() < 1e-9)
+        } else {
+            (self.shift - shift).abs() < 1e-6 && (self.lead - lead).abs() < 1e-6
+        }
+    }
 }
 
 /// Where the playheads were, put aside while a test show runs.
@@ -2110,6 +2133,8 @@ impl Engine {
                 warning: None,
                 t0: 0.0,
                 file_from: 0.0,
+                shift: 0.0,
+                lead: 0.0,
             });
         }
         let ff = self.ff.as_ref().ok_or("ffmpeg not found")?;
@@ -2147,6 +2172,8 @@ impl Engine {
             warning: None,
             t0: 0.0,
             file_from: 0.0,
+            shift: 0.0,
+            lead: 0.0,
         })
     }
 
@@ -2183,6 +2210,8 @@ impl Engine {
             warning: None,
             t0: 0.0,
             file_from: 0.0,
+            shift: 0.0,
+            lead: 0.0,
         })
     }
 
@@ -2392,6 +2421,8 @@ impl Engine {
             warning,
             t0: shift,
             file_from: shift_file,
+            shift,
+            lead,
         })
     }
 
@@ -2416,6 +2447,8 @@ impl Engine {
             warning: None,
             t0: 0.0,
             file_from: 0.0,
+            shift: 0.0,
+            lead: 0.0,
         }
     }
 
@@ -2436,16 +2469,19 @@ impl Engine {
             warning: None,
             t0: 0.0,
             file_from: 0.0,
+            shift: 0.0,
+            lead: 0.0,
         }
     }
 
-    /// What was got ready for `cue`, if it was got ready as it is now, and (with
-    /// a keyframed speed) to follow the speed from clip time `t0`.
-    fn take_prepared(&mut self, cue: &Cue, t0: f64) -> Option<Prepared> {
+    /// What was got ready for `cue`, if it was got ready as it is now, for a
+    /// start at clip time `shift` whose content began at `lead` (`Prepared::fits`).
+    fn take_prepared(&mut self, cue: &Cue, shift: f64, lead: f64) -> Option<Prepared> {
         let sig = self.signature(cue)?;
-        let idx = self.prepared.iter().position(|p| {
-            p.cue_id == cue.id && p.sig == sig && (p.speed.is_none() || (p.t0 - t0).abs() < 1e-9)
-        })?;
+        let idx = self
+            .prepared
+            .iter()
+            .position(|p| p.cue_id == cue.id && p.sig == sig && p.fits(shift, lead))?;
         Some(self.prepared.remove(idx))
     }
 
@@ -2683,16 +2719,11 @@ impl Engine {
             | CueKind::Camera(_)
             | CueKind::LiveAudio(_) => {
                 let m = cue.kind.media().expect("these cues have playback settings");
-                // A file part way in needs its own decoders: what was got ready
-                // starts at the in point (with a keyframed speed, followed from
-                // the clip time it was got ready for).
+                // A file part way in needs decoders of its own place: what was
+                // got ready for it there (a jump's), else its own are started.
                 let file = matches!(cue.kind, CueKind::Video(_) | CueKind::Audio(_));
                 let (shift, lead) = if file { (at.from, at.lead) } else { (0.0, 0.0) };
-                let ready = if (shift - lead).abs() < 1e-9 {
-                    self.take_prepared(&cue, shift)
-                } else {
-                    None
-                };
+                let ready = self.take_prepared(&cue, shift, lead);
                 let prepared = match ready {
                     Some(p) => Ok(p),
                     None => match (&cue.kind, &self.ff) {
@@ -3900,6 +3931,14 @@ impl Engine {
                 wanted.push(id);
             }
         }
+        // What a timeline's jump the clock is nearing lands in: files part
+        // way in (`jumps`), the rest as at their in points.
+        let (land, jumps) = self.timeline_jump_wanted(show);
+        for id in land {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
         // Cues a control cue asked to have ready (the ones that exist and can be).
         self.loads
             .retain(|id| show.cue(*id).is_some_and(|c| c.kind.preloads()));
@@ -4005,6 +4044,7 @@ impl Engine {
         // A timeline's clip that is to loop until the clock ends it is got ready as a loop.
         let looped: Vec<Cue> = wanted
             .iter()
+            .chain(jumps.iter().map(|j| &j.0))
             .filter_map(|id| show.cue(*id))
             .filter_map(|c| self.timeline_clip(show, c, 0.0).looped)
             .collect();
@@ -4013,10 +4053,22 @@ impl Engine {
             .iter()
             .map(|id| (*id, as_played(*id).and_then(|c| self.signature(c))))
             .collect();
+        let jump_sigs: Vec<(CueId, f64, f64, Option<PrepSig>)> = jumps
+            .iter()
+            .map(|&(id, from, lead)| {
+                let sig = as_played(id).and_then(|c| self.signature(c));
+                (id, from, lead, sig)
+            })
+            .collect();
         self.prepared.retain(|p| {
-            let keep = sigs
-                .iter()
-                .any(|(id, sig)| *id == p.cue_id && sig.as_ref() == Some(&p.sig));
+            let keep = if p.at_in_point() {
+                sigs.iter()
+                    .any(|(id, sig)| *id == p.cue_id && sig.as_ref() == Some(&p.sig))
+            } else {
+                jump_sigs.iter().any(|(id, from, lead, sig)| {
+                    *id == p.cue_id && sig.as_ref() == Some(&p.sig) && p.fits(*from, *lead)
+                })
+            };
             if !keep {
                 log::trace!("what was got ready for cue {:?} is let go", p.cue_id);
             }
@@ -4025,10 +4077,15 @@ impl Engine {
         if self.ff.is_none() {
             return;
         }
-        self.failed_preps
-            .retain(|id, (_, at)| wanted.contains(id) && at.elapsed() < PREP_RETRY);
+        self.failed_preps.retain(|id, (_, at)| {
+            (wanted.contains(id) || jumps.iter().any(|j| j.0 == *id)) && at.elapsed() < PREP_RETRY
+        });
         for id in wanted {
-            if self.is_prepared(id) {
+            if self
+                .prepared
+                .iter()
+                .any(|p| p.cue_id == id && p.at_in_point())
+            {
                 continue;
             }
             let Some(cue) = as_played(id) else { continue };
@@ -4071,6 +4128,42 @@ impl Engine {
                 }
                 Err(e) => {
                     log::debug!("preload of cue {} failed: {e}", cue.number);
+                    if let Some(sig) = sig {
+                        self.failed_preps.insert(id, (sig, Instant::now()));
+                    }
+                }
+            }
+        }
+        // A jump's files, each got ready at the place it lands in.
+        for (id, from, lead) in jumps {
+            if self
+                .prepared
+                .iter()
+                .any(|p| p.cue_id == id && p.fits(from, lead))
+            {
+                continue;
+            }
+            let Some(cue) = as_played(id) else { continue };
+            let sig = self.signature(cue);
+            if let (Some(sig), Some((failed, _))) = (&sig, self.failed_preps.get(&id))
+                && sig == failed
+            {
+                continue;
+            }
+            let Some(m) = cue.kind.file_media() else {
+                continue;
+            };
+            let info = match self.probe.get_urgent(self.ff.as_ref(), &m.file) {
+                ProbeState::Ready(info) => info.clone(),
+                _ => continue,
+            };
+            match self.prepare_from(cue, &info, from, lead) {
+                Ok(p) => {
+                    log::trace!("cue {} is being got ready for a jump", cue.number);
+                    self.prepared.push(p)
+                }
+                Err(e) => {
+                    log::debug!("preload of cue {} for a jump failed: {e}", cue.number);
                     if let Some(sig) = sig {
                         self.failed_preps.insert(id, (sig, Instant::now()));
                     }

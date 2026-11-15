@@ -3057,3 +3057,95 @@ fn abutting_videos_never_leave_the_display_empty_across_the_join() {
     }
     assert_eq!(levels(&e, out), vec![(b, 1.0)]);
 }
+
+// ----- Jumps got ready ahead (P5) --------------------------------------------------
+
+/// A jump cue to `to`.
+fn jump(show: &mut Show, to: TimelinePoint) -> Cue {
+    control(
+        show,
+        ControlCue {
+            action: ControlAction::TimelineJump,
+            at: Some(to),
+            ..Default::default()
+        },
+    )
+}
+
+/// Whether `id` has been got ready at clip time `from`, its first frame decoded.
+fn ready_at(e: &mut Engine, id: CueId, from: f64) -> bool {
+    e.prepared.iter_mut().any(|p| {
+        p.cue_id == id
+            && (p.shift - from).abs() < 1e-6
+            && match &mut p.kind {
+                PreparedKind::Video { player, .. } => player.ready(),
+                PreparedKind::Audio(v) => v.ready(),
+                _ => false,
+            }
+    })
+}
+
+#[test]
+fn a_jump_the_clock_nears_has_what_it_lands_in_ready_and_its_first_frame_comes_at_once() {
+    let Some((mut e, clip)) = with_media("testsrc_10s.mp4") else {
+        return;
+    };
+    probed(&mut e, &clip);
+    let mut show = Show::default();
+    let g = group(&mut show);
+    let c = file(&mut show, CueType::Video, clip.clone(), 3.0);
+    let first = child(&mut show, g, c, 0.0);
+    let mut c = file(&mut show, CueType::Video, clip, 9.0);
+    c.kind.media_mut().unwrap().layer = 1;
+    let late = child(&mut show, g, c, 4.0);
+    let j = jump(&mut show, TimelinePoint::Time(6.0));
+    child(&mut show, g, j, 2.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first video", 10, |e| {
+        started(e, first)
+    });
+    // Within the horizon of the jump: the clip it lands in is got ready 2 s in.
+    let t0 = Instant::now();
+    while !ready_at(&mut e, late, 2.0) {
+        assert!(t0.elapsed() < Duration::from_secs(20), "never got ready");
+        std::thread::sleep(Duration::from_millis(5));
+        e.tick(&show, 0.0);
+    }
+    ticks(&mut e, &show, 0.05, 45);
+    let v = view(&mut e, &show, key(g));
+    assert!(v.pos > 6.0 && v.pos < 6.5, "jumped: {}", v.pos);
+    // It plays from where it landed, the clock running on from there, and what
+    // was got ready for the jump has been used.
+    assert_eq!(v.state, RunState::Running);
+    let a = active(&e, late).unwrap();
+    assert!(a.started && (a.file_from - 2.0).abs() < 1e-6);
+    assert!(
+        !e.prepared
+            .iter()
+            .any(|p| p.cue_id == late && !p.at_in_point())
+    );
+    // Again, counting the ticks the jump takes: its first frame comes within
+    // two (the decoders were ready), the frame of where it landed.
+    e.stop_all(0.0);
+    e.fire(&show, g);
+    until(&mut e, &show, Some(0.0), "the first video", 10, |e| {
+        started(e, first)
+    });
+    let t0 = Instant::now();
+    while !ready_at(&mut e, late, 2.0) {
+        assert!(t0.elapsed() < Duration::from_secs(20), "never got ready");
+        std::thread::sleep(Duration::from_millis(5));
+        e.tick(&show, 0.0);
+    }
+    e.tick(&show, 2.0);
+    assert_eq!(state(&mut e, &show, key(g)), RunState::Cueing);
+    let mut n = 0;
+    while state(&mut e, &show, key(g)) != RunState::Running {
+        n += 1;
+        assert!(n <= 2, "the jump took {n} ticks");
+        std::thread::sleep(Duration::from_millis(3));
+        e.tick(&show, 0.0);
+    }
+    assert!(started(&e, late));
+    assert_eq!(shown(&e, late), Some(frame_at(&mut e, &show, late, 2.0)));
+}
