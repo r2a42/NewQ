@@ -1005,3 +1005,82 @@ Left / for others:
   at the end (the UI works it out from `RunView`).
 - Paste of plain cues into a timeline list keeps their pre-waits as their start (not the playhead).
 - The machine's `prefs.json` was left on the classic interface by the screenshots.
+
+---
+
+## U. What I2 landed (integration 2: wave 2 together)
+
+Commits on `claude/beautiful-fermi-9owexf` after the wave-2 merges, each "Timeline:" or "Docs:": the
+crossfade setting un-greyed; copy/cut/paste/duplicate of clips; drop tests; `TimelineGo::AtEnd` and the
+cross tests; loop pauses out of `model::clocked`; the `allow(dead_code)` notes; the look fixes; the overlap
+drawn; the docs; a load flake fixed. Full suite (`NEWQ_REQUIRE_MEDIA=1`): 1109 passed, 5 ignored.
+
+As built:
+- **Overlapping clips crossfade** (`control.rs::settings_fields`) is a plain checkbox now. New timelines
+  (`for_editor()`: the editor's group, a new or converted list) have it on; an old group has no settings
+  (off). Test in `edit.rs`.
+- **Clipboard in the tracks editor** (`keys::handle`): with the editor holding the keys, `Action::Cut` and
+  `Action::Duplicate` become `TimelineAction::Cut { key, ids, ripple }` / `Duplicate { key, ids }` when
+  every picked cue is a clip of it (as P6's Delete), and `Action::Paste` becomes `TimelineAction::Paste {
+  key, at: pos }` when the clipboard holds no group and nothing outside the timeline (bar its group) is
+  picked. Copy stays the cue list's. `edit::paste_clips` (via `Show::paste_cues`, so targets are remapped
+  and a cut gets its ids back; then `place_at`: the earliest at `at`, spacing and tracks kept),
+  `edit::duplicate_clips` (copies start where the last picked ends; open-ended counts from its start),
+  `edit::place_at`. `ui::timeline::paste_into` is shared with `ui.rs`: `Action::Paste` on the active
+  timeline list pastes at its playhead too, and `MoveToList` into a timeline list `place_at`s the cue at
+  that list's playhead. One undo step each (one frame); refused in show mode (`edits_the_show`).
+- **Drops:** unchanged code (P6's `keys::dropped` removes `AddFiles` when it makes clips, and `AddFiles` is
+  pushed before anything is drawn), now tested: on a track of the tab, one clip at the drop point; on the
+  tab off the tracks (the ruler), one clip at the playhead; on a plain list, one cue.
+- **`TimelineGo::AtEnd`:** `Run::at_end` is set when a list's run plays to its end, or a Run from a place
+  has nothing after it; `Engine::at_end` also needs Stopped and no armed member starting after `pos`, so
+  adding a clip later (or any seek, which makes a new `Run`) clears it. `RunView::at_end`; `describe`
+  says "… is at its end / GO does nothing: move its playhead to run it again" (web remote too); GO logs
+  it and does nothing. `list_tab::at_end` is gone. Groups never answer AtEnd (`timeline_go_for` only
+  names waiting group runs).
+- **Read-out:** a running list with a loop pause ahead (before its next pause) reads "RUNNING · loops back
+  in …" / "GO does nothing until it loops" (`list_tab::go_readout`; the engine's `describe` still says
+  "… is running").
+- **`model::clocked`:** a loop pause (`is_loop()`) doesn't count. It never stands the clock, so a clip
+  across it can't outlast its slot; the ⚠ was wrong. The engine's loop tests pass unchanged (a clip
+  across a loop pause with `run_out == Loop` is no longer played as a clocked loop: its content and its
+  slot agree).
+- **Looks:** the toolbar takes two rows under `toolbar::ONE_ROW_W` (1120 pt): transport + state, then the
+  tools wrapped; a lane just opened is scrolled into view (`EditorState::reveal`); a dragged key's label
+  is a dark chip drawn last, on the far side from a close next key; fade handles only on the hovered,
+  picked or fade-dragged clip; going to a timeline list's tab with the classic Timeline pane open sets
+  `list_rows` (rows in the tab, tracks in the pane); the overlap a clip crossfades over is drawn as an X
+  with "crossfades in 2 s" (`chase::overlap` per drawn clip). Track header labels were already two lines
+  (P6) and are not cut short at 124 pt.
+- **Flake:** `fades_and_stops_passed_are_played_through_…` failed once under the full suite: the run from
+  the park cues texts that weren't started yet, and the clock stands meanwhile; it now waits for Running.
+- `allow(dead_code)` kept: `Host::Workspace`, `TimelineAction::SetLayout` (P7), `Engine::timelines`
+  (P8's OSC feedback; tests use it).
+
+Tests added: `edit.rs` (crossfade default; paste spacing, tracks, aims, refusals; duplicate after; place);
+`ui/timeline/tests.rs` (Ctrl+C/V at the playhead with one undo; Ctrl+D and Ctrl+X/V with the cut's id;
+paste not the editor's with an outside cue picked or in show mode; a lane scrolled into view; the narrow
+toolbar's two rows); `list_tab/tests.rs` (the three drops; paste and move into a timeline list; the tab
+with split, ripple delete, a new text and a lane; waiting and free-running marks; "+1" badge and ghost
+that picks; a loop in the toolbar and transport, "loops back in"; the pane-open rows; the overlap note);
+`engine/timeline/tests.rs` (go_plan's words for a list stopped, running, paused, looping, parked,
+stopping, at its end, and after a clip is added); `model.rs` (loop pause not clocked).
+
+Looked at headless (xvfb, 1280×760 window, both interfaces, `XDG_STATE_HOME` in the scratchpad so the
+machine's `prefs.json` was not touched; `scratchpad/i2/`): the list tab stopped, running, paused,
+looping, last pass, stopping (fade), at the end; the group's editor in the classic pane and the new
+interface's panel; two lanes; the clip and track menus; a paste at 0:10; the Operator view paused and
+looping; the inspector of the loop pause and of a text "Also on" Display 2; the overlap's X. Only the
+main window opens under xvfb: no output window, so Display 2 was seen only as its tracks and ghosts.
+
+Left / still wrong:
+- The classic Timeline pane takes 40 % of the window when opened (`dock::open`, split 0.6), which leaves
+  the inspector short: its timeline rows (and "Also on") need scrolling. The split can be dragged.
+- The new interface's timeline panel and inspector (250 each) leave the cue list one row on a 760-high
+  window; both panels resize.
+- After a loop jump the active panel's elapsed times restart from the jump (Operator view: "Test card
+  0:03.1" at clock 6.9); the bars are right, the numbers look odd.
+- A loop pause's inspector still shows "Holds" and the plain pause's description; the cue track draws it
+  like any pause (no section bracket on the ruler).
+- No real displays, audio device or GPU windows: sound by the fake device, pictures through
+  `Engine::layers`; the tone cue failed for want of a device in the screenshots.
