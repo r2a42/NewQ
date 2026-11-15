@@ -391,10 +391,8 @@ fn empty_state(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
 /// What the editor asks for; made after the frame by `apply`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TimelineAction {
-    // The variants allowed dead are asked for by the editor tools still to come
-    // (split, ripple delete, adding clips and tracks, the speed lane: P6) and
-    // the standalone tab (a new timeline list, converting one: P4) and the layout
-    // choice (P7); `apply` already makes them.
+    // `SetLayout` is allowed dead: the layout choice comes with the workspace
+    // (P7); `apply` already makes it.
     // edits (refused in show mode)
     MoveClips {
         key: TimelineKey,

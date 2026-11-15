@@ -619,7 +619,7 @@ impl Engine {
             .min_by(f64::total_cmp)
     }
 
-    // For the editor (`ui/timeline.rs`), which doesn't call it yet.
+    // For OSC feedback of the runs (P8); only the tests read it so far.
     #[allow(dead_code)]
     /// Those not `Stopped`.
     pub fn timelines(&self) -> Vec<TimelineKey> {
