@@ -42,7 +42,8 @@
   .tl .tname { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .tl .clock { font-variant-numeric:tabular-nums; color:var(--head); }
   .tl .state { font-size:13px; color:var(--dim); margin:2px 0 6px; }
-  .tl .row button { flex:1; padding:10px 6px; }
+  .tl .row button { flex:1; padding:10px 6px; white-space:nowrap; }
+  .tl .leave { display:block; width:100%; margin-top:8px; border-color:var(--head); color:var(--head); font-weight:600; }
   .tl .marks { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
   .tl .marks button { padding:6px 10px; font-size:14px; }
 </style>
@@ -101,12 +102,19 @@ function renderTimelines(list) {
     time.textContent = clock(t.pos) + (t.length !== null ? ' / ' + clock(t.length) : '');
     top.append(name, time);
     const state = document.createElement('div'); state.className = 'state';
-    state.textContent = t.text + (t.next_pause !== null && t.state !== 'paused' ? ' · next pause ' + clock(t.next_pause) : '');
+    // The next pause, while it is still to come (not while it pauses, loops or fades out).
+    const ahead = ['running', 'cueing', 'stopped', 'parked'].includes(t.state);
+    state.textContent = t.text + (t.next_pause !== null && ahead ? ' · next pause ' + clock(t.next_pause) : '');
     const row = document.createElement('div'); row.className = 'row';
     row.append(button('▶ Run', () => send(at + 'run')), button('❚❚ Pause', () => send(at + 'pause')),
                button('■ Stop', () => send(at + 'stop')));
-    if (t.looping) row.append(button('Leave loop', () => send(at + 'leave_loop')));
     card.append(top, state, row);
+    // While it loops, leaving is what the operator is waiting to do: a whole row.
+    if (t.looping) {
+      const leave = button('Leave loop', () => send(at + 'leave_loop'));
+      leave.className = 'leave';
+      card.append(leave);
+    }
     if (t.markers.length) {
       const marks = document.createElement('div'); marks.className = 'marks';
       for (const m of t.markers) marks.append(button('⤳ ' + m.name, () => send(at + 'jump/' + m.time.toFixed(3))));
