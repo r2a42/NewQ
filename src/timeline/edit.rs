@@ -1927,6 +1927,26 @@ mod tests {
     }
 
     #[test]
+    fn new_timelines_crossfade_their_overlaps_and_an_old_group_does_not() {
+        let mut show = Show::default();
+        let slot = show.insert_slot(None, true, 0);
+        let g = new_timeline_group(&mut show, slot);
+        let on = |show: &Show, k| model::settings(show, k).is_some_and(|s| s.crossfade_overlaps);
+        assert!(on(&show, TimelineKey::Group(g)));
+        let n = new_timeline_list(&mut show, "T");
+        assert!(on(&show, TimelineKey::List(n)));
+        // A "start all together" group from an older show has no settings.
+        let slot = show.insert_slot(None, true, 0);
+        let mut old = show.make_cue(CueType::Group, None, slot.at);
+        if let CueKind::Group(gc) = &mut old.kind {
+            gc.mode = crate::show::GroupMode::Timeline;
+        }
+        let old_id = old.id;
+        show.insert_cue(slot, old);
+        assert!(!on(&show, TimelineKey::Group(old_id)));
+    }
+
+    #[test]
     fn keys_move_and_are_re_anchored_at_zero() {
         let mut a = Animated::new(0.0);
         a.set_key(1.0, 0.0);

@@ -487,14 +487,9 @@ pub fn settings_fields(ui: &mut Ui, s: &mut TimelineSettings) {
         "A clip that is invisible (or silent) when the playhead reaches it starts its content \
          when it begins to fade in, not before. Each clip can opt out.",
     );
-    // Kept in the show for when the engine does it; until then it does nothing,
-    // so it can't be changed.
-    ui.add_enabled(
-        false,
-        egui::Checkbox::new(&mut s.crossfade_overlaps, "Overlapping clips crossfade"),
-    )
-    .on_disabled_hover_text(
-        "Not working yet: two clips that overlap on a track don't crossfade by themselves. \
-         Give the later clip a Crossfade transition instead.",
-    );
+    ui.checkbox(&mut s.crossfade_overlaps, "Overlapping clips crossfade")
+        .on_hover_text(
+            "A clip that starts while an earlier one on its track is still playing crossfades \
+             over it for as long as they overlap. Off: it comes in by its own transition.",
+        );
 }
