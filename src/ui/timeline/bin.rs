@@ -1,5 +1,6 @@
 //! The workspace's bin: what can go on the timeline and what is on it.
 //!
+//! Three shelves, one shown at a time (so each has the column's height):
 //! - New: a text, shape, camera, live sound, fade, send or pause cue, or a
 //!   video, picture or sound file (a dialog). A click puts it at the playhead
 //!   on a track of its kind with room; a drag puts it where it is let go on a
@@ -77,7 +78,20 @@ fn note(_ui: &Ui, _name: String, _r: &egui::Response) {
     });
 }
 
-/// The bin for the timeline `key`.
+/// Which of the bin's three shelves is showing (kept for the session).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Shelf {
+    #[default]
+    New,
+    Files,
+    Clips,
+}
+
+const SHELF: &str = "ws_bin_shelf";
+
+/// The bin for the timeline `key`: a row of three shelves (new clips, the
+/// timeline's files, its clips), the chosen one in the rest of the column,
+/// so a short column still shows a useful list.
 pub(super) fn draw(
     ui: &mut Ui,
     show: &Show,
@@ -88,129 +102,185 @@ pub(super) fn draw(
 ) {
     let clips = model::clips(show, key, &mut |c| engine.cue_duration(show, c));
     let pos = engine.timeline(show, key).pos;
-    let editable = can_edit(st);
-    let push = |actions: &mut Vec<Action>, a| actions.push(Action::Timeline(a));
-    egui::ScrollArea::vertical()
+    let files = files_of(show, key);
+    let id = egui::Id::new(SHELF);
+    let mut shelf: Shelf = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (s, words) in [
+            (Shelf::New, "NEW".to_string()),
+            (Shelf::Files, format!("FILES {}", files.len())),
+            (Shelf::Clips, format!("CLIPS {}", clips.len())),
+        ] {
+            let r = ui.selectable_label(shelf == s, RichText::new(&words).small().strong());
+            note(
+                ui,
+                format!("shelf {}", words.split(' ').next().unwrap_or("")),
+                &r,
+            );
+            if r.clicked() {
+                shelf = s;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, shelf));
+    let _shown = egui::ScrollArea::vertical()
+        .id_salt(("ws_bin", shelf as u8))
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                heading(ui, "NEW");
-                ui.label(
-                    RichText::new(format!("click: at {} · drag: onto a track", fmt_time(pos)))
-                        .weak()
-                        .small(),
-                );
-            });
-            ui.add_enabled_ui(editable, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                ui.horizontal_wrapped(|ui| {
-                    for (ty, words) in PICK {
-                        let r = ui
-                            .add(egui::Button::new(RichText::new(words).small()))
-                            .on_hover_text("Choose a file for a new clip at the playhead");
-                        note(ui, words.into(), &r);
-                        if r.clicked() {
-                            let track = list_tab::fitting_track(show, key, ty, pos, &clips);
-                            push(
-                                actions,
-                                TimelineAction::PickClip {
-                                    key,
-                                    ty,
-                                    track,
-                                    at: pos,
-                                },
-                            );
-                        }
-                    }
-                    for (ty, words, what) in NEW {
-                        let r = item(ui, words, what, BinItem::New(ty));
-                        if r.clicked() {
-                            let track = list_tab::fitting_track(show, key, ty, pos, &clips);
-                            push(
-                                actions,
-                                TimelineAction::AddClip {
-                                    key,
-                                    ty,
-                                    file: None,
-                                    track,
-                                    at: pos,
-                                },
-                            );
-                        }
-                    }
-                    let r = item(
-                        ui,
-                        "Pause",
-                        "A pause cue: the timeline stops there until GO",
-                        BinItem::Pause,
-                    );
-                    if r.clicked() {
-                        push(
-                            actions,
-                            TimelineAction::AddControl {
-                                key,
-                                action: ControlAction::TimelinePause,
-                                at: pos,
-                            },
-                        );
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            heading(ui, "FILES");
-            let mut files: Vec<(CueType, PathBuf)> = Vec::new();
-            for c in model::members(show, key) {
-                let Some(m) = c.kind.file_media() else {
-                    continue;
-                };
-                if m.file.as_os_str().is_empty() || files.iter().any(|(_, f)| *f == m.file) {
-                    continue;
-                }
-                if let Some(ty) = crate::show::guess_cue_type(&m.file) {
-                    files.push((ty, m.file.clone()));
-                }
-            }
-            if files.is_empty() {
-                ui.label(RichText::new("No files on this timeline yet").weak());
-            }
-            ui.add_enabled_ui(editable, |ui| {
-                for (ty, f) in files {
-                    let words = format!("{} · {}", ty.label(), file_name(&f));
-                    let tip = format!("{}\nDrag onto a track for another clip of it", f.display());
-                    item(ui, &words, &tip, BinItem::File(ty, f));
-                }
-            });
-            ui.add_space(6.0);
-            heading(ui, "CLIPS");
-            let mut sorted: Vec<&model::Clip> = clips.iter().collect();
-            sorted.sort_by(|a, b| a.start.total_cmp(&b.start));
-            if sorted.is_empty() {
-                ui.label(RichText::new("Nothing on this timeline yet").weak());
-            }
-            let picked = st.selection(show);
-            for c in sorted {
-                let Some(cue) = show.cue(c.id) else {
-                    continue;
-                };
-                let words = format!("{}  {}", fmt_time(c.start), cue_label(cue));
-                let r = ui
-                    .add(
-                        egui::Button::selectable(picked.contains(&c.id), words)
-                            .truncate()
-                            .min_size(egui::vec2(ui.available_width(), 0.0)),
-                    )
-                    .on_hover_text(format!("{} · pick it", c.ty.label()));
-                note(ui, format!("clip {}", cue.number), &r);
-                if r.clicked() {
-                    actions.push(super::tracks::click_select(ui, c.id));
-                }
-            }
-        });
+        .show(ui, |ui| match shelf {
+            Shelf::New => new_items(ui, show, st, key, pos, &clips, actions),
+            Shelf::Files => file_items(ui, st, files),
+            Shelf::Clips => clip_items(ui, show, st, &clips, actions),
+        })
+        .inner_rect;
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("ws_bin"), _shown));
     follow(ui);
 }
 
-fn heading(ui: &mut Ui, words: &str) {
-    ui.label(RichText::new(words).small().strong().weak());
+/// The new clips: a file to choose, or a cue that needs none.
+fn new_items(
+    ui: &mut Ui,
+    show: &Show,
+    st: &UiState,
+    key: TimelineKey,
+    pos: f64,
+    clips: &[model::Clip],
+    actions: &mut Vec<Action>,
+) {
+    let push = |actions: &mut Vec<Action>, a| actions.push(Action::Timeline(a));
+    ui.label(
+        RichText::new(format!("click: at {} · drag: onto a track", fmt_time(pos)))
+            .weak()
+            .small(),
+    );
+    ui.add_enabled_ui(can_edit(st), |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        ui.horizontal_wrapped(|ui| {
+            for (ty, words) in PICK {
+                let r = ui
+                    .add(egui::Button::new(RichText::new(words).small()))
+                    .on_hover_text("Choose a file for a new clip at the playhead");
+                note(ui, words.into(), &r);
+                if r.clicked() {
+                    let track = list_tab::fitting_track(show, key, ty, pos, clips);
+                    push(
+                        actions,
+                        TimelineAction::PickClip {
+                            key,
+                            ty,
+                            track,
+                            at: pos,
+                        },
+                    );
+                }
+            }
+            for (ty, words, what) in NEW {
+                let r = item(ui, words, what, BinItem::New(ty));
+                if r.clicked() {
+                    let track = list_tab::fitting_track(show, key, ty, pos, clips);
+                    push(
+                        actions,
+                        TimelineAction::AddClip {
+                            key,
+                            ty,
+                            file: None,
+                            track,
+                            at: pos,
+                        },
+                    );
+                }
+            }
+            let r = item(
+                ui,
+                "Pause",
+                "A pause cue: the timeline stops there until GO",
+                BinItem::Pause,
+            );
+            if r.clicked() {
+                push(
+                    actions,
+                    TimelineAction::AddControl {
+                        key,
+                        action: ControlAction::TimelinePause,
+                        at: pos,
+                    },
+                );
+            }
+        });
+    });
+}
+
+/// Each file the timeline plays, once, with the type of cue it makes.
+fn files_of(show: &Show, key: TimelineKey) -> Vec<(CueType, PathBuf)> {
+    let mut files: Vec<(CueType, PathBuf)> = Vec::new();
+    for c in model::members(show, key) {
+        let Some(m) = c.kind.file_media() else {
+            continue;
+        };
+        if m.file.as_os_str().is_empty() || files.iter().any(|(_, f)| *f == m.file) {
+            continue;
+        }
+        if let Some(ty) = crate::show::guess_cue_type(&m.file) {
+            files.push((ty, m.file.clone()));
+        }
+    }
+    files
+}
+
+/// The timeline's files, each dragged onto a track for another clip of it.
+fn file_items(ui: &mut Ui, st: &UiState, files: Vec<(CueType, PathBuf)>) {
+    if files.is_empty() {
+        ui.label(RichText::new("No files on this timeline yet").weak());
+        return;
+    }
+    ui.label(
+        RichText::new("drag onto a track for another clip")
+            .weak()
+            .small(),
+    );
+    ui.add_enabled_ui(can_edit(st), |ui| {
+        for (ty, f) in files {
+            let words = format!("{} · {}", ty.label(), file_name(&f));
+            let tip = format!("{}\nDrag onto a track for another clip of it", f.display());
+            item(ui, &words, &tip, BinItem::File(ty, f));
+        }
+    });
+}
+
+/// The timeline's clips in time order; a click picks one.
+fn clip_items(
+    ui: &mut Ui,
+    show: &Show,
+    st: &UiState,
+    clips: &[model::Clip],
+    actions: &mut Vec<Action>,
+) {
+    let mut sorted: Vec<&model::Clip> = clips.iter().collect();
+    sorted.sort_by(|a, b| a.start.total_cmp(&b.start));
+    if sorted.is_empty() {
+        ui.label(RichText::new("Nothing on this timeline yet").weak());
+    }
+    let picked = st.selection(show);
+    ui.spacing_mut().item_spacing.y = 1.0;
+    ui.spacing_mut().button_padding.y = 1.0;
+    for c in sorted {
+        let Some(cue) = show.cue(c.id) else {
+            continue;
+        };
+        let words = format!("{}  {}", fmt_time(c.start), cue_label(cue));
+        let r = ui
+            .add(
+                egui::Button::selectable(picked.contains(&c.id), words)
+                    .truncate()
+                    .min_size(egui::vec2(ui.available_width(), 0.0)),
+            )
+            .on_hover_text(format!("{} · pick it", c.ty.label()));
+        note(ui, format!("clip {}", cue.number), &r);
+        if r.clicked() {
+            actions.push(super::tracks::click_select(ui, c.id));
+        }
+    }
 }
 
 /// A bin entry that is clicked or dragged.

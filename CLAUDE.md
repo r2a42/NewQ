@@ -105,9 +105,10 @@ The README describes the features; this file is about working on the code.
   leaving it is `Close`); `Open` goes to it (and `SelectList` into a timeline list does), the tab then
   keeps its rows (`shows_tracks` false) and its Tracks button opens it; a Timeline pane under B only
   points to it (`workspace::pointer`). Bar (Back = `Close`, `Show as a pane`), tracks across the
-  bottom (`TRACKS_SHARE`), left column the monitor (its own paint of `PreviewOutput`) and `bin.rs`
-  (new clips click to the playhead or drag a `BinItem` onto a track: `bin::dropped`, called by
-  `tracks.rs` next to `keys::dropped`; the timeline's files; its clips), the inspector in the
+  bottom (`TRACKS_SHARE`), left column the monitor (its own paint of `PreviewOutput`, a resizable top panel,
+  `monitor_height`) over `bin.rs` (shelves `Shelf` New/Files/Clips, one shown: new clips click to the
+  playhead or drag a `BinItem` onto a track: `bin::dropped`, called by `tracks.rs` next to
+  `keys::dropped`; the timeline's files; its clips), the inspector in the
   middle with `inspector_rows` first (`ROWS_ABOVE` skips them inside; edits spread as
   `ui::inspector`'s, `user_touched`). The inspector's two columns need about 940 pt, which is why
   the monitor isn't in the middle. Tests in `timeline/tests/workspace.rs` (1280×760, both

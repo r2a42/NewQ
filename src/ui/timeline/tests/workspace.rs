@@ -339,6 +339,8 @@ fn a_clip_dragged_in_the_workspace_moves_in_one_undo_step_and_the_bin_picks_clip
     // timeline rows first.
     m.frame(&mut f.show, &mut f.st, vec![]);
     let number = f.show.cue(f.c).unwrap().number.clone();
+    let shelf = bin_item(&m, "shelf CLIPS").center();
+    press(&mut m, &mut f, shelf);
     let row = bin_item(&m, &format!("clip {number}"));
     press(&mut m, &mut f, row.center());
     assert_eq!(f.st.selected, Some(f.c));
@@ -459,6 +461,22 @@ fn the_workspace_is_comfortable_at_1280_by_760_in_both_interfaces() {
             slice: [0.0, 0.0, 1.0, 1.0],
             canvas: (1920, 1080),
         });
+        // Seven clips, four files: more than the bin shows at once.
+        for (i, name) in ["D", "E", "F"].into_iter().enumerate() {
+            let id = super::picture(&mut f.show, name, 10.0 + i as f64, 1.0, 2, f.group);
+            if let Some(m) = f.show.cues.iter_mut().find(|c| c.id == id)
+                && let Some(m) = m.kind.media_mut()
+            {
+                m.file = format!("{name}.png").into();
+            }
+        }
+        for id in [f.a, f.b] {
+            if let Some(m) = f.show.cues.iter_mut().find(|c| c.id == id)
+                && let Some(m) = m.kind.media_mut()
+            {
+                m.file = "AB.png".into();
+            }
+        }
         let mut m = window(&mut f, modern, TimelineLayout::Workspace);
         let g = f.group;
         open_by_row(&mut m, &mut f, g);
@@ -489,6 +507,49 @@ fn the_workspace_is_comfortable_at_1280_by_760_in_both_interfaces() {
             rows.height() > 20.0 && rows.bottom() < r.ruler.top(),
             "{what}: {rows:?}"
         );
+        // The bin under the monitor: each shelf useful without scrolling.
+        let bin: Rect = noted(&m, "ws_bin").expect("the bin is drawn");
+        assert!(bin.top() >= monitor.bottom(), "{what}: {bin:?} {monitor:?}");
+        let new = noted::<Vec<(String, Rect)>>(&m, "bin_items")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(n, _)| !n.starts_with("shelf "))
+            .collect::<Vec<_>>();
+        assert_eq!(new.len(), 10, "{what}: {new:?}");
+        for (name, r) in &new {
+            assert!(
+                r.bottom() <= bin.bottom() + 0.5,
+                "{what}: {name} is out of sight in {bin:?}"
+            );
+        }
+        let at = bin_item(&m, "shelf FILES").center();
+        press(&mut m, &mut f, at);
+        let files = noted::<Vec<(String, Rect)>>(&m, "bin_items")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(n, _)| n.ends_with(".png"))
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 4, "{what}: {files:?}");
+        assert!(
+            files.iter().all(|(_, r)| r.bottom() <= bin.bottom() + 0.5),
+            "{what}: {files:?} in {bin:?}"
+        );
+        let at = bin_item(&m, "shelf CLIPS").center();
+        press(&mut m, &mut f, at);
+        let clips = noted::<Vec<(String, Rect)>>(&m, "bin_items")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(n, _)| n.starts_with("clip "))
+            .collect::<Vec<_>>();
+        assert_eq!(clips.len(), 7, "{what}: {clips:?}");
+        let seen = clips
+            .iter()
+            .filter(|(_, r)| r.bottom() <= bin.bottom() + 0.5)
+            .count();
+        assert!(seen >= 5, "{what}: {seen} of 7 clips in sight in {bin:?}");
+        // The shelf picked stays picked.
+        settle(&mut m, &mut f);
+        assert!(bin_item(&m, &clips[0].0).height() > 0.0, "{what}");
     }
 }
 

@@ -1101,11 +1101,13 @@ right, its timeline rows (*If it runs out*…) at the top. **◀ Back to cue lis
 puts it away; *Show as a pane* goes back to the pane for good. Double-clicking a
 timeline group, *Window ▸ Timeline* and going to a timeline list's tab open it
 (the tab then keeps its cue rows, and its *Tracks* button opens the workspace). The
-**bin** has new clips (a file to choose, text, shape, camera, live sound, fade,
-send, pause): click one to put it at the playhead, or drag it onto a track to put it
-where you let go (a still, a text or a shape is held for 5 seconds, wherever on a
-timeline it is made). Under them are the files the timeline plays (drag one onto a
-track for another clip of it) and its clips in time order (click to pick one). In
+**bin** under the picture has three shelves. *New* has new clips (a file to choose,
+text, shape, camera, live sound, fade, send, pause): click one to put it at the
+playhead, or drag it onto a track to put it where you let go (a still, a text or a
+shape is held for 5 seconds, wherever on a timeline it is made). *Files* are the
+files the timeline plays (drag one onto a track for another clip of it), and *Clips*
+its clips in time order (click to pick one). Drag the line between the picture and
+the bin to give either more room. In
 show mode it edits nothing, as elsewhere; the transport works. While the settings
 are open in the classic interface they take its place.
 

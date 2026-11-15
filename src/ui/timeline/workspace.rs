@@ -63,12 +63,42 @@ pub fn draw(
         .default_size(SIDE_W)
         .min_size(220.0)
         .show(ui, |ui| {
-            monitor(ui, st);
-            ui.separator();
+            // The picture over the bin, the line between them dragged to
+            // share the column out differently.
+            let tall = ui.available_height();
+            egui::Panel::top("ws_monitor_panel")
+                .resizable(true)
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                    bottom: 4,
+                    ..Default::default()
+                }))
+                .default_size(monitor_height(st, ui.available_width(), tall))
+                .min_size(90.0)
+                .max_size((tall - BIN_MIN).max(90.0))
+                .show(ui, |ui| monitor(ui, st));
             bin::draw(ui, show, engine, st, key, actions);
         });
     egui::CentralPanel::default().show(ui, |ui| inspector(ui, show, engine, st, actions));
 }
+
+/// The least height the bin keeps under the monitor when the line between
+/// them is dragged.
+const BIN_MIN: f32 = 110.0;
+
+/// The monitor's height when the workspace first opens: the chosen display's
+/// picture across the column with its header, but at most 60 % of the column,
+/// so the bin keeps the rest.
+fn monitor_height(st: &UiState, w: f32, tall: f32) -> f32 {
+    let aspect = super::super::preview_index(&st.previews, st.preview_output, None)
+        .map(|i| st.previews[i].canvas)
+        .map_or(16.0 / 9.0, |(cw, ch)| {
+            (cw as f32 / ch.max(1) as f32).max(0.1)
+        });
+    (MONITOR_HEAD + w / aspect).min(tall * 0.6).max(90.0)
+}
+
+/// The monitor's header row (PROGRAM and the display chooser).
+const MONITOR_HEAD: f32 = 28.0;
 
 /// How wide the picture and bin column is when the workspace first opens:
 /// what the inspector's two columns leave of a 1280-point window.
@@ -199,9 +229,10 @@ fn monitor(ui: &mut Ui, st: &mut UiState) {
     }
     let e = &st.previews[i];
     let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
-    // At most this much of the column's height, so the bin keeps some.
+    // As much of the panel as the picture needs (the panel's height is the
+    // bin's line).
     let w = ui.available_width();
-    let h = (w / aspect).min(ui.available_height() * 0.55).max(40.0);
+    let h = (w / aspect).min(ui.available_height()).max(40.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     #[cfg(test)]
     ui.data_mut(|d| d.insert_temp(egui::Id::new("ws_monitor"), rect));
