@@ -1618,9 +1618,15 @@ fn fades_and_stops_passed_are_played_through_and_control_cues_passed_are_not_don
     let o = opacity(&e, a).unwrap();
     assert!((o - 0.625).abs() < 1e-4, "{o}");
     assert!(active(&e, a).unwrap().faded && active(&e, b).is_some());
-    // Run: it goes on over the second left.
+    // Run: it goes on over the second left (once cued: under load the texts
+    // can take more than a couple of ticks, and the clock stands meanwhile).
     e.timeline_run(&show, key(g));
-    ticks(&mut e, &show, 0.0, 2);
+    until(&mut e, &show, Some(0.0), "the run to be cued", 10, |e| {
+        e.runs
+            .map
+            .get(&key(g))
+            .is_some_and(|r| r.state == RunState::Running)
+    });
     ticks(&mut e, &show, 0.25, 6);
     assert!((opacity(&e, a).unwrap() - 0.25).abs() < 1e-4);
     // Past it all: the end level, the stopped one gone, the cue elsewhere not
