@@ -1607,20 +1607,36 @@ mod tests {
             e.ff = Some(ff.clone());
             e.playhead = Some(built.first);
             e.go(&show);
-            let began = std::time::Instant::now();
+            use std::time::{Duration, Instant};
+            let every_tile_plays = |e: &crate::engine::Engine| {
+                show.cues
+                    .iter()
+                    .all(|c| matches!(e.status(c.id), crate::engine::CueStatus::Playing { .. }))
+            };
+            // Until every tile plays: as soon as it does, however long the
+            // FFmpegs take to start on a loaded machine (a fixed 5 s once
+            // ran out under a parallel test run, the tiles still starting).
+            let began = Instant::now();
             let mut last = began;
-            let mut all = false;
-            while began.elapsed() < std::time::Duration::from_secs(5) {
-                let now = std::time::Instant::now();
+            let mut tick = |e: &mut crate::engine::Engine| {
+                std::thread::sleep(Duration::from_millis(16));
+                let now = Instant::now();
                 e.tick(&show, now.duration_since(last).as_secs_f64());
                 last = now;
-                std::thread::sleep(std::time::Duration::from_millis(16));
-                all |= show
-                    .cues
-                    .iter()
-                    .all(|c| matches!(e.status(c.id), crate::engine::CueStatus::Playing { .. }));
+            };
+            while !every_tile_plays(&e) {
+                assert!(
+                    began.elapsed() < Duration::from_secs(60),
+                    "{tiles} tiles never played together"
+                );
+                tick(&mut e);
             }
-            assert!(all, "{tiles} tiles never played together");
+            // Then they keep playing, all of them, for a while.
+            let together = Instant::now();
+            while together.elapsed() < Duration::from_secs(2) {
+                tick(&mut e);
+                assert!(every_tile_plays(&e), "{tiles} tiles: one stopped");
+            }
             assert!(e.is_active(), "the wall must keep playing");
             e.stop_all(0.0);
             show.cues.clear();
