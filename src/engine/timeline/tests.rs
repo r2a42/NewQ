@@ -3613,6 +3613,14 @@ fn a_loops_way_back_is_got_ready_and_comes_round_within_a_tick_or_two() {
             !a.seeking() && (a.file_from - 0.5).abs() < 1e-6,
             "round {round}"
         );
+        // Its elapsed time (the active panel's number) is its place on the
+        // clock, as its bar is: 0.5 s in, at clock 1.5 s.
+        let elapsed = a.elapsed;
+        let pos = view(&mut e, &show, k).pos;
+        assert!(
+            (elapsed - (pos - 1.0)).abs() < 0.11,
+            "round {round}: elapsed {elapsed} at clock {pos}"
+        );
         // Ready again for the next time round.
         let t0 = Instant::now();
         while !ready_at(&mut e, v, 0.5) {
@@ -3624,6 +3632,39 @@ fn a_loops_way_back_is_got_ready_and_comes_round_within_a_tick_or_two() {
             e.tick(&show, 0.0);
         }
     }
+}
+
+/// The active panel's numbers (`elapsed`, and what is left of `duration`)
+/// and its bar follow the clip's place on the clock after a loop goes back,
+/// as they do before it: a clip from 0 s at clock 2.5 s says 0:02.5.
+#[test]
+fn after_a_loop_goes_back_a_clips_elapsed_time_is_its_place_on_the_clock() {
+    let (show, g, [bed, inside, _, _]) = looped_show(false);
+    let k = key(g);
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(show.outputs[0].id, (64, 36));
+    e.fire(&show, g);
+    rounds(&mut e, &show, k, 1);
+    run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 2.5);
+    let pos = view(&mut e, &show, k).pos;
+    let start = |id| show.cue(id).unwrap().pre_wait;
+    for id in [bed, inside] {
+        let a = active(&e, id).unwrap();
+        assert!(
+            (a.elapsed - (pos - start(id))).abs() < 0.11,
+            "clip at {}: elapsed {} at clock {pos}",
+            start(id),
+            a.elapsed
+        );
+        assert!((a.key_time() - (pos - start(id))).abs() < 1e-6);
+        let d = a.duration.unwrap();
+        assert!(d - a.elapsed > 0.0 && a.elapsed / d <= 1.0);
+    }
+    // Round again: still the clock's.
+    rounds(&mut e, &show, k, 1);
+    let pos = view(&mut e, &show, k).pos;
+    let a = active(&e, bed).unwrap();
+    assert!((a.elapsed - pos).abs() < 0.11, "{} at {pos}", a.elapsed);
 }
 
 #[test]
