@@ -42,6 +42,8 @@ struct Mouse {
     mods: Modifiers,
     sent: Modifiers,
     draw: Draw,
+    /// The window's size, if not the one its `draw` has.
+    size: Option<egui::Vec2>,
 }
 
 impl Mouse {
@@ -53,6 +55,7 @@ impl Mouse {
             mods: Modifiers::default(),
             sent: Modifiers::default(),
             draw: Draw::Pane,
+            size: None,
         }
     }
 
@@ -66,11 +69,11 @@ impl Mouse {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
-                if self.draw == Draw::Full {
+                self.size.unwrap_or(if self.draw == Draw::Full {
                     vec2(1300.0, 900.0)
                 } else {
                     vec2(1000.0, 520.0)
-                },
+                }),
             )),
             time: Some(self.t),
             events,
@@ -79,8 +82,16 @@ impl Mouse {
         let mut actions = Vec::new();
         let e = &mut self.e;
         let draw = self.draw;
-        self.ctx
-            .data_mut(|d| d.remove::<Vec<&'static str>>(egui::Id::new("timeline_rows")));
+        self.ctx.data_mut(|d| {
+            d.remove::<Vec<&'static str>>(egui::Id::new("timeline_rows"));
+            d.remove::<Vec<Host>>(egui::Id::new("timeline_editors"));
+            d.remove::<Vec<(&'static str, Rect)>>(egui::Id::new("workspace_buttons"));
+            d.remove::<Vec<(String, Rect)>>(egui::Id::new("bin_items"));
+            d.remove::<Vec<(super::super::modern::View, Rect)>>(egui::Id::new("modern_views"));
+            d.remove::<Vec<(bool, Rect)>>(egui::Id::new("settings_timeline_layout"));
+            d.remove::<Vec<(CueId, Rect)>>(egui::Id::new("cue_rows"));
+            d.remove::<bool>(egui::Id::new("timeline_pointer"));
+        });
         let mut out = self.ctx.run_ui(input, |ui| match draw {
             Draw::Pane => {
                 egui::CentralPanel::default().show(ui, |ui| pane(ui, show, e, st, &mut actions));
@@ -2316,3 +2327,5 @@ fn on_a_narrow_pane_the_toolbar_takes_two_rows_and_no_button_is_cut_off() {
     let r = m.rects().unwrap();
     assert!(r.ruler.top() >= at[3].bottom());
 }
+
+mod workspace;

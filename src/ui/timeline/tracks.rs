@@ -796,6 +796,7 @@ pub(super) fn draw(
         painter.rect_filled(thumb, 2.0, visuals.weak_text_color().gamma_multiply(0.8));
     }
     keys::dropped(ui, ctx, geo, &rows, actions);
+    super::bin::dropped(ui, ctx, geo, &rows, actions);
     follow_drag(
         ui,
         ctx,
@@ -833,7 +834,7 @@ pub(super) fn draw(
 
 /// What a click on a clip (or its ghost) asks: pick it, add it to the
 /// selection (Ctrl/Cmd), or a run of them (Shift).
-fn click_select(ui: &Ui, id: CueId) -> Action {
+pub(super) fn click_select(ui: &Ui, id: CueId) -> Action {
     let m = ui.input(|i| i.modifiers);
     if m.command {
         Action::ToggleSelect(id)

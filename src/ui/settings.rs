@@ -86,7 +86,9 @@ impl SettingsPage {
     /// One line under the page's title.
     pub fn blurb(self) -> &'static str {
         match self {
-            SettingsPage::General => "The show's name and how Stop All behaves.",
+            SettingsPage::General => {
+                "The show's name, how Stop All behaves and where timelines open."
+            }
             SettingsPage::Media => "The files the cues play, and whether they can all be found.",
             SettingsPage::Displays => {
                 "Which monitor each display is on, and how it is shaped, tested and sent out."
@@ -239,7 +241,7 @@ pub fn settings_view(
                 // edges and the scroll bar so nothing is clipped.
                 ui.set_max_width((ui.available_width() - 20.0).clamp(300.0, 640.0));
                 match page {
-                    SettingsPage::General => general_page(ui, show, st),
+                    SettingsPage::General => general_page(ui, show, st, actions),
                     SettingsPage::Media => media_page(ui, show, st, actions),
                     SettingsPage::Displays => displays_panel(ui, show, engine, st, actions),
                     SettingsPage::SubDisplays => sub_displays_panel(ui, show, st, actions),
@@ -335,7 +337,7 @@ fn warning(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).small().color(PREWAIT));
 }
 
-fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
+fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     section(ui, "Show", |ui| {
         egui::Grid::new("settings_show")
             .num_columns(2)
@@ -381,6 +383,9 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
              have it on; a show opened from an older NewQ has it off until you turn it on.",
         );
     });
+    section(ui, "Timeline editor (this computer)", |ui| {
+        timeline_layout(ui, st, actions)
+    });
     section(ui, "Recovery and logs", |ui| {
         ui.label(format!(
             "Unsaved changes are copied to a recovery file every {} seconds, and offered \
@@ -406,6 +411,45 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
         ui.add_space(4.0);
         log_detail(ui, st);
     });
+}
+
+/// Where the timeline editor opens: a pane or a workspace of its own, in
+/// either interface. Kept for this computer; an editor open moves.
+fn timeline_layout(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    use super::timeline::TimelineLayout as L;
+    let pane = if st.prefs.new_layout {
+        "A panel under the cue list (Editor view)"
+    } else {
+        "A pane, beside the cue list and the other panes"
+    };
+    for (layout, words) in [
+        (L::Pane, pane),
+        (
+            L::Workspace,
+            "A workspace of its own: bin, picture, inspector and the tracks across the window",
+        ),
+    ] {
+        let r = ui.radio(st.prefs.timeline_layout == layout, words);
+        #[cfg(test)]
+        ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<(bool, egui::Rect)>>(egui::Id::new(
+                "settings_timeline_layout",
+            ))
+            .push((layout == L::Workspace, r.rect))
+        });
+        if r.clicked() && st.prefs.timeline_layout != layout {
+            actions.push(Action::Timeline(
+                super::timeline::TimelineAction::SetLayout(layout),
+            ));
+        }
+    }
+    hint(
+        ui,
+        "Where a timeline opens when you double-click a timeline group, tick Timeline in the \
+         Window menu or go to a timeline list's tab. The workspace takes the cue list's place \
+         until Back to cue list; in the new interface it is the Timeline view. The Window menu \
+         and the Workspace button of the tracks' toolbar switch it too.",
+    );
 }
 
 /// How much the log says: a setting of this computer, used at once.

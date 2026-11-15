@@ -220,6 +220,23 @@ fn tools(ui: &mut Ui, ctx: &Ctx, st: &mut UiState, actions: &mut Vec<Action>) {
         ed.pps = 0.0;
         ed.scroll.x = 0.0;
     }
+    // The other layout (the workspace's own bar has the way back).
+    if host != Host::Workspace {
+        ui.separator();
+        let r = ui.button("Workspace").on_hover_text(
+            "Open the timeline in a workspace of its own: a bin, the picture, the inspector \
+             and the tracks across the whole window. It opens there from now on (Settings ▸ \
+             General ▸ Timeline editor)",
+        );
+        note(ui, host, "layout", &r);
+        if r.clicked() {
+            push(
+                actions,
+                TimelineAction::SetLayout(TimelineLayout::Workspace),
+            );
+            push(actions, TimelineAction::Open(Some(key)));
+        }
+    }
 }
 
 /// How the run is doing and, at a pause, what GO will do.

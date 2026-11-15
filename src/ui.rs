@@ -936,6 +936,8 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, show, engine, st));
     if modern {
         modern::draw(ui, show, engine, st, &mut actions);
+    } else if timeline::workspace::replaces_panes(st) {
+        timeline::workspace::draw(ui, show, engine, st, &mut actions);
     } else {
         dock_area(ui, show, engine, st, &mut actions);
     }
@@ -1489,12 +1491,17 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     ui.separator();
     for pane in Pane::ALL {
         // The new interface has the timeline editor as a panel of its Editor
-        // view, not as a pane.
-        if pane == Pane::Timeline && st.prefs.new_layout {
+        // view, not as a pane, and the workspace is no pane either.
+        let workspace = timeline::workspace::chosen(st);
+        if pane == Pane::Timeline && (st.prefs.new_layout || workspace) {
             let mut shown = st.timeline.open;
             if ui
                 .checkbox(&mut shown, pane.title())
-                .on_hover_text("The timeline editor, under the cue list in the Editor view")
+                .on_hover_text(match (workspace, st.prefs.new_layout) {
+                    (true, true) => "The timeline workspace, as the Timeline view",
+                    (true, false) => "The timeline workspace, in the panes' place",
+                    _ => "The timeline editor, under the cue list in the Editor view",
+                })
                 .changed()
             {
                 actions.push(Action::Timeline(if shown {
@@ -1504,6 +1511,7 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
                 }));
                 ui.close();
             }
+            timeline_layout_choice(ui, st, actions);
             continue;
         }
         let open = st.layout.is_open(pane);
@@ -1536,6 +1544,9 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
                 });
             }
         });
+        if pane == Pane::Timeline {
+            timeline_layout_choice(ui, st, actions);
+        }
     }
     ui.separator();
     ui.label(
@@ -1549,6 +1560,43 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     if ui.button("Reset layout").clicked() {
         actions.push(Action::ResetLayout);
         ui.close();
+    }
+}
+
+/// Under the Window menu's Timeline: where the timeline editor opens on this
+/// computer (as Settings ▸ General ▸ Timeline editor).
+fn timeline_layout_choice(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    use timeline::TimelineLayout as L;
+    let pane = if st.prefs.new_layout {
+        "as a panel under the cue list"
+    } else {
+        "as a pane"
+    };
+    for (layout, words, tip) in [
+        (
+            L::Pane,
+            pane,
+            "The timeline's tracks beside the cue list and the other panes",
+        ),
+        (
+            L::Workspace,
+            "as a workspace",
+            "A bin, the picture, the inspector and the tracks across the whole window, in \
+             place of the cue list until Back to cue list",
+        ),
+    ] {
+        let r = ui
+            .indent(("timeline_layout", layout == L::Pane), |ui| {
+                ui.radio(st.prefs.timeline_layout == layout, words)
+                    .on_hover_text(tip)
+            })
+            .inner;
+        if r.clicked() && st.prefs.timeline_layout != layout {
+            actions.push(Action::Timeline(timeline::TimelineAction::SetLayout(
+                layout,
+            )));
+            ui.close();
+        }
     }
 }
 
@@ -7043,10 +7091,20 @@ fn inspector(
         );
     }
     inspector_one(ui, show, engine, st, actions);
-    // Only what the user did is made in the others: on a frame with no pointer
-    // press, key, typing, paste or scroll, a change the inspector made by
-    // itself (a value tidied as it is drawn) stays in the one cue.
-    let touched = ui.ctx().input(|i| {
+    if let Some(before) = primary
+        && user_touched(ui)
+    {
+        spread_edit(show, &before, &picked);
+    }
+}
+
+/// Make in the other `picked` cues what was changed in `before`'s cue since.
+/// Whether the user did something this frame. Only what the user did is made
+/// in the other cues picked: on a frame with no pointer press, key, typing,
+/// paste or scroll, a change the inspector made by itself (a value tidied as
+/// it is drawn) stays in the one cue.
+fn user_touched(ui: &Ui) -> bool {
+    ui.ctx().input(|i| {
         i.pointer.any_down()
             || i.pointer.any_released()
             || i.events.iter().any(|e| {
@@ -7058,15 +7116,9 @@ fn inspector(
                         | egui::Event::MouseWheel { .. }
                 )
             })
-    });
-    if let Some(before) = primary
-        && touched
-    {
-        spread_edit(show, &before, &picked);
-    }
+    })
 }
 
-/// Make in the other `picked` cues what was changed in `before`'s cue since.
 fn spread_edit(show: &mut Show, before: &Cue, picked: &[CueId]) {
     let Some(after) = show.cue(before.id) else {
         return;
@@ -10282,9 +10334,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             {
                 st.timeline.list_rows = true;
             }
+            let into_timeline =
+                list != engine.active_list && timeline::list_tab::is_timeline_list(show, list);
             engine.switch_list(show, list);
             st.selected = engine.playhead;
             st.scroll_to_selected = true;
+            // Where the editor is a workspace, a timeline list's tab opens it.
+            if into_timeline && timeline::workspace::chosen(st) {
+                let key = crate::timeline::TimelineKey::List(list);
+                timeline::apply(timeline::TimelineAction::Open(Some(key)), show, engine, st);
+            }
         }
         Action::AddList => {
             let n = show.lists.len() + 2;
@@ -10788,6 +10847,12 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::CloseSettings => close_settings(st),
         Action::SetNewLayout(on) => {
             st.prefs.new_layout = on;
+            // An open timeline workspace stays open in the other interface.
+            if on && st.timeline.open && timeline::workspace::chosen(st) {
+                st.modern_view = modern::View::Timeline;
+            } else if st.modern_view == modern::View::Timeline {
+                st.modern_view = modern::View::Editor;
+            }
             if let Some(dir) = &st.layout_dir
                 && let Err(e) = st.prefs.save(dir)
             {

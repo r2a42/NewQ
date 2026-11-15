@@ -1,14 +1,17 @@
 //! The timeline editor: one component (`editor`) with its toolbar, ruler,
 //! markers, tracks, clips and playhead, hosted as a pane (`pane`: the dock's
 //! Timeline pane, and the bottom panel of the new interface's Editor view), as
-//! a timeline list's tab (`list_tab`), and later as a workspace; and the
-//! timeline rows of the inspector (`control`).
+//! a timeline list's tab (`list_tab`), and as a workspace of its own
+//! (`workspace`, with its bin, `bin`); and the timeline rows of the inspector
+//! (`control`). Which of the pane and the workspace opens is
+//! `Prefs::timeline_layout` (`TimelineAction::SetLayout`).
 //!
 //! The editor never changes the show while it draws: what it is asked to do
 //! comes back as `TimelineAction`s, which `apply` makes after the frame. A drag
 //! is shown from `EditorState` while it lasts and asked for once, on release,
 //! so it is one undo step.
 
+mod bin;
 mod control;
 mod keys;
 mod lanes;
@@ -17,6 +20,7 @@ mod menus;
 mod ruler;
 mod toolbar;
 mod tracks;
+pub mod workspace;
 
 pub use control::{clip_fields, control_fields, describe_control, settings_fields};
 
@@ -36,8 +40,8 @@ pub enum Host {
     Pane,
     /// A timeline list's tab, in the cue list's place.
     ListTab,
-    // The workspace (P7).
-    #[allow(dead_code)]
+    /// The workspace, in the panes' place (classic) or as the new interface's
+    /// Timeline view.
     Workspace,
 }
 
@@ -197,6 +201,9 @@ pub fn target(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey>
 /// need the show and the cue at once, so they edit a copy of the cue's part
 /// and put it back if it changed.)
 pub(super) fn inspector_rows(ui: &mut Ui, show: &mut Show, idx: usize) {
+    if ui.data(|d| d.get_temp::<bool>(egui::Id::new(workspace::ROWS_ABOVE))) == Some(true) {
+        return;
+    }
     let Some(cue) = show.cues.get(idx) else {
         return;
     };
@@ -316,6 +323,12 @@ pub fn editor(
         }
     }
     let hovered = ui.rect_contains_pointer(whole);
+    // For the tests: which editors a frame drew.
+    #[cfg(test)]
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<Host>>(egui::Id::new("timeline_editors"))
+            .push(host)
+    });
     ui.push_id(("timeline_editor", host), |ui| {
         keys::picked(st, actions);
         toolbar::draw(ui, &ctx, engine, st, actions);
@@ -333,6 +346,12 @@ pub fn pane(
     st: &mut UiState,
     actions: &mut Vec<Action>,
 ) {
+    // A Timeline pane left open (or in a window of its own) while the editor
+    // opens as a workspace: one place for it, so the pane only points there.
+    if workspace::chosen(st) {
+        workspace::pointer(ui, show, engine, st, actions);
+        return;
+    }
     match target(show, engine, st) {
         // The list's own tab has its tracks already: say so rather than draw
         // them twice.
@@ -394,8 +413,6 @@ fn empty_state(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
 /// What the editor asks for; made after the frame by `apply`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TimelineAction {
-    // `SetLayout` is allowed dead: the layout choice comes with the workspace
-    // (P7); `apply` already makes it.
     // edits (refused in show mode)
     MoveClips {
         key: TimelineKey,
@@ -543,7 +560,8 @@ pub enum TimelineAction {
     },
     Open(Option<TimelineKey>),
     Close,
-    #[allow(dead_code)]
+    /// Where the editor opens on this computer: a pane or the workspace (an
+    /// editor already open moves there).
     SetLayout(TimelineLayout),
 }
 
@@ -808,26 +826,52 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
             if key.is_some() {
                 st.timeline.pinned = key;
             }
-            // The new interface has its own place for it (the Editor view's
-            // bottom panel); the panes get the Timeline pane.
-            if !st.prefs.new_layout {
+            if workspace::chosen(st) {
+                // The workspace takes the panes' place (or is the new
+                // interface's Timeline view); the settings give it back.
+                if st.prefs.new_layout {
+                    st.modern_view = super::modern::View::Timeline;
+                }
+                if st.settings_open() {
+                    super::apply(Action::CloseSettings, show, engine, st);
+                }
+            } else if !st.prefs.new_layout {
+                // The new interface has its own place for it (the Editor view's
+                // bottom panel); the panes get the Timeline pane.
                 st.layout.open(Pane::Timeline);
             }
         }
         A::Close => {
             st.timeline.open = false;
-            if !st.prefs.new_layout {
+            if st.prefs.new_layout {
+                if st.modern_view == super::modern::View::Timeline {
+                    st.modern_view = super::modern::View::Editor;
+                }
+            } else {
                 st.layout.close(Pane::Timeline);
             }
         }
-        // Kept for this computer. (The workspace isn't built yet: the editor
-        // stays a pane until it is.)
+        // Kept for this computer; an editor that is open moves to the new place.
         A::SetLayout(layout) => {
+            let open =
+                st.timeline.open || (!st.prefs.new_layout && st.layout.is_open(Pane::Timeline));
+            let key = target(show, engine, st);
             st.prefs.timeline_layout = layout;
             if let Some(dir) = &st.layout_dir
                 && let Err(e) = st.prefs.save(dir)
             {
                 log::warn!("could not save the settings of this computer: {e}");
+            }
+            apply(A::Close, show, engine, st);
+            // Back from the workspace to a timeline list's tracks: they are
+            // in its tab, not in a pane beside it.
+            if layout == TimelineLayout::Pane
+                && key.is_some()
+                && key == list_tab::active(show, engine)
+            {
+                st.timeline.list_rows = false;
+            } else if open {
+                apply(A::Open(key), show, engine, st);
             }
         }
     }

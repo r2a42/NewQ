@@ -20,16 +20,20 @@ pub enum View {
     Editor,
     Operator,
     Patch,
+    /// The timeline workspace (when the timeline editor opens as one,
+    /// `Prefs::timeline_layout`).
+    Timeline,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Editor, View::Operator, View::Patch];
+    pub const ALL: [View; 4] = [View::Editor, View::Operator, View::Patch, View::Timeline];
 
     pub fn label(self) -> &'static str {
         match self {
             View::Editor => "Editor",
             View::Operator => "Operator",
             View::Patch => "Patch",
+            View::Timeline => "Timeline",
         }
     }
 
@@ -38,6 +42,9 @@ impl View {
             View::Editor => "Build the show: cue list, inspector and what is playing",
             View::Operator => "Run the show: the next cue, a big GO and what is running",
             View::Patch => "See and change where cues go: displays, audio outputs and gear",
+            View::Timeline => {
+                "The timeline workspace: a bin, the picture, the inspector and the tracks"
+            }
         }
     }
 }
@@ -96,6 +103,7 @@ pub fn draw(
             View::Editor => editor(ui, show, engine, st, actions),
             View::Operator => operator(ui, show, engine, st, actions),
             View::Patch => patch(ui, show, engine, st, actions),
+            View::Timeline => timeline::workspace::draw(ui, show, engine, st, actions),
         }
     });
 }
@@ -166,12 +174,25 @@ fn strip(
             ui.add_space(12.0);
         }
         for v in View::ALL {
+            // The Timeline view is there while the editor opens as a workspace.
+            if v == View::Timeline && !timeline::workspace::chosen(st) {
+                continue;
+            }
             let here = st.modern_view == v && !st.settings_open();
-            if ui
-                .selectable_label(here, v.label())
-                .on_hover_text(v.hint())
-                .clicked()
-            {
+            let r = ui.selectable_label(here, v.label()).on_hover_text(v.hint());
+            #[cfg(test)]
+            ui.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(View, Rect)>>(egui::Id::new("modern_views"))
+                    .push((v, r.rect))
+            });
+            if r.clicked() {
+                if v == View::Timeline {
+                    // Opening it is opening the editor (on what it showed last).
+                    actions.push(Action::Timeline(timeline::TimelineAction::Open(None)));
+                } else if st.modern_view == View::Timeline {
+                    // Leaving it puts the editor away; the tab brings it back.
+                    actions.push(Action::Timeline(timeline::TimelineAction::Close));
+                }
                 st.modern_view = v;
                 if st.settings_open() {
                     actions.push(Action::CloseSettings);
@@ -253,8 +274,9 @@ fn editor(
                     .show(ui, |ui| inspector(ui, show, engine, st, actions));
             });
         });
-    // The timeline editor, above the inspector, while it is wanted.
-    if st.timeline.open {
+    // The timeline editor, above the inspector, while it is wanted (and not
+    // in a workspace of its own).
+    if st.timeline.open && !timeline::workspace::chosen(st) {
         egui::Panel::bottom("modern_timeline")
             .resizable(true)
             // Room for three tracks and the cue track; more scroll.

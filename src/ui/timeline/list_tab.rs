@@ -26,8 +26,10 @@ pub fn is_timeline_list(show: &Show, list: u32) -> bool {
 }
 
 /// Whether the cue-list area shows the active list's tracks (rather than its rows).
+/// Where the editor opens as a workspace, the tab keeps its rows and its
+/// Tracks button opens the workspace.
 pub fn shows_tracks(show: &Show, engine: &Engine, st: &UiState) -> bool {
-    active(show, engine).is_some() && !st.timeline.list_rows
+    active(show, engine).is_some() && !st.timeline.list_rows && !workspace::chosen(st)
 }
 
 /// The top of the cue list when the active list is a timeline: the Tracks /
@@ -44,21 +46,28 @@ pub fn draw(
     let Some(key) = active(show, engine) else {
         return false;
     };
+    let rows = st.timeline.list_rows || workspace::chosen(st);
     ui.horizontal(|ui| {
         ui.label(RichText::new("TIMELINE").small().weak());
         let r = ui
-            .selectable_label(!st.timeline.list_rows, "Tracks")
-            .on_hover_text("The list's cues as clips on tracks, on one clock");
+            .selectable_label(!rows, "Tracks")
+            .on_hover_text(if workspace::chosen(st) {
+                "Open the list's tracks in the timeline workspace"
+            } else {
+                "The list's cues as clips on tracks, on one clock"
+            });
         note_button(ui, "tracks", &r);
         if r.clicked() {
-            st.timeline.list_rows = false;
+            if workspace::chosen(st) {
+                actions.push(Action::Timeline(TimelineAction::Open(Some(key))));
+            } else {
+                st.timeline.list_rows = false;
+            }
         }
-        let r = ui
-            .selectable_label(st.timeline.list_rows, "Cue rows")
-            .on_hover_text(
-                "The same cues as rows, to number, name and arm them (the Timeline pane, \
+        let r = ui.selectable_label(rows, "Cue rows").on_hover_text(
+            "The same cues as rows, to number, name and arm them (the Timeline pane, \
                  Window menu, shows the tracks under them)",
-            );
+        );
         note_button(ui, "rows", &r);
         if r.clicked() {
             st.timeline.list_rows = true;
@@ -88,7 +97,7 @@ pub fn draw(
             }
         });
     }
-    if st.timeline.list_rows {
+    if rows {
         return false;
     }
     editor(ui, show, engine, st, key, Host::ListTab, actions);
