@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.23.0
+
 - **Timeline tests in Test mode.** *Timeline short*, *Timeline medium* and *Timeline
   long* play a timeline list (and from Medium on a timeline group) made like a short
   programme from the test films and NASA pictures: butted and crossfaded films, stills
