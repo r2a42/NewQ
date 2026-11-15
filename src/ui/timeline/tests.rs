@@ -2084,3 +2084,15 @@ fn show_mode_splits_nothing_from_the_editor() {
         .edits_the_show()
     );
 }
+
+#[test]
+fn a_lane_key_near_the_ends_snaps_to_unseen_full_and_normal_speed() {
+    // A pixel off the bottom would end a lead-in (anything above 0 is seen).
+    assert_eq!(Lane::Opacity.value(0.02), 0.0);
+    assert_eq!(Lane::Opacity.value(0.98), 1.0);
+    assert_eq!(Lane::Opacity.value(0.5), 0.5);
+    assert_eq!(Lane::Speed.value(0.5), 1.0);
+    assert_eq!(Lane::Speed.value(0.51), 1.0);
+    assert_eq!(Lane::Speed.value(1.0), 4.0);
+    assert_eq!(Lane::Speed.value(0.0), 0.25);
+}

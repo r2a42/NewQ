@@ -65,7 +65,9 @@ pub(super) fn draw(
     let key = ctx.key;
     let host = ctx.host;
     let push = |actions: &mut Vec<Action>, a| actions.push(Action::Timeline(a));
-    ui.horizontal_wrapped(|ui| {
+    // One row: what comes last (the run state, GO's read-out) is cut short
+    // rather than wrapped onto a row that would push the tracks down.
+    ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Timeline · {}", timeline_name(ctx.show, key))).strong());
         ui.separator();
         let r = ui

@@ -844,13 +844,39 @@ fn track_heads(
             r.bottom(),
             Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
         );
-        painter.text(
-            pos2(r.left() + 8.0, r.center().y),
-            egui::Align2::LEFT_CENTER,
-            model::track_label(ctx.show, *t),
-            FontId::proportional(12.0),
-            visuals.text_color(),
-        );
+        // A display's name over its track's ("Main screen" / "V2 · Layer 1"),
+        // which won't fit the header on one line.
+        let label = model::track_label(ctx.show, *t);
+        match label
+            .split_once(" · ")
+            .filter(|(_, rest)| rest.contains(" · "))
+        {
+            Some((display, track)) => {
+                painter.text(
+                    pos2(r.left() + 8.0, r.center().y - 1.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    display,
+                    FontId::proportional(10.5),
+                    visuals.weak_text_color(),
+                );
+                painter.text(
+                    pos2(r.left() + 8.0, r.center().y),
+                    egui::Align2::LEFT_TOP,
+                    track,
+                    FontId::proportional(12.0),
+                    visuals.text_color(),
+                );
+            }
+            None => {
+                painter.text(
+                    pos2(r.left() + 8.0, r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(12.0),
+                    visuals.text_color(),
+                );
+            }
+        }
         let hit = r.intersect(heads);
         if hit.height() <= 0.0 {
             continue;
@@ -891,17 +917,18 @@ fn track_heads(
         let Some(c) = ctx.clips.iter().find(|c| c.id == *id) else {
             continue;
         };
+        let (value, more) = lanes::readout(ctx, c, *lane);
         painter.text(
             pos2(r.left() + 14.0, r.top() + 6.0),
             egui::Align2::LEFT_TOP,
-            lanes::readout(ctx, c, *lane),
+            value,
             FontId::proportional(11.0),
             visuals.text_color(),
         );
         painter.text(
             pos2(r.left() + 14.0, r.bottom() - 5.0),
             egui::Align2::LEFT_BOTTOM,
-            &c.name,
+            more,
             FontId::proportional(10.0),
             visuals.weak_text_color(),
         );

@@ -138,6 +138,10 @@ enum Drag {
         lane: Lane,
         keys: Animated,
         i: usize,
+        /// Where it was taken, and the key's value then (kept while the
+        /// pointer moves only along the lane).
+        grab: egui::Pos2,
+        v0: f32,
     },
     /// The playhead on the ruler, not yet let go.
     Playhead { pos: f64 },

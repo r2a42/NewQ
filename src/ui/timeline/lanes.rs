@@ -56,7 +56,7 @@ impl Lane {
     }
 
     /// The value at `f` up the lane, rounded as the inspector shows it.
-    fn value(self, f: f32) -> f32 {
+    pub(super) fn value(self, f: f32) -> f32 {
         let f = if f.is_finite() {
             f.clamp(0.0, 1.0)
         } else {
@@ -74,6 +74,10 @@ impl Lane {
                     (v * 100.0).round() / 100.0
                 }
             }
+            // Snap to unseen and full near the ends: a key a pixel off 0
+            // would end a lead-in (anything above 0 is seen).
+            Lane::Opacity if f < 0.05 => 0.0,
+            Lane::Opacity if f > 0.95 => 1.0,
             Lane::Opacity => (f * 100.0).round() / 100.0,
         }
     }
@@ -144,22 +148,21 @@ fn without(a: &Animated, i: usize) -> Animated {
     a
 }
 
-/// What the lane's header says: the value at the playhead, and for speed
-/// the clip's length that comes of it.
-pub(super) fn readout(ctx: &Ctx, c: &Clip, lane: Lane) -> String {
+/// What the lane's header says: the value at the playhead, then (smaller)
+/// for speed the clip's length that comes of it, and the clip's name.
+pub(super) fn readout(ctx: &Ctx, c: &Clip, lane: Lane) -> (String, String) {
     let Some(a) = ctx.show.cue(c.id).and_then(|q| keys_of(q, lane)) else {
-        return lane.label().into();
+        return (lane.label().into(), c.name.clone());
     };
     let t = ctx.pos - c.start;
     let inside = t >= 0.0 && c.len.is_none_or(|l| t <= l);
     let now = if inside { a.at(t) } else { a.at(0.0) };
-    let mut s = format!("{} {}", lane.label(), lane.text(now));
-    if lane == Lane::Speed
-        && let Some(l) = c.len
-    {
-        s += &format!(" · {}", fmt_time(l));
-    }
-    s
+    let value = format!("{} {}", lane.label(), lane.text(now));
+    let more = match (lane, c.len) {
+        (Lane::Speed, Some(l)) => format!("{} · {}", fmt_time(l), c.name),
+        _ => c.name.clone(),
+    };
+    (value, more)
 }
 
 /// What the lane's header says on hover.
@@ -258,6 +261,8 @@ pub(super) fn draw(
         lane: kl,
         keys,
         i,
+        grab,
+        v0,
     }) = st
         .timeline
         .drag
@@ -269,6 +274,8 @@ pub(super) fn draw(
         && let Some(pt) = pointer
     {
         let (t, v) = at(pt);
+        // Moved along the lane, not up or down it: the value stays.
+        let v = if (pt.y - grab.y).abs() < 6.0 { *v0 } else { v };
         let markers = model::settings(ctx.show, ctx.key).map_or(&[][..], |s| &s.markers[..]);
         let snapping = st.timeline.snap && !ui.input(|i| i.modifiers.alt);
         let pts = super::tracks::points(ctx, markers, &[], snapping);
@@ -297,6 +304,8 @@ pub(super) fn draw(
                     lane,
                     keys: a.clone(),
                     i,
+                    grab: pt,
+                    v0: a.keys[i].v,
                 },
             ));
         }
@@ -357,9 +366,15 @@ pub(super) fn draw(
             Stroke::new(1.5, if hot { Color32::WHITE } else { color }),
         ));
         if held {
+            // Beside the key, on the side of the lane away from it.
+            let (y, align) = if ctr.y > rect.center().y {
+                (rect.top() + 2.0, egui::Align2::LEFT_TOP)
+            } else {
+                (rect.bottom() - 2.0, egui::Align2::LEFT_BOTTOM)
+            };
             p.text(
-                pos2(ctr.x + 8.0, rect.top() + 2.0),
-                egui::Align2::LEFT_TOP,
+                pos2(ctr.x + 10.0, y),
+                align,
                 format!("{} · {}", fmt_time(k.t), lane.text(k.v)),
                 FontId::proportional(10.0),
                 Color32::WHITE,
