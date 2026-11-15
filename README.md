@@ -995,8 +995,9 @@ about on that clock.
 **Making one.** Make a group and set it to *Start all together*, or, with the
 Timeline pane open and no timeline chosen, click **New timeline group**. Add cues
 to it as to any group (a cue added while the group is selected goes inside). A
-group made this way has *Clips at opacity 0 wait for their fade-in* ticked (see
-below); a group from an older show has it off and plays as it always did.
+group made this way has *Clips at opacity 0 wait for their fade-in* and
+*Overlapping clips crossfade* ticked (see below); a group from an older show has
+them off and plays as it always did.
 
 **A timeline cue list.** A whole cue list can be a timeline, with a tab of its
 own: *Cue ▸ New timeline*, or **+ ▸ New timeline** at the end of the list tabs.
@@ -1006,10 +1007,12 @@ cue list* to go back. The main list is always a plain cue list.
 
 - Its tab (🎞) shows the tracks editor in the cue list's place, full size, in both
   interfaces. *Cue rows* above it shows the same cues as rows, to number, name and
-  arm them (with the Timeline pane open, the tracks are then under the rows);
-  *Tracks* goes back.
+  arm them (with the Timeline pane open, the tracks are then under the rows, and
+  the tab opens on its rows); *Tracks* goes back.
 - Cues added while it is the tab you are working on become clips at its playhead:
-  files dropped on the window, and cues from the Cue menu. Several files go one
+  files dropped on the window (on a track: where they are let go), cues from the
+  Cue menu, and cues pasted or moved into it from another list (as far apart as
+  their pre-waits were). Several files go one
   after the other where their lengths are known. A picture goes on the top picture
   track with nothing on it at the playhead, or on a new layer above the others, so
   nothing is replaced; a sound on the first sound track; fades, stops and control
@@ -1019,8 +1022,10 @@ cue list* to go back. The main list is always a plain cue list.
 - **GO** on it runs the timeline from its playhead, carries it on at a pause cue,
   and does nothing while it runs or once it has played to its end; it never fires
   anything in another list. The transport says so: *Run …*, *RUNNING · next pause
-  in 0:12.0* (or *ends in …*) with *GO does nothing until it pauses*, *Continue …*
-  and what comes in next, *… is at its end*. The new interface's header says the
+  in 0:12.0* (or *ends in …*, or *loops back in …*) with *GO does nothing until it
+  pauses*, *Continue …* and what comes in next, *Finish this pass and continue …*
+  while a section loops, *… is at its end* (until a clip is put after the playhead
+  or the playhead is moved). The web remote says the same. The new interface's header says the
   same, and its Operator view adds the run's state and clock. Pause (P) and Stop
   All work as everywhere; Stop All leaves the playhead where it was.
 - In a show with *A picture replaces only what is on its own layer* off (one from
@@ -1037,7 +1042,8 @@ its start to its end, with ramps for its fade-in and fade-out, and badges: 🔁 
 loops, ⏩ its speed is keyframed, 🔊 a video with sound, ∞ it has no end of its
 own, +2 it is also shown on two more displays, ⚠ see *If a clip runs out* below
 (and the warnings further down). A dimmed bar is disarmed. A sound clip shows its
-waveform.
+waveform. Where a clip comes in over an earlier one on its track, the overlap is
+drawn as a crossfade (an X, "crossfades in 2 s").
 
 - Drag a clip to move it in time, or up or down onto another track of its kind
   (a picture onto another layer or display, a sound onto another output); while it
@@ -1062,6 +1068,13 @@ waveform.
   markers too when every track rippled). The keys act on the editor you last
   clicked in, or the one under the pointer; with cues that aren't clips of the
   timeline picked, Delete deletes cues as in the cue list.
+- **Copy, cut, paste, duplicate:** Ctrl+C (Cmd+C on a Mac) copies the picked
+  clips; Ctrl+X cuts them (Shift, or *Ripple*, closes the gap); Ctrl+V pastes the
+  copied clips at the playhead, each on the track it came from and as far apart as
+  they were (a fade, stop or control cue among them aims at the copy of its clip);
+  Ctrl+D puts a copy of the picked clips just after them. Each is one undo step.
+  As with Delete, the keys are the editor's when it holds them and what is picked
+  is its clips (or nothing, for a paste).
 - **Adding clips:** right-click an empty spot of a track for a new clip there: a
   video, image or sound file (a file dialog), a text, a shape, a camera or live
   sound. Files dropped on a track become clips where they are let go (a sound
@@ -1096,7 +1109,9 @@ waveform.
   track).
 - Ctrl+wheel (Cmd on a Mac) zooms around the pointer; the wheel scrolls; *Fit*
   shows the whole timeline. A thin bar at the right shows there are more tracks
-  than fit.
+  than fit; a lane you open is scrolled into view. On a narrow pane the toolbar
+  takes two rows. The pane (or the new interface's panel) can be made taller by
+  dragging its edge.
 - **Markers:** *+ Marker* adds one at the playhead. Drag its flag to move it,
   double-click it to rename it, right-click for *Add Pause cue here*, *Jump here*
   and *Remove marker*.
@@ -1137,6 +1152,17 @@ pause does to what is already playing is its *Freeze* choice:
   last frame and live sound goes quiet; off (the default) they stay live, so a
   frozen picture can have a live camera over it.
 
+**Play a section again until GO.** Tick *Loop: Play a section again until GO* on a
+pause cue and choose where the section starts (*Section from*: a time, a marker or
+a clip). When the clock reaches the cue it jumps back there and plays the section
+again, round and round, everything in it together, until **GO**: GO lets the pass
+that is playing finish and the timeline carries straight on past the cue (the
+intro, a looping middle, the ending). Tick *On GO: Leave the loop at once* to go
+on the moment GO is pressed instead. The toolbar says *Looping · GO continues*,
+then *Looping · last pass, then on*. The jump back is not sample-accurate (the
+clips are started again, or jumped, at the section's start): for a bed of sound
+that must not break, set the sound clip itself to loop.
+
 The other timeline control cues: **Run timeline** (from its playhead, or from a
 point you choose), **Stop timeline** (fades out what it plays over its *Fade out*
 time, 3 seconds unless you set another, 0 for a cut, leaving the playhead; a second
@@ -1149,8 +1175,19 @@ clock runs on.
 lasts longer than the clip): *If it runs out* in the clip's inspector chooses
 **End** (the default: it fades out over its own fade-out, or the 2-second default
 fade if it has none, or the time you set; 0 is a cut), **Loop** (round again from
-its in point until the timeline ends it) or **Hold** (its last frame; a sound goes
-silent). The editor marks such a clip left on End with ⚠.
+its in point, pass after pass, until the timeline ends it; the next pass is got
+ready ahead so it follows on) or **Hold** (its last frame; a sound goes silent).
+The editor marks such a clip left on End with ⚠. (A loop-section pause doesn't
+count: the clock never stands there.)
+
+**Overlapping clips crossfade.** On a timeline with this ticked (new timelines
+have it), a clip that comes in while an earlier clip on its track (a picture on
+the same layer of a display they share, a sound on the same output) is still
+playing crossfades over it for as long as they overlap, picture and sound, and
+the earlier one doesn't fade out on its own as well. A clip wholly inside another
+doesn't, and one that dips keeps its dip. Clips that butt up against each other
+on a track follow on without a frame of black between them: the first is kept up
+until the next has its first frame.
 
 **Clips at opacity 0 wait for their fade-in.** On a timeline with this ticked, a
 clip that is invisible when the clock reaches it (opacity 0, or opacity keyframes
@@ -1163,7 +1200,10 @@ when it fades in* in its inspector.
 
 **Moving the playhead.** Click or drag on the ruler: where you let go, the timeline
 is **parked** there, with the picture at that moment on the displays and the sound
-ready, and the toolbar says *Parked*. *Run* or GO plays on from there. (A click at
+ready, and the toolbar says *Parked*. The picture changes all at once: what was up
+stays (a video on the same clip is jumped where it is) until everything at the new
+place is ready. A Jump cue does the same, and what it lands in is got ready ahead
+of it. *Run* or GO plays on from there. (A click at
 the very start shows the first frame.) In show mode the ruler of a timeline group
 is locked, since parking puts its picture on the outputs; the ruler of the timeline
 list you are working on stays free, as the operator's way to cue it.
@@ -1172,22 +1212,20 @@ list you are working on stays free, as the operator's way to cue it.
 the timeline's clock, so they stand still at a pause and go on from the GO, even
 while the clip's content plays on. Its speed keyframes follow its content.
 
-**Not there yet:** a cue list that is a timeline (a Timeline tab of its own),
-automatic crossfades between overlapping clips (give the later clip a Crossfade
-transition; the group's *Overlapping clips crossfade* is greyed until then), and a
-separate timeline workspace.
-
 **A picture on several displays.** *Also on* in the inspector of a picture, video,
 text, shape or camera cue (with more than one display) ticks the other displays it
 is shown on too, besides its own *Output*: the same picture, effects, position and
 keyframes, on the same layer. The cue list shows it as "Display 1 +2". Picking
 several cues and ticking a display gives them all the same choice (a cue's own
-display is left out of it). This arrives with this version.
+display is left out of it). Each display is its own: a cue that comes in on one of
+them replaces (or crossfades) it there only, and it stays on the others; it ends
+when it is gone from all of them. Its sound plays until it has gone from the last
+display it is fully on, then fades with it. A fade or Stop cue acts on it
+everywhere. Text and shapes are drawn at the size of its own display and stretched
+on the others.
 
-**Not there yet:** automatic crossfades between overlapping clips (give the later
-clip a Crossfade transition; the group's *Overlapping clips crossfade* is greyed
-until then), adding clips and tracks, splitting and ripple delete from the editor,
-a speed lane, and a separate timeline workspace.
+**Not there yet:** a separate timeline workspace (bin, monitor and tracks in one
+view), and OSC commands and feedback for timelines.
 
 A show that uses the timeline control cues (Run, Pause, Stop, Jump timeline) does
 not open in NewQ 0.20.3 or older.
@@ -1488,6 +1526,8 @@ night is about 3,000 rows.
 | Alt while dragging (tracks editor) | Place freely, without snapping     |
 | Ctrl+K (tracks editor) | Split the picked clips (or those under the playhead) at the playhead |
 | Del / Shift+Del (tracks editor) | Delete the picked clips / ripple delete (close the gap) |
+| Ctrl+C / Ctrl+X / Ctrl+V (tracks editor) | Copy / cut the picked clips / paste at the playhead on their tracks |
+| Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
 
 Space and Esc also work while an output window has focus.

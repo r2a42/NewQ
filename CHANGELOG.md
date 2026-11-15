@@ -7,72 +7,88 @@ release page, and a release is refused if it has none.
 ## Unreleased
 
 - **Changelog.** Each release page now starts with what changed in that version.
-- **Timelines.** A *Start all together* group is now a timeline you can see and
-  work on: double-click it (or *Window ▸ Timeline*) to open its tracks, one row per
-  display layer and sound output, with the clips as bars. Drag clips to move them,
-  drag their ends to trim, add markers, and click the ruler to park the show at
-  any moment with its picture on the displays. See *Timelines* in the README.
-- **Pause cues on a timeline.** A *Pause timeline* cue stops the timeline's clock
-  until GO. It can let what is playing run on (and then the next crossfade, fade
-  or keyframe ramp waits for your GO), or hold everything on a frame, or hold only
-  the clips you tick; cameras and live sound stay live unless you say otherwise.
-  *Run*, *Stop* and *Jump in timeline* cues go with it, and a clip's own Pause and
-  Resume cues still hold just that clip. Fades already under way when the clock
-  stops (a fade cue, a crossfade, a clip's fade-in or fade-out, matrix levels) wait
-  where they are and finish after GO; a fade you start by hand still runs.
+
+Timelines:
+
+- **Timeline groups.** A *Start all together* group is now a timeline you can see
+  and work on: double-click it (or *Window ▸ Timeline*) to open its tracks, one row
+  per display layer and sound output, with the clips as bars. Drag clips to move
+  them, drag their ends to trim, add markers, and click the ruler to park the show
+  at any moment with its picture on the displays. Double-clicking a timeline group
+  in the cue list now opens its tracks instead of firing it (GO and *Fire* still
+  start it). See *Timelines* in the README.
+- **Timeline cue lists.** *Cue ▸ New timeline* (or *+ ▸ New timeline* by the list
+  tabs) makes a cue list that is a timeline, with a tab of its own showing its
+  tracks in the cue list's place; right-click a list's tab to make it a timeline or
+  a plain list again. Files dropped on it, cues added to it and cues pasted or
+  moved into it become clips at its playhead. GO runs it, carries it on at a pause
+  and does nothing while it runs or once it is at its end.
+- **Editing in the tracks.** Ctrl+K (Cmd+K) or *✂ Split* cuts clips in two at the
+  playhead (a sound split in two may click at the join; the status bar says so).
+  Delete takes clips off, and Shift+Delete (or Delete with *Ripple* on) closes the
+  gap they leave. Ctrl+C, X and V copy, cut and paste clips: they are pasted at the
+  playhead on the tracks they came from, as far apart as they were. Ctrl+D puts a
+  copy of the picked clips just after them. Pick clips with a rubber band, trim
+  several at once, and drag the square at a clip's corner to set its fade-in or
+  fade-out.
+- **Adding to a timeline:** right-click an empty spot of a track for a new clip
+  there, drop files on a track, use the cue track's + for a pause, stop, fade, send
+  or wait cue at the playhead, and *+ Track* for an empty track. Right-click a
+  track's name to remove an empty one or move a picture track above or below the
+  next.
+- **Speed and opacity lanes under a clip:** add, drag and remove keyframes where
+  the clip is, and see its length follow its speed.
+- **Pause cues.** A *Pause timeline* cue stops the timeline's clock until GO. It
+  can let what is playing run on (and then the next crossfade, fade or keyframe
+  ramp waits for your GO), hold everything on a frame, or hold only the clips you
+  tick; cameras and live sound stay live unless you say otherwise. Fades already
+  under way when the clock stops wait where they are and finish after GO; a fade
+  you start by hand still runs. *Run*, *Stop* and *Jump in timeline* cues go with
+  it, and a clip's own Pause and Resume cues still hold just that clip.
+- **Play a section again until GO.** A pause cue can loop the timeline back to a
+  marker or a time and play that section round until GO; GO lets the pass finish
+  and carries on past the cue (or, if you choose, leaves at once). The jump back
+  isn't sample-accurate: for a bed of sound that must not break, loop the sound
+  clip itself.
 - **The timeline Stop cue fades what the timeline is playing out**, over 3 seconds
   unless you set another time (0 cuts); pressing Stop again during the fade cuts at
   once. The editor's Stop button does the same.
-- **The transport says what GO will do on a timeline that waits:** "Continue …" and
-  what it brings in next, instead of the next cue in the list (also in the new
-  interface and on the web remote).
-- **A clip that runs out during a pause** fades out by default; choose Loop or Hold
-  for it in its inspector. The editor marks such clips with ⚠.
+- **Overlapping clips crossfade** on a timeline made in this version: a clip that
+  comes in while an earlier one on its track is still playing crossfades over it
+  for as long as they overlap, and the tracks draw the crossfade. Clips that butt
+  up against each other follow on without a gap of black.
+- **Moving the playhead, or a Jump cue, changes the picture all at once**: what was
+  up stays until everything at the new place is ready.
+- **A clip set to Loop goes round again** if a pause outlasts it; *Hold* keeps its
+  last frame; *End* (the default) fades it out. The editor marks a clip left to
+  end with ⚠.
 - **Clips at opacity 0 wait for their fade-in** on a timeline made in this version,
   so a picture that fades up later is seen from its first frame. A clip can opt out
   (*Already running when it fades in*). Older shows play as they did.
 - **On a timeline, opacity, position and effect keyframes follow the timeline's
   clock:** they stand still at a pause and go on from the GO. Speed keyframes
   follow the clip.
-- **Duplicating a group** now aims the Pause, Fade and Stop cues inside it at the
-  copied cues, not at the originals.
-- **Double-clicking a timeline group** in the cue list opens its tracks instead of
-  firing it (GO and *Fire* still start it). Other cues still fire on a
-  double-click.
-- **Not yet:** timeline cue lists (a tab of their own) and automatic crossfades
-  where clips overlap.
-- **Split, delete and ripple delete in the tracks editor.** Ctrl+K (Cmd+K) or
-  *✂ Split* cuts clips in two at the playhead; Delete takes clips off, and
-  Shift+Delete (or Delete with *Ripple* on) closes the gap they leave. A sound
-  split in two may click at the join; the status bar says so.
-- **Add clips, cues and tracks from the tracks editor:** right-click an empty spot
-  of a track for a new clip there, drop files on a track, use the cue track's +
-  for a pause, stop, fade, send or wait cue at the playhead, and *+ Track* for an
-  empty track. Right-click a track's name to remove an empty one or move a picture
-  track above or below the next.
-- **Pick clips with a rubber band**, trim several at once, and drag the square at
-  a clip's corner to set its fade-in or fade-out.
-- **Speed and opacity lanes under a clip** in the tracks editor: add, drag and
-  remove keyframes where the clip is, and see its length follow its speed. Speed
-  keys follow the clip's content; opacity keys follow the timeline's clock and
-  wait at a pause.
-- **A clip shown on several displays** carries a "+N" badge, with a ghost of it
-  on each other display's track.
+- **The transport says what GO will do on a timeline:** "Continue …" and what it
+  brings in next, "RUNNING · next pause in 0:12.0", "Finish this pass and
+  continue …" while a section loops, "… is at its end" (also in the new interface
+  and on the web remote).
 - **The tracks editor warns** of a clip that nothing fades up (it never starts)
   and of one that cuts in over the clip under it as it fades up; sound clips show
   their waveform.
 
-- **Timeline cue lists.** *Cue ▸ New timeline* (or *+ ▸ New timeline* by the list
-  tabs) makes a cue list that is a timeline, with a tab of its own showing its
-  tracks in the cue list's place; right-click a list's tab to make it a timeline or
-  a plain list again. Files dropped on it and cues added to it become clips at its
-  playhead. GO runs it, carries it on at a pause and does nothing while it runs,
-  and the transport says so ("RUNNING · next pause in 0:12.0").
+Several displays:
+
 - **A picture on several displays.** A picture, video, text, shape or camera cue
   has an *Also on* row in its inspector to show it on other displays too; the cue
-  list shows "Display 1 +2".
-- **Not yet:** automatic crossfades where clips overlap, adding clips, splitting
-  and tracks from the editor.
+  list shows "Display 1 +2" and the tracks a "+2" badge, with a ghost of the clip
+  on each other display's track. What comes in on one of those displays replaces
+  it there only; its sound plays until it has gone from the last of them. Text and
+  shapes are drawn at the size of the cue's own display.
+
+Also:
+
+- **Duplicating a group** now aims the Pause, Fade and Stop cues inside it at the
+  copied cues, not at the originals.
 - **A show that uses the new timeline cues (Run, Pause, Stop or Jump timeline)
   will not open in NewQ 0.20.3 or older.**
 
