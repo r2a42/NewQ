@@ -51,8 +51,9 @@ objc2 = "0.5"
 core-foundation = "0.9"
 core-graphics = "0.23"
 
-# To end the streaming server with NewQ, whichever way NewQ ends.
-[target.'cfg(target_os = "linux")'.dependencies]
+# To end the streaming server with NewQ, whichever way NewQ ends (Linux), and
+# the main thread's processor time when it stalls (crumbs.rs).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # The icon in the Windows executable (see build.rs).

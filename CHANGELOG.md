@@ -6,6 +6,20 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Test Mode reports sound dropouts.** Each time the sound device says it ran out of sound to
+  play (a buffer underrun: a click or gap you can hear), the test notes when, counts it in the
+  window and in `stats.csv`, and the report says so: tracked if it happened at all, a problem
+  above four an hour or three within ten seconds. The report says *No audio dropouts* when there
+  were none. The log now says, for each, the device's buffer size and whether NewQ's mixing was
+  slow or the system asked for sound late; the Statistics window counts them too.
+- **Test Mode reports stalls properly.** Every time the program's main loop was held up for a
+  tenth of a second or more (the pictures stand still meanwhile) is listed with its time and what
+  the program was doing (the show engine, making the pictures, the test's own measuring): tracked
+  if there were a few, a problem for one of a quarter of a second or more, or more than twelve an
+  hour. When most of them came just after a whole minute by the clock, the report says that
+  something done once a minute is behind them, not the show. The log's stall warning now also
+  says how long the main thread itself worked, whether the whole program was held up, which step
+  of the show engine (and which cue) took the time, and the slowest picture made.
 - **Test Mode no longer holds the show up while it measures.** Looking at NewQ's and
   FFmpeg's memory and processor use is done on a thread of its own, and so is writing the
   measurements file. On Windows that look sometimes took up to 3 seconds, and the show

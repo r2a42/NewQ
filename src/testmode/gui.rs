@@ -153,6 +153,10 @@ pub fn stats_window(ctx: &egui::Context, st: &mut UiState) {
                         format!("{:.1}%", s.inputs.audio_permille as f32 / 10.0),
                     );
                     ui.label(format!(
+                        "Sound dropouts since NewQ started: {}",
+                        s.inputs.audio_errors
+                    ));
+                    ui.label(format!(
                         "{} cue{} playing, {} picture layer{}",
                         s.inputs.playing,
                         if s.inputs.playing == 1 { "" } else { "s" },
@@ -857,6 +861,7 @@ fn running(ui: &mut egui::Ui, r: &Run) {
     } else {
         ui.label(RichText::new("Measuring…").weak());
     }
+    ui.label(hitches_line(&r.hitches));
     ui.separator();
     if r.findings.is_empty() {
         ui.colored_label(GREEN, "Nothing wrong so far.");
@@ -956,6 +961,7 @@ fn checking(ui: &mut egui::Ui, r: &super::full::FullRun) {
             .small(),
         );
     }
+    ui.label(RichText::new(hitches_line(&r.hitches)).weak().small());
     ui.separator();
     ui.label(RichText::new("Its files").small().weak());
     ui.label(RichText::new(r.folder.display().to_string()).small());
@@ -1123,6 +1129,17 @@ fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<St
         .weak()
         .small(),
     );
+}
+
+/// The running count of the main loop's stalls and the sound's dropouts.
+fn hitches_line(h: &super::hitches::Hitches) -> String {
+    let worst = h.stalls.iter().map(|s| s.ms).max();
+    format!(
+        "Main loop held up 100 ms or more: {}{} · Sound dropouts: {}",
+        h.stalls.len(),
+        worst.map_or(String::new(), |w| format!(" (worst {w} ms)")),
+        h.dropouts.len()
+    )
 }
 
 #[cfg(test)]

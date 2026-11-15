@@ -283,7 +283,7 @@ stays on the computer until you send it yourself.
   per computer, so don't leave it on in a show.
 - **Statistics window:** *Window ▸ Statistics* opens the live figures Test Mode shows while
   it runs, for an ordinary show: memory, processor, FFmpeg's processes and processor, the slowest
-  frame, late frames, audio load, cues and layers playing, and the frame rate of each display.
+  frame, late frames, audio load, sound dropouts, cues and layers playing, and the frame rate of each display.
   It measures every 2 seconds while it is open and not at all when it is closed, and can also
   write a log file (`newq-stats.csv` in the log folder, the same file `NEWQ_STATS` makes).
 - **Output windows on a Mac** are borderless windows above the menu bar, on every Space, so the
@@ -319,7 +319,11 @@ stays on the computer until you send it yourself.
 - **Stalls are explained in the log:** when the main loop stops for more than 100 ms,
   `newq.log` says which parts of the loop took the time (*event loop stalled for 4815 ms:
   drawing the control window 4790 ms…*) and how much of it was spent outside NewQ's own
-  code, and a cue that takes more than 100 ms to start says so.
+  code, how long the main thread itself worked, whether a thread that only sleeps was held up
+  too (then the whole program was), inside the show engine which step and cue took the time,
+  and the slowest picture made; a cue that takes more than 100 ms to start says so. A sound
+  device's dropout is logged with its buffer size and whether NewQ's mixing was slow or the
+  system called for sound late.
 - **Settings:** every setting of the show is in one place, *Settings ▸ Open
   settings…* (**Ctrl+,** to open and close it). It takes the place of the cue
   list, so GO, Stop All and the live preview stay where they are and a setting
@@ -1513,6 +1517,26 @@ The report has a *Timelines* part (how often GO was pressed, loops left, seeks; 
 clock, the clips and the cueing in figures), and `timeline.csv` in the zip has each
 measurement. A clip on a sound device that isn't there isn't judged (the report notes
 there was no working audio output).
+
+**Stalls and sound dropouts, in every test.** Each time the main loop is held up for 100 ms
+or more (every display's picture stands still meanwhile) and each time the sound device
+reports a dropout (a buffer underrun: the sound broke up for a moment), the test writes it
+in `events.log` with its time and, for a stall, what the loop was doing (the show engine,
+making the pictures, the test's own measuring, drawing the window), how much of it the main
+thread spent working and whether the whole program was held up. The window counts both as
+the test runs, `stats.csv` has an `audio_errors` column, and the report gives a line for each
+(*No audio dropouts on …* when there were none):
+
+| Finding | Problem when | Tracked when |
+|---|---|---|
+| Stalls of the main loop of 100 ms or more | one of 250 ms or more, or more than 12 an hour (100 ms is ten frames at 100 Hz; more than one every five minutes is several an act) | any |
+| Sound dropouts | more than 4 an hour, or 3 within 10 s | any |
+
+A run shorter than a quarter of an hour is counted as a quarter of an hour. The stall
+finding says how many were the test's own doing, and when most began just after a whole
+minute by the clock, says that something done once a minute is behind them, not the show.
+The test measures memory and processor use on threads of its own, so it doesn't hold the
+show up itself.
 
 **The media.** The first time, Test mode downloads free films and pictures (the
 Blender Foundation's *Big Buck Bunny* and *Sintel* and the *Jellyfish* clip, under

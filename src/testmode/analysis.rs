@@ -274,10 +274,6 @@ pub fn analyse(
         out.push(problem(format!(
             "The program froze for {stall} ms once: every output stopped for that long."
         )));
-    } else if stall > 250 {
-        out.push(note(format!(
-            "The longest pause of the main loop was {stall} ms."
-        )));
     }
 
     // Late frames count only while a picture is being drawn.
@@ -395,6 +391,169 @@ pub fn analyse(
         ));
     }
     out
+}
+
+// ----- Stalls and sound dropouts ----------------------------------------------------
+
+/// A stall of the main loop (`crumbs::Stall`), as a test noted it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StallNote {
+    /// Seconds into the test when it ended.
+    pub t: f64,
+    pub ms: u64,
+    /// The part of the loop that took longest.
+    pub part: String,
+    /// Seconds past the whole minute by the wall clock when it began.
+    pub past_minute: f64,
+}
+
+/// A stall this long is a Problem by itself: a quarter of a second of every
+/// display standing still is plain to see.
+pub const STALL_PROBLEM_MS: u64 = 250;
+/// More stalls of 100 ms or more than this an hour is a Problem: 100 ms is 10
+/// frames at 100 Hz, a hitch an audience can see in moving pictures, and more
+/// than one every five minutes is several in any act.
+pub const STALLS_PER_HOUR: f64 = 12.0;
+/// More sound dropouts than this an hour is a Problem: each is a click or gap
+/// that can be heard, and one every quarter of an hour is several a show.
+pub const DROPOUTS_PER_HOUR: f64 = 4.0;
+/// ...and so is this many within `BURST_SECS` of each other.
+pub const DROPOUT_BURST: usize = 3;
+pub const BURST_SECS: f64 = 10.0;
+
+/// A rate over `hours`, a run shorter than a quarter of an hour counted as that
+/// long (two in a five-minute test is not 24 an hour).
+fn per_hour(n: usize, hours: f64) -> f64 {
+    n as f64 / hours.max(0.25)
+}
+
+/// What a part of the main loop is called in a report.
+fn part_words(part: &str) -> String {
+    match part {
+        "test mode" => "the test's own measuring".into(),
+        "the show engine" => "the show engine".into(),
+        "making the pictures (textures and uploads)" => "making the pictures".into(),
+        other => other.into(),
+    }
+}
+
+fn mmss(t: f64) -> String {
+    super::session::clock(std::time::Duration::from_secs_f64(t.max(0.0)))
+}
+
+/// Whether a stall began within a quarter of a second after a whole minute.
+fn on_the_minute(s: &StallNote) -> bool {
+    s.past_minute < 0.25 || s.past_minute > 59.95
+}
+
+/// The finding for the stalls of a run (100 ms or more each), `hours` long.
+pub fn analyse_stalls(stalls: &[StallNote], hours: f64) -> Vec<Finding> {
+    if stalls.is_empty() {
+        return Vec::new();
+    }
+    let worst = stalls.iter().map(|s| s.ms).max().unwrap_or(0);
+    let n = stalls.len();
+    let mut parts: Vec<(String, usize)> = Vec::new();
+    for s in stalls {
+        let w = part_words(&s.part);
+        match parts.iter_mut().find(|(p, _)| *p == w) {
+            Some((_, c)) => *c += 1,
+            None => parts.push((w, 1)),
+        }
+    }
+    parts.sort_by_key(|p| std::cmp::Reverse(p.1));
+    let by_part = parts
+        .iter()
+        .map(|(p, c)| format!("{p} {c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut worst_first: Vec<&StallNote> = stalls.iter().collect();
+    worst_first.sort_by_key(|s| std::cmp::Reverse(s.ms));
+    let listed = worst_first
+        .iter()
+        .take(8)
+        .map(|s| format!("{} ({}, {} ms)", mmss(s.t), part_words(&s.part), s.ms))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut text = format!(
+        "The main loop was held up {n} time{} for 100 ms or more (the worst {worst} ms); meanwhile the pictures stand still on every display and cues wait. By what it was doing: {by_part}. {}: {listed}.",
+        if n == 1 { "" } else { "s" },
+        if n > 8 { "The longest" } else { "When" },
+    );
+    let ours = parts
+        .iter()
+        .find(|(p, _)| p == "the test's own measuring")
+        .map_or(0, |(_, c)| *c);
+    if ours > 0 {
+        text.push_str(&format!(
+            " {ours} of them were the test's own measuring, not the show."
+        ));
+    }
+    let minute = stalls.iter().filter(|s| on_the_minute(s)).count();
+    // By chance a quarter-second window in each minute holds about 1 in 240.
+    if minute >= 3 && minute * 2 >= n {
+        text.push_str(&format!(
+            " {minute} of them began within a quarter of a second after a whole minute by the clock: something done once a minute (by the system, another program or NewQ) is behind those, not what the show was playing."
+        ));
+    }
+    let bad = worst >= STALL_PROBLEM_MS || (n >= 3 && per_hour(n, hours) > STALLS_PER_HOUR);
+    vec![if bad { problem(text) } else { watch(text) }]
+}
+
+/// One line for the report about the stalls.
+pub fn stall_summary(stalls: &[StallNote]) -> String {
+    match stalls.iter().map(|s| s.ms).max() {
+        None => "Main loop held up for 100 ms or more: never.".into(),
+        Some(worst) => format!(
+            "Main loop held up for 100 ms or more: {} time{}, the worst {worst} ms ({} began just after a whole minute).",
+            stalls.len(),
+            if stalls.len() == 1 { "" } else { "s" },
+            stalls.iter().filter(|s| on_the_minute(s)).count()
+        ),
+    }
+}
+
+/// The finding for the sound device's dropouts (stream errors), at `times`
+/// seconds into a run `hours` long, on `device` (None: no working device).
+pub fn analyse_dropouts(times: &[f64], hours: f64, device: Option<&str>) -> Vec<Finding> {
+    if times.is_empty() {
+        return Vec::new();
+    }
+    let n = times.len();
+    let burst = times
+        .windows(DROPOUT_BURST)
+        .any(|w| w[DROPOUT_BURST - 1] - w[0] <= BURST_SECS);
+    let at = times
+        .iter()
+        .take(10)
+        .map(|t| mmss(*t))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = format!(
+        "The sound device{} reported {n} dropout{} (a buffer underrun: the sound broke up for a moment), at {at}{}{}. newq.log says, for each, whether NewQ's mixing was slow or the system called for sound late.",
+        device.map_or(String::new(), |d| format!(" ({d})")),
+        if n == 1 { "" } else { "s" },
+        if n > 10 { " and later" } else { "" },
+        if burst {
+            format!(", {DROPOUT_BURST} or more within {BURST_SECS:.0} s")
+        } else {
+            String::new()
+        },
+    );
+    let bad = burst || per_hour(n, hours) > DROPOUTS_PER_HOUR;
+    vec![if bad { problem(text) } else { watch(text) }]
+}
+
+/// One line for the report about the sound.
+pub fn dropout_summary(times: &[f64], device: Option<&str>) -> String {
+    match (times.len(), device) {
+        (0, Some(d)) => format!("No audio dropouts on {d}."),
+        (0, None) => "No working sound device, so dropouts were not measured.".into(),
+        (n, d) => format!(
+            "Audio dropouts: {n} on {}.",
+            d.unwrap_or("the sound device")
+        ),
+    }
 }
 
 // ----- Timelines -------------------------------------------------------------------
@@ -1064,6 +1223,123 @@ mod tests {
         assert!(
             !f.iter()
                 .any(|f| f.severity == Severity::Problem && f.text.contains("audio device"))
+        );
+    }
+
+    fn stall(t: f64, ms: u64, part: &str, past_minute: f64) -> StallNote {
+        StallNote {
+            t,
+            ms,
+            part: part.into(),
+            past_minute,
+        }
+    }
+
+    #[test]
+    fn a_few_short_stalls_are_tracked_with_their_parts_and_times() {
+        let s = [
+            stall(186.5, 149, "test mode", 59.97),
+            stall(
+                761.8,
+                125,
+                "making the pictures (textures and uploads)",
+                35.27,
+            ),
+        ];
+        let f = analyse_stalls(&s, 1.0);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Watch);
+        let t = &f[0].text;
+        assert!(
+            t.contains("held up 2 times") && t.contains("the worst 149 ms"),
+            "{t}"
+        );
+        assert!(
+            t.contains("the test's own measuring 1, making the pictures 1"),
+            "{t}"
+        );
+        assert!(t.contains("3:06 (the test's own measuring, 149 ms)"), "{t}");
+        assert!(t.contains("1 of them were the test's own measuring"), "{t}");
+        assert!(!t.contains("whole minute"), "{t}");
+        assert!(analyse_stalls(&[], 1.0).is_empty());
+    }
+
+    #[test]
+    fn many_stalls_or_a_long_one_are_a_problem_and_the_minute_is_noticed() {
+        // The Mac hour: 14 of 100-150 ms, nine just after a whole minute.
+        let mut s: Vec<StallNote> = (0..9)
+            .map(|i| {
+                stall(
+                    186.5 + 300.0 * i as f64,
+                    110,
+                    "making the pictures (textures and uploads)",
+                    0.01,
+                )
+            })
+            .collect();
+        s.extend((0..5).map(|i| {
+            stall(
+                100.0 + 600.0 * i as f64,
+                105,
+                "drawing the control window",
+                35.3,
+            )
+        }));
+        let f = analyse_stalls(&s, 1.0);
+        assert_eq!(f[0].severity, Severity::Problem, "14 an hour");
+        assert!(
+            f[0].text
+                .contains("9 of them began within a quarter of a second after a whole minute"),
+            "{}",
+            f[0].text
+        );
+        // Twelve an hour is still only tracked...
+        let f = analyse_stalls(&s[..12], 1.0);
+        assert_eq!(f[0].severity, Severity::Watch);
+        // ...but one of a quarter of a second is a problem.
+        let f = analyse_stalls(&[stall(5.0, 260, "the show engine", 12.0)], 1.0);
+        assert_eq!(f[0].severity, Severity::Problem);
+        // A short run is judged as a quarter of an hour: 3 in 5 minutes is 12 an hour.
+        let three: Vec<_> = (0..3)
+            .map(|i| stall(i as f64 * 60.0, 120, "test mode", 20.0))
+            .collect();
+        assert_eq!(analyse_stalls(&three, 0.08)[0].severity, Severity::Watch);
+        assert!(stall_summary(&s).contains("14 times, the worst 110 ms (9 began just after"));
+        assert_eq!(
+            stall_summary(&[]),
+            "Main loop held up for 100 ms or more: never."
+        );
+    }
+
+    #[test]
+    fn dropouts_are_tracked_and_too_many_or_a_burst_are_a_problem() {
+        let mac = [885.8, 917.2, 2250.7, 2492.9, 2714.4, 2854.4];
+        let f = analyse_dropouts(&mac[..2], 1.0, Some("MacBook Pro Speakers"));
+        assert_eq!(f[0].severity, Severity::Watch);
+        assert!(
+            f[0].text
+                .contains("(MacBook Pro Speakers) reported 2 dropouts"),
+            "{}",
+            f[0].text
+        );
+        assert!(f[0].text.contains("at 14:45, 15:17"), "{}", f[0].text);
+        // Six in an hour is more than four.
+        assert_eq!(
+            analyse_dropouts(&mac, 1.0, None)[0].severity,
+            Severity::Problem
+        );
+        // Three within ten seconds, in a long run.
+        let f = analyse_dropouts(&[100.0, 104.0, 109.0], 8.0, None);
+        assert_eq!(f[0].severity, Severity::Problem);
+        assert!(f[0].text.contains("3 or more within 10 s"), "{}", f[0].text);
+        assert!(analyse_dropouts(&[], 1.0, None).is_empty());
+        assert_eq!(
+            dropout_summary(&[], Some("Speakers")),
+            "No audio dropouts on Speakers."
+        );
+        assert_eq!(
+            dropout_summary(&mac, Some("Speakers")),
+            "Audio dropouts: 6 on Speakers."
         );
     }
 }

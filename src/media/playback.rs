@@ -261,13 +261,24 @@ impl Children {
     }
 
     pub fn close(&self) {
+        let began = std::time::Instant::now();
         let live = {
             let mut st = self.0.lock();
             st.closed = true;
             std::mem::take(&mut st.live)
         };
+        let n = live.len();
         for (_, c) in live {
             reap(c);
+        }
+        // Called on the main thread as a cue ends: never expected to take long.
+        let took = began.elapsed();
+        if took >= std::time::Duration::from_millis(30) {
+            log::warn!(
+                "stopping a player's {n} FFmpeg process{} took {} ms",
+                if n == 1 { "" } else { "es" },
+                took.as_millis()
+            );
         }
     }
 }

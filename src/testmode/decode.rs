@@ -480,6 +480,7 @@ impl Compare {
                         layers: engine.picture_layers(),
                         late_permille: crate::render::late_frames_permille(),
                         audio_permille: 0,
+                        audio_errors: crate::media::audio::stream_errors(),
                     })
                 }) {
                     self.live = Some(sample);

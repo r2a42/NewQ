@@ -82,11 +82,153 @@ impl Crumbs {
         out
     }
 
+    /// The parts that took any time, slowest first ("a 30 ms, b 20 ms"), or
+    /// "no part took long". Doesn't end the cycle.
+    pub fn summary(&self) -> String {
+        let mut parts: Vec<_> = self
+            .parts
+            .iter()
+            .filter(|(_, d)| *d >= WORTH_NAMING)
+            .collect();
+        parts.sort_by_key(|(_, d)| std::cmp::Reverse(*d));
+        if parts.is_empty() {
+            return "no part took long".into();
+        }
+        parts
+            .iter()
+            .take(6)
+            .map(|(n, d)| format!("{n} {} ms", d.as_millis()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Forget the cycle (nothing was wrong).
     pub fn next_cycle(&mut self) {
         self.parts.clear();
         self.mark = Instant::now();
     }
+}
+
+// ----- Stalls, for Test Mode and the warning ---------------------------------
+
+/// A stall of the main loop, as the warning told it: kept for Test Mode, which
+/// reports each with its time and what the loop was doing.
+#[derive(Clone, Debug)]
+pub struct Stall {
+    /// When it ended.
+    pub at: Instant,
+    pub ms: u64,
+    /// The part of the loop that took longest ("test mode", "the show engine").
+    pub part: &'static str,
+    /// Seconds past the whole minute, by the wall clock, when it began: many
+    /// that began just after one are something done once a minute.
+    pub past_minute: f64,
+    /// The warning's words after "stalled for N ms: ".
+    pub text: String,
+}
+
+static STALLS: std::sync::Mutex<Vec<Stall>> = std::sync::Mutex::new(Vec::new());
+/// Kept until taken, no more than this (a test takes them every frame).
+const STALLS_KEPT: usize = 500;
+
+pub fn note_stall(s: Stall) {
+    if let Ok(mut v) = STALLS.lock() {
+        if v.len() >= STALLS_KEPT {
+            v.remove(0);
+        }
+        v.push(s);
+    }
+}
+
+/// The stalls noted since the last call.
+pub fn take_stalls() -> Vec<Stall> {
+    STALLS
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
+}
+
+/// The part that took longest so far this cycle.
+impl Crumbs {
+    pub fn worst(&self) -> Option<&'static str> {
+        self.parts.iter().max_by_key(|(_, d)| *d).map(|(n, _)| *n)
+    }
+}
+
+/// Seconds past the whole minute (by the wall clock) that `ago` before now was.
+pub fn past_minute(ago: Duration) -> f64 {
+    std::time::SystemTime::now()
+        .checked_sub(ago)
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0.0, |d| {
+            (d.as_secs() % 60) as f64 + f64::from(d.subsec_millis()) / 1000.0
+        })
+}
+
+/// The processor time the calling thread has had: how much of a stall the
+/// main thread spent working, and how much waiting (or not given a processor).
+#[cfg(unix)]
+pub fn thread_cpu() -> Option<Duration> {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `t` is a valid timespec that lives through the call.
+    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    (ok == 0).then(|| Duration::new(t.tv_sec as u64, t.tv_nsec as u32))
+}
+
+#[cfg(windows)]
+pub fn thread_cpu() -> Option<Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut made, mut ended, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the pseudo handle for this thread is always valid, and the four
+    // times live through the call.
+    let ok = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut made,
+            &mut ended,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    let ticks = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // In units of 100 ns (counted in whole scheduler quanta, about 16 ms).
+    (ok != 0).then(|| Duration::from_nanos((ticks(kernel) + ticks(user)) * 100))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn thread_cpu() -> Option<Duration> {
+    None
+}
+
+/// The most a thread that only sleeps for 10 ms at a time has overslept since
+/// the last call. Large while the main loop stalls: the whole program (or the
+/// computer) was held up, not the main thread alone.
+pub fn pulse_late() -> Duration {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LATE_US: AtomicU64 = AtomicU64::new(0);
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("stall-pulse".into())
+            .spawn(|| {
+                let step = Duration::from_millis(10);
+                loop {
+                    let t = Instant::now();
+                    std::thread::sleep(step);
+                    let late = t.elapsed().saturating_sub(step);
+                    LATE_US.fetch_max(late.as_micros() as u64, Ordering::Relaxed);
+                }
+            });
+    });
+    Duration::from_micros(LATE_US.swap(0, Ordering::Relaxed))
 }
 
 #[cfg(test)]
@@ -116,6 +258,51 @@ mod tests {
         c.add("events", Duration::from_millis(20));
         let r = c.report(Duration::from_millis(100));
         assert!(r.starts_with("events 40 ms, engine 30 ms"), "{r}");
+    }
+
+    #[test]
+    fn a_summary_names_the_slow_parts_and_keeps_the_cycle() {
+        let mut c = Crumbs::new();
+        assert_eq!(c.summary(), "no part took long");
+        c.add("quick", Duration::from_millis(1));
+        c.add("slow", Duration::from_millis(900));
+        assert_eq!(c.summary(), "slow 900 ms");
+        assert_eq!(c.parts.len(), 2);
+        assert_eq!(c.worst(), Some("slow"));
+    }
+
+    #[test]
+    fn stalls_are_kept_until_taken() {
+        let _ = take_stalls();
+        note_stall(Stall {
+            at: Instant::now(),
+            ms: 120,
+            part: "test mode",
+            past_minute: 0.02,
+            text: "test mode 119 ms".into(),
+        });
+        let got = take_stalls();
+        assert!(got.iter().any(|s| s.ms == 120 && s.part == "test mode"));
+        assert!(take_stalls().iter().all(|s| s.ms != 120));
+    }
+
+    #[test]
+    fn a_busy_thread_has_processor_time_and_a_minute_has_sixty_seconds() {
+        let Some(before) = thread_cpu() else { return };
+        let t = Instant::now();
+        let mut x = 0u64;
+        while t.elapsed() < Duration::from_millis(60) {
+            x = x.wrapping_add(std::hint::black_box(1));
+        }
+        assert!(x > 0);
+        let used = thread_cpu().unwrap() - before;
+        assert!(used >= Duration::from_millis(15), "{used:?}");
+        // Asleep is not working.
+        let before = thread_cpu().unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(thread_cpu().unwrap() - before < Duration::from_millis(40));
+        let p = past_minute(Duration::from_secs(3));
+        assert!((0.0..60.0).contains(&p), "{p}");
     }
 
     #[test]

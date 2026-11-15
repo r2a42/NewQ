@@ -314,6 +314,12 @@ pub struct App {
     stats: Option<crate::stats::StatsLog>,
     /// Where the main loop's time went, named when it stalls.
     crumbs: crate::crumbs::Crumbs,
+    /// The main thread's processor time when this cycle of the loop began.
+    cycle_cpu: Option<Duration>,
+    /// Where the show engine's time went, if its last tick was slow.
+    engine_note: Option<String>,
+    /// The slowest picture made this cycle: (instance, width, height, time).
+    slowest_upload: Option<(u64, u32, u32, Duration)>,
     /// A presenter-style remote's keys (see `clicker`).
     clicker: Arc<crate::clicker::Shared>,
     /// Rouses the event loop (the remote-control threads and the system's
@@ -463,6 +469,9 @@ impl App {
             feedback: crate::feedback::Feedback::new(),
             stats: crate::stats::StatsLog::from_env(&crate::crash::log_dir()),
             crumbs: crate::crumbs::Crumbs::new(),
+            cycle_cpu: None,
+            engine_note: None,
+            slowest_upload: None,
             preview_meter: Default::default(),
             live_sampler: None,
             fps_labels: HashMap::new(),
@@ -1732,6 +1741,7 @@ impl App {
                     .audio
                     .device_status(None)
                     .map_or(0, |d| d.load_permille),
+                audio_errors: crate::media::audio::stream_errors(),
             })
         {
             let h = &mut self.ui.live_stats;
@@ -1837,6 +1847,7 @@ impl App {
             let engine_layers = self.engine.layers(source);
             let has_picture = !engine_layers.is_empty();
             for l in engine_layers {
+                let began = Instant::now();
                 let entry = match &l.source {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
@@ -1896,6 +1907,10 @@ impl App {
                         })
                     }
                 };
+                let took = began.elapsed();
+                if self.slowest_upload.is_none_or(|(.., d)| took > d) {
+                    self.slowest_upload = Some((l.instance, entry.0.width, entry.0.height, took));
+                }
                 layers.push(OutputLayer {
                     texture: entry.0.clone(),
                     opacity: l.opacity,
@@ -2780,15 +2795,64 @@ impl App {
             dt = 0.0;
         }
         self.was_active = self.engine.is_active();
+        let cpu = crate::crumbs::thread_cpu();
+        let late = crate::crumbs::pulse_late();
         if dt > 0.1 && self.was_active {
-            log::warn!(
-                "event loop stalled for {:.0} ms: {}",
-                dt * 1000.0,
-                self.crumbs.report(Duration::from_secs_f64(dt))
-            );
+            let took = Duration::from_secs_f64(dt);
+            let part = self.crumbs.worst().unwrap_or("no part of the loop");
+            let mut text = self.crumbs.report(took);
+            if let (Some(a), Some(b)) = (self.cycle_cpu, cpu) {
+                text.push_str(&format!(
+                    "; the main thread worked for {} ms of it",
+                    b.saturating_sub(a).as_millis()
+                ));
+            }
+            text.push_str(&format!(
+                "; a thread that only sleeps was {} ms late meanwhile ({})",
+                late.as_millis(),
+                if late * 2 > took {
+                    "the whole program was held up"
+                } else {
+                    "the main thread alone was"
+                }
+            ));
+            if part == "the show engine"
+                && let Some(n) = &self.engine_note
+            {
+                text.push_str(&format!("; in the show engine: {n}"));
+            }
+            if let Some((instance, w, h, d)) = self.slowest_upload
+                && d >= Duration::from_millis(15)
+            {
+                let name = self
+                    .engine
+                    .active
+                    .iter()
+                    .find(|a| a.instance == instance)
+                    .and_then(|a| self.show.cue(a.cue_id))
+                    .map_or_else(
+                        || "a cue now ended".to_string(),
+                        |c| format!("cue {} ({})", c.number, c.name),
+                    );
+                text.push_str(&format!(
+                    "; the slowest picture was {name}'s, {w}x{h}, {} ms",
+                    d.as_millis()
+                ));
+            }
+            log::warn!("event loop stalled for {:.0} ms: {text}", dt * 1000.0);
+            crate::crumbs::note_stall(crate::crumbs::Stall {
+                at: now,
+                ms: took.as_millis() as u64,
+                part,
+                past_minute: crate::crumbs::past_minute(took),
+                text,
+            });
         } else {
             self.crumbs.next_cycle();
         }
+        self.cycle_cpu = cpu;
+        self.engine_note = None;
+        self.slowest_upload = None;
 
         // What went wrong on any thread since the last pass, for the operator.
         for told in crate::crash::take_notices() {
@@ -2855,7 +2919,11 @@ impl App {
         self.part("The show engine", |app| {
             crate::crash::test_panic("engine");
             app.engine.on_clock(&app.show, crate::clock::now(), gap);
+            let began = Instant::now();
             app.engine.tick(&app.show, dt);
+            if began.elapsed() >= Duration::from_millis(50) {
+                app.engine_note = Some(app.engine.tick_breakdown(&app.show));
+            }
         });
         self.crumbs.lap("the show engine");
         self.part("Test Mode", |app| {
@@ -2888,6 +2956,7 @@ impl App {
                         .audio
                         .device_status(None)
                         .map_or(0, |d| d.load_permille),
+                    audio_errors: crate::media::audio::stream_errors(),
                 });
             }
             app.sample_for_window(now);

@@ -155,7 +155,10 @@ The README describes the features; this file is about working on the code.
   `audio.rs`), not the main loop: a process start took 3 to 4 s now and then on a Mac. A start that
   fails shows as `error()` and no frames. `Engine::update_preload` also preloads the children of
   the group that an auto-follow leads to (`MAX_PRELOAD_CHILDREN`), so a group of layers starts warm.
-  `crumbs.rs` leaves a note after each part of the main loop; a stall over 100 ms is logged with them.
+  `crumbs.rs` leaves a note after each part of the main loop; a stall over 100 ms is logged with them, the main
+  thread's CPU time (`thread_cpu`), a sleeping thread's lateness (`pulse_late`: whole program held or not), the
+  engine's own crumbs (`Engine::crumbs`, `tick_breakdown`, slowest cue) and the slowest picture made, and kept for
+  Test Mode (`note_stall`/`take_stalls`, with `past_minute`). `Children::close` warns if it takes 30 ms.
 - Display loss: `app.rs::control_for_outputs` treats the main window as being on no display while its
   remembered display (`control_home`) is disconnected (a lid closed), so an output stays on its display
   even though the system moved the window there. `HomeTracker` (app.rs) makes a display the window's home
@@ -294,7 +297,10 @@ The README describes the features; this file is about working on the code.
   `Instant` while Running; the first tick from idle, dt 0 by `app.rs`'s rule, is skipped), `Arrival`s (a clip the
   running clock crossed, by `Engine::timeline_clips_up`'s `due`, per key) and `CueSpell`s; `analysis::
   analyse_timeline` judges them and lap spread; `timeline.csv`, the report's Timelines part. `session::Run::timeline`
-  replaces the first-cue lap logic. Engine test: Timeline short at 2x through an `Engine` (~30 s). The full check (`feature.rs`, chosen as "Debug test" beside
+  replaces the first-cue lap logic. `hitches.rs` (every test, the full check too) notes stalls and sound dropouts
+  (`audio::stream_errors`, the cpal error callback; `Stats` keeps the last 64 buffers' work and gap for its log line)
+  into events.log; `analysis::analyse_stalls`/`analyse_dropouts` judge them (`STALLS_PER_HOUR`, `STALL_PROBLEM_MS`,
+  `DROPOUTS_PER_HOUR`, `DROPOUT_BURST`); stats.csv's last column is `audio_errors`. Engine test: Timeline short at 2x through an `Engine` (~30 s). The full check (`feature.rs`, chosen as "Debug test" beside
   Short/Medium/Long, `TestMode::debug`, `Phase::FullPrep`/`Full`, driven by `full.rs`): `make_media` makes a clip, tone, stills and a Hap
   clip in the run folder, cut from the catalog's Sintel trailer and NASA pictures (`feature::Sources`,
   fetched by `full.rs::real_media` when downloads are allowed, else only from the cache) or plain ones; `build` makes a show with every cue kind and a list of `Part`s (acts at times,

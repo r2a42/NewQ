@@ -160,15 +160,91 @@ struct Device {
 struct Stats {
     load: AtomicU32,
     peaks: [AtomicU32; 64],
+    /// The stream errors the device has reported (a buffer underrun: the
+    /// sound broke up).
+    errors: AtomicU32,
+    /// Frames the last buffer held.
+    frames: AtomicU32,
+    /// The last `RECENT` buffers: how long the mixing took for each, and the
+    /// time since the one before it was asked for (microseconds), so that an
+    /// underrun can be told as NewQ's mixing being slow or the system calling
+    /// late.
+    work_us: [AtomicU32; RECENT],
+    gap_us: [AtomicU32; RECENT],
+    next: AtomicU32,
 }
+
+/// How many buffers' timings are kept (about 0.7 s at 512 frames, 48 kHz).
+const RECENT: usize = 64;
 
 impl Default for Stats {
     fn default() -> Stats {
         Stats {
             load: AtomicU32::new(0),
             peaks: std::array::from_fn(|_| AtomicU32::new(0)),
+            errors: AtomicU32::new(0),
+            frames: AtomicU32::new(0),
+            work_us: std::array::from_fn(|_| AtomicU32::new(0)),
+            gap_us: std::array::from_fn(|_| AtomicU32::new(0)),
+            next: AtomicU32::new(0),
         }
     }
+}
+
+impl Stats {
+    /// One buffer's timings (from the audio callback: atomics only).
+    fn note_buffer(
+        &self,
+        frames: usize,
+        work: std::time::Duration,
+        gap: Option<std::time::Duration>,
+    ) {
+        self.frames.store(frames as u32, Ordering::Relaxed);
+        let i = self.next.fetch_add(1, Ordering::Relaxed) as usize % RECENT;
+        let us = |d: std::time::Duration| d.as_micros().min(u128::from(u32::MAX)) as u32;
+        self.work_us[i].store(us(work), Ordering::Relaxed);
+        self.gap_us[i].store(gap.map_or(0, us), Ordering::Relaxed);
+    }
+
+    /// The worst work and gap of the recent buffers, in ms.
+    fn recent_worst(&self) -> (f64, f64) {
+        let worst = |a: &[AtomicU32; RECENT]| {
+            a.iter()
+                .map(|v| v.load(Ordering::Relaxed))
+                .max()
+                .unwrap_or(0) as f64
+                / 1000.0
+        };
+        (worst(&self.work_us), worst(&self.gap_us))
+    }
+}
+
+/// Stream errors reported by every device since NewQ started (Test Mode counts
+/// them: each is a moment the sound broke up).
+static STREAM_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn stream_errors() -> u64 {
+    STREAM_ERRORS.load(Ordering::Relaxed)
+}
+
+/// What a device's stream error says in the log, with what the mixing was
+/// doing just then: `frames` a buffer at `rate`, the worst `work` and `gap`
+/// (ms) of the last buffers.
+fn error_text(name: &str, e: &str, n: u32, frames: u32, rate: u32, work: f64, gap: f64) -> String {
+    let period = f64::from(frames) * 1000.0 / f64::from(rate.max(1));
+    let mut t = format!("audio stream error on {name}: {e} ({n} so far");
+    if frames > 0 {
+        t.push_str(&format!(
+            "; {frames} frames a buffer, {period:.1} ms; over the last buffers NewQ's mixing took at most {work:.1} ms of one, and the longest time between two calls for sound was {gap:.1} ms"
+        ));
+        if gap > period * 1.5 && work < period * 0.5 {
+            t.push_str(": the system called late, NewQ's mixing was not slow");
+        } else if work >= period * 0.8 {
+            t.push_str(": NewQ's mixing was too slow");
+        }
+    }
+    t.push(')');
+    t
 }
 
 impl Device {
@@ -337,6 +413,10 @@ pub struct DeviceStatus {
     /// How much of its time the mixing takes, in thousandths (the worst
     /// lately). Near 1000 the sound breaks up.
     pub load_permille: u32,
+    /// The stream errors it has reported since it was opened (underruns).
+    pub stream_errors: u32,
+    /// Frames in its last buffer (0 before the first).
+    pub buffer_frames: u32,
 }
 
 pub struct AudioOut {
@@ -550,6 +630,8 @@ impl AudioOut {
             channels: d.channels,
             error: d.error.clone().or_else(|| d.lost.why()),
             load_permille: d.stats.load.load(Ordering::Relaxed),
+            stream_errors: d.stats.errors.load(Ordering::Relaxed),
+            buffer_frames: d.stats.frames.load(Ordering::Relaxed),
         })
     }
 
@@ -1423,18 +1505,46 @@ fn open_stream(
     let config = supported.config();
     let (sr, channels) = (config.sample_rate, config.channels);
     let stream = match format {
-        cpal::SampleFormat::F32 => {
-            build::<f32>(&device, config, voices_rx, master, lost, stats, tap)?
-        }
-        cpal::SampleFormat::I16 => {
-            build::<i16>(&device, config, voices_rx, master, lost, stats, tap)?
-        }
-        cpal::SampleFormat::U16 => {
-            build::<u16>(&device, config, voices_rx, master, lost, stats, tap)?
-        }
-        cpal::SampleFormat::I32 => {
-            build::<i32>(&device, config, voices_rx, master, lost, stats, tap)?
-        }
+        cpal::SampleFormat::F32 => build::<f32>(
+            &device,
+            config,
+            voices_rx,
+            master,
+            lost,
+            stats,
+            tap,
+            device_name.clone(),
+        )?,
+        cpal::SampleFormat::I16 => build::<i16>(
+            &device,
+            config,
+            voices_rx,
+            master,
+            lost,
+            stats,
+            tap,
+            device_name.clone(),
+        )?,
+        cpal::SampleFormat::U16 => build::<u16>(
+            &device,
+            config,
+            voices_rx,
+            master,
+            lost,
+            stats,
+            tap,
+            device_name.clone(),
+        )?,
+        cpal::SampleFormat::I32 => build::<i32>(
+            &device,
+            config,
+            voices_rx,
+            master,
+            lost,
+            stats,
+            tap,
+            device_name.clone(),
+        )?,
         other => return Err(anyhow!("unsupported sample format {other:?}")),
     };
     stream.play()?;
@@ -1444,6 +1554,7 @@ fn open_stream(
 /// What a cue is told when its reader thread panicked.
 pub const READER_PANICKED: &str = "its reader stopped unexpectedly (a report was saved)";
 
+#[allow(clippy::too_many_arguments)]
 fn build<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
@@ -1452,6 +1563,7 @@ fn build<T>(
     lost: Arc<Lost>,
     stats: Arc<Stats>,
     tap: TapSlot,
+    name: String,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -1466,6 +1578,9 @@ where
     // A finished voice holds a couple of seconds of buffer; freeing that is
     // not something to do on the audio thread, so a thread of its own does it.
     let (dead_tx, dead_rx) = crossbeam_channel::unbounded::<MixVoice>();
+    let told = stats.clone();
+    let sample_rate = config.sample_rate;
+    let mut last_call: Option<std::time::Instant> = None;
     let _ = std::thread::Builder::new()
         .name("audio-janitor".into())
         .spawn(move || while dead_rx.recv().is_ok() {});
@@ -1473,6 +1588,8 @@ where
         config,
         move |out: &mut [T], _| {
             let began = std::time::Instant::now();
+            let gap = last_call.map(|t| began.duration_since(t));
+            last_call = Some(began);
             while let Ok(v) = voices_rx.try_recv() {
                 voices.push(v);
             }
@@ -1496,7 +1613,9 @@ where
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tap.push(&mix, channels, master);
-                let used = began.elapsed().as_secs_f32() / (frames as f32 / rate).max(1e-6);
+                let work = began.elapsed();
+                stats.note_buffer(frames, work, gap);
+                let used = work.as_secs_f32() / (frames as f32 / rate).max(1e-6);
                 worst = used.max(worst * 0.99);
                 stats.load.store((worst * 1000.0) as u32, Ordering::Relaxed);
                 // Peaks fall by half about every 0.3 s.
@@ -1505,7 +1624,14 @@ where
             }));
         },
         move |e| {
-            log::error!("audio stream error: {e}");
+            let n = told.errors.fetch_add(1, Ordering::Relaxed) + 1;
+            STREAM_ERRORS.fetch_add(1, Ordering::Relaxed);
+            let (work, gap) = told.recent_worst();
+            let frames = told.frames.load(Ordering::Relaxed);
+            log::error!(
+                "{}",
+                error_text(&name, &e.to_string(), n, frames, sample_rate, work, gap)
+            );
             if ends_stream(e.kind()) {
                 lost.set(e.to_string());
             }
@@ -1782,6 +1908,31 @@ mod tests {
                 .as_ref()
                 .is_some_and(|t| t.producer.is_abandoned()),
             "left for the tap's drop to clear"
+        );
+    }
+
+    #[test]
+    fn an_underrun_is_told_with_what_the_mixing_was_doing() {
+        let s = Stats::default();
+        let ms = std::time::Duration::from_millis;
+        for _ in 0..RECENT {
+            s.note_buffer(512, ms(0), Some(ms(10)));
+        }
+        s.note_buffer(512, std::time::Duration::from_micros(300), Some(ms(31)));
+        let (work, gap) = s.recent_worst();
+        assert!((work - 0.3).abs() < 1e-9 && (gap - 31.0).abs() < 1e-9);
+        let t = error_text("Speakers", "A buffer underrun", 2, 512, 48_000, work, gap);
+        assert!(
+            t.contains("on Speakers: A buffer underrun (2 so far; 512 frames a buffer, 10.7 ms"),
+            "{t}"
+        );
+        assert!(t.contains("the system called late"), "{t}");
+        let t = error_text("Speakers", "x", 1, 512, 48_000, 10.0, 11.0);
+        assert!(t.contains("NewQ's mixing was too slow"), "{t}");
+        // Before any buffer, only the count.
+        assert_eq!(
+            error_text("S", "x", 1, 0, 48_000, 0.0, 0.0),
+            "audio stream error on S: x (1 so far)"
         );
     }
 

@@ -137,6 +137,10 @@ pub struct Run {
     /// Samples of the frozen program copied into the folder (see `freeze`).
     freeze_files: Vec<String>,
     memory: MemoryWatch,
+    /// The main loop's stalls and the sound's dropouts, as they happen.
+    pub hitches: super::hitches::Hitches,
+    /// The sound device the test plays on, if it is working.
+    sound_device: Option<String>,
     /// A timeline test's driver and what it watches.
     pub timeline: Option<Box<TimelineRun>>,
 }
@@ -1058,12 +1062,13 @@ fn launch(
     if timeline.is_none() {
         engine.go(show);
     }
+    let started = Instant::now();
     Ok(Run {
         level: prep.level,
         flavour: prep.flavour,
         timeline,
         heavy: prep.heavy,
-        started: Instant::now(),
+        started,
         planned,
         folder,
         history: Vec::new(),
@@ -1095,6 +1100,8 @@ fn launch(
         log_path,
         freeze_files: Vec::new(),
         memory: MemoryWatch::new(),
+        hitches: super::hitches::Hitches::new(started),
+        sound_device: super::hitches::working_device(engine),
     })
 }
 
@@ -1109,6 +1116,7 @@ impl Run {
         if let Some(tl) = &self.timeline {
             f.extend(super::analysis::analyse_timeline(&tl.watch.notes, &clean));
         }
+        f.extend(self.hitches.findings(hours, self.sound_device.as_deref()));
         f
     }
 
@@ -1242,13 +1250,20 @@ impl Run {
                 .audio
                 .device_status(None)
                 .map_or(0, |d| d.load_permille),
+            audio_errors: crate::media::audio::stream_errors(),
         }) {
             self.last = Some(sample);
             self.history.push(sample);
         }
+        for (t, line) in self.hitches.tick(now) {
+            self.log_at(t, &line);
+        }
         // What has been found so far, for the window.
         if now.duration_since(self.last_analysis) > Duration::from_secs(5) {
             self.last_analysis = now;
+            if self.sound_device.is_none() {
+                self.sound_device = super::hitches::working_device(engine);
+            }
             self.findings = self.judge(elapsed.as_secs_f64() / 3600.0);
             let t = elapsed.as_secs_f64();
             for line in self.finding_log.update(t, &self.findings) {
@@ -1370,6 +1385,9 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
             let _ = writeln!(f, "1,{began:.1},{took:.1},{:.1}", run.lap_secs);
             let _ = f.flush();
         }
+    }
+    for (t, line) in run.hitches.tick(Instant::now()) {
+        run.log_at(t, &line);
     }
     let hours = elapsed.as_secs_f64() / 3600.0;
     let clean = run.clean_laps();
@@ -1671,6 +1689,9 @@ fn compose(
         }
         Err(e) => line(&mut out, &format!("  (none: {e})")),
     }
+    for l in run.hitches.summary(run.sound_device.as_deref()) {
+        line(&mut out, &format!("  {l}"));
+    }
     line(&mut out, "");
     line(&mut out, "Media");
     line(&mut out, "-----");
@@ -1806,10 +1827,16 @@ pub(super) fn system_report(
     ));
     match engine.audio.device_status(None) {
         Some(d) => p(format!(
-            "Sound: {} {} Hz, {} channels{}",
+            "Sound: {} {} Hz, {} channels{}{}",
             d.name,
             d.sample_rate,
             d.channels,
+            // (Known once it has played: the system's choice, NewQ asks for none.)
+            if d.buffer_frames > 0 {
+                format!(", {} frames a buffer", d.buffer_frames)
+            } else {
+                String::new()
+            },
             d.error
                 .map_or(String::new(), |e| format!(" (problem: {e})"))
         )),

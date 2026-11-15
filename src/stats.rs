@@ -15,7 +15,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 pub const HEADER: &str = "time_utc,uptime_s,rss_mb,cpu_pct,ffmpeg,ffmpeg_rss_mb,ffmpeg_cpu_pct,\
                           fds,threads,playing,started_total,layers,late_permille,audio_permille,\
-                          stall_max_ms,log_kb,gpu_mb,commit_mb";
+                          stall_max_ms,log_kb,gpu_mb,commit_mb,audio_errors";
 
 /// What the app tells the log at each sample.
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,6 +25,8 @@ pub struct Inputs {
     pub layers: u32,
     pub late_permille: u32,
     pub audio_permille: u32,
+    /// The sound devices' stream errors (dropouts) since NewQ started.
+    pub audio_errors: u64,
 }
 
 /// One row of the log, as numbers (the Test Mode window shows the latest).
@@ -342,7 +344,7 @@ fn row(
 ) -> String {
     let cell = |v: Option<u64>| v.map_or(String::new(), |v| v.to_string());
     format!(
-        "{},{uptime},{},{:.1},{ffmpeg},{},{:.1},{},{},{},{},{},{},{},{stall_ms},{log_kb},{},{}",
+        "{},{uptime},{},{:.1},{ffmpeg},{},{:.1},{},{},{},{},{},{},{},{stall_ms},{log_kb},{},{},{}",
         utc(when),
         rss[0] >> 20,
         cpu[0],
@@ -357,6 +359,7 @@ fn row(
         i.audio_permille,
         cell(extra[0]),
         cell(extra[1]),
+        i.audio_errors,
     )
 }
 
@@ -511,6 +514,15 @@ pub fn report(text: &str) -> Result<String, String> {
         late / 10.0,
         audio / 10.0
     );
+    // Counted since NewQ started: what rose while the log was kept.
+    let errors = finite(&r.col["audio_errors"]);
+    if let (Some(first), Some(last)) = (errors.first(), errors.last()) {
+        let n = (last - first).max(0.0);
+        out += &format!("Sound dropouts (the device's stream errors): {n}\n");
+        if n > 0.0 {
+            flags.push(format!("the sound device reported {n} dropouts"));
+        }
+    }
     if stall > 1000.0 {
         flags.push(format!("the main loop stalled for {stall} ms"));
     }
@@ -586,6 +598,7 @@ mod tests {
                 layers: 2,
                 late_permille: late as u32,
                 audio_permille: 100,
+                audio_errors: 0,
             };
             text += &row(
                 1_700_000_000 + n as i64 * 10,
@@ -604,11 +617,11 @@ mod tests {
         text
     }
 
-    /// A file from before the graphics and commit columns existed: those two
-    /// columns cut off its header and rows.
+    /// A file from before the graphics, commit and audio error columns
+    /// existed: those three columns cut off its header and rows.
     fn without_the_last_two_columns(text: &str) -> String {
         text.lines()
-            .map(|l| l.rsplitn(3, ',').last().unwrap().to_string())
+            .map(|l| l.rsplitn(4, ',').last().unwrap().to_string())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -622,6 +635,7 @@ mod tests {
         assert!(r.contains("100 samples"), "{r}");
         // And no line about columns it never had.
         assert!(!r.contains("graphics card"), "{r}");
+        assert!(!r.contains("dropouts"), "{r}");
     }
 
     #[test]
@@ -634,6 +648,7 @@ mod tests {
                 layers: 1,
                 late_permille: 0,
                 audio_permille: 0,
+                audio_errors: 0,
             };
             // Working set flat; the card's side grows 100 MB an hour (a sample
             // every 10 s over two hours).
@@ -663,6 +678,42 @@ mod tests {
         let cells = text.lines().nth(1).unwrap().split(',').count();
         assert_eq!(cells, HEADER.split(',').count());
         assert!(text.contains("2023-11-14T22:13:20Z"), "{text}");
+    }
+
+    #[test]
+    fn dropouts_are_counted_from_the_rows_and_an_old_file_has_none() {
+        let mut text = format!("{HEADER}\n");
+        for n in 0..50u64 {
+            let i = Inputs {
+                audio_errors: 2 + n / 20,
+                ..Inputs::default()
+            };
+            text += &row(
+                1_700_000_000 + n as i64 * 10,
+                n * 10,
+                [1 << 20, 0],
+                [0.0; 2],
+                0,
+                [None; 2],
+                i,
+                10,
+                1,
+                [None; 2],
+            );
+            text.push('\n');
+        }
+        let r = report(&text).unwrap();
+        assert!(
+            r.contains("Sound dropouts (the device's stream errors): 2\n"),
+            "{r}"
+        );
+        assert!(r.contains("reported 2 dropouts"), "{r}");
+        // A file from before the column: no line about it.
+        let old: String = text
+            .lines()
+            .map(|l| l.rsplit_once(',').unwrap().0.to_string() + "\n")
+            .collect();
+        assert!(!report(&old).unwrap().contains("dropouts"));
     }
 
     #[test]
@@ -810,6 +861,7 @@ mod tests {
                     layers,
                     late_permille: 1000,
                     audio_permille: 5,
+                    audio_errors: 0,
                 };
                 text += &row(
                     1_700_000_000 + n as i64 * 10,

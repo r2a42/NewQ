@@ -193,6 +193,9 @@ pub struct FullRun {
     pub stop: bool,
     awake: KeepAwake,
     memory: MemoryWatch,
+    /// The main loop's stalls and the sound's dropouts, as they happen.
+    pub hitches: super::hitches::Hitches,
+    sound_device: Option<String>,
     sleep_watch: SleepWatch,
     sleeps: Vec<(f64, f64)>,
     media_notes: Vec<String>,
@@ -382,8 +385,11 @@ pub fn launch(
         "Test mode: the full check begins ({parts} parts, about {:.0} s)",
         planned
     ));
+    let started = Instant::now();
     Ok(FullRun {
-        started: Instant::now(),
+        hitches: super::hitches::Hitches::new(started),
+        sound_device: super::hitches::working_device(engine),
+        started,
         folder,
         log_dir: prep.log_dir,
         runner: Runner::new(plan.parts, plan.osc, true),
@@ -627,6 +633,9 @@ impl FullRun {
             let rel = at.saturating_duration_since(self.started).as_secs_f64();
             self.log_at(rel, &text);
         }
+        for (t, line) in self.hitches.tick(now) {
+            self.log_at(t, &line);
+        }
         let problems = engine.take_problems();
         self.stream_said.extend(
             problems
@@ -643,6 +652,7 @@ impl FullRun {
                 .audio
                 .device_status(None)
                 .map_or(0, |d| d.load_permille),
+            audio_errors: crate::media::audio::stream_errors(),
         }) {
             self.last = Some(sample);
             self.history.push(sample);
@@ -825,6 +835,10 @@ pub fn finish(
     let mut findings = feature::findings(&results);
     let hours = t_end / 3600.0;
     findings.extend(analyse(&run.history, &[], 0.0, &[], hours));
+    for (t, line) in run.hitches.tick(Instant::now()) {
+        run.log_at(t, &line);
+    }
+    findings.extend(run.hitches.findings(hours, run.sound_device.as_deref()));
     let panics = crate::crash::panic_count().saturating_sub(run.panics_before);
     if panics > 0 {
         findings.insert(
@@ -1000,6 +1014,9 @@ fn compose(
             }
         }
         Err(e) => line(&mut out, &format!("  (none: {e})")),
+    }
+    for l in run.hitches.summary(run.sound_device.as_deref()) {
+        line(&mut out, &format!("  {l}"));
     }
     line(&mut out, "");
     line(&mut out, "Files");

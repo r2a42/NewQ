@@ -14,6 +14,7 @@ pub mod decode;
 pub mod feature;
 pub mod full;
 pub mod gui;
+pub mod hitches;
 pub mod plan;
 pub mod selftest;
 pub mod session;

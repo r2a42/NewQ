@@ -1035,6 +1035,10 @@ pub struct Engine {
     /// Current size of each open output window, used to pick decode resolution.
     pub output_sizes: HashMap<OutputId, (u32, u32)>,
     pub probe: ProbeCache,
+    /// Where the last tick's time went (the main loop names it when it stalls).
+    pub crumbs: crate::crumbs::Crumbs,
+    /// The cue whose part of the last tick took longest, and how long.
+    slowest_cue: Option<(CueId, Duration)>,
     /// The sound of each file, drawn in the inspector for setting in and out points.
     pub waveforms: WaveformCache,
     prepared: Vec<Prepared>,
@@ -1103,6 +1107,8 @@ impl Engine {
             logged: HashMap::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
+            crumbs: crate::crumbs::Crumbs::new(),
+            slowest_cue: None,
             waveforms: WaveformCache::default(),
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
@@ -1146,6 +1152,8 @@ impl Engine {
             logged: HashMap::new(),
             output_sizes: HashMap::new(),
             probe: ProbeCache::default(),
+            crumbs: crate::crumbs::Crumbs::new(),
+            slowest_cue: None,
             waveforms: WaveformCache::default(),
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
@@ -3263,12 +3271,15 @@ impl Engine {
     // ----- Per-frame update --------------------------------------------------
 
     pub fn tick(&mut self, show: &Show, dt: f64) {
+        self.crumbs.next_cycle();
+        self.slowest_cue = None;
         self.probe.poll();
         self.waveforms.poll();
         self.timecode.tick(dt);
         for problem in self.outbox.errors() {
             self.problem(problem);
         }
+        self.crumbs.lap("files read and messages sent");
         // A layer changed in the inspector moves a cue that is already on screen.
         for a in &mut self.active {
             if matches!(a.kind, ActiveKind::Video(_) | ActiveKind::Image(_))
@@ -3288,6 +3299,8 @@ impl Engine {
         // The timelines' clocks, and what they reach, in order.
         let before = self.runs.clocks();
         self.timeline_tick(show, dt);
+        self.crumbs
+            .lap("the timelines' clocks and the clips they reach");
         if !self.paused {
             // (the cue, a dip's reveal, how to start it)
             type Due = (CueId, Option<(u64, f64)>, StartAt);
@@ -3365,7 +3378,23 @@ impl Engine {
         let unseen = self.runs.hiding();
         // Clips gone round to their in point (`RunOut::Loop`, detached at run time).
         let mut restarts: Vec<u64> = Vec::new();
+        self.crumbs.lap("starting the cues that are due");
+        // The cue that took longest, and (just after) the one dropped, if any:
+        // a cue that ends is dropped by `retain_mut` after its turn.
+        let slowest: std::cell::Cell<Option<(CueId, Duration)>> = std::cell::Cell::new(None);
+        let mut turn: Option<(CueId, Instant)> = None;
+        let note = |turn: &mut Option<(CueId, Instant)>| {
+            if let Some((id, at)) = turn.take() {
+                let took = at.elapsed();
+                if slowest.get().is_none_or(|(_, d)| took > d) {
+                    slowest.set(Some((id, took)));
+                }
+            }
+        };
         self.active.retain_mut(|a| {
+            // The last cue's turn ends here, with its drop if it was dropped.
+            note(&mut turn);
+            turn = Some((a.cue_id, Instant::now()));
             let joins = joining.contains(&a.instance);
             let (show_paused, voice_paused) = (paused, a.voice_paused(paused));
             // A cue held by a control cue stands still while the rest go on.
@@ -3833,6 +3862,10 @@ impl Engine {
             }
             true
         });
+        note(&mut turn);
+        self.slowest_cue = slowest.get();
+        self.crumbs
+            .lap("playing the cues (and dropping those that ended)");
         for m in messages {
             self.problem(m);
         }
@@ -3848,12 +3881,35 @@ impl Engine {
         for id in follow {
             self.fire_next(show, id);
         }
+        self.crumbs.lap("starting what follows");
         // The timelines: their groups' times, and the runs that have ended.
         self.timeline_after_tick(show);
         self.timeline_hold_crosspoints(show);
+        self.crumbs.lap("the timelines' groups and ends");
 
         self.update_preload(show);
+        self.crumbs.lap("getting cues ready ahead");
         self.log_cue_changes(show);
+        self.crumbs.lap("noting what changed");
+    }
+
+    /// Where the last tick's time went, for a stall's warning: its slow parts
+    /// and the cue that took longest.
+    pub fn tick_breakdown(&mut self, show: &Show) -> String {
+        let mut out = self.crumbs.summary();
+        if let Some((id, took)) = self.slowest_cue
+            && took >= Duration::from_millis(15)
+        {
+            let name = show.cue(id).map_or_else(
+                || format!("cue {id:?}"),
+                |c| format!("cue {} ({})", c.number, c.name),
+            );
+            out.push_str(&format!(
+                "; the slowest cue was {name}, {} ms",
+                took.as_millis()
+            ));
+        }
+        out
     }
 
     /// At the Detailed level, say in the log when each cue is started, when
