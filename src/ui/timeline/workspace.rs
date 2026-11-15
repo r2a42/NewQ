@@ -18,6 +18,17 @@ pub fn replaces_panes(st: &UiState) -> bool {
     !st.prefs.new_layout && chosen(st) && st.timeline.open && !st.layout.is_docked(Pane::Settings)
 }
 
+/// The timeline the workspace is on screen with now, if it is (in the panes'
+/// place, or as the new interface's Timeline view).
+pub fn showing(show: &Show, engine: &Engine, st: &UiState) -> Option<TimelineKey> {
+    let on_screen = if st.prefs.new_layout {
+        chosen(st) && st.modern_view == super::super::modern::View::Timeline
+    } else {
+        replaces_panes(st)
+    };
+    on_screen.then(|| target(show, engine, st)).flatten()
+}
+
 /// How much of the height the tracks take when the workspace first opens.
 const TRACKS_SHARE: f32 = 0.46;
 

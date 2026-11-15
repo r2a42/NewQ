@@ -7150,6 +7150,9 @@ fn inspector_one(
         ui.label(RichText::new("Select a cue to edit it.").weak());
         return;
     };
+    // The timeline the workspace is open on (a group's "Open" button is moot there).
+    let open_on = timeline::workspace::showing(show, engine, st);
+    let ws_chosen = timeline::workspace::chosen(st);
     let media_cues: Vec<(CueId, String)> = show
         .cues
         .iter()
@@ -7676,17 +7679,33 @@ fn inspector_one(
                         // Back to none at the defaults, so the group is written as before.
                         g.timeline = (!s.is_default()).then_some(s);
                     }
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("Open in timeline editor")
-                            .on_hover_text("Its tracks, under the cue list")
-                            .clicked()
-                        {
-                            actions.push(Action::Timeline(timeline::TimelineAction::Open(Some(
-                                crate::timeline::TimelineKey::Group(cue_id),
-                            ))));
-                        }
-                    });
+                    let key = crate::timeline::TimelineKey::Group(cue_id);
+                    if open_on == Some(key) {
+                        // The workspace is on this group already: its tracks
+                        // are under the inspector.
+                        ui.label(RichText::new("Its tracks are below.").weak());
+                        #[cfg(test)]
+                        ui.data_mut(|d| d.insert_temp(egui::Id::new("open_in_editor"), false));
+                    } else {
+                        let hover = if ws_chosen {
+                            "Its tracks, in the timeline workspace"
+                        } else {
+                            "Its tracks, under the cue list"
+                        };
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Open in timeline editor")
+                                .on_hover_text(hover)
+                                .clicked()
+                            {
+                                actions.push(Action::Timeline(timeline::TimelineAction::Open(
+                                    Some(key),
+                                )));
+                            }
+                        });
+                        #[cfg(test)]
+                        ui.data_mut(|d| d.insert_temp(egui::Id::new("open_in_editor"), true));
+                    }
                 }
             }
             CueKind::Wait(w) => {

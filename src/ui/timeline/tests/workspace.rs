@@ -501,3 +501,31 @@ fn the_layout_action_is_not_an_edit() {
     super::super::super::apply(a, &mut f.show, &mut e, &mut f.st);
     assert_eq!(f.st.prefs.timeline_layout, TimelineLayout::Workspace);
 }
+
+#[test]
+fn the_group_inspector_offers_to_open_the_editor_only_where_it_is_not_open_on_it() {
+    for modern in [false, true] {
+        let what = format!("modern {modern}");
+        let mut f = fixture();
+        let mut m = window(&mut f, modern, TimelineLayout::Workspace);
+        let g = f.group;
+        // Not open: the group's inspector offers it.
+        super::super::super::apply(Action::Select(g), &mut f.show, &mut m.e, &mut f.st);
+        settle(&mut m, &mut f);
+        assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(true), "{what}");
+        open_by_row(&mut m, &mut f, g);
+        assert_eq!(editors(&m), vec![Host::Workspace], "{what}");
+        assert_eq!(f.st.selected, Some(g), "{what}");
+        // Open on it: the inspector in the workspace says where its tracks are.
+        m.ctx
+            .data_mut(|d| d.remove::<bool>(egui::Id::new("open_in_editor")));
+        settle(&mut m, &mut f);
+        assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(false), "{what}");
+        // Back to the cue list: offered again.
+        let back = ws_button(&m, "back").center();
+        press(&mut m, &mut f, back);
+        assert!(editors(&m).is_empty(), "{what}");
+        settle(&mut m, &mut f);
+        assert_eq!(noted::<bool>(&m, "open_in_editor"), Some(true), "{what}");
+    }
+}
