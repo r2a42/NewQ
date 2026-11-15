@@ -131,9 +131,9 @@ fn strip(
             if ui
                 .add(go)
                 .on_hover_text(if on_timeline {
-                    "Run the timeline, or carry it on from a pause (Space)"
+                    "GO (0): run the timeline, or carry it on from a pause; Space plays and pauses it"
                 } else {
-                    "Fire the cue at the playhead (Space)"
+                    "GO (0, or Space on a cue list): fire the cue at the playhead"
                 })
                 .clicked()
             {
@@ -374,7 +374,11 @@ fn operator(
         .corner_radius(CornerRadius::same(14));
         if ui
             .add_sized([ui.available_width(), 130.0], go)
-            .on_hover_text("Fire the cue at the playhead (Space)")
+            .on_hover_text(if timeline::list_tab::active(show, engine).is_some() {
+                "GO (0): run the timeline, or carry it on from a pause; Space plays and pauses it"
+            } else {
+                "GO (0, or Space on a cue list): fire the cue at the playhead"
+            })
             .clicked()
         {
             actions.push(Action::Go);

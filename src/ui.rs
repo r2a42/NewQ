@@ -613,6 +613,9 @@ const FOLD_W: f32 = 18.0;
 
 enum Action {
     Go,
+    /// The Space key: on a timeline being worked on, its play/pause; else GO
+    /// (`space_key`). With the timeline of an editor the pointer was over.
+    Space(Option<crate::timeline::TimelineKey>),
     Panic,
     TogglePause,
     Select(CueId),
@@ -889,6 +892,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     poll_save(ui.ctx(), engine, st);
     refresh_missing(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
+    timeline::next_pass(st);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
         i.raw
@@ -1225,7 +1229,12 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
                 }
             }
         }
+        // Space plays and pauses a timeline being worked on, else it is GO
+        // (`space_key`); 0 (either one) is GO everywhere.
         if fresh_key(i, egui::Modifiers::NONE, Key::Space) {
+            actions.push(Action::Space(timeline::hovered_editor(st)));
+        }
+        if fresh_key(i, egui::Modifiers::NONE, Key::Num0) {
             actions.push(Action::Go);
         }
         // Show mode leaves the arrows free: Right and Page Down are what a
@@ -1933,7 +1942,8 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
             ui.separator();
             ui.label(RichText::new("Keyboard").strong());
             for (k, d) in [
-                ("Space", "GO"),
+                ("Space", "GO (a timeline: play / pause)"),
+                ("0", "GO"),
                 ("Esc", "Fade out all (press twice: stop now)"),
                 ("P", "Pause / resume"),
                 ("A", "Arm / disarm the selected cue"),
@@ -1975,9 +1985,9 @@ fn transport(
         if ui
             .add(go)
             .on_hover_text(if on_timeline {
-                "Run the timeline, or carry it on from a pause (Space)"
+                "GO (0): run the timeline, or carry it on from a pause; Space plays and pauses it"
             } else {
-                "Fire the cue at the playhead (Space)"
+                "GO (0, or Space on a cue list): fire the cue at the playhead"
             })
             .clicked()
         {
@@ -10039,6 +10049,30 @@ fn load_into(
 /// the next slide), or resumes after a pause. Back shows the slide before in
 /// such a slide show; otherwise it pauses everything, and Back again fades
 /// everything out and stops.
+/// The Space key (`hovered`: the timeline of the editor the pointer is over, if
+/// any): on a timeline being worked on (`timeline::space_target`: the editor
+/// that holds the keys, else a timeline list being shown) its play/pause, as
+/// its toolbar's (`timeline::space_action`); anywhere else GO.
+pub fn space_key(
+    hovered: Option<crate::timeline::TimelineKey>,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+) {
+    match timeline::space_target(show, engine, st, hovered) {
+        Some(key) => {
+            let a = timeline::space_action(show, engine, key);
+            timeline::apply(a, show, engine, st);
+        }
+        None => apply(Action::Go, show, engine, st),
+    }
+}
+
+/// The 0 key and the GO button: GO.
+pub fn go_key(show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    apply(Action::Go, show, engine, st);
+}
+
 pub fn remote_button(button: Button, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     // A pause is let go of or ended the same way whatever is on.
     if !engine.paused && button == Button::Back && engine.deck_step(show, false) != DeckStep::NoDeck
@@ -10338,6 +10372,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 st.scroll_to_selected = true;
             }
         }
+        Action::Space(hovered) => space_key(hovered, show, engine, st),
         Action::Remote(button) => remote_button(button, show, engine, st),
         Action::Panic => engine.panic(show),
         Action::TogglePause => {
@@ -12131,7 +12166,55 @@ mod tests {
         // Unbound keys do nothing, and the transport keys are untouched.
         assert!(keys_with(&show, &st, &[(Key::W, M::NONE)]).is_empty());
         let a = keys_with(&show, &st, &[(Key::Space, M::NONE)]);
+        assert!(matches!(a[..], [Action::Space(None)]));
+        // 0 is GO, unless a cue has it as its hotkey.
+        let a = keys_with(&show, &st, &[(Key::Num0, M::NONE)]);
         assert!(matches!(a[..], [Action::Go]));
+        show.set_hotkey(d, Some("0".into()));
+        let a = keys_with(&show, &st, &[(Key::Num0, M::NONE)]);
+        assert!(matches!(a[..], [Action::FireCue(id)] if id == d));
+    }
+
+    #[test]
+    fn typing_in_a_text_box_space_and_0_do_nothing() {
+        let ctx = egui::Context::default();
+        let (show, st) = (Show::default(), UiState::default());
+        let mut text = String::new();
+        let id = egui::Id::new("a text box");
+        let mut actions = Vec::new();
+        for n in 0..3 {
+            let events = if n == 2 {
+                [Key::Space, Key::Num0]
+                    .into_iter()
+                    .map(|key| Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+                time: Some(1.0 + n as f64 * 0.03),
+                events,
+                ..Default::default()
+            };
+            actions.clear();
+            let mut out = ctx.run_ui(input, |ui| {
+                keyboard(ui.ctx(), &show, &st, &mut actions);
+                let r = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+                if n == 0 {
+                    r.request_focus();
+                }
+            });
+            out.textures_delta.clear();
+        }
+        assert!(ctx.egui_wants_keyboard_input());
+        assert!(actions.is_empty(), "{}", actions.len());
     }
 
     #[test]
@@ -14051,7 +14134,11 @@ mod tests {
 
     #[test]
     fn holding_a_key_does_not_repeat_its_action() {
-        let go = |a: &[Action]| a.iter().filter(|a| matches!(a, Action::Go)).count();
+        let go = |a: &[Action]| {
+            a.iter()
+                .filter(|a| matches!(a, Action::Go | Action::Space(_)))
+                .count()
+        };
         let panic = |a: &[Action]| a.iter().filter(|a| matches!(a, Action::Panic)).count();
         let down = |a: &[Action]| {
             a.iter()

@@ -2381,7 +2381,14 @@ impl App {
         }
         let show_mode = self.ui.show_mode;
         match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.engine.go(&self.show),
+            // As in the main window: Space plays and pauses a timeline being
+            // worked on (else GO), 0 is GO.
+            Key::Named(NamedKey::Space) => {
+                ui::space_key(None, &mut self.show, &mut self.engine, &mut self.ui)
+            }
+            Key::Character(c) if c.as_str() == "0" => {
+                ui::go_key(&mut self.show, &mut self.engine, &mut self.ui)
+            }
             Key::Named(NamedKey::Escape) => self.engine.panic(&self.show),
             // Show mode: the arrows are a presenter remote's forward and back.
             Key::Named(NamedKey::ArrowRight | NamedKey::PageDown) if show_mode => {

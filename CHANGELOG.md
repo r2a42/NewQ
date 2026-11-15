@@ -13,6 +13,12 @@ release page, and a release is refused if it has none.
 - **Or keep the playhead in the middle.** Settings ▸ General ▸ *Timeline editor* now
   chooses how the view follows a running timeline: turning the page, or keeping the
   playhead centred with the tracks creeping under it. Kept for this computer.
+- **Space plays and pauses a timeline; 0 is GO.** On a timeline list's tab, or in a
+  tracks editor you last clicked in, Space now pauses a running timeline and runs it on
+  again (at a pause cue or in a loop it does exactly what GO does). On an ordinary cue
+  list Space is GO as before, in edit and show mode alike. The 0 key (top row or keypad)
+  is GO everywhere, unless a cue has 0 as its hotkey. Output windows follow the same
+  rules.
 - **Tidier Cues track and marker flags when zoomed out.** Cue names no longer run over
   each other: each is cut short to fit before the next cue, or left out, and hovering a
   cue shows its whole name, number, time and what it does. The picked or hovered cue's

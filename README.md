@@ -334,7 +334,7 @@ stays on the computer until you send it yourself.
   green *on* for a listener that is working, and counts of displays and audio
   outputs. The *Settings* menu lists the same pages and jumps straight to one.
   Settings are saved in the show, as before.
-- **Cue list with a GO button.** Space fires the cue at the playhead and the
+- **Cue list with a GO button.** Space (or 0) fires the cue at the playhead and the
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
   finishes).
@@ -1213,7 +1213,10 @@ are open in the classic interface they take its place.
   work.
 
 **Running it.** GO on the group runs the timeline from the top, and the toolbar's
-*Run* from where its playhead is; the red playhead follows the clock and the toolbar says *Running · next pause
+*Run* from where its playhead is (**Space** plays and pauses the timeline whose tab
+you are on, or whose tracks editor you last clicked in: running, it pauses as *Pause*
+does; anything else, it does what GO does to that timeline, so at a pause cue it
+carries on, in a loop it leaves the loop, and stopped it runs; **0** is always GO); the red playhead follows the clock and the toolbar says *Running · next pause
 in …*. The toolbar's *Pause* holds every clip where it is (live cameras and live
 sound stay live) and *Run* carries on; *Stop* fades out what the timeline plays over
 3 seconds (picture and sound) and leaves the playhead where it is: press it again
@@ -1636,11 +1639,12 @@ night is about 3,000 rows.
 
 | Key                   | Action                                          |
 |-----------------------|-------------------------------------------------|
-| Space                 | GO                                              |
+| Space                 | GO on a cue list; on a timeline you are working on (a timeline list's tab, or the tracks editor you last clicked in or are pointing at): play / pause it — running, it pauses; paused, parked, at a pause cue or in a loop it does what GO does there; stopped, it runs |
+| 0 (top row or keypad) | GO, everywhere (on a timeline, as GO does there: nothing while it runs) |
 | Esc                   | Fade out everything (press twice: stop now)     |
 | P                     | Pause / resume everything                       |
 | A                     | Arm / disarm the selected cue                   |
-| any cue's hotkey      | Fire that cue (letters, digits and F1–F12)      |
+| any cue's hotkey      | Fire that cue (letters, digits and F1–F12; a cue given 0 takes it from GO) |
 | ↑ / ↓                 | Move selection and playhead                     |
 | → / Page Down         | Show mode: GO (the next slide of a slide show that advances on GO) |
 | ← / Page Up           | Show mode: the slide before in such a slide show; otherwise pause everything, and again to fade it out |
@@ -1660,7 +1664,7 @@ night is about 3,000 rows.
 | Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
 
-Space and Esc also work while an output window has focus.
+Space, 0 and Esc also work, the same way, while an output window has focus.
 
 ## Getting FFmpeg
 

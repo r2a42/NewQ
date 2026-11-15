@@ -91,7 +91,11 @@ The README describes the features; this file is about working on the code.
   holds the keys (`EditorState::focus`, last clicked, or hovered) swaps the `Action::Delete`, `Cut` and
   `Duplicate` it already made for its own (`TimelineAction::Delete`/`Cut`/`Duplicate`) when every picked
   cue is one of its clips, and `Paste` for `TimelineAction::Paste` (at the playhead, `paste_into`) when
-  the clipboard holds no group and nothing outside the timeline is picked; and an `Action::AddFiles` for
+  the clipboard holds no group and nothing outside the timeline is picked; Space is `Action::Space` (the
+  hovered editor's timeline), `ui::space_key`: `timeline::space_target` (the focused editor still showing
+  its timeline, `EditorState::drawn`, else the hovered one, else `list_tab::active`) gets
+  `space_action` (Pause while running outside a loop or cueing, else `TimelineAction::Go` =
+  `timeline_go_one`), none is GO; `0` is GO (`ui::go_key`; output windows too); and an `Action::AddFiles` for
   `AddClip`s when the files were let go over a track (exactly one handles a drop). A clip on several
   displays has a "+N" badge and ghosts. Double-clicking a timeline group's row opens it rather than
   firing it. `list_tab.rs`: a timeline list's tab: `cue_list` calls `list_tab::draw` after the tabs, which

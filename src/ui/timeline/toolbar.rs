@@ -96,14 +96,19 @@ fn transport(ui: &mut Ui, ctx: &Ctx, actions: &mut Vec<Action>) {
     ui.separator();
     let r = ui
         .button("▶ Run")
-        .on_hover_text("Run the timeline from its playhead (or carry on from a pause)");
+        .on_hover_text("Run the timeline from its playhead (or carry on from a pause). Space");
     note(ui, host, "run", &r);
     if r.clicked() {
         push(actions, TimelineAction::Run(key));
     }
     let r = ui
         .button("⏸ Pause")
-        .on_hover_text("Stop the clock and hold every clip (live inputs stay live)");
+        .on_hover_text(if ctx.run.looping.is_some() {
+            "Stop the clock and hold every clip (live inputs stay live). In a loop, Space leaves \
+         the loop as GO does: pause it here"
+        } else {
+            "Stop the clock and hold every clip (live inputs stay live). Space"
+        });
     note(ui, host, "pause", &r);
     if r.clicked() {
         push(actions, TimelineAction::Pause(key));

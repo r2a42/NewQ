@@ -76,6 +76,11 @@ pub struct EditorState {
     menu_at: Option<(Host, TrackId, f64)>,
     /// A file being chosen for a new clip, answered by the dialog's thread.
     pick: Option<std::sync::mpsc::Receiver<Picked>>,
+    /// Each host's editor as last drawn: its timeline, whether the pointer was
+    /// over it, and in which pass (`pass`); for the Space key (`space_target`).
+    drawn: Vec<(Host, TimelineKey, bool, u64)>,
+    /// Counts the main window's frames (`next_pass`, after its keys are read).
+    pass: u64,
 }
 
 /// A keyframe lane under a clip: its speed (keys that follow its content) or
@@ -108,6 +113,8 @@ impl Default for EditorState {
             focus: None,
             menu_at: None,
             pick: None,
+            drawn: Vec::new(),
+            pass: 0,
         }
     }
 }
@@ -325,6 +332,9 @@ pub fn editor(
         }
     }
     let hovered = ui.rect_contains_pointer(whole);
+    let pass = st.timeline.pass;
+    st.timeline.drawn.retain(|d| d.0 != host);
+    st.timeline.drawn.push((host, key, hovered, pass));
     // For the tests: which editors a frame drew.
     #[cfg(test)]
     ui.data_mut(|d| {
@@ -338,6 +348,62 @@ pub fn editor(
         tracks::draw(ui, &ctx, engine, st, actions);
         keys::handle(ui, &ctx, st, hovered, actions);
     });
+}
+
+/// A new frame of the main window has begun (its keys read): editors drawn
+/// before it are no longer under the pointer.
+pub(super) fn next_pass(st: &mut UiState) {
+    st.timeline.pass += 1;
+}
+
+/// The timeline of an editor the pointer was over in the last frame.
+pub(super) fn hovered_editor(st: &UiState) -> Option<TimelineKey> {
+    st.timeline
+        .drawn
+        .iter()
+        .find(|d| d.2 && d.3 == st.timeline.pass)
+        .map(|d| d.1)
+}
+
+/// The timeline the Space key plays and pauses, if one is being worked on:
+/// the editor that holds the keys (the one last clicked in, while it still
+/// shows that timeline; else the one under the pointer, `hovered`), else the
+/// timeline list being shown (its tracks or its rows, any view). None: Space
+/// is GO.
+pub(super) fn space_target(
+    show: &Show,
+    engine: &Engine,
+    st: &UiState,
+    hovered: Option<TimelineKey>,
+) -> Option<TimelineKey> {
+    let focused = st.timeline.focus.and_then(|h| {
+        let (_, key, _, _) = *st.timeline.drawn.iter().find(|d| d.0 == h)?;
+        let shown = match h {
+            Host::ListTab => list_tab::active(show, engine) == Some(key),
+            Host::Pane | Host::Workspace => {
+                (st.timeline.open || st.layout.is_open(Pane::Timeline))
+                    && target(show, engine, st) == Some(key)
+            }
+        };
+        shown.then_some(key)
+    });
+    focused
+        .or(hovered)
+        .filter(|k| model::is_timeline(show, *k))
+        .or_else(|| list_tab::active(show, engine))
+}
+
+/// What Space does to the timeline `key`: running (outside a loop) or
+/// cueing, the toolbar's Pause; else what GO does to it (`timeline_go_one`:
+/// a stopped one runs, a paused or parked one goes on as GO would at a pause
+/// cue, a loop is left as its cue says, nothing in a loop's last pass).
+pub(super) fn space_action(show: &Show, engine: &mut Engine, key: TimelineKey) -> TimelineAction {
+    let run = engine.timeline(show, key);
+    if run.looping.is_none() && matches!(run.state, RunState::Running | RunState::Cueing) {
+        TimelineAction::Pause(key)
+    } else {
+        TimelineAction::Go(key)
+    }
 }
 
 /// Option A's body: `editor` for `target(..)`, or the empty state.
@@ -537,6 +603,8 @@ pub enum TimelineAction {
     // transport (allowed in show mode)
     Run(TimelineKey),
     Pause(TimelineKey),
+    /// What GO does to this timeline (Space, where it isn't a Pause).
+    Go(TimelineKey),
     Stop(TimelineKey),
     /// On release of the playhead.
     Seek {
@@ -601,6 +669,7 @@ impl TimelineAction {
             | A::UseOwnLayers => true,
             A::Run(_)
             | A::Pause(_)
+            | A::Go(_)
             | A::Stop(_)
             | A::Seek { .. }
             | A::JumpToMarker { .. }
@@ -780,6 +849,7 @@ pub(super) fn apply(a: TimelineAction, show: &mut Show, engine: &mut Engine, st:
             engine.log("A picture now replaces only what is on its own layer of its display");
         }
         A::Run(key) => engine.timeline_run(show, key),
+        A::Go(key) => engine.timeline_go_one(show, key),
         // The editor's Pause holds everything (as the transport's Pause does)
         // and leaves live inputs live; its Run carries on.
         A::Pause(key) => {
