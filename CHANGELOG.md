@@ -6,6 +6,14 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Several computers, first step: the show network.** Settings ▸ Show network finds the other
+  computers that are to run a show with this one and gives them roles from the one you run the
+  show from (the primary): add a computer to the show, make it a display or the backup, rename it,
+  make it show its name, release it. Nothing is ever typed on the other computers beyond switching
+  them on (or starting them with `newq --join`). Displays can be put on another computer's monitor
+  and sound outputs given to other computers. This version only finds the computers and gives
+  them roles: playing across them comes in the next ones. Off unless you turn it on.
+
 ## 0.23.1
 
 - **Test Mode remembers the test you chose.** The window opens on the test last picked on this

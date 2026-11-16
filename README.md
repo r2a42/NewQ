@@ -45,7 +45,8 @@ This program will not transfer any information to other networked systems
 unless specifically requested by the user. NewQ has no telemetry and no update
 check. It uses the network only for what you set up: OSC, MIDI-over-network,
 the web remote, NDI, PJLink and TCP sends, and streams go to the addresses you
-enter, and *Test Mode* downloads its free test media when you start a test with that box ticked. The zip a test makes
+enter, a computer switched on to be part of a show network announces itself on
+the local network and talks to the other NewQs there, and *Test Mode* downloads its free test media when you start a test with that box ticked. The zip a test makes
 stays on the computer until you send it yourself.
 
 ## Features
@@ -1041,6 +1042,50 @@ stays on the computer until you send it yourself.
   main window and every output window again on a new device, usually in well
   under a second. Cues keep playing; a picture may blink out for that moment.
 
+## Several computers: the show network
+
+*New, and only the first part.* This version finds the computers that are to
+run a show together and gives each a role. **It doesn't yet play anything across
+them**: each NewQ still plays its own show. Showing pictures and playing sound
+on the other computers, in step with the one you run the show from, comes in the
+next versions.
+
+- **Off unless you turn it on.** A NewQ that isn't part of a show network opens
+  nothing on the network (no firewall question).
+- **The computer you run the show from:** *Settings ▸ Show network ▸ Run the
+  show network from this computer*. It becomes the *primary*.
+- **Every other computer:** tick *This computer is part of a show network* on
+  the same page (or start it with `newq --join`, handy for setting up several).
+  That is all that is ever typed on it: a display computer up in a truss never
+  needs a keyboard again. (`newq --primary` does the primary's button.)
+- **Adding them.** On the primary they appear under *Waiting to join*; *Add to
+  the show* makes one a display computer of this show. It then follows only
+  this show network until it is released, and remembers it after a restart.
+- **A row per computer** on the primary: online or not, its role (*Display* or
+  *Backup*, chosen from the menu and written on that computer at once), its
+  name (*Rename*), NewQ version (a different one is said plainly), wired or
+  Wi-Fi where it can tell, free disk, its monitors and sound devices.
+  *Identify* shows the computer's name big on its screen for a few seconds;
+  *Release* sends it back to waiting. On the other computer the page and the
+  status bar say which primary it follows.
+- **Displays and sound on other computers.** On the primary, *Displays* offers
+  each computer's monitors beside its own: a display given another computer's
+  monitor opens no window on this one (its picture is still in the preview).
+  An *Audio output* can be ticked for any of the computers (the primary
+  included, several at once: separate rooms, a booth monitor), with a device
+  from that computer's list; one given only to other computers opens no
+  device here. The show file keeps which computer each is on; a show that
+  uses none of this is saved exactly as before.
+- **Finding each other.** Computers announce themselves once a second on every
+  network connection (UDP port 47820 and the next few; several NewQs on one
+  computer each take the next free one). Where a network drops these
+  announcements, type the other computer's address under *Add by address*.
+- **Passcode (optional).** Only for a network that carries more than one show:
+  set one on the primary and the computers of the show obey no primary that
+  doesn't have it (the passcode itself never crosses the network). A computer
+  waiting to join can be given it too, and then only that show takes it.
+- A wired network is recommended; Wi-Fi works.
+
 ## Timelines
 
 A *Start all together* group is a **timeline**: each cue in it (a *clip*) starts at
@@ -1785,6 +1830,8 @@ release build.
 | `NEWQ_STATS`      | Write a CSV of memory, CPU, FFmpeg processes, late frames, audio load and main-loop stalls (a file, or `1` for `newq-stats.csv` in the log folder) |
 | `NEWQ_STATS_SECS` | Seconds between rows of that file (default 10)                      |
 | `NEWQ_AUTOSTART`  | Press GO this many seconds after starting (`1` = 5), once, for shows that run unattended |
+| `NEWQ_NODE_DIR`   | Folder of this computer's show network identity (`node.json`; default the log folder), to run several NewQs on one computer |
+| `NEWQ_NET_PORT`   | First port of the show network's range (default 47820)              |
 
 ## How it works
 
