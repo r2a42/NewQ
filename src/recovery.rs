@@ -221,9 +221,21 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let cue = show.make_cue(CueType::Wait, None, 0);
         show.cues.push(cue);
-        assert!(write_in_background(show.clone(), Some(path.clone())));
-        wait_idle();
-        let rec = pending(Some(&path)).expect("the copy was written");
+        // The "cleared since it was asked for" count is the whole process's:
+        // another test saving a show at that moment makes this write a stale
+        // one, rightly skipped. So ask again until one is written.
+        let t0 = std::time::Instant::now();
+        let rec = loop {
+            wait_idle();
+            if write_in_background(show.clone(), Some(path.clone())) {
+                wait_idle();
+            }
+            if let Some(rec) = pending(Some(&path)) {
+                break rec;
+            }
+            assert!(t0.elapsed().as_secs() < 60, "the copy was never written");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
         assert_eq!(Show::load(&rec).unwrap().cues.len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -37,6 +37,31 @@ The README describes the features; this file is about working on the code.
   most once a second; one put-aside only when the top file waits behind full slots for `URGENT_WAIT`;
   the library after the used files; `availability` and `Progress` by bytes, `Progress::sum`, answered
   from memory). Tests over loopback with fake bad sources; no real network, multi-GB file or full disk.
+  Computers and roles (stage 2a): `node.rs` this computer's `Identity` in `node.json` (log folder, or
+  `NEWQ_NODE_DIR`; never in the show): `NodeId`, `Role` (Alone/Display/Primary/Backup), `on`, `network`,
+  `primary`, the passcode's `Key` (HMAC proofs over a nonce) and `term`; a corrupt file is put aside. The
+  pure rules: `judge` (first primary wins, own network only, passcode if held, highest term; a primary
+  obeys only a newer one of its network and becomes `Backup`), `adopt`, `release`, `set_role`,
+  `switch_off`; `--join`/`--primary` (`apply_startup`). `proto.rs`: frames (4-byte length + JSON `Msg`,
+  `MAX_FRAME`), `PROTOCOL`, a lenient first `Hello` (`mismatch_sentence`), `Msg::Unknown` for messages a
+  later NewQ adds, `Beacon`, `StatusReport` (monitors, sound devices, disk, `Link`; clock/show/media
+  fields unfilled). `session.rs`: a reader and a writer thread per TCP connection, bounded queue (a full
+  one drops the peer), 5 s write timeout. `discover.rs`: a UDP beacon each second to every port of
+  `[NEWQ_NET_PORT or 47820, +8)` on each adapter's broadcast address, loopback and addresses added by
+  hand; each NewQ binds the first free port (UDP and TCP the same number), so several on one machine
+  find each other. `hub.rs`: the `net-hub` thread; **nothing is opened until switched on** (D1); the
+  primary dials its computers and the waiting ones; Ping each second, 6 s of silence closes; followers
+  report `Status` each second; `NetView` is published on a change with the app's `wake`;
+  `Hub::send_to`/`broadcast`, messages the hub doesn't handle come out of `take_events` as
+  `NetEvent::Message`, a role change as `NetEvent::RoleChanged`. Tests in `net/hub_tests.rs` (two and
+  three hubs on loopback, `lan: false`). App: `App::net`, `pass_net`, `sync_audio_outputs`
+  (`AudioOutputConfig::device_here` -> `AudioOut::sync_placed`; an output given only to other
+  computers opens no device). Show (D5): `OutputConfig::computer` (`is_on(me)`; another computer's
+  display opens no window here, `route_outputs`), `AudioOutputConfig::computers`/`devices_on`
+  (`set_plays_on`), unwritten when unused. UI: `src/ui/network.rs` (Settings ▸ Show network, `badge`,
+  the status bar, the Identify overlay), the Displays menu's other computers' monitors
+  (`remote_display_status`), the audio output's "Plays on"; tests in `ui/network_tests.rs`. Only
+  loopback and xvfb have been tried.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
