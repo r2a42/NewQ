@@ -95,6 +95,11 @@ pub enum NetAction {
     Restart(NodeId),
     /// Primary: a computer starts NewQ at login, or not.
     StartAtLogin(NodeId, bool),
+    // ---- Take control (stage 5) ----
+    /// The backup takes control: it becomes the primary (D7).
+    TakeControl,
+    /// Primary: forget a computer of the network that is gone for good.
+    Forget(NodeId),
 }
 
 /// What this computer has that the others are told about (set by the app).
@@ -169,7 +174,13 @@ pub struct Following {
     pub id: NodeId,
     pub name: String,
     pub online: bool,
+    /// Seconds since it was last heard from, once that is `QUIET_AFTER` or
+    /// more (stage 5: the backup's cue to take control).
+    pub quiet_secs: Option<u64>,
 }
+
+/// The primary is said to have gone quiet after this long without a word.
+pub const QUIET_AFTER: Duration = Duration::from_secs(2);
 
 /// Everything the UI shows of the show network, published by the hub.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -187,6 +198,8 @@ pub struct NetView {
     pub status: StatusReport,
     /// Its name is to be shown big until then.
     pub identify_until: Option<Instant>,
+    /// This computer took control (stage 5) from the primary of this name.
+    pub took_control_from: Option<String>,
 }
 
 impl NetView {
@@ -258,6 +271,7 @@ pub struct Hub {
     /// A follower's shared clock (stage 4a): kept by the clock thread the hub
     /// starts while this computer follows a primary.
     clock: super::time::ClockHandle,
+    primary_clock: super::time::PrimaryClock,
     view: Arc<Mutex<Arc<NetView>>>,
     events: Receiver<NetEvent>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -274,6 +288,8 @@ impl Hub {
         let mut state = State::new(cfg, me, tx.clone(), ev_tx);
         state.wake = Arc::new(wake);
         let clock = state.clock.clone();
+        let primary_clock = state.primary_clock.clone();
+        state.recall_known(Instant::now());
         let view = Arc::new(Mutex::new(Arc::new(state.view())));
         let published = view.clone();
         let thread = std::thread::Builder::new()
@@ -288,6 +304,7 @@ impl Hub {
         Hub {
             tx,
             clock,
+            primary_clock,
             view,
             events: ev_rx,
             thread,
@@ -342,6 +359,12 @@ impl Hub {
         self.clock.clone()
     }
 
+    /// The shared time when this computer is the primary: its own clock, or
+    /// the one it carried on when it took control (stage 5).
+    pub fn primary_now(&self) -> f64 {
+        self.primary_clock.now()
+    }
+
     /// What happened since the last call.
     pub fn take_events(&self) -> Vec<NetEvent> {
         self.events.try_iter().collect()
@@ -379,6 +402,9 @@ struct Peer {
     dialling: bool,
     /// Primary: orders waiting for the session (an adoption).
     pending: Vec<Msg>,
+    /// Remembered in `node.json` (stage 5): dialled at its last address even
+    /// when its beacon isn't heard.
+    known: bool,
 }
 
 impl Peer {
@@ -402,6 +428,7 @@ impl Peer {
             backoff: Duration::from_millis(500),
             dialling: false,
             pending: Vec::new(),
+            known: false,
         }
     }
 
@@ -488,6 +515,13 @@ struct State {
     clock: super::time::ClockHandle,
     keeper: Option<(NodeId, super::time::Keeper)>,
     sync: SyncFacts,
+    // ---- Take control (stage 5) ----
+    primary_clock: super::time::PrimaryClock,
+    started: Instant,
+    /// The network the follower's clock was kept in.
+    clock_network: Option<node::NetworkId>,
+    /// The primary this computer took control from.
+    took_from: Option<String>,
 }
 
 impl State {
@@ -515,6 +549,10 @@ impl State {
             clock: Default::default(),
             keeper: None,
             sync: SyncFacts::default(),
+            primary_clock: Default::default(),
+            started: Instant::now(),
+            clock_network: None,
+            took_from: None,
         }
     }
 
@@ -561,7 +599,17 @@ impl State {
         if let Err(e) = node::save(&self.cfg.dir, &next) {
             log::warn!("show network: could not keep this computer's role: {e}");
         }
-        log::info!(
+        // Only the computers it remembers changed: nothing to say.
+        let only_known = node::Identity {
+            known: self.me.known.clone(),
+            ..next.clone()
+        } == self.me;
+        log::log!(
+            if only_known {
+                log::Level::Debug
+            } else {
+                log::Level::Info
+            },
             "show network: this computer is {} ({}{})",
             next.role.described(),
             if next.on { "on" } else { "off" },
@@ -693,6 +741,7 @@ impl State {
             content.clone(),
             self.manual_addrs.clone(),
             self.tx.clone(),
+            self.primary_clock.clone(),
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -744,6 +793,12 @@ impl State {
             return;
         }
         let p = self.peers.entry(b.id).or_insert_with(|| Peer::new(b.id));
+        // Heard again after a silence (a computer started again): dialled at
+        // once rather than after the pause its silence grew (stage 5).
+        if !p.heard_lately(now) && p.conn.is_none() && !p.dialling {
+            p.next_dial = now;
+            p.backoff = Duration::from_millis(500);
+        }
         p.name = b.name;
         p.role = b.role;
         p.version = b.version;
@@ -899,6 +954,7 @@ impl State {
             _ => None,
         };
         let ip = conn.session.peer.ip();
+        let their_port = conn.session.peer.port();
         let mac = self.me.passcode.map(|k| k.proof(h.nonce, self.me.id));
         let p = self.peers.entry(h.id).or_insert_with(|| Peer::new(h.id));
         p.name = h.name.clone();
@@ -913,6 +969,12 @@ impl State {
         p.on = true;
         if p.addr.is_none() {
             p.addr = Some(ip);
+        }
+        // Dialled by this computer: the port it answered on is the one it
+        // listens on (kept for a restart, stage 5; a beacon may never come).
+        if manual.is_some() && p.tcp_port == 0 {
+            p.addr = Some(ip);
+            p.tcp_port = their_port;
         }
         if let Some(a) = manual
             && let Some(m) = self.manual.iter_mut().find(|m| m.addr == Some(a))
@@ -961,7 +1023,25 @@ impl State {
             match node::judge(&self.me, &claim) {
                 Ok(()) => {
                     if self.me.network.is_some() {
+                        let was_primary = self.me.role == Role::Primary;
                         let next = node::obey(&self.me, &claim);
+                        if was_primary {
+                            // A newer primary (a backup that took control):
+                            // this one steps down to be the backup (stage 5),
+                            // and lets go of the computers it ran.
+                            log::info!(
+                                "show network: {} took control (turn {}): this computer is \
+                                 the backup now",
+                                claim.from_name,
+                                claim.term
+                            );
+                            for (id, conn) in self.conns.iter_mut() {
+                                if *id != c && !conn.closing {
+                                    conn.closing = true;
+                                    conn.session.close();
+                                }
+                            }
+                        }
                         self.set_me(next);
                         if let Some(conn) = self.conns.get_mut(&c) {
                             conn.obeying = true;
@@ -1258,6 +1338,24 @@ impl State {
             NetAction::Release(id) => self.order(id, Msg::Release),
             NetAction::Restart(id) => self.order(id, Msg::Restart),
             NetAction::StartAtLogin(id, on) => self.order(id, Msg::StartAtLogin { on }),
+            NetAction::TakeControl => self.take_control(now),
+            NetAction::Forget(id) => {
+                if self.me.role != Role::Primary {
+                    return;
+                }
+                let up = self
+                    .peers
+                    .get(&id)
+                    .and_then(|p| p.conn)
+                    .is_some_and(|c| self.conns.get(&c).is_some_and(|c| !c.closing));
+                if up {
+                    // Still here: release it rather.
+                    return;
+                }
+                self.peers.remove(&id);
+                let next = node::forget(&self.me, id);
+                self.set_me(next);
+            }
             NetAction::SetRole(id, role) => {
                 if Role::GIVEN.contains(&role) {
                     self.order(id, Msg::SetRole { role });
@@ -1419,6 +1517,7 @@ impl State {
         }
         if self.me.role == Role::Primary {
             self.dial(now);
+            self.keep_known();
         }
         self.keep_clock();
         // Computers of other networks, or waiting, long gone are forgotten.
@@ -1441,7 +1540,7 @@ impl State {
                 && p.conn.is_none()
                 && !p.dialling
                 && now >= p.next_dial
-                && p.heard_lately(now)
+                && (p.heard_lately(now) || p.known)
                 && p.tcp_port != 0
                 && (p.network == mine || (p.network.is_none() && p.on));
             if let (true, Some(ip)) = (want, p.addr) {
@@ -1603,9 +1702,16 @@ impl State {
                     }
                 }
                 _ => {
-                    if self.keeper.as_ref().is_some_and(|(was, _)| *was != id) {
+                    // Another primary of another network starts the clock
+                    // afresh; one of the same network (a backup that took
+                    // control, carrying the shared clock on) keeps it, so
+                    // what plays here doesn't jump (stage 5).
+                    if self.keeper.as_ref().is_some_and(|(was, _)| *was != id)
+                        && self.clock_network != self.me.network
+                    {
                         self.clock.reset();
                     }
+                    self.clock_network = self.me.network;
                     match super::time::Keeper::start(self.clock.clone(), to) {
                         Ok(k) => {
                             log::info!("show network: keeping the shared clock with {to}");
@@ -1623,6 +1729,140 @@ impl State {
                 }
             }
         }
+    }
+
+    // ---- Take control (stage 5) ----
+
+    /// The backup takes control (D7): the shared clock it kept as a follower
+    /// carries on as the primary's, the term goes up, and every session is
+    /// made again the other way round (the primary dials). The computers of
+    /// the network obey it as soon as they hear it; the old primary, if it is
+    /// there, steps down to be the backup when it does.
+    fn take_control(&mut self, now: Instant) {
+        let seen = self
+            .peers
+            .values()
+            .filter(|p| p.network.is_some() && p.network == self.me.network)
+            .map(|p| p.term)
+            .max()
+            .unwrap_or(0);
+        let Some(next) = node::take_control(&self.me, seen) else {
+            log::info!("show network: only the backup can take control");
+            return;
+        };
+        // The time the followers have, carried on (before the keeper stops).
+        let carried = self.clock.continued();
+        if carried.is_none() {
+            log::warn!(
+                "show network: taking control without a shared clock: the other computers' \
+                 pictures may jump"
+            );
+        }
+        self.primary_clock.carry_on(carried);
+        self.took_from = Some(
+            self.me
+                .primary
+                .and_then(|p| self.peers.get(&p))
+                .map(|p| p.name.clone())
+                .or_else(|| self.me.primary_name.clone())
+                .unwrap_or_else(|| "the primary".into()),
+        );
+        log::info!(
+            "show network: this computer takes control (turn {}){}",
+            next.term,
+            self.me
+                .primary_name
+                .as_ref()
+                .map(|p| format!(" from {p}"))
+                .unwrap_or_default()
+        );
+        self.set_me(next);
+        for c in self.conns.values_mut() {
+            c.closing = true;
+            c.obeying = false;
+            c.session.close();
+        }
+        for p in self.peers.values_mut() {
+            p.dialling = false;
+            p.next_dial = now;
+            p.backoff = Duration::from_millis(500);
+            p.problem = None;
+        }
+        self.keep_clock();
+    }
+
+    /// A primary starting: the computers it remembers, to be dialled at their
+    /// last address before their beacons are heard (or where none is).
+    fn recall_known(&mut self, now: Instant) {
+        if self.me.role != Role::Primary {
+            return;
+        }
+        let network = self.me.network;
+        for k in self.me.known.clone() {
+            if k.id == self.me.id {
+                continue;
+            }
+            let p = self.peers.entry(k.id).or_insert_with(|| Peer::new(k.id));
+            p.known = true;
+            p.name = k.name.clone();
+            p.role = k.role;
+            p.network = network;
+            if let Some(a) = k.socket() {
+                p.addr = Some(a.ip());
+                p.tcp_port = a.port();
+            }
+            p.next_dial = now;
+        }
+    }
+
+    /// A primary keeps the computers of its network in `node.json`.
+    fn keep_known(&mut self) {
+        let mine = self.me.network;
+        let now: Vec<node::Known> = self
+            .peers
+            .values()
+            .filter(|p| p.network.is_some() && p.network == mine && p.id != self.me.id)
+            .map(|p| node::Known {
+                id: p.id,
+                name: p.name.clone(),
+                role: p.role,
+                // The address it was reached at, when this computer dialled
+                // it (a beacon can be heard on several adapters in turn).
+                addr: p
+                    .conn
+                    .and_then(|c| self.conns.get(&c))
+                    .filter(|c| c.target.is_some() && c.hello.is_some())
+                    .map(|c| c.session.peer.ip())
+                    .or(p.addr)
+                    .map(|a| a.to_string()),
+                port: p.tcp_port,
+            })
+            .collect();
+        let next = node::remember(&self.me.known, &now);
+        if next != self.me.known {
+            for p in self.peers.values_mut() {
+                if next.iter().any(|k| k.id == p.id) {
+                    p.known = true;
+                }
+            }
+            let mut me = self.me.clone();
+            me.known = next;
+            self.set_me(me);
+        }
+    }
+
+    /// How long the primary `id` has been quiet, once it is `QUIET_AFTER`.
+    fn quiet_for(&self, id: NodeId, now: Instant) -> Option<u64> {
+        let rx = self
+            .conns
+            .values()
+            .filter(|c| c.peer == Some(id) && c.obeying)
+            .map(|c| c.last_rx)
+            .max();
+        let heard = self.peers.get(&id).and_then(|p| p.heard);
+        let last = rx.max(heard).unwrap_or(self.started);
+        let quiet = now.saturating_duration_since(last);
+        (quiet >= QUIET_AFTER).then_some(quiet.as_secs())
     }
 
     /// Free space on the log folder's disk, now and then (it can take a moment).
@@ -1688,6 +1928,7 @@ impl State {
                     .conns
                     .values()
                     .any(|c| c.obeying && !c.closing && c.peer == Some(id)),
+                quiet_secs: self.quiet_for(id, now),
             });
         NetView {
             me: self.me.clone(),
@@ -1706,6 +1947,10 @@ impl State {
             following,
             status: self.own_status(),
             identify_until: self.identify_until,
+            took_control_from: self
+                .took_from
+                .clone()
+                .filter(|_| self.me.role == Role::Primary),
         }
     }
 }

@@ -27,6 +27,8 @@ enum Act {
     Seek(f64),
     Pause,
     StopAll,
+    /// Fire the send cue (`World::send_cue`).
+    FireSend,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +39,14 @@ enum Ev {
     Sample,
     /// A follower starts again from nothing (clock, engine, everything).
     Restart(usize),
+    // ---- Take control (stage 5) ----
+    /// This backup takes control; the old primary dies with it (`true`) or
+    /// stays and steps down when it hears (`false`).
+    TakeOver(usize, bool),
+    /// The old primary, still there, hears the new one and steps down.
+    StepDown(usize),
+    /// A computer that died comes back from nothing, as a follower.
+    Return(usize),
 }
 
 enum Wire {
@@ -49,6 +59,8 @@ enum Wire {
 struct Node {
     clock: NodeClock,
     est: Option<SharedClock>,
+    /// A backup that took control: the shared clock it carried on.
+    cont: Option<crate::net::time::Continued>,
     engine: Engine,
     leader: Option<Leader>,
     follower: Option<Follower>,
@@ -72,6 +84,7 @@ impl Node {
         Node {
             clock,
             est: (!primary).then(SharedClock::default),
+            cont: None,
             engine,
             leader: primary.then(|| Leader::new(7)),
             follower: (!primary).then(Follower::default),
@@ -89,7 +102,7 @@ impl Node {
     fn shared(&self, t: f64) -> Option<f64> {
         let local = self.clock.local(t);
         match &self.est {
-            None => Some(local),
+            None => Some(self.cont.map_or(local, |c| c.at(local))),
             Some(e) => e.now(local).filter(|n| n.locked).map(|n| n.time),
         }
     }
@@ -117,6 +130,15 @@ struct World {
     skip: Vec<(f64, f64)>,
     samples: usize,
     straddles: usize,
+    // ---- Take control (stage 5) ----
+    /// Which node is the primary now, and which are gone.
+    primary: usize,
+    dead: Vec<bool>,
+    /// The send cue of `Act::FireSend`.
+    send_cue: Option<CueId>,
+    /// The largest difference (seconds) between the computers' times of the
+    /// same cue or timeline, where the frames were judged.
+    worst_gap: f64,
 }
 
 fn frame(t: f64) -> i64 {
@@ -168,11 +190,22 @@ impl World {
             skip: Vec::new(),
             samples: 0,
             straddles: 0,
+            primary: 0,
+            dead: vec![false; followers + 1],
+            send_cue: None,
+            worst_gap: 0.0,
         }
     }
 
     fn send(&mut self, now: f64, from: usize, to: usize, w: Wire) {
-        let link = if to == 0 { self.net.up } else { self.net.down };
+        if self.dead[from] || self.dead[to] {
+            return;
+        }
+        let link = if to == self.primary {
+            self.net.up
+        } else {
+            self.net.down
+        };
         let Some(mut d) = link.delay(&mut self.rng) else {
             return;
         };
@@ -230,7 +263,12 @@ impl World {
         match w {
             Wire::Clock(bytes) => match ClockMsg::decode(&bytes) {
                 Ok(ClockMsg::ClockAsk { seq, t1 }) => {
-                    let t2 = self.nodes[0].clock.local(now);
+                    // Only the primary answers (an ask that reached a node
+                    // that has stepped down meanwhile goes unanswered).
+                    if to != self.primary || self.dead[to] {
+                        return;
+                    }
+                    let t2 = self.nodes[to].shared(now).unwrap_or(0.0);
                     let reply = ClockMsg::ClockReply {
                         seq,
                         t1,
@@ -238,7 +276,7 @@ impl World {
                         t3: t2 + 0.000_03,
                     }
                     .encode();
-                    self.send(now, 0, from, Wire::Clock(reply));
+                    self.send(now, to, from, Wire::Clock(reply));
                 }
                 Ok(ClockMsg::ClockReply { seq, t1, t2, t3 }) => {
                     let n = &mut self.nodes[to];
@@ -253,17 +291,25 @@ impl World {
                 _ => {}
             },
             Wire::Command(t) => {
+                // Only the primary it follows is listened to (as the app
+                // takes `Play` only from `me.primary`).
+                if from != self.primary {
+                    return;
+                }
                 let n = &mut self.nodes[to];
                 let Some(f) = n.follower.as_mut() else { return };
                 let (epoch, seq) = f.receive(t, &mut n.engine, show);
-                self.send(now, to, 0, Wire::Ack(epoch, seq));
+                self.send(now, to, from, Wire::Ack(epoch, seq));
             }
             Wire::Ack(epoch, seq) => {
-                if let Some(l) = self.nodes[0].leader.as_mut() {
+                if let Some(l) = self.nodes[to].leader.as_mut() {
                     l.ack(id(from), epoch, seq);
                 }
             }
             Wire::State(s) => {
+                if from != self.primary {
+                    return;
+                }
                 if let Some(f) = self.nodes[to].follower.as_mut() {
                     f.heard(s);
                 }
@@ -275,6 +321,11 @@ impl World {
         match ev {
             Ev::Tick(i) => self.tick(now, i),
             Ev::Ask(i) => {
+                if self.dead[i] || self.nodes[i].est.is_none() {
+                    // Dead, or the primary now: it asks no more.
+                    return;
+                }
+                let to = self.primary;
                 let n = &mut self.nodes[i];
                 let locked = n.est.as_ref().is_some_and(|e| e.locked());
                 let every = if locked { 0.5 } else { 0.1 };
@@ -283,12 +334,13 @@ impl World {
                 n.asks.push((n.seq, t1));
                 let bytes = ClockMsg::ClockAsk { seq: n.seq, t1 }.encode();
                 self.q.push(now + every, Ev::Ask(i));
-                self.send(now, i, 0, Wire::Clock(bytes));
+                self.send(now, i, to, Wire::Clock(bytes));
             }
             Ev::Act(k) => {
                 let (_, act) = self.script[k];
                 let key = TimelineKey::Group(self.ts.group);
-                let (e, show) = (&mut self.nodes[0].engine, &self.ts.show);
+                let send = self.send_cue;
+                let (e, show) = (&mut self.nodes[self.primary].engine, &self.ts.show);
                 match act {
                     Act::Go => e.go(show),
                     Act::Fire => e.fire(show, self.ts.cue),
@@ -298,6 +350,11 @@ impl World {
                         e.timeline_pause(show, key, PauseFreeze::Everything, &[], false, true)
                     }
                     Act::StopAll => e.stop_all(0.0),
+                    Act::FireSend => {
+                        if let Some(c) = send {
+                            e.fire(show, c)
+                        }
+                    }
                 }
             }
             Ev::Restart(i) => {
@@ -311,11 +368,64 @@ impl World {
                 self.q.push(now + SAMPLE, Ev::Sample);
                 self.sample(now);
             }
+            Ev::TakeOver(i, kill) => self.take_over(now, i, kill),
+            Ev::StepDown(j) => {
+                let n = &mut self.nodes[j];
+                // What it hadn't done yet it does now, as `app/play.rs` does
+                // (the new primary let its copies go).
+                if let Some(mut l) = n.leader.take() {
+                    l.step(&mut n.engine, &self.ts.show, f64::INFINITY);
+                }
+                n.est = Some(SharedClock::default());
+                n.cont = None;
+                n.follower = Some(Follower::default());
+                n.engine.net_set_mode(NetMode::Follower);
+                self.q.push(now, Ev::Ask(j));
+            }
+            Ev::Return(j) => {
+                let c = self.nodes[j].clock;
+                let mut fresh = Node::new(c, false, &mut self.rng);
+                fresh.phase = self.nodes[j].phase;
+                fresh.k = self.nodes[j].k;
+                self.nodes[j] = fresh;
+                self.dead[j] = false;
+                self.q.push(now, Ev::Tick(j));
+                self.q.push(now, Ev::Ask(j));
+            }
         }
     }
 
+    /// Backup `i` takes control (D7), as `app/play.rs` makes it: its shared
+    /// clock carried on as the primary's, a leader with a new epoch, the old
+    /// primary's commands still to come let go, the engine as it is.
+    fn take_over(&mut self, now: f64, i: usize, kill: bool) {
+        let old = self.primary;
+        if kill {
+            self.dead[old] = true;
+        }
+        let n = &mut self.nodes[i];
+        let local = n.clock.local(now);
+        let est = n.est.take().expect("a follower");
+        let shared = est.now(local).expect("a clock").time;
+        n.cont = Some(crate::net::time::Continued {
+            local,
+            shared,
+            rate: est.rate(),
+        });
+        let _let_go = n.follower.take().map(|mut f| f.take_queue());
+        n.engine.net_set_mode(NetMode::Primary);
+        n.leader = Some(Leader::new(100 + i as u64));
+        self.primary = i;
+    }
+
     fn tick(&mut self, now: f64, i: usize) {
-        let followers: Vec<NodeId> = (1..self.nodes.len()).map(id).collect();
+        if self.dead[i] {
+            return;
+        }
+        let followers: Vec<NodeId> = (0..self.nodes.len())
+            .filter(|k| *k != i && !self.dead[*k])
+            .map(id)
+            .collect();
         let lead = self.lead;
         let show = &self.ts.show;
         let n = &mut self.nodes[i];
@@ -329,6 +439,8 @@ impl World {
         n.last_local = Some(local);
         let mut outs = Vec::new();
         if let Some(l) = n.leader.as_mut() {
+            // Its own clock, or the one it carried on.
+            let local = n.cont.map_or(local, |c| c.at(local));
             let cmds = n.engine.net_take();
             outs.extend(l.issue(cmds, local, lead, &followers));
             outs.extend(l.resend(local));
@@ -367,15 +479,15 @@ impl World {
                 Out::Command(to, t) => {
                     let tos: Vec<usize> = match to {
                         Some(to) => vec![to.0 as usize],
-                        None => (1..self.nodes.len()).collect(),
+                        None => (0..self.nodes.len()).filter(|k| *k != i).collect(),
                     };
                     for to in tos {
-                        self.send(now, 0, to, Wire::Command(t.clone()));
+                        self.send(now, i, to, Wire::Command(t.clone()));
                     }
                 }
                 Out::State(s) => {
-                    for to in 1..self.nodes.len() {
-                        self.send(now, 0, to, Wire::State(s.clone()));
+                    for to in (0..self.nodes.len()).filter(|k| *k != i) {
+                        self.send(now, i, to, Wire::State(s.clone()));
                     }
                 }
             }
@@ -386,7 +498,9 @@ impl World {
     fn times(&self, now: f64) -> Vec<(Option<f64>, Option<f64>)> {
         self.nodes
             .iter()
-            .map(|n| {
+            .enumerate()
+            .filter(|(k, _)| !self.dead[*k])
+            .map(|(_, n)| {
                 let (Some((src, cue, run)), Some(at)) = (n.note, n.shared(now)) else {
                     return (None, None);
                 };
@@ -421,6 +535,12 @@ impl World {
                     continue;
                 }
                 self.samples += 1;
+                let secs: Vec<f64> = v.iter().map(|t| t.unwrap_or(0.0)).collect();
+                let gap = secs.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                    - secs.iter().copied().fold(f64::INFINITY, f64::min);
+                if gap > self.worst_gap {
+                    self.worst_gap = gap;
+                }
                 if d > self.worst {
                     self.worst = d;
                     self.worst_at = now;
@@ -431,7 +551,10 @@ impl World {
 
     /// Everyone locked by true time `t`?
     fn locked(&self, t: f64) -> bool {
-        self.nodes.iter().all(|n| n.shared(t).is_some())
+        self.nodes
+            .iter()
+            .enumerate()
+            .all(|(k, n)| self.dead[k] || n.shared(t).is_some())
     }
 }
 
@@ -442,7 +565,10 @@ fn id(i: usize) -> NodeId {
 /// A show in which every follower's cue and timeline match the primary's.
 fn all_have(w: &World, now: f64, cue: bool, run: Option<RunState>) -> bool {
     let key = TimelineKey::Group(w.ts.group);
-    w.nodes.iter().all(|n| {
+    w.nodes.iter().enumerate().all(|(k, n)| {
+        if w.dead[k] {
+            return true;
+        }
         let has_cue = n.engine.active.iter().any(|a| a.cue_id == w.ts.cue);
         let state = n
             .engine
@@ -723,4 +849,140 @@ fn a_send_cue_fires_once_with_two_followers() {
     for (e, _) in &f {
         assert_eq!(e.net_sent(), 0);
     }
+}
+
+// ---- Take control (stage 5) ----
+
+/// A world of three (0 the primary, 1 the backup, 2 a display computer) with
+/// a send cue, locked, a cue and a timeline playing from 5.5 s.
+fn three_playing(seed: u64) -> World {
+    use crate::show::CueType;
+    let mut w = World::new(2, Network::wired(), seed);
+    let s =
+        w.ts.show
+            .make_cue(CueType::Send, None, w.ts.show.cues.len());
+    w.send_cue = Some(s.id);
+    w.ts.show.cues.push(s);
+    w.run(5.0);
+    assert!(w.locked(5.0), "the followers didn't lock");
+    w.judge_from = 5.0;
+    w.acts(&[(5.5, Act::Fire), (5.5, Act::RunTimeline)]);
+    w
+}
+
+fn sent(w: &World) -> usize {
+    w.nodes.iter().map(|n| n.engine.net_sent()).sum()
+}
+
+/// The backup takes control mid-show while the primary dies: the cue and the
+/// timeline play on everywhere without a jump (the display stays within a
+/// frame of the new primary), the new primary's seek and send cue work and a
+/// send cue fires once; the old primary, back from nothing, follows.
+#[test]
+fn the_backup_takes_control_mid_show_and_nothing_jumps() {
+    let mut w = three_playing(41);
+    w.acts(&[(10.0, Act::FireSend)]);
+    w.run(20.0);
+    assert!(all_have(&w, 20.0, true, Some(RunState::Running)));
+    assert_eq!(sent(&w), 1, "the send cue went once, from the primary");
+    let before = w.worst;
+    // The primary dies and the backup takes control. (In life the press
+    // comes some seconds later; the display plays on by its clock meanwhile:
+    // `the_display_plays_on_while_nobody_runs_the_show`.)
+    w.q.push(20.0, Ev::TakeOver(1, true));
+    w.run(40.0);
+    assert_eq!(w.primary, 1);
+    assert!(all_have(&w, 40.0, true, Some(RunState::Running)));
+    eprintln!(
+        "take control: worst {} frames apart (before: {before}), largest gap {:.3} ms over {} samples",
+        w.worst,
+        w.worst_gap * 1000.0,
+        w.samples
+    );
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    assert!(w.worst_gap < 1.0 / 60.0, "{} s", w.worst_gap);
+    // The display had nothing to put right: the clock carried on.
+    let f = w.nodes[2].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 0, "{:?}", f.corrected);
+    assert!(f.in_step);
+    // The new primary runs the show: a seek and a send, done everywhere once.
+    w.acts(&[(41.0, Act::Seek(200.0)), (41.0, Act::FireSend)]);
+    w.skip = vec![(40.9, 41.5)];
+    w.run(50.0);
+    assert_eq!(
+        sent(&w),
+        2,
+        "the second send went once, from the new primary"
+    );
+    let key = TimelineKey::Group(w.ts.group);
+    for k in [1, 2] {
+        let pos = w.nodes[k].engine.timeline_clock(key).unwrap().1;
+        assert!(pos > 205.0 && pos < 215.0, "{k}: {pos}");
+    }
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    // The old primary comes back from nothing: it follows the new one and
+    // catches up from its heartbeats.
+    w.q.push(50.0, Ev::Return(0));
+    w.skip.push((50.0, 60.0));
+    w.run(70.0);
+    assert!(all_have(&w, 70.0, true, Some(RunState::Running)));
+    assert!(w.nodes[0].follower.as_ref().unwrap().in_step);
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    // (Its engine is a new one: it counts from 0.)
+    assert_eq!(
+        w.nodes[0].engine.net_sent(),
+        0,
+        "nothing sent by the old primary"
+    );
+    assert_eq!(w.nodes[1].engine.net_sent(), 1);
+}
+
+/// Nobody runs the show for a while (the primary died, the backup's operator
+/// hasn't pressed yet): the display and the backup play on by their clocks,
+/// still within a frame of each other.
+#[test]
+fn the_display_plays_on_while_nobody_runs_the_show() {
+    let mut w = three_playing(45);
+    w.run(20.0);
+    w.dead[0] = true;
+    w.run(30.0);
+    assert!(all_have(&w, 30.0, true, Some(RunState::Running)));
+    w.q.push(30.0, Ev::TakeOver(1, false));
+    w.run(45.0);
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    assert!(w.worst_gap < 1.0 / 60.0, "{} s", w.worst_gap);
+}
+
+/// The old primary is still there when the backup takes control: it steps
+/// down when it hears the new one. A send cue fired just before fires once:
+/// the old primary does what it had still to do as it steps down, the new one
+/// lets its copy go.
+#[test]
+fn an_old_primary_still_there_steps_down_and_a_send_fires_once() {
+    let mut w = three_playing(43);
+    w.run(10.0);
+    w.acts(&[(10.0, Act::FireSend)]);
+    // Taken over 10 ms after the press (its time is 50 ms after it), the old
+    // primary hearing the new one 20 ms after that.
+    w.q.push(10.01, Ev::TakeOver(1, false));
+    w.q.push(10.03, Ev::StepDown(0));
+    w.run(20.0);
+    assert_eq!(sent(&w), 1);
+    assert_eq!(w.nodes[0].engine.net_sent(), 1, "the old primary's");
+    assert!(all_have(&w, 20.0, true, Some(RunState::Running)));
+    w.judge_from = 20.0;
+    w.run(30.0);
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    for k in [0, 2] {
+        let f = w.nodes[k].follower.as_ref().unwrap();
+        assert!(f.in_step, "{k}");
+    }
+    // Stepped down a while later instead (after the send's time): still once.
+    let mut w = three_playing(44);
+    w.run(10.0);
+    w.acts(&[(10.0, Act::FireSend)]);
+    w.q.push(10.01, Ev::TakeOver(1, false));
+    w.q.push(10.5, Ev::StepDown(0));
+    w.run(20.0);
+    assert_eq!(sent(&w), 1);
 }

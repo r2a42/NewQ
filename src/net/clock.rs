@@ -210,6 +210,13 @@ impl SharedClock {
         self.fit.map_or(0.0, |f| f.b)
     }
 
+    /// The rate it runs at against the local clock (shared seconds per local
+    /// second), without a slew under way: what a backup that takes control
+    /// keeps its clock running at (`time::Continued`).
+    pub fn rate(&self) -> f64 {
+        self.rate
+    }
+
     /// The clock given, before the never-back guard.
     fn raw(&self, local: f64) -> f64 {
         let fast = self.rate + self.slew;

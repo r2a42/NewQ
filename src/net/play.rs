@@ -538,6 +538,15 @@ impl Follower {
         ack
     }
 
+    /// The commands still to be done, taken away. A backup taking control
+    /// lets the old primary's go: that one, if it is still there, does them
+    /// itself as it steps down (`app/play.rs::play_switch`), so a send cue
+    /// never fires twice (R8); if it is gone, a GO pressed in its last
+    /// fraction of a second is lost and is pressed again (stage 5).
+    pub fn take_queue(&mut self) -> Vec<Timed> {
+        std::mem::take(&mut self.queue)
+    }
+
     /// The primary's heartbeat.
     pub fn heard(&mut self, s: PlayState) {
         self.new_epoch(s.epoch);

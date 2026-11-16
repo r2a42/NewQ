@@ -172,6 +172,12 @@ pub struct MediaView {
     /// Primary: the library's files no cue uses yet (the timeline bin offers them).
     pub library_files: Arc<Vec<PathBuf>>,
     pub problem: Option<String>,
+    // ---- Take control (stage 5) ----
+    /// A primary that took control: files the show uses that the old primary
+    /// had and this computer has neither on its disk nor in its store.
+    pub lacking_here: usize,
+    /// A primary that took control serves from its store.
+    pub from_store: bool,
 }
 
 impl MediaView {
@@ -266,6 +272,9 @@ pub struct Manager {
     order: Option<Vec<String>>,
     /// The `NetView` the cue marks were last worked out from.
     seen_net: Option<Arc<NetView>>,
+    /// This network has had a backup take control (its term is past the
+    /// first): a primary then looks in its store too (stage 5).
+    took_control: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -283,6 +292,7 @@ impl Manager {
             view: Arc::new(MediaView::default()),
             order: None,
             seen_net: None,
+            took_control: false,
         }
     }
 
@@ -300,6 +310,15 @@ impl Manager {
     pub fn finder(&self) -> Option<Arc<StoreFinder>> {
         match &self.side {
             SideState::Follower(f) => Some(f.finder.clone()),
+            _ => None,
+        }
+    }
+
+    /// The finder of a primary that took control (tests).
+    #[cfg(test)]
+    pub fn primary_finder(&self) -> Option<Arc<super::PrimaryFinder>> {
+        match &self.side {
+            SideState::Primary(p) => p.finder.clone(),
             _ => None,
         }
     }
@@ -337,6 +356,7 @@ impl Manager {
             SideState::Primary(_) => Side::Primary,
             SideState::Follower(_) => Side::Follower,
         };
+        self.took_control = f.net.me.term >= 2;
         if want != have {
             self.switch(want);
         }
@@ -435,15 +455,29 @@ impl Manager {
     }
 
     fn switch(&mut self, to: Side) {
-        let old = std::mem::replace(&mut self.side, SideState::Off);
-        if matches!(old, SideState::Follower(_)) && self.cfg.global {
+        let mut old = std::mem::replace(&mut self.side, SideState::Off);
+        let had_finder = match &old {
+            SideState::Follower(_) => true,
+            SideState::Primary(p) => p.finder.is_some(),
+            SideState::Off => false,
+        };
+        if had_finder && self.cfg.global {
             super::set_finder(None);
         }
+        // ---- Take control (stage 5) ----
+        // A follower that takes control keeps its store: the files it has
+        // are served from it and played from it.
+        let kept = match &mut old {
+            SideState::Follower(f) if to == Side::Primary => f.store.take(),
+            _ => None,
+        };
         drop_later(old);
         self.seen_net = None;
         self.side = match to {
             Side::Off => SideState::Off,
-            Side::Primary => SideState::Primary(PrimarySide::new(&self.cfg)),
+            Side::Primary => {
+                SideState::Primary(PrimarySide::new(&self.cfg, kept, self.took_control))
+            }
             Side::Follower => {
                 let f = FollowerSide::new(&self.cfg, self.order.clone());
                 if self.cfg.global {
@@ -457,7 +491,12 @@ impl Manager {
 
 impl Drop for Manager {
     fn drop(&mut self) {
-        if matches!(self.side, SideState::Follower(_)) && self.cfg.global {
+        let had_finder = match &self.side {
+            SideState::Follower(_) => true,
+            SideState::Primary(p) => p.finder.is_some(),
+            SideState::Off => false,
+        };
+        if had_finder && self.cfg.global {
             super::set_finder(None);
         }
     }
@@ -661,10 +700,20 @@ struct PrimarySide {
     summary: (Option<(usize, u64)>, usize, Vec<FolderView>),
     summarised: Option<String>,
     library_files: Arc<Vec<PathBuf>>,
+    // ---- Take control (stage 5) ----
+    /// The store being opened (a primary that took control, started again).
+    store_opening: Option<Opening>,
+    /// Its finder, once it has a store (playback finds files there).
+    finder: Option<Arc<super::PrimaryFinder>>,
+    finder_given: bool,
+    lacking_here: usize,
 }
 
 impl PrimarySide {
-    fn new(cfg: &Config) -> PrimarySide {
+    /// `store`: a follower's that took control, handed over; else, when
+    /// `look` (this network has had a takeover), the store beside the log
+    /// is opened if there is one.
+    fn new(cfg: &Config, store: Option<Store>, look: bool) -> PrimarySide {
         let cache = Arc::new(Mutex::new(HashCache::open(Some(cfg.dir.join(HASH_FILE)))));
         let facts = Arc::new(Mutex::new(FactsCache::open(cfg.dir.join(FACTS_FILE))));
         let primary = Primary::new(cache.clone());
@@ -685,6 +734,27 @@ impl PrimarySide {
             ),
         };
         let watch = primary.watch(cfg.watch_every);
+        let finder = store
+            .as_ref()
+            .map(|s| Arc::new(super::PrimaryFinder(s.clone())));
+        primary.set_store(store.clone());
+        let store_opening = if store.is_none() && look {
+            let policy = PolicySetting::load(&cfg.dir);
+            let root = policy
+                .folder
+                .clone()
+                .unwrap_or_else(|| cfg.dir.join("media"));
+            root.join("objects").is_dir().then(|| {
+                let p = policy.policy();
+                std::thread::Builder::new()
+                    .name("media-open".into())
+                    .spawn(move || Store::open(&root, p, crate::net::store::space::system()))
+                    .ok()
+            })
+        } else {
+            None
+        }
+        .flatten();
         PrimarySide {
             primary,
             server,
@@ -709,6 +779,10 @@ impl PrimarySide {
             summary: (None, 0, Vec::new()),
             summarised: None,
             library_files: Arc::new(Vec::new()),
+            store_opening,
+            finder,
+            finder_given: false,
+            lacking_here: 0,
         }
     }
 
@@ -730,6 +804,30 @@ impl PrimarySide {
 
     fn update(&mut self, cfg: &Config, f: Frame, out: &mut Vec<Outgoing>, view: &mut MediaView) {
         let now = Instant::now();
+        // ---- Take control (stage 5): the store, once open, stands in ----
+        if let Some(h) = &self.store_opening
+            && h.is_finished()
+            && let Some(h) = self.store_opening.take()
+        {
+            match h.join() {
+                Ok(Ok(store)) => {
+                    self.primary.set_store(Some(store.clone()));
+                    self.finder = Some(Arc::new(super::PrimaryFinder(store)));
+                    // Made again with the store's files.
+                    self.built = None;
+                }
+                Ok(Err(e)) => log::warn!("media: the store couldn't be opened: {e}"),
+                Err(_) => log::warn!("media: opening the store failed"),
+            }
+        }
+        if !self.finder_given
+            && let Some(fi) = &self.finder
+        {
+            self.finder_given = true;
+            if cfg.global {
+                super::set_finder(Some(fi.clone() as Arc<dyn Finder>));
+            }
+        }
         // The show's files: looked at about once a second (it walks the cues).
         let look = self
             .last_look
@@ -792,6 +890,10 @@ impl PrimarySide {
             self.making = None;
             match r {
                 Ok(manifest) => {
+                    // What the old primary had and this disk hasn't: from the
+                    // store (stage 5).
+                    let (manifest, lacking) = self.primary.inherit(manifest);
+                    self.lacking_here = lacking;
                     self.primary.publish(manifest);
                     self.built = Some(sig);
                     self.built_at = Some(now);
@@ -849,6 +951,8 @@ impl PrimarySide {
             .map(Server::transfers)
             .unwrap_or_default();
         view.problem = self.problem.clone();
+        view.lacking_here = self.lacking_here;
+        view.from_store = self.finder.is_some();
     }
 
     /// Work the order out again when the playheads or the files moved, and

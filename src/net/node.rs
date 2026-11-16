@@ -267,6 +267,33 @@ pub struct Identity {
     /// The highest primary term seen (D7): a primary with a lower one is old.
     #[serde(default)]
     pub term: u64,
+    /// A primary's computers, as last heard (stage 5): a primary that starts
+    /// again dials them at once, before (or without) their beacons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<Known>,
+}
+
+/// A computer of this primary's network, remembered in `node.json`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Known {
+    pub id: NodeId,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub role: Role,
+    /// Its address and port when last heard (as text, so an address of a
+    /// kind a later NewQ adds doesn't spoil the file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+    #[serde(default)]
+    pub port: u16,
+}
+
+impl Known {
+    pub fn socket(&self) -> Option<std::net::SocketAddr> {
+        let ip: std::net::IpAddr = self.addr.as_deref()?.parse().ok()?;
+        (self.port != 0).then(|| std::net::SocketAddr::new(ip, self.port))
+    }
 }
 
 impl Identity {
@@ -282,6 +309,7 @@ impl Identity {
             primary_name: None,
             passcode: None,
             term: 0,
+            known: Vec::new(),
         }
     }
 
@@ -522,10 +550,17 @@ pub fn judge(me: &Identity, claim: &Claim) -> Result<(), Refusal> {
     match (me.role, me.network) {
         (_, None) => Ok(()),
         (_, Some(n)) if n != claim.network => Err(Refusal::OtherNetwork),
-        (Role::Primary, Some(_)) if claim.term <= me.term => {
+        // Two primaries of one term (two backups took control at the same
+        // moment): the higher id wins, so one is ever obeyed (stage 5).
+        (Role::Primary, Some(_)) if (claim.term, claim.from) <= (me.term, me.id) => {
             Err(Refusal::OldTerm { seen: me.term })
         }
         (_, Some(_)) if claim.term < me.term => Err(Refusal::OldTerm { seen: me.term }),
+        (Role::Display | Role::Backup, Some(_))
+            if claim.term == me.term && me.primary.is_some_and(|p| claim.from < p) =>
+        {
+            Err(Refusal::OldTerm { seen: me.term })
+        }
         _ => Ok(()),
     }
 }
@@ -581,6 +616,7 @@ pub fn release(me: &Identity) -> Identity {
         primary_name: None,
         passcode: None,
         term: 0,
+        known: Vec::new(),
         ..me.clone()
     }
 }
@@ -588,6 +624,59 @@ pub fn release(me: &Identity) -> Identity {
 /// The role the primary gives: a display or the backup, nothing else.
 pub fn set_role(me: &Identity, role: Role) -> Option<Identity> {
     (me.adopted() && Role::GIVEN.contains(&role)).then(|| Identity { role, ..me.clone() })
+}
+
+// ---- Take control (stage 5, D7) ----
+
+/// The backup takes control: it becomes the primary of the same network with
+/// a term above any it has seen (`seen`: the highest of the others'), so that
+/// every computer obeys it from now on and the old primary, when it hears it,
+/// steps down to be the backup. Only a backup that is switched on can.
+pub fn take_control(me: &Identity, seen: u64) -> Option<Identity> {
+    if me.role != Role::Backup || !me.on || me.network.is_none() {
+        return None;
+    }
+    Some(Identity {
+        role: Role::Primary,
+        primary: Some(me.id),
+        primary_name: None,
+        term: me.term.max(seen) + 1,
+        // The network's passcode key stays: it is this network's.
+        ..me.clone()
+    })
+}
+
+/// The computers a primary remembers, with `now` (those it hears) put in:
+/// one heard is updated, one not heard is kept as it was, until forgotten.
+pub fn remember(known: &[Known], now: &[Known]) -> Vec<Known> {
+    let mut out: Vec<Known> = known
+        .iter()
+        .filter(|k| !now.iter().any(|n| n.id == k.id))
+        .cloned()
+        .collect();
+    for n in now {
+        let mut n = n.clone();
+        // An address not heard this time keeps the one known.
+        if let Some(old) = known.iter().find(|k| k.id == n.id) {
+            if n.addr.is_none() {
+                n.addr = old.addr.clone();
+            }
+            if n.port == 0 {
+                n.port = old.port;
+            }
+        }
+        out.push(n);
+    }
+    out.sort_by_key(|k| k.id);
+    out
+}
+
+/// Forget a computer the primary remembered (gone for good).
+pub fn forget(me: &Identity, id: NodeId) -> Identity {
+    Identity {
+        known: me.known.iter().filter(|k| k.id != id).cloned().collect(),
+        ..me.clone()
+    }
 }
 
 /// A new name; an empty one is the computer's own name again.
@@ -812,6 +901,136 @@ mod tests {
             (now.role, now.term, now.primary),
             (Role::Backup, 3, Some(NodeId(9)))
         );
+    }
+
+    #[test]
+    fn the_backup_takes_control_with_a_higher_term_and_everyone_follows_it() {
+        // A display can't; nor a computer switched off, nor one alone.
+        let d = adopt(&on(), &claim(1, 10, 4, None), None, Role::Display).unwrap();
+        assert_eq!(take_control(&d, 4), None);
+        assert_eq!(take_control(&on(), 0), None);
+        let key = Key::from_passcode("p");
+        let b = adopt(&on(), &claim(1, 10, 4, None), Some(key), Role::Backup).unwrap();
+        let mut off = b.clone();
+        off.on = false;
+        assert_eq!(take_control(&off, 4), None);
+        // Above anything seen, its own term or another's.
+        let p = take_control(&b, 6).unwrap();
+        assert_eq!(
+            (p.role, p.term, p.primary, p.network),
+            (Role::Primary, 7, Some(b.id), Some(NetworkId(10)))
+        );
+        assert_eq!(p.passcode, Some(key), "the network's passcode stays");
+        assert_eq!(take_control(&b, 0).unwrap().term, 5);
+        assert!(!p.adopted());
+        // The display obeys the new primary; the old one, still at 4, is refused.
+        let new = Claim {
+            from: p.id,
+            from_name: "Backup".into(),
+            network: NetworkId(10),
+            term: p.term,
+            proof: Some(true),
+        };
+        assert_eq!(judge(&d, &new), Ok(()));
+        let d = obey(&d, &new);
+        assert_eq!((d.primary, d.term), (Some(p.id), 7));
+        assert!(matches!(
+            judge(&d, &claim(1, 10, 4, None)),
+            Err(Refusal::OldTerm { .. })
+        ));
+        // The old primary, back, steps down to be the backup on hearing it; the
+        // new one never obeys the old.
+        let mut old = become_primary(&on());
+        old.network = Some(NetworkId(10));
+        old.term = 4;
+        let mut new_claim = new.clone();
+        new_claim.proof = None;
+        assert_eq!(judge(&old, &new_claim), Ok(()));
+        let old = obey(&old, &new_claim);
+        assert_eq!((old.role, old.term), (Role::Backup, 7));
+        let old_claim = claim(old.id.0, 10, 4, Some(true));
+        assert!(matches!(
+            judge(&p, &old_claim),
+            Err(Refusal::OldTerm { .. })
+        ));
+        // And the old primary, now the backup, could take control back.
+        assert_eq!(take_control(&old, 7).unwrap().term, 8);
+    }
+
+    #[test]
+    fn two_backups_taking_control_at_once_leave_one_primary() {
+        let net = NetworkId(10);
+        let mut a = become_primary(&on());
+        a.network = Some(net);
+        a.id = NodeId(5);
+        a.term = 3;
+        let mut b = a.clone();
+        b.id = NodeId(9);
+        let as_claim = |p: &Identity| Claim {
+            from: p.id,
+            from_name: "x".into(),
+            network: net,
+            term: p.term,
+            proof: None,
+        };
+        // The lower id obeys the higher; never the other way.
+        assert_eq!(judge(&a, &as_claim(&b)), Ok(()));
+        assert!(judge(&b, &as_claim(&a)).is_err());
+        assert_eq!(obey(&a, &as_claim(&b)).role, Role::Backup);
+        // A display that follows the higher stays with it; one that followed
+        // the lower moves to the higher.
+        let d = adopt(&on(), &as_claim(&b), None, Role::Display).unwrap();
+        assert!(judge(&d, &as_claim(&a)).is_err());
+        let d = adopt(&on(), &as_claim(&a), None, Role::Display).unwrap();
+        assert_eq!(judge(&d, &as_claim(&b)), Ok(()));
+    }
+
+    #[test]
+    fn a_primary_remembers_its_computers_until_forgotten() {
+        let k = |id: u64, addr: Option<&str>, port: u16| Known {
+            id: NodeId(id),
+            name: format!("C{id}"),
+            role: Role::Display,
+            addr: addr.map(String::from),
+            port,
+        };
+        let known = remember(&[], &[k(2, Some("10.0.0.2"), 47820)]);
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].socket(), Some("10.0.0.2:47820".parse().unwrap()));
+        // Heard again without an address: the old one stays. Another added.
+        let known = remember(&known, &[k(2, None, 0), k(3, Some("10.0.0.3"), 47821)]);
+        assert_eq!(known.len(), 2);
+        assert_eq!(known[0].addr.as_deref(), Some("10.0.0.2"));
+        // Not heard: kept, until forgotten.
+        let known = remember(&known, &[]);
+        assert_eq!(known.len(), 2);
+        let mut me = become_primary(&on());
+        me.known = known;
+        let me = forget(&me, NodeId(2));
+        assert_eq!(
+            me.known.iter().map(|k| k.id).collect::<Vec<_>>(),
+            [NodeId(3)]
+        );
+        assert_eq!(k(4, Some("not an address"), 1).socket(), None);
+        // Kept in node.json, and an old file without it reads as none.
+        let dir = temp("known");
+        save(&dir, &me).unwrap();
+        assert_eq!(load(&dir).known, me.known);
+        let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(text.contains("\"known\""));
+        std::fs::write(
+            dir.join(FILE),
+            br#"{"id":"00000000000000aa","role":"Primary","on":true}"#,
+        )
+        .unwrap();
+        assert!(load(&dir).known.is_empty());
+        // None known: nothing written.
+        let mut plain = load(&dir);
+        plain.known.clear();
+        save(&dir, &plain).unwrap();
+        let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(!text.contains("known"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

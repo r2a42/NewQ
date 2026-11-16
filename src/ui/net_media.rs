@@ -95,6 +95,37 @@ pub fn primary_summary(ui: &mut Ui, v: &NetView, st: &UiState) {
                 ),
             );
         }
+        // ---- Take control (stage 5) ----
+        if m.from_store {
+            let r = ui.label(
+                RichText::new(
+                    "This computer took control: the media it had as the backup is sent from its \
+                     own copy.",
+                )
+                .small()
+                .weak(),
+            );
+            note(ui, "media_from_store", r.rect);
+        }
+        if m.lacking_here > 0 {
+            let n = m.lacking_here;
+            let r = ui.label(
+                RichText::new(format!(
+                    "⚠ {n} file{} of the show {} not on this computer: the old primary had \
+                     {}, and the backup's copy wasn't finished. Here {} cue{} shows a \"Media not \
+                     found\" card; the computers that have {} play {} as before.",
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { "is" } else { "are" },
+                    if n == 1 { "it" } else { "them" },
+                    if n == 1 { "its" } else { "their" },
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { "it" } else { "them" },
+                    if n == 1 { "it" } else { "them" },
+                ))
+                .color(STOP_RED),
+            );
+            note(ui, "media_lacking_here", r.rect);
+        }
         if let Some(p) = &m.problem {
             warning(ui, &format!("⚠ {p}"));
         }

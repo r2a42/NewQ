@@ -454,6 +454,37 @@ impl Store {
         (size == e.size).then(|| self.object_path(&key))
     }
 
+    // ---- Take control (stage 5): a primary that serves from its store ----
+
+    /// The entry a show path names in the newest version this store holds
+    /// that has it (one being fetched for first, then the current, then the
+    /// older ones kept): what a computer that took control knows of a file
+    /// the old primary had.
+    pub fn find_latest(&self, show_path: &str) -> Option<Entry> {
+        let st = self.inner.state.lock();
+        let ids = st.pending.iter().chain(st.history.iter().rev());
+        for id in ids {
+            if let Some(e) = st
+                .manifests
+                .get(id)
+                .and_then(|k| k.find(show_path))
+                .filter(|e| !e.missing)
+            {
+                return Some(e.clone());
+            }
+        }
+        None
+    }
+
+    /// Where this computer has the bytes of the file a show path names in
+    /// `find_latest`'s version: only a whole, verified object.
+    pub fn resolve_latest(&self, show_path: &str) -> Option<PathBuf> {
+        let e = self.find_latest(show_path)?;
+        let key = e.object();
+        let size = self.inner.state.lock().objects.get(&key).copied()?;
+        (size == e.size).then(|| self.object_path(&key))
+    }
+
     /// Whether the file a show path names is here, under the current version.
     /// Two lookups in memory: cheap enough for every frame.
     pub fn ready(&self, show_path: &str) -> Readiness {

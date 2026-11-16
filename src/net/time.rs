@@ -96,6 +96,82 @@ impl ClockHandle {
     fn locked(&self) -> bool {
         self.0.lock().clock.locked()
     }
+
+    /// Where this follower's shared clock is now, for carrying it on as the
+    /// primary's (a backup taking control, D7). None before any exchange.
+    pub fn continued(&self) -> Option<Continued> {
+        let k = self.0.lock();
+        let local = local_now();
+        let now = k.clock.now(local)?;
+        Some(Continued {
+            local,
+            shared: now.time,
+            rate: k.clock.rate(),
+        })
+    }
+}
+
+// ---- Take control (stage 5): the shared clock carried on by a new primary ----
+
+/// A primary's shared clock that carries on another's: `shared` at the local
+/// time `local`, running at `rate` shared seconds per local second (the old
+/// primary's rate as this computer saw it). A backup that takes control keeps
+/// the time it had as a follower, so the cues playing everywhere, anchored to
+/// shared times, carry on without a jump.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Continued {
+    pub local: f64,
+    pub shared: f64,
+    pub rate: f64,
+}
+
+impl Continued {
+    /// The shared time at local time `local`.
+    pub fn at(&self, local: f64) -> f64 {
+        // A rate from a fit is within a thousandth of 1; anything else is
+        // not believed.
+        let rate = if self.rate.is_finite() && (self.rate - 1.0).abs() < 0.001 {
+            self.rate
+        } else {
+            1.0
+        };
+        self.shared + (local - self.local) * rate
+    }
+}
+
+/// What this computer answers as the shared time when it is the primary: its
+/// own clock (`local_now`), or, after it took control, the clock it carried on
+/// (`Continued`). One per hub, shared with the beacon thread that answers.
+#[derive(Clone, Default)]
+pub struct PrimaryClock(Arc<Mutex<Option<Continued>>>);
+
+impl PrimaryClock {
+    /// The shared time at local time `local`.
+    pub fn at(&self, local: f64) -> f64 {
+        match *self.0.lock() {
+            Some(c) => c.at(local),
+            None => local,
+        }
+    }
+
+    /// The shared time now.
+    pub fn now(&self) -> f64 {
+        self.at(local_now())
+    }
+
+    /// Carry on `c` from now (None: keep what it is). What the followers had
+    /// is what counts: it is taken even if it is behind what this computer
+    /// answered when it was the primary before.
+    pub fn carry_on(&self, c: Option<Continued>) {
+        if let Some(c) = c {
+            *self.0.lock() = Some(c);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn get(&self) -> Option<Continued> {
+        *self.0.lock()
+    }
 }
 
 /// The follower's side of the exchange: a thread with a socket of its own that
@@ -192,15 +268,16 @@ fn keep(
 }
 
 /// The primary's side: the answer to a datagram that is a clock request
-/// (`received` is when it came, by `local_now`), or None.
-pub fn answer(data: &[u8], received: f64) -> Option<Vec<u8>> {
+/// (`received` is when it came, by `local_now`), by the shared clock `clock`
+/// gives, or None.
+pub fn answer(data: &[u8], received: f64, clock: &PrimaryClock) -> Option<Vec<u8>> {
     match Msg::decode(data) {
         Ok(Msg::ClockAsk { seq, t1 }) => Some(
             Msg::ClockReply {
                 seq,
                 t1,
-                t2: received,
-                t3: local_now(),
+                t2: clock.at(received),
+                t3: clock.now(),
             }
             .encode(),
         ),
@@ -235,7 +312,7 @@ mod tests {
             let mut buf = [0u8; 64];
             while !stopping.load(Ordering::Relaxed) {
                 if let Ok((n, from)) = primary.recv_from(&mut buf)
-                    && let Some(reply) = answer(&buf[..n], local_now())
+                    && let Some(reply) = answer(&buf[..n], local_now(), &PrimaryClock::default())
                 {
                     let _ = primary.send_to(&reply, from);
                 }
@@ -256,5 +333,57 @@ mod tests {
         drop(keeper);
         stop.store(true, Ordering::Relaxed);
         answering.join().unwrap();
+    }
+
+    #[test]
+    fn a_clock_carried_on_keeps_its_time_and_its_rate() {
+        let c = Continued {
+            local: 100.0,
+            shared: 5000.0,
+            rate: 1.0 + 20e-6,
+        };
+        assert_eq!(c.at(100.0), 5000.0);
+        assert!((c.at(200.0) - (5100.0 + 100.0 * 20e-6)).abs() < 1e-9);
+        // A rate no fit gives is not believed.
+        let wild = Continued { rate: 1.5, ..c };
+        assert_eq!(wild.at(200.0), 5100.0);
+        // A primary's clock is its own until it carries another's on.
+        let p = PrimaryClock::default();
+        assert_eq!(p.at(42.0), 42.0);
+        p.carry_on(None);
+        assert_eq!(p.get(), None);
+        p.carry_on(Some(c));
+        assert_eq!(p.at(100.0), 5000.0);
+        // And the answer to a follower is by it.
+        let ask = Msg::ClockAsk { seq: 3, t1: 1.0 }.encode();
+        let reply = answer(&ask, 100.0, &p).unwrap();
+        match Msg::decode(&reply).unwrap() {
+            Msg::ClockReply { seq, t1, t2, t3 } => {
+                assert_eq!((seq, t1, t2), (3, 1.0, 5000.0));
+                assert!(t3 >= t2 - 1.0, "{t3}");
+            }
+            m => panic!("{m:?}"),
+        }
+    }
+
+    /// A follower's clock handle carried on is where its clock is now.
+    #[test]
+    fn a_follower_clock_carried_on_starts_where_it_is() {
+        let h = ClockHandle::default();
+        assert!(h.continued().is_none(), "no exchange yet");
+        let l = local_now();
+        // The primary 1000 s ahead of this computer, 2 ms each way.
+        h.take(
+            Exchange {
+                t1: l,
+                t2: l + 1000.002,
+                t3: l + 1000.002,
+                t4: l + 0.004,
+            },
+            l + 0.004,
+        );
+        let c = h.continued().unwrap();
+        assert!((c.shared - c.local - 1000.0).abs() < 0.001, "{c:?}");
+        assert!((c.rate - 1.0).abs() < 1e-9);
     }
 }

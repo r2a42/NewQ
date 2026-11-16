@@ -205,6 +205,46 @@ impl Finder for StoreFinder {
     }
 }
 
+// ---- Take control (stage 5) ----
+
+/// The finder of a primary that took control: the files it had as a
+/// follower are in its store, not at the show's paths (those were the old
+/// primary's). A file the store has is played from it (whole and verified
+/// only, R20); one the old primary had that is neither in the store nor on
+/// this disk is "not found" (its card shows here; the computers that have it
+/// play it); anything else (a file added since, on this computer) is played
+/// where it is, as on any primary.
+pub struct PrimaryFinder(pub Store);
+
+impl Finder for PrimaryFinder {
+    fn local(&self, show_path: &Path) -> Local {
+        let text = paths::path_text(show_path);
+        if let Some(p) = self.0.resolve_latest(&text) {
+            return Local::Here(p);
+        }
+        if self.0.find_latest(&text).is_some() && !show_path.is_file() {
+            return Local::NotFound;
+        }
+        Local::Here(show_path.to_path_buf())
+    }
+
+    fn facts(&self, show_path: &Path) -> Option<super::store::manifest::Facts> {
+        self.0.find_latest(&paths::path_text(show_path))?.facts
+    }
+
+    fn generation(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        (
+            self.0.generation(),
+            self.0.current_id(),
+            self.0.pending_id(),
+        )
+            .hash(&mut h);
+        h.finish()
+    }
+}
+
 /// A follower's store, served to the other computers (so they can fetch from
 /// it as well as from the primary).
 pub struct StoreServes(pub Store);

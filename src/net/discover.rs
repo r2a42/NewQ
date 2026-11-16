@@ -104,6 +104,7 @@ pub struct Beaconer {
 impl Beaconer {
     /// Start announcing `content` (kept up to date by the hub) from `socket`,
     /// heard beacons going to `heard`.
+    #[allow(clippy::too_many_arguments)] // each is one of the hub's own
     pub fn start(
         socket: UdpSocket,
         base: u16,
@@ -112,6 +113,7 @@ impl Beaconer {
         content: Arc<Mutex<Beacon>>,
         manual: Arc<Mutex<Vec<SocketAddr>>>,
         heard: Sender<super::hub::Event>,
+        clock: super::time::PrimaryClock,
     ) -> std::io::Result<Beaconer> {
         socket.set_read_timeout(Some(Duration::from_millis(200)))?;
         let _ = socket.set_broadcast(true);
@@ -157,7 +159,7 @@ impl Beaconer {
                     // answered at once, on this thread, so the reply waits on
                     // nothing else.
                     let received = super::time::local_now();
-                    if let Some(reply) = super::time::answer(&buf[..n], received) {
+                    if let Some(reply) = super::time::answer(&buf[..n], received, &clock) {
                         let _ = socket.send_to(&reply, from);
                         continue;
                     }

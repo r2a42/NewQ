@@ -27,6 +27,13 @@ struct Inner {
     cache: Arc<Mutex<HashCache>>,
     /// Paths being hashed again after a change.
     rehashing: Mutex<HashSet<String>>,
+    // ---- Take control (stage 5) ----
+    /// A primary that was a follower before (it took control): its store,
+    /// whose objects stand in for files the show names that aren't on this
+    /// computer's disk.
+    store: Mutex<Option<super::Store>>,
+    /// The digests of entries taken from the store (`inherit`).
+    inherited: Mutex<HashSet<String>>,
 }
 
 /// The primary's media, as served. Cheap to clone.
@@ -42,8 +49,62 @@ impl Primary {
                 state: Mutex::new(State::default()),
                 cache,
                 rehashing: Mutex::new(HashSet::new()),
+                store: Mutex::new(None),
+                inherited: Mutex::new(HashSet::new()),
             }),
         }
+    }
+
+    // ---- Take control (stage 5) ----
+
+    /// The store of a computer that took control (None: files only where
+    /// they are).
+    pub fn set_store(&self, store: Option<super::Store>) {
+        *self.inner.store.lock() = store;
+    }
+
+    pub fn store(&self) -> Option<super::Store> {
+        self.inner.store.lock().clone()
+    }
+
+    /// A version made from the show's paths, with each file that isn't on
+    /// this computer's disk taken from what the store knows of it (the old
+    /// primary's digest, size and facts), so the other computers keep what
+    /// they have. Also returns how many of those this computer hasn't the
+    /// bytes of either (their cues show a card here; the others, which have
+    /// them, play them).
+    pub fn inherit(&self, m: Manifest) -> (Manifest, usize) {
+        let Some(store) = self.store() else {
+            return (m, 0);
+        };
+        let mut entries = m.entries.clone();
+        let mut taken = 0;
+        let mut lacking = 0;
+        let mut inherited = self.inner.inherited.lock();
+        for e in entries.iter_mut().filter(|e| e.missing && !e.library) {
+            let Some(old) = store.find_latest(&e.path) else {
+                continue;
+            };
+            e.size = old.size;
+            e.sha256 = old.sha256.clone();
+            e.modified = old.modified;
+            e.facts = old.facts.clone();
+            e.missing = false;
+            inherited.insert(e.sha256.clone());
+            taken += 1;
+            if store.any_with(&e.sha256, e.size).is_none() {
+                lacking += 1;
+            }
+        }
+        drop(inherited);
+        if taken == 0 {
+            return (m, 0);
+        }
+        (Manifest::new(entries), lacking)
+    }
+
+    fn is_inherited(&self, sha: &str) -> bool {
+        !sha.is_empty() && self.inner.inherited.lock().contains(sha)
     }
 
     /// The hash cache (shared with `Hashing` when the show changes).
@@ -96,6 +157,8 @@ impl Primary {
             let same = match (&now, e.missing) {
                 (None, true) => true,
                 (Some(m), false) => m.len() == e.size && modified_ns(m) == e.modified,
+                // Taken from the store: not on this disk, and that is no change.
+                (None, false) => self.is_inherited(&e.sha256),
                 _ => false,
             };
             if !same {
@@ -279,6 +342,17 @@ impl Provider for Primary {
                         path: file,
                         size: e.size,
                     };
+                }
+                // Taken from the store (stage 5): its object, if it is here.
+                Err(_) if self.is_inherited(&e.sha256) => {
+                    if let Some(store) = self.store()
+                        && let Some(key) = store.any_with(&e.sha256, e.size)
+                    {
+                        return Served::File {
+                            path: store.object_path(&key),
+                            size: e.size,
+                        };
+                    }
                 }
                 _ => {
                     // Changed or gone since the version was made.

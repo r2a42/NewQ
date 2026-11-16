@@ -13,6 +13,15 @@ use crate::net::play::{
 };
 use crate::net::proto::{Link, Msg};
 use crate::net::time::local_now;
+// ---- Take control (stage 5) ----
+use crate::net::hub::Hub;
+
+/// The shared time when this computer runs the show: its own clock, or the
+/// one it carried on when it took control (`Hub::primary_now`).
+fn primary_now(net: &Hub) -> f64 {
+    net.primary_now()
+}
+// ---- end of take control's ----
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -120,6 +129,45 @@ impl App {
             mode,
             self.play.mode
         );
+        // ---- Take control (stage 5) ----
+        // A backup that takes control, and a primary that steps down to be
+        // the backup, go straight from one to the other: the engine keeps
+        // the shared times its cues are anchored to (the clock carries on),
+        // so nothing that plays here jumps.
+        let took_control = self.play.mode == NetMode::Follower && mode == NetMode::Primary;
+        let stepped_down = self.play.mode == NetMode::Primary && mode == NetMode::Follower;
+        if took_control {
+            // The old primary's commands still to come are let go: if it is
+            // still there it does them itself as it steps down (a send cue
+            // never fires twice, R8).
+            let let_go = self.play.follower.take_queue().len();
+            if let_go > 0 {
+                log::info!("show network: {let_go} of the old primary's commands let go");
+            }
+            self.ui.took_control();
+            self.engine
+                .log("Show network: this computer took control and runs the show now");
+        }
+        if stepped_down {
+            // What it had still to do it does now (the new primary let its
+            // copies go); inputs not yet timed are the new primary's to make.
+            if let Some(mut l) = self.play.leader.take() {
+                l.step(&mut self.engine, &self.show, f64::INFINITY);
+            }
+            let left = self.engine.net_take();
+            if !left.is_empty() {
+                log::info!(
+                    "show network: {} inputs left to the new primary",
+                    left.len()
+                );
+            }
+            self.engine
+                .log("Show network: another computer took control; this one is the backup now");
+        }
+        if took_control || stepped_down {
+            self.engine.net_set_mode(mode);
+        }
+        // ---- end of take control's ----
         // Commands still to be done here are done now, as they would have
         // been alone.
         if let Some(mut l) = self.play.leader.take() {
@@ -127,7 +175,9 @@ impl App {
         }
         // Inputs caught and not yet timed are done at once.
         let left = self.engine.net_take();
-        self.engine.net_set_mode(NetMode::Off);
+        if !(took_control || stepped_down) {
+            self.engine.net_set_mode(NetMode::Off);
+        }
         for c in left {
             self.engine.net_apply(&self.show, &c, 0.0);
         }
@@ -139,8 +189,9 @@ impl App {
         match mode {
             NetMode::Primary => {
                 self.play.leader = Some(Leader::new(crate::net::node::random_u64()));
-                // Versions go on rising across restarts of the primary.
-                self.play.version = (local_now() * 1000.0) as u64;
+                // Versions go on rising across restarts of the primary (and
+                // past the old primary's, after taking control).
+                self.play.version = (primary_now(&self.net) * 1000.0) as u64;
                 self.play.hash = None;
                 self.play.seen = None;
             }
@@ -155,7 +206,7 @@ impl App {
         let Some(leader) = self.play.leader.as_mut() else {
             return;
         };
-        let now = local_now();
+        let now = primary_now(&self.net);
         let cmds = self.engine.net_take();
         for c in &cmds {
             if let Some(id) = c.will_start(&self.show) {
@@ -395,7 +446,7 @@ impl App {
                 .leader
                 .as_ref()
                 .and_then(Leader::next_due)
-                .map(|at| at - local_now()),
+                .map(|at| at - primary_now(&self.net)),
             NetMode::Follower => {
                 let shared = self.net.clock().now().map(|n| n.time);
                 self.play

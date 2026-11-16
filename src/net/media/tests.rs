@@ -835,3 +835,121 @@ fn alone_the_manager_does_nothing() {
     let _: &NetView = &n.hub.view();
     let _ = Arc::new(());
 }
+
+// ---- Take control (stage 5) ----
+
+/// The backup takes control with the show's files only in its store (the
+/// old primary's paths are gone): it plays them from there, serves them, and
+/// a computer that joins after (or lacks a file) gets them; a file the new
+/// primary hasn't got is said, and comes from a display that has it.
+#[test]
+fn after_taking_control_the_media_is_served_from_the_store() {
+    let mut rig = Rig::new();
+    let media = scratch("takeover-media");
+    rig.dirs.push(media.clone());
+    let files: Vec<PathBuf> = (0..3)
+        .map(|i| {
+            let f = media.join(format!("clip{i}.mp4"));
+            std::fs::write(&f, bytes(50_000, 40 + i)).unwrap();
+            f
+        })
+        .collect();
+    let want: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|f| (f.clone(), std::fs::read(f).unwrap()))
+        .collect();
+    let mut p = rig.node("Booth", None, 2);
+    let mut a = rig.node("Backup", None, 2);
+    let mut b = rig.node("Left", None, 2);
+    network(&mut p, &mut [&mut a, &mut b]);
+    same_show(&mut [&mut p, &mut a, &mut b], &files, &[]);
+    let aid = a.id();
+    p.hub
+        .ask(NetAction::SetRole(aid, crate::net::node::Role::Backup));
+    until(&mut [&mut p, &mut a, &mut b], "every file on both", |n| {
+        n[1..]
+            .iter()
+            .all(|f| files.iter().all(|x| f.local(x).is_here()))
+            && n[1].hub.view().me.role == crate::net::node::Role::Backup
+    });
+    // The primary goes, and its files with it (on another computer they
+    // were never at these paths).
+    drop(p);
+    for f in &files {
+        std::fs::remove_file(f).unwrap();
+    }
+    a.hub.ask(NetAction::TakeControl);
+    until(
+        &mut [&mut a, &mut b],
+        "the backup to serve the media",
+        |n| {
+            let v = n[0].mgr.view();
+            v.side == Side::Primary && v.from_store && v.served.is_some_and(|(k, _)| k == 3)
+        },
+    );
+    // It plays the files from its store, whole.
+    let fi = a.mgr.primary_finder().expect("a finder");
+    for f in &files {
+        match fi.local(f) {
+            Local::Here(at) => {
+                assert_ne!(&at, f);
+                assert_eq!(std::fs::read(&at).unwrap(), want[f]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            fi.facts(f).is_none(),
+            "no FFmpeg here: no facts, and none made up"
+        );
+    }
+    // A computer that joins now gets every file from it.
+    let mut c = rig.node("Late", None, 2);
+    c.show = a.show.clone();
+    c.at = a.at.clone();
+    c.hub.ask(NetAction::SetOn(true));
+    let cid = c.id();
+    let mut asked = false;
+    until(
+        &mut [&mut a, &mut b, &mut c],
+        "the late computer to have every file",
+        |n| {
+            let v = n[0].hub.view();
+            if !asked && v.peer(cid).is_some_and(|x| x.waiting && x.connected) {
+                n[0].hub.ask(NetAction::Adopt(cid));
+                asked = true;
+            }
+            n[2].mgr.finder().is_some() && files.iter().all(|x| n[2].local(x).is_here())
+        },
+    );
+    for f in &files {
+        match c.local(f) {
+            Local::Here(at) => assert_eq!(
+                std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display())),
+                want[f]
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+    // A file the new primary lacks: said on its page, "not found" here, and
+    // still played (and sent) by the computers that have it.
+    let store = fi.0.clone();
+    let gone = store
+        .find_latest(&paths::path_text(&files[1]))
+        .unwrap()
+        .object();
+    store.remove_object(&gone);
+    // A change to the show makes the list again.
+    let extra = media.join("added-here.mp4");
+    std::fs::write(&extra, bytes(10_000, 99)).unwrap();
+    let cue = a.show.make_cue(CueType::Video, Some(extra.clone()), 3);
+    a.show.cues.push(cue);
+    until(&mut [&mut a, &mut b, &mut c], "the lack to be said", |n| {
+        n[0].mgr.view().lacking_here == 1
+    });
+    assert_eq!(fi.local(&files[1]), Local::NotFound);
+    assert!(
+        fi.local(&extra).is_here(),
+        "a file added here plays where it is"
+    );
+    assert!(b.local(&files[1]).is_here(), "the display keeps it");
+}

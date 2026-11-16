@@ -284,6 +284,7 @@ fn a_computer_in_the_network_shows_whom_it_follows_and_only_the_switch() {
         id: LEFT,
         name: "Booth".into(),
         online: true,
+        quiet_secs: None,
     });
     for modern in [false, true] {
         let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v.clone());
@@ -492,6 +493,7 @@ fn a_follower_shows_its_own_media() {
         id: LEFT,
         name: "Booth".into(),
         online: true,
+        quiet_secs: None,
     });
     for modern in [false, true] {
         let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v.clone());
@@ -576,6 +578,7 @@ fn follower_view(role: Role) -> NetView {
         id: LEFT,
         name: "Booth".into(),
         online: true,
+        quiet_secs: None,
     });
     v.status.standing = Some("Getting ready".into());
     v
@@ -686,4 +689,134 @@ fn a_blended_picture_on_wifi_or_a_loose_clock_is_warned_of() {
     });
     show.outputs.push(other);
     assert!(super::blend_warning(&show, left, &s).is_some());
+}
+
+// ---- Take control (stage 5) ----
+
+/// The locked window of a computer following "Booth", drawn.
+fn locked_window(modern: bool, v: NetView) -> (Win, Show, UiState) {
+    let mut st = UiState::default();
+    st.prefs.new_layout = modern;
+    st.net = Arc::new(v);
+    let mut show = Show::default();
+    let c = show.make_cue(crate::show::CueType::Wait, None, 0);
+    show.cues.push(c);
+    let mut w = Win::new();
+    w.settle(&mut show, &mut st);
+    (w, show, st)
+}
+
+#[test]
+fn the_backup_takes_control_with_one_confirming_click() {
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = locked_window(modern, follower_view(Role::Backup));
+        assert!(w.find("net_rects", "locked_banner").is_some());
+        // The first click only asks.
+        w.press(&mut show, &mut st, "net_rects", "take_control");
+        assert!(st.net_requests.is_empty(), "modern {modern}");
+        assert!(w.find("net_rects", "take_control").is_none());
+        // The question and the banner's own words don't overlap.
+        let ask = w
+            .find("net_rects", "take_control_ask")
+            .expect("the question");
+        let banner = w.find("net_rects", "locked_banner").unwrap();
+        assert!(!ask.intersects(banner), "{ask:?} {banner:?}");
+        assert!(Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(ask));
+        // Cancel goes back; asked again and confirmed, it is asked of the network.
+        w.press(&mut show, &mut st, "net_rects", "take_control_cancel");
+        assert!(st.net_requests.is_empty());
+        w.press(&mut show, &mut st, "net_rects", "take_control");
+        w.press(&mut show, &mut st, "net_rects", "take_control_yes");
+        assert_eq!(
+            st.net_requests,
+            vec![NetAction::TakeControl],
+            "modern {modern}"
+        );
+        assert!(
+            w.find("net_rects", "take_control").is_some(),
+            "back to the button"
+        );
+    }
+    // A display computer's window has no such button (it is hidden anyway).
+    let (w, _, _) = locked_window(false, follower_view(Role::Display));
+    assert!(w.find("net_rects", "take_control").is_none());
+}
+
+#[test]
+fn the_backup_says_when_the_primary_has_gone_quiet() {
+    let mut v = follower_view(Role::Backup);
+    assert_eq!(quiet_words(&v), None, "heard: nothing to say");
+    let f = v.following.as_mut().unwrap();
+    f.online = false;
+    f.quiet_secs = Some(12);
+    assert_eq!(
+        quiet_words(&v).as_deref(),
+        Some("The primary (Booth) has not been heard for 12 s.")
+    );
+    for modern in [false, true] {
+        let (w, _, _) = locked_window(modern, v.clone());
+        let r = w
+            .find("net_rects", "quiet_primary")
+            .expect("the warning is drawn");
+        assert!(
+            Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(r),
+            "modern {modern}: {r:?}"
+        );
+        assert!(w.find("net_rects", "take_control").is_some());
+    }
+}
+
+#[test]
+fn a_computer_gone_for_good_is_forgotten_and_a_takeover_is_said() {
+    let mut v = primary_view();
+    v.peers[0].online = false;
+    v.peers[0].connected = false;
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v.clone());
+        assert!(
+            w.find("net_rects", "forget:0000000000000100").is_none(),
+            "not this computer"
+        );
+        w.press(&mut show, &mut st, "net_rects", &format!("forget:{LEFT}"));
+        assert_eq!(
+            st.net_requests,
+            vec![NetAction::Forget(LEFT)],
+            "modern {modern}"
+        );
+        // Online: no Forget (Release is the way).
+        st.net = Arc::new(primary_view());
+        w.settle(&mut show, &mut st);
+        assert!(w.find("net_rects", &format!("forget:{LEFT}")).is_none());
+        // After taking control: unsaved here, Save asks where, and the page says so.
+        st.show_path = Some(PathBuf::from("/shows/old.newq"));
+        st.net = Arc::new(follower_view(Role::Backup));
+        st.took_control();
+        assert_eq!(st.show_path, None);
+        assert!(st.dirty);
+        st.net = Arc::new(primary_view());
+        w.settle(&mut show, &mut st);
+        assert!(w.find("net_rects", "took_control_note").is_some());
+        assert_eq!(
+            st.net_edit.took_control_from.as_deref(),
+            Some("Booth"),
+            "modern {modern}"
+        );
+    }
+}
+
+#[test]
+fn a_primary_that_took_control_says_what_media_it_lacks() {
+    for modern in [false, true] {
+        let (v, mut m) = primary_media_view();
+        m.from_store = true;
+        m.lacking_here = 2;
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v);
+        st.media = Arc::new(m);
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", "media_from_store").is_some(),
+            "modern {modern}"
+        );
+        assert!(w.find("net_rects", "media_lacking_here").is_some());
+    }
 }

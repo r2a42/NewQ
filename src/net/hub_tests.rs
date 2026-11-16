@@ -740,3 +740,204 @@ fn the_show_and_commands_reach_a_follower_over_loopback() {
         pair.follower.corrected
     );
 }
+
+// ---- Take control (stage 5) ----
+
+/// A primary, a display and a backup, all reporting, the followers' clocks
+/// locked to the primary's.
+fn primary_display_backup(rig: &mut Rig) -> (Hub, Hub, Hub) {
+    let (p, d) = primary_and_display(rig);
+    let b = rig.hub("Backup");
+    b.ask(NetAction::SetOn(true));
+    let bid = id_of(&b);
+    until(&p, "the backup to be heard", |v| {
+        peer(v, bid).is_some_and(|x| x.waiting && x.connected)
+    });
+    p.ask(NetAction::Adopt(bid));
+    until(&p, "the backup adopted", |v| {
+        peer(v, bid).is_some_and(|x| x.ours && x.connected && x.status.is_some())
+    });
+    p.ask(NetAction::SetRole(bid, Role::Backup));
+    until(&b, "the backup role", |v| v.me.role == Role::Backup);
+    for (h, what) in [(&d, "the display's clock"), (&b, "the backup's clock")] {
+        let began = Instant::now();
+        while !h.clock().now().is_some_and(|n| n.locked) {
+            assert!(
+                began.elapsed() < Duration::from_secs(120),
+                "{what} never locked"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    (p, d, b)
+}
+
+fn restart(dir: PathBuf, base: u16) -> Hub {
+    Hub::start(
+        HubConfig {
+            dir,
+            port_base: base,
+            port_span: 4,
+            lan: false,
+        },
+        || {},
+    )
+}
+
+/// The primary stops; the backup says so, takes control, and the display
+/// follows it with its clock carried on; the old primary, started again,
+/// steps down to be the backup and follows the new one.
+#[test]
+fn the_backup_takes_control_and_the_old_primary_comes_back_as_the_backup() {
+    let mut rig = Rig::new();
+    let (p, d, b) = primary_display_backup(&mut rig);
+    let (pid, did, bid) = (id_of(&p), id_of(&d), id_of(&b));
+    let term = p.view().me.term;
+    let pdir = rig.dirs[0].clone();
+    // Take control is refused on the display.
+    d.ask(NetAction::TakeControl);
+    drop(p);
+    let bv = until(&b, "the primary to be said quiet", |v| {
+        v.following
+            .as_ref()
+            .is_some_and(|f| f.id == pid && !f.online && f.quiet_secs.is_some())
+    });
+    assert!(bv.following.as_ref().unwrap().quiet_secs.unwrap() >= 2);
+    assert_eq!(
+        d.view().me.role,
+        Role::Display,
+        "a display can't take control"
+    );
+    b.ask(NetAction::TakeControl);
+    let bv = until(&b, "the backup to run the show", |v| v.is_primary());
+    assert_eq!(bv.me.term, term + 1);
+    assert_eq!(node::load(&rig.dirs[2]).role, Role::Primary, "kept");
+    until(&d, "the display to follow the new primary", |v| {
+        v.following
+            .as_ref()
+            .is_some_and(|f| f.id == bid && f.online)
+    });
+    until(&b, "the display under the new primary", |v| {
+        peer(v, did).is_some_and(|x| x.connected && x.ours && x.status.is_some())
+    });
+    assert_eq!(d.view().me.term, term + 1);
+    // The shared clock carried on: the display's agrees with the new
+    // primary's (one computer: within the loopback's noise).
+    let began = Instant::now();
+    let mut best = f64::INFINITY;
+    while began.elapsed() < Duration::from_secs(60) {
+        if let Some(n) = d.clock().now().filter(|n| n.locked) {
+            best = best.min((n.time - b.primary_now()).abs());
+            if best < 0.005 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(best < 0.005, "display {best} s from the new primary");
+    // The old primary starts again: it hears the newer one and steps down.
+    let p = restart(pdir.clone(), rig.base);
+    until(&p, "the old primary to step down", |v| {
+        v.me.role == Role::Backup
+            && v.following
+                .as_ref()
+                .is_some_and(|f| f.id == bid && f.online)
+    });
+    assert_eq!(node::load(&pdir).role, Role::Backup);
+    until(&b, "the old primary as the backup", |v| {
+        peer(v, pid).is_some_and(|x| x.connected && x.role == Role::Backup)
+    });
+    assert!(
+        d.view().following.as_ref().is_some_and(|f| f.id == bid),
+        "the display never went back"
+    );
+}
+
+/// The backup takes control while the primary is still there: the primary
+/// hears it and steps down; the display moves over.
+#[test]
+fn a_primary_still_there_steps_down_when_the_backup_takes_control() {
+    let mut rig = Rig::new();
+    let (p, d, b) = primary_display_backup(&mut rig);
+    let bid = id_of(&b);
+    b.ask(NetAction::TakeControl);
+    until(&b, "the backup to run the show", |v| v.is_primary());
+    until(&p, "the old primary to step down and follow", |v| {
+        v.me.role == Role::Backup
+            && v.following
+                .as_ref()
+                .is_some_and(|f| f.id == bid && f.online)
+    });
+    until(&d, "the display to follow the new primary", |v| {
+        v.following
+            .as_ref()
+            .is_some_and(|f| f.id == bid && f.online)
+    });
+    // Only one primary: the old one runs nothing now.
+    assert!(!p.view().is_primary());
+    until(&b, "everyone under the new primary", |v| {
+        v.computers().len() == 2
+    });
+}
+
+/// A primary remembers its computers in node.json: started again where no
+/// beacon reaches, it dials them at their last address; one gone for good is
+/// forgotten.
+#[test]
+fn a_restarted_primary_finds_its_computers_again() {
+    let mut rig = Rig::new();
+    let mut far = Rig::new();
+    let p = rig.hub("Booth");
+    let mut cfg = far.cfg("Far");
+    cfg.port_span = 1;
+    let d = Hub::start(cfg, || {});
+    p.ask(NetAction::BecomePrimary);
+    d.ask(NetAction::SetOn(true));
+    let dport = until(&d, "the far one to listen", |v| v.port.is_some())
+        .port
+        .unwrap();
+    let did = id_of(&d);
+    p.ask(NetAction::AddAddress(format!("127.0.0.1:{dport}")));
+    until(&p, "the address to be reached", |v| {
+        peer(v, did).is_some_and(|x| x.connected && x.waiting)
+    });
+    p.ask(NetAction::Adopt(did));
+    until(&p, "adopted", |v| {
+        peer(v, did).is_some_and(|x| x.connected && x.ours)
+    });
+    let pdir = rig.dirs[0].clone();
+    let began = Instant::now();
+    while !node::load(&pdir)
+        .known
+        .iter()
+        .any(|k| k.id == did && k.port == dport)
+    {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "never remembered"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Started again: no address added by hand this time, and no beacon.
+    drop(p);
+    let p = restart(pdir.clone(), rig.base);
+    let pv = p.view();
+    assert!(
+        peer(&pv, did).is_some_and(|x| x.ours),
+        "listed at once, before it is reached"
+    );
+    until(&p, "the display found again", |v| {
+        peer(v, did).is_some_and(|x| x.connected && x.ours)
+    });
+    until(&d, "the display following again", |v| {
+        v.following.as_ref().is_some_and(|f| f.online)
+    });
+    // Gone for good: forgotten.
+    drop(d);
+    until(&p, "the display offline", |v| {
+        peer(v, did).is_some_and(|x| !x.online && !x.connected)
+    });
+    p.ask(NetAction::Forget(did));
+    until(&p, "forgotten", |v| peer(v, did).is_none());
+    assert!(node::load(&pdir).known.is_empty());
+}

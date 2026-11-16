@@ -17,6 +17,8 @@ pub struct Editing {
     passcode: String,
     /// A computer being renamed, and the name so far.
     renaming: Option<(NodeId, String)>,
+    /// This computer took control (stage 5): who from, for the page's note.
+    pub took_control_from: Option<String>,
 }
 
 /// For the tests: where a control of the page was drawn.
@@ -244,6 +246,27 @@ fn computers(ui: &mut Ui, show: &Show, v: &NetView, st: &mut UiState, actions: &
         .collect();
     section(ui, "Computers in this show", |ui| {
         own_row(ui, v);
+        // ---- Take control (stage 5) ----
+        if let Some(from) = &st.net_edit.took_control_from {
+            let r = ui.label(
+                RichText::new(format!(
+                    "This computer took control from {from}. The show it runs is the one {from} \
+                     last sent and isn't saved on this computer yet: Save asks where to keep it."
+                ))
+                .color(Color32::from_rgb(220, 160, 40)),
+            );
+            note(ui, "took_control_note", r.rect);
+        }
+        let backups = ours.iter().filter(|p| p.role == Role::Backup).count();
+        if backups > 1 {
+            hint(
+                ui,
+                &format!(
+                    "{backups} backups: whichever takes control first runs the show, and the \
+                     others follow it."
+                ),
+            );
+        }
         for p in &ours {
             ui.separator();
             computer_row(ui, show, p, v, st, actions);
@@ -423,7 +446,20 @@ fn computer_row(
             .weak()
             .small()
     };
-    ui.label(state);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(state);
+        // ---- Take control (stage 5): a computer gone for good is forgotten ----
+        if !p.online {
+            let r = ui.small_button("Forget").on_hover_text(
+                "This computer is gone for good: stop looking for it. If it comes back, it \
+                 appears here again.",
+            );
+            note(ui, format!("forget:{}", p.id), r.rect);
+            if r.clicked() {
+                actions.push(Action::Net(NetAction::Forget(p.id)));
+            }
+        }
+    });
     if let Some(s) = &p.status
         && s.version != proto::VERSION
         && !s.version.is_empty()
@@ -718,6 +754,25 @@ impl UiState {
     /// undo history starts from it, and a selection of a cue that has gone is
     /// let go. What plays is left alone (the engine copies the live fields of
     /// a playing cue from the show each tick).
+    /// This computer took control (stage 5): the show it holds is the one the
+    /// old primary last sent. It isn't saved here: it reads as unsaved and
+    /// Save asks where to keep it (not over a show file this computer had
+    /// open before it followed).
+    pub fn took_control(&mut self) {
+        self.net_edit.took_control_from = Some(
+            self.net
+                .took_control_from
+                .clone()
+                .or_else(|| self.net.following.as_ref().map(|f| f.name.clone()))
+                .or_else(|| self.net.me.primary_name.clone())
+                .unwrap_or_else(|| "the old primary".into()),
+        );
+        self.show_path = None;
+        // Unlike any show: unsaved until saved.
+        self.saved_json = Some(String::new());
+        self.dirty = true;
+    }
+
     pub fn took_synced_show(&mut self, show: &Show, engine: &mut Engine) {
         // As this computer has it (its files where they are here).
         let json = serde_json::to_string(show).unwrap_or_default();
@@ -764,7 +819,14 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         if let Some(s) = &v.status.standing {
             ui.label(RichText::new(s).weak());
         }
-        if v.following.as_ref().is_some_and(|f| !f.online) {
+    });
+    // A second row: whether the primary is heard, and what can be done here.
+    ui.horizontal(|ui| {
+        // ---- Take control (stage 5): the primary gone quiet ----
+        if let Some(text) = quiet_words(v) {
+            let r = ui.label(RichText::new(text).color(STOP_RED).strong());
+            note(ui, "quiet_primary", r.rect);
+        } else if v.following.as_ref().is_some_and(|f| !f.online) {
             ui.label(
                 RichText::new(format!("{who} can't be reached: playing on by its clock."))
                     .color(STOP_RED),
@@ -778,6 +840,67 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
             if r.clicked() {
                 actions.push(Action::Net(NetAction::SetOn(false)));
             }
+            if v.me.role == Role::Backup {
+                take_control_button(ui, &who, actions);
+            }
         });
     });
+}
+
+/// "The primary (Booth) has not been heard for 12 s." once it has gone quiet.
+pub fn quiet_words(v: &NetView) -> Option<String> {
+    let f = v.following.as_ref()?;
+    let secs = f.quiet_secs?;
+    Some(format!(
+        "The primary ({}) has not been heard for {secs} s.",
+        f.name
+    ))
+}
+
+/// The backup's "Take control", with its one-click confirmation (kept in the
+/// window's memory, so the banner needs nothing of its own).
+fn take_control_button(ui: &mut Ui, who: &str, actions: &mut Vec<Action>) {
+    let id = egui::Id::new("net_confirm_take");
+    let asking = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    if asking {
+        let r = ui.button("Cancel");
+        note(ui, "take_control_cancel", r.rect);
+        if r.clicked() {
+            ui.data_mut(|d| d.insert_temp(id, false));
+        }
+        let r = ui
+            .add(
+                egui::Button::new(
+                    RichText::new("Yes, take control")
+                        .strong()
+                        .color(Color32::WHITE),
+                )
+                .fill(STOP_RED),
+            )
+            .on_hover_text(format!(
+                "This computer runs the show from now on; {who} becomes the backup if it is \
+                 there or comes back."
+            ));
+        note(ui, "take_control_yes", r.rect);
+        if r.clicked() {
+            ui.data_mut(|d| d.insert_temp(id, false));
+            actions.push(Action::Net(NetAction::TakeControl));
+        }
+        let r = ui.label(RichText::new("Run the show from this computer?").strong());
+        note(ui, "take_control_ask", r.rect);
+    } else {
+        let r = ui
+            .add(
+                egui::Button::new(RichText::new("Take control").strong().color(Color32::WHITE))
+                    .fill(Color32::from_rgb(200, 120, 20)),
+            )
+            .on_hover_text(
+                "Run the show from this computer: for when the primary has stopped. What plays \
+                 carries on; the other computers follow this one.",
+            );
+        note(ui, "take_control", r.rect);
+        if r.clicked() {
+            ui.data_mut(|d| d.insert_temp(id, true));
+        }
+    }
 }
