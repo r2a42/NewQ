@@ -260,3 +260,82 @@ fn a_file_read_before_joining_the_network_is_asked_again_through_the_store() {
             .any(|a| matches!(a.kind, ActiveKind::Video(_)) && !a.seeking())
     });
 }
+
+/// A carded cue whose length isn't known (no facts from the primary) would
+/// hold until stopped; on a follower the primary's heartbeat ends it once
+/// the primary's own cue has ended (`engine/net.rs`).
+#[test]
+fn a_carded_cue_of_unknown_length_ends_when_the_primarys_does() {
+    use crate::engine::{NetCorrection, NetMode};
+    use crate::net::play::{Command, CueNow, PlayState};
+    let Some((ff, clip)) = crate::media::test_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let fake = Arc::new(Fake {
+        here: AtomicBool::new(false),
+        file: clip,
+        facts: None,
+        generation: AtomicU64::new(0),
+        asked: AtomicU64::new(0),
+    });
+    let mut e = Engine::for_tests();
+    e.ff = Some(ff);
+    e.set_media_finder(Some(fake as Arc<dyn Finder>));
+    let mut show = Show::default();
+    let c = show.make_cue(
+        CueType::Video,
+        Some(PathBuf::from("/Shows/Primary/media/clip.mp4")),
+        0,
+    );
+    let id = c.id;
+    show.cues.push(c);
+    e.net_set_mode(NetMode::Follower);
+    let mut now = 100.0;
+    e.tick_shared(&show, now);
+    // The primary's command, done here.
+    e.net_apply(&show, &Command::Fire { cue: id }, 0.0);
+    let t0 = Instant::now();
+    while !e.cards().iter().any(|(c, t)| *c == id && t.is_some()) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "no card");
+        std::thread::sleep(Duration::from_millis(5));
+        now += 0.005;
+        e.tick_shared(&show, now);
+    }
+    let a = e.active.iter().find(|a| a.cue_id == id).unwrap();
+    assert_eq!(a.duration, None, "its length isn't known here");
+    // While the primary plays it, it stays.
+    let mut doubts = NetCorrection::default();
+    for _ in 0..3 {
+        now += 0.3;
+        e.tick_shared(&show, now);
+        let s = PlayState {
+            time: now,
+            cues: vec![CueNow {
+                cue: id,
+                anchor: 100.0,
+                stopping: false,
+            }],
+            ..Default::default()
+        };
+        let fixed = e.net_correct(&show, &s, now, &mut doubts);
+        assert!(fixed.is_empty(), "{fixed:?}");
+    }
+    assert!(e.active.iter().any(|a| a.cue_id == id));
+    // The primary's cue has ended: two heartbeats without it end it here.
+    for _ in 0..2 {
+        now += 0.3;
+        e.tick_shared(&show, now);
+        let s = PlayState {
+            time: now,
+            ..Default::default()
+        };
+        e.net_correct(&show, &s, now, &mut doubts);
+    }
+    let t0 = Instant::now();
+    while e.active.iter().any(|a| a.cue_id == id) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "still playing");
+        std::thread::sleep(Duration::from_millis(5));
+        now += 0.005;
+        e.tick_shared(&show, now);
+    }
+}
