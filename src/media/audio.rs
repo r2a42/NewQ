@@ -6,7 +6,9 @@
 use super::ffmpeg::Ffmpeg;
 use super::playback::{Children, PassFeed, Playback};
 use crate::fx::{AudioChain, FxShared};
-use crate::show::{AudioOutputConfig, AudioOutputId, Effect, EffectKind};
+#[cfg(test)]
+use crate::show::AudioOutputConfig;
+use crate::show::{AudioOutputId, Effect, EffectKind};
 use crate::speed::{SpeedPlan, Stretcher};
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -427,8 +429,13 @@ pub struct AudioOut {
     routes: HashMap<AudioOutputId, Option<String>>,
     /// The device for cues that don't choose an output: the first output's.
     default_key: Option<String>,
-    /// The outputs the devices were last opened for.
-    synced: Option<Vec<(AudioOutputId, Option<String>)>>,
+    /// The show's outputs given only to other computers of a show network:
+    /// nothing is opened for them here (and cues for them play nowhere here).
+    elsewhere: HashSet<AudioOutputId>,
+    /// The first output is one of those.
+    default_elsewhere: bool,
+    /// The outputs the devices were last opened for (None: given to other computers).
+    synced: Option<Vec<(AudioOutputId, Option<Option<String>>)>>,
 }
 
 impl AudioOut {
@@ -438,6 +445,8 @@ impl AudioOut {
             devices: HashMap::new(),
             routes: HashMap::new(),
             default_key: None,
+            elsewhere: HashSet::new(),
+            default_elsewhere: false,
             synced: None,
         }
     }
@@ -526,23 +535,50 @@ impl AudioOut {
 
     /// Open the devices the show's audio outputs use (the system default if
     /// it has none), and close those no longer used. Cheap when nothing changed.
+    #[cfg(test)]
     pub fn sync(&mut self, outputs: &[AudioOutputConfig]) {
-        let key: Vec<_> = outputs.iter().map(|o| (o.id, o.device.clone())).collect();
-        if self.synced.as_ref() == Some(&key) {
+        let placed: Vec<_> = outputs
+            .iter()
+            .map(|o| (o.id, Some(o.device.clone())))
+            .collect();
+        self.sync_placed(&placed);
+    }
+
+    /// `sync`, with each output's device on this computer, or None for one
+    /// given only to other computers of a show network (none of it is opened).
+    pub fn sync_placed(&mut self, outputs: &[(AudioOutputId, Option<Option<String>>)]) {
+        if self.synced.as_deref() == Some(outputs) {
             return;
         }
-        self.default_key = outputs.first().and_then(|o| o.device.clone());
-        let mut wanted: HashSet<Option<String>> =
-            outputs.iter().map(|o| o.device.clone()).collect();
-        wanted.insert(self.default_key.clone());
+        let here = || outputs.iter().filter_map(|(id, d)| Some((*id, d.clone()?)));
+        self.default_elsewhere = outputs.first().is_some_and(|(_, d)| d.is_none());
+        self.default_key = outputs.first().and_then(|(_, d)| d.clone().flatten());
+        self.elsewhere = outputs
+            .iter()
+            .filter(|(_, d)| d.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        let mut wanted: HashSet<Option<String>> = here().map(|(_, d)| d).collect();
+        if !self.default_elsewhere {
+            wanted.insert(self.default_key.clone());
+        }
         self.devices.retain(|k, _| wanted.contains(k));
         for k in wanted {
             self.devices
                 .entry(k.clone())
                 .or_insert_with(|| Device::open(k.as_deref()));
         }
-        self.routes = key.iter().cloned().collect();
-        self.synced = Some(key);
+        self.routes = here().collect();
+        self.synced = Some(outputs.to_vec());
+    }
+
+    /// Whether `output` (None = the default) is given only to other computers.
+    pub fn is_elsewhere(&self, output: Option<AudioOutputId>) -> bool {
+        match output {
+            Some(id) if self.elsewhere.contains(&id) => true,
+            Some(id) if self.routes.contains_key(&id) => false,
+            _ => self.default_elsewhere,
+        }
     }
 
     /// Try again to open devices that failed (a USB interface plugged in
@@ -572,6 +608,9 @@ impl AudioOut {
 
     /// The device a cue's output name resolves to.
     fn device_for(&self, output: Option<AudioOutputId>) -> Option<&Device> {
+        if self.is_elsewhere(output) {
+            return None;
+        }
         let key = output
             .and_then(|id| self.routes.get(&id))
             .unwrap_or(&self.default_key);
@@ -638,6 +677,7 @@ impl AudioOut {
     /// One line for the status bar: Ok with what is playing out, or Err with why not.
     pub fn summary(&self) -> Result<String, String> {
         match self.device_for(None) {
+            None if self.default_elsewhere => Ok("sound plays on other computers".into()),
             None => Ok("starting audio…".into()),
             Some(d) => match d.error.clone().or_else(|| d.lost.why()) {
                 Some(e) => Err(e),
@@ -707,6 +747,11 @@ impl AudioOut {
         speed: Option<SpeedPlan>,
     ) -> Result<Voice> {
         let src = matrix.map_or(2, |m| m.source_channels.clamp(1, MAX_SOURCE_CHANNELS));
+        if self.is_elsewhere(route.0) {
+            return Err(anyhow!(
+                "its sound output plays on other computers of the show network"
+            ));
+        }
         let device = self
             .device_for(route.0)
             .ok_or_else(|| anyhow!("no audio output device"))?;
@@ -987,6 +1032,11 @@ impl AudioOut {
         route: (Option<AudioOutputId>, u16),
         sound: &[EffectKind],
     ) -> Result<Voice> {
+        if self.is_elsewhere(route.0) {
+            return Err(anyhow!(
+                "its sound output plays on other computers of the show network"
+            ));
+        }
         let device = self
             .device_for(route.0)
             .ok_or_else(|| anyhow!("no audio output device"))?;
@@ -2103,6 +2153,8 @@ mod tests {
             name: format!("Out {id}"),
             device: device.map(String::from),
             delay_ms: 0,
+            computers: Vec::new(),
+            devices_on: Default::default(),
         }
     }
 
@@ -2157,6 +2209,26 @@ mod tests {
             audio.devices.keys().cloned().collect::<Vec<_>>(),
             vec![None]
         );
+    }
+
+    #[test]
+    fn an_output_given_to_other_computers_opens_nothing_here() {
+        let mut audio = AudioOut::new();
+        let (a, b) = (AudioOutputId(1), AudioOutputId(2));
+        audio.sync_placed(&[(a, Some(Some("Missing A".into()))), (b, None)]);
+        assert_eq!(
+            audio.devices.keys().cloned().collect::<Vec<_>>(),
+            vec![Some("Missing A".to_string())]
+        );
+        assert!(audio.is_elsewhere(Some(b)) && !audio.is_elsewhere(Some(a)));
+        assert!(!audio.is_elsewhere(None), "the default is the first output");
+        assert!(audio.device_status(Some(b)).is_none());
+        // The first given away: cues that don't choose play nowhere here, and
+        // no device at all is opened.
+        audio.sync_placed(&[(b, None)]);
+        assert!(audio.devices.is_empty());
+        assert!(audio.is_elsewhere(None));
+        assert_eq!(audio.summary(), Ok("sound plays on other computers".into()));
     }
 
     /// Wait for a voice to have decoded `frames` frames.

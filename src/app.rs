@@ -359,6 +359,10 @@ pub struct App {
     start_failed: Option<String>,
     /// When a render thread that had stopped was last started again.
     render_restart: Option<Instant>,
+    /// The show network (see `net`): its thread, and what it was last told
+    /// of this computer's monitors and sound devices.
+    net: crate::net::hub::Hub,
+    net_told: crate::net::hub::LocalFacts,
 }
 
 impl App {
@@ -406,7 +410,12 @@ impl App {
         if crate::clicker::AVAILABLE {
             crate::clicker::start_global(clicker.clone());
         }
+        // Opens nothing on the network unless this computer was switched on.
+        let net = crate::net::hub::Hub::start(crate::net::hub::HubConfig::from_env());
+        ui.net = net.view();
         App {
+            net,
+            net_told: Default::default(),
             remote,
             clicker,
             wake,
@@ -589,6 +598,71 @@ impl App {
         }
     }
 
+    /// The show network: tell it this computer's monitors and sound devices
+    /// when they change, pass on what the page asked, and take what it says.
+    /// Never waits on the network.
+    fn pass_net(&mut self) {
+        use crate::net::hub::{LocalFacts, NetEvent};
+        let facts = LocalFacts {
+            monitors: self
+                .ui
+                .monitors
+                .iter()
+                .map(|m| crate::net::proto::MonitorReport {
+                    identity: m.title().to_string(),
+                    raw: m.name.clone(),
+                    hardware: m.hardware.clone(),
+                    size: m.size,
+                    refresh_hz: m.refresh_hz,
+                })
+                .collect(),
+            audio_devices: self.ui.audio_devices.clone(),
+        };
+        if facts != self.net_told {
+            self.net.set_local(facts.clone());
+            self.net_told = facts;
+        }
+        for a in std::mem::take(&mut self.ui.net_requests) {
+            self.net.ask(a);
+        }
+        for ev in self.net.take_events() {
+            match ev {
+                NetEvent::RoleChanged { role, .. } => {
+                    let v = self.net.view();
+                    let follows = v
+                        .following
+                        .as_ref()
+                        .map(|f| format!(", run from {}", f.name))
+                        .unwrap_or_default();
+                    self.engine.log(format!(
+                        "Show network: this computer is {}{follows}",
+                        role.described()
+                    ));
+                }
+                NetEvent::Identify { .. } => {
+                    self.engine
+                        .log("Show network: the primary asked this computer to show its name");
+                }
+                NetEvent::Message { .. } => {}
+            }
+        }
+        self.ui.net = self.net.view();
+    }
+
+    /// Open the sound devices of the show's audio outputs, leaving out those
+    /// given only to other computers of a show network.
+    fn sync_audio_outputs(&mut self) {
+        let me = self.ui.net.me.id;
+        let runs_show = !self.ui.net.me.adopted();
+        let placed: Vec<_> = self
+            .show
+            .audio_outputs
+            .iter()
+            .map(|o| (o.id, o.device_here(me, runs_show)))
+            .collect();
+        self.engine.audio.sync_placed(&placed);
+    }
+
     /// Keep the OSC and MIDI listeners matching the show's settings, and act
     /// on what they have received.
     fn run_remote(&mut self, now: Instant) {
@@ -712,7 +786,7 @@ impl App {
             // top of it.
             return self.show.outputs.iter().map(|o| (o.id, None)).collect();
         };
-        route_outputs(&self.show.outputs, &keys, control)
+        route_outputs(&self.show.outputs, &keys, control, self.ui.net.me.id)
     }
 
     /// The display outputs must keep clear of, as `control_for_routing` says
@@ -1315,7 +1389,7 @@ impl App {
             .show
             .outputs
             .iter()
-            .filter(|o| !o.is_sub_display())
+            .filter(|o| !o.is_sub_display() && o.is_on(self.ui.net.me.id))
             .map(|d| {
                 (
                     d.id,
@@ -2895,7 +2969,8 @@ impl App {
         });
         self.part("Remote control", |app| {
             app.save_layout(false);
-            app.engine.audio.sync(&app.show.audio_outputs);
+            app.pass_net();
+            app.sync_audio_outputs();
             app.run_remote(now);
             app.sync_clicker();
         });
@@ -3302,6 +3377,7 @@ fn route_outputs(
     outputs: &[OutputConfig],
     monitors: &[MonitorKey],
     control: Option<usize>,
+    me: crate::show::NodeId,
 ) -> HashMap<OutputId, Option<Target>> {
     outputs
         .iter()
@@ -3310,7 +3386,10 @@ fn route_outputs(
             let display = match o.within {
                 None => Some(o),
                 Some(d) => outputs.iter().find(|x| x.id == d && x.within.is_none()),
-            };
+            }
+            // A display of another computer of a show network: no window here
+            // (its picture is still previewed in the main window).
+            .filter(|d| d.is_on(me));
             let target = display.and_then(|d| {
                 match display_state(d.monitor.as_ref(), d.twins, monitors, control) {
                     DisplayState::Connected(monitor) => Some(Target {
@@ -3361,7 +3440,7 @@ fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::show::DisplayRef;
+    use crate::show::{DisplayRef, NodeId};
 
     fn keys(names: &[&str]) -> Vec<MonitorKey> {
         names
@@ -3399,7 +3478,7 @@ mod tests {
         monitors: &[&str],
         control: Option<usize>,
     ) -> HashMap<OutputId, Option<usize>> {
-        route_outputs(outputs, &keys(monitors), control)
+        route_outputs(outputs, &keys(monitors), control, NodeId(1))
             .into_iter()
             .map(|(id, t)| (id, t.map(|t| t.monitor)))
             .collect()
@@ -3726,7 +3805,7 @@ mod tests {
             sub(12, 99, left),
         ];
         let monitors = keys(&["Laptop", "Projector"]);
-        let r = route_outputs(&outs, &monitors, Some(0));
+        let r = route_outputs(&outs, &monitors, Some(0), NodeId(1));
         assert_eq!(
             r[&OutputId(10)],
             Some(Target {
@@ -3746,7 +3825,25 @@ mod tests {
         // A sub display of a display that isn't there shows nowhere.
         assert_eq!(r[&OutputId(12)], None);
         // Projector unplugged: everything on it shows nowhere else.
-        let r = route_outputs(&outs, &keys(&["Laptop", "TV"]), Some(0));
+        let r = route_outputs(&outs, &keys(&["Laptop", "TV"]), Some(0), NodeId(1));
         assert!(r.values().all(|t| t.is_none()));
+    }
+
+    #[test]
+    fn a_display_of_another_computer_opens_no_window_here() {
+        let mut d = display(1, Some(("Projector", 1)));
+        let left = Corners::rect(0.0, 0.0, 0.5, 1.0);
+        let monitors = keys(&["Laptop", "Projector"]);
+        let me = NodeId(1);
+        // Its monitor's name is one of this computer's, but it is another's.
+        d.computer = Some(NodeId(2));
+        let outs = [d.clone(), sub(10, 1, left)];
+        let r = route_outputs(&outs, &monitors, Some(0), me);
+        assert_eq!(r[&OutputId(1)], None, "previewed in the main window only");
+        assert_eq!(r[&OutputId(10)], None, "and so are its sub displays");
+        // Given to this computer, it is shown here.
+        d.computer = Some(me);
+        let r = route_outputs(&[d], &monitors, Some(0), me);
+        assert_eq!(r[&OutputId(1)].map(|t| t.monitor), Some(1));
     }
 }

@@ -11,6 +11,7 @@ pub enum SettingsPage {
     #[default]
     General,
     Media,
+    Network,
     Displays,
     SubDisplays,
     Audio,
@@ -46,9 +47,10 @@ impl SettingsGroup {
 
 impl SettingsPage {
     /// In the order the sidebar lists them.
-    pub const ALL: [SettingsPage; 9] = [
+    pub const ALL: [SettingsPage; 10] = [
         SettingsPage::General,
         SettingsPage::Media,
+        SettingsPage::Network,
         SettingsPage::Displays,
         SettingsPage::SubDisplays,
         SettingsPage::Audio,
@@ -62,6 +64,7 @@ impl SettingsPage {
         match self {
             SettingsPage::General => "General",
             SettingsPage::Media => "Media",
+            SettingsPage::Network => "Show network",
             SettingsPage::Displays => "Displays",
             SettingsPage::SubDisplays => "Sub displays",
             SettingsPage::Audio => "Audio outputs",
@@ -74,7 +77,9 @@ impl SettingsPage {
 
     pub fn group(self) -> SettingsGroup {
         match self {
-            SettingsPage::General | SettingsPage::Media => SettingsGroup::Show,
+            SettingsPage::General | SettingsPage::Media | SettingsPage::Network => {
+                SettingsGroup::Show
+            }
             SettingsPage::Displays
             | SettingsPage::SubDisplays
             | SettingsPage::Audio
@@ -90,6 +95,9 @@ impl SettingsPage {
                 "The show's name, how Stop All behaves and where timelines open."
             }
             SettingsPage::Media => "The files the cues play, and whether they can all be found.",
+            SettingsPage::Network => {
+                "Other computers that run this show with this one: find them and give them roles."
+            }
             SettingsPage::Displays => {
                 "Which monitor each display is on, and how it is shaped, tested and sent out."
             }
@@ -112,7 +120,7 @@ pub struct Badge {
     pub color: Color32,
 }
 
-fn badge(text: impl Into<String>, color: Color32) -> Option<Badge> {
+pub(super) fn badge(text: impl Into<String>, color: Color32) -> Option<Badge> {
     Some(Badge {
         text: text.into(),
         color,
@@ -135,6 +143,7 @@ pub fn page_badge(page: SettingsPage, show: &Show, st: &UiState) -> Option<Badge
                 color: STOP_RED,
             })
         }
+        SettingsPage::Network => super::network::badge(&st.net),
         SettingsPage::Displays => {
             let displays: Vec<&OutputConfig> = show
                 .outputs
@@ -243,6 +252,7 @@ pub fn settings_view(
                 match page {
                     SettingsPage::General => general_page(ui, show, st, actions),
                     SettingsPage::Media => media_page(ui, show, st, actions),
+                    SettingsPage::Network => super::network::page(ui, st, actions),
                     SettingsPage::Displays => displays_panel(ui, show, engine, st, actions),
                     SettingsPage::SubDisplays => sub_displays_panel(ui, show, st, actions),
                     SettingsPage::Audio => audio_panel(ui, show, engine, st, actions),
@@ -319,7 +329,7 @@ fn nav_row(ui: &mut Ui, label: &str, selected: bool, badge: Option<&Badge>) -> b
 }
 
 /// A titled block of a page.
-fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+pub(super) fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.add_space(6.0);
     ui.label(RichText::new(title).strong());
     ui.add_space(2.0);
@@ -329,11 +339,11 @@ fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
     });
 }
 
-fn hint(ui: &mut Ui, text: &str) {
+pub(super) fn hint(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).weak().small());
 }
 
-fn warning(ui: &mut Ui, text: &str) {
+pub(super) fn warning(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).small().color(PREWAIT));
 }
 

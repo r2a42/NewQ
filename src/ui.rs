@@ -1,6 +1,7 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 mod modern;
+mod network;
 mod settings;
 mod timeline;
 
@@ -217,6 +218,12 @@ pub use crate::mediamtx::Status as HostingStatus;
 
 #[derive(Default)]
 pub struct UiState {
+    /// The show network as its thread last published it (set by the app each pass).
+    pub net: std::sync::Arc<crate::net::hub::NetView>,
+    /// What the page asked of it, for the app to pass on.
+    pub net_requests: Vec<crate::net::hub::NetAction>,
+    /// The page's fields being typed in.
+    net_edit: network::Editing,
     /// Which arrangement of the new interface is showing.
     pub modern_view: modern::View,
     /// The streaming server NewQ runs for "Run the server in NewQ".
@@ -612,6 +619,8 @@ const CHILD_INDENT: f32 = 14.0;
 const FOLD_W: f32 = 18.0;
 
 enum Action {
+    /// Asked of the show network (Settings ▸ Show network); the app passes it on.
+    Net(crate::net::hub::NetAction),
     Go,
     /// The Space key: on a timeline being worked on, its play/pause; else GO
     /// (`space_key`). With the timeline of an editor the pointer was over.
@@ -889,6 +898,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     poll_slide_dialog(ui.ctx(), st, &mut actions);
     poll_deck(ui.ctx(), st, &mut actions);
     deck_window(ui.ctx(), st);
+    network::identify(ui.ctx(), st);
     poll_save(ui.ctx(), engine, st);
     refresh_missing(ui.ctx(), show, st);
     keyboard(ui.ctx(), show, st, &mut actions);
@@ -2156,6 +2166,7 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
                      the lid open.",
             );
         }
+        network::status(ui, st);
         if st.keeping_awake {
             ui.label(RichText::new("☀ awake").weak()).on_hover_text(
                 "NewQ is keeping this computer and its displays awake while a display is \
@@ -4903,6 +4914,17 @@ fn audio_panel(
                         ui.selectable_value(&mut o.device, Some(d.clone()), label);
                     }
                 });
+            if st.net.is_primary() && (!st.net.computers().is_empty() || !o.computers.is_empty()) {
+                plays_on(ui, o, st);
+            }
+            if engine.audio.is_elsewhere(Some(o.id)) {
+                ui.label(
+                    RichText::new("Plays on the other computers ticked, not on this one")
+                        .weak()
+                        .small(),
+                );
+                return;
+            }
             match engine.audio.device_status(Some(o.id)) {
                 Some(d) if d.error.is_none() => {
                     ui.label(
@@ -4952,8 +4974,121 @@ fn audio_panel(
     }
 }
 
+/// The monitors computer `c` of the show network reported, as shows know them.
+fn remote_monitors(st: &UiState, c: NodeId) -> Option<&[crate::net::proto::MonitorReport]> {
+    st.net
+        .peer(c)
+        .and_then(|p| p.status.as_ref())
+        .map(|s| s.monitors.as_slice())
+}
+
+/// A display on another computer of the show network: which, and whether its
+/// monitor is there.
+fn remote_display_status(d: &OutputConfig, c: NodeId, st: &UiState) -> (String, Option<Color32>) {
+    let who = st.net.name_of(c);
+    let monitor = d.monitor.as_ref().map_or("", |r| r.name.as_str());
+    let Some(p) = st.net.peer(c).filter(|p| p.online) else {
+        return (
+            format!("On {who}, which isn't connected now: shown in the main window here"),
+            Some(STOP_RED),
+        );
+    };
+    let Some(monitors) = remote_monitors(st, c) else {
+        return (format!("On {}: waiting for its report", p.name), None);
+    };
+    let keys: Vec<MonitorKey> = monitors.iter().map(|m| m.key()).collect();
+    match display_state(d.monitor.as_ref(), d.twins, &keys, None) {
+        DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i) => {
+            let size = monitors[i].size;
+            (
+                format!("On {} · connected · {}×{}", p.name, size.0, size.1),
+                Some(GO_GREEN),
+            )
+        }
+        DisplayState::Missing => (
+            format!("⚠ {monitor} isn't connected to {}", p.name),
+            Some(STOP_RED),
+        ),
+        DisplayState::Unassigned => (format!("On {}: no monitor chosen", p.name), None),
+    }
+}
+
+/// Which computers of the show network play an audio output (R10), and on
+/// which of each one's devices.
+fn plays_on(ui: &mut Ui, o: &mut AudioOutputConfig, st: &UiState) {
+    let me = st.net.me.id;
+    let mut ids: Vec<NodeId> = vec![me];
+    ids.extend(st.net.computers().iter().map(|p| p.id));
+    for c in &o.computers {
+        if !ids.contains(c) {
+            ids.push(*c);
+        }
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Plays on");
+        for id in ids {
+            let mut on = o.plays_on(id, me);
+            let last = on && o.computers.len() <= 1;
+            let name = if id == me {
+                format!("{} (this computer)", st.net.name)
+            } else {
+                st.net.name_of(id)
+            };
+            let r = ui
+                .add_enabled(!last, egui::Checkbox::new(&mut on, name))
+                .on_disabled_hover_text("Sound has to play somewhere: tick another first.");
+            #[cfg(test)]
+            ui.data_mut(|data| {
+                data.get_temp_mut_or_default::<Vec<(String, egui::Rect)>>(egui::Id::new("plays_on"))
+                    .push((format!("{}:{id}", o.id.0), r.rect))
+            });
+            if r.changed() {
+                o.set_plays_on(id, on, me);
+            }
+        }
+    });
+    for id in o.computers.clone().into_iter().filter(|c| *c != me) {
+        let devices = st
+            .net
+            .peer(id)
+            .and_then(|p| p.status.as_ref())
+            .map(|s| s.audio_devices.clone())
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label(format!("On {}", st.net.name_of(id)));
+            let shown = o
+                .devices_on
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "System default".into());
+            egui::ComboBox::from_id_salt(("audio_device_on", o.id.0, id.0))
+                .width((ui.available_width() - 8.0).max(120.0))
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(!o.devices_on.contains_key(&id), "System default")
+                        .clicked()
+                    {
+                        o.devices_on.remove(&id);
+                    }
+                    for d in &devices {
+                        if ui
+                            .selectable_label(o.devices_on.get(&id) == Some(d), d)
+                            .clicked()
+                        {
+                            o.devices_on.insert(id, d.clone());
+                        }
+                    }
+                });
+        });
+    }
+}
+
 /// What to tell the user about a display, from what it is attached to.
 fn display_status(d: &OutputConfig, st: &UiState) -> (String, Option<Color32>) {
+    if let Some(c) = d.computer.filter(|c| *c != st.net.me.id) {
+        return remote_display_status(d, c, st);
+    }
     let monitor = d.monitor.as_ref().map_or("", |r| r.name.as_str());
     match st.display_states.get(&d.id) {
         Some(DisplayState::Connected(i)) => {
@@ -5070,15 +5205,25 @@ fn displays_panel(
                     }
                 });
             });
-            let shown = match (&d.monitor, state) {
-                (None, _) => "Not assigned".to_string(),
+            let elsewhere = d.computer.filter(|c| *c != st.net.me.id);
+            let shown = match (&d.monitor, state, elsewhere) {
+                (None, _, _) => "Not assigned".to_string(),
+                (Some(r), _, Some(c)) => format!("{}: {}", st.net.name_of(c), r.name),
                 (
                     Some(_),
                     Some(DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i)),
+                    None,
                 ) => monitor_label(st, i),
-                (Some(r), _) => format!("{} (not connected)", r.name),
+                (Some(r), _, None) => format!("{} (not connected)", r.name),
             };
-            egui::ComboBox::from_id_salt(("display_monitor", d.id.0))
+            // The primary of a show network offers the other computers'
+            // monitors too, under the names of their computers.
+            let others = if st.net.is_primary() {
+                st.net.computers()
+            } else {
+                Vec::new()
+            };
+            let menu = egui::ComboBox::from_id_salt(("display_monitor", d.id.0))
                 .width(ui.available_width() - 8.0)
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
@@ -5087,21 +5232,80 @@ fn displays_panel(
                         .clicked()
                     {
                         d.monitor = None;
+                        d.computer = None;
                         d.twins = 1;
                     }
+                    if !others.is_empty() {
+                        ui.label(RichText::new(format!("{} (this computer)", st.net.name)).weak().small());
+                    }
                     for i in 0..st.monitors.len() {
-                        let chosen = matches!(
-                            state,
-                            Some(DisplayState::Connected(c) | DisplayState::OnMainWindowDisplay(c))
-                                if c == i
-                        );
+                        let chosen = elsewhere.is_none()
+                            && matches!(
+                                state,
+                                Some(DisplayState::Connected(c) | DisplayState::OnMainWindowDisplay(c))
+                                    if c == i
+                            );
                         if ui.selectable_label(chosen, monitor_label(st, i)).clicked() {
                             let keys = monitor_keys(&st.monitors);
                             d.monitor = Some(keys[i].reference(i));
+                            d.computer = None;
                             d.twins = twins_of(&keys, i);
                         }
                     }
+                    for p in &others {
+                        let Some(s) = &p.status else { continue };
+                        ui.separator();
+                        ui.label(RichText::new(&p.name).weak().small());
+                        if s.monitors.is_empty() {
+                            ui.label(RichText::new("no monitors").weak().small());
+                        }
+                        let keys: Vec<MonitorKey> = s.monitors.iter().map(|m| m.key()).collect();
+                        let found = (elsewhere == Some(p.id))
+                            .then(|| display_state(d.monitor.as_ref(), d.twins, &keys, None));
+                        for (i, m) in s.monitors.iter().enumerate() {
+                            let chosen = matches!(
+                                found,
+                                Some(DisplayState::Connected(c) | DisplayState::OnMainWindowDisplay(c))
+                                    if c == i
+                            );
+                            let label = format!(
+                                "{}: {}: {} ({}×{})",
+                                p.name,
+                                i + 1,
+                                m.identity,
+                                m.size.0,
+                                m.size.1
+                            );
+                            let r = ui.selectable_label(chosen, label);
+                            #[cfg(test)]
+                            ui.data_mut(|data| {
+                                data.get_temp_mut_or_default::<Vec<(String, egui::Rect)>>(
+                                    egui::Id::new("remote_monitors"),
+                                )
+                                .push((format!("{}:{i}", p.id), r.rect))
+                            });
+                            if r.clicked() {
+                                d.monitor = Some(keys[i].reference(i));
+                                d.computer = Some(p.id);
+                                d.twins = twins_of(&keys, i);
+                            }
+                        }
+                    }
                 });
+            #[cfg(test)]
+            {
+                let r = menu.response.rect;
+                ui.data_mut(|data| {
+                    data.get_temp_mut_or_default::<Vec<(u64, egui::Rect)>>(egui::Id::new(
+                        "display_monitor_menus",
+                    ))
+                    .push((d.id.0, r))
+                });
+            }
+            let _ = menu.response.on_hover_text(
+                "The monitor this display is shown on. On the primary of a show network, the \
+                 other computers' monitors are offered too.",
+            );
             let (text, color) = display_status(d, st);
             let on: Vec<&str> = subs
                 .iter()
@@ -11020,6 +11224,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             st.settings_page = page;
         }
         Action::CloseSettings => close_settings(st),
+        Action::Net(a) => st.net_requests.push(a),
         Action::SetNewLayout(on) => {
             st.prefs.new_layout = on;
             // An open timeline workspace stays open in the other interface.
@@ -13446,11 +13651,11 @@ mod tests {
     #[test]
     fn the_settings_pages_are_grouped_once_each_with_names_and_blurbs() {
         let all = SettingsPage::ALL;
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
         let mut labels: Vec<&str> = all.iter().map(|p| p.label()).collect();
         labels.sort();
         labels.dedup();
-        assert_eq!(labels.len(), 9, "names are different");
+        assert_eq!(labels.len(), 10, "names are different");
         assert!(all.iter().all(|p| !p.blurb().is_empty()));
         // Each page is in exactly one group, and every group has pages, in
         // the order the sidebar lists them.

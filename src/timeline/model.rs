@@ -817,12 +817,16 @@ mod tests {
                 name: "Main".into(),
                 device: None,
                 delay_ms: 0,
+                computers: Vec::new(),
+                devices_on: Default::default(),
             },
             AudioOutputConfig {
                 id: AudioOutputId(51),
                 name: "Foldback".into(),
                 device: None,
                 delay_ms: 0,
+                computers: Vec::new(),
+                devices_on: Default::default(),
             },
         ];
         let pic = |show: &mut Show, out: OutputId, layer: i32| {

@@ -5,10 +5,12 @@ use crate::media::playback::Playback;
 use crate::timecode::Timecode;
 pub use crate::timeline::{PauseFreeze, RunOut, TimelineKey, TimelinePoint, TimelineSettings};
 // Tests name a marker through the show's types.
+/// A computer of a show network (a display's or a sound output's).
+pub use crate::net::node::NodeId;
 #[cfg(test)]
 pub use crate::timeline::Marker;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 pub const SHOW_EXTENSION: &str = "newq";
@@ -93,6 +95,65 @@ pub struct AudioOutputConfig {
     /// picture (a Bluetooth speaker, a long cable run, a slow display).
     #[serde(default, skip_serializing_if = "no_delay")]
     pub delay_ms: u32,
+    /// The computers of a show network that play it (R10); none = the
+    /// primary alone, as a show without a network has it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computers: Vec<NodeId>,
+    /// The device it plays on, on each of those computers that doesn't use its
+    /// system default (the primary uses `device`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub devices_on: BTreeMap<NodeId, String>,
+}
+
+impl AudioOutputConfig {
+    /// The device it plays on on computer `me` (`Some(None)`: the system's
+    /// default), or None when it is given only to other computers. `primary`:
+    /// `me` runs the show (the primary, or a computer in no network). One given
+    /// to no computer plays wherever the show is open, as before networks
+    /// (a display computer leaving it to the primary is a later stage's).
+    pub fn device_here(&self, me: NodeId, primary: bool) -> Option<Option<String>> {
+        if self.computers.is_empty() {
+            return Some(self.device.clone());
+        }
+        if !self.computers.contains(&me) {
+            return None;
+        }
+        Some(match self.devices_on.get(&me) {
+            Some(d) => Some(d.clone()),
+            None if primary => self.device.clone(),
+            None => None,
+        })
+    }
+
+    /// Whether computer `id` plays it; `primary` is the primary's id (which
+    /// plays it when no computer is named).
+    pub fn plays_on(&self, id: NodeId, primary: NodeId) -> bool {
+        if self.computers.is_empty() {
+            id == primary
+        } else {
+            self.computers.contains(&id)
+        }
+    }
+
+    /// Give it to computer `id`, or take it away, as ticked on the primary
+    /// `primary`. The primary alone is written as no computer; the last one
+    /// can't be taken away.
+    pub fn set_plays_on(&mut self, id: NodeId, on: bool, primary: NodeId) {
+        if self.computers.is_empty() {
+            self.computers.push(primary);
+        }
+        if on {
+            if !self.computers.contains(&id) {
+                self.computers.push(id);
+            }
+        } else if self.computers.len() > 1 {
+            self.computers.retain(|c| *c != id);
+            self.devices_on.remove(&id);
+        }
+        if self.computers == [primary] {
+            self.computers.clear();
+        }
+    }
 }
 
 fn no_delay(v: &u32) -> bool {
@@ -507,6 +568,11 @@ pub struct OutputConfig {
     /// shown only in the main window's preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<DisplayRef>,
+    /// Display: the computer of a show network whose monitor that is; None =
+    /// the primary's (or, outside a network, this computer's). A display on
+    /// another computer opens no window here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<NodeId>,
     /// How many look-alike monitors (the same make and model) were connected
     /// when it was assigned. With identical monitors the display can only be
     /// told apart by their order, so it is not used unless they are all
@@ -550,6 +616,7 @@ impl OutputConfig {
             stream: None,
             delay_ms: 0,
             monitor: None,
+            computer: None,
             twins: 1,
             within: None,
             area: Corners::default(),
@@ -561,6 +628,12 @@ impl OutputConfig {
 
     pub fn is_sub_display(&self) -> bool {
         self.within.is_some()
+    }
+
+    /// Whether this display is shown on computer `me` (not on another
+    /// computer of a show network).
+    pub fn is_on(&self, me: NodeId) -> bool {
+        self.computer.is_none_or(|c| c == me)
     }
 }
 
@@ -3408,7 +3481,7 @@ impl Show {
         let mut claimed: std::collections::HashSet<usize> = self
             .outputs
             .iter()
-            .filter(|o| !o.is_sub_display())
+            .filter(|o| !o.is_sub_display() && o.computer.is_none())
             .filter_map(
                 |o| match display_state(o.monitor.as_ref(), o.twins, monitors, control) {
                     DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i) => Some(i),
@@ -3446,7 +3519,12 @@ impl Show {
         control: Option<usize>,
     ) -> Vec<String> {
         let mut notes = Vec::new();
-        for o in self.outputs.iter_mut().filter(|o| o.within.is_none()) {
+        // (A display on another computer is that computer's monitor, not one of these.)
+        for o in self
+            .outputs
+            .iter_mut()
+            .filter(|o| o.within.is_none() && o.computer.is_none())
+        {
             let state = display_state(o.monitor.as_ref(), o.twins, monitors, control);
             let (DisplayState::Connected(i) | DisplayState::OnMainWindowDisplay(i)) = state else {
                 continue;
@@ -3600,6 +3678,8 @@ impl Show {
             name: format!("Audio {n}"),
             device: None,
             delay_ms: 0,
+            computers: Vec::new(),
+            devices_on: BTreeMap::new(),
         });
         id
     }
@@ -5098,6 +5178,99 @@ mod tests {
             assert!(back.outputs[0].test_pattern);
             assert_eq!(json.contains("\"pattern\""), kind != PatternKind::Bars);
         }
+    }
+
+    #[test]
+    fn computers_of_a_show_network_are_kept_and_unwritten_when_none() {
+        let mut show = Show::default();
+        show.add_audio_output();
+        let plain = serde_json::to_string(&show).unwrap();
+        for word in ["computer", "devices_on"] {
+            assert!(!plain.contains(word), "{word} isn't written: {plain}");
+        }
+        // A show from before networks (these fields absent) loads with none.
+        let old = r#"{"version":2,"name":"Old","outputs":[{"id":1,"name":"Display 1",
+            "enabled":true}],"audio_outputs":[{"id":2,"name":"Audio 1","device":null}],
+            "cues":[],"next_id":3}"#;
+        let back: Show = serde_json::from_str(old).unwrap();
+        assert_eq!(back.outputs[0].computer, None);
+        assert!(back.audio_outputs[0].computers.is_empty());
+        assert!(back.audio_outputs[0].devices_on.is_empty());
+        // Given to computers, they are kept.
+        let (a, b) = (NodeId(0xa), NodeId(0xb));
+        show.outputs[0].computer = Some(b);
+        show.audio_outputs[0].computers = vec![a, b];
+        show.audio_outputs[0].devices_on.insert(b, "USB".into());
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(json.contains("\"computer\":\"000000000000000b\""), "{json}");
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.outputs[0].computer, Some(b));
+        assert_eq!(back.audio_outputs[0].computers, vec![a, b]);
+        assert_eq!(
+            back.audio_outputs[0].devices_on.get(&b).map(String::as_str),
+            Some("USB")
+        );
+    }
+
+    #[test]
+    fn where_a_display_and_a_sound_output_play() {
+        let (me, other) = (NodeId(1), NodeId(2));
+        let mut d = OutputConfig::new(OutputId(1), "D".into());
+        assert!(d.is_on(me), "no computer: here");
+        d.computer = Some(other);
+        assert!(!d.is_on(me));
+        d.computer = Some(me);
+        assert!(d.is_on(me));
+        let mut show = Show::default();
+        show.add_audio_output();
+        let o = &mut show.audio_outputs[0];
+        o.device = Some("Desk".into());
+        assert_eq!(o.device_here(me, true), Some(Some("Desk".into())));
+        o.computers = vec![other];
+        assert_eq!(o.device_here(me, true), None, "only on the other computer");
+        assert_eq!(
+            o.device_here(other, false),
+            Some(None),
+            "its default device"
+        );
+        o.devices_on.insert(other, "USB".into());
+        assert_eq!(o.device_here(other, false), Some(Some("USB".into())));
+        o.computers = vec![me, other];
+        assert_eq!(o.device_here(me, true), Some(Some("Desk".into())));
+        // Ticked on the primary (`me`): the primary alone is no computer at all.
+        o.computers.clear();
+        o.devices_on.clear();
+        assert!(o.plays_on(me, me) && !o.plays_on(other, me));
+        o.set_plays_on(other, true, me);
+        assert_eq!(o.computers, vec![me, other]);
+        o.set_plays_on(me, false, me);
+        assert_eq!(o.computers, vec![other]);
+        assert!(!o.plays_on(me, me));
+        o.set_plays_on(other, false, me);
+        assert_eq!(o.computers, vec![other], "the last one stays");
+        o.devices_on.insert(other, "USB".into());
+        o.set_plays_on(me, true, me);
+        o.set_plays_on(other, false, me);
+        assert!(o.computers.is_empty(), "back to the primary alone");
+        assert!(o.devices_on.is_empty(), "its device forgotten");
+    }
+
+    #[test]
+    fn a_display_on_another_computer_is_not_matched_to_monitors_here() {
+        let mut show = Show::default();
+        show.outputs[0].computer = Some(NodeId(9));
+        show.outputs[0].monitor = Some(DisplayRef {
+            name: "DELL".into(),
+            index: 0,
+            hardware: None,
+        });
+        let here = vec![MonitorKey {
+            identity: "DELL".into(),
+            raw: "DP-1".into(),
+            hardware: Some("DEL:5".into()),
+        }];
+        assert!(show.learn_hardware_ids(&here, None).is_empty());
+        assert_eq!(show.outputs[0].monitor.as_ref().unwrap().hardware, None);
     }
 
     #[test]
