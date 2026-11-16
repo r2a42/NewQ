@@ -13,6 +13,15 @@ The README describes the features; this file is about working on the code.
   `next_top`, `move_cue` and `insert_slot` stay inside a list. The engine's
   `playhead` is the active list's; the other lists' are in `list_playheads`.
 - `src/engine.rs`: GO, pre-waits, continues, transitions, fades, groups, preload.
+- `src/net/` (stage 1 of `.claude/notes/network-plan.md`; results and what remains in
+  `network-sync-trial.md`): `clock.rs` a follower's shared clock from NTP-style exchanges (pure;
+  weighted fit by round trip, drift, slews once locked, never back), `msg.rs` the wire format
+  (clock ask/reply, commands at a shared time, ack, heartbeat), `sim.rs` and `trial.rs` (tests
+  only) a simulated network and three `Engine`s; the hour-long report is the ignored
+  `the_hour_long_report`. Nothing in the app uses it yet. `Engine::tick_shared(show, now)` ticks by
+  a shared time: cues get `ActiveCue::anchor` and runs `Run::anchor`, clips `clock_offset`, and
+  their times are then the clock's (`ActiveCue::pinned`), not sums of ticks or the sound device's
+  count; `tick` alone (the app) is unchanged.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:

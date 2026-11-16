@@ -8,3 +8,5 @@ pub mod clock;
 pub mod msg;
 #[cfg(test)]
 mod sim;
+#[cfg(test)]
+mod trial;
