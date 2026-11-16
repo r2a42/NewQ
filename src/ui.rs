@@ -1034,6 +1034,17 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         st.json_at = now;
         st.json_stale = false;
     }
+    // A follower's show is the primary's: an edit made here (a field the
+    // locked window let through) is put back at once.
+    if locked
+        && st.json.is_some()
+        && st.json != st.saved_json
+        && let Some(saved) = st.saved_json.clone()
+        && let Ok(back) = serde_json::from_str::<Show>(&saved)
+    {
+        *show = back;
+        st.json = Some(saved);
+    }
     st.dirty = st.json != st.saved_json;
     if let Some(json) = st.json.take() {
         track_history(st, &json, now, acted);

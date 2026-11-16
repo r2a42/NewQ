@@ -296,10 +296,15 @@ fn a_computer_in_the_network_shows_whom_it_follows_and_only_the_switch() {
         ] {
             assert!(w.find("net_rects", absent).is_none(), "{absent}");
         }
-        // Its window is locked (stage 4a): the switch is there but does
-        // nothing; leaving is the banner's button.
+        // Its window is locked (stage 4a) but for leaving: the switch (where
+        // the settings aren't greyed with the rest) or the banner's button.
         w.press(&mut show, &mut st, "net_rects", "switch");
-        assert!(st.net_requests.is_empty(), "{:?}", st.net_requests);
+        assert!(
+            st.net_requests.is_empty() || st.net_requests == vec![NetAction::SetOn(false)],
+            "{:?}",
+            st.net_requests
+        );
+        st.net_requests.clear();
         w.press(&mut show, &mut st, "net_rects", "leave_network");
         assert_eq!(st.net_requests, vec![NetAction::SetOn(false)]);
     }
@@ -606,6 +611,13 @@ fn a_follower_is_locked_with_a_line_saying_who_runs_the_show() {
             }
             w.settle(&mut show, &mut st);
             assert!(w.e.active.is_empty() && w.e.pending.is_empty());
+            // An edit that got through (a field written directly) is put back.
+            let name = show.cues[0].name.clone();
+            show.cues[0].name = "Edited here".into();
+            for _ in 0..30 {
+                w.frame(&mut show, &mut st, vec![]);
+            }
+            assert_eq!(show.cues[0].name, name);
             assert!(st.net_requests.is_empty());
         }
     }
@@ -645,6 +657,7 @@ fn a_blended_picture_on_wifi_or_a_loose_clock_is_warned_of() {
     let v = primary_view();
     let left = &v.peers[0];
     let mut show = Show::default();
+    show.outputs.clear();
     let mut d = crate::show::OutputConfig::new(crate::show::OutputId(1), "D".into());
     d.computer = Some(LEFT);
     show.outputs.push(d);

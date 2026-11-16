@@ -8,12 +8,14 @@
 use std::path::{Path, PathBuf};
 
 /// The LaunchAgent's label (and file name).
+#[cfg_attr(windows, allow(dead_code))]
 pub const LABEL: &str = "org.newq.start-at-login";
 /// The Windows Run value's name.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const RUN_VALUE: &str = "NewQ";
 
 /// XML's special characters escaped.
+#[cfg_attr(windows, allow(dead_code))]
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -22,6 +24,7 @@ fn xml(s: &str) -> String {
 }
 
 /// The Mac LaunchAgent for the program at `exe`.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn launch_agent(exe: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -46,6 +49,7 @@ pub fn launch_agent(exe: &Path) -> String {
 }
 
 /// The Linux autostart entry for the program at `exe`.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn desktop_entry(exe: &Path) -> String {
     // The Exec key's quoting: inside double quotes, `"`, `` ` ``, `$` and `\`
     // are escaped with a backslash.
@@ -68,6 +72,7 @@ pub fn run_value(exe: &Path) -> String {
 }
 
 /// Where the entry goes on this system (None on Windows: the registry).
+#[cfg_attr(windows, allow(dead_code))]
 fn entry_path() -> Option<PathBuf> {
     let home = crate::relink::home_dir()?;
     if cfg!(target_os = "macos") {
