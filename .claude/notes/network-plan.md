@@ -90,3 +90,78 @@ from start-up), **primary control**, **backup control**.
   have one show and no internet. "This is for art": nothing an artist has to configure
   to make the ordinary case work.
 - R12. Build agents are Opus where possible.
+
+## Design for stages 2, 4 and 5 (2026-11-16; the owner said build all day to a release to test)
+
+### D1. Turning it on
+A NewQ that is not part of a show network opens no ports (no firewall prompt for an
+artist who never uses this). One switch, Settings ▸ Show network: "This computer is
+part of a show network". On: it listens and announces itself. Everything after that is
+done from the primary (R3). The same page on the computer that will run the show has
+"Run the show network from this computer" (makes it primary). `newq --join` on the
+command line does the same as the switch, for setting up many machines.
+
+### D2. Identity
+`node.json` beside the log (per computer, never in the show): id (random, made once),
+name (the host name until renamed, renamable from the primary), role (`Alone`,
+`Display`, `Primary`, `Backup`), the network it belongs to (the primary's network id)
+and the optional passcode's hash (R11), `term` (see D7).
+
+### D3. Finding each other
+UDP broadcast beacon once a second on every adapter (`if-addrs`), fixed port, plus
+"add by address" for networks that drop broadcasts. Beacon: id, name, role, NewQ
+version, protocol version, network id, TCP port, show version, term. No mDNS dependency.
+
+### D4. Channels
+TCP (nodelay) per peer for everything ordered: adoption, roles, show sync, commands,
+state. UDP for the clock exchange only. Time-critical commands carry a shared-clock time
+a lead ahead (from the sync trial), so TCP's delay is inside the lead.
+
+### D5. What the show says
+`DisplaySlot` and each audio output gain `computer` (a node id; absent = the primary,
+unwritten, so old shows are unchanged). An audio output can name several computers
+(R10). Monitors: each computer reports its monitors; the primary's Displays page assigns
+Display N to computer X's monitor Y, exactly as it assigns local monitors now.
+
+### D6. Who does what
+Every computer runs the whole engine on the same show. A computer draws only the
+displays it owns and opens only the audio outputs given to it. The primary alone sends
+(send cues, scripts, projector control), listens (MIDI, OSC, timecode, web remote,
+clock triggers) and records (R8); what those cause goes to the others as commands.
+Replicated: operator inputs as commands at a shared time (GO, fire/stop/fade a cue,
+Stop All, pause/resume, each timeline verb, seek, playhead and list changes), and the
+show itself (whole JSON on each burst of edits, with a version number and hash; the
+engine already copies live fields into playing cues). Authority: the primary's state
+heartbeat (active cues with their shared start times, each run's clock anchor,
+playheads). A follower that differs corrects itself: starts what it lacks at the right
+place (timelines: `chase.rs`), ends what the primary doesn't have. The same mechanism
+is "catch up after a restart".
+
+### D7. Primary, backup, takeover
+`term` is a counter. The primary's messages carry it. Take control on the backup raises
+the term and announces it; every computer obeys the highest term it has seen, and an
+old primary that comes back and sees a higher term becomes the backup (never two
+primaries obeyed). Manual only (R7). The backup's window follows the primary (show,
+playheads, what is playing) with its controls locked but for Take control.
+
+### D8. Display computers
+Role `Display`: no control window; every monitor is an output from start-up; before the
+show is in step each shows a quiet card (name, address, "waiting for the primary",
+media progress), black otherwise; "Identify" from the primary flashes the name. Start
+at login is written by NewQ itself (Mac LaunchAgent, Windows Run key, Linux autostart
+entry), so the primary can turn it on remotely once the computer has joined. Keep-awake
+and crash survival exist already.
+
+### D9. The primary's page (Settings ▸ Show network)
+A row per computer: name (rename), role (menu), online, clock error, show in step,
+media (progress, disk free, versions or replace), wired or Wi-Fi where it can be told,
+NewQ version (a mismatch is said plainly), Identify, Release. Wi-Fi on a computer that
+shares a blended picture is flagged (R2).
+
+### D10. Order of work
+2a identity, beacon, TCP session, adoption, roles, the page (no playback yet).
+2b show sync + media store wired in (pull from the primary, readiness on cues).
+4a the engine on the shared clock; commands and the heartbeat; display role window.
+5  backup follow and take control.
+6  Test Mode network test (several NewQs on one machine), README, CHANGELOG.
+The release to test is a pre-release (`-rc1`).
