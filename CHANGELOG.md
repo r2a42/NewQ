@@ -6,6 +6,17 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **The network test.** On the computer that runs a show network, *Help ▸ Test mode* now offers
+  *Start the network test* (about 2 minutes) and *Network soak* (about 20). It sends a short show
+  of its own and its media to every computer, plays it on every display of every computer (films,
+  sound, a timeline with a seek, a pause), and each computer measures how closely it keeps to the
+  primary: its clock, how early each GO arrived, how far apart the pictures were (in frames), the
+  corrections it made, stalls. The answer is in plain words per computer ("In step: worst 0.4
+  frames apart over 2 min"), with one zip to send that holds every computer's measurements and the
+  end of its log. Your show comes back on every computer at the end, after Stop, and to a computer
+  that dropped out once it is back. It starts with a *Sync flash* (a big frame number, a stepping
+  bar and a white flash each second) to film across two projectors with a phone in slow motion.
+  The README's *Show network: several computers* is now one guide, step by step.
 - **Several computers, first step: the show network.** Settings ▸ Show network finds the other
   computers that are to run a show with this one and gives them roles from the one you run the
   show from (the primary): add a computer to the show, make it a display or the backup, rename it,

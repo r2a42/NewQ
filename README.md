@@ -1042,12 +1042,49 @@ stays on the computer until you send it yourself.
   main window and every output window again on a new device, usually in well
   under a second. Cues keep playing; a picture may blink out for that moment.
 
-## Several computers: the show network
+## Show network: several computers
 
-*New.* Several computers run one show together: you run it from one (the
-*primary*), and the others show pictures and play sound in step with it, each
-from its own copy of the show and the media. **Only tried on one computer and on
-simulated networks so far**: try it between your own computers before a show.
+*New, and not yet tried on a real show network: try it between your own
+computers before a show, and run the network test (below).* Several computers
+run one show together. You run the show from one of them (the *primary*); the
+others (*display computers*, and a *backup*) show pictures and play sound in step
+with it. Each computer plays from its own copy of the show and of the media, so
+no picture travels over the network while the show runs: only small messages (GO,
+a seek, an edit) and a shared clock. A display computer keeps playing if the
+primary goes away.
+
+**What you need.** NewQ (the same version) on every computer, and a network
+between them. A wired network (an Ethernet switch, ideally one just for the show)
+is strongly recommended; Wi-Fi works, but its timing is looser and NewQ says so
+where it matters. Nothing has to be set up on the network itself.
+
+### Setting it up, step by step
+
+1. **Install NewQ on every computer** and open it once.
+2. **On each display computer** (the ones with projectors or screens): *Settings ▸
+   Show network*, tick *This computer is part of a show network*. That is all you
+   ever do there. NewQ asks the system to let it use the network the first time
+   (allow it). Once the primary has added it, it starts NewQ when the computer
+   starts (*Starts at login*), so a computer up in a truss never needs a keyboard
+   again.
+3. **On the computer you run the show from:** open your show, then *Settings ▸
+   Show network ▸ Run the show network from this computer*.
+4. **Add the computers:** they appear under *Waiting to join*; *Add to the show*
+   on each. Give each its role from its row's menu: *Display*, or *Backup* for a
+   second control computer. *Identify* flashes a computer's name on its screens
+   if you aren't sure which is which.
+5. **Displays:** in *Displays*, give each display of the show a monitor: the menu
+   offers every computer's monitors beside this one's.
+6. **Sound:** in *Settings ▸ Audio*, tick *Plays on* for the computer (or
+   computers) each audio output should play on, and pick its device there.
+7. **Media:** nothing to copy. The show's files go to every computer by
+   themselves (below). For content you may use later, add its folder under
+   *Settings ▸ Media ▸ Folders to keep on every computer* at load-in.
+8. **Wait for "In step"** on every row of the Show network page, then run the
+   network test (below) once. Then rehearse as usual: everything you do on the
+   primary happens on every computer.
+
+### The computers
 
 - **Off unless you turn it on.** A NewQ that isn't part of a show network opens
   nothing on the network (no firewall question).
@@ -1083,7 +1120,6 @@ simulated networks so far**: try it between your own computers before a show.
   set one on the primary and the computers of the show obey no primary that
   doesn't have it (the passcode itself never crosses the network). A computer
   waiting to join can be given it too, and then only that show takes it.
-- A wired network is recommended; Wi-Fi works.
 
 ### Media on every computer
 
@@ -1210,7 +1246,63 @@ never copy media by hand, and nothing waits for it.
 - **Blended pictures.** The primary warns when a computer that shares a blended
   picture (an edge blend, or a part of a picture another computer shows) is on
   Wi-Fi or its clock may be more than half a frame off.
-- Test Mode is off while a computer is in a show network.
+- Test Mode is off while a computer is in a show network, except for the
+  network test below.
+
+### Limits, plainly
+
+- **Displays refresh on their own.** NewQ chooses the same frame of a film on
+  every computer for the same moment, but each display shows it at its own next
+  refresh. Without genlock (hardware that makes displays refresh together) two
+  projectors can be up to one refresh apart (1/60 s at 60 Hz). Film the Sync
+  flash (below) to see it.
+- **Sound on two computers is not sample-locked.** Each computer's sound card
+  keeps its own time. Sound from two computers is for separate rooms or separate
+  speakers (a booth monitor, a foyer), not for one sound shared between them.
+- **The firewall** asks the first time a computer is switched on: allow NewQ on
+  private networks. NewQ uses UDP and TCP ports 47820 to 47827 (each NewQ takes
+  the first free one), and each computer sends media from a port the system
+  chooses, so allow the program rather than single ports. On a network that
+  blocks broadcasts, add computers by address on the Show network page.
+- **Only the primary sends** (above): a send cue or MIDI out fires once, from the
+  primary.
+
+### The network test
+
+Before a show, run the network test from the primary: *Help ▸ Test mode*, then
+*Start the network test* (about 2 minutes) or *Network soak* (the same, ten times
+over, about 20 minutes). It is offered on a primary with at least one computer
+*In step*; elsewhere the window says what it needs. No command line.
+
+- **What it does.** It puts your show aside and plays a short show of its own on
+  every display of every computer (your displays, and any monitor of a display
+  computer the show doesn't use yet): a Sync flash, a film with sound, a
+  timeline with a seek, a pause, Stop All. First its media goes to every computer
+  through the show network, and the window shows each computer's progress until
+  all of it is there, and how fast it came.
+- **What it measures**, on each computer: how far its clock may be off and the
+  round trip to the primary, how early each GO arrived (or how late), every
+  correction it made to keep in step, how far its cues' times were from the
+  primary's (in milliseconds and in frames at its displays' refresh), its own
+  stalls and late frames, and whether it is wired or on Wi-Fi.
+- **The answer**, per computer, in plain words: *In step: worst 0.4 frames apart
+  over 2 min*, or what went wrong (*Late commands: 3 of 40 arrived after their
+  time; use a wire*, *Clock error up to 6 ms: Wi-Fi*, *dropped out of the network
+  for 12 s*), and one verdict for all. It says too what software can't see (the
+  displays' refresh, sound between computers).
+- **Your show comes back** on every computer at the end, after *Stop*, and to a
+  computer that dropped out once it is back.
+- **Send the zip.** The test makes one zip (*Show the zip in its folder*): the
+  report, `network.csv` (every computer's measurements twice a second),
+  `events.log`, the end of each computer's own log, and this computer's log.
+  Send that one file.
+- **The Sync flash: see it with your own eyes.** The test starts with it, and
+  shows it again later: a big frame number, a yellow bar stepping along a row of
+  sixty slots, one slot a frame, and a white flash at the start of every second,
+  on every display at once. Film two displays together with a phone in
+  slow motion. In any one frame of the video, the two numbers should be the same,
+  or one apart (that is the refresh, above); the bars should be in the same slot
+  or the next. Two or more apart is worth sending with the zip.
 
 ## Timelines
 
