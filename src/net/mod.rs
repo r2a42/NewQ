@@ -8,5 +8,6 @@ pub mod clock;
 pub mod msg;
 #[cfg(test)]
 mod sim;
+pub mod store;
 #[cfg(test)]
 mod trial;
