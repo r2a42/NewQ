@@ -184,3 +184,15 @@ The release to test is a pre-release (`-rc1`).
 - R16. The primary shows a warning while transfers run: playback may be less smooth
   until they finish. It is a notice, not a gate.
 - (The owner: this is the worst part of Watchout. Get it right.)
+
+## Rulings, 4 (2026-11-16)
+
+- R17 (replaces R14's put-aside rule). The order is re-made when a file completes, or
+  about once a second when many small files are completing. Transfers in flight carry
+  on. One exception (ours, told to the owner, who may strike it): when the nearest
+  file is not in flight, every slot is busy and none will free within about 30 s, the
+  lowest-ranked transfer in flight is put aside (its `.part` kept) so the nearest
+  starts now.
+- R18. An accurate percentage and time estimate, by bytes, for each computer and for
+  all of them together (on the primary's page and in its notice), and per file on the
+  "Media transferring" card.
