@@ -163,7 +163,12 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
         // Its name: what the others call it.
         ui.horizontal(|ui| {
             ui.label("Name");
-            rename_field(ui, v.me.id, &v.name, v, st, actions);
+            if v.me.adopted() {
+                // Named from the primary.
+                ui.label(RichText::new(&v.name).strong());
+            } else {
+                rename_field(ui, v.me.id, &v.name, v, st, actions);
+            }
         });
     });
 }
@@ -546,13 +551,13 @@ pub fn status(ui: &mut Ui, st: &UiState) {
         let ours = v.peers.iter().filter(|p| p.ours).count();
         let online = v.peers.iter().filter(|p| p.ours && p.online).count();
         (
-            format!("⇄ primary · {online}/{ours} computers"),
+            format!("Show network: primary · {online}/{ours} computers"),
             if online == ours { GO_GREEN } else { STOP_RED },
             "This computer runs the show network. Settings ▸ Show network.".to_string(),
         )
     } else if let Some(f) = &v.following {
         (
-            format!("⇄ {} · run from {}", v.me.role.label(), f.name),
+            format!("Show network: {} · run from {}", v.me.role.label(), f.name),
             if f.online { GO_GREEN } else { STOP_RED },
             if f.online {
                 format!(
@@ -566,7 +571,7 @@ pub fn status(ui: &mut Ui, st: &UiState) {
         )
     } else {
         (
-            "⇄ waiting for a primary".to_string(),
+            "Show network: waiting for a primary".to_string(),
             Color32::from_gray(150),
             "Switched on: the first primary that adds this computer runs it.".to_string(),
         )

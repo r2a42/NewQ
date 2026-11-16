@@ -411,7 +411,10 @@ impl App {
             crate::clicker::start_global(clicker.clone());
         }
         // Opens nothing on the network unless this computer was switched on.
-        let net = crate::net::hub::Hub::start(crate::net::hub::HubConfig::from_env());
+        let net = crate::net::hub::Hub::start(crate::net::hub::HubConfig::from_env(), {
+            let wake = wake.clone();
+            move || wake()
+        });
         ui.net = net.view();
         App {
             net,
@@ -646,7 +649,13 @@ impl App {
                 NetEvent::Message { .. } => {}
             }
         }
-        self.ui.net = self.net.view();
+        let now = self.net.view();
+        if !Arc::ptr_eq(&now, &self.ui.net) {
+            self.ui.net = now;
+            if let Some(ctl) = &mut self.control {
+                ctl.next_repaint = Some(Instant::now());
+            }
+        }
     }
 
     /// Open the sound devices of the show's audio outputs, leaving out those

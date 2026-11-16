@@ -288,7 +288,12 @@ fn a_computer_in_the_network_shows_whom_it_follows_and_only_the_switch() {
     for modern in [false, true] {
         let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v.clone());
         assert!(w.find("net_rects", "switch").is_some());
-        for absent in ["become_primary", "address", "passcode"] {
+        for absent in [
+            "become_primary",
+            "address",
+            "passcode",
+            "rename:0000000000000100",
+        ] {
             assert!(w.find("net_rects", absent).is_none(), "{absent}");
         }
         // Switching off is leaving.

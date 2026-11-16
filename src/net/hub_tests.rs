@@ -55,7 +55,7 @@ impl Rig {
     }
 
     fn hub(&mut self, name: &str) -> Hub {
-        Hub::start(self.cfg(name))
+        Hub::start(self.cfg(name), || {})
     }
 }
 
@@ -112,7 +112,7 @@ fn primary_and_display(rig: &mut Rig) -> (Hub, Hub) {
 fn a_computer_that_is_not_switched_on_opens_nothing() {
     let mut rig = Rig::new();
     let cfg = rig.cfg("Quiet");
-    let h = Hub::start(cfg.clone());
+    let h = Hub::start(cfg.clone(), || {});
     std::thread::sleep(Duration::from_millis(500));
     let v = h.view();
     assert!(v.port.is_none());
@@ -241,12 +241,15 @@ fn a_computer_that_vanishes_is_offline_and_comes_back() {
     });
     assert!(peer(&pv, did).unwrap().ours, "kept in the list, offline");
     // It starts again (same folder: same identity) and is back, still adopted.
-    let d = Hub::start(HubConfig {
-        dir,
-        port_base: base,
-        port_span: 4,
-        lan: false,
-    });
+    let d = Hub::start(
+        HubConfig {
+            dir,
+            port_base: base,
+            port_span: 4,
+            lan: false,
+        },
+        || {},
+    );
     assert_eq!(d.view().me.role, Role::Display);
     until(&p, "the display to be back", |v| {
         peer(v, did).is_some_and(|x| x.online && x.connected && x.ours)
@@ -287,7 +290,7 @@ fn an_address_added_by_hand_is_found_without_beacons() {
     let p = rig.hub("Booth");
     let mut cfg = far.cfg("Far");
     cfg.port_span = 1;
-    let d = Hub::start(cfg);
+    let d = Hub::start(cfg, || {});
     p.ask(NetAction::BecomePrimary);
     d.ask(NetAction::SetOn(true));
     let dport = until(&d, "the far one to listen", |v| v.port.is_some())
@@ -339,12 +342,15 @@ fn the_passcode_is_needed_once_set() {
     let mut me = node::load(&pdir);
     me.passcode = None;
     node::save(&pdir, &me).unwrap();
-    let p = Hub::start(HubConfig {
-        dir: pdir.clone(),
-        port_base: rig.base,
-        port_span: 4,
-        lan: false,
-    });
+    let p = Hub::start(
+        HubConfig {
+            dir: pdir.clone(),
+            port_base: rig.base,
+            port_span: 4,
+            lan: false,
+        },
+        || {},
+    );
     let pv = until(&p, "the refusal", |v| {
         peer(v, did).is_some_and(|x| x.problem.as_deref().is_some_and(|t| t.contains("passcode")))
     });
@@ -354,12 +360,15 @@ fn the_passcode_is_needed_once_set() {
     let mut me = node::load(&pdir);
     me.passcode = Some(Key::from_passcode("opening night"));
     node::save(&pdir, &me).unwrap();
-    let p = Hub::start(HubConfig {
-        dir: pdir,
-        port_base: rig.base,
-        port_span: 4,
-        lan: false,
-    });
+    let p = Hub::start(
+        HubConfig {
+            dir: pdir,
+            port_base: rig.base,
+            port_span: 4,
+            lan: false,
+        },
+        || {},
+    );
     until(&p, "the display back with the passcode", |v| {
         peer(v, did).is_some_and(|x| x.connected && x.ours)
     });
@@ -388,7 +397,7 @@ fn a_newer_primary_wins_and_the_old_one_becomes_the_backup() {
     me.network = p.view().me.network;
     me.term = p.view().me.term + 1;
     node::save(&b.dir, &me).unwrap();
-    let b = Hub::start(b);
+    let b = Hub::start(b, || {});
     let bid = id_of(&b);
     until(&d, "the display to follow the newer primary", |v| {
         v.following

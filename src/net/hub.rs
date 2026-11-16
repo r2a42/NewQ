@@ -154,7 +154,7 @@ pub struct Following {
 }
 
 /// Everything the UI shows of the show network, published by the hub.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct NetView {
     pub me: Identity,
     pub name: String,
@@ -233,12 +233,14 @@ pub struct Hub {
 
 impl Hub {
     /// Read this computer's identity and start the hub's thread. Nothing is
-    /// opened on the network unless the identity is switched on.
-    pub fn start(cfg: HubConfig) -> Hub {
+    /// opened on the network unless the identity is switched on. `wake` is
+    /// called when the view changes or there are events (to rouse the UI).
+    pub fn start(cfg: HubConfig, wake: impl Fn() + Send + Sync + 'static) -> Hub {
         let me = node::load(&cfg.dir);
         let (tx, rx) = crossbeam_channel::unbounded();
         let (ev_tx, ev_rx) = crossbeam_channel::unbounded();
         let mut state = State::new(cfg, me, tx.clone(), ev_tx);
+        state.wake = Arc::new(wake);
         let view = Arc::new(Mutex::new(Arc::new(state.view())));
         let published = view.clone();
         let thread = std::thread::Builder::new()
@@ -422,6 +424,7 @@ struct State {
     disk_free: Option<u64>,
     disk_looked: Option<Instant>,
     quit: bool,
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl State {
@@ -444,6 +447,7 @@ impl State {
             disk_free: None,
             disk_looked: None,
             quit: false,
+            wake: Arc::new(|| {}),
         }
     }
 
@@ -466,7 +470,12 @@ impl State {
                 last_tick = Some(Instant::now());
                 self.tick(Instant::now());
             }
-            *view.lock() = Arc::new(self.view());
+            // Published (and the UI roused) only when something changed.
+            let now = self.view();
+            if now != **view.lock() {
+                *view.lock() = Arc::new(now);
+                (self.wake)();
+            }
         }
         self.close_everything();
     }
