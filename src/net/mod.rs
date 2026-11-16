@@ -9,6 +9,8 @@
 pub mod clock;
 pub mod discover;
 pub mod hub;
+// The network test's measurements (stage 6).
+pub mod measure;
 pub mod media;
 pub mod msg;
 pub mod node;

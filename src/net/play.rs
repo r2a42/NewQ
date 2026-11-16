@@ -559,6 +559,13 @@ impl Follower {
         self.queue.iter().map(|t| t.at).reduce(f64::min)
     }
 
+    /// Every command the heartbeat `s` counts has been done here (the network
+    /// test compares what plays only then: a command still on its way is a
+    /// late command, not a difference).
+    pub fn has_done(&self, s: &PlayState) -> bool {
+        self.epoch == Some(s.epoch) && self.floor >= s.seq
+    }
+
     /// Where it stands, with its clock (`locked`) and show (`hash`).
     pub fn standing(&self, locked: bool, hash: Option<u64>) -> Standing {
         if !locked {

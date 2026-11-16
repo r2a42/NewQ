@@ -941,3 +941,75 @@ fn a_restarted_primary_finds_its_computers_again() {
     until(&p, "forgotten", |v| peer(v, did).is_none());
     assert!(node::load(&pdir).known.is_empty());
 }
+
+// ---- The network test (stage 6, `net::measure`) ----
+
+#[test]
+fn the_network_tests_measurements_reach_the_primary_from_two_computers() {
+    use crate::net::measure::{NetTest, Report, Row};
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let e = rig.hub("Right");
+    e.ask(NetAction::SetOn(true));
+    let eid = id_of(&e);
+    until(&p, "the third to be heard", |v| {
+        peer(v, eid).is_some_and(|x| x.waiting && x.connected)
+    });
+    p.ask(NetAction::Adopt(eid));
+    until(&p, "both adopted and connected", |v| {
+        v.computers().len() == 2 && v.peers.iter().all(|x| !x.ours || x.connected)
+    });
+    let (pid, did) = (id_of(&p), id_of(&d));
+    let _ = (d.take_events(), e.take_events(), p.take_events());
+    // The primary tells them to measure; each hears it.
+    p.broadcast(Msg::NetTest(Box::new(NetTest::Begin {
+        run: 9,
+        start: 1.0,
+    })));
+    for h in [&d, &e] {
+        let began = Instant::now();
+        let mut got = false;
+        while !got && began.elapsed() < Duration::from_secs(60) {
+            got = h.take_events().into_iter().any(|ev| {
+                matches!(ev, NetEvent::Message { from, msg: Msg::NetTest(t) }
+                    if from == pid && *t == NetTest::Begin { run: 9, start: 1.0 })
+            });
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(got, "Begin reached a computer");
+    }
+    // Each reports back.
+    for (h, n) in [(&d, 1u32), (&e, 2)] {
+        let r = Report {
+            run: 9,
+            seq: n,
+            rows: vec![Row {
+                t: 0.5,
+                apart_ms: Some(f64::from(n)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        h.send_to(pid, Msg::NetTest(Box::new(NetTest::Report(Box::new(r)))));
+    }
+    let began = Instant::now();
+    let mut from = Vec::new();
+    while from.len() < 2 && began.elapsed() < Duration::from_secs(60) {
+        for ev in p.take_events() {
+            if let NetEvent::Message {
+                from: f,
+                msg: Msg::NetTest(t),
+            } = ev
+                && let NetTest::Report(r) = *t
+            {
+                assert_eq!(r.rows[0].apart_ms, Some(f64::from(r.seq)));
+                from.push(f);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    from.sort();
+    let mut want = vec![did, eid];
+    want.sort();
+    assert_eq!(from, want);
+}

@@ -238,6 +238,11 @@ pub enum Msg {
     /// Primary to a computer: check every file of its store again.
     MediaVerify,
     // ---- end of the media manager's ----
+    // ---- The network test (stage 6, `net::measure`, `testmode::network`) ----
+    /// Primary and computers: the network test's begin and end, and what each
+    /// computer measured. An older NewQ reads it as `Unknown`.
+    NetTest(Box<super::measure::NetTest>),
+    // ---- end of the network test's ----
     /// A message a later NewQ of the same protocol sent, unknown here.
     #[serde(other)]
     Unknown,
