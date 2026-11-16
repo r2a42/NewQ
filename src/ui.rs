@@ -1,6 +1,7 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 mod modern;
+mod net_media;
 mod network;
 mod settings;
 mod timeline;
@@ -120,6 +121,8 @@ pub enum DialogFor {
     RelinkFolder,
     /// A folder to copy the show's media into.
     CollectMedia,
+    /// A folder for the media manager's library.
+    LibraryFolder,
 }
 
 impl DialogFor {
@@ -135,6 +138,7 @@ impl DialogFor {
             DialogFor::ExportCueSheet => Action::ExportCueSheet(path),
             DialogFor::RelinkFolder => Action::RelinkFolder(path),
             DialogFor::CollectMedia => Action::CollectMedia(path),
+            DialogFor::LibraryFolder => Action::AddLibraryFolder(path),
         }
     }
 }
@@ -222,6 +226,10 @@ pub struct UiState {
     pub net: std::sync::Arc<crate::net::hub::NetView>,
     /// What the page asked of it, for the app to pass on.
     pub net_requests: Vec<crate::net::hub::NetAction>,
+    /// The media manager as it last published (set by the app each pass).
+    pub media: std::sync::Arc<crate::net::media::MediaView>,
+    /// Messages the media rows asked to send to a computer (the app passes them on).
+    pub media_requests: Vec<(crate::net::node::NodeId, crate::net::proto::Msg)>,
     /// The page's fields being typed in.
     net_edit: network::Editing,
     /// Which arrangement of the new interface is showing.
@@ -621,6 +629,10 @@ const FOLD_W: f32 = 18.0;
 enum Action {
     /// Asked of the show network (Settings ▸ Show network); the app passes it on.
     Net(crate::net::hub::NetAction),
+    /// A media manager's message to one computer (its versions setting, a check).
+    MediaTo(crate::net::node::NodeId, crate::net::proto::Msg),
+    /// A folder added to the media manager's library.
+    AddLibraryFolder(PathBuf),
     Go,
     /// The Space key: on a timeline being worked on, its play/pause; else GO
     /// (`space_key`). With the timeline of an editor the pointer was over.
@@ -811,6 +823,7 @@ impl Action {
                 | Action::MoveCues(..)
                 | Action::AddSyncCue(_)
                 | Action::RelinkFolder(_)
+                | Action::AddLibraryFolder(_)
                 | Action::RelinkCue(..)
                 | Action::CollectMedia(_)
                 | Action::RelinkMany(_)
@@ -2167,6 +2180,7 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
             );
         }
         network::status(ui, st);
+        net_media::status(ui, st);
         if st.keeping_awake {
             ui.label(RichText::new("☀ awake").weak()).on_hover_text(
                 "NewQ is keeping this computer and its displays awake while a display is \
@@ -2903,6 +2917,11 @@ fn cue_list(
                 let missing = c.kind.media().is_some_and(|m| {
                     !m.file.as_os_str().is_empty() && st.missing.contains(&m.file)
                 });
+                // In a show network: not on every computer yet.
+                let lack = net_media::cue_mark(show, st, c);
+                if let Some((_, tip)) = &lack {
+                    resp.clone().on_hover_text(tip.as_str());
+                }
                 // Sent to a display whose monitor isn't connected.
                 let dark = c
                     .kind
@@ -2915,10 +2934,17 @@ fn cue_list(
                         format!("⚠ missing: {}", cue_target_text(show, c))
                     } else if dark {
                         format!("⚠ {}", cue_target_text(show, c))
+                    } else if lack.is_some() {
+                        format!("↓ {}", cue_target_text(show, c))
                     } else {
                         cue_target_text(show, c)
                     },
-                    if missing || dark { STOP_RED } else { weak },
+                    match &lack {
+                        _ if missing || dark => STOP_RED,
+                        Some((true, _)) => STOP_RED,
+                        Some((false, _)) => PREWAIT,
+                        None => weak,
+                    },
                 );
                 cell(5, fades_text(c), weak);
                 cell(
@@ -3152,6 +3178,9 @@ fn start_dialog(st: &mut UiState, show: &Show, purpose: DialogFor) {
             .save_file(),
         DialogFor::RelinkFolder => rfd::FileDialog::new()
             .set_title("Where are the media files now?")
+            .pick_folder(),
+        DialogFor::LibraryFolder => rfd::FileDialog::new()
+            .set_title("A folder to keep on every computer")
             .pick_folder(),
         DialogFor::CollectMedia => {
             let mut dialog = rfd::FileDialog::new().set_title("Copy the media into…");
@@ -3667,6 +3696,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                     );
                 }
             });
+            net_media::missing_note(ui, st, missing.len());
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
@@ -11225,6 +11255,12 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         }
         Action::CloseSettings => close_settings(st),
         Action::Net(a) => st.net_requests.push(a),
+        Action::MediaTo(to, msg) => st.media_requests.push((to, msg)),
+        Action::AddLibraryFolder(dir) => {
+            if !show.library_folders.contains(&dir) {
+                show.library_folders.push(dir);
+            }
+        }
         Action::SetNewLayout(on) => {
             st.prefs.new_layout = on;
             // An open timeline workspace stays open in the other interface.

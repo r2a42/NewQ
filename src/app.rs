@@ -363,6 +363,9 @@ pub struct App {
     /// of this computer's monitors and sound devices.
     net: crate::net::hub::Hub,
     net_told: crate::net::hub::LocalFacts,
+    /// The media manager (`net::media`) and the report last given the hub.
+    media: crate::net::media::Manager,
+    media_told: Option<crate::net::media::MediaReport>,
 }
 
 impl App {
@@ -419,6 +422,8 @@ impl App {
         App {
             net,
             net_told: Default::default(),
+            media: crate::net::media::Manager::new(crate::net::media::manager::Config::from_env()),
+            media_told: None,
             remote,
             clicker,
             wake,
@@ -646,9 +651,16 @@ impl App {
                     self.engine
                         .log("Show network: the primary asked this computer to show its name");
                 }
-                NetEvent::Message { .. } => {}
+                NetEvent::Message { from, msg } => {
+                    // The media manager's messages.
+                    let v = self.net.view();
+                    if self.media.handle(from, &msg, &v) {
+                        continue;
+                    }
+                }
             }
         }
+        self.pass_media();
         let now = self.net.view();
         if !Arc::ptr_eq(&now, &self.ui.net) {
             self.ui.net = now;
@@ -657,6 +669,55 @@ impl App {
             }
         }
     }
+
+    // ---- The media manager (`net::media`) ----
+
+    /// The media manager's pass: what side this computer is on, the order
+    /// and the port to the others, this computer's report to the hub, and
+    /// what the pages show. Never waits.
+    fn pass_media(&mut self) {
+        use crate::net::media::manager::{Frame, Outgoing};
+        let net = self.net.view();
+        let e = &mut self.engine;
+        let at = crate::net::media::Positions {
+            active_list: e.active_list,
+            playhead: e.playhead,
+            others: e.other_playheads(),
+            timelines: e
+                .timelines()
+                .into_iter()
+                .filter_map(|k| e.timeline_clock(k).map(|(_, pos)| (k, pos)))
+                .collect(),
+        };
+        let ff = e.ff.clone();
+        let show = &self.show;
+        let show_dir = self.ui.show_path.as_deref().and_then(|p| p.parent());
+        let mut dur = |c: &crate::show::Cue| e.cue_duration(show, c).flatten();
+        let out = self.media.update(Frame {
+            net: &net,
+            show,
+            show_dir,
+            at,
+            dur: &mut dur,
+            ff: ff.as_ref(),
+        });
+        for o in out {
+            match o {
+                Outgoing::To(id, m) => self.net.send_to(id, m),
+            }
+        }
+        for (id, m) in std::mem::take(&mut self.ui.media_requests) {
+            self.net.send_to(id, m);
+        }
+        let report = self.media.report();
+        if report != self.media_told {
+            self.net.set_media(report.clone());
+            self.media_told = report;
+        }
+        self.ui.media = self.media.view();
+    }
+
+    // ---- end of the media manager's ----
 
     /// Open the sound devices of the show's audio outputs, leaving out those
     /// given only to other computers of a show network.

@@ -102,7 +102,16 @@ pub(super) fn draw(
 ) {
     let clips = model::clips(show, key, &mut |c| engine.cue_duration(show, c));
     let pos = engine.timeline(show, key).pos;
-    let files = files_of(show, key);
+    let mut files = files_of(show, key);
+    // The media manager's library (in a show network, on the primary): files
+    // already on every computer, ready to be used.
+    for f in st.media.library_files.iter() {
+        if !files.iter().any(|(_, g)| g == f)
+            && let Some(ty) = crate::show::guess_cue_type(f)
+        {
+            files.push((ty, f.clone()));
+        }
+    }
     let id = egui::Id::new(SHELF);
     let mut shelf: Shelf = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     ui.horizontal(|ui| {

@@ -85,12 +85,14 @@ pub fn page(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
     let v = st.net.clone();
     this_computer(ui, &v, st, actions);
     if v.is_primary() {
+        super::net_media::primary_summary(ui, &v, st);
         computers(ui, &v, st, actions);
         by_address(ui, &v, st, actions);
         passcode(ui, &v, st, actions);
     } else if v.me.on && !v.me.adopted() {
         waiting(ui, &v, st, actions);
     }
+    super::net_media::own(ui, st);
 }
 
 fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -402,6 +404,7 @@ fn computer_row(
     if let Some(t) = &p.problem {
         warning(ui, &format!("⚠ {t}"));
     }
+    super::net_media::computer_rows(ui, p, st, actions);
 }
 
 /// One line of what a computer reported.

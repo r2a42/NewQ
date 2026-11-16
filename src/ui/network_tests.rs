@@ -374,3 +374,184 @@ fn a_sound_output_is_ticked_for_another_computer() {
         assert_eq!(show.audio_outputs[0].device_here(ME, true), None);
     }
 }
+
+// ---- The media manager's rows (`net_media.rs`) ----
+
+use crate::net::media::manager::{CueLack, FolderView, Lack, MediaReport, MediaView, Side};
+use crate::net::proto::Msg;
+use crate::net::store::pull::{Progress, Tier};
+
+/// A computer's report: 40 % of 1 GB here, at 20 MB/s.
+fn busy_report() -> MediaReport {
+    MediaReport {
+        progress: Progress {
+            manifest_id: Some("m".into()),
+            used: Tier {
+                files_wanted: 3,
+                files_here: 1,
+                bytes_wanted: 1_000_000_000,
+                bytes_here: 300_000_000,
+                bytes_partial: 100_000_000,
+                ..Tier::default()
+            },
+            rate: Some(20_000_000.0),
+            eta_secs: Some(30.0),
+            computers: 1,
+            ..Progress::default()
+        },
+        plan: "2 files to copy (700 MB).".into(),
+        lacking: vec![Lack {
+            path: "/media/clip.mp4".into(),
+            done: 430,
+            total: 1000,
+        }],
+        serve_port: Some(4000),
+        store_free: Some(80_000_000_000),
+        ..MediaReport::default()
+    }
+}
+
+fn primary_media_view() -> (NetView, MediaView) {
+    let mut v = primary_view();
+    v.peers[0].status.as_mut().unwrap().media_progress = Some(Box::new(busy_report()));
+    let sum = Progress::sum(&[busy_report().progress]);
+    let mut lacking = std::collections::HashMap::new();
+    lacking.insert(
+        crate::net::store::paths::path_key("/media/clip.mp4"),
+        vec![CueLack {
+            node: LEFT,
+            name: "Left".into(),
+            percent: 43.0,
+        }],
+    );
+    let m = MediaView {
+        side: Side::Primary,
+        sum: Some(sum),
+        busy: 1,
+        served: Some((3, 1_000_000_000)),
+        lacking,
+        ..MediaView::default()
+    };
+    (v, m)
+}
+
+#[test]
+fn the_primary_shows_each_computers_media_and_sets_its_versions_and_checks() {
+    for modern in [false, true] {
+        let (v, m) = primary_media_view();
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v);
+        st.media = Arc::new(m);
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", "media_all").is_some(),
+            "modern {modern}"
+        );
+        assert!(w.find("net_rects", &format!("media:{LEFT}")).is_some());
+        assert!(
+            w.find("net_rects", "media_notice").is_some(),
+            "the status bar's notice, modern {modern}"
+        );
+        w.press(&mut show, &mut st, "net_rects", &format!("verify:{LEFT}"));
+        assert_eq!(st.media_requests, vec![(LEFT, Msg::MediaVerify)]);
+        st.media_requests.clear();
+        w.press(
+            &mut show,
+            &mut st,
+            "net_rects",
+            &format!("policy_menu:{LEFT}"),
+        );
+        w.press(&mut show, &mut st, "net_rects", &format!("policy:{LEFT}:2"));
+        assert_eq!(
+            st.media_requests,
+            vec![(
+                LEFT,
+                Msg::MediaPolicy {
+                    keep: 5,
+                    replace_all: true,
+                    replace_over: None
+                }
+            )]
+        );
+    }
+}
+
+#[test]
+fn a_follower_shows_its_own_media() {
+    let mut v = primary_view();
+    v.me.role = Role::Display;
+    v.peers.clear();
+    v.following = Some(Following {
+        id: LEFT,
+        name: "Booth".into(),
+        online: true,
+    });
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v.clone());
+        st.media = Arc::new(MediaView {
+            side: Side::Follower,
+            own: Some(busy_report()),
+            ..MediaView::default()
+        });
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", "media_own").is_some(),
+            "modern {modern}"
+        );
+        assert!(w.find("net_rects", "media_notice").is_some());
+    }
+}
+
+#[test]
+fn the_media_page_keeps_library_folders_and_the_card_setting() {
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Media, NetView::default());
+        show.library_folders = vec!["/Content/Looks".into(), "/Content/Spare".into()];
+        st.media = Arc::new(MediaView {
+            side: Side::Primary,
+            folders: vec![FolderView {
+                path: "/Content/Looks".into(),
+                files: 12,
+                bytes: 3_000_000_000,
+                listed: true,
+            }],
+            ..MediaView::default()
+        });
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", "library_add").is_some(),
+            "modern {modern}"
+        );
+        assert!(w.find("net_rects", "library_folder:1").is_some());
+        w.press(&mut show, &mut st, "net_rects", "library_remove:1");
+        assert_eq!(show.library_folders, [PathBuf::from("/Content/Looks")]);
+        w.press(&mut show, &mut st, "net_rects", "transfer_cards");
+        assert!(show.no_transfer_cards);
+    }
+}
+
+#[test]
+fn a_cue_whose_file_a_computer_lacks_is_marked_more_strongly_where_it_shows() {
+    let (v, m) = primary_media_view();
+    for modern in [false, true] {
+        let mut st = UiState::default();
+        st.prefs.new_layout = modern;
+        st.net = Arc::new(v.clone());
+        st.media = Arc::new(m.clone());
+        let mut show = Show::default();
+        let c = show.make_cue(CueType::Video, Some(PathBuf::from("/media/clip.mp4")), 0);
+        show.cues.push(c.clone());
+        let (strong, tip) = net_media::cue_mark(&show, &st, &c).unwrap();
+        assert!(!strong, "its display is on this computer");
+        assert!(tip.contains("Left: 43 %"), "{tip}");
+        show.outputs[0].computer = Some(LEFT);
+        let (strong, tip) = net_media::cue_mark(&show, &st, &c).unwrap();
+        assert!(strong);
+        assert!(tip.contains("shows this cue's display"));
+        // Drawn in the list (both interfaces) without trouble.
+        let mut w = Win::new();
+        w.settle(&mut show, &mut st);
+        // Alone: no mark.
+        st.media = Arc::new(MediaView::default());
+        assert!(net_media::cue_mark(&show, &st, &c).is_none());
+    }
+}

@@ -566,7 +566,7 @@ fn log_detail(ui: &mut Ui, st: &mut UiState) {
     }
 }
 
-fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
+fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let files = show
         .cues
         .iter()
@@ -601,6 +601,7 @@ fn media_page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Acti
              together.",
         );
     });
+    super::net_media::library(ui, show, st, actions);
     section(ui, "Streaming server (this computer)", |ui| {
         let mut on = st.prefs.allow_hosting;
         if ui
