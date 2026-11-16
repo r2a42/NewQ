@@ -1,0 +1,677 @@
+//! The engine's side of computers playing together (`crate::net::play`).
+//!
+//! **The gate.** In a show network every operator input that changes playback
+//! must happen at the same shared time on every computer. Rather than find and
+//! change every caller (the transport, the cue list's menu, hotkeys, OSC, MIDI,
+//! the web remote, clock triggers, timecode, Test Mode), the engine's own entry
+//! points catch the call: on a primary (`NetMode::Primary`) a call from outside
+//! the engine is noted as a `Command` and not done (`net_take` hands them to the
+//! app, which times them and does them through `net_apply`); on a follower it is
+//! dropped (its controls are locked; what plays there is the primary's). What
+//! the engine does to itself while it ticks (a control cue, a group's children,
+//! an auto-follow) is never caught: `depth` counts the engine's own calls, and
+//! every computer does those itself. Alone (`NetMode::Off`) nothing is caught.
+//!
+//! **The heartbeat** (`net_state`) and **corrections** (`net_correct`): what
+//! plays, compared by cue (not by instance, which differ between computers) and
+//! by timeline.
+
+use super::{ActiveKind, Engine, StartAt};
+use crate::net::play::{Command, CueNow, PlayState, RunNow, RunWord};
+use crate::show::{CueId, CueKind, Show};
+use crate::timeline::{PauseFreeze, TimelineKey};
+use std::collections::{HashMap, HashSet};
+
+/// What this engine is in a show network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetMode {
+    /// Alone: everything as it always was.
+    #[default]
+    Off,
+    /// Runs the show for other computers: inputs are caught as commands.
+    Primary,
+    /// Follows a primary: inputs are dropped, and nothing is sent out (send
+    /// cues, timecode), nor a camera it hasn't got looked for.
+    Follower,
+}
+
+#[derive(Default)]
+pub struct NetGate {
+    pub mode: NetMode,
+    /// The engine's own calls under way (a tick, a command being done).
+    depth: u32,
+    taken: Vec<Command>,
+}
+
+/// Two playing pictures are a frame apart past this (seconds; a 60 Hz frame).
+pub const FRAME: f64 = 1.0 / 60.0;
+/// A cue started (or let go) this close to a heartbeat is not judged by it: the
+/// two computers may be either side of that moment.
+const SETTLING: f64 = 0.25;
+/// Off by more than this, a playing file is jumped (new decoders) rather than
+/// re-anchored (its decoders run to catch up).
+const JUMP_PAST: f64 = 0.5;
+/// A timeline's clock off by less than this is moved; by more, it is sought.
+const RUN_NUDGE: f64 = 0.25;
+
+/// A difference seen at one heartbeat, acted on when seen again at the next.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Doubt {
+    Missing(CueId, usize),
+    Extra(u64),
+    Off(u64),
+    Run(TimelineKey),
+    Paused,
+}
+
+/// The differences seen at the last heartbeat (`Engine::net_correct`).
+#[derive(Default, Debug)]
+pub struct NetCorrection {
+    seen: HashSet<Doubt>,
+}
+
+impl NetCorrection {
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+}
+
+impl Engine {
+    /// Put the engine in a show network as `mode` (or alone). Leaving one
+    /// gives up the shared clock, so `tick` alone is as it always was.
+    pub fn net_set_mode(&mut self, mode: NetMode) {
+        if self.net.mode == mode {
+            return;
+        }
+        log::info!("show network: the engine is now {mode:?}");
+        self.net.mode = mode;
+        self.net.taken.clear();
+        if mode == NetMode::Off {
+            self.net_leave_shared();
+        }
+    }
+
+    /// Between passes of the main loop no call of the engine's own is under
+    /// way (a panic in one leaves the count up: this puts it back).
+    pub fn net_settle(&mut self) {
+        self.net.depth = 0;
+    }
+
+    /// The inputs caught since the last call (a primary's).
+    pub fn net_take(&mut self) -> Vec<Command> {
+        std::mem::take(&mut self.net.taken)
+    }
+
+    /// Whether a call from outside is caught: noted (primary) or dropped
+    /// (follower). Called first thing in each entry point.
+    pub(super) fn gated(&mut self, cmd: impl FnOnce(&Engine) -> Command) -> bool {
+        if self.net.depth > 0 {
+            return false;
+        }
+        match self.net.mode {
+            NetMode::Off => false,
+            NetMode::Primary => {
+                let c = cmd(self);
+                self.net.taken.push(c);
+                true
+            }
+            NetMode::Follower => {
+                log::debug!("show network: an input on a follower is left to the primary");
+                true
+            }
+        }
+    }
+
+    pub(super) fn enter(&mut self) {
+        self.net.depth += 1;
+    }
+
+    pub(super) fn leave(&mut self) {
+        self.net.depth = self.net.depth.saturating_sub(1);
+    }
+
+    /// A follower: send cues and timecode stay on the primary.
+    pub(super) fn sends_here(&self) -> bool {
+        self.net.mode != NetMode::Follower
+    }
+
+    /// A follower plays a camera cue only if the device is on this computer
+    /// (an NDI source is looked for when it starts); otherwise nothing, quietly.
+    pub(super) fn camera_missing(&mut self, cue: &crate::show::Cue) -> bool {
+        let CueKind::Camera(c) = &cue.kind else {
+            return false;
+        };
+        if self.net.mode != NetMode::Follower
+            || c.device.starts_with("ndi:")
+            || c.device == super::TEST_PATTERN_DEVICE
+        {
+            return false;
+        }
+        let here = self.cameras().contains(&c.device);
+        if !here {
+            log::debug!(
+                "show network: camera {} isn't on this computer; cue {} shows nothing here",
+                c.device,
+                cue.number
+            );
+        }
+        !here
+    }
+
+    /// The `nth` (by start) playing instance of `cue`, and back.
+    pub(super) fn nth_of(&self, instance: u64) -> Option<(CueId, usize)> {
+        let a = self.active.iter().find(|a| a.instance == instance)?;
+        let nth = self
+            .active
+            .iter()
+            .filter(|b| b.cue_id == a.cue_id && b.instance < instance)
+            .count();
+        Some((a.cue_id, nth))
+    }
+
+    fn instance_of(&self, cue: CueId, nth: usize) -> Option<u64> {
+        let mut v: Vec<u64> = self
+            .active
+            .iter()
+            .filter(|a| a.cue_id == cue)
+            .map(|a| a.instance)
+            .collect();
+        v.sort_unstable();
+        v.get(nth).copied()
+    }
+
+    /// The shared time of the last tick, while ticking by one.
+    pub fn net_shared_time(&self) -> Option<f64> {
+        self.sync.map(|s| s.now)
+    }
+
+    /// Back to ticking by `dt` alone: anchors are let go, so times are sums of
+    /// ticks again from where they are.
+    pub fn net_leave_shared(&mut self) {
+        self.sync = None;
+        for a in &mut self.active {
+            a.anchor = None;
+        }
+        self.runs.net_unanchor();
+    }
+
+    /// Do a command (at the shared time of the last tick). `late`: it was due
+    /// that long ago, so what it starts is placed as if it had been done then.
+    pub fn net_apply(&mut self, show: &Show, cmd: &Command, late: f64) {
+        self.enter();
+        let before = self.next_instance;
+        let pending_before = self.pending.len();
+        let runs_before = self.runs.net_runs();
+        self.apply_one(show, cmd);
+        if late > 0.0
+            && let Some(now) = self.net_shared_time()
+        {
+            for a in self.active.iter_mut().filter(|a| a.instance >= before) {
+                if a.run.is_none() && !matches!(a.kind, ActiveKind::Audio(_)) {
+                    a.anchor = Some(now - late - a.elapsed);
+                }
+            }
+            for p in self.pending.iter_mut().skip(pending_before) {
+                if p.run.is_none() && p.reading.is_none() {
+                    p.remaining -= late;
+                }
+            }
+            // A run set going by it began its clock that long ago.
+            for (key, state, pos, _) in self.runs.net_runs() {
+                let was = runs_before.iter().find(|r| r.0 == key);
+                let went = matches!(state, super::RunState::Running | super::RunState::Cueing)
+                    && was.is_none_or(|w| {
+                        !matches!(w.1, super::RunState::Running | super::RunState::Cueing)
+                            || (w.2 - pos).abs() > 1e-9
+                    });
+                if went {
+                    self.runs.net_place(key, now - late - pos, None);
+                }
+            }
+        }
+        self.leave();
+    }
+
+    fn apply_one(&mut self, show: &Show, cmd: &Command) {
+        let set_list = |e: &mut Engine, list: u32, playhead: Option<CueId>| {
+            if e.active_list != list {
+                e.switch_list(show, list);
+            }
+            e.playhead = playhead;
+        };
+        match cmd {
+            Command::Go { list, playhead } => {
+                set_list(self, *list, *playhead);
+                self.go(show);
+            }
+            Command::GoPlayhead { list, playhead } => {
+                set_list(self, *list, *playhead);
+                self.go_playhead(show);
+            }
+            Command::GoList { list } => self.go_list(show, *list),
+            Command::Fire { cue } => self.fire(show, *cue),
+            Command::StopCue { cue, fade } => self.stop_cue(*cue, *fade),
+            Command::FadeOutCue { cue } => self.fade_out_cue(show, *cue),
+            Command::StopAll { fade } => self.stop_all(*fade),
+            Command::Panic => self.panic(show),
+            Command::ResetAll => self.reset_all(show),
+            Command::SetPaused { paused } => self.set_paused(*paused),
+            Command::StopInstance { cue, nth, fade } => {
+                if let Some(i) = self.instance_of(*cue, *nth) {
+                    self.stop_instance(i, *fade);
+                }
+            }
+            Command::FadeOutInstance { cue, nth } => {
+                if let Some(i) = self.instance_of(*cue, *nth) {
+                    self.fade_out_instance(show, i);
+                }
+            }
+            Command::Seek { cue, nth, to } => {
+                if let Some(i) = self.instance_of(*cue, *nth)
+                    && let Err(e) = self.seek(show, i, *to)
+                {
+                    log::debug!("show network: a seek couldn't be done here: {e}");
+                }
+            }
+            Command::Control {
+                action,
+                target,
+                from,
+            } => self.control_target(show, *action, *target, from),
+            Command::TimelineRun { key } => self.timeline_run(show, *key),
+            Command::TimelineSeek { key, pos, picture } => {
+                self.timeline_seek(show, *key, *pos, *picture)
+            }
+            Command::TimelineRunFrom { key, pos } => self.timeline_run_from(show, *key, *pos),
+            Command::TimelinePause {
+                key,
+                freeze,
+                clips,
+                live,
+                waits_for_go,
+            } => self.timeline_pause(show, *key, *freeze, clips, *live, *waits_for_go),
+            Command::TimelineStop { key, fade } => self.timeline_stop(show, *key, *fade),
+            Command::TimelineGoOne { key } => self.timeline_go_one(show, *key),
+            Command::TimelineContinue { key } => self.timeline_continue(show, *key),
+            Command::TimelineLeave { key } => self.timeline_leave(show, *key),
+        }
+    }
+
+    /// What this engine plays at shared time `now` (the heartbeat; `epoch`,
+    /// `seq` and `show` are the caller's).
+    pub fn net_state(&self, now: f64) -> PlayState {
+        let mut cues: Vec<CueNow> = self
+            .active
+            .iter()
+            .filter(|a| a.run.is_none())
+            .map(|a| CueNow {
+                cue: a.cue_id,
+                anchor: a.anchor.unwrap_or(now - a.elapsed),
+                stopping: a.stopping,
+            })
+            .collect();
+        cues.sort_by(|a, b| a.cue.0.cmp(&b.cue.0).then(a.anchor.total_cmp(&b.anchor)));
+        let mut playheads: Vec<(u32, Option<CueId>)> =
+            self.list_playheads.iter().map(|(l, p)| (*l, *p)).collect();
+        playheads.sort_by_key(|p| p.0);
+        let runs = self
+            .runs
+            .net_runs()
+            .into_iter()
+            .map(|(key, state, pos, anchor)| RunNow {
+                key,
+                state: word(state),
+                pos: match (state, anchor) {
+                    (super::RunState::Running, Some(a)) => (now - a).max(pos),
+                    _ => pos,
+                },
+                anchor,
+            })
+            .collect();
+        PlayState {
+            time: now,
+            paused: self.paused,
+            list: self.active_list,
+            playhead: self.playhead,
+            playheads,
+            cues,
+            runs,
+            ..Default::default()
+        }
+    }
+
+    /// Compare what plays here with the primary's heartbeat `s`, at shared time
+    /// `now`, and put right what has differed at this heartbeat and the last
+    /// (`doubts` keeps them between). Returns what was put right, in words.
+    pub fn net_correct(
+        &mut self,
+        show: &Show,
+        s: &PlayState,
+        now: f64,
+        doubts: &mut NetCorrection,
+    ) -> Vec<String> {
+        self.enter();
+        let mut seen: HashSet<Doubt> = HashSet::new();
+        let mut done = Vec::new();
+        // The playheads are the primary's (no side effects: nothing plays).
+        if self.active_list != s.list && show.has_list(s.list) {
+            self.active_list = s.list;
+        }
+        self.playhead = s.playhead.filter(|id| show.cue(*id).is_some());
+        self.list_playheads = s
+            .playheads
+            .iter()
+            .filter(|(l, _)| show.has_list(*l) && *l != self.active_list)
+            .map(|(l, p)| (*l, p.filter(|id| show.cue(*id).is_some())))
+            .collect();
+        if self.paused != s.paused {
+            if doubts.seen.contains(&Doubt::Paused) {
+                self.set_paused(s.paused);
+                done.push(if s.paused { "paused" } else { "resumed" }.to_string());
+            } else {
+                seen.insert(Doubt::Paused);
+            }
+        }
+        // Cues, by cue: the primary's instances against ours, oldest first.
+        let mut theirs: HashMap<CueId, Vec<&CueNow>> = HashMap::new();
+        for c in &s.cues {
+            theirs.entry(c.cue).or_default().push(c);
+        }
+        let mut ours: HashMap<CueId, Vec<(u64, f64, bool)>> = HashMap::new();
+        for a in self.active.iter().filter(|a| a.run.is_none()) {
+            ours.entry(a.cue_id).or_default().push((
+                a.instance,
+                a.anchor.unwrap_or(now - a.elapsed),
+                a.stopping,
+            ));
+        }
+        for v in ours.values_mut() {
+            v.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+        let timeline_groups: HashSet<CueId> = s
+            .runs
+            .iter()
+            .filter_map(|r| match r.key {
+                TimelineKey::Group(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let mut start: Vec<(CueId, f64)> = Vec::new();
+        let mut stop: Vec<u64> = Vec::new();
+        let mut shift: Vec<(u64, f64)> = Vec::new();
+        for (cue, list) in &theirs {
+            let here = ours.get(cue).cloned().unwrap_or_default();
+            let live: Vec<&&CueNow> = list.iter().filter(|c| !c.stopping).collect();
+            let here_live: Vec<&(u64, f64, bool)> = here.iter().filter(|h| !h.2).collect();
+            for (n, c) in live.iter().enumerate() {
+                match here_live.get(n) {
+                    None => {
+                        // Not one this engine starts by itself part way.
+                        if s.time - c.anchor < SETTLING
+                            || !restartable(show, *cue)
+                            || timeline_groups.contains(cue)
+                        {
+                            continue;
+                        }
+                        let d = Doubt::Missing(*cue, n);
+                        if doubts.seen.contains(&d) {
+                            start.push((*cue, c.anchor));
+                        } else {
+                            seen.insert(d);
+                        }
+                    }
+                    Some((instance, anchor, _)) => {
+                        let off = anchor - c.anchor;
+                        if off.abs() <= FRAME || s.time - c.anchor < SETTLING {
+                            continue;
+                        }
+                        let d = Doubt::Off(*instance);
+                        if doubts.seen.contains(&d) {
+                            shift.push((*instance, c.anchor));
+                        } else {
+                            seen.insert(d);
+                        }
+                    }
+                }
+            }
+        }
+        for (cue, list) in &ours {
+            let wanted = theirs
+                .get(cue)
+                .map_or(0, |v| v.iter().filter(|c| !c.stopping).count());
+            for (instance, anchor, stopping) in list.iter().filter(|h| !h.2).skip(wanted) {
+                if *stopping || s.time - anchor < SETTLING {
+                    continue;
+                }
+                let d = Doubt::Extra(*instance);
+                if doubts.seen.contains(&d) {
+                    stop.push(*instance);
+                } else {
+                    seen.insert(d);
+                }
+            }
+        }
+        for (cue, anchor) in start {
+            let from = (now - anchor).max(0.0);
+            let before = self.next_instance;
+            self.start_with(
+                show,
+                cue,
+                None,
+                StartAt {
+                    from,
+                    ..StartAt::default()
+                },
+            );
+            for a in self.active.iter_mut().filter(|a| a.instance >= before) {
+                if !matches!(a.kind, ActiveKind::Audio(_)) {
+                    a.anchor = Some(anchor);
+                }
+            }
+            done.push(format!("{} started {from:.2} s in", name(show, cue)));
+        }
+        for instance in stop {
+            let id = self
+                .active
+                .iter()
+                .find(|a| a.instance == instance)
+                .map(|a| a.cue_id);
+            self.stop_instance(instance, 0.1);
+            if let Some(id) = id {
+                done.push(format!("{} stopped", name(show, id)));
+            }
+        }
+        for (instance, anchor) in shift {
+            let Some(a) = self.active.iter_mut().find(|a| a.instance == instance) else {
+                continue;
+            };
+            let id = a.cue_id;
+            let was = a.anchor.unwrap_or(now - a.elapsed);
+            let file = matches!(a.kind, ActiveKind::Video(_) | ActiveKind::Audio(_));
+            if (was - anchor).abs() > JUMP_PAST && file {
+                let to = (now - anchor).max(0.0);
+                let _ = self.seek(show, instance, to);
+            } else if !matches!(a.kind, ActiveKind::Audio(_)) {
+                a.anchor = Some(anchor);
+            } else {
+                continue;
+            }
+            done.push(format!(
+                "{} moved {:+.0} ms",
+                name(show, id),
+                (was - anchor) * 1000.0
+            ));
+        }
+        // Timelines.
+        let here: HashMap<TimelineKey, (super::RunState, f64, Option<f64>)> = self
+            .runs
+            .net_runs()
+            .into_iter()
+            .map(|(k, st, pos, anchor)| {
+                let pos = match (st, anchor) {
+                    (super::RunState::Running, Some(a)) => (now - a).max(pos),
+                    _ => pos,
+                };
+                (k, (st, pos, anchor))
+            })
+            .collect();
+        let mut keys: Vec<TimelineKey> = here.keys().copied().collect();
+        keys.extend(s.runs.iter().map(|r| r.key));
+        keys.sort_by_key(|k| format!("{k:?}"));
+        keys.dedup();
+        for key in keys {
+            if !match key {
+                TimelineKey::Group(id) => show.cue(id).is_some(),
+                TimelineKey::List(n) => show.has_list(n),
+            } {
+                continue;
+            }
+            let theirs = s.runs.iter().find(|r| r.key == key);
+            let mine = here.get(&key).copied();
+            let Some(fix) = run_fix(theirs, mine, s.time, now) else {
+                continue;
+            };
+            let d = Doubt::Run(key);
+            if !doubts.seen.contains(&d) {
+                seen.insert(d);
+                continue;
+            }
+            match fix {
+                RunFix::RunFrom(pos, anchor) => {
+                    self.timeline_run_from(show, key, pos);
+                    self.runs.net_place(key, anchor, Some(now));
+                    done.push(format!("timeline run from {pos:.2} s"));
+                }
+                RunFix::Nudge(anchor) => {
+                    self.runs.net_place(key, anchor, Some(now));
+                    done.push("timeline clock moved".to_string());
+                }
+                RunFix::Pause(pos) => {
+                    self.timeline_pause(show, key, PauseFreeze::Everything, &[], false, false);
+                    if self
+                        .runs
+                        .net_runs()
+                        .iter()
+                        .any(|r| r.0 == key && (r.2 - pos).abs() > FRAME)
+                    {
+                        self.timeline_seek(show, key, pos, true);
+                    }
+                    done.push(format!("timeline paused at {pos:.2} s"));
+                }
+                RunFix::Park(pos) => {
+                    self.timeline_seek(show, key, pos, true);
+                    done.push(format!("timeline put at {pos:.2} s"));
+                }
+                RunFix::Stop => {
+                    self.timeline_stop(show, key, 0.2);
+                    done.push("timeline stopped".to_string());
+                }
+            }
+        }
+        doubts.seen = seen;
+        self.leave();
+        done
+    }
+}
+
+/// What to do to a run to agree with the primary's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RunFix {
+    /// Run from this place, its clock anchored here.
+    RunFrom(f64, f64),
+    /// Running both: its clock's anchor moved.
+    Nudge(f64),
+    Pause(f64),
+    /// Paused both, at different places.
+    Park(f64),
+    Stop,
+}
+
+fn run_fix(
+    theirs: Option<&RunNow>,
+    mine: Option<(super::RunState, f64, Option<f64>)>,
+    then: f64,
+    now: f64,
+) -> Option<RunFix> {
+    use super::RunState as S;
+    let my_state = mine.map_or(S::Stopped, |m| m.0);
+    let my_pos = mine.map_or(0.0, |m| m.1);
+    let Some(t) = theirs else {
+        return matches!(my_state, S::Running | S::Paused { .. } | S::Cueing)
+            .then_some(RunFix::Stop);
+    };
+    match t.state {
+        // Getting ready: nothing to compare yet.
+        RunWord::Cueing => None,
+        RunWord::Stopped => {
+            matches!(my_state, S::Running | S::Paused { .. } | S::Cueing).then_some(RunFix::Stop)
+        }
+        RunWord::Running => {
+            let anchor = t.anchor.unwrap_or(then - t.pos);
+            let pos = (now - anchor).max(0.0);
+            match my_state {
+                S::Running => {
+                    let off = my_pos - pos;
+                    if off.abs() <= FRAME {
+                        None
+                    } else if off.abs() < RUN_NUDGE {
+                        Some(RunFix::Nudge(anchor))
+                    } else {
+                        Some(RunFix::RunFrom(pos, anchor))
+                    }
+                }
+                // Getting ready here too: it catches up by its anchor.
+                S::Cueing => None,
+                S::Stopped | S::Paused { .. } => Some(RunFix::RunFrom(pos, anchor)),
+            }
+        }
+        RunWord::Paused => match my_state {
+            S::Running | S::Cueing => Some(RunFix::Pause(t.pos)),
+            S::Paused { .. } if (my_pos - t.pos).abs() > FRAME => Some(RunFix::Park(t.pos)),
+            S::Stopped => Some(RunFix::Park(t.pos)),
+            _ => None,
+        },
+    }
+}
+
+fn word(s: super::RunState) -> RunWord {
+    match s {
+        super::RunState::Stopped => RunWord::Stopped,
+        super::RunState::Cueing => RunWord::Cueing,
+        super::RunState::Running => RunWord::Running,
+        super::RunState::Paused { .. } => RunWord::Paused,
+    }
+}
+
+/// A cue a follower starts by itself part way in when it lacks it: something
+/// that shows or sounds (not a group, a fade or a control cue, which the
+/// primary's own commands and the cues' own logic see to).
+fn restartable(show: &Show, id: CueId) -> bool {
+    show.cue(id).is_some_and(|c| {
+        matches!(
+            c.kind,
+            CueKind::Video(_)
+                | CueKind::Image(_)
+                | CueKind::Audio(_)
+                | CueKind::Text(_)
+                | CueKind::Shape(_)
+                | CueKind::Camera(_)
+                | CueKind::LiveAudio(_)
+                | CueKind::Wait(_)
+        )
+    })
+}
+
+fn name(show: &Show, id: CueId) -> String {
+    show.cue(id)
+        .map(|c| format!("cue {} ({})", c.number, c.name))
+        .unwrap_or_else(|| "a cue".into())
+}
+
+#[cfg(test)]
+impl Engine {
+    /// How many messages its send cues have sent (a test outbox records them).
+    pub fn net_sent(&self) -> usize {
+        self.outbox.sent().len()
+    }
+}

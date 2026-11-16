@@ -551,3 +551,192 @@ fn garbage_on_the_port_is_shrugged_off() {
         peer(v, did).is_some_and(|x| x.connected)
     });
 }
+
+// ---- Playing together (stage 4a) over loopback: the clock, the show, commands ----
+
+/// A follower keeps the primary's clock over UDP (the beacon socket answers),
+/// locks, and its report of the error and its show reaches the primary.
+#[test]
+fn a_follower_locks_to_the_primary_clock_and_reports_it() {
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let did = id_of(&d);
+    let clock = d.clock();
+    let began = Instant::now();
+    while !clock.now().is_some_and(|n| n.locked) {
+        assert!(began.elapsed() < Duration::from_secs(60), "never locked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // One computer, one clock: the error is the loopback's.
+    let n = clock.now().unwrap();
+    assert!(
+        (n.time - super::super::time::local_now()).abs() < 0.005,
+        "{n:?}"
+    );
+    assert!(clock.worst_rtt().is_some_and(|r| r < 0.5));
+    d.set_sync(SyncFacts {
+        clock_error_ms: Some(n.error * 1000.0),
+        clock_locked: true,
+        show_hash: Some(42),
+        in_step: true,
+        ..Default::default()
+    });
+    until(&p, "the follower's clock to be reported", |v| {
+        peer(v, did)
+            .and_then(|x| x.status.as_ref())
+            .is_some_and(|s| {
+                s.clock_locked && s.clock_error_ms.is_some() && s.show_hash == Some(42)
+            })
+    });
+}
+
+/// Two engines and their app-side state, as `app/play.rs` keeps them.
+struct Pair {
+    show_p: crate::show::Show,
+    show_d: crate::show::Show,
+    ep: crate::engine::Engine,
+    ed: crate::engine::Engine,
+    leader: crate::net::play::Leader,
+    follower: crate::net::play::Follower,
+    assembly: crate::net::play::ShowAssembly,
+    have: Option<u64>,
+    hash: u64,
+    version: u64,
+}
+
+impl Pair {
+    fn send_show(&mut self, p: &Hub) {
+        let json = serde_json::to_string(&self.show_p).unwrap();
+        self.version += 1;
+        for part in crate::net::play::show_parts(self.version, &json) {
+            p.tell(None, Msg::ShowPart(Box::new(part)), false);
+        }
+        self.hash = crate::net::play::show_hash(&json);
+    }
+
+    /// One pass of both computers, as the app makes it.
+    fn pass(&mut self, p: &Hub, d: &Hub, did: NodeId) {
+        use crate::net::play::Out;
+        let now = super::super::time::local_now();
+        let outs = self.leader.issue(self.ep.net_take(), now, 0.05, &[did]);
+        for o in outs.into_iter().chain(self.leader.resend(now)) {
+            if let Out::Command(to, t) = o {
+                p.tell(to, Msg::Play(Box::new(t)), true);
+            }
+        }
+        self.leader.step(&mut self.ep, &self.show_p, now);
+        if let Some(s) = self.leader.beat(&self.ep, self.hash, now) {
+            p.tell(None, Msg::PlayState(Box::new(s)), true);
+        }
+        for ev in d.take_events() {
+            if let NetEvent::Message { msg, .. } = ev {
+                match msg {
+                    Msg::Play(t) => {
+                        let (epoch, seq) = self.follower.receive(*t, &mut self.ed, &self.show_d);
+                        d.tell(None, Msg::PlayAck { epoch, seq }, true);
+                    }
+                    Msg::PlayState(s) => self.follower.heard(*s),
+                    Msg::ShowPart(part) => {
+                        if let Some((_, h, json)) = self.assembly.take(*part) {
+                            self.show_d = serde_json::from_str(&json).unwrap();
+                            self.have = Some(h);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for ev in p.take_events() {
+            if let NetEvent::Message {
+                from,
+                msg: Msg::PlayAck { epoch, seq },
+            } = ev
+            {
+                self.leader.ack(from, epoch, seq);
+            }
+        }
+        let shared = d.clock().now().filter(|n| n.locked).map(|n| n.time);
+        self.follower
+            .step(&mut self.ed, &self.show_d, shared, 0.01, self.have);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    /// Passes until `f` holds, for up to a minute.
+    fn until(&mut self, p: &Hub, d: &Hub, did: NodeId, what: &str, f: impl Fn(&Pair) -> bool) {
+        let began = Instant::now();
+        while !f(self) {
+            assert!(
+                began.elapsed() < Duration::from_secs(60),
+                "waited a minute for {what}"
+            );
+            self.pass(p, d, did);
+        }
+    }
+}
+
+/// Two engines on two hubs over loopback: the show goes over, GO on the
+/// primary plays on both at the same shared time, an edit reaches the follower
+/// without stopping what plays there, and the heartbeat finds both alike.
+#[test]
+fn the_show_and_commands_reach_a_follower_over_loopback() {
+    use crate::engine::{Engine, NetMode};
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let did = id_of(&d);
+    let ts = crate::net::trial::trial_show();
+    let mut ep = Engine::for_tests();
+    ep.net_set_mode(NetMode::Primary);
+    let mut ed = Engine::for_tests();
+    ed.net_set_mode(NetMode::Follower);
+    let mut pair = Pair {
+        show_p: ts.show.clone(),
+        show_d: crate::show::Show::default(),
+        ep,
+        ed,
+        leader: crate::net::play::Leader::new(5),
+        follower: Default::default(),
+        assembly: Default::default(),
+        have: None,
+        hash: 0,
+        version: 0,
+    };
+    pair.send_show(&p);
+    pair.until(&p, &d, did, "the show and the clock", |x| {
+        x.have == Some(x.hash) && x.ed.net_shared_time().is_some()
+    });
+    assert_eq!(pair.show_d.cues.len(), pair.show_p.cues.len());
+    // The operator fires the cue on the primary: both play it.
+    let show_p = pair.show_p.clone();
+    pair.ep.fire(&show_p, ts.cue);
+    pair.until(&p, &d, did, "the cue on the follower", |x| {
+        x.ed.active.iter().any(|a| a.cue_id == ts.cue)
+    });
+    // An edit: the cue renamed. It reaches the follower, and the cue plays on.
+    pair.show_p.cues[0].name = "Renamed".into();
+    // And the media manager's show settings with it.
+    pair.show_p.no_transfer_cards = true;
+    pair.show_p.library_folders = vec!["/media/library".into()];
+    pair.send_show(&p);
+    pair.until(&p, &d, did, "the edit and a heartbeat in step", |x| {
+        x.have == Some(x.hash) && x.follower.in_step
+    });
+    assert_eq!(pair.show_d.cues[0].name, "Renamed");
+    assert!(pair.show_d.no_transfer_cards);
+    assert_eq!(pair.show_d.library_folders, pair.show_p.library_folders);
+    assert!(
+        pair.ed.active.iter().any(|a| a.cue_id == ts.cue),
+        "it plays on"
+    );
+    // Where the cue's time was 0, by the shared clock, on each: within a frame.
+    let zero = |e: &Engine| {
+        let a = e.active.iter().find(|a| a.cue_id == ts.cue).unwrap();
+        e.net_shared_time().unwrap() - a.elapsed
+    };
+    let (zp, zd) = (zero(&pair.ep), zero(&pair.ed));
+    assert!((zp - zd).abs() < 1.0 / 60.0, "{zp} {zd}");
+    assert_eq!(
+        pair.follower.corrections, 0,
+        "{:?}",
+        pair.follower.corrected
+    );
+}

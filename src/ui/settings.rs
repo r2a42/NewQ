@@ -252,7 +252,7 @@ pub fn settings_view(
                 match page {
                     SettingsPage::General => general_page(ui, show, st, actions),
                     SettingsPage::Media => media_page(ui, show, st, actions),
-                    SettingsPage::Network => super::network::page(ui, st, actions),
+                    SettingsPage::Network => super::network::page(ui, show, st, actions),
                     SettingsPage::Displays => displays_panel(ui, show, engine, st, actions),
                     SettingsPage::SubDisplays => sub_displays_panel(ui, show, st, actions),
                     SettingsPage::Audio => audio_panel(ui, show, engine, st, actions),

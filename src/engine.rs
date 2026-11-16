@@ -3,7 +3,10 @@
 
 mod cards;
 mod displays;
+mod net;
 mod timeline;
+
+pub use net::{NetCorrection, NetMode};
 
 // For the timeline editor, which names a run's state (`ui/timeline.rs`).
 pub use timeline::{FIRST_FRAME, RunMark, RunState, RunView, TimelineGo};
@@ -1139,6 +1142,8 @@ pub struct Engine {
     /// Ticking by a shared clock (`tick_shared`, the network sync trial): None
     /// unless that is called, so `tick` is as it always was.
     sync: Option<SharedTime>,
+    /// In a show network: the gate on the engine's entry points (`engine/net.rs`).
+    net: net::NetGate,
     /// A media finder of its own (tests); else the app's, if this computer
     /// takes its media from a show network's primary (`net::media`).
     media_finder: Option<std::sync::Arc<dyn crate::net::media::Finder>>,
@@ -1202,6 +1207,7 @@ impl Engine {
             edits: Vec::new(),
             runs: timeline::Runs::default(),
             sync: None,
+            net: net::NetGate::default(),
             media_finder: None,
             transfer_cards: true,
         }
@@ -1250,6 +1256,7 @@ impl Engine {
             edits: Vec::new(),
             runs: timeline::Runs::default(),
             sync: None,
+            net: net::NetGate::default(),
             media_finder: None,
             transfer_cards: true,
         }
@@ -1605,6 +1612,12 @@ impl Engine {
     /// resumed before anything else is fired.
     /// `go_plan` says beforehand what it will do.
     pub fn go(&mut self, show: &Show) {
+        if self.gated(|e| crate::net::play::Command::Go {
+            list: e.active_list,
+            playhead: e.playhead,
+        }) {
+            return;
+        }
         if self.deck_step(show, true) == DeckStep::Moved {
             return;
         }
@@ -1618,6 +1631,12 @@ impl Engine {
     /// cue 12" and a cue list's own GO, which ask for a particular cue and must
     /// not be taken for a step through the slides.
     pub fn go_playhead(&mut self, show: &Show) {
+        if self.gated(|e| crate::net::play::Command::GoPlayhead {
+            list: e.active_list,
+            playhead: e.playhead,
+        }) {
+            return;
+        }
         let Some(here) = self.playhead_top(show) else {
             self.log("GO: no cue at the playhead");
             return;
@@ -1746,6 +1765,9 @@ impl Engine {
     /// GO on a cue list that is not the one being worked, leaving that one as
     /// it is. Does nothing if there is no such list.
     pub fn go_list(&mut self, show: &Show, list: u32) {
+        if self.gated(|_| crate::net::play::Command::GoList { list }) {
+            return;
+        }
         if !show.has_list(list) {
             return;
         }
@@ -1763,6 +1785,9 @@ impl Engine {
     /// Cues it leads to (continues, a group's children) are fired after it,
     /// in order, before this returns.
     pub fn fire(&mut self, show: &Show, id: CueId) {
+        if self.gated(|_| crate::net::play::Command::Fire { cue: id }) {
+            return;
+        }
         self.fire_queue.push_back(id);
         if self.firing {
             return;
@@ -1819,6 +1844,9 @@ impl Engine {
     }
 
     pub fn set_paused(&mut self, paused: bool) {
+        if self.gated(|_| crate::net::play::Command::SetPaused { paused }) {
+            return;
+        }
         self.paused = paused;
         for a in &self.active {
             if a.started
@@ -1899,6 +1927,9 @@ impl Engine {
     /// Stop everything, forget what was asked to be ready and put the
     /// playhead back at the top of the list.
     pub fn reset_all(&mut self, show: &Show) {
+        if self.gated(|_| crate::net::play::Command::ResetAll) {
+            return;
+        }
         self.stop_all(0.0);
         self.timeline_forget();
         self.loads.clear();
@@ -1938,6 +1969,13 @@ impl Engine {
         target: CueId,
         from: &str,
     ) {
+        if self.gated(|_| crate::net::play::Command::Control {
+            action,
+            target,
+            from: from.to_string(),
+        }) {
+            return;
+        }
         let name = from;
         let tname = show
             .cue(target)
@@ -1998,6 +2036,9 @@ impl Engine {
 
     /// Stop everything with the given fade time.
     pub fn stop_all(&mut self, fade: f64) {
+        if self.gated(|_| crate::net::play::Command::StopAll { fade }) {
+            return;
+        }
         self.pending.clear();
         self.started_early.clear();
         self.timeline_stop_all();
@@ -2017,6 +2058,9 @@ impl Engine {
 
     /// Esc: fade everything out; pressing again during the fade stops instantly.
     pub fn panic(&mut self, show: &Show) {
+        if self.gated(|_| crate::net::play::Command::Panic) {
+            return;
+        }
         if self.paused {
             self.set_paused(false);
         }
@@ -2044,6 +2088,11 @@ impl Engine {
     }
 
     pub fn stop_instance(&mut self, instance: u64, fade: f64) {
+        if let Some((cue, nth)) = self.nth_of(instance)
+            && self.gated(|_| crate::net::play::Command::StopInstance { cue, nth, fade })
+        {
+            return;
+        }
         // A timeline group's run stops with it, keeping its place.
         self.timeline_stopped(instance);
         // Stopping a group stops its children; the group itself just ends.
@@ -2063,6 +2112,11 @@ impl Engine {
 
     /// Fade a playing instance out using its cue's own fade-out time.
     pub fn fade_out_instance(&mut self, show: &Show, instance: u64) {
+        if let Some((cue, nth)) = self.nth_of(instance)
+            && self.gated(|_| crate::net::play::Command::FadeOutInstance { cue, nth })
+        {
+            return;
+        }
         if let Some(kids) = self.group_children(instance) {
             self.active.retain(|a| a.instance != instance);
             for k in kids {
@@ -2084,6 +2138,11 @@ impl Engine {
     /// new position start now and take over when they have a frame; asking
     /// again meanwhile replaces them.
     pub fn seek(&mut self, show: &Show, instance: u64, to: f64) -> Result<(), String> {
+        if let Some((cue, nth)) = self.nth_of(instance)
+            && self.gated(|_| crate::net::play::Command::Seek { cue, nth, to })
+        {
+            return Ok(());
+        }
         let a = self
             .active
             .iter()
@@ -2156,6 +2215,9 @@ impl Engine {
 
     /// Fade every instance of a cue out using its own fade-out time.
     pub fn fade_out_cue(&mut self, show: &Show, id: CueId) {
+        if self.gated(|_| crate::net::play::Command::FadeOutCue { cue: id }) {
+            return;
+        }
         self.pending.retain(|p| p.cue_id != id);
         let instances: Vec<u64> = self
             .active
@@ -2169,6 +2231,9 @@ impl Engine {
     }
 
     pub fn stop_cue(&mut self, id: CueId, fade: f64) {
+        if self.gated(|_| crate::net::play::Command::StopCue { cue: id, fade }) {
+            return;
+        }
         self.pending.retain(|p| p.cue_id != id);
         let instances: Vec<u64> = self
             .active
@@ -2788,6 +2853,9 @@ impl Engine {
         let Some(original) = show.cue(id) else {
             return;
         };
+        if self.camera_missing(original) {
+            return;
+        }
         // A timeline's clip: whether its clock keeps its end, and where that is;
         // one that is to loop until the clock ends it is played as a loop.
         let clip = at.run.map(|_| self.timeline_clip(show, original, at.lead));
@@ -3254,11 +3322,12 @@ impl Engine {
             }
             CueKind::Timecode(t) => {
                 active.duration = (t.duration > 0.0).then_some(t.duration);
-                active.kind = ActiveKind::Timecode(self.outbox.start_timecode(
-                    t.port.clone(),
-                    t.start,
-                    t.rate,
-                ));
+                // In a show network the primary alone makes timecode (R8).
+                active.kind = ActiveKind::Timecode(if self.sends_here() {
+                    self.outbox.start_timecode(t.port.clone(), t.start, t.rate)
+                } else {
+                    None
+                });
             }
             CueKind::Control(c) => {
                 ok = false; // instantaneous; nothing stays active
@@ -3266,7 +3335,10 @@ impl Engine {
             }
             CueKind::Send(s) => {
                 ok = false; // instantaneous; nothing stays active
-                self.outbox.send(Outgoing::from_cue(s));
+                // In a show network the primary alone sends (ruling R8).
+                if self.sends_here() {
+                    self.outbox.send(Outgoing::from_cue(s));
+                }
             }
             CueKind::Group(g) => {
                 let children: Vec<CueId> = show.armed_children(id).iter().map(|c| c.id).collect();
@@ -3476,6 +3548,14 @@ impl Engine {
     }
 
     pub fn tick(&mut self, show: &Show, dt: f64) {
+        // What the engine does to itself while it ticks is never an input to
+        // be caught by a show network's gate (`engine/net.rs`).
+        self.enter();
+        self.tick_inner(show, dt);
+        self.leave();
+    }
+
+    fn tick_inner(&mut self, show: &Show, dt: f64) {
         self.crumbs.next_cycle();
         self.slowest_cue = None;
         self.probe.poll();

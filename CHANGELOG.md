@@ -12,7 +12,29 @@ release page, and a release is refused if it has none.
   make it show its name, release it. Nothing is ever typed on the other computers beyond switching
   them on (or starting them with `newq --join`). Displays can be put on another computer's monitor
   and sound outputs given to other computers. This version only finds the computers and gives
-  them roles: playing across them comes in the next ones. Off unless you turn it on.
+  them roles. Off unless you turn it on.
+- **The computers play together.** Every computer of a show network plays the whole show from its
+  own copy, in step with the primary by a clock they share: GO, a cue fired, stopped or faded,
+  Stop All, pause, and every timeline action (run, pause, seek, jump) happen at the same moment on
+  each, a moment ahead of when you press so that every computer is ready. Edits on the primary
+  reach the others a moment after you make them, without stopping what plays. A computer that
+  starts late, restarts or misses something catches up by itself, part way into what is playing.
+  The primary alone sends (send cues, MIDI timecode, projector control), listens (OSC, MIDI, the
+  web remote, clock triggers) and records or streams. Not yet tried between two real computers:
+  measured on simulated networks and on one computer.
+- **Display computers.** A computer given the *Display* role has no control window: every monitor
+  it has becomes an output, with a quiet card (its name, address, who runs the show and how it is
+  getting on) until it is in step, and on any monitor the show doesn't use. *Identify* shows its
+  name big on every output. NewQ sets itself to start at login on a display computer, and the
+  primary can turn that on or off for any computer, or start NewQ again on it.
+- **The other computers' controls are locked.** A computer following a primary shows the show and
+  what plays, with a line saying who runs it; *Leave the show network* is the one thing it does.
+- **The primary's page** says, for each computer, whether its show is in step and how far its clock
+  may be off, and warns when a computer sharing a blended picture is on Wi-Fi or its clock is more
+  than half a frame off.
+- **Sound in a show network:** an audio output not given to any computer plays on the primary only
+  (it played on every computer before).
+- Test Mode is off while a computer is in a show network.
 - **The show's media reaches every computer by itself.** In a show network the primary sends every
   file of the show to every computer, nearest the playhead first and following the playhead as you
   jump about, then the folders you add under *Settings ▸ Media ▸ Folders to keep on every computer*

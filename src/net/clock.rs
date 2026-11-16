@@ -205,6 +205,7 @@ impl SharedClock {
     }
 
     /// The fitted drift: shared seconds per local second, less 1.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn drift(&self) -> f64 {
         self.fit.map_or(0.0, |f| f.b)
     }

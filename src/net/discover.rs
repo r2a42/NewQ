@@ -150,8 +150,18 @@ impl Beaconer {
                     }
                     // (An error is a timeout, or on Windows a beacon sent to a
                     // port nobody listens on being refused: nothing to do.)
-                    if let Ok((n, from)) = socket.recv_from(&mut buf)
-                        && let Some(beacon) = proto::decode_beacon(&buf[..n])
+                    let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                        continue;
+                    };
+                    // A follower asking for the shared time (`net::time`):
+                    // answered at once, on this thread, so the reply waits on
+                    // nothing else.
+                    let received = super::time::local_now();
+                    if let Some(reply) = super::time::answer(&buf[..n], received) {
+                        let _ = socket.send_to(&reply, from);
+                        continue;
+                    }
+                    if let Some(beacon) = proto::decode_beacon(&buf[..n])
                         && heard
                             .send(super::hub::Event::Heard(Heard { beacon, from }))
                             .is_err()

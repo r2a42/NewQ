@@ -226,6 +226,10 @@ pub struct UiState {
     pub net: std::sync::Arc<crate::net::hub::NetView>,
     /// What the page asked of it, for the app to pass on.
     pub net_requests: Vec<crate::net::hub::NetAction>,
+    /// NewQ starts at login on this computer (`autostart`), and a change asked
+    /// on the Show network page.
+    pub start_at_login: bool,
+    pub start_at_login_request: Option<bool>,
     /// The media manager as it last published (set by the app each pass).
     pub media: std::sync::Arc<crate::net::media::MediaView>,
     /// Messages the media rows asked to send to a computer (the app passes them on).
@@ -549,6 +553,11 @@ impl UiState {
             || self.deck_import.is_some()
         {
             Some("Close the open file dialog first.")
+        } else if self.net.me.on && (self.net.is_primary() || self.net.me.adopted()) {
+            // (A test show would be played on the other computers too.)
+            Some(
+                "Test Mode is off while this computer is in a show network. Switch the show network off (Settings ▸ Show network) to run a test.",
+            )
         } else {
             None
         }
@@ -914,7 +923,11 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     network::identify(ui.ctx(), st);
     poll_save(ui.ctx(), engine, st);
     refresh_missing(ui.ctx(), show, st);
-    keyboard(ui.ctx(), show, st, &mut actions);
+    // A computer following a primary is locked: the show is run from there.
+    let locked = network::locked(st);
+    if !locked {
+        keyboard(ui.ctx(), show, st, &mut actions);
+    }
     timeline::next_pass(st);
 
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -953,6 +966,10 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     if show.relay_slides() {
         st.json_stale = true;
     }
+    if locked {
+        egui::Panel::top("net_locked").show(ui, |ui| network::locked_banner(ui, st, &mut actions));
+        ui.disable();
+    }
     egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, show, st, &mut actions));
     let modern = st.prefs.new_layout;
     if !modern {
@@ -990,6 +1007,10 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             });
     }
 
+    // A follower does nothing but what the network asks of it.
+    if locked {
+        actions.retain(|a| matches!(a, Action::Net(_)));
+    }
     // Actions change state after this frame was laid out; show the result now
     // rather than on the next mouse move.
     let acted = !actions.is_empty();

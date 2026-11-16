@@ -62,6 +62,19 @@ pub struct StatusReport {
     /// has.
     pub clock_error_ms: Option<f64>,
     pub show_version: Option<u64>,
+    // ---- Playing together (stage 4a, `net::play`) ----
+    /// Its shared clock is locked to the primary's.
+    pub clock_locked: bool,
+    /// The longest recent round trip to the primary (ms), for the lead.
+    pub rtt_ms: Option<f64>,
+    /// The hash of the show it has (`play::show_hash`).
+    pub show_hash: Option<u64>,
+    /// What it plays agreed with the primary at its last heartbeat.
+    pub in_step: bool,
+    /// Where it stands, in a few words ("waiting for the clock").
+    pub standing: Option<String>,
+    /// NewQ starts when this computer does.
+    pub start_at_login: bool,
     /// Its media: progress by bytes, what is missing, its versions setting
     /// (`net::media`). None from the primary itself and from a NewQ alone.
     pub media_progress: Option<Box<crate::net::media::MediaReport>>,
@@ -182,6 +195,25 @@ pub enum Msg {
     Pong {
         n: u64,
     },
+    // ---- Playing together (stage 4a, `net::play`) ----
+    /// Primary to its computers: do this at a shared time.
+    Play(Box<super::play::Timed>),
+    /// A computer to its primary: that command arrived.
+    PlayAck {
+        epoch: u64,
+        seq: u64,
+    },
+    /// Primary to its computers: what it plays (the heartbeat).
+    PlayState(Box<super::play::PlayState>),
+    /// Primary to its computers: a piece of the show.
+    ShowPart(Box<super::play::ShowPart>),
+    /// Primary to a computer: start NewQ again (a role change that needs it).
+    Restart,
+    /// Primary to a computer: start at login, or not.
+    StartAtLogin {
+        on: bool,
+    },
+    // ---- end of playing together ----
     // ---- The media manager (`net::media`) ----
     /// Primary to a computer: its media is served on this port (at the
     /// primary's address); `sources` are other computers ("address:port")

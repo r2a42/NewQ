@@ -20,6 +20,10 @@ use crate::show::{
     OutputId, PartOf, PatternKind, RemoteSettings, Show, StreamOut, display_state,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
+
+// The computers playing together (stage 4a): the shared clock, commands, the
+// heartbeat and show sync (`app/play.rs`).
+mod play;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -363,6 +367,8 @@ pub struct App {
     /// of this computer's monitors and sound devices.
     net: crate::net::hub::Hub,
     net_told: crate::net::hub::LocalFacts,
+    /// Playing together with the other computers (`app/play.rs`).
+    play: play::Playing,
     /// The media manager (`net::media`) and the report last given the hub.
     media: crate::net::media::Manager,
     media_told: Option<crate::net::media::MediaReport>,
@@ -419,7 +425,11 @@ impl App {
             move || wake()
         });
         ui.net = net.view();
-        App {
+        ui.start_at_login = crate::autostart::is_set();
+        let follows = ui.net.me.on && ui.net.me.adopted();
+        let open_kept = follows && ui.show_path.is_none();
+        let mut app = App {
+            play: Default::default(),
             net,
             net_told: Default::default(),
             media: crate::net::media::Manager::new(crate::net::media::manager::Config::from_env()),
@@ -508,7 +518,12 @@ impl App {
             main_window_only,
             start_failed: None,
             render_restart: None,
+        };
+        // A follower starts with the show its primary last gave it.
+        if open_kept {
+            app.play_load_kept();
         }
+        app
     }
 
     fn scan_monitors(&mut self, event_loop: &ActiveEventLoop) {
@@ -636,6 +651,7 @@ impl App {
         for ev in self.net.take_events() {
             match ev {
                 NetEvent::RoleChanged { role, .. } => {
+                    self.play_role_changed(role);
                     let v = self.net.view();
                     let follows = v
                         .following
@@ -657,10 +673,17 @@ impl App {
                     if self.media.handle(from, &msg, &v) {
                         continue;
                     }
+                    // ---- Playing together (stage 4a, `app/play.rs`) ----
+                    self.play_message(from, msg);
                 }
             }
         }
         self.pass_media();
+        // ---- Playing together: the show to the followers ----
+        self.play_send_show();
+        if let Some(on) = self.ui.start_at_login_request.take() {
+            self.set_start_at_login(on);
+        }
         let now = self.net.view();
         if !Arc::ptr_eq(&now, &self.ui.net) {
             self.ui.net = now;
@@ -741,8 +764,16 @@ impl App {
         }
         let settled = now.duration_since(self.remote_seen.1) > Duration::from_millis(400);
         if settled {
-            self.remote.sync(&self.show.remote);
-            self.feedback.set_target(&self.show.remote.osc_feedback);
+            // A follower listens to nothing and sends no feedback: the primary
+            // alone does (ruling R8), and what it hears reaches here as commands.
+            let off = RemoteSettings::default();
+            let remote = if self.sends_here() {
+                &self.show.remote
+            } else {
+                &off
+            };
+            self.remote.sync(remote);
+            self.feedback.set_target(&remote.osc_feedback);
         }
         self.feedback.update(&self.show, &mut self.engine, now);
         self.ui.feedback_error = self.feedback.error.clone();
@@ -865,6 +896,10 @@ impl App {
     /// display, which may be the one showing the output, and the output has
     /// the right to stay. The window comes home when its display does.
     fn control_for_outputs(&mut self, found: Option<usize>) -> Option<Option<usize>> {
+        // A display computer has no control window to keep clear of.
+        if self.is_display_computer() {
+            return Some(None);
+        }
         let displaced = control_displaced(
             self.home.home.is_some(),
             self.home
@@ -999,8 +1034,11 @@ impl App {
             window.scale_factor()
         );
         // A new fullscreen window takes the focus (and on a Mac, its own
-        // Space); bring the controls back in front.
-        if let Some(ctl) = &self.control {
+        // Space); bring the controls back in front (not a display computer's
+        // hidden window).
+        if let Some(ctl) = &self.control
+            && !self.is_display_computer()
+        {
             ctl.window.focus_window();
         }
         self.screens.insert(
@@ -1376,6 +1414,13 @@ impl App {
                 .push(((order, oi), o.id));
             self.targets.insert(o.id, *t);
         }
+        // A display computer: every monitor has a window, whether or not the
+        // show gives it a display yet (one with none shows its card).
+        if self.is_display_computer() && !self.main_window_only {
+            for m in 0..self.monitors.len() {
+                per_screen.entry(m).or_default();
+            }
+        }
         // A display whose number changed because another went (a laptop's lid
         // closing) keeps its window: closing it and opening another leaves the
         // desktop showing and flashes.
@@ -1541,6 +1586,7 @@ impl App {
             .outputs
             .iter()
             .filter(|o| o.enabled && !o.is_sub_display() && self.show.part_of(o.id).is_none())
+            .filter(|_| self.sends_here())
             .filter_map(|o| o.stream.as_ref().filter(|s| s.enabled))
             .map(|s| s.kind.clone())
             .collect();
@@ -1632,6 +1678,8 @@ impl App {
             .outputs
             .iter()
             .filter(|o| o.enabled && !o.is_sub_display() && self.show.part_of(o.id).is_none())
+            // Streams and recordings are the primary's (R8).
+            .filter(|_| self.sends_here())
             .filter_map(|o| {
                 let mut s = o.stream.as_ref().filter(|s| s.enabled)?.clamped();
                 if let Some(p) = &plan {
@@ -1900,7 +1948,8 @@ impl App {
     }
 
     fn update_outputs(&mut self, playing: bool) {
-        let Some(gpu) = &self.gpu else { return };
+        let Some(gpu) = self.gpu.clone() else { return };
+        let gpu = &gpu;
         self.ui.previews.clear();
         let configs: Vec<OutputSetup> = self
             .show
@@ -2220,12 +2269,40 @@ impl App {
         self.fps_labels.retain(|id, _| groups.contains_key(id));
 
         self.ui.screens.clear();
+        // A display computer's card, and Identify's name, per monitor.
+        let mut cards: HashMap<usize, Option<play::Card>> = HashMap::new();
+        let monitors: Vec<(usize, bool)> = self
+            .screens
+            .iter()
+            .map(|(m, s)| (*m, !s.outputs.is_empty()))
+            .collect();
+        for (m, has_display) in monitors {
+            cards.insert(m, self.card(has_display));
+        }
         for (m, screen) in &mut self.screens {
-            let list: Vec<OutputGroup> = screen
+            let mut list: Vec<OutputGroup> = screen
                 .outputs
                 .iter()
                 .filter_map(|id| groups.get(id).cloned())
                 .collect();
+            match cards.remove(m).flatten() {
+                Some(card) => {
+                    let fresh = self.play.cards.get(m).is_none_or(|(c, _)| *c != card);
+                    if fresh {
+                        let tex = card_texture(gpu, &card, screen.size);
+                        self.play.cards.insert(*m, (card, tex));
+                        screen.needs_redraw = true;
+                    }
+                    if let Some((_, tex)) = self.play.cards.get(m) {
+                        list.push(card_group(tex.clone(), screen.size));
+                    }
+                }
+                None => {
+                    if self.play.cards.remove(m).is_some() {
+                        screen.needs_redraw = true;
+                    }
+                }
+            }
             let sent: Vec<SentGeometry> = screen
                 .outputs
                 .iter()
@@ -2351,13 +2428,18 @@ impl App {
     /// Until then they are drawn while hidden: some systems don't ask a hidden
     /// window to repaint, so ask for it here.
     fn reveal_windows(&mut self, event_loop: &ActiveEventLoop) {
+        // A display computer's control window stays hidden (`app/play.rs`).
+        self.keep_control_hidden();
+        let hidden = self.is_display_computer();
         if let Some(ctl) = &self.control
+            && !hidden
             && !ctl.shown
             && ctl.last_paint.elapsed() > Duration::from_millis(30)
         {
             self.render_control(event_loop);
         }
         if let Some(ctl) = &mut self.control
+            && !hidden
             && !ctl.shown
             && (ctl.thread.as_ref().is_some_and(|t| t.has_presented())
                 || ctl.created.elapsed() > FIRST_FRAME_WAIT)
@@ -2466,6 +2548,13 @@ impl App {
     }
 
     fn render_control(&mut self, event_loop: &ActiveEventLoop) {
+        // A display computer has no controls: its window stays hidden, undrawn.
+        if self.is_display_computer() {
+            if let Some(ctl) = &mut self.control {
+                ctl.last_paint = Instant::now();
+            }
+            return;
+        }
         let Some(ctl) = &mut self.control else { return };
         ctl.last_paint = Instant::now();
         if let Some(f) = self.preview_meter.tick(ctl.last_paint) {
@@ -2781,6 +2870,31 @@ impl App {
         }
     }
 
+    /// Start NewQ again (asked by the primary): a new copy with the same
+    /// arguments, then this one ends as a quit does.
+    fn restart_self(&mut self, event_loop: &ActiveEventLoop) {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                self.engine
+                    .problem(format!("NewQ couldn't start again: {e}"));
+                return;
+            }
+        };
+        match std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .spawn()
+        {
+            Ok(_) => {
+                log::info!("starting NewQ again, as the primary asked");
+                event_loop.exit();
+            }
+            Err(e) => self
+                .engine
+                .problem(format!("NewQ couldn't start again: {e}")),
+        }
+    }
+
     /// After a panic while a window was being drawn or its events handled: what
     /// was open in the controls may be what it fell over, so it is closed, and
     /// the window is drawn again.
@@ -2945,12 +3059,15 @@ impl App {
                 return;
             }
         }
+        // No call of the engine's own is under way between passes.
+        self.engine.net_settle();
         let now = Instant::now();
         if let Some(s) = &self.splash
             && crate::splash::due(
                 s.opened,
                 now,
-                self.control.as_ref().is_some_and(|c| c.shown),
+                // (A display computer's control window is never shown.)
+                self.control.as_ref().is_some_and(|c| c.shown) || self.is_display_computer(),
             )
         {
             self.splash = None;
@@ -3045,6 +3162,11 @@ impl App {
             app.sync_clicker();
         });
         self.crumbs.lap("layout, audio outputs and remote control");
+        // The primary asked NewQ to start again.
+        if self.play.restart {
+            self.play.restart = false;
+            self.restart_self(event_loop);
+        }
         self.pass_show(event_loop, now, dt);
     }
 
@@ -3088,9 +3210,14 @@ impl App {
         self.last_clock_look = now;
         self.part("The show engine", |app| {
             crate::crash::test_panic("engine");
-            app.engine.on_clock(&app.show, crate::clock::now(), gap);
+            // Clock triggers are the primary's (R8); what they fire reaches the
+            // others as commands.
+            if app.sends_here() {
+                app.engine.on_clock(&app.show, crate::clock::now(), gap);
+            }
             let began = Instant::now();
-            app.engine.tick(&app.show, dt);
+            // Alone, `tick` as always; in a show network, by the shared clock.
+            app.play_tick(dt);
             if began.elapsed() >= Duration::from_millis(50) {
                 app.engine_note = Some(app.engine.tick_breakdown(&app.show));
             }
@@ -3216,6 +3343,9 @@ impl App {
         if playing {
             next = next.min(now + TICK_WHILE_PLAYING);
         }
+        if let Some(t) = self.play_wake(now) {
+            next = next.min(t);
+        }
         if let Some(s) = &self.splash {
             // Look again when it is time for the splash to go.
             next = next.min((s.opened + crate::splash::HOLD).max(now + Duration::from_millis(50)));
@@ -3308,6 +3438,8 @@ impl ApplicationHandler for App {
         }
         // The streaming server NewQ runs goes with it.
         self.hosting_runner = None;
+        // Stopped here, not caught as an input for the show network.
+        self.engine.net_set_mode(crate::engine::NetMode::Off);
         self.engine.stop_all(0.0);
         self.save_layout(true);
         if let Some(t) = self.control.as_mut().and_then(|c| c.thread.take()) {
@@ -3476,6 +3608,55 @@ fn route_outputs(
             (o.id, target)
         })
         .collect()
+}
+
+/// A display computer's card (or Identify's name) as a picture the shape of
+/// its monitor: grey words in the middle of black.
+fn card_texture(gpu: &Gpu, card: &play::Card, size: (u32, u32)) -> Arc<LayerTexture> {
+    let w = 1280u32;
+    let h = ((w as f32 * size.1 as f32 / size.0.max(1) as f32) as u32).clamp(2, 4096);
+    let mut cue = crate::show::TextCue::new(None);
+    cue.text = card.text.clone();
+    cue.size = if card.big { 0.16 } else { 0.035 };
+    cue.width = 0.9;
+    cue.align = crate::show::TextAlign::Center;
+    cue.valign = crate::show::TextVAlign::Middle;
+    cue.bold = card.big;
+    cue.color = if card.big {
+        // The flash: bright, and a little dimmer on the other half second.
+        if card.text.ends_with(' ') {
+            [170, 170, 170, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    } else {
+        [120, 120, 120, 255]
+    };
+    let img = crate::text::render(&cue, (w, h));
+    let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
+    tex.upload_rgba(&gpu.queue, &img.data);
+    Arc::new(tex)
+}
+
+/// The card over the whole of a monitor.
+fn card_group(texture: Arc<LayerTexture>, size: (u32, u32)) -> OutputGroup {
+    OutputGroup {
+        layers: vec![OutputLayer {
+            texture,
+            opacity: 1.0,
+            fit: Fit::Stretch,
+            transform: LayerTransform::default(),
+            color: ColorAdjust::default(),
+            fx: Default::default(),
+        }],
+        geometry: Geometry {
+            canvas: size,
+            warp: gpu::IDENTITY,
+            pin: gpu::IDENTITY,
+            mesh: None,
+            slice: Geometry::WHOLE,
+        },
+    }
 }
 
 /// Ask whether to take back the changes a crashed session left in `rec`.

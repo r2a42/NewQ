@@ -117,11 +117,11 @@ impl AudioOutputConfig {
     /// The device it plays on on computer `me` (`Some(None)`: the system's
     /// default), or None when it is given only to other computers. `primary`:
     /// `me` runs the show (the primary, or a computer in no network). One given
-    /// to no computer plays wherever the show is open, as before networks
-    /// (a display computer leaving it to the primary is a later stage's).
+    /// to no computer plays on the primary alone (and on a computer in no
+    /// network, as before networks): a display computer leaves it to the primary.
     pub fn device_here(&self, me: NodeId, primary: bool) -> Option<Option<String>> {
         if self.computers.is_empty() {
-            return Some(self.device.clone());
+            return primary.then(|| self.device.clone());
         }
         if !self.computers.contains(&me) {
             return None;
@@ -5236,6 +5236,9 @@ mod tests {
         let o = &mut show.audio_outputs[0];
         o.device = Some("Desk".into());
         assert_eq!(o.device_here(me, true), Some(Some("Desk".into())));
+        // Given to no computer: the primary's alone (stage 4a), so a display
+        // computer opens no device for it.
+        assert_eq!(o.device_here(other, false), None);
         o.computers = vec![other];
         assert_eq!(o.device_here(me, true), None, "only on the other computer");
         assert_eq!(

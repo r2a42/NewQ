@@ -227,6 +227,11 @@ impl<T> Queue<T> {
     pub fn pop(&mut self) -> Option<(f64, T)> {
         self.heap.pop().map(|e| (e.at, e.what))
     }
+
+    /// When the next event is.
+    pub fn peek_time(&self) -> Option<f64> {
+        self.heap.peek().map(|e| e.at)
+    }
 }
 
 #[cfg(test)]

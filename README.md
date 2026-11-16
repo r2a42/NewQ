@@ -1044,11 +1044,10 @@ stays on the computer until you send it yourself.
 
 ## Several computers: the show network
 
-*New, and only the first part.* This version finds the computers that are to
-run a show together and gives each a role. **It doesn't yet play anything across
-them**: each NewQ still plays its own show. Showing pictures and playing sound
-on the other computers, in step with the one you run the show from, comes in the
-next versions.
+*New.* Several computers run one show together: you run it from one (the
+*primary*), and the others show pictures and play sound in step with it, each
+from its own copy of the show and the media. **Only tried on one computer and on
+simulated networks so far**: try it between your own computers before a show.
 
 - **Off unless you turn it on.** A NewQ that isn't part of a show network opens
   nothing on the network (no firewall question).
@@ -1134,6 +1133,67 @@ never copy media by hand, and nothing waits for it.
   only very large files; the setting is kept on that computer. *Verify* reads
   every file a computer holds again and copies a damaged one again.
 - Where it is kept: the `media` folder beside the log on each computer.
+### Playing together
+
+- **One clock.** Each computer keeps the primary's clock, asking it for the time
+  several times a second. The primary's page says how far each computer's clock
+  may be off (*clock ±0.05 ms* on a good wired network; on one computer, as when
+  trying it out, it is the noise of the computer itself). Until a computer's
+  clock has settled (a second or so) it starts nothing new, and says so.
+- **Everything at the same moment.** Whatever you do on the primary that changes
+  what plays (GO, firing, stopping or fading a cue, Stop All, Panic, pause, a
+  timeline's run, pause, stop and seek, a slide show's step, a hotkey, OSC, MIDI,
+  the web remote, a clock trigger) is done on every computer at the same moment
+  by the shared clock, a little after you press: 50 ms on a wired show network,
+  up to 400 ms on a slow one or Wi-Fi. The primary does it at that moment too, so
+  they stay together. Each computer gets ready what it will start when it hears
+  of it. The trial on simulated networks found every computer within one frame
+  of the others (at 60 frames a second) through starts, seeks and pauses; what
+  each display shows can still be up to one refresh apart, since displays don't
+  refresh together without genlock hardware.
+- **The show.** Every change made on the primary goes to the other computers a
+  moment after you make it (the whole show, so nothing is missed), and to any
+  computer that joins. What plays there carries on through it. A follower keeps
+  the last show it was given and starts with it.
+- **Catching up.** Several times a second the primary says what it is playing.
+  A computer that differs (one switched on late, restarted, or that missed a
+  message) puts itself right: it starts what it lacks part way in, at the right
+  place, stops what the primary isn't playing, and moves a timeline's clock that
+  is off by more than a frame. It waits to see a difference twice before acting,
+  so a moment's delay is never mistaken for one. If the primary can't be
+  reached, the others play on by their own clocks and pick up again when it is
+  back. A group that plays its cues in order is caught up as what is playing,
+  not as a group: what it plays next reaches the late computer the same way.
+- **Only the primary sends, listens and records:** send cues (OSC, MIDI,
+  projectors, network messages, programs), MIDI timecode out, OSC/MIDI/web
+  remote input, clock triggers, Send out (streams and recordings). Nothing fires
+  twice.
+- **Sound** plays on the computers its audio output is given to; one given to
+  no computer plays on the primary only. Two computers playing the same sound in
+  one room will not be sample-locked.
+- **Cameras.** A computer plays a camera cue only if it has that camera (a
+  capture card in each display computer); otherwise it shows nothing for it.
+- **Display computers** have no control window. Every monitor they have becomes
+  an output at start-up. Until the computer is in step, and on any monitor the
+  show doesn't use, a quiet grey card says its name, its address, who runs the
+  show and how it is getting on; once in step a monitor with nothing playing is
+  black. *Identify* from the primary flashes the name on every output. A change
+  of role takes effect at once (the control window closes or opens again);
+  *Restart* on the primary's row starts NewQ again on that computer.
+- **Backup computers** follow like any other computer and show the show, the
+  playheads and what is playing, with their controls locked. Taking control from
+  the backup comes in a later version.
+- **Start at login.** A display computer is set to start NewQ when it starts
+  (so one in a truss comes back after a power cut); the primary's row has a
+  *Starts at login* tick for every computer, and each computer's own page has
+  one. (Written by NewQ itself: a LaunchAgent on a Mac, the Run key on Windows,
+  an autostart entry on Linux. Only tried on Linux so far.)
+- **The other computers' controls are locked**, with a line saying who runs the
+  show; *Leave the show network* takes one out.
+- **Blended pictures.** The primary warns when a computer that shares a blended
+  picture (an edge blend, or a part of a picture another computer shows) is on
+  Wi-Fi or its clock may be more than half a frame off.
+- Test Mode is off while a computer is in a show network.
 
 ## Timelines
 

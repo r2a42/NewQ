@@ -81,12 +81,12 @@ pub fn space(bytes: u64) -> String {
     }
 }
 
-pub fn page(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+pub fn page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let v = st.net.clone();
     this_computer(ui, &v, st, actions);
     if v.is_primary() {
         super::net_media::primary_summary(ui, &v, st);
-        computers(ui, &v, st, actions);
+        computers(ui, show, &v, st, actions);
         by_address(ui, &v, st, actions);
         passcode(ui, &v, st, actions);
     } else if v.me.on && !v.me.adopted() {
@@ -157,10 +157,25 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
         if v.me.adopted() {
             hint(
                 ui,
-                "Its role and name are set from the primary; nothing needs doing here. Taking \
-                 part in the show (following the primary, showing pictures) comes in a later \
-                 version: for now it only says what it is. Switching off leaves the show network.",
+                "Its role and name are set from the primary; nothing needs doing here. It plays \
+                 the primary's show in step with it, on the displays and sound outputs given to \
+                 it. Switching off leaves the show network.",
             );
+            if let Some(s) = &v.status.standing {
+                ui.label(RichText::new(s).strong());
+            }
+        }
+        // Start at login (D8): on by itself for a display computer.
+        let mut at_login = st.start_at_login;
+        let r = ui
+            .checkbox(&mut at_login, "Start NewQ when this computer starts")
+            .on_hover_text(
+                "For a computer out of reach (a display computer in a truss): it comes back by \
+                 itself after a power cut. The primary can set this too.",
+            );
+        note(ui, "start_at_login", r.rect);
+        if r.changed() {
+            st.start_at_login_request = Some(at_login);
         }
         // Its name: what the others call it.
         ui.horizontal(|ui| {
@@ -215,7 +230,7 @@ fn rename_field(
     }
 }
 
-fn computers(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<Action>) {
+fn computers(ui: &mut Ui, show: &Show, v: &NetView, st: &mut UiState, actions: &mut Vec<Action>) {
     let ours: Vec<&PeerView> = v.peers.iter().filter(|p| p.ours).collect();
     let waiting: Vec<&PeerView> = v
         .peers
@@ -231,7 +246,7 @@ fn computers(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<Actio
         own_row(ui, v);
         for p in &ours {
             ui.separator();
-            computer_row(ui, p, v, st, actions);
+            computer_row(ui, show, p, v, st, actions);
         }
         if ours.is_empty() {
             hint(
@@ -326,6 +341,7 @@ fn own_row(ui: &mut Ui, v: &NetView) {
 /// be done to it.
 fn computer_row(
     ui: &mut Ui,
+    show: &Show,
     p: &PeerView,
     v: &NetView,
     st: &mut UiState,
@@ -367,9 +383,35 @@ fn computer_row(
                 if r.clicked() {
                     actions.push(Action::Net(NetAction::Identify(p.id)));
                 }
+                let r = ui
+                    .small_button("Restart")
+                    .on_hover_text("Start NewQ again on that computer.");
+                note(ui, format!("restart:{}", p.id), r.rect);
+                if r.clicked() {
+                    actions.push(Action::Net(NetAction::Restart(p.id)));
+                }
             });
         });
     });
+    // ---- Playing together (stage 4a): in step, clock, start at login ----
+    if p.connected
+        && let Some(s) = &p.status
+    {
+        ui.horizontal_wrapped(|ui| {
+            let (text, color) = step_words(s);
+            let r = ui.label(RichText::new(text).color(color).small());
+            note(ui, format!("step:{}", p.id), r.rect);
+            let mut at_login = s.start_at_login;
+            let r = ui.checkbox(&mut at_login, RichText::new("Starts at login").small());
+            note(ui, format!("at_login:{}", p.id), r.rect);
+            if r.changed() {
+                actions.push(Action::Net(NetAction::StartAtLogin(p.id, at_login)));
+            }
+        });
+        if let Some(w) = blend_warning(show, p, s) {
+            warning(ui, &w);
+        }
+    }
     let state = if !p.online {
         RichText::new("Offline: not heard from")
             .color(STOP_RED)
@@ -437,10 +479,62 @@ fn facts(s: &proto::StatusReport, p: Option<&PeerView>) -> String {
         1 => parts.push("1 sound device".into()),
         n => parts.push(format!("{n} sound devices")),
     }
-    if let Some(e) = s.clock_error_ms {
-        parts.push(format!("clock ±{e:.1} ms"));
+    if let Some(e) = s.clock_error_ms
+        && p.is_some()
+    {
+        parts.push(format!("clock ±{e:.2} ms"));
     }
     parts.join(" · ")
+}
+
+/// Whether a computer's playing agrees with the primary's, in words and colour.
+fn step_words(s: &proto::StatusReport) -> (String, Color32) {
+    if s.in_step && s.clock_locked {
+        return ("Show in step".into(), GO_GREEN);
+    }
+    let text = s
+        .standing
+        .clone()
+        .unwrap_or_else(|| "Not in step yet".into());
+    (text, Color32::from_rgb(220, 160, 40))
+}
+
+/// Half a frame at 60 Hz (ms): a clock further off than this can show a
+/// blended picture's halves a frame apart.
+const HALF_FRAME_MS: f64 = 1000.0 / 120.0;
+
+/// A plain warning when computer `p` shares a blended picture (an edge blend,
+/// or a part of a picture another computer shows too) and is on Wi-Fi or its
+/// clock is more than half a frame off (ruling R2).
+pub fn blend_warning(show: &Show, p: &PeerView, s: &proto::StatusReport) -> Option<String> {
+    let mine = |o: &crate::show::OutputConfig| o.computer == Some(p.id);
+    let shares = show.outputs.iter().filter(|o| o.enabled).any(|o| {
+        let blended = o.blend != crate::show::EdgeBlend::default();
+        let part = show.part_of(o.id).and_then(|pt| show.output(pt.display));
+        let across = part.is_some_and(|src| mine(src) != mine(o));
+        let shown_elsewhere = show
+            .outputs
+            .iter()
+            .any(|x| show.part_of(x.id).is_some_and(|pt| pt.display == o.id) && mine(x) != mine(o));
+        (mine(o) && blended) || ((mine(o) || part.is_some_and(mine)) && (across || shown_elsewhere))
+    });
+    if !shares {
+        return None;
+    }
+    if s.link == Link::WiFi {
+        return Some(format!(
+            "⚠ {} shares a blended picture and is on Wi-Fi: its half may be a frame or more \
+             apart from the other's. A cable keeps them together.",
+            p.name
+        ));
+    }
+    s.clock_error_ms.filter(|e| *e > HALF_FRAME_MS).map(|e| {
+        format!(
+            "⚠ {} shares a blended picture and its clock may be {e:.0} ms off: its half may \
+             be a frame apart from the other's.",
+            p.name
+        )
+    })
 }
 
 fn by_address(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -610,3 +704,80 @@ pub fn identify(ctx: &egui::Context, st: &UiState) {
 #[cfg(test)]
 #[path = "network_tests.rs"]
 mod tests;
+
+// ---- Playing together (stage 4a): the show from the primary ----
+
+impl UiState {
+    /// The show as the control window last serialised it (a primary sends it).
+    pub fn show_json(&self) -> Option<&str> {
+        self.json.as_deref()
+    }
+
+    /// A follower has been given the primary's show:
+    /// it is the saved show from here (nothing to save, no recovery copy), the
+    /// undo history starts from it, and a selection of a cue that has gone is
+    /// let go. What plays is left alone (the engine copies the live fields of
+    /// a playing cue from the show each tick).
+    pub fn took_synced_show(&mut self, show: &Show, engine: &mut Engine) {
+        // As this computer has it (its files where they are here).
+        let json = serde_json::to_string(show).unwrap_or_default();
+        engine.sync_lists(show);
+        self.saved_json = Some(json.clone());
+        self.history.reset(json.clone());
+        self.json = Some(json);
+        self.json_stale = false;
+        if self.selected.is_some_and(|id| show.cue(id).is_none()) {
+            self.selected = engine.playhead.filter(|id| show.cue(*id).is_some());
+        }
+        self.forget_multi();
+        self.capture_hotkey = None;
+    }
+}
+
+/// A computer that follows a primary (a display computer's hidden window, a
+/// backup's): its controls are locked, the show is run from the primary.
+pub fn locked(st: &UiState) -> bool {
+    st.net.me.on && st.net.me.adopted()
+}
+
+/// The line across the top of a follower's window: who runs the show, where
+/// this computer stands, and the one thing that can be done here.
+pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    let v = &st.net;
+    let who = v
+        .following
+        .as_ref()
+        .map_or_else(|| "The primary".to_string(), |f| f.name.clone());
+    ui.horizontal_wrapped(|ui| {
+        let what = if v.me.role == Role::Backup {
+            "this computer is its backup, following its show"
+        } else {
+            "this computer follows its show"
+        };
+        let r = ui.label(
+            RichText::new(format!(
+                "🔒 {who} runs the show: {what}, and its controls are locked here."
+            ))
+            .strong(),
+        );
+        note(ui, "locked_banner", r.rect);
+        if let Some(s) = &v.status.standing {
+            ui.label(RichText::new(s).weak());
+        }
+        if v.following.as_ref().is_some_and(|f| !f.online) {
+            ui.label(
+                RichText::new(format!("{who} can't be reached: playing on by its clock."))
+                    .color(STOP_RED),
+            );
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let r = ui
+                .button("Leave the show network")
+                .on_hover_text("Switch this computer out of the show network: it plays alone.");
+            note(ui, "leave_network", r.rect);
+            if r.clicked() {
+                actions.push(Action::Net(NetAction::SetOn(false)));
+            }
+        });
+    });
+}

@@ -296,8 +296,11 @@ fn a_computer_in_the_network_shows_whom_it_follows_and_only_the_switch() {
         ] {
             assert!(w.find("net_rects", absent).is_none(), "{absent}");
         }
-        // Switching off is leaving.
+        // Its window is locked (stage 4a): the switch is there but does
+        // nothing; leaving is the banner's button.
         w.press(&mut show, &mut st, "net_rects", "switch");
+        assert!(st.net_requests.is_empty(), "{:?}", st.net_requests);
+        w.press(&mut show, &mut st, "net_rects", "leave_network");
         assert_eq!(st.net_requests, vec![NetAction::SetOn(false)]);
     }
     assert_eq!(badge(&v).map(|b| b.text), Some("on".to_string()));
@@ -554,4 +557,120 @@ fn a_cue_whose_file_a_computer_lacks_is_marked_more_strongly_where_it_shows() {
         st.media = Arc::new(MediaView::default());
         assert!(net_media::cue_mark(&show, &st, &c).is_none());
     }
+}
+
+// ---- Playing together (stage 4a) ----
+
+/// A computer following "Booth".
+fn follower_view(role: Role) -> NetView {
+    let mut v = primary_view();
+    v.me.role = role;
+    v.me.primary = Some(LEFT);
+    v.peers.clear();
+    v.following = Some(Following {
+        id: LEFT,
+        name: "Booth".into(),
+        online: true,
+    });
+    v.status.standing = Some("Getting ready".into());
+    v
+}
+
+#[test]
+fn a_follower_is_locked_with_a_line_saying_who_runs_the_show() {
+    for role in [Role::Display, Role::Backup] {
+        for modern in [false, true] {
+            let mut st = UiState::default();
+            st.prefs.new_layout = modern;
+            st.net = Arc::new(follower_view(role));
+            let mut show = Show::default();
+            let c = show.make_cue(crate::show::CueType::Wait, None, 0);
+            show.cues.push(c);
+            let mut w = Win::new();
+            w.e.playhead = show.cues.first().map(|c| c.id);
+            w.settle(&mut show, &mut st);
+            let r = w
+                .find("net_rects", "locked_banner")
+                .expect("the banner is drawn");
+            assert!(Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(r));
+            // GO's key does nothing here: the show is run from the primary.
+            for key in [egui::Key::Space, egui::Key::Num0] {
+                let ev = |pressed| Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: Default::default(),
+                };
+                w.frame(&mut show, &mut st, vec![ev(true), ev(false)]);
+            }
+            w.settle(&mut show, &mut st);
+            assert!(w.e.active.is_empty() && w.e.pending.is_empty());
+            assert!(st.net_requests.is_empty());
+        }
+    }
+}
+
+#[test]
+fn the_primary_page_says_each_computer_is_in_step_and_sets_it_up() {
+    for modern in [false, true] {
+        let mut v = primary_view();
+        if let Some(s) = v.peers[0].status.as_mut() {
+            s.clock_error_ms = Some(0.05);
+            s.clock_locked = true;
+            s.in_step = true;
+        }
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v);
+        assert!(w.find("net_rects", &format!("step:{LEFT}")).is_some());
+        w.press(&mut show, &mut st, "net_rects", &format!("at_login:{LEFT}"));
+        assert_eq!(st.net_requests, vec![NetAction::StartAtLogin(LEFT, true)]);
+        st.net_requests.clear();
+        w.press(&mut show, &mut st, "net_rects", &format!("restart:{LEFT}"));
+        assert_eq!(st.net_requests, vec![NetAction::Restart(LEFT)]);
+        st.net_requests.clear();
+        // This computer's own tick.
+        w.press(&mut show, &mut st, "net_rects", "start_at_login");
+        assert_eq!(st.start_at_login_request, Some(true));
+    }
+    let (text, color) = super::step_words(&StatusReport {
+        standing: Some("Getting the show".into()),
+        ..Default::default()
+    });
+    assert_eq!(text, "Getting the show");
+    assert_ne!(color, GO_GREEN);
+}
+
+#[test]
+fn a_blended_picture_on_wifi_or_a_loose_clock_is_warned_of() {
+    let v = primary_view();
+    let left = &v.peers[0];
+    let mut show = Show::default();
+    let mut d = crate::show::OutputConfig::new(crate::show::OutputId(1), "D".into());
+    d.computer = Some(LEFT);
+    show.outputs.push(d);
+    let mut s = left.status.clone().unwrap();
+    s.clock_error_ms = Some(20.0);
+    // No blend: nothing to say.
+    assert_eq!(super::blend_warning(&show, left, &s), None);
+    show.outputs[0].blend.right = 0.1;
+    assert!(super::blend_warning(&show, left, &s).is_some_and(|w| w.contains("20 ms")));
+    s.clock_error_ms = Some(0.1);
+    assert_eq!(
+        super::blend_warning(&show, left, &s),
+        None,
+        "wired and close"
+    );
+    s.link = Link::WiFi;
+    assert!(super::blend_warning(&show, left, &s).is_some_and(|w| w.contains("Wi-Fi")));
+    // A part of a picture another computer shows counts too.
+    show.outputs[0].blend = Default::default();
+    s.link = Link::Wired;
+    s.clock_error_ms = Some(12.0);
+    let mut other = crate::show::OutputConfig::new(crate::show::OutputId(2), "E".into());
+    other.part_of = Some(crate::show::PartOf {
+        display: crate::show::OutputId(1),
+        area: [0.5, 0.0, 0.5, 1.0],
+    });
+    show.outputs.push(other);
+    assert!(super::blend_warning(&show, left, &s).is_some());
 }

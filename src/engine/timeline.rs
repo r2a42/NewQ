@@ -315,6 +315,41 @@ impl Runs {
         }
     }
 
+    /// Each run: its key, state, clock and anchor (`engine/net.rs`).
+    pub(super) fn net_runs(&self) -> Vec<(TimelineKey, RunState, f64, Option<f64>)> {
+        let mut v: Vec<_> = self
+            .map
+            .iter()
+            .map(|(k, r)| (*k, r.state, r.pos, r.anchor))
+            .collect();
+        v.sort_by_key(|r| format!("{:?}", r.0));
+        v
+    }
+
+    /// Anchor a run's clock at `anchor` (the shared time it was at 0); with
+    /// `now`, its clock is put there at once (it may go back a little, which
+    /// the anchor alone never does).
+    pub(super) fn net_place(&mut self, key: TimelineKey, anchor: f64, now: Option<f64>) {
+        if let Some(r) = self.map.get_mut(&key)
+            && matches!(r.state, RunState::Running | RunState::Cueing)
+        {
+            r.anchor = Some(anchor);
+            if let Some(now) = now
+                && r.state == RunState::Running
+            {
+                r.pos = (now - anchor).max(0.0);
+            }
+        }
+    }
+
+    /// No longer ticking by a shared clock.
+    pub(super) fn net_unanchor(&mut self) {
+        for r in self.map.values_mut() {
+            r.anchor = None;
+        }
+        self.stepping_at = None;
+    }
+
     /// The runs (instances) running by a shared clock.
     pub(super) fn anchored(&self) -> HashSet<u64> {
         self.map
@@ -734,6 +769,9 @@ impl Engine {
 
     /// Run from where it is: Stopped/parked -> cue then run; Paused -> resume; Running -> no-op.
     pub fn timeline_run(&mut self, show: &Show, key: TimelineKey) {
+        if self.gated(|_| crate::net::play::Command::TimelineRun { key }) {
+            return;
+        }
         match self.runs.map.get(&key).map(|r| r.state) {
             Some(RunState::Running) => self.log("The timeline is already running"),
             Some(RunState::Cueing) => {}
@@ -1248,6 +1286,13 @@ impl Engine {
     /// otherwise parks, with the picture (clips started held) when
     /// `show_picture`, without when not.
     pub fn timeline_seek(&mut self, show: &Show, key: TimelineKey, pos: f64, show_picture: bool) {
+        if self.gated(|_| crate::net::play::Command::TimelineSeek {
+            key,
+            pos,
+            picture: show_picture,
+        }) {
+            return;
+        }
         if !model::is_timeline(show, key) {
             self.problem("There is no such timeline");
             return;
@@ -1289,6 +1334,9 @@ impl Engine {
 
     /// Run from `pos`: cue what is there and run on from it.
     pub fn timeline_run_from(&mut self, show: &Show, key: TimelineKey, pos: f64) {
+        if self.gated(|_| crate::net::play::Command::TimelineRunFrom { key, pos }) {
+            return;
+        }
         if self.paused {
             self.set_paused(false);
         }
@@ -2055,6 +2103,15 @@ impl Engine {
         live: bool,
         waits_for_go: bool,
     ) {
+        if self.gated(|_| crate::net::play::Command::TimelinePause {
+            key,
+            freeze,
+            clips: clips.to_vec(),
+            live,
+            waits_for_go,
+        }) {
+            return;
+        }
         let paused = self.paused;
         let Some(run) = self.runs.map.get_mut(&key) else {
             self.log("The timeline is not running");
@@ -2154,6 +2211,9 @@ impl Engine {
     /// clock stands and nothing more of it starts; it is over when the last of
     /// them has gone. A Stop while an earlier one's fade is still going cuts.
     pub fn timeline_stop(&mut self, _show: &Show, key: TimelineKey, fade: f64) {
+        if self.gated(|_| crate::net::play::Command::TimelineStop { key, fade }) {
+            return;
+        }
         let Some(run) = self.runs.map.get(&key) else {
             return;
         };
@@ -2289,6 +2349,9 @@ impl Engine {
     /// a paused run goes on, a loop is left as its cue says; while it runs or
     /// cues, or a list stands at its end, nothing (and the log says why).
     pub fn timeline_go_one(&mut self, show: &Show, key: TimelineKey) {
+        if self.gated(|_| crate::net::play::Command::TimelineGoOne { key }) {
+            return;
+        }
         if !model::is_timeline(show, key) {
             self.problem("There is no such timeline");
             return;
@@ -2319,6 +2382,9 @@ impl Engine {
     /// A paused timeline goes on (a remote's resume); anything else is left as
     /// it is, and the log says so.
     pub fn timeline_continue(&mut self, show: &Show, key: TimelineKey) {
+        if self.gated(|_| crate::net::play::Command::TimelineContinue { key }) {
+            return;
+        }
         match self.runs.map.get(&key).map(|r| r.state) {
             Some(RunState::Paused { .. }) => {
                 if self.paused {
@@ -2333,6 +2399,9 @@ impl Engine {
     /// A loop playing on a timeline is left (a remote's leave-loop), as GO
     /// would: this pass is the last, or at once when its cue says so.
     pub fn timeline_leave(&mut self, show: &Show, key: TimelineKey) {
+        if self.gated(|_| crate::net::play::Command::TimelineLeave { key }) {
+            return;
+        }
         let looping = self
             .runs
             .map

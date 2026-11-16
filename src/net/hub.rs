@@ -91,6 +91,10 @@ pub enum NetAction {
     /// Primary: the network's passcode (None: none). Waiting: accept only a
     /// primary that has it.
     SetPasscode(Option<String>),
+    /// Primary: start NewQ again on a computer (a role change that needs it).
+    Restart(NodeId),
+    /// Primary: a computer starts NewQ at login, or not.
+    StartAtLogin(NodeId, bool),
 }
 
 /// What this computer has that the others are told about (set by the app).
@@ -98,6 +102,20 @@ pub enum NetAction {
 pub struct LocalFacts {
     pub monitors: Vec<MonitorReport>,
     pub audio_devices: Vec<String>,
+}
+
+/// How this computer is playing with the others, told to the hub by the app
+/// (stage 4a) for its status report.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SyncFacts {
+    pub clock_error_ms: Option<f64>,
+    pub clock_locked: bool,
+    pub rtt_ms: Option<f64>,
+    pub show_version: Option<u64>,
+    pub show_hash: Option<u64>,
+    pub in_step: bool,
+    pub standing: Option<String>,
+    pub start_at_login: bool,
 }
 
 /// What the hub tells the app.
@@ -216,6 +234,14 @@ pub enum Event {
     Media(Option<Box<crate::net::media::MediaReport>>),
     Send(NodeId, Msg),
     Broadcast(Msg),
+    /// To the computers of this network (or one), ahead of other frames when
+    /// `urgent` (stage 4a).
+    Tell {
+        to: Option<NodeId>,
+        msg: Msg,
+        urgent: bool,
+    },
+    Sync(SyncFacts),
     Quit,
 }
 
@@ -229,6 +255,9 @@ pub enum Target {
 /// The handle the app holds: start, ask, read.
 pub struct Hub {
     tx: Sender<Event>,
+    /// A follower's shared clock (stage 4a): kept by the clock thread the hub
+    /// starts while this computer follows a primary.
+    clock: super::time::ClockHandle,
     view: Arc<Mutex<Arc<NetView>>>,
     events: Receiver<NetEvent>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -244,6 +273,7 @@ impl Hub {
         let (ev_tx, ev_rx) = crossbeam_channel::unbounded();
         let mut state = State::new(cfg, me, tx.clone(), ev_tx);
         state.wake = Arc::new(wake);
+        let clock = state.clock.clone();
         let view = Arc::new(Mutex::new(Arc::new(state.view())));
         let published = view.clone();
         let thread = std::thread::Builder::new()
@@ -257,6 +287,7 @@ impl Hub {
             .ok();
         Hub {
             tx,
+            clock,
             view,
             events: ev_rx,
             thread,
@@ -291,6 +322,24 @@ impl Hub {
     #[allow(dead_code)] // for later stages
     pub fn broadcast(&self, msg: Msg) {
         let _ = self.tx.send(Event::Broadcast(msg));
+    }
+
+    // ---- Playing together (stage 4a) ----
+
+    /// Send `msg` to computer `to` of this network, or (None) to all of them,
+    /// ahead of other frames when `urgent`. Dropped where no session is up.
+    pub fn tell(&self, to: Option<NodeId>, msg: Msg, urgent: bool) {
+        let _ = self.tx.send(Event::Tell { to, msg, urgent });
+    }
+
+    /// How this computer plays with the others, for its report.
+    pub fn set_sync(&self, facts: SyncFacts) {
+        let _ = self.tx.send(Event::Sync(facts));
+    }
+
+    /// A follower's shared clock.
+    pub fn clock(&self) -> super::time::ClockHandle {
+        self.clock.clone()
     }
 
     /// What happened since the last call.
@@ -435,6 +484,10 @@ struct State {
     media: Option<Box<crate::net::media::MediaReport>>,
     quit: bool,
     wake: Arc<dyn Fn() + Send + Sync>,
+    // ---- Playing together (stage 4a) ----
+    clock: super::time::ClockHandle,
+    keeper: Option<(NodeId, super::time::Keeper)>,
+    sync: SyncFacts,
 }
 
 impl State {
@@ -459,6 +512,9 @@ impl State {
             media: None,
             quit: false,
             wake: Arc::new(|| {}),
+            clock: Default::default(),
+            keeper: None,
+            sync: SyncFacts::default(),
         }
     }
 
@@ -534,7 +590,7 @@ impl State {
             role: self.me.role,
             network: self.me.network,
             tcp_port: self.net.as_ref().map_or(0, |n| n.port),
-            show_version: None,
+            show_version: self.sync.show_version,
             term: self.me.term,
             on: self.me.on,
         }
@@ -576,6 +632,8 @@ impl State {
                     self.send(c, &msg);
                 }
             }
+            Event::Tell { to, msg, urgent } => self.tell(to, &msg, urgent),
+            Event::Sync(f) => self.sync = f,
             Event::Broadcast(msg) => {
                 let frame = Arc::new(proto::encode(&msg));
                 let to: Vec<ConnId> = self
@@ -1079,6 +1137,8 @@ impl State {
                     && let Some(from) = from
                 {
                     let _ = self.out.send(NetEvent::Message { from, msg: other });
+                    // Commands are timed: the app is roused at once.
+                    (self.wake)();
                 }
             }
         }
@@ -1196,6 +1256,8 @@ impl State {
                 }
             }
             NetAction::Release(id) => self.order(id, Msg::Release),
+            NetAction::Restart(id) => self.order(id, Msg::Restart),
+            NetAction::StartAtLogin(id, on) => self.order(id, Msg::StartAtLogin { on }),
             NetAction::SetRole(id, role) => {
                 if Role::GIVEN.contains(&role) {
                     self.order(id, Msg::SetRole { role });
@@ -1358,6 +1420,7 @@ impl State {
         if self.me.role == Role::Primary {
             self.dial(now);
         }
+        self.keep_clock();
         // Computers of other networks, or waiting, long gone are forgotten.
         let mine = self.me.network;
         self.peers.retain(|_, p| {
@@ -1470,9 +1533,95 @@ impl State {
             audio_devices: self.local.audio_devices.clone(),
             disk_free: self.disk_free,
             link: Link::Unknown,
-            clock_error_ms: None,
-            show_version: None,
+            clock_error_ms: self.sync.clock_error_ms,
+            show_version: self.sync.show_version,
             media_progress: self.media.clone(),
+            clock_locked: self.sync.clock_locked,
+            rtt_ms: self.sync.rtt_ms,
+            show_hash: self.sync.show_hash,
+            in_step: self.sync.in_step,
+            standing: self.sync.standing.clone(),
+            start_at_login: self.sync.start_at_login,
+        }
+    }
+
+    // ---- Playing together (stage 4a) ----
+
+    /// Send to the computers of this network that have a session up (`to`:
+    /// one of them).
+    fn tell(&mut self, to: Option<NodeId>, msg: &Msg, urgent: bool) {
+        let mine = self.me.network;
+        let conns: Vec<ConnId> = self
+            .peers
+            .values()
+            .filter(|p| to.is_none_or(|t| t == p.id))
+            .filter(|p| p.network.is_some() && p.network == mine)
+            .filter_map(|p| p.conn)
+            .filter(|c| {
+                self.conns
+                    .get(c)
+                    .is_some_and(|c| (c.welcomed || c.obeying) && !c.closing)
+            })
+            .collect();
+        if conns.is_empty() {
+            return;
+        }
+        let frame = Arc::new(proto::encode(msg));
+        for c in conns {
+            let ok = self.conns.get(&c).is_some_and(|conn| {
+                if urgent {
+                    conn.session.send_urgent(frame.clone())
+                } else {
+                    conn.session.send_bytes(frame.clone())
+                }
+            });
+            if !ok {
+                self.drop_slow(c);
+            }
+        }
+    }
+
+    /// A follower keeps a shared clock with its primary over UDP (`time.rs`),
+    /// asking at the primary's port where its beacon was heard; anyone else
+    /// keeps none. A new primary starts the clock afresh; the same one found
+    /// at another address keeps it.
+    fn keep_clock(&mut self) {
+        let primary = self
+            .me
+            .primary
+            .filter(|_| self.me.adopted() && self.me.role != Role::Primary);
+        let target = primary.and_then(|id| {
+            let p = self.peers.get(&id)?;
+            let ip = p.addr?;
+            (p.tcp_port != 0).then(|| SocketAddr::new(ip, p.tcp_port))
+        });
+        match (primary, target) {
+            (Some(id), Some(to)) => match &self.keeper {
+                Some((was, k)) if *was == id => {
+                    if k.target() != Some(to) {
+                        k.aim(to);
+                    }
+                }
+                _ => {
+                    if self.keeper.as_ref().is_some_and(|(was, _)| *was != id) {
+                        self.clock.reset();
+                    }
+                    match super::time::Keeper::start(self.clock.clone(), to) {
+                        Ok(k) => {
+                            log::info!("show network: keeping the shared clock with {to}");
+                            self.keeper = Some((id, k));
+                        }
+                        Err(e) => log::warn!("show network: the clock couldn't start: {e}"),
+                    }
+                }
+            },
+            // Following, the primary not heard yet: the clock runs on as it was.
+            (Some(_), None) => {}
+            (None, _) => {
+                if self.keeper.take().is_some() {
+                    self.clock.reset();
+                }
+            }
         }
     }
 

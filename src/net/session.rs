@@ -38,6 +38,9 @@ pub struct Session {
     /// This end's address (which adapter reaches the peer).
     pub local: Option<SocketAddr>,
     tx: Sender<Arc<Vec<u8>>>,
+    /// Frames written ahead of anything else queued (commands, their acks, the
+    /// heartbeat): never behind a piece of the show.
+    urgent: Sender<Arc<Vec<u8>>>,
     stream: TcpStream,
     closed: Arc<AtomicBool>,
 }
@@ -56,13 +59,14 @@ impl Session {
         stream.set_read_timeout(None)?;
         let closed = Arc::new(AtomicBool::new(false));
         let (tx, rx) = crossbeam_channel::bounded::<Arc<Vec<u8>>>(QUEUE);
+        let (urgent, urgent_rx) = crossbeam_channel::bounded::<Arc<Vec<u8>>>(QUEUE);
         let writer = stream.try_clone()?;
         let reader = stream.try_clone()?;
         {
             let closed = closed.clone();
             std::thread::Builder::new()
                 .name(format!("net-write-{id}"))
-                .spawn(move || write_loop(writer, rx, closed))?;
+                .spawn(move || write_loop(writer, urgent_rx, rx, closed))?;
         }
         {
             let closed = closed.clone();
@@ -75,6 +79,7 @@ impl Session {
             peer,
             local,
             tx,
+            urgent,
             stream,
             closed,
         })
@@ -95,6 +100,14 @@ impl Session {
             Ok(()) => true,
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
         }
+    }
+
+    /// Queue an encoded frame ahead of the rest (see `urgent`).
+    pub fn send_urgent(&self, frame: Arc<Vec<u8>>) -> bool {
+        if self.closed.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.urgent.try_send(frame).is_ok()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -134,9 +147,22 @@ impl Drop for Session {
     }
 }
 
-fn write_loop(mut stream: TcpStream, rx: Receiver<Arc<Vec<u8>>>, closed: Arc<AtomicBool>) {
+fn write_loop(
+    mut stream: TcpStream,
+    urgent: Receiver<Arc<Vec<u8>>>,
+    rx: Receiver<Arc<Vec<u8>>>,
+    closed: Arc<AtomicBool>,
+) {
     use std::io::Write;
-    while let Ok(frame) = rx.recv() {
+    loop {
+        // The urgent ones first, whatever else waits.
+        let frame = match urgent.try_recv() {
+            Ok(f) => f,
+            Err(_) => crossbeam_channel::select! {
+                recv(urgent) -> f => match f { Ok(f) => f, Err(_) => break },
+                recv(rx) -> f => match f { Ok(f) => f, Err(_) => break },
+            },
+        };
         if closed.load(Ordering::Relaxed) {
             break;
         }
