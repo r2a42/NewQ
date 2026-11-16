@@ -816,7 +816,9 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
             .strong(),
         );
         note(ui, "locked_banner", r.rect);
-        if let Some(s) = &v.status.standing {
+        // "In step" says nothing true while the primary isn't heard.
+        let heard = v.following.as_ref().is_none_or(|f| f.online) && quiet_words(v).is_none();
+        if let Some(s) = v.status.standing.as_ref().filter(|_| heard) {
             ui.label(RichText::new(s).weak());
         }
     });

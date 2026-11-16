@@ -153,6 +153,25 @@ The README describes the features; this file is about working on the code.
   as backup, Restart from the primary); never on separate computers. Known: a backup with no clock lock
   at takeover starts from its own clock; the old primary, now backup, copies the media into its store; an
   output that names the old primary stays with it.
+  Stage 6, the network test: `net/measure.rs` (pure) is `Msg::NetTest` (Begin{run,start}/End/Report/
+  LogTail; marked block in proto.rs) and a follower's `Measurer` (rows every `ROW_EVERY` of clock error,
+  rtt, `apart_ms` from `apart_between` at each heartbeat once `Follower::has_done(s)`, commands' `lead_ms`,
+  corrections via `correction_ms`, stalls, late frames; a `Report` each `SEND_EVERY`; `log_tail` at End),
+  fed by `app/play.rs`'s marked block (`net_test_message`, `net_test_pass` from `play_send_show`, which
+  also moves `TestMode::net_in/net_out`; `NEWQ_NET_TEST_AUTOSTART=<n>` for developers). `testmode/
+  network.rs`: `refusal` (a primary with a computer `in_step`), `build` (the user's displays and outputs,
+  a display per bare follower monitor, `KEPT_LIST` of the user's media disarmed so one-version stores keep
+  it, `SHOW_NAME`/`is_test_show`: a follower doesn't keep it), `NetPrep` (assets `MEDIA` and
+  `syncflash::make`, frames drawn by `syncflash::frame`), `NetRun` (Stage WaitingForMedia via
+  `media_state` and `MediaView.current`, Playing a `script` of `lap()`, Ending; `finish` restores, writes
+  report.txt, network.csv, events.log, computers.txt, computer-<name>-newq.log, the zip). `testmode/
+  net_judge.rs`: pure judging, constants, `csv`, `report`, `CANNOT_SEE`. Tests: `network_tests.rs` (a
+  simulated primary and two followers through `Leader`/`Follower`: late, cancel, drop-out),
+  `network_ui_tests.rs` (1280x760 both interfaces), hub_tests' loopback NetTest; `testmode/net_demo.rs`
+  (cfg(test)) starts NewQs as children (`NEWQ_E2E_PROGRAM`, `NEWQ_E2E_DISPLAYS`, `NEWQ_E2E_DIR`) for the
+  ignored `three_newqs_run_the_network_test_by_themselves`; `scripts/net_demo.sh` the same by hand. On
+  one overloaded machine the test said "Problems found" (up to 9 frames apart around a pause and seek,
+  174 main-loop stalls): unknown whether real computers do better. The soak's 10 laps were never run.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
