@@ -18,7 +18,7 @@ The README describes the features; this file is about working on the code.
   weighted fit by round trip, drift, slews once locked, never back), `msg.rs` the wire format
   (clock ask/reply, commands at a shared time, ack, heartbeat), `sim.rs` and `trial.rs` (tests
   only) a simulated network and three `Engine`s; the hour-long report is the ignored
-  `the_hour_long_report`. Nothing in the app uses it yet. `Engine::tick_shared(show, now)` ticks by
+  `the_hour_long_report`. The app uses it through `net/play.rs` (below). `Engine::tick_shared(show, now)` ticks by
   a shared time: cues get `ActiveCue::anchor` and runs `Run::anchor`, clips `clock_offset`, and
   their times are then the clock's (`ActiveCue::pinned`), not sums of ticks or the sound device's
   count; `tick` alone (the app) is unchanged.
@@ -89,6 +89,44 @@ The README describes the features; this file is about working on the code.
   primary's notice, `cue_mark`, the library on Settings ▸ Media, the missing-media note), and
   `MediaView.library_files` in the timeline bin's Files shelf. Tried headless with two NewQs on one
   machine; no real network, no take-up of a timeline clip or a cue on several displays.
+  Playing together (stage 4a; D6): `src/net/play.rs` and `src/engine/net.rs`. The engine's entry points
+  are a gate (`Engine::gated`, `NetGate`, `NetMode` Off/Primary/Follower): alone nothing is caught; on a
+  primary an input from outside the engine becomes a `play::Command` (`net_take`); on a follower it is
+  dropped; calls the engine makes to itself are never caught (`enter`/`leave` around `tick` and
+  `net_apply`; `net_settle` each pass). `Leader` times commands `lead_for(rtt, wifi)` ahead (50-400 ms;
+  at least 300 on Wi-Fi), never before an earlier one, does its own at the same shared time (`step`:
+  `tick_shared(at)`, `net_apply`, `tick_shared(now)`), resends unacknowledged ones every `RESEND` until
+  `GIVE_UP`, and sends a `PlayState` heartbeat every `BEAT` and after each command (`Engine::net_state`:
+  cues not on a timeline with their shared anchors, runs, playheads, the show's hash). `Follower`:
+  `receive` gets the cue ready (`load_ahead`) and acks; `step` does what is due by the shared clock,
+  backdating a late command (`net_apply(late)`), and holds commands while its show hash isn't the
+  primary's; it compares with a heartbeat only when no command at or below the heartbeat's `seq` is
+  waiting and none above it has been done; `Engine::net_correct` acts only on a difference seen at two
+  heartbeats in a row (`NetCorrection`), never on a cue within `SETTLING`: it starts missing cues part
+  way, stops extras (a carded cue of unknown length ends this way), re-anchors (or seeks past
+  `JUMP_PAST`) and puts runs right (`RunFix`). `net/time.rs`: `local_now()` is monotonic, counted from
+  the wall clock at start; the primary answers `ClockAsk` on its beacon socket (`discover.rs`); a
+  follower's `Keeper` thread (`keep_clock`, `Hub::clock()`) asks at 10 Hz until locked, 2 Hz after.
+  `proto::Msg::{Play, PlayAck, PlayState, ShowPart, Restart, StartAtLogin}`; `Hub::tell(to, msg, urgent)`
+  (`Session::send_urgent`, written ahead of other frames); `Hub::set_sync(SyncFacts)` fills the
+  `StatusReport`'s `clock_locked`, `rtt_ms`, `show_hash`, `in_step`, `standing`, `start_at_login`.
+  `src/app/play.rs`: `play_tick` replaces `engine.tick` (`mode_of(NetView)`: a primary with no adopted
+  computer is Off, so alone it is `tick` as before); `play_send_show` sends the whole show JSON 150 ms
+  after a change (`show_parts`, 256 KB pieces; FNV `show_hash`) and again to a computer whose reported
+  hash differs; `take_show`/`UiState::took_synced_show` install it, kept as `synced-show.newq` in the
+  node folder and opened at start-up; `sends_here`: remote input, feedback, clock triggers, streams,
+  send cues and timecode are the primary's alone (R8), `camera_missing` for cameras. Display computers
+  (D8): `is_display_computer` hides the control window (`keep_control_hidden`), gives every monitor an
+  output window (`reconcile_outputs`) and draws `card`/`card_text` per monitor until in step; Identify
+  flashes the name. `src/autostart.rs` writes start at login (pure contents tested; only Linux's was
+  run). `AudioOutputConfig::device_here`: no computers named = the primary only. `ui/network.rs`:
+  `locked`/`locked_banner` (a follower's actions are filtered to `Action::Net` and an edit is put back
+  within 0.25 s; greying alone doesn't reach every panel), `step_words`, `blend_warning`, Restart,
+  Starts at login. Test Mode is refused in a network. Tests: `net/play_tests.rs` (simulated, 2-3
+  engines; its `World` is the harness to grow), `net/hub_tests.rs` (loopback clock and show sync),
+  `engine/cards_tests.rs`, `ui/network_tests.rs`. Tried headless with two NewQs on one machine (output
+  windows did not go full screen there: no window manager); never on two computers. Not done: an
+  ordered group on a late joiner, timeline jumps got ready on arrival, sound resampled to the clock.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
