@@ -589,6 +589,15 @@ pub struct ActiveCue {
     /// Held on its last frame (or past its time) for the clip that abuts it on
     /// its track, until that one comes in (`Engine::timeline_joins`).
     joined: bool,
+    /// Ticking by a shared clock (`Engine::tick_shared`): the shared time at
+    /// which its own time was 0. Its time is then the clock's since then, not a
+    /// sum of ticks, nor its sound device's count. None otherwise (always, in
+    /// the app as it is).
+    anchor: Option<f64>,
+    /// A timeline's clip: its own time less its clock's time (`clock_time`) as
+    /// it was started or jumped, where both were exact. By a shared clock its
+    /// time is kept at its clock's plus this (`pinned`).
+    clock_offset: f64,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -605,6 +614,37 @@ struct Seek {
 }
 
 impl ActiveCue {
+    /// Its time by a shared clock at `now` (`Engine::tick_shared`), if it keeps
+    /// to one: one with an anchor (moved on while it is paused or held, so its
+    /// time stands meanwhile), or a clip of a run whose clock follows the shared
+    /// one (`runs`), whose time is its clock's while its content is on that
+    /// clock. None while it jumps (until its new decoders are there), and when
+    /// not ticking by a shared clock.
+    fn pinned(
+        &mut self,
+        now: Option<f64>,
+        paused: bool,
+        dt: f64,
+        runs: &HashSet<u64>,
+    ) -> Option<f64> {
+        let now = now?;
+        if let Some(anchor) = &mut self.anchor {
+            if paused {
+                *anchor += dt;
+                return None;
+            }
+            return (self.seeking.is_none()).then(|| (now - *anchor).max(0.0));
+        }
+        let on_clock = self.run.is_some_and(|r| runs.contains(&r))
+            && self.clip_zero.is_some()
+            && !paused
+            && !self.detached
+            && !self.live_frozen
+            && !self.held
+            && self.seeking.is_none();
+        on_clock.then_some(self.clock_time + self.clock_offset)
+    }
+
     /// The length of the bar for the cue if it can be scrubbed: a file that
     /// plays once (not a camera), or a still with a time; a loop with a set
     /// number of plays, all of them; a loop that never ends, one pass.
@@ -835,6 +875,11 @@ pub struct Reading {
     pub since: Instant,
     /// If it is the second half of a dip, how to finish the dip.
     reveal: Option<(u64, f64)>,
+    /// Ticking by a shared clock: the shared time it was fired at, which its
+    /// time counts from once it starts; a timeline's clip, where its run's
+    /// clock was then, which its time keeps to.
+    shared: Option<f64>,
+    clock: Option<f64>,
 }
 
 /// How long to wait for a file to be probed before giving up on the cue.
@@ -1078,6 +1123,17 @@ pub struct Engine {
     edits: Vec<ShowEdit>,
     /// The timelines' runs: their clocks and states (see `engine/timeline.rs`).
     runs: timeline::Runs,
+    /// Ticking by a shared clock (`tick_shared`, the network sync trial): None
+    /// unless that is called, so `tick` is as it always was.
+    sync: Option<SharedTime>,
+}
+
+/// Where the shared clock was at the last `Engine::tick_shared`.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct SharedTime {
+    /// The shared time of this tick (while it runs) or of the last one.
+    now: f64,
 }
 
 /// A change to the show asked for by a control cue.
@@ -1127,6 +1183,7 @@ impl Engine {
             loads: HashSet::new(),
             edits: Vec::new(),
             runs: timeline::Runs::default(),
+            sync: None,
         }
     }
 
@@ -1172,6 +1229,7 @@ impl Engine {
             loads: HashSet::new(),
             edits: Vec::new(),
             runs: timeline::Runs::default(),
+            sync: None,
         }
     }
 
@@ -2044,6 +2102,10 @@ impl Engine {
             .iter_mut()
             .find(|a| a.instance == instance)
             .ok_or("that cue is no longer playing")?;
+        // By a shared clock: its time goes on from `to` as of now.
+        if let (Some(anchor), Some(now)) = (&mut a.anchor, self.sync.map(|s| s.now)) {
+            *anchor = now - to;
+        }
         if is_image {
             a.elapsed = to;
             a.restart_auto_fade();
@@ -2645,6 +2707,8 @@ impl Engine {
             screens: dips.into_iter().map(displays::Screen::on).collect(),
             crossed_by: None,
             joined: false,
+            anchor: None,
+            clock_offset: 0.0,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2730,6 +2794,8 @@ impl Engine {
             screens: Vec::new(),
             crossed_by: None,
             joined: false,
+            anchor: None,
+            clock_offset: 0.0,
         };
         // A timeline's clip: its keyframes follow its run's clock from here.
         if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
@@ -2799,6 +2865,8 @@ impl Engine {
                                             file: m.file.clone(),
                                             since: Instant::now(),
                                             reveal,
+                                            shared: self.sync.map(|s| s.now),
+                                            clock: self.run_clock(at.run).map(|c| c.1),
                                         }),
                                         run: None,
                                         at: 0.0,
@@ -3150,6 +3218,7 @@ impl Engine {
             if let (Some(_), Some(clip)) = (at.run, clip) {
                 self.timeline_adopt(show, &mut active, &at, clip);
             }
+            active.clock_offset = active.elapsed - active.clock_time;
             self.active.push(active);
             // A timeline group's run starts what is at 0, in order.
             if let Some(key) = begun {
@@ -3270,6 +3339,52 @@ impl Engine {
 
     // ----- Per-frame update --------------------------------------------------
 
+    /// The time in its cue of the frame a video cue shows (its decoders count
+    /// from where they began, `seek_base`), for the sync trial.
+    #[cfg(test)]
+    pub fn shown_frame(&self, id: CueId) -> Option<f64> {
+        let a = self.active.iter().rev().find(|a| a.cue_id == id)?;
+        match &a.kind {
+            ActiveKind::Video(v) => v.player.current().map(|f| a.seek_base + f.pts),
+            _ => None,
+        }
+    }
+
+    /// Tick by a shared clock (the network sync trial, `crate::net`): `now` is
+    /// the shared time, which several computers agree on. The tick's `dt` is
+    /// how far it moved, and the cues started from here on, and the timelines'
+    /// runs, are anchored to it: a cue's time is `now` less the shared time it
+    /// began at (`ActiveCue::anchor`), however late its decoders were ready, and
+    /// a running timeline's clock is `now` less the shared time it was at 0
+    /// (`Run::anchor`), however late its clips were cued. A cue fired between
+    /// two ticks began at the earlier one's time, so to start something at
+    /// shared time T, tick to T and fire it then. A sound's own position is
+    /// still its device's (a picture with sound follows the anchor, not the
+    /// sound). Never called by the app: `tick` alone is as it always was.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tick_shared(&mut self, show: &Show, now: f64) {
+        let s = self.sync.get_or_insert(SharedTime { now });
+        // The shared clock never goes back; a tick that says it did stands still.
+        let prev = s.now;
+        let now = if now.is_finite() { now.max(prev) } else { prev };
+        s.now = now;
+        // Started since the last tick (by GO, or at its end), or let go by a
+        // timeline: they began, or go on, from its time.
+        for a in &mut self.active {
+            if a.anchor.is_none() && a.run.is_none() && !matches!(a.kind, ActiveKind::Audio(_)) {
+                a.anchor = Some(prev - a.elapsed);
+            }
+        }
+        self.runs.anchor_runs(prev);
+        self.tick(show, now - prev);
+    }
+
+    /// The shared time of the tick under way (or the last), when ticking by a
+    /// shared clock; a timeline's step that started a jump puts its own here.
+    fn shared_now(&self) -> Option<f64> {
+        self.runs.shared_at().or(self.sync.map(|s| s.now))
+    }
+
     pub fn tick(&mut self, show: &Show, dt: f64) {
         self.crumbs.next_cycle();
         self.slowest_cue = None;
@@ -3302,11 +3417,13 @@ impl Engine {
         self.crumbs
             .lap("the timelines' clocks and the clips they reach");
         if !self.paused {
-            // (the cue, a dip's reveal, how to start it)
-            type Due = (CueId, Option<(u64, f64)>, StartAt);
+            // (the cue, a dip's reveal, how to start it, how long ago it was due,
+            // where its run's clock was then)
+            type Due = (CueId, Option<(u64, f64)>, StartAt, f64, Option<f64>);
             let mut due: Vec<Due> = Vec::new();
             let mut gave_up: Vec<CueId> = Vec::new();
             let probe = &self.probe;
+            let shared_now = self.sync.map(|s| s.now);
             self.pending.retain_mut(|p| {
                 // A timeline's own: its run starts it (`timeline_tick`).
                 if p.run.is_some() {
@@ -3322,14 +3439,15 @@ impl Engine {
                         }
                         // Answered (or forgotten meanwhile: it asks again).
                         _ => {
-                            due.push((p.cue_id, r.reveal, p.start.clone()));
+                            let late = shared_now.zip(r.shared).map_or(0.0, |(n, s)| n - s);
+                            due.push((p.cue_id, r.reveal, p.start.clone(), late.max(0.0), r.clock));
                             false
                         }
                     };
                 }
                 p.remaining -= dt;
                 if p.remaining <= 0.0 {
-                    due.push((p.cue_id, None, p.start.clone()));
+                    due.push((p.cue_id, None, p.start.clone(), -p.remaining, None));
                     false
                 } else {
                     true
@@ -3342,8 +3460,25 @@ impl Engine {
                     .unwrap_or_default();
                 self.problem(format!("Cue {name}: reading its file took too long"));
             }
-            for (id, reveal, at) in due {
+            for (id, reveal, at, late, clock) in due {
+                let before = self.active.len();
                 self.start_with(show, id, reveal, at);
+                // Ticking by a shared clock: what this started began when it was
+                // due (part way through the tick, or when it was fired and its
+                // file had still to be read); a timeline's clip, where its clock
+                // was then.
+                if let Some(now) = self.sync.map(|s| s.now) {
+                    for a in self.active.iter_mut().skip(before) {
+                        if let (Some(_), Some(zero), Some(clock)) = (a.run, a.clip_zero, clock) {
+                            a.clock_offset = a.elapsed - (clock - zero).max(0.0);
+                        } else if a.anchor.is_none()
+                            && a.run.is_none()
+                            && !matches!(a.kind, ActiveKind::Audio(_))
+                        {
+                            a.anchor = Some(now - late - a.elapsed);
+                        }
+                    }
+                }
             }
         }
 
@@ -3378,6 +3513,9 @@ impl Engine {
         let unseen = self.runs.hiding();
         // Clips gone round to their in point (`RunOut::Loop`, detached at run time).
         let mut restarts: Vec<u64> = Vec::new();
+        // Ticking by a shared clock: its time, and the runs whose clocks follow it.
+        let shared = self.sync.map(|s| s.now);
+        let anchored = self.runs.anchored();
         self.crumbs.lap("starting the cues that are due");
         // The cue that took longest, and (just after) the one dropped, if any:
         // a cue that ends is dropped by `retain_mut` after its turn.
@@ -3453,6 +3591,8 @@ impl Engine {
                     cue.map(|c| c.number.as_str()).unwrap_or("?")
                 ));
             }
+            // Ticking by a shared clock: its time is the clock's (`tick_shared`).
+            let pinned = a.pinned(shared, paused, dt, &anchored);
 
             match &mut a.kind {
                 ActiveKind::Video(v) => {
@@ -3489,6 +3629,7 @@ impl Engine {
                     }
                     if a.started {
                         match &v.voice {
+                            _ if pinned.is_some() => a.elapsed = pinned.unwrap_or(a.elapsed),
                             Some(vo) if !vo.finished() => {
                                 a.elapsed = a.elapsed.max(a.seek_base + vo.clock());
                             }
@@ -3496,8 +3637,11 @@ impl Engine {
                             _ => {}
                         }
                         // The picture follows the sound's clock, lead and all,
-                        // less its own delay; with no sound, its own time.
+                        // less its own delay; with no sound, its own time. (By a
+                        // shared clock, that clock's: the sound's device keeps
+                        // its own time.)
                         let on_the_clock = match &v.voice {
+                            _ if pinned.is_some() => None,
                             Some(vo) if !vo.finished() => Some(vo.clock_with_lead()),
                             _ => None,
                         };
@@ -3555,7 +3699,9 @@ impl Engine {
                         }
                     }
                     a.started = img.image.is_some();
-                    if a.started && !paused {
+                    if let (true, Some(t)) = (a.started, pinned) {
+                        a.elapsed = t;
+                    } else if a.started && !paused {
                         a.elapsed += dt;
                     }
                     // A shape or typed text whose settings were changed is drawn again.
@@ -3686,7 +3832,9 @@ impl Engine {
                             ));
                         }
                     }
-                    if !paused {
+                    if let Some(t) = pinned {
+                        a.elapsed = t;
+                    } else if !paused {
                         a.elapsed += fade_dt;
                     }
                     if a.duration.is_some_and(|d| a.elapsed >= d) {
@@ -3694,7 +3842,9 @@ impl Engine {
                     }
                 }
                 ActiveKind::Group(_) => {
-                    if !paused {
+                    if let Some(t) = pinned {
+                        a.elapsed = t;
+                    } else if !paused {
                         a.elapsed += dt;
                     }
                     completed = done_groups.contains(&a.instance);

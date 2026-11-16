@@ -234,6 +234,10 @@ struct Run {
     at_end: bool,
     /// `Runs::placed` when it was begun or put at a new place (`RunView::mark`).
     placed: u64,
+    /// Ticking by a shared clock (`Engine::tick_shared`): the shared time at
+    /// which its clock was (or would have been) at 0, while it runs or cues to
+    /// run. Its clock is then that time's distance, not a sum of ticks.
+    anchor: Option<f64>,
 }
 
 impl Run {
@@ -254,6 +258,7 @@ impl Run {
             looping: None,
             at_end: false,
             placed: 0,
+            anchor: None,
         }
     }
 
@@ -280,6 +285,9 @@ pub struct Runs {
     /// Counts the times a run has been put at a new place (`timeline_place`):
     /// a clock step that started a jump stops there.
     placed: u64,
+    /// Ticking by a shared clock: the shared time a run's clock step has got
+    /// to while it starts what it reaches (a jump made there is anchored to it).
+    stepping_at: Option<f64>,
 }
 
 /// What a run placed at a new time does there.
@@ -292,6 +300,35 @@ enum Then {
 }
 
 impl Runs {
+    /// Ticking by a shared clock, at the start of a tick (`Engine::tick_shared`):
+    /// a run that went on since the last (GO, a resume) is anchored to that
+    /// tick's time `at`, where its clock stood; one that stands is not anchored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn anchor_runs(&mut self, at: f64) {
+        for r in self.map.values_mut() {
+            match r.state {
+                RunState::Running | RunState::Cueing => {
+                    r.anchor.get_or_insert(at - r.pos);
+                }
+                RunState::Stopped | RunState::Paused { .. } => r.anchor = None,
+            }
+        }
+    }
+
+    /// The runs (instances) running by a shared clock.
+    pub(super) fn anchored(&self) -> HashSet<u64> {
+        self.map
+            .values()
+            .filter(|r| r.state == RunState::Running && r.anchor.is_some())
+            .map(|r| r.instance)
+            .collect()
+    }
+
+    /// The shared time a run's clock step has got to (see `stepping_at`).
+    pub(super) fn shared_at(&self) -> Option<f64> {
+        self.stepping_at
+    }
+
     /// Each run's clock, by its instance.
     pub(super) fn clocks(&self) -> HashMap<u64, f64> {
         self.map.values().map(|r| (r.instance, r.pos)).collect()
@@ -937,6 +974,9 @@ impl Engine {
         r.parked = !run;
         r.placed = self.runs.placed;
         r.cue_since = run.then(Instant::now);
+        // By a shared clock: it runs from `pos` as of now, however long its
+        // clips take to be cued (it catches up once they are).
+        r.anchor = self.shared_now().filter(|_| run).map(|now| now - pos);
         if !picture {
             r.unstarted = ch.alive.clone();
         }
@@ -1064,6 +1104,8 @@ impl Engine {
         let zero = zero_of(cue);
         a.clip_zero = Some(zero);
         a.clock_time = (pos - zero).max(0.0);
+        // Its time once jumped is `x.from` (`apply_seek`).
+        a.clock_offset = x.from - a.clock_time;
         a.clocked = timing.clocked;
         a.ends_at = timing.ends_at;
         a.detached = false;
@@ -1576,7 +1618,12 @@ impl Engine {
         let instance = run.instance;
         let placed = self.runs.placed;
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-        let target = run.pos + dt;
+        // By a shared clock, the clock is where that says (never back).
+        let anchor = run.anchor.filter(|_| self.sync.is_some());
+        let target = match (anchor, self.sync) {
+            (Some(a), Some(s)) => (s.now - a).max(run.pos),
+            _ => run.pos + dt,
+        };
         let order = |p: &PendingCue| {
             let c = show.cue(p.cue_id);
             (
@@ -1607,7 +1654,11 @@ impl Engine {
             if let Some(r) = self.runs.map.get_mut(&key) {
                 r.pos = r.pos.max(p.at);
             }
+            // A jump it makes there is made at the shared time the clock was there.
+            let pos = self.runs.map.get(&key).map_or(p.at, |r| r.pos);
+            self.runs.stepping_at = anchor.map(|a| a + pos);
             self.start_at(show, p.cue_id, p.start);
+            self.runs.stepping_at = None;
             // Stopped, paused, or put somewhere else (a jump, which has run on
             // from there itself if it could).
             if !self.still_running(key, instance) || self.runs.placed != placed {
