@@ -1086,6 +1086,55 @@ next versions.
   waiting to join can be given it too, and then only that show takes it.
 - A wired network is recommended; Wi-Fi works.
 
+### Media on every computer
+
+Every computer of the show network gets every file of the show by itself: you
+never copy media by hand, and nothing waits for it.
+
+- **It just goes.** As soon as a computer is in the show, the primary sends it
+  the show's files, the ones nearest the playhead first (then those of a
+  running timeline from its clock, then the other cue lists, then everything
+  behind the playheads). Jump the playhead about and the order follows it,
+  about once a second, without starting anything again: a file under way
+  finishes, and a file put aside goes on from where it stopped.
+- **Rehearsal never waits.** Each computer plays what it has. Where a cue's
+  file hasn't reached a computer yet, its display shows a plain card in the
+  cue's place: *Media transferring*, the file's name, how far along it is and
+  about how long is left. The cue keeps its place and its length (the primary
+  tells the others how long each file is), so cue lists and timelines keep
+  their timing. When the file arrives while the cue is still up, it takes over
+  at the right moment of the cue. A file isn't played until all of it is there
+  and checked. A sound on its way is silent until it arrives.
+- **Media not found.** A file the primary itself hasn't (it was moved, a disk
+  isn't mounted) can't reach anyone: its displays say *Media not found* and the
+  primary's media manager lists it (*Settings ▸ Media ▸ Open the media
+  manager…*), where it is found as ever.
+- **Black instead of cards.** *Settings ▸ Media ▸ Show transfer cards on the
+  displays*: off, a display shows black where the card would be, for a show in
+  front of an audience.
+- **The library.** *Settings ▸ Media ▸ Folders to keep on every computer*: add a
+  folder of content you might use (at load-in, all of it). It goes to every
+  computer after the files the show uses, so a file is already everywhere when
+  you reach for it, and its files are offered in the timeline workspace's
+  *Files* shelf. A folder is read once: NewQ remembers what it read, so a big
+  folder isn't read again after a restart.
+- **Progress.** On the primary, *Settings ▸ Show network* has every computer's
+  progress by bytes (percent, what is left, the rate, about how long), files no
+  computer has, its free disk and what the next copy needs, and all the
+  computers together at the top. While anything is copying the primary's status
+  bar says so: playback may be less smooth meanwhile (it is a notice, never a
+  lock). A computer whose file hasn't arrived is marked in the cue list (⏳,
+  red when it is the computer that shows that cue's display; hover for which
+  computers and how far along). Each computer's own page and status bar show
+  its own progress.
+- **Versions.** Change a file on the primary and the others get the new one.
+  By default each computer keeps the last five versions of the show's media, so
+  going back to an older show needs no copying. A computer short of room can be
+  set from the primary to *Replace* (only the newest is kept), or to replace
+  only very large files; the setting is kept on that computer. *Verify* reads
+  every file a computer holds again and copies a damaged one again.
+- Where it is kept: the `media` folder beside the log on each computer.
+
 ## Timelines
 
 A *Start all together* group is a **timeline**: each cue in it (a *clip*) starts at
@@ -1832,6 +1881,7 @@ release build.
 | `NEWQ_AUTOSTART`  | Press GO this many seconds after starting (`1` = 5), once, for shows that run unattended |
 | `NEWQ_NODE_DIR`   | Folder of this computer's show network identity (`node.json`; default the log folder), to run several NewQs on one computer |
 | `NEWQ_NET_PORT`   | First port of the show network's range (default 47820)              |
+| `NEWQ_MEDIA_RATE` | Bytes a second the primary sends media at most (for trying transfers; default as fast as it goes) |
 
 ## How it works
 

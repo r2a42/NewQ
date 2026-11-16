@@ -13,6 +13,16 @@ release page, and a release is refused if it has none.
   them on (or starting them with `newq --join`). Displays can be put on another computer's monitor
   and sound outputs given to other computers. This version only finds the computers and gives
   them roles: playing across them comes in the next ones. Off unless you turn it on.
+- **The show's media reaches every computer by itself.** In a show network the primary sends every
+  file of the show to every computer, nearest the playhead first and following the playhead as you
+  jump about, then the folders you add under *Settings ▸ Media ▸ Folders to keep on every computer*
+  (a library of content you might use). Rehearsal never waits: a display whose file hasn't arrived
+  shows a *Media transferring* card in the cue's place (name, percent, time left), or *Media not
+  found*, and the cue keeps its timing; when the file arrives the cue takes it up at the right
+  moment. A file is only ever played once all of it is there and checked. The primary shows each
+  computer's progress and all of them together, says in its status bar while copying runs that
+  playback may be less smooth, marks cues whose file a computer still lacks, and sets each
+  computer to keep versions or to replace. Cards can be turned to black for an audience.
 
 ## 0.23.1
 
