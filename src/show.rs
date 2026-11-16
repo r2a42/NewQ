@@ -81,6 +81,14 @@ pub struct Show {
     /// OSC and MIDI control. Off unless the show asks for it.
     #[serde(default, skip_serializing_if = "RemoteSettings::is_default")]
     pub remote: RemoteSettings,
+    /// The media manager's library: folders whose media goes to every
+    /// computer of a show network, used by a cue or not (rulings R15, R19).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_folders: Vec<PathBuf>,
+    /// In a show network, a display whose cue's file hasn't reached its
+    /// computer shows black instead of the "Media transferring" card.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_transfer_cards: bool,
 }
 
 /// A named audio output, on one of the machine's audio devices.
@@ -253,6 +261,8 @@ impl Default for Show {
             own_layers: true,
             sync: SyncSettings::default(),
             remote: RemoteSettings::default(),
+            library_folders: Vec::new(),
+            no_transfer_cards: false,
         };
         let id = OutputId(show.alloc_id());
         show.outputs.push(OutputConfig::new(id, "Display 1".into()));
@@ -7576,6 +7586,28 @@ mod tests {
         }
         show.normalize_lists();
         (show, other)
+    }
+
+    #[test]
+    fn library_folders_and_the_card_setting_round_trip_and_are_not_written_unset() {
+        let show = Show::default();
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(
+            !json.contains("library_folders") && !json.contains("no_transfer_cards"),
+            "{json}"
+        );
+        // A show from before the media manager loads with neither.
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert!(back.library_folders.is_empty() && !back.no_transfer_cards);
+        let show = Show {
+            library_folders: vec![PathBuf::from("/Volumes/Content/Looks")],
+            no_transfer_cards: true,
+            ..Show::default()
+        };
+        let json = serde_json::to_string(&show).unwrap();
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.library_folders, show.library_folders);
+        assert!(back.no_transfer_cards);
     }
 
     #[test]

@@ -202,13 +202,19 @@ impl WaveformCache {
     /// The waveform of `path`, starting to read it in the background if need be.
     pub fn get(&mut self, ff: Option<&Ffmpeg>, path: &Path, duration: Option<f64>) -> &WaveState {
         if !self.entries.contains_key(path) {
+            // In a show network, the store's copy once it is here (asked
+            // again while it isn't).
+            let file = match crate::net::media::local_path(path) {
+                crate::net::media::Local::Here(f) => f,
+                _ => return &WaveState::Pending,
+            };
             let state = match ff {
                 None => WaveState::Failed("ffmpeg not found".into()),
-                Some(_) if !path.is_file() => WaveState::Failed("file not found".into()),
+                Some(_) if !file.is_file() => WaveState::Failed("file not found".into()),
                 Some(ff) => {
                     let (ff, tx, p) = (ff.clone(), self.tx.clone(), path.to_path_buf());
                     std::thread::spawn(move || {
-                        let r = read(&ff, &p, duration);
+                        let r = read(&ff, &file, duration);
                         let _ = tx.send((p, r));
                     });
                     WaveState::Pending

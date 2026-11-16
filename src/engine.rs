@@ -1,6 +1,7 @@
 //! Playback engine: fires cues, runs pre-waits, continues, fades and stops,
 //! and owns the decoders for everything that is playing.
 
+mod cards;
 mod displays;
 mod timeline;
 
@@ -598,6 +599,9 @@ pub struct ActiveCue {
     /// it was started or jumped, where both were exact. By a shared clock its
     /// time is kept at its clock's plus this (`pinned`).
     clock_offset: f64,
+    /// In a show network, its file isn't on this computer yet: a card (or
+    /// silence) keeps its place until the file is here (`cards.rs`).
+    card: Option<Box<cards::CardState>>,
 }
 
 /// Decoders for a new position in a cue that is playing. The old ones keep
@@ -611,6 +615,10 @@ struct Seek {
     /// Its length from there, when that changes with the jump (a timeline's
     /// clip jumped where it is by a seek of its timeline).
     duration: Option<Option<f64>>,
+    /// The cue's time goes on as it was (a file that arrived while its card
+    /// was up, taken up where the cue is by now): only the decoders' start is
+    /// moved, not the cue's time.
+    keep_time: bool,
 }
 
 impl ActiveCue {
@@ -977,6 +985,11 @@ enum PreparedKind {
     Audio(Voice),
     /// A title being drawn on a thread (at 4K it takes tens of milliseconds).
     Text(Receiver<Result<RgbaImage, String>>),
+    /// In a show network, a picture whose file isn't on this computer yet:
+    /// the card drawn in its place (`cards.rs`).
+    Card(Receiver<Result<RgbaImage, String>>),
+    /// The same for a sound: silence that keeps its time.
+    Silent,
 }
 
 struct Prepared {
@@ -1126,6 +1139,11 @@ pub struct Engine {
     /// Ticking by a shared clock (`tick_shared`, the network sync trial): None
     /// unless that is called, so `tick` is as it always was.
     sync: Option<SharedTime>,
+    /// A media finder of its own (tests); else the app's, if this computer
+    /// takes its media from a show network's primary (`net::media`).
+    media_finder: Option<std::sync::Arc<dyn crate::net::media::Finder>>,
+    /// The show's "transfer cards" setting, as of the last tick (off: black).
+    transfer_cards: bool,
 }
 
 /// Where the shared clock was at the last `Engine::tick_shared`.
@@ -1184,6 +1202,8 @@ impl Engine {
             edits: Vec::new(),
             runs: timeline::Runs::default(),
             sync: None,
+            media_finder: None,
+            transfer_cards: true,
         }
     }
 
@@ -1230,6 +1250,8 @@ impl Engine {
             edits: Vec::new(),
             runs: timeline::Runs::default(),
             sync: None,
+            media_finder: None,
+            transfer_cards: true,
         }
     }
 
@@ -1620,6 +1642,15 @@ impl Engine {
     /// Work another cue list: the playhead of the one being left is kept
     /// where it is, and the other's is taken up again (the first cue that
     /// will run, if it hasn't been used).
+    /// The playheads the other cue lists were left at (the media manager's
+    /// order looks ahead of each).
+    pub fn other_playheads(&self) -> Vec<(u32, Option<CueId>)> {
+        let mut v: Vec<(u32, Option<CueId>)> =
+            self.list_playheads.iter().map(|(l, p)| (*l, *p)).collect();
+        v.sort_by_key(|(l, _)| *l);
+        v
+    }
+
     pub fn switch_list(&mut self, show: &Show, list: u32) {
         let list = if show.has_list(list) { list } else { 0 };
         if list == self.active_list {
@@ -2117,6 +2148,7 @@ impl Engine {
                 file_from,
                 spawned_at: Instant::now(),
                 duration: None,
+                keep_time: false,
             });
         }
         Ok(())
@@ -2446,17 +2478,50 @@ impl Engine {
             }),
             _ => None,
         };
+        // In a show network, a file not on this computer yet: a card (or
+        // silence) in its place, with the cue's length (R13).
+        let file = match self.local_file(&m.file) {
+            crate::net::media::Local::Here(f) => f,
+            other => {
+                let kind = match &cue.kind {
+                    CueKind::Audio(_) => PreparedKind::Silent,
+                    _ => PreparedKind::Card(cards::draw_on_thread(
+                        &m.file,
+                        &other,
+                        self.output_size(m.output),
+                        !self.transfer_cards,
+                    )),
+                };
+                let duration = match &cue.kind {
+                    CueKind::Image(_) => m.end.filter(|d| *d > 0.0),
+                    _ => duration,
+                };
+                return Ok(Prepared {
+                    cue_id: cue.id,
+                    pass_len,
+                    speed: speed.as_ref().map(|p| p.map.clone()),
+                    sig,
+                    kind,
+                    duration,
+                    warning: None,
+                    t0: shift,
+                    file_from: shift_file,
+                    shift,
+                    lead,
+                });
+            }
+        };
         let kind = match &cue.kind {
             CueKind::Video(_) => {
                 let vi = info.video.as_ref().ok_or("file has no video stream")?;
                 let size = video::decode_size((vi.width, vi.height), sig.size, m.fit == Fit::Cover);
                 // Hap goes to the graphics card as it is; anything else is decoded and scaled.
                 let player = if video::plays_as_hap(vi) {
-                    VideoPlayer::spawn_hap(ff, &m.file, vi, m.start, playback, rate, speed.clone())
+                    VideoPlayer::spawn_hap(ff, &file, vi, m.start, playback, rate, speed.clone())
                 } else {
                     VideoPlayer::spawn_at_rate(
                         ff,
-                        &m.file,
+                        &file,
                         vi,
                         m.start,
                         playback,
@@ -2469,7 +2534,7 @@ impl Engine {
                 let voice = if info.has_audio && self.audio.available() {
                     match self.audio.spawn_voice_routed(
                         ff,
-                        &m.file,
+                        &file,
                         m.start,
                         playback,
                         initial_gain,
@@ -2494,7 +2559,7 @@ impl Engine {
             CueKind::Image(_) => {
                 let vi = info.video.as_ref().ok_or("file is not an image")?;
                 let size = video::decode_size((vi.width, vi.height), sig.size, m.fit == Fit::Cover);
-                PreparedKind::Image(video::load_image(ff, &m.file, size))
+                PreparedKind::Image(video::load_image(ff, &file, size))
             }
             CueKind::Audio(_) => {
                 if !info.has_audio {
@@ -2504,7 +2569,7 @@ impl Engine {
                     .audio
                     .spawn_voice_routed(
                         ff,
-                        &m.file,
+                        &file,
                         m.start,
                         playback,
                         initial_gain,
@@ -2709,6 +2774,7 @@ impl Engine {
             joined: false,
             anchor: None,
             clock_offset: 0.0,
+            card: None,
         });
         if cue.continue_mode == ContinueMode::AutoContinue {
             self.fire_next(show, cue.id);
@@ -2796,6 +2862,7 @@ impl Engine {
             joined: false,
             anchor: None,
             clock_offset: 0.0,
+            card: None,
         };
         // A timeline's clip: its keyframes follow its run's clock from here.
         if let Some((zero, t)) = at.run.and_then(|r| self.timeline_clock_time(original, r)) {
@@ -2910,7 +2977,22 @@ impl Engine {
                         active.started = false;
                         active.audio_lead = show.audio_delay_ms(m.audio_output) as f64 / 1000.0;
                         active.video_lag = show.video_delay_ms(m.output) as f64 / 1000.0;
+                        let carded = matches!(p.kind, PreparedKind::Card(_) | PreparedKind::Silent);
                         active.kind = match p.kind {
+                            PreparedKind::Card(loader) => ActiveKind::Image(ImageState {
+                                image: None,
+                                version: 0,
+                                loader: Some(loader),
+                                output: m.output,
+                                layer: m.layer,
+                                fit: Fit::Stretch,
+                                transform: m.transform,
+                                color: m.color,
+                                fx: VideoFx::at(&m.effects, 0.0),
+                                redraw: None,
+                                live: None,
+                            }),
+                            PreparedKind::Silent => ActiveKind::Wait,
                             PreparedKind::Video { player, voice } => {
                                 ActiveKind::Video(Box::new(VideoState {
                                     player,
@@ -2970,6 +3052,14 @@ impl Engine {
                                 },
                             }),
                         };
+                        if carded {
+                            active.card =
+                                Some(Box::new(cards::CardState::new(m.file.clone(), m.fit)));
+                            // Silence keeps its time from now.
+                            if matches!(active.kind, ActiveKind::Wait) {
+                                active.started = true;
+                            }
+                        }
                         // A picture is on each of its displays.
                         if active.is_visual() {
                             active.screens = m
@@ -3390,6 +3480,10 @@ impl Engine {
         self.slowest_cue = None;
         self.probe.poll();
         self.waveforms.poll();
+        // In a show network: the cards of files on their way, and files that
+        // have arrived taken up.
+        self.transfer_cards = !show.no_transfer_cards;
+        self.tend_cards(show);
         self.timecode.tick(dt);
         for problem in self.outbox.errors() {
             self.problem(problem);
@@ -3904,7 +3998,8 @@ impl Engine {
                             i.fit = m.fit;
                         }
                         // The time a picture is held, changed while it is up.
-                        if !a.stopping {
+                        // (A card keeps the length of what it stands for.)
+                        if !a.stopping && a.card.is_none() {
                             a.duration = m.end.filter(|d| *d > 0.0).map(|d| d + a.extra_hold);
                         }
                         i.transform = geometry;
@@ -4402,6 +4497,10 @@ impl Engine {
             let Some(m) = cue.kind.file_media() else {
                 continue;
             };
+            // (A file still on its way to this computer is got ready once here.)
+            if !self.local_file(&m.file).is_here() {
+                continue;
+            }
             let info = match self.probe.get_urgent(self.ff.as_ref(), &m.file) {
                 ProbeState::Ready(info) => info.clone(),
                 _ => continue,
@@ -4441,6 +4540,10 @@ impl Engine {
             let Some(m) = cue.kind.file_media() else {
                 continue;
             };
+            // (A file still on its way to this computer is got ready once here.)
+            if !self.local_file(&m.file).is_here() {
+                continue;
+            }
             let info = match self.probe.get_urgent(self.ff.as_ref(), &m.file) {
                 ProbeState::Ready(info) => info.clone(),
                 _ => continue,
@@ -4622,8 +4725,34 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
         }
         VideoStart::GoSilent => {}
     }
-    let s = a.seeking.take()?;
+    let mut s = a.seeking.take()?;
     let lead = a.audio_lead;
+    // A file that arrived while its card was up: the card makes way.
+    if let Some(card) = a.card.take() {
+        match &a.kind {
+            ActiveKind::Image(i) if s.player.is_some() => {
+                let player = s.player.take()?;
+                a.kind = ActiveKind::Video(Box::new(VideoState {
+                    player,
+                    voice: None,
+                    output: i.output,
+                    layer: i.layer,
+                    fit: card.fit,
+                    transform: i.transform,
+                    color: i.color,
+                    fx: i.fx,
+                    spawned_at: s.spawned_at,
+                }));
+            }
+            ActiveKind::Wait if s.voice.is_some() => {
+                let voice = s.voice.take()?;
+                voice.set_lead(lead);
+                voice.set_paused(paused);
+                a.kind = ActiveKind::Audio(voice);
+            }
+            _ => {}
+        }
+    }
     match &mut a.kind {
         ActiveKind::Video(v) => {
             if let Some(p) = s.player {
@@ -4646,7 +4775,9 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
         _ => return None,
     }
     a.seek_base = s.base;
-    a.elapsed = s.base;
+    if !s.keep_time {
+        a.elapsed = s.base;
+    }
     a.file_from = s.file_from;
     // (A clip gone round again from its last frame.)
     a.held = false;

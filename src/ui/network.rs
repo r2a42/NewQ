@@ -437,9 +437,6 @@ fn facts(s: &proto::StatusReport, p: Option<&PeerView>) -> String {
     if let Some(e) = s.clock_error_ms {
         parts.push(format!("clock ±{e:.1} ms"));
     }
-    if let Some(m) = s.media_progress {
-        parts.push(format!("media {:.0}%", m * 100.0));
-    }
     parts.join(" · ")
 }
 

@@ -1094,6 +1094,7 @@ impl Engine {
             file_from: p.file_from,
             spawned_at: Instant::now(),
             duration: Some(p.duration.map(|d| d + x.from)),
+            keep_time: false,
         });
         a.pass_len = p.pass_len;
         a.speed = p.speed;
@@ -1519,6 +1520,7 @@ impl Engine {
                 file_from: 0.0,
                 spawned_at: Instant::now(),
                 duration: Some(p.duration.map(|d| d + lead)),
+                keep_time: false,
             });
         }
     }

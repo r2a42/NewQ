@@ -59,10 +59,12 @@ pub struct StatusReport {
     pub disk_free: Option<u64>,
     pub link: Link,
     /// Filled by later stages: the shared clock's error, the show version it
-    /// has, and how much of the media it has (0 to 1).
+    /// has.
     pub clock_error_ms: Option<f64>,
     pub show_version: Option<u64>,
-    pub media_progress: Option<f32>,
+    /// Its media: progress by bytes, what is missing, its versions setting
+    /// (`net::media`). None from the primary itself and from a NewQ alone.
+    pub media_progress: Option<Box<crate::net::media::MediaReport>>,
 }
 
 /// A monitor as a computer reports it: what a display of the show keeps to
@@ -180,6 +182,30 @@ pub enum Msg {
     Pong {
         n: u64,
     },
+    // ---- The media manager (`net::media`) ----
+    /// Primary to a computer: its media is served on this port (at the
+    /// primary's address); `sources` are other computers ("address:port")
+    /// that have every used file, to fetch from as well.
+    MediaServer {
+        port: u16,
+        #[serde(default)]
+        sources: Vec<String>,
+    },
+    /// Primary to a computer: the show's files, nearest the playheads first.
+    MediaOrder {
+        paths: Vec<String>,
+    },
+    /// Primary to a computer: how it keeps versions (kept on that computer).
+    MediaPolicy {
+        keep: usize,
+        #[serde(default)]
+        replace_all: bool,
+        #[serde(default)]
+        replace_over: Option<u64>,
+    },
+    /// Primary to a computer: check every file of its store again.
+    MediaVerify,
+    // ---- end of the media manager's ----
     /// A message a later NewQ of the same protocol sent, unknown here.
     #[serde(other)]
     Unknown,

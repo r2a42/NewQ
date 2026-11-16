@@ -27,7 +27,8 @@ const PROBE_WORKERS: usize = 3;
 
 /// Files waiting to be probed, shared with the worker threads.
 struct Jobs {
-    queue: Mutex<VecDeque<(PathBuf, Ffmpeg)>>,
+    /// (the path the show names, the file to read, FFmpeg)
+    queue: Mutex<VecDeque<(PathBuf, PathBuf, Ffmpeg)>>,
     wake: Condvar,
     closed: AtomicBool,
     /// Tests keep the workers from finishing, to look at what is waiting.
@@ -47,6 +48,16 @@ pub struct ProbeCache {
     rx: Receiver<Probed>,
     jobs: Arc<Jobs>,
     workers: usize,
+    /// In a show network, files come from the media store (`net::media`):
+    /// the paths answered through it, with the store's file read (None: what
+    /// the primary said of a file not here yet), and the finder's generation
+    /// they were answered at.
+    via: HashMap<PathBuf, Option<PathBuf>>,
+    via_gen: Option<u64>,
+    /// Paths are answered through a finder (since the last look).
+    through_store: bool,
+    /// A finder of its own (tests), else the app's (`net::media::finder`).
+    pub finder: Option<Arc<dyn crate::net::media::Finder>>,
 }
 
 impl Default for ProbeCache {
@@ -65,6 +76,10 @@ impl Default for ProbeCache {
                 hold: AtomicBool::new(false),
             }),
             workers: 0,
+            via: HashMap::new(),
+            via_gen: None,
+            through_store: false,
+            finder: None,
         }
     }
 }
@@ -79,7 +94,7 @@ impl Drop for ProbeCache {
 /// One probe worker: takes the next file off the queue until the cache is gone.
 fn probe_worker(jobs: &Jobs, tx: &Sender<Probed>) {
     loop {
-        let (path, ff) = {
+        let (path, file, ff) = {
             let mut queue = jobs.queue.lock();
             loop {
                 if jobs.closed.load(Ordering::Acquire) {
@@ -95,7 +110,7 @@ fn probe_worker(jobs: &Jobs, tx: &Sender<Probed>) {
         while jobs.hold.load(Ordering::Acquire) && !jobs.closed.load(Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let r = ff.probe(&path).map_err(|e| format!("{e:#}"));
+        let r = ff.probe(&file).map_err(|e| format!("{e:#}"));
         if tx.send((path, r)).is_err() {
             return;
         }
@@ -140,7 +155,13 @@ impl ProbeCache {
     }
 
     pub fn poll(&mut self) {
+        self.follow_store();
         while let Ok((path, result)) = self.rx.try_recv() {
+            // In a show network, an answer for a path no longer read from
+            // the store's file is stale.
+            if !matches!(self.via.get(&path), Some(Some(_))) && self.finder().is_some() {
+                continue;
+            }
             let state = match result {
                 Ok(info) => ProbeState::Ready(info),
                 Err(e) => ProbeState::Failed(e),
@@ -165,8 +186,79 @@ impl ProbeCache {
         self.entries.get(path)
     }
 
+    /// The finder in use: this cache's own, else the app's.
+    fn finder(&self) -> Option<Arc<dyn crate::net::media::Finder>> {
+        self.finder.clone().or_else(crate::net::media::finder)
+    }
+
+    /// In a show network: when the store has changed, the paths answered
+    /// through it whose file is now another (it arrived, or a new version)
+    /// are read again.
+    fn follow_store(&mut self) {
+        let Some(f) = self.finder() else {
+            self.through_store = false;
+            if !self.via.is_empty() {
+                for p in std::mem::take(&mut self.via).into_keys() {
+                    self.entries.remove(&p);
+                }
+                self.via_gen = None;
+            }
+            return;
+        };
+        // Just joined a show network: everything known was read from the
+        // paths themselves, and is asked again through the store.
+        if !self.through_store {
+            self.through_store = true;
+            self.entries.clear();
+            self.rechecked.clear();
+            self.via.clear();
+        }
+        let g = f.generation();
+        if self.via_gen == Some(g) {
+            return;
+        }
+        self.via_gen = Some(g);
+        let stale: Vec<PathBuf> = self
+            .via
+            .iter()
+            .filter(|(p, was)| f.local(p).here().map(Path::to_path_buf) != **was)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in stale {
+            self.via.remove(&p);
+            self.entries.remove(&p);
+        }
+    }
+
+    /// Whether what is known of `path` was read from a file here (not what
+    /// the primary said of one on its way).
+    pub fn read_here(&self, path: &Path) -> bool {
+        !matches!(self.via.get(path), Some(None))
+    }
+
     fn lookup(&mut self, ff: Option<&Ffmpeg>, path: &Path, urgent: bool) -> &ProbeState {
         self.poll();
+        if let Some(f) = self.finder() {
+            if !self.entries.contains_key(path) {
+                let state = match (f.local(path), ff) {
+                    (_, None) => ProbeState::Failed("ffmpeg not found".into()),
+                    (crate::net::media::Local::Here(file), Some(ff)) => {
+                        self.queue(ff.clone(), path.to_path_buf(), file.clone(), urgent);
+                        self.via.insert(path.to_path_buf(), Some(file));
+                        ProbeState::Pending
+                    }
+                    // Not here yet: what the primary read from it.
+                    (_, Some(_)) => {
+                        self.via.insert(path.to_path_buf(), None);
+                        ProbeState::Ready(crate::net::media::card::info_from(
+                            f.facts(path).as_ref(),
+                        ))
+                    }
+                };
+                self.entries.insert(path.to_path_buf(), state);
+            }
+            return &self.entries[path];
+        }
         self.recheck(path);
         if !self.entries.contains_key(path) {
             let state = match ff {
@@ -177,7 +269,7 @@ impl ProbeCache {
                     ProbeState::Failed(NOT_FOUND.into())
                 }
                 Some(ff) => {
-                    self.queue(ff.clone(), path.to_path_buf(), urgent);
+                    self.queue(ff.clone(), path.to_path_buf(), path.to_path_buf(), urgent);
                     ProbeState::Pending
                 }
             };
@@ -185,7 +277,7 @@ impl ProbeCache {
         } else if urgent && matches!(self.entries.get(path), Some(ProbeState::Pending)) {
             // Already waiting its turn: move it up.
             let mut queue = self.jobs.queue.lock();
-            if let Some(i) = queue.iter().position(|(p, _)| p == path)
+            if let Some(i) = queue.iter().position(|(p, _, _)| p == path)
                 && let Some(job) = queue.remove(i)
             {
                 queue.push_front(job);
@@ -195,13 +287,13 @@ impl ProbeCache {
     }
 
     /// Put a file in the queue, and start a worker if fewer than the limit run.
-    fn queue(&mut self, ff: Ffmpeg, path: PathBuf, urgent: bool) {
+    fn queue(&mut self, ff: Ffmpeg, path: PathBuf, file: PathBuf, urgent: bool) {
         {
             let mut queue = self.jobs.queue.lock();
             if urgent {
-                queue.push_front((path, ff));
+                queue.push_front((path, file, ff));
             } else {
-                queue.push_back((path, ff));
+                queue.push_back((path, file, ff));
             }
         }
         if self.workers < PROBE_WORKERS {
@@ -231,6 +323,7 @@ impl ProbeCache {
     /// Forget a path so it is probed again (e.g. after the user relinks a file).
     pub fn invalidate(&mut self, path: &Path) {
         self.entries.remove(path);
+        self.via.remove(path);
         self.rechecked.remove(path);
     }
 }

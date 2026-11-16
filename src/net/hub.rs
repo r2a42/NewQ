@@ -211,6 +211,9 @@ pub enum Event {
     Dialled(Target, Result<TcpStream, String>),
     Do(NetAction),
     Local(LocalFacts),
+    /// This computer's media report (the media manager's; sent with the
+    /// next status, not at once: it changes every second while copying).
+    Media(Option<Box<crate::net::media::MediaReport>>),
     Send(NodeId, Msg),
     Broadcast(Msg),
     Quit,
@@ -271,6 +274,11 @@ impl Hub {
 
     pub fn set_local(&self, facts: LocalFacts) {
         let _ = self.tx.send(Event::Local(facts));
+    }
+
+    /// This computer's media report, sent with its status (`net::media`).
+    pub fn set_media(&self, report: Option<crate::net::media::MediaReport>) {
+        let _ = self.tx.send(Event::Media(report.map(Box::new)));
     }
 
     /// Send `msg` to computer `to` if a session with it is up (else dropped).
@@ -423,6 +431,8 @@ struct State {
     identify_until: Option<Instant>,
     disk_free: Option<u64>,
     disk_looked: Option<Instant>,
+    /// The media manager's report, sent in the status.
+    media: Option<Box<crate::net::media::MediaReport>>,
     quit: bool,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -446,6 +456,7 @@ impl State {
             identify_until: None,
             disk_free: None,
             disk_looked: None,
+            media: None,
             quit: false,
             wake: Arc::new(|| {}),
         }
@@ -559,6 +570,7 @@ impl State {
                     }
                 }
             }
+            Event::Media(m) => self.media = m,
             Event::Send(to, msg) => {
                 if let Some(c) = self.peers.get(&to).and_then(|p| p.conn) {
                     self.send(c, &msg);
@@ -1460,7 +1472,7 @@ impl State {
             link: Link::Unknown,
             clock_error_ms: None,
             show_version: None,
-            media_progress: None,
+            media_progress: self.media.clone(),
         }
     }
 
