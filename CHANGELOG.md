@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.0
+
 - **The network test.** On the computer that runs a show network, *Help ▸ Test mode* now offers
   *Start the network test* (about 2 minutes) and *Network soak* (about 20). It sends a short show
   of its own and its media to every computer, plays it on every display of every computer (films,
