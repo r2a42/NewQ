@@ -39,6 +39,55 @@ pub struct Entry {
     /// every file the show uses.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub library: bool,
+    /// What the primary's FFmpeg read from the file (its length above all),
+    /// so a computer that hasn't the file yet still knows how long its cue
+    /// lasts. None until read (and for a library file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<Facts>,
+}
+
+/// What the primary read from a file with FFprobe: enough for a computer that
+/// hasn't the file yet to give its cue the right length and shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Facts {
+    /// Milliseconds; None for a still or a stream that doesn't say.
+    pub duration_ms: Option<u64>,
+    pub video: bool,
+    pub width: u32,
+    pub height: u32,
+    /// Frames a second, in thousandths.
+    pub fps_milli: u32,
+    pub audio: bool,
+    pub channels: u16,
+    pub still: bool,
+    pub codec: String,
+    pub alpha: bool,
+}
+
+impl Facts {
+    pub fn of(info: &crate::media::ffmpeg::MediaInfo) -> Facts {
+        let v = info.video.as_ref();
+        Facts {
+            duration_ms: info
+                .duration
+                .filter(|d| d.is_finite() && *d >= 0.0)
+                .map(|d| (d * 1000.0).round() as u64),
+            video: v.is_some(),
+            width: v.map_or(0, |v| v.width),
+            height: v.map_or(0, |v| v.height),
+            fps_milli: v.map_or(0, |v| (v.fps.clamp(0.0, 1000.0) * 1000.0).round() as u32),
+            audio: info.has_audio,
+            channels: info.audio_channels,
+            still: info.is_still,
+            codec: v.map(|v| v.codec.clone()).unwrap_or_default(),
+            alpha: v.is_some_and(|v| v.has_alpha),
+        }
+    }
+
+    pub fn duration(&self) -> Option<f64> {
+        self.duration_ms.map(|ms| ms as f64 / 1000.0)
+    }
 }
 
 impl Entry {
@@ -114,6 +163,9 @@ struct CanonEntry<'a> {
     sha256: &'a str,
     missing: bool,
     library: bool,
+    /// Only when known, so a manifest without them has the id it always had.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    facts: Option<&'a Facts>,
 }
 
 impl Manifest {
@@ -145,6 +197,7 @@ impl Manifest {
                     sha256: &e.sha256,
                     missing: e.missing,
                     library: e.library,
+                    facts: e.facts.as_ref(),
                 })
                 .collect(),
         };
@@ -556,6 +609,7 @@ fn build_files(
             modified: 0,
             missing: true,
             library: *library,
+            facts: None,
         };
         if let Some((size, modified)) = sm {
             let sha = match known {

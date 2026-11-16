@@ -1401,6 +1401,7 @@ fn manifests_check_their_id_and_old_ones_read() {
         modified: 7,
         missing: false,
         library: false,
+        facts: None,
     };
     let m = Manifest::new(vec![
         e("/b.mp4", b"b"),
@@ -1438,6 +1439,7 @@ fn paths_from_other_systems_find_their_files() {
             modified: 0,
             missing: false,
             library: false,
+            facts: None,
         },
         Entry {
             path: "/Users/me/Shows/Big Night/sound/été.wav".into(),
@@ -1447,6 +1449,7 @@ fn paths_from_other_systems_find_their_files() {
             modified: 0,
             missing: false,
             library: false,
+            facts: None,
         },
     ];
     let m = Manifest::new(entries);

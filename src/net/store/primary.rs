@@ -197,6 +197,11 @@ impl Primary {
         let mut touched = false;
         for e in entries.iter_mut().filter(|e| e.path == path) {
             touched = true;
+            // What was read from the file before isn't true of it now (the
+            // media manager reads it again).
+            if looked.as_ref().is_none_or(|(_, _, sha)| *sha != e.sha256) {
+                e.facts = None;
+            }
             match &looked {
                 Some((size, modified, sha)) => {
                     e.size = *size;
