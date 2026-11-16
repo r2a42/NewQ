@@ -31,7 +31,10 @@ mod media;
 mod mediamtx;
 mod mesh;
 mod monitor;
+// Not used by the app yet (the network sync trial, stage 1).
 mod ndi;
+#[cfg_attr(not(test), allow(dead_code))]
+mod net;
 mod output;
 mod pattern;
 mod pdf;
