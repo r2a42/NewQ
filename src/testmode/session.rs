@@ -2389,6 +2389,7 @@ mod tests {
     /// lap, files are written and the show comes back as it was.
     #[test]
     fn a_short_test_runs_logs_and_gives_the_show_back() {
+        let _heavy = crate::testmode::heavy();
         let Some(ff) = Ffmpeg::locate() else {
             assert!(std::env::var("NEWQ_REQUIRE_MEDIA").is_err(), "no ffmpeg");
             return;
@@ -2496,6 +2497,7 @@ mod tests {
     /// report says it was stopped.
     #[test]
     fn a_timeline_test_stopped_part_way_gives_the_show_back() {
+        let _heavy = crate::testmode::heavy();
         let Some(ff) = Ffmpeg::locate() else {
             assert!(std::env::var("NEWQ_REQUIRE_MEDIA").is_err(), "no ffmpeg");
             return;

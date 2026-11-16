@@ -541,6 +541,7 @@ mod tests {
     /// up, and the engine reports nothing wrong.
     #[test]
     fn the_short_timeline_test_plays_to_its_end_with_go_pressed_at_its_pause() {
+        let _heavy = crate::testmode::heavy();
         let Some((ff, res)) = stand_ins() else {
             assert!(
                 std::env::var("NEWQ_REQUIRE_MEDIA").is_err(),

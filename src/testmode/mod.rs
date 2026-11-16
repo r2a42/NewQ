@@ -74,3 +74,14 @@ impl Flavour {
         }
     }
 }
+
+/// One at a time for the tests here that play a whole test show through real
+/// FFmpeg against the clock: several at once starved a Windows CI runner until
+/// a clip's FFmpeg took ten seconds to start and missed its place.
+#[cfg(test)]
+pub(crate) fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    HEAVY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}

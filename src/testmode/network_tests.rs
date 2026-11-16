@@ -542,6 +542,7 @@ fn a_computers_media_is_here_when_its_version_is_the_primarys_and_lacks_none_of_
 
 #[test]
 fn the_measurements_of_two_followers_reach_the_primary_and_the_show_comes_back_everywhere() {
+    let _heavy = crate::testmode::heavy();
     let Some(ff) = ffmpeg() else { return };
     let mut r = Rig::new(&ff, "full");
     r.start();
@@ -597,6 +598,7 @@ fn the_measurements_of_two_followers_reach_the_primary_and_the_show_comes_back_e
 
 #[test]
 fn a_follower_whose_commands_come_late_is_reported_late() {
+    let _heavy = crate::testmode::heavy();
     let Some(ff) = ffmpeg() else { return };
     let mut r = Rig::new(&ff, "late");
     r.comps[1].delay = 0.12;
@@ -631,6 +633,7 @@ fn a_follower_whose_commands_come_late_is_reported_late() {
 
 #[test]
 fn cancelling_while_the_media_is_on_its_way_puts_the_show_back_everywhere() {
+    let _heavy = crate::testmode::heavy();
     let Some(ff) = ffmpeg() else { return };
     let mut r = Rig::new(&ff, "cancel");
     r.media_comes = false;
@@ -666,6 +669,7 @@ fn cancelling_while_the_media_is_on_its_way_puts_the_show_back_everywhere() {
 
 #[test]
 fn a_follower_that_drops_out_is_reported_and_gets_the_show_back_when_it_returns() {
+    let _heavy = crate::testmode::heavy();
     let Some(ff) = ffmpeg() else { return };
     let mut r = Rig::new(&ff, "drop");
     r.start();
