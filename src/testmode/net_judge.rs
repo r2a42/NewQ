@@ -1,0 +1,839 @@
+//! The network test's judging and its files' text (pure; tested on made-up
+//! numbers). What each computer sent (`net::measure::Report`s, gathered in a
+//! `ComputerNotes`) becomes a verdict in plain words per computer, findings
+//! for the report and the window, `network.csv` and the report's network part.
+
+use super::analysis::{Finding, Severity, Verdict};
+use crate::net::measure::{CommandNote, CorrectionNote, Report, Row, StallNote};
+use crate::net::proto::Link;
+use std::fmt::Write as _;
+
+/// Cues further apart than this many frames now and then: a note.
+pub const APART_NOTE_FRAMES: f64 = 1.0;
+/// Further apart than this: a problem (when it is more than a moment).
+pub const APART_PROBLEM_FRAMES: f64 = 2.0;
+/// Rows over `APART_PROBLEM_FRAMES` before it is a problem (half a second each).
+pub const APART_PROBLEM_ROWS: usize = 3;
+/// The shared clock's error bound over this (ms): a note.
+pub const CLOCK_NOTE_MS: f64 = 2.0;
+/// Over this (half a 60 Hz frame): a problem.
+pub const CLOCK_PROBLEM_MS: f64 = 8.0;
+/// A round trip over this (ms): a note (a show LAN pings in about 2 ms).
+pub const RTT_NOTE_MS: f64 = 15.0;
+/// A command that arrived with less than this to spare (ms): tight.
+pub const TIGHT_LEAD_MS: f64 = 10.0;
+/// More of the commands than this came late: a problem, not a note.
+pub const LATE_PROBLEM_SHARE: f64 = 0.05;
+/// And more than this many of them.
+pub const LATE_PROBLEM_COUNT: usize = 2;
+/// Corrections more often than this (a minute): a problem.
+pub const CORRECTIONS_PROBLEM_PER_MIN: f64 = 1.0;
+/// A stall of the main loop this long (ms): a problem; shorter ones are notes.
+pub const STALL_PROBLEM_MS: u64 = 250;
+/// Late frames over this, in thousandths: a note.
+pub const LATE_FRAMES_NOTE: u32 = 20;
+/// No report for this long (seconds): it dropped out.
+pub const GAP_SECS: f64 = 3.0;
+/// The clock may still be settling for this long after the test begins (s).
+pub const SETTLING_SECS: f64 = 5.0;
+/// Something played on the primary and not here for this long (s): a problem.
+pub const MISSING_PROBLEM_SECS: f64 = 2.0;
+
+/// What software can't see, said in every report.
+pub const CANNOT_SEE: &str = "What this test can't see: each display draws at its own moment within its refresh, so two projectors without genlock can be up to one refresh apart even when NewQ chose the same frame on both (film the Sync flash to see it). Sound from two computers is not locked to the sample: it is meant for separate rooms or separate speakers, not one sound from two computers. The numbers come from the computers' own clocks; the network itself is measured by the round trips.";
+
+/// A transfer of the test's media to one computer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Transfer {
+    pub bytes: u64,
+    pub secs: f64,
+    /// It was all there at the first look: it came within `secs` of the
+    /// primary's list of it, so the rate is at least this.
+    pub within: bool,
+}
+
+impl Transfer {
+    /// Bytes a second, if anything was transferred.
+    pub fn rate(&self) -> Option<f64> {
+        (self.bytes > 0 && self.secs > 0.0).then(|| self.bytes as f64 / self.secs)
+    }
+}
+
+/// Everything one computer sent during the test.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComputerNotes {
+    pub name: String,
+    pub link: Link,
+    pub refresh_hz: Option<f32>,
+    pub rows: Vec<Row>,
+    pub commands: Vec<CommandNote>,
+    pub corrections: Vec<CorrectionNote>,
+    pub stalls: Vec<StallNote>,
+    pub late_frames_permille: u32,
+    pub reports: u32,
+    /// Reports that never came (gaps in their numbers).
+    pub lost_reports: u32,
+    last_seq: u32,
+    /// Silences: when (seconds into the test) and how long.
+    pub gaps: Vec<(f64, f64)>,
+    pub transfer: Option<Transfer>,
+    /// Its log's end arrived.
+    pub log_tail: bool,
+    /// Its last report arrived.
+    pub ended: bool,
+}
+
+impl ComputerNotes {
+    pub fn new(name: &str) -> ComputerNotes {
+        ComputerNotes {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Take a report in.
+    pub fn take(&mut self, r: Report) {
+        if self.reports > 0 && r.seq > self.last_seq + 1 {
+            self.lost_reports += r.seq - self.last_seq - 1;
+        }
+        self.last_seq = self.last_seq.max(r.seq);
+        self.reports += 1;
+        self.link = r.link;
+        if r.refresh_hz.is_some() {
+            self.refresh_hz = r.refresh_hz;
+        }
+        self.rows.extend(r.rows);
+        self.commands.extend(r.commands);
+        self.corrections.extend(r.corrections);
+        self.stalls.extend(r.stalls);
+        if let Some(l) = r.late_frames_permille {
+            self.late_frames_permille = self.late_frames_permille.max(l);
+        }
+        self.ended |= r.last;
+    }
+
+    /// Milliseconds of a frame at its displays' refresh (60 Hz if unknown).
+    pub fn frame_ms(&self) -> f64 {
+        1000.0
+            / self
+                .refresh_hz
+                .filter(|r| r.is_finite() && *r >= 20.0)
+                .map_or(60.0, f64::from)
+    }
+
+    fn worst_apart(&self) -> Option<f64> {
+        self.rows.iter().filter_map(|r| r.apart_ms).reduce(f64::max)
+    }
+
+    fn worst_clock(&self) -> Option<f64> {
+        self.rows
+            .iter()
+            .filter(|r| r.locked && r.t >= SETTLING_SECS)
+            .filter_map(|r| r.clock_error_ms)
+            .reduce(f64::max)
+    }
+
+    fn worst_rtt(&self) -> Option<f64> {
+        self.rows.iter().filter_map(|r| r.rtt_ms).reduce(f64::max)
+    }
+}
+
+/// One computer's verdict.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComputerVerdict {
+    pub name: String,
+    pub verdict: Verdict,
+    /// One line: "In step: worst 0.4 frames apart over 2 min".
+    pub headline: String,
+    /// The numbers, a line each.
+    pub lines: Vec<String>,
+    pub findings: Vec<Finding>,
+}
+
+/// Everything judged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Judged {
+    pub verdict: Verdict,
+    pub headline: String,
+    pub computers: Vec<ComputerVerdict>,
+    /// Every computer's findings, named, with the test's own.
+    pub findings: Vec<Finding>,
+}
+
+fn finding(severity: Severity, text: String) -> Finding {
+    Finding { severity, text }
+}
+
+/// "2 min", "45 s", "1 h 05 min".
+pub fn span(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    if s < 90 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min", (s + 30) / 60)
+    } else {
+        format!("{} h {:02} min", s / 3600, s / 60 % 60)
+    }
+}
+
+/// "1:05" into the test.
+pub fn at(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+fn megabytes(b: u64) -> String {
+    format!("{:.0} MB", b as f64 / 1_000_000.0)
+}
+
+/// The words for a transfer: "42 MB in 6 s (7.0 MB/s)".
+pub fn transfer_words(t: &Transfer) -> String {
+    let secs = if t.secs < 10.0 {
+        format!("{:.1} s", t.secs)
+    } else {
+        span(t.secs)
+    };
+    match (t.rate(), t.within) {
+        (Some(r), false) => format!(
+            "{} in {secs} ({:.1} MB/s)",
+            megabytes(t.bytes),
+            r / 1_000_000.0
+        ),
+        (Some(r), true) => format!(
+            "{} here within {secs} (at least {:.1} MB/s)",
+            megabytes(t.bytes),
+            r / 1_000_000.0
+        ),
+        (None, _) => "nothing had to be sent".into(),
+    }
+}
+
+/// Judge one computer over a test `secs` long.
+pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
+    let mut f: Vec<Finding> = Vec::new();
+    let mut lines = Vec::new();
+    let frame = c.frame_ms();
+    let wifi = c.link == Link::WiFi;
+    let link = match c.link {
+        Link::Wired => "wired",
+        Link::WiFi => "on Wi-Fi",
+        Link::Unknown => "link unknown",
+    };
+    let refresh = c
+        .refresh_hz
+        .map_or("refresh unknown, 60 Hz assumed".into(), |r| {
+            format!("{r:.0} Hz")
+        });
+    lines.push(format!("{link}, displays at {refresh}"));
+    if let Some(t) = &c.transfer {
+        lines.push(format!("Media: {}", transfer_words(t)));
+    }
+    if c.reports == 0 {
+        let text = format!(
+            "No measurements came from {}: is it running this version of NewQ?",
+            c.name
+        );
+        f.push(finding(Severity::Problem, text.clone()));
+        return ComputerVerdict {
+            name: c.name.clone(),
+            verdict: Verdict::ProblemsFound,
+            headline: text,
+            lines,
+            findings: f,
+        };
+    }
+    // How far apart.
+    let worst = c.worst_apart();
+    let worst_frames = worst.map(|w| w / frame);
+    if let (Some(w), Some(wf)) = (worst, worst_frames) {
+        lines.push(format!(
+            "Worst {w:.1} ms apart ({wf:.2} frames), over {} rows",
+            c.rows.iter().filter(|r| r.apart_ms.is_some()).count()
+        ));
+        let over = c
+            .rows
+            .iter()
+            .filter(|r| r.apart_ms.is_some_and(|a| a / frame > APART_PROBLEM_FRAMES))
+            .count();
+        if over >= APART_PROBLEM_ROWS {
+            f.push(finding(
+                Severity::Problem,
+                format!(
+                    "Out of step: {} was more than {APART_PROBLEM_FRAMES:.0} frames apart from the primary for about {}, worst {wf:.1} frames",
+                    c.name,
+                    span(over as f64 * crate::net::measure::ROW_EVERY)
+                ),
+            ));
+        } else if wf > APART_NOTE_FRAMES {
+            f.push(finding(
+                Severity::Note,
+                format!(
+                    "{} was {wf:.1} frames apart from the primary for a moment",
+                    c.name
+                ),
+            ));
+        }
+    } else {
+        lines.push("Nothing played to compare".into());
+    }
+    // The clock.
+    if let Some(e) = c.worst_clock() {
+        lines.push(format!("Clock error up to {e:.1} ms"));
+        let why = if wifi {
+            "Wi-Fi"
+        } else {
+            "a busy network or computer"
+        };
+        if e > CLOCK_PROBLEM_MS {
+            f.push(finding(
+                Severity::Problem,
+                format!(
+                    "Clock error up to {e:.0} ms on {}: {why}. Half a frame or more; use a wire",
+                    c.name
+                ),
+            ));
+        } else if e > CLOCK_NOTE_MS {
+            f.push(finding(
+                Severity::Note,
+                format!("Clock error up to {e:.0} ms on {}: {why}", c.name),
+            ));
+        }
+    }
+    let unlocked = c
+        .rows
+        .iter()
+        .filter(|r| r.t >= SETTLING_SECS && !r.locked)
+        .count();
+    if unlocked > 0 {
+        f.push(finding(
+            Severity::Problem,
+            format!(
+                "{}'s clock was not locked to the primary's for about {}",
+                c.name,
+                span(unlocked as f64 * crate::net::measure::ROW_EVERY)
+            ),
+        ));
+    }
+    if let Some(r) = c.worst_rtt() {
+        lines.push(format!("Round trip up to {r:.1} ms"));
+        if r > RTT_NOTE_MS {
+            f.push(finding(
+                Severity::Note,
+                format!(
+                    "Round trips to {} up to {r:.0} ms (a show network pings in about 2 ms){}",
+                    c.name,
+                    if wifi { ": Wi-Fi" } else { "" }
+                ),
+            ));
+        }
+    }
+    // Commands.
+    let n = c.commands.len();
+    let late: Vec<&CommandNote> = c.commands.iter().filter(|k| k.lead_ms < 0.0).collect();
+    let tight = c
+        .commands
+        .iter()
+        .filter(|k| k.lead_ms >= 0.0 && k.lead_ms < TIGHT_LEAD_MS)
+        .count();
+    if n > 0 {
+        let least = c.commands.iter().map(|k| k.lead_ms).reduce(f64::min);
+        lines.push(format!(
+            "{n} commands, {} late, the least time to spare {:.0} ms",
+            late.len(),
+            least.unwrap_or(0.0)
+        ));
+    }
+    if !late.is_empty() {
+        let worst = late
+            .iter()
+            .map(|k| -k.lead_ms)
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+        let text = format!(
+            "Late commands on {}: {} of {n} arrived after their time (up to {worst:.0} ms); they were put right, but a picture may have jumped. Use a wire, or a quieter network",
+            c.name,
+            late.len()
+        );
+        let problem = late.len() > LATE_PROBLEM_COUNT
+            || (late.len() as f64 / n.max(1) as f64) > LATE_PROBLEM_SHARE;
+        f.push(finding(
+            if problem {
+                Severity::Problem
+            } else {
+                Severity::Note
+            },
+            text,
+        ));
+    } else if tight > 0 {
+        f.push(finding(
+            Severity::Note,
+            format!(
+                "{tight} of {n} commands reached {} with less than {TIGHT_LEAD_MS:.0} ms to spare",
+                c.name
+            ),
+        ));
+    }
+    // Corrections.
+    if !c.corrections.is_empty() {
+        let k = c.corrections.len();
+        let some: Vec<&str> = c
+            .corrections
+            .iter()
+            .take(3)
+            .map(|x| x.what.as_str())
+            .collect();
+        lines.push(format!("{k} corrections"));
+        let per_min = k as f64 / (secs / 60.0).max(1.0);
+        f.push(finding(
+            if per_min > CORRECTIONS_PROBLEM_PER_MIN {
+                Severity::Problem
+            } else {
+                Severity::Note
+            },
+            format!(
+                "{} put itself right {k} time{} ({})",
+                c.name,
+                if k == 1 { "" } else { "s" },
+                some.join("; ")
+            ),
+        ));
+    }
+    // Played less than the primary.
+    let missing_secs =
+        c.rows.iter().filter(|r| r.missing > 0).count() as f64 * crate::net::measure::ROW_EVERY;
+    if missing_secs >= MISSING_PROBLEM_SECS {
+        f.push(finding(
+            Severity::Problem,
+            format!(
+                "{} played less than the primary for about {} (a file not there yet, or a camera it hasn't)",
+                c.name,
+                span(missing_secs)
+            ),
+        ));
+    }
+    // Its own computer.
+    if let Some(s) = c.stalls.iter().max_by_key(|s| s.ms) {
+        lines.push(format!(
+            "{} stall{} of the main loop, the longest {} ms",
+            c.stalls.len(),
+            if c.stalls.len() == 1 { "" } else { "s" },
+            s.ms
+        ));
+        f.push(finding(
+            if s.ms >= STALL_PROBLEM_MS {
+                Severity::Problem
+            } else {
+                Severity::Note
+            },
+            format!(
+                "{} stalled for {} ms at {} ({})",
+                c.name,
+                s.ms,
+                at(s.t),
+                s.part
+            ),
+        ));
+    }
+    if c.late_frames_permille > LATE_FRAMES_NOTE {
+        f.push(finding(
+            Severity::Note,
+            format!(
+                "{} drew {:.1} % of its frames late",
+                c.name,
+                c.late_frames_permille as f64 / 10.0
+            ),
+        ));
+    }
+    for (t, len) in &c.gaps {
+        f.push(finding(
+            Severity::Problem,
+            format!(
+                "{} dropped out of the network for {} at {}",
+                c.name,
+                span(*len),
+                at(*t)
+            ),
+        ));
+    }
+    if c.lost_reports > 0 {
+        lines.push(format!("{} reports lost", c.lost_reports));
+    }
+    let verdict = Verdict::of(&f);
+    let headline = match (verdict, worst_frames) {
+        (Verdict::ProblemsFound, _) => f
+            .iter()
+            .find(|x| x.severity == Severity::Problem)
+            .map(|x| x.text.clone())
+            .unwrap_or_default(),
+        (_, Some(wf)) => format!("In step: worst {wf:.1} frames apart over {}", span(secs)),
+        (_, None) => format!("In touch for {}, but nothing played to compare", span(secs)),
+    };
+    ComputerVerdict {
+        name: c.name.clone(),
+        verdict,
+        headline,
+        lines,
+        findings: f,
+    }
+}
+
+/// Judge every computer; `own` are the test's own findings (the primary's
+/// stalls, media that never arrived).
+pub fn judge(computers: &[ComputerNotes], secs: f64, own: Vec<Finding>) -> Judged {
+    let per: Vec<ComputerVerdict> = computers.iter().map(|c| judge_computer(c, secs)).collect();
+    let mut findings = own;
+    for c in &per {
+        findings.extend(c.findings.iter().cloned());
+    }
+    let verdict = Verdict::of(&findings);
+    let bad = per
+        .iter()
+        .filter(|c| c.verdict == Verdict::ProblemsFound)
+        .count();
+    let n = per.len();
+    let headline = if n == 0 {
+        "No computer took part.".to_string()
+    } else if bad == 0 && verdict != Verdict::ProblemsFound {
+        format!(
+            "{} kept in step with this one.",
+            if n == 1 {
+                "The other computer".to_string()
+            } else {
+                format!("All {n} computers")
+            }
+        )
+    } else if bad == 0 {
+        "The computers kept in step, but see the problems below.".into()
+    } else {
+        format!(
+            "{bad} of {n} computer{} had problems.",
+            if n == 1 { "" } else { "s" }
+        )
+    };
+    Judged {
+        verdict,
+        headline,
+        computers: per,
+        findings,
+    }
+}
+
+/// `network.csv`: a row per look of each computer.
+pub fn csv(computers: &[ComputerNotes]) -> String {
+    let mut s = String::from(
+        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing\n",
+    );
+    let num = |v: Option<f64>| v.map_or(String::new(), |x| format!("{x:.2}"));
+    for c in computers {
+        let frame = c.frame_ms();
+        for r in &c.rows {
+            let _ = writeln!(
+                s,
+                "{},{:.2},{},{},{},{},{},{},{},{}",
+                csv_field(&c.name),
+                r.t,
+                num(r.clock_error_ms),
+                num(r.rtt_ms),
+                u8::from(r.locked),
+                u8::from(r.in_step),
+                num(r.apart_ms),
+                num(r.apart_ms.map(|a| a / frame)),
+                r.compared,
+                r.missing
+            );
+        }
+    }
+    s
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// The report's network part.
+pub fn report(j: &Judged, computers: &[ComputerNotes], secs: f64, about: &str) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "NewQ network test");
+    let _ = writeln!(s, "=================");
+    let _ = writeln!(s, "{about}");
+    let _ = writeln!(s, "Ran for {}.", span(secs));
+    let _ = writeln!(s);
+    let _ = writeln!(s, "Verdict: {}. {}", j.verdict.label(), j.headline);
+    let _ = writeln!(s);
+    for (c, notes) in j.computers.iter().zip(computers) {
+        let _ = writeln!(s, "{} — {}", c.name, c.verdict.label());
+        let _ = writeln!(s, "  {}", c.headline);
+        for l in &c.lines {
+            let _ = writeln!(s, "  {l}");
+        }
+        if !notes.corrections.is_empty() {
+            let _ = writeln!(s, "  Corrections:");
+            for k in &notes.corrections {
+                let _ = writeln!(s, "    {} {}", at(k.t), k.what);
+            }
+        }
+        let late: Vec<&CommandNote> = notes.commands.iter().filter(|k| k.lead_ms < 0.0).collect();
+        if !late.is_empty() {
+            let _ = writeln!(s, "  Late commands:");
+            for k in late {
+                let _ = writeln!(
+                    s,
+                    "    {} command {} {:.1} ms late",
+                    at(k.t),
+                    k.seq,
+                    -k.lead_ms
+                );
+            }
+        }
+        let _ = writeln!(s);
+    }
+    if !j.findings.is_empty() {
+        let _ = writeln!(s, "Findings");
+        for f in &j.findings {
+            let word = match f.severity {
+                Severity::Problem => "Problem",
+                Severity::Note => "Note",
+                Severity::Watch => "Tracked",
+            };
+            let _ = writeln!(s, "  {word}: {}", f.text);
+        }
+        let _ = writeln!(s);
+    }
+    let _ = writeln!(s, "{CANNOT_SEE}");
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "How it is measured: each computer compares, at each of the primary's heartbeats (four a second), the time each playing cue began by the shared clock with the primary's, and notes the largest difference twice a second (\"apart\"); frames are at its displays' refresh. Each command's lead is how long before its shared time it arrived. The clock error is the clock's own bound, usually well above the real error. network.csv has every row."
+    );
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(n: usize, apart: f64, clock: f64) -> Vec<Row> {
+        (0..n)
+            .map(|i| Row {
+                t: i as f64 * 0.5,
+                clock_error_ms: Some(clock),
+                rtt_ms: Some(1.2),
+                locked: true,
+                in_step: true,
+                apart_ms: Some(apart),
+                compared: 2,
+                missing: 0,
+            })
+            .collect()
+    }
+
+    fn commands(n: usize, late: usize) -> Vec<CommandNote> {
+        (0..n)
+            .map(|i| CommandNote {
+                t: i as f64,
+                seq: i as u64 + 1,
+                lead_ms: if i < late { -12.0 } else { 45.0 },
+            })
+            .collect()
+    }
+
+    fn good(name: &str) -> ComputerNotes {
+        ComputerNotes {
+            name: name.into(),
+            link: Link::Wired,
+            refresh_hz: Some(60.0),
+            rows: rows(240, 6.7, 0.3),
+            commands: commands(40, 0),
+            reports: 120,
+            transfer: Some(Transfer {
+                bytes: 42_000_000,
+                secs: 12.0,
+                within: false,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_computer_in_step_says_so_with_its_worst_in_frames() {
+        let v = judge_computer(&good("Left"), 120.0);
+        assert_eq!(v.verdict, Verdict::Passed, "{:?}", v.findings);
+        assert_eq!(v.headline, "In step: worst 0.4 frames apart over 2 min");
+        assert!(
+            v.lines
+                .contains(&"Media: 42 MB in 12 s (3.5 MB/s)".to_string()),
+            "{:?}",
+            v.lines
+        );
+        assert!(
+            v.lines
+                .iter()
+                .any(|l| l == "40 commands, 0 late, the least time to spare 45 ms")
+        );
+        // At 50 Hz the same 6.7 ms is a third of a frame.
+        let mut c = good("Left");
+        c.refresh_hz = Some(50.0);
+        assert!(judge_computer(&c, 120.0).headline.contains("0.3 frames"));
+    }
+
+    #[test]
+    fn late_commands_are_a_note_when_few_and_a_problem_when_many() {
+        let mut c = good("Left");
+        c.commands = commands(40, 1);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::PassedWithNotes);
+        assert!(
+            v.findings[0]
+                .text
+                .starts_with("Late commands on Left: 1 of 40 arrived after their time")
+        );
+        c.commands = commands(40, 3);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert!(
+            v.headline.contains("3 of 40 arrived after their time"),
+            "{}",
+            v.headline
+        );
+        assert!(v.headline.contains("Use a wire"));
+    }
+
+    #[test]
+    fn clock_error_is_named_with_its_likely_cause() {
+        let mut c = good("Prop");
+        c.link = Link::WiFi;
+        c.rows = rows(240, 6.7, 6.0);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::PassedWithNotes);
+        assert_eq!(v.findings[0].text, "Clock error up to 6 ms on Prop: Wi-Fi");
+        c.rows = rows(240, 6.7, 12.0);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert!(v.headline.contains("Half a frame or more; use a wire"));
+        // While it is still settling, the first seconds don't count.
+        let mut c = good("Left");
+        c.rows[0].clock_error_ms = Some(50.0);
+        c.rows[0].locked = false;
+        assert_eq!(judge_computer(&c, 120.0).verdict, Verdict::Passed);
+    }
+
+    #[test]
+    fn frames_apart_a_moment_is_a_note_and_for_longer_a_problem() {
+        let mut c = good("Left");
+        c.rows[100].apart_ms = Some(25.0);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::PassedWithNotes);
+        assert!(
+            v.findings[0].text.contains("1.5 frames apart"),
+            "{:?}",
+            v.findings
+        );
+        for r in &mut c.rows[100..110] {
+            r.apart_ms = Some(60.0);
+        }
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert!(
+            v.headline
+                .starts_with("Out of step: Left was more than 2 frames apart")
+        );
+    }
+
+    #[test]
+    fn silence_corrections_stalls_and_no_reports_are_said() {
+        let mut c = good("Left");
+        c.gaps.push((65.0, 12.0));
+        c.corrections.push(CorrectionNote {
+            t: 70.0,
+            what: "Film moved +40 ms".into(),
+            ms: Some(40.0),
+        });
+        c.stalls.push(StallNote {
+            t: 30.0,
+            ms: 140,
+            part: "the show engine".into(),
+        });
+        let v = judge_computer(&c, 120.0);
+        let texts: Vec<&str> = v.findings.iter().map(|f| f.text.as_str()).collect();
+        assert!(
+            texts.contains(&"Left dropped out of the network for 12 s at 1:05"),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"Left put itself right 1 time (Film moved +40 ms)"));
+        assert!(texts.contains(&"Left stalled for 140 ms at 0:30 (the show engine)"));
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        let v = judge_computer(&ComputerNotes::new("Right"), 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert!(v.headline.starts_with("No measurements came from Right"));
+    }
+
+    #[test]
+    fn the_overall_verdict_counts_the_computers_with_problems() {
+        let j = judge(&[good("Left"), good("Right")], 120.0, vec![]);
+        assert_eq!(j.verdict, Verdict::Passed);
+        assert_eq!(j.headline, "All 2 computers kept in step with this one.");
+        let j = judge(&[good("Left")], 120.0, vec![]);
+        assert_eq!(j.headline, "The other computer kept in step with this one.");
+        let j = judge(&[good("Left"), ComputerNotes::new("Right")], 120.0, vec![]);
+        assert_eq!(j.verdict, Verdict::ProblemsFound);
+        assert_eq!(j.headline, "1 of 2 computers had problems.");
+        let own = vec![Finding {
+            severity: Severity::Problem,
+            text: "x".into(),
+        }];
+        let j = judge(&[good("Left")], 120.0, own);
+        assert_eq!(
+            j.headline,
+            "The computers kept in step, but see the problems below."
+        );
+    }
+
+    #[test]
+    fn reports_are_taken_in_and_a_lost_one_is_counted() {
+        let mut c = ComputerNotes::new("Left");
+        for seq in [1, 2, 4] {
+            c.take(Report {
+                seq,
+                link: Link::Wired,
+                refresh_hz: Some(59.94),
+                rows: rows(2, 1.0, 0.1),
+                late_frames_permille: Some(seq),
+                last: seq == 4,
+                ..Default::default()
+            });
+        }
+        assert_eq!((c.reports, c.lost_reports, c.rows.len()), (3, 1, 6));
+        assert!(c.ended && c.late_frames_permille == 4);
+        assert!((c.frame_ms() - 16.683).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_csv_and_the_report_hold_every_row_and_say_what_cant_be_seen() {
+        let mut a = good("Left, stage");
+        a.rows.truncate(2);
+        let mut b = good("Right");
+        b.rows.truncate(1);
+        b.rows[0].apart_ms = None;
+        let text = csv(&[a.clone(), b.clone()]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[0],
+            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing"
+        );
+        assert_eq!(lines[1], "\"Left, stage\",0.00,0.30,1.20,1,1,6.70,0.40,2,0");
+        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,2,0");
+        b.commands = commands(40, 1);
+        let cs = [a, b];
+        let j = judge(&cs, 120.0, vec![]);
+        let r = report(&j, &cs, 120.0, "Network test, from Booth");
+        assert!(r.contains("Verdict: Passed, with notes."), "{r}");
+        assert!(r.contains("Right — Passed, with notes"));
+        assert!(r.contains("0:00 command 1 12.0 ms late"));
+        assert!(r.contains("genlock") && r.contains("not locked to the sample"));
+    }
+}

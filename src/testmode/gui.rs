@@ -26,6 +26,14 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     let mut open = true;
     let mut test = std::mem::take(&mut st.test);
     let refusal = st.test_refusal();
+    let net = NetChoice {
+        refusal: super::network::refusal(st),
+        in_network: st.net.me.on,
+        computers: super::network::in_step(&st.net)
+            .iter()
+            .map(|p| p.name.clone())
+            .collect(),
+    };
     let mut apply: Option<bool> = None;
     let screens = screens_of(st);
     let mut selected = st.prefs.test_displays.clone();
@@ -42,6 +50,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
                 engine,
                 &mut test,
                 refusal,
+                &net,
                 &mut apply,
                 &screens,
                 &mut selected,
@@ -202,6 +211,7 @@ fn body(
     engine: &Engine,
     test: &mut super::TestMode,
     refusal: Option<&'static str>,
+    net: &NetChoice,
     apply: &mut Option<bool>,
     screens: &[Screen],
     selected: &mut Vec<String>,
@@ -213,9 +223,38 @@ fn body(
     let mut failed = None;
     match test.view() {
         View::Idle => {
+            // In a show network only the network test can run: it comes first.
+            if net.in_network {
+                network_section(ui, engine, test, net, &log_dir);
+                ui.separator();
+            }
             idle(
                 ui, engine, test, refusal, &log_dir, screens, selected, devices, sound,
             );
+            if !net.in_network {
+                ui.separator();
+                network_section(ui, engine, test, net, &log_dir);
+            }
+        }
+        View::NetPreparing(p) => {
+            ui.label(RichText::new("Getting the network test ready").strong());
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(super::network::prep_line(p));
+            });
+            if ui.button("Cancel").clicked() {
+                test.stop();
+            }
+            ui.label(
+                RichText::new("Nothing about your show has changed.")
+                    .weak()
+                    .small(),
+            );
+        }
+        View::Network(r) => {
+            if network_running(ui, r) {
+                test.stop();
+            }
         }
         View::Preparing(p) => {
             let st = p.fetch.status.lock();
@@ -387,6 +426,20 @@ fn body(
                     .weak()
                     .small(),
                 );
+            } else if let Some(n) = &d.network {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(word).size(22.0).strong().color(colour));
+                    ui.label(format!(
+                        "{}, {}",
+                        if n.soak {
+                            "Network soak"
+                        } else {
+                            "Network test"
+                        },
+                        clock(d.elapsed)
+                    ));
+                });
+                network_results(ui, n);
             } else if let Some(kinds) = &d.full {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(word).size(22.0).strong().color(colour));
@@ -411,7 +464,11 @@ fn body(
             }
             ui.colored_label(
                 GREEN,
-                "Your show is back exactly as it was. Nothing was saved or changed.",
+                if d.network.is_some() {
+                    "Your show is back exactly as it was, here and (through the show network) on every computer. Nothing was saved or changed."
+                } else {
+                    "Your show is back exactly as it was. Nothing was saved or changed."
+                },
             );
             ui.separator();
             egui::ScrollArea::vertical()
@@ -769,6 +826,220 @@ fn choose(ui: &mut egui::Ui, test: &mut super::TestMode) {
             }
         });
     }
+}
+
+/// What the window knows of the show network, for the network test.
+pub struct NetChoice {
+    pub refusal: Option<String>,
+    pub in_network: bool,
+    /// The computers in step, by name.
+    pub computers: Vec<String>,
+}
+
+/// For the tests: the network test's words and buttons as drawn.
+#[cfg(test)]
+fn note_net(ui: &egui::Ui, name: &str, r: egui::Rect) {
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(String, egui::Rect)>>(egui::Id::new("test_net"))
+            .push((name.to_string(), r))
+    });
+}
+
+fn net_label(ui: &mut egui::Ui, text: impl Into<RichText>) {
+    let t: RichText = text.into();
+    #[cfg(test)]
+    let s = t.text().to_string();
+    let _r = ui.label(t);
+    #[cfg(test)]
+    note_net(ui, &s, _r.rect);
+}
+
+/// The network test's choice: why it can't run here, or its two Start buttons.
+fn network_section(
+    ui: &mut egui::Ui,
+    engine: &Engine,
+    test: &mut super::TestMode,
+    net: &NetChoice,
+    log_dir: &std::path::Path,
+) {
+    net_label(
+        ui,
+        RichText::new("Several computers: the network test").strong(),
+    );
+    net_label(
+        ui,
+        RichText::new(
+            "Plays a short show of its own on every display of every computer of the show network and measures how closely each computer keeps to this one: the clock, each GO's arrival, the pictures' timing, corrections and stalls. The test's media is sent to every computer first. It includes a Sync flash you can film with a phone in slow motion across two projectors. Your show is put back on every computer at the end.",
+        )
+        .weak()
+        .small(),
+    );
+    if let Some(why) = &net.refusal {
+        ui.colored_label(AMBER, why.as_str());
+        #[cfg(test)]
+        note_net(ui, why, egui::Rect::NOTHING);
+    } else {
+        net_label(
+            ui,
+            format!("With {} (in step now).", net.computers.join(", ")),
+        );
+    }
+    let can = net.refusal.is_none() && engine.ff.is_some();
+    ui.horizontal(|ui| {
+        let a = ui.add_enabled(
+            can,
+            egui::Button::new(RichText::new("Start the network test").strong()),
+        );
+        let b = ui.add_enabled(can, egui::Button::new("Network soak"));
+        #[cfg(test)]
+        {
+            note_net(ui, "Start the network test", a.rect);
+            note_net(ui, "Network soak", b.rect);
+        }
+        let soak = if a.clicked() {
+            Some(false)
+        } else if b.clicked() {
+            Some(true)
+        } else {
+            None
+        };
+        if let (Some(soak), Some(ff)) = (soak, engine.ff.clone()) {
+            test.network = true;
+            test.soak = soak;
+            test.start_network(ff, log_dir, soak);
+        }
+    });
+    net_label(
+        ui,
+        RichText::new(format!(
+            "The test: about {} minutes. The soak: the same, {} times over, about {} minutes. Send the zip it makes.",
+            (super::network::LAP_SECS / 60.0).round(),
+            super::network::SOAK_LAPS,
+            (super::network::LAP_SECS * f64::from(super::network::SOAK_LAPS) / 60.0).round()
+        ))
+        .weak()
+        .small(),
+    );
+}
+
+/// The network test under way. True when the user asked to stop it.
+fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun) -> bool {
+    use super::network::Stage;
+    let now = crate::net::time::local_now();
+    let title = if r.soak {
+        "Network soak"
+    } else {
+        "Network test"
+    };
+    match r.stage {
+        Stage::WaitingForMedia => {
+            net_label(
+                ui,
+                RichText::new(format!(
+                    "{title}: sending the test's media to the computers"
+                ))
+                .strong(),
+            );
+            ui.horizontal(|ui| {
+                ui.spinner();
+                net_label(
+                    ui,
+                    format!(
+                        "Waiting until every computer has all of it ({})",
+                        clock(r.started.elapsed())
+                    ),
+                );
+            });
+            for line in r.media_lines() {
+                net_label(ui, line);
+            }
+            if !r.notes.is_empty() {
+                for n in &r.notes {
+                    net_label(ui, RichText::new(n).weak().small());
+                }
+            }
+        }
+        Stage::Playing => {
+            let played = r.played(now);
+            net_label(ui, RichText::new(format!("{title}: playing")).strong());
+            ui.add(
+                egui::ProgressBar::new((played / r.planned.max(1.0)).clamp(0.0, 1.0) as f32).text(
+                    format!(
+                        "{} of {}",
+                        clock(std::time::Duration::from_secs_f64(played)),
+                        clock(std::time::Duration::from_secs_f64(r.planned))
+                    ),
+                ),
+            );
+            let lap = played % super::network::LAP_SECS;
+            if lap < 25.0 || (80.0..110.0).contains(&lap) {
+                net_label(
+                    ui,
+                    RichText::new(
+                        "The Sync flash is up: film two displays at once in slow motion now.",
+                    )
+                    .color(Color32::LIGHT_BLUE),
+                );
+            }
+            for (line, warn) in r.live_lines(now) {
+                if warn {
+                    ui.colored_label(AMBER, &line);
+                    #[cfg(test)]
+                    note_net(ui, &line, egui::Rect::NOTHING);
+                } else {
+                    net_label(ui, line);
+                }
+            }
+        }
+        Stage::Ending { .. } => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                net_label(ui, "Collecting the computers' last measurements and logs…");
+            });
+        }
+    }
+    ui.separator();
+    let label = match r.stage {
+        Stage::WaitingForMedia => "Cancel",
+        _ => "Stop the test",
+    };
+    let b = ui.button(label);
+    #[cfg(test)]
+    note_net(ui, label, b.rect);
+    net_label(
+        ui,
+        RichText::new("Stopping puts your show back on every computer and still makes the zip.")
+            .weak()
+            .small(),
+    );
+    b.clicked()
+}
+
+/// The network test's results: a line per computer.
+fn network_results(ui: &mut egui::Ui, n: &super::network::NetDone) {
+    for c in &n.computers {
+        let colour = match c.verdict {
+            Verdict::Passed => GREEN,
+            Verdict::PassedWithNotes => AMBER,
+            Verdict::ProblemsFound => RED,
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&c.name).strong());
+            ui.colored_label(colour, &c.headline);
+        });
+        #[cfg(test)]
+        note_net(
+            ui,
+            &format!("{}: {}", c.name, c.headline),
+            egui::Rect::NOTHING,
+        );
+        ui.indent(("net-lines", &c.name), |ui| {
+            for l in &c.lines {
+                ui.label(RichText::new(l).weak().small());
+            }
+        });
+    }
+    ui.label(RichText::new(super::net_judge::CANNOT_SEE).weak().small());
 }
 
 /// For the tests: where each choice of test is, and whether it is the one chosen.

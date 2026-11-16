@@ -541,6 +541,21 @@ impl UiState {
 
     /// Why a test can't start now, if it can't.
     pub fn test_refusal(&self) -> Option<&'static str> {
+        if let Some(why) = self.test_refusal_base() {
+            Some(why)
+        } else if self.net.me.on && (self.net.is_primary() || self.net.me.adopted()) {
+            // (A test show would be played on the other computers too: the
+            // network test is the one for that, `testmode::network::refusal`.)
+            Some(
+                "Test Mode is off while this computer is in a show network, except for the network test below. Switch the show network off (Settings ▸ Show network) to run the others.",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Why no test at all can start now (the show, a dialog), if one can't.
+    pub fn test_refusal_base(&self) -> Option<&'static str> {
         if self.dirty {
             Some(
                 "Save your show first: it has changes that aren't saved. (The test puts your show aside and brings it back, but a test is no time to risk unsaved work.)",
@@ -553,11 +568,6 @@ impl UiState {
             || self.deck_import.is_some()
         {
             Some("Close the open file dialog first.")
-        } else if self.net.me.on && (self.net.is_primary() || self.net.me.adopted()) {
-            // (A test show would be played on the other computers too.)
-            Some(
-                "Test Mode is off while this computer is in a show network. Switch the show network off (Settings ▸ Show network) to run a test.",
-            )
         } else {
             None
         }

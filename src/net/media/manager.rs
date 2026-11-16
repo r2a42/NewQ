@@ -178,6 +178,9 @@ pub struct MediaView {
     pub lacking_here: usize,
     /// A primary that took control serves from its store.
     pub from_store: bool,
+    /// Primary: the id of the version served (the network test waits for its
+    /// computers to have it).
+    pub current: Option<String>,
 }
 
 impl MediaView {
@@ -927,6 +930,7 @@ impl PrimarySide {
         self.tell(cfg, f.net, now, out);
         view.hashing = self.making.as_ref().map(|m| m.progress.lock().clone());
         view.served = self.summary.0;
+        view.current = self.primary.current_id();
         view.library_files = self.library_files.clone();
         view.missing_here = self.summary.1;
         view.folders = f

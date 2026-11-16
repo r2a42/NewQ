@@ -44,6 +44,19 @@ pub struct TestMode {
     pub debug: bool,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
+    // ---- The network test (`network`) ----
+    /// The window has the network test chosen.
+    pub network: bool,
+    /// The network soak (about 20 minutes) rather than the test (about 2).
+    pub soak: bool,
+    /// From the computers of the show network (the app puts them here).
+    pub net_in: Vec<(crate::net::node::NodeId, crate::net::measure::NetTest)>,
+    /// For the computers (the app sends them; None: to all).
+    pub net_out: Vec<(
+        Option<crate::net::node::NodeId>,
+        crate::net::measure::NetTest,
+    )>,
+    // ----
     phase: Phase,
 }
 
@@ -59,6 +72,10 @@ impl Default for TestMode {
             heavy: false,
             debug: false,
             notice: None,
+            network: false,
+            soak: false,
+            net_in: Vec::new(),
+            net_out: Vec::new(),
             phase: Phase::Idle,
         }
     }
@@ -72,6 +89,9 @@ enum Phase {
     /// The full check (see `full`): its media being made, and it running.
     FullPrep(Box<super::full::FullPrep>),
     Full(Box<super::full::FullRun>),
+    /// The network test: its media being made ready here, and it running.
+    NetPrep(Box<super::network::NetPrep>),
+    Network(Box<super::network::NetRun>),
     Done(Box<Done>),
 }
 
@@ -484,6 +504,8 @@ pub struct Done {
     pub flavour: Flavour,
     /// It was the full check: how each kind of cue came out (passed, failed, not run).
     pub full: Option<Vec<(&'static str, usize, usize, usize)>>,
+    /// It was the network test: each computer's verdict.
+    pub network: Option<super::network::NetDone>,
     /// The one zip of everything, being made or made (see `bundle`).
     pub bundle: super::bundle::Bundle,
     pub level: Level,
@@ -518,6 +540,8 @@ pub enum View<'a> {
     Comparing(&'a Compare),
     PreparingFull(&'a super::full::FullPrep),
     Checking(&'a super::full::FullRun),
+    NetPreparing(&'a super::network::NetPrep),
+    Network(&'a super::network::NetRun),
     Done(&'a Done),
 }
 
@@ -599,6 +623,8 @@ impl TestMode {
             Phase::Comparing(c) => View::Comparing(c),
             Phase::FullPrep(p) => View::PreparingFull(p),
             Phase::Full(r) => View::Checking(r),
+            Phase::NetPrep(p) => View::NetPreparing(p),
+            Phase::Network(r) => View::Network(r),
             Phase::Done(d) => View::Done(d),
         }
     }
@@ -612,6 +638,8 @@ impl TestMode {
                 | Phase::Comparing(_)
                 | Phase::FullPrep(_)
                 | Phase::Full(_)
+                | Phase::NetPrep(_)
+                | Phase::Network(_)
         )
     }
 
@@ -633,6 +661,7 @@ impl TestMode {
     /// Choose a test: its level and flavour.
     pub fn choose(&mut self, level: Level, flavour: Flavour) {
         self.debug = false;
+        self.network = false;
         self.flavour = flavour;
         self.set_level(level);
     }
@@ -744,14 +773,116 @@ impl TestMode {
             Phase::Comparing(c) => c.request_stop(),
             Phase::FullPrep(p) => p.cancel(),
             Phase::Full(r) => r.stop = true,
+            Phase::NetPrep(p) => p.cancel(),
+            Phase::Network(r) => r.request_stop(),
             _ => {}
+        }
+    }
+
+    /// Begin the network test (or soak): its media made ready here first.
+    pub fn start_network(&mut self, ff: Ffmpeg, log_dir: &Path, soak: bool) {
+        if self.busy() {
+            return;
+        }
+        self.notice = None;
+        self.phase = Phase::NetPrep(Box::new(super::network::NetPrep::start(
+            ff,
+            log_dir,
+            soak,
+            self.download,
+        )));
+    }
+
+    /// Start the network test with a show already made (the tests of the test).
+    #[cfg(test)]
+    pub fn launch_network(
+        &mut self,
+        built: super::network::Built,
+        log_dir: &Path,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+    ) -> Result<(), String> {
+        let run =
+            super::network::NetRun::launch(built, false, log_dir, Vec::new(), show, engine, st)?;
+        self.phase = Phase::Network(Box::new(run));
+        Ok(())
+    }
+
+    /// The network test under way, if it is.
+    #[cfg(test)]
+    pub fn network_run(&self) -> Option<&super::network::NetRun> {
+        match &self.phase {
+            Phase::Network(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Show a finished test's result (the window's tests).
+    #[cfg(test)]
+    pub fn show_done(&mut self, done: Done) {
+        self.phase = Phase::Done(Box::new(done));
+    }
+
+    #[cfg(test)]
+    pub fn network_run_mut(&mut self) -> Option<&mut super::network::NetRun> {
+        match &mut self.phase {
+            Phase::Network(r) => Some(r),
+            _ => None,
         }
     }
 
     /// Called every frame of the application.
     pub fn update(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+        self.update_at(show, engine, st, crate::net::time::local_now());
+    }
+
+    /// `update`, at the primary's shared time `now` (the tests set it).
+    pub fn update_at(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState, now: f64) {
+        let inbox = std::mem::take(&mut self.net_in);
         match &mut self.phase {
             Phase::Idle | Phase::Done(_) => {}
+            Phase::NetPrep(p) => {
+                let Some((res, flash)) = p.ready() else {
+                    return;
+                };
+                let Phase::NetPrep(p) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                    return;
+                };
+                if p.cancelled() {
+                    self.notice = Some("Cancelled. Nothing was changed.".into());
+                    return;
+                }
+                if let Err(e) = &flash {
+                    log::warn!("network test: the Sync flash couldn't be made: {e}");
+                }
+                let peers = st.net.peers.clone();
+                let built = super::network::build(show, &res, flash.as_deref().ok(), &peers);
+                match super::network::NetRun::launch(
+                    built,
+                    p.soak,
+                    &p.log_dir,
+                    p.wanted.clone(),
+                    show,
+                    engine,
+                    st,
+                ) {
+                    Ok(run) => self.phase = Phase::Network(Box::new(run)),
+                    Err(e) => self.notice = Some(e),
+                }
+            }
+            Phase::Network(r) => {
+                let end = r.tick(show, engine, st, now, inbox);
+                self.net_out.append(&mut r.out);
+                if let Some(end) = end {
+                    let Phase::Network(r) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                        return;
+                    };
+                    self.phase = Phase::Done(Box::new(super::network::finish(
+                        *r, end, show, engine, st, now,
+                    )));
+                }
+            }
             Phase::Preparing(p) => {
                 if !p.fetch.finished() {
                     return;
@@ -897,6 +1028,21 @@ impl TestMode {
             }
             Phase::Preparing(p) => p.fetch.cancel(),
             Phase::FullPrep(p) => p.cancel(),
+            Phase::NetPrep(p) => p.cancel(),
+            Phase::Network(mut r) => {
+                // The computers are told it is over; the show comes back here.
+                r.out
+                    .push((None, crate::net::measure::NetTest::End { run: r.run }));
+                self.net_out.append(&mut r.out);
+                self.phase = Phase::Done(Box::new(super::network::finish(
+                    *r,
+                    End::Quit,
+                    show,
+                    engine,
+                    st,
+                    crate::net::time::local_now(),
+                )));
+            }
             Phase::Full(r) => {
                 self.phase = Phase::Done(Box::new(super::full::finish(
                     *r,
@@ -955,6 +1101,7 @@ fn compare_done(
     let verdict = Verdict::of(&findings);
     Done {
         full: None,
+        network: None,
         flavour: Flavour::Cues,
         bundle: super::bundle::Bundle::start(
             folder.clone(),
@@ -1544,6 +1691,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     Done {
         compare: None,
         full: None,
+        network: None,
         flavour: run.flavour,
         bundle: super::bundle::Bundle::start(
             run.folder.clone(),

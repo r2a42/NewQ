@@ -15,9 +15,14 @@ pub mod feature;
 pub mod full;
 pub mod gui;
 pub mod hitches;
+#[cfg(test)]
+pub mod net_demo;
+pub mod net_judge;
+pub mod network;
 pub mod plan;
 pub mod selftest;
 pub mod session;
+pub mod syncflash;
 pub mod timeline;
 
 use serde::{Deserialize, Serialize};

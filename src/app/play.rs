@@ -64,6 +64,15 @@ pub(super) struct Playing {
     address: Option<(Instant, Option<String>)>,
     /// The card drawn on each monitor (its words and texture).
     pub cards: HashMap<usize, (Card, std::sync::Arc<crate::gpu::LayerTexture>)>,
+    // ---- The network test (stage 6) ----
+    measure: crate::net::measure::Measurer,
+    /// The end of this computer's log, being read for the primary.
+    tail: Option<(u64, std::sync::mpsc::Receiver<String>)>,
+    /// When the measuring began (it ends by itself if never told to).
+    measuring_since: Option<Instant>,
+    /// `NEWQ_NET_TEST_AUTOSTART` was looked at (and acted on).
+    autostarted: bool,
+    auto_ready: Option<Instant>,
 }
 
 impl Playing {
@@ -255,10 +264,20 @@ impl App {
             self.ui.net.me.primary == Some(from) && mode_of(&self.ui.net) == NetMode::Follower;
         match msg {
             Msg::Play(t) if primary => {
+                // ---- The network test: how much lead it had left ----
+                let shared = self.net.clock().now().map(|n| n.time);
+                self.play.measure.command(shared, t.seq, t.at);
                 let (epoch, seq) = self.play.follower.receive(*t, &mut self.engine, &self.show);
                 self.net.tell(Some(from), Msg::PlayAck { epoch, seq }, true);
             }
-            Msg::PlayState(s) if primary => self.play.follower.heard(*s),
+            Msg::PlayState(s) if primary => {
+                // ---- The network test: how far apart, at this heartbeat ----
+                if self.play.measure.running().is_some() && self.play.follower.has_done(&s) {
+                    let ours = self.engine.net_state(s.time);
+                    self.play.measure.heartbeat(&s, &ours);
+                }
+                self.play.follower.heard(*s)
+            }
             Msg::ShowPart(p) if primary => {
                 if let Some((_, hash, json)) = self.play.assembly.take(*p) {
                     self.take_show(hash, json);
@@ -274,6 +293,7 @@ impl App {
                 self.play.restart = true;
             }
             Msg::StartAtLogin { on } if primary => self.set_start_at_login(on),
+            Msg::NetTest(t) => self.net_test_message(from, *t, primary),
             _ => {}
         }
     }
@@ -300,7 +320,11 @@ impl App {
             "show network: took the primary's show ({} bytes)",
             json.len()
         );
-        // Kept for the next start (on a thread: a large show is a moment's write).
+        // Kept for the next start (on a thread: a large show is a moment's write);
+        // not the network test's show, which is the primary's for a few minutes.
+        if crate::testmode::network::is_test_show(&self.show) {
+            return;
+        }
         let dir = crate::net::node::node_dir();
         let _ = std::thread::Builder::new()
             .name("net-keep-show".into())
@@ -334,6 +358,7 @@ impl App {
     /// The primary: send the show when it has changed and settled, and to any
     /// computer whose show isn't this one (one that joined, or missed it).
     pub(super) fn play_send_show(&mut self) {
+        self.net_test_pass();
         if self.play.mode != NetMode::Primary {
             return;
         }
@@ -618,6 +643,183 @@ impl App {
             log::info!("show network: a display computer: the control window is hidden");
             ctl.shown = false;
             ctl.window.set_visible(false);
+        }
+    }
+}
+
+// ---- The network test (stage 6, `net::measure`, `testmode::network`) ----
+
+/// A follower measures for at most this long without being told it is over.
+const MEASURE_AT_MOST: Duration = Duration::from_secs(3 * 3600);
+
+impl App {
+    /// A network test message: from the primary to this follower (`primary`),
+    /// or from a computer to this primary's Test Mode.
+    fn net_test_message(&mut self, from: NodeId, t: crate::net::measure::NetTest, primary: bool) {
+        use crate::net::measure::NetTest;
+        if !primary {
+            if self.play.mode == NetMode::Primary {
+                self.ui.test.net_in.push((from, t));
+            }
+            return;
+        }
+        match t {
+            NetTest::Begin { run, start } => {
+                if self.play.measure.running() != Some(run) {
+                    self.play.measuring_since = Some(Instant::now());
+                    // Stalls from before the test aren't its.
+                    let _ = crate::crumbs::take_stalls();
+                }
+                self.play.measure.begin(run, start);
+            }
+            NetTest::End { run } => {
+                let now = self.net.clock().now().map_or(local_now(), |n| n.time);
+                let (link, refresh) = self.net_test_facts();
+                if let Some(r) = self.play.measure.end(run, now, link, refresh) {
+                    self.net.tell(
+                        Some(from),
+                        Msg::NetTest(Box::new(NetTest::Report(Box::new(r)))),
+                        false,
+                    );
+                }
+                self.play.measuring_since = None;
+                // The end of the log, read on a thread (it can be large).
+                let (tx, rx) = std::sync::mpsc::channel();
+                let path = crate::crash::log_dir().join("newq.log");
+                crate::logging::flush();
+                let _ = std::thread::Builder::new()
+                    .name("net-test-log".into())
+                    .spawn(move || {
+                        let _ = tx.send(crate::net::measure::log_tail(
+                            &path,
+                            crate::net::measure::LOG_TAIL,
+                        ));
+                    });
+                self.play.tail = Some((run, rx));
+            }
+            _ => {}
+        }
+    }
+
+    /// For developers (the end-to-end test, `scripts/net_demo.sh`):
+    /// `NEWQ_NET_TEST_AUTOSTART=<n>` starts the network test, with media made
+    /// here, once `n` computers are in step (once a run).
+    fn net_test_autostart(&mut self) {
+        if self.play.autostarted {
+            return;
+        }
+        let Some(n) = std::env::var("NEWQ_NET_TEST_AUTOSTART")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        else {
+            self.play.autostarted = true;
+            return;
+        };
+        // The window shows meanwhile (what it says before the test), and the
+        // test starts once they have been in step for a few seconds.
+        self.ui.test.open = true;
+        let ready = crate::testmode::network::in_step(&self.ui.net).len() >= n
+            && crate::testmode::network::refusal(&self.ui).is_none();
+        if !ready {
+            self.play.auto_ready = None;
+            return;
+        }
+        let since = *self.play.auto_ready.get_or_insert_with(Instant::now);
+        if since.elapsed() < Duration::from_secs(8) {
+            return;
+        }
+        if let Some(ff) = self.engine.ff.clone() {
+            self.play.autostarted = true;
+            log::info!("NEWQ_NET_TEST_AUTOSTART: the network test starts");
+            self.ui.test.download = false;
+            self.ui
+                .test
+                .start_network(ff, &crate::crash::log_dir(), false);
+        }
+    }
+
+    /// This computer's link and its monitors' fastest refresh.
+    fn net_test_facts(&self) -> (Link, Option<f32>) {
+        (
+            self.ui.net.status.link,
+            self.ui
+                .monitors
+                .iter()
+                .filter_map(|m| m.refresh_hz)
+                .reduce(f32::max),
+        )
+    }
+
+    /// Each pass: a primary sends what Test Mode has for the computers; a
+    /// follower that is measuring notes and reports. Never waits.
+    fn net_test_pass(&mut self) {
+        use crate::net::measure::{NetTest, Sample};
+        let out = std::mem::take(&mut self.ui.test.net_out);
+        if self.play.mode == NetMode::Primary {
+            for (to, m) in out {
+                self.net.tell(to, Msg::NetTest(Box::new(m)), false);
+            }
+            self.net_test_autostart();
+        }
+        let primary = self.ui.net.me.primary;
+        if let Some((run, rx)) = &self.play.tail
+            && let Ok(text) = rx.try_recv()
+        {
+            let run = *run;
+            self.play.tail = None;
+            if let Some(p) = primary {
+                self.net.tell(
+                    Some(p),
+                    Msg::NetTest(Box::new(NetTest::LogTail { run, text })),
+                    false,
+                );
+            }
+        }
+        if self.play.measure.running().is_none() {
+            return;
+        }
+        if self.play.mode != NetMode::Follower
+            || self
+                .play
+                .measuring_since
+                .is_some_and(|t| t.elapsed() > MEASURE_AT_MOST)
+        {
+            self.play.measure = Default::default();
+            self.play.measuring_since = None;
+            return;
+        }
+        let clock = self.net.clock();
+        let Some(n) = clock.now() else {
+            return;
+        };
+        let now = n.time;
+        let words = self.play.follower.corrected.clone();
+        self.play
+            .measure
+            .corrections(now, self.play.follower.corrections, &words);
+        for s in crate::crumbs::take_stalls() {
+            self.play.measure.stall(now, s.ms, s.part);
+        }
+        self.play.measure.sample(
+            now,
+            Sample {
+                clock_error_ms: Some(n.error * 1000.0),
+                rtt_ms: clock.worst_rtt().map(|r| r * 1000.0),
+                locked: n.locked,
+                in_step: self.play.follower.in_step,
+            },
+        );
+        let (link, refresh) = self.net_test_facts();
+        let late = Some(crate::render::late_frames_permille());
+        if let (Some(p), Some(r)) = (
+            primary,
+            self.play.measure.report(now, link, refresh, late, false),
+        ) {
+            self.net.tell(
+                Some(p),
+                Msg::NetTest(Box::new(NetTest::Report(Box::new(r)))),
+                false,
+            );
         }
     }
 }
