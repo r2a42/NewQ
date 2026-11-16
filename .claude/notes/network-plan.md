@@ -78,3 +78,15 @@ from start-up), **primary control**, **backup control**.
   primary that claims it. Acceptable on a show LAN; after adoption it obeys only that
   network's key, and the primary can release it.
 - A fresh computer still needs NewQ installed and set to start at login once, by hand.
+
+## Rulings, 2 (2026-11-16)
+
+- R10. Sound on several computers is for separate rooms, a booth monitor, or local
+  sound on the primary while editing. Make it flexible: any computer can be given any
+  of the show's audio outputs, the primary included. No warning needed for the normal
+  cases; no attempt at locking sound between computers.
+- R11. Ease of use over security. Adoption needs no code by default. An optional
+  passcode exists only for a network that carries more than one show. Most networks
+  have one show and no internet. "This is for art": nothing an artist has to configure
+  to make the ordinary case work.
+- R12. Build agents are Opus where possible.
