@@ -1181,8 +1181,25 @@ never copy media by hand, and nothing waits for it.
   of role takes effect at once (the control window closes or opens again);
   *Restart* on the primary's row starts NewQ again on that computer.
 - **Backup computers** follow like any other computer and show the show, the
-  playheads and what is playing, with their controls locked. Taking control from
-  the backup comes in a later version.
+  playheads and what is playing, with their controls locked. Give a computer the
+  *Backup* role from the primary's row (several can be backups). Its window has
+  a **Take control** button beside *Leave the show network*, and says when the
+  primary has gone quiet ("The primary (Booth) has not been heard for 12 s").
+  *Take control* (and one more click, *Yes, take control*) makes the backup the
+  primary: what plays carries on without a jump (the clock the computers share
+  carries on with it), every computer follows it, and the old primary, if it is
+  still there or comes back, becomes the backup and locks. Sends, OSC, MIDI,
+  timecode, the web remote, clock triggers and recordings move to the new
+  primary; so do sound outputs and displays given to no computer in particular
+  (one given to a named computer stays with that computer). The new primary
+  sends the media from its own copy: a file it hadn't finished copying shows a
+  *Media not found* card on it (its page says how many), while the computers
+  that have it play it and send it on. The show it runs is the one the old
+  primary last sent: it isn't saved on the backup, so *Save* asks where to keep
+  it. Taking control is never automatic.
+- **A primary remembers its computers** (with their addresses) and finds them
+  again after a restart, even where the network drops announcements. *Forget*
+  on an offline computer's row stops looking for one that is gone for good.
 - **Start at login.** A display computer is set to start NewQ when it starts
   (so one in a truss comes back after a power cut); the primary's row has a
   *Starts at login* tick for every computer, and each computer's own page has

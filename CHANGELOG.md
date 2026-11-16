@@ -45,6 +45,14 @@ release page, and a release is refused if it has none.
   computer's progress and all of them together, says in its status bar while copying runs that
   playback may be less smooth, marks cues whose file a computer still lacks, and sets each
   computer to keep versions or to replace. Cards can be turned to black for an audience.
+- **Take control from the backup.** A computer given the *Backup* role has a *Take control* button
+  (with one confirming click) and says when the primary has gone quiet. Pressed, the backup runs
+  the show from then on: what plays carries on without a jump, every computer follows it, and the
+  old primary becomes the backup when it is there or comes back. Sends, remote control, timecode
+  and recordings move with it, and it sends the media from its own copy. Its show isn't saved on
+  it yet, so *Save* asks where to keep it. Never automatic.
+- **A primary finds its computers again after a restart**, at their last addresses, and *Forget*
+  drops a computer that is gone for good.
 
 ## 0.23.1
 
