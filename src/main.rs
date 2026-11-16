@@ -32,8 +32,6 @@ mod mediamtx;
 mod mesh;
 mod monitor;
 mod ndi;
-// Not used by the app yet (the network sync trial, stage 1).
-#[cfg_attr(not(test), allow(dead_code))]
 mod net;
 mod output;
 mod pattern;
@@ -128,6 +126,10 @@ fn main() -> anyhow::Result<()> {
         },
         logging::level().name()
     );
+    // `--join` and `--primary`: this computer's place in a show network.
+    if let Some(flag) = net::node::startup_flag(&args) {
+        log::info!("{}", net::node::apply_startup(flag, &net::node::node_dir()));
+    }
     let (show_path, main_window_only) = startup_options(
         std::env::args_os().skip(1),
         std::env::var_os("NEWQ_MAIN_WINDOW_ONLY").is_some(),

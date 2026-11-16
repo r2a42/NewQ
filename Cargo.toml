@@ -32,7 +32,7 @@ serde_json = "1.0.151"
 sha2 = "0.11.1"
 softbuffer = "0.4"
 snap = "1.1.2"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
 ureq = "3"
 wgpu = "30.0.1"
 winit = "0.30.13"
