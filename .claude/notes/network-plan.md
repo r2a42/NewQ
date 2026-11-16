@@ -165,3 +165,22 @@ shares a blended picture is flagged (R2).
 5  backup follow and take control.
 6  Test Mode network test (several NewQs on one machine), README, CHANGELOG.
 The release to test is a pre-release (`-rc1`).
+
+## Rulings, 3 (2026-11-16): transfers never block rehearsal
+
+- R13. A transfer never blocks rehearsal. Every computer plays what it has. Where a
+  cue's file isn't on a computer yet its display shows a card in the cue's place:
+  "Media transferring" (with the name and progress) when it is on its way, "Media not
+  found" when no computer has it (missing on the primary too). When the file lands
+  while the cue is still up, the cue picks it up at the right place.
+- R14. Order: files nearest the playhead first (the active list's playhead and each
+  running timeline's clock, forward first). The order follows the playhead as the user
+  jumps around, without thrash: a transfer in flight is put aside (its `.part` kept)
+  only for something now clearly nearer, never when it is nearly done, and the order
+  is re-made at most about once a second.
+- R15. After every file the show uses: the files in the media manager that are not in
+  the show yet (the manifest's "library" entries: the show's media folder and any
+  folder the user added to the manager).
+- R16. The primary shows a warning while transfers run: playback may be less smooth
+  until they finish. It is a notice, not a gate.
+- (The owner: this is the worst part of Watchout. Get it right.)
