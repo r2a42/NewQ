@@ -196,3 +196,12 @@ The release to test is a pre-release (`-rc1`).
 - R18. An accurate percentage and time estimate, by bytes, for each computer and for
   all of them together (on the primary's page and in its notice), and per file on the
   "Media transferring" card.
+
+## Rulings, 5 (2026-11-16)
+
+- R19. The media manager's library is a first-class use: at load-in a designer adds a
+  huge folder of content they might use; it goes to every computer in the background
+  so that using a file later needs no transfer.
+- R20. **Never play a partial file.** A computer plays a file only when it is complete
+  and verified. Until then the card is shown; the cue takes the file up only once it
+  is whole. (This also means: no "start playing while it downloads".)
