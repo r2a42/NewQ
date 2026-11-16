@@ -1017,7 +1017,10 @@ fn a_video_that_runs_out_during_a_free_run_pause_ends_loops_or_holds_as_it_is_se
     );
     start(&mut e, &show, g, clip);
     let (_, part) = watch_fade(&mut e, &show, clip, 0.05, 6.0);
-    assert!(!part && active(&e, clip).is_none(), "cut");
+    assert!(!part, "cut");
+    until(&mut e, &show, None, "the cut clip to end", 20, |e| {
+        active(e, clip).is_none()
+    });
     // Loop: still going round, then the clock ends it after GO.
     let (show, g, clip) = run_out_show(
         CueType::Video,

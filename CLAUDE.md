@@ -22,6 +22,21 @@ The README describes the features; this file is about working on the code.
   a shared time: cues get `ActiveCue::anchor` and runs `Run::anchor`, clips `clock_offset`, and
   their times are then the clock's (`ActiveCue::pinned`), not sums of ticks or the sound device's
   count; `tick` alone (the app) is unchanged.
+  `src/net/store/` is the media store (stage 3; rulings R4, R13-R20; not wired in yet): `manifest.rs`
+  (`Manifest`: show path, `rel` to the show folder, size, SHA-256, `missing`, `library`; id = hash of
+  the entries without times; built on a thread by `Hashing` from `Sources` with a `HashCache` keyed by
+  path, size and mtime; `Lookup` matches a path exactly, then ignoring case, then by the longest `rel`
+  tail, for paths from another system), `local.rs` (`Store`, a receiver's objects `objects/ab/<sha>.<ext>`;
+  partials in `partial/`, never reachable by `resolve`: **a partial file is never handed out**; an object
+  is indexed only after its hash matched and the rename; `Policy` keeps N versions or replaces; `plan`,
+  `gc`, `verify`), `primary.rs` (`Primary` serves files where they are; `watch` re-hashes a changed one
+  and publishes a new version), `http.rs` (`Server` on std sockets with Range and a rate cap,
+  `transfers()` for the primary's notice; our own client with an idle timeout per read), `fetch.rs`
+  (resume, verify while writing, next source on failure), `pull.rs` (`Puller`: follows the primary's
+  current version in the caller's order, `set_order`; a new order is taken up when a transfer ends, at
+  most once a second; one put-aside only when the top file waits behind full slots for `URGENT_WAIT`;
+  the library after the used files; `availability` and `Progress` by bytes, `Progress::sum`, answered
+  from memory). Tests over loopback with fake bad sources; no real network, multi-GB file or full disk.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
