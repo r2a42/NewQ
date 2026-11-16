@@ -127,6 +127,32 @@ The README describes the features; this file is about working on the code.
   `engine/cards_tests.rs`, `ui/network_tests.rs`. Tried headless with two NewQs on one machine (output
   windows did not go full screen there: no window manager); never on two computers. Not done: an
   ordered group on a late joiner, timeline jumps got ready on arrival, sound resampled to the clock.
+  Take control (stage 5; D7, R7): `node::take_control` (Backup -> Primary, term above any seen),
+  `remember`/`forget` and `Identity::known` (a primary's computers with their last address, dialled at
+  start by `Hub` `recall_known` even without beacons; `keep_known` each tick; `NetAction::Forget`);
+  `judge` breaks a tie of terms by the higher id. `hub.rs`: `NetAction::TakeControl`
+  (`State::take_control`: carries the follower's `ClockHandle::continued()` into the hub's
+  `time::PrimaryClock`, which the beacon thread answers clock asks with (`time::answer`) and
+  `Hub::primary_now` gives the app; closes every session so the new primary dials), an old primary that
+  judges a newer one steps down and closes its sessions; followers keep their shared clock when the
+  primary changes within one network (`clock_network`); `Following::quiet_secs` (`QUIET_AFTER`);
+  `NetView::took_control_from`; a peer heard again after a silence is dialled at once.
+  `app/play.rs::play_switch`: Follower->Primary and Primary->Follower skip the pass through Off (anchors
+  kept); the new primary lets the old primary's queued commands go (`Follower::take_queue`), the one
+  stepping down does its own at once (a send fires once); `UiState::took_control` (unsaved, `show_path`
+  None: Save asks). Media: a primary keeps a follower's store when it takes control (and reopens
+  `<node dir>/media` when `me.term >= 2`): `store::Primary::set_store`/`inherit` (entries missing on disk
+  taken from `Store::find_latest`, served from the object, not re-hashed by the watch),
+  `media::PrimaryFinder` (store object, else "not found" if the old primary had it, else the path),
+  `MediaView::lacking_here`/`from_store`. UI: `network::locked_banner` second row (`quiet_words`,
+  `take_control_button` with a confirm kept in egui memory), *Forget* on an offline row, the took-control
+  note. Tests: `net/play_tests.rs` (`World` has `primary`, `dead`, `Ev::TakeOver/StepDown/Return`,
+  `worst_gap`), `net/hub_tests.rs` (takeover, the old primary back, a restarted primary re-finding its
+  computers), `net/media/tests.rs::after_taking_control_the_media_is_served_from_the_store`,
+  `ui/network_tests.rs`. Tried headless with three NewQs on one machine (takeover, the old primary back
+  as backup, Restart from the primary); never on separate computers. Known: a backup with no clock lock
+  at takeover starts from its own clock; the old primary, now backup, copies the media into its store; an
+  output that names the old primary stays with it.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
