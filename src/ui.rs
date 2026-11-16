@@ -2935,7 +2935,7 @@ fn cue_list(
                     } else if dark {
                         format!("⚠ {}", cue_target_text(show, c))
                     } else if lack.is_some() {
-                        format!("↓ {}", cue_target_text(show, c))
+                        format!("⏳ {}", cue_target_text(show, c))
                     } else {
                         cue_target_text(show, c)
                     },

@@ -59,9 +59,9 @@ pub fn draw(card: &Card, size: (u32, u32), black: bool) -> RgbaImage {
         [175, 180, 190, 255],
         false,
     );
-    over(&mut img, &heading, (-0.1 * hf) as i32);
+    over(&mut img, &heading, (-0.12 * hf) as i32);
     over(&mut img, &name, 0);
-    over(&mut img, &detail, (0.09 * hf) as i32);
+    over(&mut img, &detail, (0.11 * hf) as i32);
     img
 }
 

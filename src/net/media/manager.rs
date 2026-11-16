@@ -1180,11 +1180,13 @@ impl FollowerSide {
         };
         let snap = p.snapshot();
         r.progress = snap.progress.clone();
-        r.plan = snap
-            .plan
-            .as_ref()
-            .map(|pl| pl.words())
-            .unwrap_or_else(|| "Waiting for the primary's list of media".into());
+        // (The plan is worked out when a version is taken up: once all is
+        // here it would still say what was to copy.)
+        r.plan = match &snap.plan {
+            Some(_) if !words::busy(&snap.progress) => "All the media is here.".into(),
+            Some(pl) => pl.words(),
+            None => "Waiting for the primary's list of media".into(),
+        };
         r.not_found = snap.not_found.clone();
         if r.problem.is_none() {
             r.problem = snap.problem.clone();

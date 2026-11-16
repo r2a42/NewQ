@@ -279,7 +279,7 @@ pub fn status(ui: &mut Ui, st: &UiState) {
         Side::Primary => {
             if let Some(text) = m.notice() {
                 let r = ui
-                    .label(RichText::new(format!("↓ {text}")).color(PREWAIT))
+                    .label(RichText::new(format!("⏳ {text}")).color(PREWAIT))
                     .on_hover_text(
                         "The other computers are being sent the show's media. Each plays what it \
                          has; a display whose file hasn't arrived shows a card in the cue's place. \
@@ -295,7 +295,7 @@ pub fn status(ui: &mut Ui, st: &UiState) {
             {
                 let r = ui
                     .label(
-                        RichText::new(format!("↓ Media: {}", words::progress(&r.progress)))
+                        RichText::new(format!("⏳ Media: {}", words::progress(&r.progress)))
                             .color(PREWAIT),
                     )
                     .on_hover_text("The show's media is being copied to this computer.");
