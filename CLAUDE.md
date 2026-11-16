@@ -62,6 +62,33 @@ The README describes the features; this file is about working on the code.
   the status bar, the Identify overlay), the Displays menu's other computers' monitors
   (`remote_display_status`), the audio output's "Plays on"; tests in `ui/network_tests.rs`. Only
   loopback and xvfb have been tried.
+  `src/net/media/` is the media manager (stage 2b media; rulings R4, R13-R20). `mod.rs`:
+  `local_path(&Path) -> Local {Here|Transferring(Transfer)|NotFound}`, the one way the engine, the probe
+  cache and the waveform reach a file; with no finder it is one atomic load (alone, primary).
+  `set_finder`/`finder()` hold a follower's `StoreFinder`, which answers from the `Puller` and only ever
+  hands out `Store::resolve`; `StoreServes` serves a follower's store to the others. `manager.rs`:
+  `Manager` (`App::pass_media`, its own block called from `pass_net`) decides Off/Primary/Follower from
+  the `NetView`. Primary: hashes the show's used files and `Show::library_folders` on a thread
+  (`media-hashes.json`, FFprobe `Facts` per digest in `media-facts.json`, re-made once the files have
+  rested `settle`), publishes, `Server` (`NEWQ_MEDIA_RATE`), `Primary::watch`, sends
+  `Msg::MediaServer{port, sources}` and `MediaOrder` to each computer, builds `MediaView.lacking`/`sum`
+  from the reports. Follower: `Store` at `<node dir>/media` opened on a thread, its own server, a
+  `Puller` on the primary plus complete followers, `MediaPolicy` kept in `media-policy.json`
+  (`PolicySetting.folder` is the hook for choosing the store folder), `MediaVerify`, `MediaReport` in
+  `StatusReport.media_progress` (via `Hub::set_media`). `order.rs`: `order` and `signature` (R17), pure.
+  `words.rs`: the card text, progress, policy and notice wording, pure. `card.rs`: `draw` and
+  `info_from(facts)`. Manifest entries carry `facts` (`Facts::of`), written only when known. Engine:
+  `engine/cards.rs`: in `prepare_from` a file not `Here` gives `PreparedKind::Card` (a picture; black
+  with `Show::no_transfer_cards`) or `Silent` (`ActiveKind::Wait`), with the length from the facts;
+  `ActiveCue::card` (`CardState`) is redrawn about once a second (`tend_cards`); once the file is
+  `Here`, `take_up` starts decoders `TAKE_UP_LEAD` ahead as a `Seek { keep_time }` that `apply_seek`
+  turns into Video or Audio (**never a partial file**, R20). Preloads skip files that aren't here;
+  `ProbeCache` asks through the finder (`via`, `through_store`, `read_here`). Tests:
+  `net/media/tests.rs` (loopback hubs), `engine/cards_tests.rs` (real media, fake finder), media rows in
+  `ui/network_tests.rs`. UI: `ui/net_media.rs` (the Show network page's media rows and policy, the
+  primary's notice, `cue_mark`, the library on Settings ▸ Media, the missing-media note), and
+  `MediaView.library_files` in the timeline bin's Files shelf. Tried headless with two NewQs on one
+  machine; no real network, no take-up of a timeline clip or a cue on several displays.
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
