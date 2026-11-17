@@ -442,19 +442,8 @@ pub fn library(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Act
             "In a show network, every computer gets the show's files first, nearest the \
              playhead first, then these folders, so the content is in place at load-in. A \
              folder is read once; NewQ remembers what it read, so a restart doesn't read it \
-             again.",
-        );
-        let mut cards = !show.no_transfer_cards;
-        let r = ui.checkbox(&mut cards, "Show transfer cards on the displays");
-        note(ui, "transfer_cards", r.rect);
-        if r.changed() {
-            show.no_transfer_cards = !cards;
-        }
-        hint(
-            ui,
-            "Where a cue's file hasn't reached a computer yet, its display shows \"Media \
-             transferring\" in the cue's place. Off: black instead (for a show in front of an \
-             audience).",
+             again. What display computers show while a file is still coming is set on \
+             the Show network page.",
         );
     });
 }

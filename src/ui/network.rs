@@ -21,6 +21,115 @@ pub struct Editing {
     pub took_control_from: Option<String>,
 }
 
+/// An address as the page writes it: "10.0.0.2", with its port only when it
+/// isn't the usual one ("10.0.0.2, port 47821").
+pub fn address_text(ip: std::net::IpAddr, port: Option<u16>) -> String {
+    match port.filter(|p| *p != 0 && *p != crate::net::discover::DEFAULT_PORT) {
+        Some(p) => format!("{ip}, port {p}"),
+        None => ip.to_string(),
+    }
+}
+
+/// Where computer `id` is: the address its session is connected on, else the
+/// one its announcements come from, else (offline) the last one known. The
+/// flag says it is a last known address. Pure, for the tests.
+pub fn peer_address(v: &NetView, id: NodeId) -> Option<(String, bool)> {
+    if let Some((_, a)) = v.reached.iter().find(|(p, _)| *p == id) {
+        return Some((address_text(a.ip(), Some(a.port())), false));
+    }
+    let p = v.peer(id);
+    if let Some(a) = p.filter(|p| p.online).and_then(|p| p.addr) {
+        return Some((address_text(a, None), false));
+    }
+    let k = v.me.known.iter().find(|k| k.id == id)?;
+    match k.socket() {
+        Some(s) => Some((address_text(s.ip(), Some(s.port())), true)),
+        None => {
+            let ip: std::net::IpAddr = k.addr.as_deref()?.parse().ok()?;
+            Some((address_text(ip, None), true))
+        }
+    }
+    .or_else(|| {
+        p.and_then(|p| p.addr)
+            .map(|a| (address_text(a, None), true))
+    })
+}
+
+/// This computer's addresses, one per network adapter, best first:
+/// "Wired · 192.168.1.10". Pure, for the tests.
+pub fn own_addresses(adapters: &[crate::net::paths::Adapter], port: Option<u16>) -> Vec<String> {
+    adapters
+        .iter()
+        .filter(|a| !a.ip.is_link_local())
+        .map(|a| format!("{} · {}", a.kind.label(), address_text(a.ip.into(), port)))
+        .collect()
+}
+
+/// The way this computer reaches computer `id` (or is reached by it): the
+/// kind of our adapter its address is on, e.g. "Wired". Pure, for the tests.
+pub fn path_to(v: &NetView, id: NodeId) -> Option<crate::net::paths::AdapterKind> {
+    use crate::net::paths;
+    let ip = v
+        .reached
+        .iter()
+        .find(|(p, _)| *p == id)
+        .map(|(_, a)| a.ip())
+        .or_else(|| v.peer(id).and_then(|p| p.addr))?;
+    let std::net::IpAddr::V4(v4) = ip else {
+        return None;
+    };
+    if v4.is_loopback() {
+        return None;
+    }
+    v.adapters
+        .iter()
+        .filter(|a| a.holds(v4))
+        .min_by_key(|a| paths::rank(a.ip.into(), &v.adapters))
+        .map(|a| a.kind)
+        .or(Some(paths::AdapterKind::Other))
+}
+
+/// The one line said when a VPN is in the way: on this computer, on another,
+/// or a connection going through one. None when there is none. Pure, for the
+/// tests.
+pub fn vpn_words(v: &NetView) -> Option<String> {
+    use crate::net::paths::AdapterKind;
+    let mut lines = Vec::new();
+    let lan = v
+        .adapters
+        .iter()
+        .find(|a| a.kind != AdapterKind::Vpn && !a.ip.is_link_local());
+    if crate::net::paths::vpn_on(&v.adapters) {
+        lines.push(match lan {
+            Some(a) => format!(
+                "A VPN is on: it can slow the show network. NewQ is using the {} network ({}).",
+                a.kind.label().to_lowercase(),
+                a.ip
+            ),
+            None => "A VPN is on and there is no local network: the show network goes \
+                     through the VPN, which can slow it."
+                .to_string(),
+        });
+    }
+    for p in v.peers.iter().filter(|p| p.ours) {
+        let through = path_to(v, p.id) == Some(AdapterKind::Vpn)
+            || p.status.as_ref().and_then(|s| s.path) == Some(AdapterKind::Vpn);
+        if through {
+            lines.push(format!(
+                "{} is connected through a VPN: it can be slow. Give it a cable on the same \
+                 network as this computer.",
+                p.name
+            ));
+        } else if p.status.as_ref().is_some_and(|s| s.vpn_on) {
+            lines.push(format!(
+                "A VPN is on on {}: it can slow the show network there.",
+                p.name
+            ));
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// For the tests: where a control of the page was drawn.
 #[cfg(test)]
 fn note(ui: &Ui, name: impl Into<String>, rect: egui::Rect) {
@@ -83,7 +192,7 @@ pub fn space(bytes: u64) -> String {
     }
 }
 
-pub fn page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
+pub fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let v = st.net.clone();
     this_computer(ui, &v, st, actions);
     if v.is_primary() {
@@ -94,7 +203,57 @@ pub fn page(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action
     } else if v.me.on && !v.me.adopted() {
         waiting(ui, &v, st, actions);
     }
+    // The show's own settings for its display computers (a follower's come
+    // from the primary).
+    if !v.me.adopted() || v.is_primary() {
+        display_cards(ui, show);
+    }
     super::net_media::own(ui, st);
+}
+
+/// What display computers' screens show when there is nothing to play: the
+/// waiting card, and the "Media transferring" card in a cue's place. Both
+/// are the show's, so they follow it to every computer.
+fn display_cards(ui: &mut Ui, show: &mut Show) {
+    section(ui, "Cards on display computers' screens", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Show a card while they wait");
+            let r = egui::ComboBox::from_id_salt("wait_cards")
+                .selected_text(show.wait_cards.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for w in crate::show::WaitCards::ALL {
+                        let r = ui.selectable_label(show.wait_cards == w, w.label());
+                        note(ui, format!("wait_cards:{}", w.label()), r.rect);
+                        if r.clicked() {
+                            show.wait_cards = w;
+                        }
+                    }
+                })
+                .response;
+            note(ui, "wait_cards", r.rect);
+        });
+        hint(
+            ui,
+            "The waiting card shows a display computer's name, address and how it stands, so it \
+             can be found and set up. Once the show is ready on it, a screen with nothing \
+             playing is black between cues, whatever is chosen here. \"Never\": black from \
+             the start (a computer no show has added yet still shows it). Identify always \
+             shows the name.",
+        );
+        let mut cards = !show.no_transfer_cards;
+        let r = ui.checkbox(&mut cards, "Show transfer cards on the displays");
+        note(ui, "transfer_cards", r.rect);
+        if r.changed() {
+            show.no_transfer_cards = !cards;
+        }
+        hint(
+            ui,
+            "Where a cue's file hasn't reached a computer yet, its display shows \"Media \
+             transferring\" in the cue's place. Off: black instead (for a show in front of an \
+             audience).",
+        );
+    });
 }
 
 fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -139,8 +298,19 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
             ))
             .color(GO_GREEN)
         } else if let Some(f) = &v.following {
+            // The primary's address, so it can be found (or typed in) by hand.
+            let at = peer_address(v, f.id)
+                .map(|(a, last)| {
+                    if last {
+                        format!(" (last at {a})")
+                    } else {
+                        format!(" ({a})")
+                    }
+                })
+                .unwrap_or_default();
+            note(ui, format!("primary_at:{at}"), egui::Rect::NOTHING);
             let text = format!(
-                "This computer is {} in the show network run from {}{}",
+                "This computer is {} in the show network run from {}{at}{}",
                 v.me.role.described(),
                 f.name,
                 if f.online {
@@ -155,7 +325,25 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
         } else {
             RichText::new("Waiting for a primary to add this computer.").weak()
         };
-        ui.label(said);
+        let r = ui.label(said);
+        note(ui, "said", r.rect);
+        // Its addresses, to read out to whoever sets up the other computers.
+        let port = v.port;
+        let mine = own_addresses(&v.adapters, port);
+        let text = match mine.len() {
+            0 => "This computer has no network address yet: plug in a cable or join a network."
+                .to_string(),
+            1 => format!("This computer's address: {}", mine[0]),
+            _ => format!("This computer's addresses: {}", mine.join(" · ")),
+        };
+        let r = ui.label(RichText::new(&text).small());
+        note(ui, format!("own_address:{text}"), r.rect);
+        if let Some(w) = vpn_words(v) {
+            for l in w.lines() {
+                warning(ui, &format!("⚠ {l}"));
+                note(ui, format!("vpn:{l}"), egui::Rect::NOTHING);
+            }
+        }
         if v.me.adopted() {
             hint(
                 ui,
@@ -352,9 +540,14 @@ fn dot(ui: &mut Ui, online: bool) {
 
 /// The primary itself, first in the list.
 fn own_row(ui: &mut Ui, v: &NetView) {
-    ui.horizontal(|ui| {
+    let mine = own_addresses(&v.adapters, v.port);
+    ui.horizontal_wrapped(|ui| {
         dot(ui, true);
         ui.label(RichText::new(&v.name).strong());
+        for a in &mine {
+            let r = ui.label(RichText::new(a).monospace());
+            note(ui, format!("address:me:{a}"), r.rect);
+        }
         ui.label(RichText::new("Primary · this computer").weak());
     });
     ui.label(RichText::new(facts(&v.status, None)).small().weak());
@@ -373,6 +566,15 @@ fn computer_row(
     ui.horizontal(|ui| {
         dot(ui, p.online);
         rename_field(ui, p.id, &p.name, v, st, actions);
+        if let Some((a, last)) = peer_address(v, p.id) {
+            let text = match (last, path_to(v, p.id)) {
+                (true, _) => format!("last at {a}"),
+                (false, Some(k)) => format!("{} · {a}", k.label()),
+                (false, None) => a,
+            };
+            let r = ui.label(RichText::new(&text).monospace());
+            note(ui, format!("address:{}:{text}", p.id), r.rect);
+        }
         let usable = p.connected;
         ui.add_enabled_ui(usable, |ui| {
             let r = egui::ComboBox::from_id_salt(("net_role", p.id.0))
@@ -496,9 +698,6 @@ fn facts(s: &proto::StatusReport, p: Option<&PeerView>) -> String {
     }
     if s.link != Link::Unknown {
         parts.push(s.link.label().to_string());
-    }
-    if let Some(a) = p.and_then(|p| p.addr) {
-        parts.push(a.to_string());
     }
     if let Some(b) = s.disk_free {
         parts.push(space(b));
