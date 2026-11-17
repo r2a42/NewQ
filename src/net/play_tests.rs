@@ -139,6 +139,22 @@ struct World {
     /// The largest difference (seconds) between the computers' times of the
     /// same cue or timeline, where the frames were judged.
     worst_gap: f64,
+    // ---- R21: the picture never waits for, or jumps at, the primary ----
+    /// Added to the cues' times in the heartbeats a follower hears: a steady
+    /// offset, and a random jitter of up to this either way (seconds).
+    state_offset: f64,
+    state_jitter: f64,
+    /// Heartbeats held up by a random extra delay of up to this (s): late,
+    /// out of order, in bursts.
+    state_delay: f64,
+    /// Nothing at all reaches or leaves this follower in this span (true time).
+    silence: Option<(usize, f64, f64)>,
+    /// Per computer: the cue's time at its last tick (by its own clock), and
+    /// the ticks at which it moved by other than the time gone (a jump or a
+    /// stall), and how many ticks were looked at.
+    last_cue: Vec<Option<(f64, f64)>>,
+    jumps: Vec<Vec<f64>>,
+    ticks_seen: Vec<u64>,
 }
 
 fn frame(t: f64) -> i64 {
@@ -194,6 +210,13 @@ impl World {
             dead: vec![false; followers + 1],
             send_cue: None,
             worst_gap: 0.0,
+            state_offset: 0.0,
+            state_jitter: 0.0,
+            state_delay: 0.0,
+            silence: None,
+            last_cue: vec![None; followers + 1],
+            jumps: vec![Vec::new(); followers + 1],
+            ticks_seen: vec![0; followers + 1],
         }
     }
 
@@ -206,9 +229,18 @@ impl World {
         } else {
             self.net.down
         };
+        if self
+            .silence
+            .is_some_and(|(who, a, b)| (who == to || who == from) && now >= a && now < b)
+        {
+            return;
+        }
         let Some(mut d) = link.delay(&mut self.rng) else {
             return;
         };
+        if matches!(w, Wire::State(_)) && self.state_delay > 0.0 {
+            d += self.rng.range(0.0, self.state_delay);
+        }
         if let Wire::Command(_) = &w {
             if self
                 .lose_commands
@@ -306,9 +338,17 @@ impl World {
                     l.ack(id(from), epoch, seq);
                 }
             }
-            Wire::State(s) => {
+            Wire::State(mut s) => {
                 if from != self.primary {
                     return;
+                }
+                for c in &mut s.cues {
+                    let j = if self.state_jitter > 0.0 {
+                        self.rng.range(-self.state_jitter, self.state_jitter)
+                    } else {
+                        0.0
+                    };
+                    c.anchor += self.state_offset + j;
                 }
                 if let Some(f) = self.nodes[to].follower.as_mut() {
                     f.heard(s);
@@ -456,6 +496,20 @@ impl World {
                 .filter(|s| s.locked || n.engine.net_shared_time().is_some())
                 .map(|s| s.time);
             f.step(&mut n.engine, show, shared, dt, Some(1));
+            // Its cue moves on by the time gone, every tick (R21).
+            let cue = n
+                .engine
+                .active
+                .iter()
+                .find(|a| a.cue_id == self.ts.cue)
+                .map(|a| a.elapsed);
+            if let (Some(c), Some((l, was))) = (cue, self.last_cue[i]) {
+                self.ticks_seen[i] += 1;
+                if ((c - was) - (local - l)).abs() > 0.5 / TICK_HZ {
+                    self.jumps[i].push(now);
+                }
+            }
+            self.last_cue[i] = cue.map(|c| (local, c));
         }
         let src = n.shared(now);
         if let Some(src) = src {
@@ -784,6 +838,7 @@ fn commands_and_heartbeats_go_over_the_session_and_back() {
             cue: CueId(1),
             anchor: 9.0,
             stopping: false,
+            sound: None,
         }],
         runs: vec![RunNow {
             key: TimelineKey::Group(CueId(5)),
@@ -985,4 +1040,83 @@ fn an_old_primary_still_there_steps_down_and_a_send_fires_once() {
     w.q.push(10.5, Ev::StepDown(0));
     w.run(20.0);
     assert_eq!(sent(&w), 1);
+}
+
+// ---- R21: the network is a reference, never something a picture waits for ----
+
+/// Plays the cue on a primary and one follower from 4.5 s.
+fn playing_one(seed: u64, net: Network, set: impl FnOnce(&mut World)) -> World {
+    let mut w = World::new(1, net, seed);
+    set(&mut w);
+    w.run(4.0);
+    w.acts(&[(4.5, Act::Fire)]);
+    w
+}
+
+/// The follower's cue moved on by exactly the time gone at every tick after
+/// `from` (no jump, no stall), and was looked at for most of them.
+fn smooth(w: &World, from: f64) {
+    let jumps: Vec<&f64> = w.jumps[1].iter().filter(|t| **t >= from).collect();
+    assert!(jumps.is_empty(), "the picture jumped or stood at {jumps:?}");
+    assert!(w.ticks_seen[1] > 600, "{}", w.ticks_seen[1]);
+}
+
+/// A primary whose heartbeats say its cues began a little early or late,
+/// at random (up to 10 ms either way): nothing is put right, ever.
+#[test]
+fn heartbeats_that_jitter_never_move_the_picture() {
+    let mut w = playing_one(41, Network::wired(), |w| w.state_jitter = 0.010);
+    w.run(40.0);
+    smooth(&w, 5.5);
+    let f = w.nodes[1].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 0, "{:?}", f.corrected);
+}
+
+/// A primary that says its cue began a steady 118 ms off (as 0.24.1 did for
+/// a sound, by its sound device): put right once at most, never sought, and
+/// never again however long it goes on.
+#[test]
+fn a_steady_difference_is_put_right_once_and_never_again() {
+    let mut w = playing_one(43, Network::wired(), |w| w.state_offset = 0.118);
+    w.run(30.0);
+    let f = w.nodes[1].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 1, "{:?}", f.corrected);
+    assert!(f.corrected[0].contains("moved"), "{:?}", f.corrected);
+    assert!(f.in_step, "it agrees with what it was told");
+    // Told otherwise again (the 118 ms gone): it differs, and says so, but
+    // the cue is not moved a second time.
+    w.state_offset = 0.0;
+    w.run(60.0);
+    let f = w.nodes[1].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 1, "{:?}", f.corrected);
+    assert!(!f.in_step);
+    // One jump of 118 ms (7 frames) when it was put right, and none after.
+    assert_eq!(w.jumps[1].len(), 1, "{:?}", w.jumps[1]);
+    smooth(&w, w.jumps[1][0] + 0.001);
+}
+
+/// A follower that hears nothing from the primary for 5 s (no heartbeat, no
+/// clock reply) plays on by its own clock, and is still in step after.
+#[test]
+fn five_seconds_of_silence_changes_nothing_on_the_screen() {
+    let mut w = playing_one(47, Network::wired(), |w| w.silence = Some((1, 15.0, 20.0)));
+    w.judge_from = 6.0;
+    w.run(40.0);
+    smooth(&w, 5.5);
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    let f = w.nodes[1].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 0, "{:?}", f.corrected);
+}
+
+/// Heartbeats held up by up to 300 ms, so that they come late, out of order
+/// and in bursts: nothing visible changes.
+#[test]
+fn late_and_bunched_heartbeats_change_nothing_on_the_screen() {
+    let mut w = playing_one(53, Network::wired(), |w| w.state_delay = 0.3);
+    w.judge_from = 6.0;
+    w.run(40.0);
+    smooth(&w, 5.5);
+    assert!(w.worst <= 1, "{} frames apart at {}", w.worst, w.worst_at);
+    let f = w.nodes[1].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 0, "{:?}", f.corrected);
 }

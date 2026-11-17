@@ -53,6 +53,14 @@ const SETTLING: f64 = 0.25;
 const JUMP_PAST: f64 = 0.5;
 /// A timeline's clock off by less than this is moved; by more, it is sought.
 const RUN_NUDGE: f64 = 0.25;
+/// A cue off from the primary's by no more than this is left alone (R21: a
+/// heartbeat never moves a picture for jitter; the commands placed it).
+pub const LEAVE_UNDER: f64 = 1.5 * FRAME;
+/// A cue is put right only once it has been off at this many heartbeats in a
+/// row (about a second)...
+const STEADY_BEATS: u32 = 4;
+/// ...by amounts within this of each other (a steady difference, not jitter).
+const STEADY_SPREAD: f64 = FRAME;
 
 /// A difference seen at one heartbeat, acted on when seen again at the next.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -64,10 +72,19 @@ enum Doubt {
     Paused,
 }
 
-/// The differences seen at the last heartbeat (`Engine::net_correct`).
+/// The differences seen at the last heartbeat (`Engine::net_correct`), and
+/// what has been put right.
 #[derive(Default, Debug)]
 pub struct NetCorrection {
     seen: HashSet<Doubt>,
+    /// A playing instance off from the primary's: the heartbeats in a row it
+    /// has been, and the least and most it was off by (seconds).
+    steady: HashMap<u64, (u32, f64, f64)>,
+    /// Instances put right already: never again (R21: one correction, then
+    /// it is said, not jumped at again).
+    fixed: HashSet<u64>,
+    /// Instances said to still differ after their one correction.
+    said: HashSet<u64>,
 }
 
 impl NetCorrection {
@@ -207,7 +224,7 @@ impl Engine {
             && let Some(now) = self.net_shared_time()
         {
             for a in self.active.iter_mut().filter(|a| a.instance >= before) {
-                if a.run.is_none() && !matches!(a.kind, ActiveKind::Audio(_)) {
+                if a.run.is_none() {
                     a.anchor = Some(now - late - a.elapsed);
                 }
             }
@@ -308,6 +325,7 @@ impl Engine {
                 cue: a.cue_id,
                 anchor: a.anchor.unwrap_or(now - a.elapsed),
                 stopping: a.stopping,
+                sound: a.sound_zero,
             })
             .collect();
         cues.sort_by(|a, b| a.cue.0.cmp(&b.cue.0).then(a.anchor.total_cmp(&b.anchor)));
@@ -422,15 +440,36 @@ impl Engine {
                     }
                     Some((instance, anchor, _)) => {
                         let off = anchor - c.anchor;
-                        if off.abs() <= FRAME || s.time - c.anchor < SETTLING {
+                        if s.time - c.anchor < SETTLING {
                             continue;
                         }
-                        let d = Doubt::Off(*instance);
-                        if doubts.seen.contains(&d) {
-                            shift.push((*instance, c.anchor));
-                        } else {
-                            seen.insert(d);
+                        if off.abs() <= LEAVE_UNDER {
+                            continue;
                         }
+                        seen.insert(Doubt::Off(*instance));
+                        // Put right only a difference that is real: steady
+                        // over several heartbeats, and only once.
+                        let st = doubts.steady.entry(*instance).or_insert((0, off, off));
+                        st.0 += 1;
+                        st.1 = st.1.min(off);
+                        st.2 = st.2.max(off);
+                        if st.2 - st.1 > STEADY_SPREAD {
+                            *st = (1, off, off);
+                        }
+                        if st.0 < STEADY_BEATS {
+                            continue;
+                        }
+                        if doubts.fixed.contains(instance) {
+                            if doubts.said.insert(*instance) {
+                                log::info!(
+                                    "show network: {} still differs from the primary's by {:+.0} ms after being put right once; it is left as it is",
+                                    name(show, *cue),
+                                    off * 1000.0
+                                );
+                            }
+                            continue;
+                        }
+                        shift.push((*instance, c.anchor));
                     }
                 }
             }
@@ -464,9 +503,7 @@ impl Engine {
                 },
             );
             for a in self.active.iter_mut().filter(|a| a.instance >= before) {
-                if !matches!(a.kind, ActiveKind::Audio(_)) {
-                    a.anchor = Some(anchor);
-                }
+                a.anchor = Some(anchor);
             }
             done.push(format!("{} started {from:.2} s in", name(show, cue)));
         }
@@ -482,19 +519,21 @@ impl Engine {
             }
         }
         for (instance, anchor) in shift {
+            doubts.fixed.insert(instance);
+            doubts.steady.remove(&instance);
             let Some(a) = self.active.iter_mut().find(|a| a.instance == instance) else {
                 continue;
             };
             let id = a.cue_id;
             let was = a.anchor.unwrap_or(now - a.elapsed);
             let file = matches!(a.kind, ActiveKind::Video(_) | ActiveKind::Audio(_));
+            // A sound re-anchored behind where it plays catches up by itself
+            // (`Voice::keep_to`); one ahead goes on a little ahead.
             if (was - anchor).abs() > JUMP_PAST && file {
                 let to = (now - anchor).max(0.0);
                 let _ = self.seek(show, instance, to);
-            } else if !matches!(a.kind, ActiveKind::Audio(_)) {
-                a.anchor = Some(anchor);
             } else {
-                continue;
+                a.anchor = Some(anchor);
             }
             done.push(format!(
                 "{} moved {:+.0} ms",
@@ -568,6 +607,12 @@ impl Engine {
                 }
             }
         }
+        // What no longer differs starts counting again; what has ended is
+        // forgotten.
+        doubts.steady.retain(|i, _| seen.contains(&Doubt::Off(*i)));
+        let playing: HashSet<u64> = self.active.iter().map(|a| a.instance).collect();
+        doubts.fixed.retain(|i| playing.contains(i));
+        doubts.said.retain(|i| playing.contains(i));
         doubts.seen = seen;
         self.leave();
         done
@@ -675,3 +720,7 @@ impl Engine {
         self.outbox.sent().len()
     }
 }
+
+#[cfg(test)]
+#[path = "net_sound_tests.rs"]
+mod sound_tests;

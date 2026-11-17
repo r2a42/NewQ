@@ -53,6 +53,24 @@ pub struct Report {
     pub late_frames_permille: Option<u32>,
     /// The last report of the run.
     pub last: bool,
+    /// How fast its output windows drew since the last report, a monitor
+    /// each (those drawing continuously). A NewQ before 0.24.2 sends none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub monitors: Vec<MonitorRate>,
+}
+
+/// How fast a computer's output window on one of its monitors drew.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MonitorRate {
+    /// Its place in the computer's monitors (0 = the first), and its name.
+    pub index: usize,
+    pub name: String,
+    pub refresh_hz: Option<f32>,
+    /// The slowest it drew (frames a second, over a second at a time).
+    pub fps: f32,
+    /// Its late frames, in thousandths (the most seen).
+    pub late_permille: u32,
 }
 
 /// A look at one moment (every `ROW_EVERY` seconds).
@@ -74,6 +92,12 @@ pub struct Row {
     /// Cues (and timelines) compared, and those playing there but not here.
     pub compared: u32,
     pub missing: u32,
+    /// The largest difference between a sound's place here and on the
+    /// primary, by what each sound device has been sent (ms); None: no sound
+    /// playing on both. Apart from `apart_ms`, which is the cues' (and so the
+    /// pictures') time by the shared clock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound_apart_ms: Option<f64>,
 }
 
 /// A command as it arrived.
@@ -128,6 +152,7 @@ pub struct Measurer {
     run: Option<(u64, f64)>,
     pending: Report,
     apart: Option<f64>,
+    sound_apart: Option<f64>,
     compared: u32,
     missing: u32,
     next_row: f64,
@@ -135,6 +160,8 @@ pub struct Measurer {
     seq: u32,
     /// The engine's count of corrections when last looked at.
     corrections_seen: Option<u64>,
+    /// Its output windows' drawing since the last report.
+    rates: Vec<MonitorRate>,
 }
 
 impl Measurer {
@@ -185,6 +212,9 @@ impl Measurer {
         }
         self.compared = self.compared.max(compared);
         self.missing = self.missing.max(missing);
+        if let Some(a) = sound_apart_between(theirs, ours) {
+            self.sound_apart = Some(self.sound_apart.map_or(a, |w: f64| w.max(a)));
+        }
     }
 
     /// The engine's corrections so far (`Follower::corrections`) and the words
@@ -221,6 +251,24 @@ impl Measurer {
         }
     }
 
+    /// How fast its output windows are drawing now (those drawing): the
+    /// slowest of each since the last report goes in it.
+    pub fn drawing(&mut self, now: &[MonitorRate]) {
+        if self.run.is_none() {
+            return;
+        }
+        for r in now {
+            match self.rates.iter_mut().find(|m| m.index == r.index) {
+                Some(m) => {
+                    m.fps = m.fps.min(r.fps);
+                    m.late_permille = m.late_permille.max(r.late_permille);
+                    m.refresh_hz = r.refresh_hz.or(m.refresh_hz);
+                }
+                None => self.rates.push(r.clone()),
+            }
+        }
+    }
+
     /// Note a row if one is due.
     pub fn sample(&mut self, now: f64, s: Sample) {
         if self.run.is_none() || now < self.next_row {
@@ -236,6 +284,7 @@ impl Measurer {
             apart_ms: self.apart.take().map(round2),
             compared: std::mem::take(&mut self.compared),
             missing: std::mem::take(&mut self.missing),
+            sound_apart_ms: self.sound_apart.take().map(round2),
         };
         if self.pending.rows.len() < MAX_NOTES {
             self.pending.rows.push(row);
@@ -264,6 +313,8 @@ impl Measurer {
         r.refresh_hz = refresh_hz;
         r.late_frames_permille = late_frames_permille;
         r.last = last;
+        r.monitors = std::mem::take(&mut self.rates);
+        r.monitors.sort_by_key(|m| m.index);
         Some(r)
     }
 
@@ -337,6 +388,35 @@ pub fn apart_between(theirs: &PlayState, ours: &PlayState) -> (Option<f64>, u32,
     (worst, compared, missing)
 }
 
+/// How far apart the sounds playing on both are, by what each computer's
+/// sound device has been sent (ms): cues matched as `apart_between` matches
+/// them, each with its sound's zero time (`CueNow::sound`). None when no
+/// sound plays on both.
+pub fn sound_apart_between(theirs: &PlayState, ours: &PlayState) -> Option<f64> {
+    let by_cue = |s: &PlayState| {
+        let mut m: HashMap<crate::show::CueId, Vec<(f64, Option<f64>)>> = HashMap::new();
+        for c in s.cues.iter().filter(|c| !c.stopping) {
+            m.entry(c.cue).or_default().push((c.anchor, c.sound));
+        }
+        for v in m.values_mut() {
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        m
+    };
+    let (here, there) = (by_cue(ours), by_cue(theirs));
+    let mut worst: Option<f64> = None;
+    for (cue, list) in there {
+        let Some(mine) = here.get(&cue) else { continue };
+        for ((_, a), (_, b)) in list.iter().zip(mine) {
+            if let (Some(a), Some(b)) = (a, b) {
+                let d = ((b - a) * 1000.0).abs();
+                worst = Some(worst.map_or(d, |w| w.max(d)));
+            }
+        }
+    }
+    worst
+}
+
 /// The milliseconds in a correction's words: "moved +40 ms" is 40, "started
 /// 1.20 s in" 1200; None where they say no amount.
 pub fn correction_ms(words: &str) -> Option<f64> {
@@ -392,6 +472,7 @@ mod tests {
                     cue: CueId(c),
                     anchor: a,
                     stopping: false,
+                    sound: None,
                 })
                 .collect(),
             runs: run
@@ -517,6 +598,28 @@ mod tests {
         assert!(last.last && last.seq == 2 && last.rows.is_empty());
         assert_eq!(m.running(), None);
         assert!(m.end(7, 101.3, Link::Wired, None).is_none());
+    }
+
+    #[test]
+    fn the_slowest_drawing_of_each_monitor_goes_in_the_next_report() {
+        let mut m = Measurer::default();
+        let rate = |index, fps, late| MonitorRate {
+            index,
+            name: format!("Screen {index}"),
+            refresh_hz: Some(64.0),
+            fps,
+            late_permille: late,
+        };
+        // Not measuring: nothing kept.
+        m.drawing(&[rate(0, 4.0, 1000)]);
+        m.begin(1, 0.0);
+        m.drawing(&[rate(0, 4.2, 900), rate(1, 60.0, 0)]);
+        m.drawing(&[rate(0, 3.6, 1000)]);
+        let r = m.report(1.0, Link::Wired, None, None, false).unwrap();
+        assert_eq!(r.monitors, vec![rate(0, 3.6, 1000), rate(1, 60.0, 0)]);
+        // The next report starts afresh.
+        let r = m.report(2.0, Link::Wired, None, None, false).unwrap();
+        assert!(r.monitors.is_empty());
     }
 
     #[test]

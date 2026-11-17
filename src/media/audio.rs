@@ -58,6 +58,9 @@ struct VoiceShared {
     lead_left: AtomicU64,
     /// How many frames the lead was in all.
     lead_total: AtomicU64,
+    /// Frames to pass over, unheard, to catch up with a shared clock
+    /// (`Voice::keep_to`): what is left of the lead first, then the sound.
+    skip_left: AtomicU64,
     received_frames: AtomicU64,
     /// Once a released loop has gone on to its last pass: the frames queued
     /// before it, plus one (0 = it hasn't).
@@ -81,6 +84,15 @@ struct MixVoice {
     /// The device's sample rate, for how far a gain moves in a buffer.
     sr: f32,
 }
+
+/// How far a sound may fall behind a shared clock before it catches up by
+/// passing over the difference (`Voice::keep_to`): more than a device's buffer
+/// (a device fills its buffer ahead, so a sound on time never reads as behind)
+/// and a late callback or two, less than anyone would hear as an echo between
+/// two rooms. What a device itself adds after that (its own latency) is fixed
+/// for the device and is not counted: the sound is heard that much later on
+/// it, steadily.
+pub const SOUND_SLACK: f64 = 0.04;
 
 /// The most channels of a file a matrix can use.
 pub const MAX_SOURCE_CHANNELS: usize = 8;
@@ -321,6 +333,31 @@ impl Device {
     }
 }
 
+/// A test's sound card (`AudioOut::with_manual_device`).
+#[cfg(test)]
+pub struct ManualMix {
+    rx: Receiver<MixVoice>,
+    voices: Vec<MixVoice>,
+    mix: Vec<f32>,
+    /// Frames mixed in all.
+    pub frames: u64,
+}
+
+#[cfg(test)]
+impl ManualMix {
+    /// Mix (and throw away) `frames` frames of every voice, as one callback.
+    pub fn mix(&mut self, frames: usize) {
+        while let Ok(v) = self.rx.try_recv() {
+            self.voices.push(v);
+        }
+        self.mix.clear();
+        self.mix.resize(frames * 2, 0.0);
+        let mix = &mut self.mix;
+        self.voices.retain_mut(|v| mix_voice(v, mix, frames, 2));
+        self.frames += frames as u64;
+    }
+}
+
 /// Where a recording takes a copy of the sound a device plays: stereo,
 /// from a pair of the device's channels, into a ring that the recording
 /// reads. The audio callback only ever `try_lock`s it, so a recording can
@@ -465,6 +502,25 @@ impl AudioOut {
         let mut out = AudioOut::new();
         out.devices.insert(None, good);
         (out, lost)
+    }
+
+    /// A default device whose voices are mixed only when the test says
+    /// (`ManualMix::mix`), as a sound card's callback would: a test can start
+    /// it late, or let it miss buffers.
+    #[cfg(test)]
+    pub fn with_manual_device() -> (AudioOut, ManualMix) {
+        let (good, rx) = Device::for_test(2);
+        let mut out = AudioOut::new();
+        out.devices.insert(None, good);
+        (
+            out,
+            ManualMix {
+                rx,
+                voices: Vec::new(),
+                mix: Vec::new(),
+                frames: 0,
+            },
+        )
     }
 
     /// A default device whose voices are mixed (and dropped) in real time by a
@@ -1369,6 +1425,28 @@ impl Voice {
         let lead = self.shared.lead_total.load(Ordering::Relaxed);
         played.saturating_sub(lead) as f64 / self.sample_rate as f64
     }
+    /// Keep the sound to a shared clock: `at` is how far into the voice (its
+    /// lead included) the clock says it is. A voice more than `SOUND_SLACK`
+    /// behind (its decoder or its device started it late, or the device missed
+    /// buffers) passes over the difference, once; ahead, it goes on (a sound is
+    /// never held back, and a device fills its buffer a little ahead of what is
+    /// heard). Returns how far behind it was when it skipped (seconds).
+    pub fn keep_to(&self, at: f64) -> Option<f64> {
+        let behind = at - self.reached();
+        if behind.is_nan() || behind <= SOUND_SLACK {
+            return None;
+        }
+        let frames = (behind * self.sample_rate as f64).round() as u64;
+        self.shared.skip_left.fetch_add(frames, Ordering::Relaxed);
+        Some(behind)
+    }
+    /// Seconds sent to the device, the lead and what it is still to pass over
+    /// (`keep_to`) included: where the voice is, or is about to be.
+    pub fn reached(&self) -> f64 {
+        let played = self.shared.played_frames.load(Ordering::Relaxed);
+        let skip = self.shared.skip_left.load(Ordering::Relaxed);
+        (played + skip) as f64 / self.sample_rate as f64
+    }
     /// Seconds since the voice started, the lead included. A picture that
     /// goes with the sound is paced by this, so it keeps its place however the
     /// two are delayed.
@@ -1798,6 +1876,22 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
     if sh.paused.load(Ordering::Relaxed) {
         return true;
     }
+    let src = v.src.clamp(1, MAX_SOURCE_CHANNELS);
+    // Behind a shared clock: pass over what it is behind by, the lead first,
+    // then as much of the sound as has been read (the rest at the next buffers).
+    let skip = sh.skip_left.load(Ordering::Relaxed);
+    if skip > 0 {
+        let from_lead = skip.min(sh.lead_left.load(Ordering::Relaxed));
+        sh.lead_left.fetch_sub(from_lead, Ordering::Relaxed);
+        let n = (skip - from_lead).min((v.consumer.slots() / src) as u64);
+        if n > 0
+            && let Ok(chunk) = v.consumer.read_chunk(n as usize * src)
+        {
+            chunk.commit_all();
+        }
+        sh.played_frames.fetch_add(from_lead + n, Ordering::Relaxed);
+        sh.skip_left.fetch_sub(from_lead + n, Ordering::Relaxed);
+    }
     // The lead is silence: spend it before any of the sound is mixed in.
     let lead = sh.lead_left.load(Ordering::Relaxed);
     let (mix, frames) = if lead > 0 {
@@ -1811,7 +1905,6 @@ fn mix_voice(v: &mut MixVoice, mix: &mut [f32], frames: usize, channels: usize) 
     if frames == 0 {
         return true;
     }
-    let src = v.src.clamp(1, MAX_SOURCE_CHANNELS);
     // Crosspoint gains go on towards where they are being faded to, unless
     // held where they are.
     if !v.matrix.is_empty() && !sh.xp_hold.load(Ordering::Relaxed) {
