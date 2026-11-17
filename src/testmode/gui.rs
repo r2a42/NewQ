@@ -230,8 +230,8 @@ fn live_lines(test: &super::TestMode, st: &UiState) -> Vec<(String, bool)> {
     };
     let mut v = match test.view() {
         View::Network(r) => return r.live_lines(st, now),
-        View::Running(r) => vec![super::network::own_line(&name, &r.outputs, &r.hitches)],
-        View::Checking(r) => vec![super::network::own_line(&name, &r.outputs, &r.hitches)],
+        View::Running(r) => vec![super::network::own_line(&name, &st.drawing, &r.hitches)],
+        View::Checking(r) => vec![super::network::own_line(&name, &st.drawing, &r.hitches)],
         _ => Vec::new(),
     };
     if let Some(f) = test.fleet() {

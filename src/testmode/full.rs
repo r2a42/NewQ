@@ -209,8 +209,9 @@ pub struct FullRun {
     settling: Option<Instant>,
     panics_before: u32,
     ff: Option<Ffmpeg>,
-    /// This computer's outputs' frame rates.
-    pub outputs: super::fleet::OutputWatch,
+    /// This computer's screens' drawing, and when it was last looked at.
+    pub drawing: Vec<super::net_judge::MonitorNotes>,
+    drawing_looked: Option<f64>,
 }
 
 /// Whether a streaming server can be run for the check: the program is with
@@ -446,11 +447,21 @@ pub fn launch(
         settling: None,
         panics_before: crate::crash::panic_count(),
         ff: engine.ff.clone(),
-        outputs: Default::default(),
+        drawing: Vec::new(),
+        drawing_looked: None,
     })
 }
 
 impl FullRun {
+    /// This computer's screens, once a second.
+    pub fn note_drawing(&mut self, now: &[crate::net::measure::MonitorRate]) {
+        let t = self.started.elapsed().as_secs_f64();
+        if self.drawing_looked.is_none_or(|l| t - l >= 1.0) {
+            self.drawing_looked = Some(t);
+            super::net_judge::note_drawing(&mut self.drawing, now);
+        }
+    }
+
     /// Lines from the computers of a show network, into events.log.
     pub fn said(&mut self, lines: Vec<(f64, String)>) {
         for (_, l) in lines {
@@ -886,7 +897,7 @@ pub fn finish(
         run.log_at(t, &line);
     }
     findings.extend(run.hitches.findings(hours, run.sound_device.as_deref()));
-    findings.extend(run.outputs.findings("This computer"));
+    findings.extend(super::net_judge::drawing_findings("This computer", &run.drawing).1);
     let panics = crate::crash::panic_count().saturating_sub(run.panics_before);
     if panics > 0 {
         findings.insert(

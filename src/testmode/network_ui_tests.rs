@@ -264,6 +264,7 @@ fn two_monitors(in_step: bool) -> NetView {
         hardware: None,
         size: (1920, 1080),
         refresh_hz: Some(60.0),
+        ..Default::default()
     };
     if let Some(s) = v.peers[0].status.as_mut() {
         s.monitors = vec![m("Projector"), m("Side screen")];

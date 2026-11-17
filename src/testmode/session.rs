@@ -210,8 +210,10 @@ pub struct Run {
     sound_device: Option<String>,
     /// A timeline test's driver and what it watches.
     pub timeline: Option<Box<TimelineRun>>,
-    /// This computer's outputs' frame rates.
-    pub outputs: super::fleet::OutputWatch,
+    /// This computer's screens' drawing (`net_judge::note_drawing`), and
+    /// when it was last looked at (seconds into the test).
+    pub drawing: Vec<super::net_judge::MonitorNotes>,
+    drawing_looked: Option<f64>,
 }
 
 /// A timeline test's part of a run (see `testmode::timeline`).
@@ -919,14 +921,16 @@ impl TestMode {
             f.keep_up(st, now);
         }
         match &mut self.phase {
+            // This computer's screens, once a second (every test judges a
+            // screen that draws far below its refresh).
             Phase::Running(r) => {
                 let t = r.started.elapsed().as_secs_f64();
-                r.outputs.note(t, &super::fleet::own_rates(show, st));
+                if r.drawing_looked.is_none_or(|l| t - l >= 1.0) {
+                    r.drawing_looked = Some(t);
+                    super::net_judge::note_drawing(&mut r.drawing, &st.drawing);
+                }
             }
-            Phase::Full(r) => {
-                let t = r.started.elapsed().as_secs_f64();
-                r.outputs.note(t, &super::fleet::own_rates(show, st));
-            }
+            Phase::Full(r) => r.note_drawing(&st.drawing),
             _ => {}
         }
         self.update_phase(show, engine, st, now, inbox);
@@ -1674,7 +1678,8 @@ fn launch(
         memory: MemoryWatch::new(),
         hitches: super::hitches::Hitches::new(started),
         sound_device: super::hitches::working_device(engine),
-        outputs: Default::default(),
+        drawing: Vec::new(),
+        drawing_looked: None,
     })
 }
 
@@ -1690,7 +1695,7 @@ impl Run {
             f.extend(super::analysis::analyse_timeline(&tl.watch.notes, &clean));
         }
         f.extend(self.hitches.findings(hours, self.sound_device.as_deref()));
-        f.extend(self.outputs.findings("This computer"));
+        f.extend(super::net_judge::drawing_findings("This computer", &self.drawing).1);
         f
     }
 

@@ -41,11 +41,6 @@ pub const STEP_LIMIT: Duration = Duration::from_secs(90);
 /// A computer that stops answering while the test waits for it ends the wait
 /// after this long.
 pub const GONE_LIMIT: Duration = Duration::from_secs(30);
-/// An output drawing fewer frames a second than this, while it draws one after
-/// another, stutters: the test's slowest film is 24 frames a second.
-pub const STUTTER_FPS: f32 = 15.0;
-/// ...for at least this many readings (one about every second or two).
-pub const STUTTER_READINGS: usize = 2;
 
 // ----- Media on the computers ---------------------------------------------------
 
@@ -138,94 +133,25 @@ impl OutputWatch {
             }
         }
     }
+}
 
-    /// The latest reading of each output.
-    pub fn now(&self) -> Vec<(String, f32)> {
-        self.readings
-            .iter()
-            .filter_map(|(n, v)| v.last().map(|(_, f, _)| (n.clone(), *f)))
-            .collect()
-    }
-
-    /// "Display 1 59.9 fps, Display 2 4.1 fps".
-    pub fn now_text(&self) -> String {
-        let now = self.now();
-        if now.is_empty() {
-            return "no output drawing".into();
-        }
-        now.iter()
-            .map(|(n, f)| format!("{n} {f:.0} fps"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    /// The stretches an output stuttered: `STUTTER_READINGS` or more readings
-    /// in a row under `STUTTER_FPS`: (output, from, to, worst fps, refresh).
-    pub fn stutters(&self) -> Vec<(String, f64, f64, f32, Option<f32>)> {
-        let mut out = Vec::new();
-        for (name, v) in &self.readings {
-            let mut run: Vec<&(f64, f32, Option<f32>)> = Vec::new();
-            let mut close = |run: &mut Vec<&(f64, f32, Option<f32>)>| {
-                if run.len() >= STUTTER_READINGS {
-                    let worst = run.iter().map(|r| r.1).fold(f32::MAX, f32::min);
-                    out.push((
-                        name.clone(),
-                        run[0].0,
-                        run[run.len() - 1].0,
-                        worst,
-                        run[0].2,
-                    ));
-                }
-                run.clear();
-            };
-            for r in v {
-                if r.1 < STUTTER_FPS {
-                    run.push(r);
-                } else {
-                    close(&mut run);
-                }
+/// "screen 1 60 fps, screen 2 4 fps" for this computer's drawing windows,
+/// and those that draw slowly.
+pub fn drawing_text(rates: &[crate::net::measure::MonitorRate]) -> (String, Vec<String>) {
+    let mut slow = Vec::new();
+    let text: Vec<String> = rates
+        .iter()
+        .map(|r| {
+            if r.fps < crate::net::proto::slow_below(r.refresh_hz) {
+                slow.push(format!("screen {} draws slowly", r.index + 1));
             }
-            close(&mut run);
-        }
-        out
-    }
-
-    /// The findings about the outputs of computer `who` ("This computer").
-    pub fn findings(&self, who: &str) -> Vec<Finding> {
-        self.stutters()
-            .into_iter()
-            .map(|(name, from, to, worst, refresh)| Finding {
-                severity: Severity::Problem,
-                text: format!(
-                    "{who}: the output {name} drew only about {worst:.0} frames a second for {} (from {} into the test){}: its picture stutters there.",
-                    net_judge::span((to - from).max(1.0)),
-                    net_judge::at(from),
-                    refresh.map_or(String::new(), |r| format!(
-                        "; its display runs at {r:.0} Hz"
-                    ))
-                ),
-            })
-            .collect()
-    }
-
-    /// The report's line: each output's lowest and usual rate.
-    pub fn summary(&self) -> Vec<String> {
-        self.readings
-            .iter()
-            .filter(|(_, v)| !v.is_empty())
-            .map(|(n, v)| {
-                let mut f: Vec<f32> = v.iter().map(|r| r.1).collect();
-                f.sort_by(f32::total_cmp);
-                format!(
-                    "{n}: usually {:.0} frames a second, lowest {:.0}{}",
-                    f[f.len() / 2],
-                    f[0],
-                    v.last()
-                        .and_then(|r| r.2)
-                        .map_or(String::new(), |r| format!(" (display at {r:.0} Hz)"))
-                )
-            })
-            .collect()
+            format!("screen {} {:.0} fps", r.index + 1, r.fps)
+        })
+        .collect();
+    if text.is_empty() {
+        ("no screen drawing".into(), slow)
+    } else {
+        (text.join(", "), slow)
     }
 }
 
@@ -297,7 +223,6 @@ impl LocalNotes {
         for x in &mut f {
             x.text = format!("{who}: {}", x.text);
         }
-        f.extend(self.outputs.findings(who));
         f
     }
 
@@ -330,7 +255,6 @@ impl LocalNotes {
             self.dropouts.len(),
             if self.dropouts.len() == 1 { "" } else { "s" }
         ));
-        l.extend(self.outputs.summary());
         l
     }
 }
@@ -844,9 +768,15 @@ impl Fleet {
                 if late > 0 {
                     wrong.push(format!("{late} commands late"));
                 }
-                for (name, fps) in c.local.outputs.now() {
-                    if fps < STUTTER_FPS {
-                        wrong.push(format!("{name} stutters"));
+                // Its screens' drawing, as its status says now.
+                let mut screens = Vec::new();
+                if let Some(s) = st.net.peer(c.id).and_then(|p| p.status.as_ref()) {
+                    for (i, m) in s.monitors.iter().enumerate() {
+                        let Some(f) = m.drawing_fps else { continue };
+                        screens.push(format!("screen {} {f:.0} fps", i + 1));
+                        if m.drawing_slowly() {
+                            wrong.push(format!("screen {} draws slowly", i + 1));
+                        }
                     }
                 }
                 if !c.local.dropouts.is_empty() {
@@ -869,7 +799,11 @@ impl Fleet {
                     "{}: {}{apart} · {}{}",
                     c.notes.name,
                     if step { "in step" } else { "NOT in step" },
-                    c.local.outputs.now_text(),
+                    if screens.is_empty() {
+                        "no screen drawing".to_string()
+                    } else {
+                        screens.join(", ")
+                    },
                     if wrong.is_empty() {
                         String::new()
                     } else {
@@ -1124,30 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn an_output_that_draws_a_few_frames_a_second_is_a_problem_and_a_moment_isnt() {
-        let mut w = OutputWatch::default();
-        for t in 0..20 {
-            let t = f64::from(t);
-            // Display 2 stutters from 5 s to 9 s; Display 1 dips once.
-            let two = if (5.0..10.0).contains(&t) { 4.0 } else { 59.0 };
-            let one = if t == 12.0 { 10.0 } else { 60.0 };
-            w.note(t, &[rate("Display 1", one), rate("Display 2", two)]);
-            // A second reading within the second isn't kept.
-            w.note(t + 0.5, &[rate("Display 1", 1.0)]);
-        }
-        let f = w.findings("Left");
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert_eq!(f[0].severity, Severity::Problem);
-        assert!(
-            f[0].text.starts_with("Left: the output Display 2 drew only about 4 frames a second for 4 s (from 0:05 into the test); its display runs at 60 Hz"),
-            "{}",
-            f[0].text
-        );
-        assert_eq!(w.now_text(), "Display 1 60 fps, Display 2 59 fps");
-        assert!(w.summary()[1].contains("lowest 4"), "{:?}", w.summary());
-    }
-
-    #[test]
     fn a_computer_whose_own_measurements_never_came_is_a_problem() {
         let mut c = Computer::new(NodeId(2), "Left");
         // It reported how it keeps to the primary, but nothing of itself.
@@ -1215,10 +1125,6 @@ mod tests {
             text.iter()
                 .any(|t| t.starts_with("Left: ") && t.contains("dropout")),
             "{text:?}"
-        );
-        assert!(
-            text.iter()
-                .any(|t| t.contains("the output Left 1 drew only"))
         );
         assert_eq!(v.verdict, Verdict::ProblemsFound);
         assert!(
