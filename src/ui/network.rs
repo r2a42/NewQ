@@ -275,8 +275,8 @@ fn computers(ui: &mut Ui, show: &Show, v: &NetView, st: &mut UiState, actions: &
             hint(
                 ui,
                 "No other computer is in the show yet. On each computer that is to take part, \
-                 open Settings ▸ Show network and switch it on (or start it with newq --join): \
-                 it appears below, ready to add.",
+                 open NewQ Display (beside NewQ), or open Settings ▸ Show network and switch it \
+                 on: it appears below, ready to add.",
             );
         }
     });

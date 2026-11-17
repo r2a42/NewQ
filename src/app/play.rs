@@ -7,7 +7,7 @@
 use super::App;
 use crate::engine::NetMode;
 use crate::net::hub::{NetView, SyncFacts};
-use crate::net::node::{NodeId, Role};
+use crate::net::node::{Identity, NodeId, Role};
 use crate::net::play::{
     Follower, Leader, Out, ShowAssembly, Standing, lead_for, show_hash, show_parts,
 };
@@ -62,6 +62,12 @@ pub(super) struct Playing {
     pub restart: bool,
     /// This computer's address and when it was looked at (a display card's).
     address: Option<(Instant, Option<String>)>,
+    /// Started as a display computer (`--display`, NewQ Display): one from
+    /// the first moment, before any primary adopts it (`display_computer`).
+    pub display: bool,
+    /// The waiting computers this primary added because its show names them
+    /// (`vouched_for`), each once a run.
+    pub vouched: HashSet<NodeId>,
     /// The card drawn on each monitor (its words and texture).
     pub cards: HashMap<usize, (Card, std::sync::Arc<crate::gpu::LayerTexture>)>,
     // ---- The network test (stage 6) ----
@@ -497,7 +503,10 @@ impl App {
     /// Start at login on this computer (`autostart.rs`), as the primary asked
     /// or the page ticked.
     pub(super) fn set_start_at_login(&mut self, on: bool) {
-        match crate::autostart::set(on) {
+        // A display computer comes back as one (`--display`): no splash,
+        // nothing asked, its cards at once.
+        let display = self.play.display || self.ui.net.me.role == Role::Display;
+        match crate::autostart::set(on, display) {
             Ok(()) => log::info!(
                 "start at login {}",
                 if on { "switched on" } else { "switched off" }
@@ -526,6 +535,50 @@ impl App {
 pub(super) struct Card {
     pub text: String,
     pub big: bool,
+    /// Small, dim words at the foot of the card (how to add it, how to quit).
+    pub hint: Option<String>,
+}
+
+/// The key that quits a display computer, as the card says it (`quits`).
+pub(super) fn quit_words() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Command-Q quits NewQ on this computer"
+    } else {
+        "Ctrl+Q quits NewQ on this computer"
+    }
+}
+
+/// Whether a key pressed in an output window quits a display computer:
+/// Ctrl+Q, or Command-Q on a Mac (`egui::Modifiers::command`).
+pub(super) fn quits(key: egui::Key, mods: egui::Modifiers) -> bool {
+    key == egui::Key::Q && mods.command && !mods.alt && !mods.shift
+}
+
+/// A display computer: one the primary made a display (switched on and
+/// adopted), or one started as a display (`--display`) that is waiting for a
+/// primary or is its display. Given another role (the backup) it is not:
+/// its control window shows, as for any backup. Pure, for the tests.
+pub(super) fn display_computer(me: &Identity, started_as_display: bool) -> bool {
+    match me.role {
+        Role::Display => started_as_display || (me.on && me.adopted()),
+        Role::Alone => started_as_display,
+        Role::Primary | Role::Backup => false,
+    }
+}
+
+/// The windows a display computer has: one per connected monitor, whatever
+/// the show gives them (`reconcile_outputs`). None for any other computer, or
+/// with every output kept in the main window. Pure, for the tests.
+pub(super) fn display_windows(
+    display: bool,
+    main_window_only: bool,
+    monitors: usize,
+) -> Vec<usize> {
+    if display && !main_window_only {
+        (0..monitors).collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// The card's words: the computer's name, its address, who runs the show and
@@ -542,6 +595,11 @@ pub(super) fn card_text(
         lines.push(a.to_string());
     }
     lines.push(String::new());
+    if primary.is_none() && standing.is_none() {
+        // Not adopted yet (started as a display): any primary may add it.
+        lines.push("Waiting for a NewQ primary on this network".into());
+        return lines.join("\n");
+    }
     match primary {
         Some((p, true)) => lines.push(format!("Run from {p}")),
         Some((p, false)) => lines.push(format!("Waiting for the primary ({p})")),
@@ -557,11 +615,58 @@ pub(super) fn card_text(
     lines.join("\n")
 }
 
+/// The waiting computers the open show vouches for: switched on, in no show
+/// network, speaking this NewQ's protocol, and named by one of the show's
+/// displays or sound outputs (it was this show's computer on another primary,
+/// or before this primary forgot it). A primary adds them by itself, once a run
+/// each (`asked`), so a computer released by hand stays released. A computer
+/// that belongs to any network, another primary's included, is never taken.
+/// Pure, for the tests.
+pub(super) fn vouched_for(
+    show: &crate::show::Show,
+    v: &NetView,
+    asked: &HashSet<NodeId>,
+) -> Vec<NodeId> {
+    if !v.is_primary() {
+        return Vec::new();
+    }
+    let named = |id: NodeId| {
+        show.outputs.iter().any(|o| o.computer == Some(id))
+            || show.audio_outputs.iter().any(|a| a.computers.contains(&id))
+    };
+    v.peers
+        .iter()
+        .filter(|p| {
+            p.waiting
+                && !p.ours
+                && p.network.is_none()
+                && p.compatible
+                && !p.adopting
+                && p.problem.is_none()
+                && !asked.contains(&p.id)
+                && named(p.id)
+        })
+        .map(|p| p.id)
+        .collect()
+}
+
 impl App {
+    /// A primary adds, with no click, a waiting computer its open show names
+    /// (`vouched_for`).
+    pub(super) fn add_vouched(&mut self) {
+        for id in vouched_for(&self.show, &self.ui.net, &self.play.vouched) {
+            self.play.vouched.insert(id);
+            let name = self.ui.net.name_of(id);
+            self.engine.log(format!(
+                "Show network: {name} is one of this show's computers: added to the show"
+            ));
+            self.net.ask(crate::net::hub::NetAction::Adopt(id));
+        }
+    }
+
     /// A display computer: no control window; every monitor is an output.
     pub(super) fn is_display_computer(&self) -> bool {
-        let me = &self.ui.net.me;
-        me.on && me.adopted() && me.role == Role::Display
+        display_computer(&self.ui.net.me, self.play.display)
     }
 
     /// This computer's address on the network, for its card (looked at now
@@ -603,6 +708,7 @@ impl App {
                     format!("{} ", v.name)
                 },
                 big: true,
+                hint: None,
             });
         }
         if !self.is_display_computer() {
@@ -629,7 +735,24 @@ impl App {
                 text.push_str(&format!("\nMedia {:.0} % here", used.percent()));
             }
         }
-        Some(Card { text, big: false })
+        let waiting = !v.me.adopted();
+        let mut hint = Vec::new();
+        if waiting {
+            hint.push(
+                "To add it: on the computer that runs the show, open Settings, then Show network, \
+                 and press Add to the show."
+                    .to_string(),
+            );
+        }
+        if let Some(p) = &v.problem {
+            hint.push(p.clone());
+        }
+        hint.push(quit_words().to_string());
+        Some(Card {
+            text,
+            big: false,
+            hint: Some(hint.join("\n")),
+        })
     }
 
     /// The control window is hidden on a display computer, and shown again
@@ -854,6 +977,125 @@ mod tests {
         );
         let t = card_text("Left", None, Some(("Booth", false)), None, None);
         assert!(t.contains("Waiting for the primary (Booth)"), "{t}");
+        // Started as a display and not added yet: any primary on the network.
+        let t = card_text("Left", Some("10.0.0.2"), None, None, None);
+        assert_eq!(
+            t,
+            "Left\n10.0.0.2\n\nWaiting for a NewQ primary on this network"
+        );
+    }
+
+    #[test]
+    fn started_as_a_display_it_is_one_before_any_primary_is_heard() {
+        use crate::net::node::{self, Claim, NetworkId};
+        let waiting = node::switch_on(&Identity::fresh());
+        // Waiting: a display only when started as one (`--join` has controls).
+        assert!(display_computer(&waiting, true));
+        assert!(!display_computer(&waiting, false));
+        // No control window, and a window on every monitor, before adoption.
+        assert_eq!(display_windows(true, false, 3), [0, 1, 2]);
+        assert_eq!(display_windows(true, true, 3), [] as [usize; 0]);
+        assert_eq!(display_windows(false, false, 3), [] as [usize; 0]);
+        // Adopted: a display, started either way (the role the primary gives).
+        let claim = Claim {
+            from: NodeId(1),
+            from_name: "Booth".into(),
+            network: NetworkId(10),
+            term: 1,
+            proof: None,
+        };
+        let adopted = node::adopt(&waiting, &claim, None, Role::Display).unwrap();
+        assert!(display_computer(&adopted, true));
+        assert!(display_computer(&adopted, false));
+        // Made the backup: its controls show, however it was started.
+        let backup = node::set_role(&adopted, Role::Backup).unwrap();
+        assert!(!display_computer(&backup, true));
+        // Released by the primary: started as a display, it waits as one again.
+        let released = node::release(&adopted);
+        assert!(display_computer(&released, true));
+        assert!(!display_computer(&released, false));
+        // A primary never is.
+        assert!(!display_computer(&node::become_primary(&waiting), true));
+    }
+
+    #[test]
+    fn the_open_show_vouches_for_a_waiting_computer_it_names_and_never_steals_one() {
+        use crate::net::hub::PeerView;
+        use crate::net::node::{Identity, NetworkId};
+        use crate::show::{AudioOutputConfig, OutputConfig, Show};
+        let peer = |id: u64, network: Option<u64>| PeerView {
+            id: NodeId(id),
+            name: format!("C{id}"),
+            role: Role::Alone,
+            version: String::new(),
+            compatible: true,
+            network: network.map(NetworkId),
+            ours: network == Some(1),
+            waiting: network.is_none(),
+            online: true,
+            connected: true,
+            addr: None,
+            status: None,
+            problem: None,
+            adopting: false,
+        };
+        let mut v = NetView {
+            me: Identity {
+                role: Role::Primary,
+                on: true,
+                network: Some(NetworkId(1)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // 2: waiting, named by a display. 3: waiting, named by a sound output.
+        // 4: waiting, not named. 5: named, but another (absent) primary's.
+        // 6: named and already ours.
+        v.peers = vec![
+            peer(2, None),
+            peer(3, None),
+            peer(4, None),
+            peer(5, Some(7)),
+            peer(6, Some(1)),
+        ];
+        let mut show = Show::default();
+        for id in [2, 5, 6] {
+            let mut o = OutputConfig::new(crate::show::OutputId(id), "D".into());
+            o.computer = Some(NodeId(id));
+            show.outputs.push(o);
+        }
+        let a: AudioOutputConfig = serde_json::from_str(
+            r#"{"id": 9, "name": "Sound", "computers": ["0000000000000003"]}"#,
+        )
+        .unwrap();
+        show.audio_outputs = vec![a];
+        let none = HashSet::new();
+        assert_eq!(vouched_for(&show, &v, &none), [NodeId(2), NodeId(3)]);
+        // Each once a run: one released by hand stays released.
+        let asked: HashSet<NodeId> = [NodeId(2)].into();
+        assert_eq!(vouched_for(&show, &v, &asked), [NodeId(3)]);
+        // Refused (a passcode of its own) or being added: left alone.
+        v.peers[1].problem = Some("needs a passcode".into());
+        v.peers[0].adopting = true;
+        assert!(vouched_for(&show, &v, &none).is_empty());
+        v.peers[1].problem = None;
+        v.peers[0].adopting = false;
+        // Another NewQ version: left alone.
+        v.peers[0].compatible = false;
+        assert_eq!(vouched_for(&show, &v, &none), [NodeId(3)]);
+        // Only a primary adds anyone.
+        v.me.role = Role::Display;
+        assert!(vouched_for(&show, &v, &none).is_empty());
+    }
+
+    #[test]
+    fn ctrl_or_command_q_quits_a_display_computer() {
+        let cmd = egui::Modifiers::COMMAND;
+        assert!(quits(egui::Key::Q, cmd));
+        assert!(!quits(egui::Key::Q, egui::Modifiers::NONE));
+        assert!(!quits(egui::Key::W, cmd));
+        assert!(!quits(egui::Key::Q, cmd | egui::Modifiers::SHIFT));
+        assert!(quit_words().contains("Q quits"));
     }
 
     #[test]

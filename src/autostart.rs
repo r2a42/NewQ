@@ -23,9 +23,20 @@ fn xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// What NewQ is started with at login: `--display` for a display computer
+/// (started by NewQ Display, or made one by its primary), so it comes back as
+/// one with nothing asked; nothing otherwise.
+pub fn args(display: bool) -> &'static [&'static str] {
+    if display { &["--display"] } else { &[] }
+}
+
 /// The Mac LaunchAgent for the program at `exe`.
 #[cfg_attr(windows, allow(dead_code))]
-pub fn launch_agent(exe: &Path) -> String {
+pub fn launch_agent(exe: &Path, args: &[&str]) -> String {
+    let more: String = args
+        .iter()
+        .map(|a| format!("\n\t\t<string>{}</string>", xml(a)))
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,7 +46,7 @@ pub fn launch_agent(exe: &Path) -> String {
 	<string>{LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>{}</string>
+		<string>{}</string>{more}
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -50,7 +61,7 @@ pub fn launch_agent(exe: &Path) -> String {
 
 /// The Linux autostart entry for the program at `exe`.
 #[cfg_attr(windows, allow(dead_code))]
-pub fn desktop_entry(exe: &Path) -> String {
+pub fn desktop_entry(exe: &Path, args: &[&str]) -> String {
     // The Exec key's quoting: inside double quotes, `"`, `` ` ``, `$` and `\`
     // are escaped with a backslash.
     let mut quoted = String::new();
@@ -60,15 +71,18 @@ pub fn desktop_entry(exe: &Path) -> String {
         }
         quoted.push(c);
     }
+    // Plain words (`--display`): no quoting needed.
+    let more: String = args.iter().map(|a| format!(" {a}")).collect();
     format!(
-        "[Desktop Entry]\nType=Application\nName=NewQ\nComment=Started at login for a show network\nExec=\"{quoted}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+        "[Desktop Entry]\nType=Application\nName=NewQ\nComment=Started at login for a show network\nExec=\"{quoted}\"{more}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
     )
 }
 
 /// The Windows Run value for the program at `exe`: its path in quotes.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn run_value(exe: &Path) -> String {
-    format!("\"{}\"", exe.to_string_lossy())
+pub fn run_value(exe: &Path, args: &[&str]) -> String {
+    let more: String = args.iter().map(|a| format!(" {a}")).collect();
+    format!("\"{}\"{more}", exe.to_string_lossy())
 }
 
 /// Where the entry goes on this system (None on Windows: the registry).
@@ -108,12 +122,13 @@ pub fn is_set() -> bool {
     }
 }
 
-/// Start at login, or not.
-pub fn set(on: bool) -> Result<(), String> {
+/// Start at login, or not (`display`: as a display computer, `args`).
+pub fn set(on: bool, display: bool) -> Result<(), String> {
+    let args = args(display);
     #[cfg(windows)]
     {
         if on {
-            windows::write(&run_value(&exe()?))
+            windows::write(&run_value(&exe()?, args))
         } else {
             windows::delete()
         }
@@ -123,9 +138,9 @@ pub fn set(on: bool) -> Result<(), String> {
         let path = entry_path().ok_or("no home folder")?;
         let exe = exe()?;
         let text = if cfg!(target_os = "macos") {
-            launch_agent(&exe)
+            launch_agent(&exe, args)
         } else {
-            desktop_entry(&exe)
+            desktop_entry(&exe, args)
         };
         write_entry(&path, on.then_some(text.as_str()))
     }
@@ -219,8 +234,13 @@ mod tests {
 
     #[test]
     fn a_mac_launch_agent_runs_newq_at_load() {
-        let p = launch_agent(Path::new("/Applications/NewQ & Co.app/Contents/MacOS/newq"));
-        assert!(p.contains("<string>/Applications/NewQ &amp; Co.app/Contents/MacOS/newq</string>"));
+        let p = launch_agent(
+            Path::new("/Applications/NewQ & Co.app/Contents/MacOS/newq"),
+            &[],
+        );
+        assert!(p.contains(
+            "<string>/Applications/NewQ &amp; Co.app/Contents/MacOS/newq</string>\n\t</array>"
+        ));
         assert!(p.contains("<key>RunAtLoad</key>\n\t<true/>"));
         assert!(p.contains(&format!("<string>{LABEL}</string>")));
         assert!(p.starts_with("<?xml"));
@@ -228,7 +248,7 @@ mod tests {
 
     #[test]
     fn a_linux_entry_quotes_the_path() {
-        let e = desktop_entry(Path::new("/opt/new q/$bin/newq"));
+        let e = desktop_entry(Path::new("/opt/new q/$bin/newq"), &[]);
         assert!(e.contains("Exec=\"/opt/new q/\\$bin/newq\"\n"), "{e}");
         assert!(e.starts_with("[Desktop Entry]\nType=Application\n"));
     }
@@ -236,8 +256,31 @@ mod tests {
     #[test]
     fn the_windows_value_is_the_path_in_quotes() {
         assert_eq!(
-            run_value(Path::new(r"C:\Program Files\NewQ\newq.exe")),
+            run_value(Path::new(r"C:\Program Files\NewQ\newq.exe"), &[]),
             r#""C:\Program Files\NewQ\newq.exe""#
+        );
+    }
+
+    #[test]
+    fn a_display_computer_starts_at_login_as_one() {
+        assert_eq!(args(true), ["--display"]);
+        assert!(args(false).is_empty());
+        let p = launch_agent(
+            Path::new("/Applications/NewQ.app/Contents/MacOS/newq"),
+            args(true),
+        );
+        assert!(
+            p.contains(
+                "<string>/Applications/NewQ.app/Contents/MacOS/newq</string>\n\t\t\
+                 <string>--display</string>\n\t</array>"
+            ),
+            "{p}"
+        );
+        let e = desktop_entry(Path::new("/opt/new q/newq"), args(true));
+        assert!(e.contains("Exec=\"/opt/new q/newq\" --display\n"), "{e}");
+        assert_eq!(
+            run_value(Path::new(r"C:\NewQ\newq.exe"), args(true)),
+            r#""C:\NewQ\newq.exe" --display"#
         );
     }
 

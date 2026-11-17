@@ -167,17 +167,20 @@ EOF
 case "$platform" in
   windows-x64)
     cp target/release/newq.exe "$stage/"
+    # The NewQ Display launcher (src/bin/newq-display.rs), named for people.
+    cp target/release/newq-display.exe "$stage/NewQ Display.exe"
     bundle_ffmpeg "$(pinned_asset -win64-lgpl-)" ".exe"
     bundle_mediamtx "$stage/mediamtx" windows_amd64 ".exe"
     "$stage/mediamtx/mediamtx.exe" --version
     (cd dist/stage && 7z a -tzip -bso0 "${root}/dist/${name}.zip" "$name")
     ;;
   linux-x64)
-    cp target/release/newq "$stage/"
-    chmod +x "$stage/newq"
-    # The icon, and a launcher to copy to ~/.local/share/applications (edit Exec and Icon to the full paths).
+    cp target/release/newq target/release/newq-display "$stage/"
+    chmod +x "$stage/newq" "$stage/newq-display"
+    # The icon, and launchers to copy to ~/.local/share/applications (edit Exec and Icon to the full paths).
     cp assets/logo/png/newq-icon-256.png "$stage/newq.png"
     cp assets/linux/newq.desktop "$stage/newq.desktop"
+    cp assets/linux/newq-display.desktop "$stage/newq-display.desktop"
     bundle_ffmpeg "$(pinned_asset -linux64-lgpl-)" ""
     bundle_mediamtx "$stage/mediamtx" linux_amd64 ""
     "$stage/mediamtx/mediamtx" --version
@@ -247,6 +250,35 @@ EOF
 </dict>
 </plist>
 EOF
+    # NewQ Display.app: the launcher (src/bin/newq-display.rs), a bundle of its
+    # own beside NewQ.app. It opens NewQ.app with --display.
+    display_app="$stage/NewQ Display.app"
+    mkdir -p "$display_app/Contents/MacOS" "$display_app/Contents/Resources"
+    cp target/release/newq-display "$display_app/Contents/MacOS/newq-display"
+    chmod +x "$display_app/Contents/MacOS/newq-display"
+    cp assets/logo/newq.icns "$display_app/Contents/Resources/newq.icns"
+    cat > "$display_app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>NewQ Display</string>
+  <key>CFBundleDisplayName</key><string>NewQ Display</string>
+  <key>CFBundleIdentifier</key><string>io.github.r2a42.newq.display</string>
+  <key>CFBundleExecutable</key><string>newq-display</string>
+  <key>CFBundleIconFile</key><string>newq</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${tag#v}</string>
+  <key>CFBundleVersion</key><string>${tag#v}</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+EOF
+    # Both programs must be universal (Intel and Apple silicon).
+    for bin in "$app/Contents/MacOS/newq" "$display_app/Contents/MacOS/newq-display"; do
+      lipo "$bin" -verify_arch x86_64 arm64 || { echo "$bin is not universal" >&2; exit 1; }
+    done
     if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
       # A Developer ID signature with the hardened runtime and a secure
       # timestamp, which is what notarisation asks for. Inside out: the helpers
@@ -256,6 +288,9 @@ EOF
       "${sign[@]}" "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe" "$app/Contents/MacOS/mediamtx"
       "${sign[@]}" "$app"
       codesign --verify --deep --strict --verbose=2 "$app"
+      # (Its one program is the bundle's main executable, signed with it.)
+      "${sign[@]}" "$display_app"
+      codesign --verify --deep --strict --verbose=2 "$display_app"
       if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
         # Notarise (Apple scans it and records it), then staple the ticket so the
         # app opens even offline.
@@ -272,9 +307,12 @@ EOF
           exit 1
         fi
         rm -f dist/notarize.zip
-        xcrun stapler staple "$app"
-        xcrun stapler validate "$app"
-        spctl --assess --type execute --verbose=2 "$app"
+        # One submission held both apps (the zip is the whole folder).
+        for a in "$app" "$display_app"; do
+          xcrun stapler staple "$a"
+          xcrun stapler validate "$a"
+          spctl --assess --type execute --verbose=2 "$a"
+        done
       else
         echo "signed, not notarised (no App Store Connect API key given)"
       fi
@@ -283,6 +321,8 @@ EOF
       codesign --force --sign - "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe" "$app/Contents/MacOS/mediamtx"
       codesign --force --sign - "$app"
       codesign --verify --deep --strict "$app"
+      codesign --force --sign - "$display_app"
+      codesign --verify --deep --strict "$display_app"
     fi
     (cd dist/stage && ditto -c -k --keepParent "$name" "${root}/dist/${name}.zip")
     ;;

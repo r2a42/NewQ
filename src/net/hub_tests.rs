@@ -1013,3 +1013,112 @@ fn the_network_tests_measurements_reach_the_primary_from_two_computers() {
     want.sort();
     assert_eq!(from, want);
 }
+
+// ---- NewQ Display (`--display`) ----
+
+/// A computer started as a display (`--display`): its folder set up as
+/// `apply_startup` does at start-up.
+fn display_cfg(rig: &mut Rig, name: &str) -> HubConfig {
+    let cfg = rig.cfg(name);
+    assert!(node::apply_startup(node::Startup::Display, &cfg.dir).display);
+    cfg
+}
+
+/// Started as a display, it is seen waiting by a primary, is added with one
+/// click there and is a display without its role being set.
+#[test]
+fn a_computer_started_as_a_display_waits_and_is_added_as_a_display() {
+    let mut rig = Rig::new();
+    let p = rig.hub("Booth");
+    p.ask(NetAction::BecomePrimary);
+    let d = Hub::start(display_cfg(&mut rig, "Left"), || {});
+    let did = id_of(&d);
+    let pid = id_of(&p);
+    until(&p, "the display waiting", |v| {
+        peer(v, did).is_some_and(|x| x.waiting && !x.ours)
+    });
+    p.ask(NetAction::Adopt(did));
+    until(&d, "the display following", |v| {
+        v.me.role == Role::Display
+            && v.following
+                .as_ref()
+                .is_some_and(|f| f.id == pid && f.online)
+    });
+    until(&p, "the display reporting as a display", |v| {
+        peer(v, did).is_some_and(|x| {
+            x.ours && x.connected && x.status.as_ref().is_some_and(|s| s.role == Role::Display)
+        })
+    });
+}
+
+/// A display added once comes back to its primary with no click anywhere,
+/// whichever of them starts again, and in either order when both do; and
+/// `--display` at each start never undoes the pairing.
+#[test]
+fn a_paired_display_comes_back_by_itself_after_either_or_both_start_again() {
+    let mut rig = Rig::new();
+    let p = rig.hub("Booth");
+    p.ask(NetAction::BecomePrimary);
+    let dcfg = display_cfg(&mut rig, "Left");
+    let (pdir, ddir) = (rig.dirs[0].clone(), dcfg.dir.clone());
+    let d = Hub::start(dcfg, || {});
+    let (pid, did) = (id_of(&p), id_of(&d));
+    until(&p, "the display waiting", |v| {
+        peer(v, did).is_some_and(|x| x.waiting)
+    });
+    p.ask(NetAction::Adopt(did));
+    // Paired: the display follows, and the primary remembers it.
+    let paired = |p: &Hub, d: &Hub, what: &str| {
+        until(d, &format!("{what}: the display following"), |v| {
+            v.me.role == Role::Display
+                && v.following
+                    .as_ref()
+                    .is_some_and(|f| f.id == pid && f.online)
+        });
+        until(p, &format!("{what}: the display connected"), |v| {
+            peer(v, did).is_some_and(|x| x.ours && x.connected && x.status.is_some())
+        });
+    };
+    paired(&p, &d, "added");
+    let began = Instant::now();
+    while !node::load(&pdir).known.iter().any(|k| k.id == did) {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "never remembered"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let network = node::load(&ddir).network;
+    assert!(network.is_some());
+    // As NewQ Display starts it: `--display` again, then the hub.
+    let start_display = |dir: &PathBuf| {
+        let r = node::apply_startup(node::Startup::Display, dir);
+        assert!(r.display, "{r:?}");
+        let me = node::load(dir);
+        assert_eq!((me.role, me.network), (Role::Display, network), "kept");
+        restart(dir.clone(), rig.base)
+    };
+    // (a) The display starts again.
+    drop(d);
+    let d = start_display(&ddir);
+    paired(&p, &d, "display restarted");
+    // (b) The primary starts again.
+    drop(p);
+    let p = restart(pdir.clone(), rig.base);
+    paired(&p, &d, "primary restarted");
+    // (c) Both, the display first.
+    drop(p);
+    drop(d);
+    let d = start_display(&ddir);
+    std::thread::sleep(Duration::from_millis(300));
+    let p = restart(pdir.clone(), rig.base);
+    paired(&p, &d, "both, display first");
+    // (c) Both, the primary first.
+    drop(p);
+    drop(d);
+    let p = restart(pdir.clone(), rig.base);
+    std::thread::sleep(Duration::from_millis(300));
+    let d = start_display(&ddir);
+    paired(&p, &d, "both, primary first");
+    assert_eq!(node::load(&ddir).network, network);
+}

@@ -397,40 +397,106 @@ pub enum Startup {
     Join,
     /// `--primary`: runs a show network.
     Primary,
+    /// `--display` (what NewQ Display starts): switched on, and a display
+    /// computer from the first moment, adopted or not.
+    Display,
+    /// `--display` and `--primary` together: neither is done.
+    Both,
 }
 
 pub fn startup_flag(args: &[String]) -> Option<Startup> {
-    if args.iter().any(|a| a == "--primary") {
-        Some(Startup::Primary)
-    } else if args.iter().any(|a| a == "--join") {
-        Some(Startup::Join)
-    } else {
-        None
+    let has = |f: &str| args.iter().any(|a| a == f);
+    match (has("--display"), has("--primary")) {
+        (true, true) => Some(Startup::Both),
+        (true, false) => Some(Startup::Display),
+        (false, true) => Some(Startup::Primary),
+        (false, false) => has("--join").then_some(Startup::Join),
     }
 }
 
-/// Act on `--join` or `--primary`: kept in `node.json` like the page's switch
-/// and button, so a computer set up from the command line stays so. Returns
-/// what to say in the log.
-pub fn apply_startup(flag: Startup, dir: &Path) -> String {
+/// What `apply_startup` did: what to say in the log, and whether NewQ runs as
+/// a display computer from the start (`--display`, not refused).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Applied {
+    pub said: String,
+    pub display: bool,
+}
+
+/// `--display` on this identity: the computer it becomes, or why it stays as
+/// it is. Waiting (alone, on or off) or a display: switched on as it is (an
+/// adopted display keeps following its primary). The backup stays the backup
+/// (it has controls). A primary that is switched on runs a show and is never
+/// turned into a display by a launcher opened by mistake; one switched off
+/// leaves its old network and waits as a display.
+pub fn display_startup(me: &Identity) -> Result<Identity, String> {
+    match me.role {
+        Role::Primary if me.on => Err(
+            "--display: this computer runs a show network, so it stays the primary. To make it \
+             a display, switch its show network off first (Settings ▸ Show network)"
+                .into(),
+        ),
+        Role::Primary => Ok(Identity {
+            on: true,
+            ..release(me)
+        }),
+        _ => Ok(switch_on(me)),
+    }
+}
+
+/// Act on `--join`, `--primary` or `--display`: kept in `node.json` like the
+/// page's switch and button, so a computer set up from the command line stays
+/// so.
+pub fn apply_startup(flag: Startup, dir: &Path) -> Applied {
     let me = load(dir);
+    let refused = |said: String| Applied {
+        said,
+        display: false,
+    };
     let next = match flag {
+        Startup::Both => {
+            return refused(
+                "--display and --primary together: a computer is one or the other, so neither \
+                 was done"
+                    .into(),
+            );
+        }
         Startup::Join => switch_on(&me),
         Startup::Primary if me.adopted() => {
-            return format!(
+            return refused(format!(
                 "--primary: this computer is {} of another primary's show network; release it \
                  from there first",
                 me.role.described()
-            );
+            ));
         }
         Startup::Primary => become_primary(&me),
+        Startup::Display => match display_startup(&me) {
+            Ok(next) => next,
+            Err(why) => return refused(why),
+        },
     };
-    if let Err(e) = save(dir, &next) {
-        return format!("could not keep the show network setting: {e}");
+    if next != me
+        && let Err(e) = save(dir, &next)
+    {
+        return Applied {
+            said: format!("could not keep the show network setting: {e}"),
+            // A display all the same: it says so on its card.
+            display: flag == Startup::Display,
+        };
     }
-    match flag {
+    let said = match flag {
         Startup::Join => "--join: this computer is part of a show network".into(),
         Startup::Primary => "--primary: this computer runs the show network".into(),
+        _ if next.role == Role::Backup => {
+            "--display: this computer is the backup of its show network, so it keeps its \
+             controls"
+                .into()
+        }
+        _ if next.adopted() => "--display: a display computer of its show network".into(),
+        _ => "--display: a display computer, waiting for a primary to add it".into(),
+    };
+    Applied {
+        said,
+        display: flag == Startup::Display && next.role != Role::Backup,
     }
 }
 
@@ -1054,7 +1120,7 @@ mod tests {
         assert_eq!(a(&["--join"]), Some(Startup::Join));
         assert_eq!(a(&["show.newq", "--primary"]), Some(Startup::Primary));
         let dir = temp("flags");
-        apply_startup(Startup::Join, &dir);
+        assert!(!apply_startup(Startup::Join, &dir).display);
         let me = load(&dir);
         assert!(me.on && me.role == Role::Alone);
         apply_startup(Startup::Primary, &dir);
@@ -1063,8 +1129,68 @@ mod tests {
         // An adopted computer isn't made a primary by the command line.
         let adopted = adopt(&me, &claim(1, 10, 1, None), None, Role::Display).unwrap();
         save(&dir, &adopted).unwrap();
-        assert!(apply_startup(Startup::Primary, &dir).contains("release it"));
+        let said = apply_startup(Startup::Primary, &dir);
+        assert!(said.said.contains("release it") && !said.display);
         assert_eq!(load(&dir).role, Role::Display);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn display_asks_for_a_display_computer_and_never_unmakes_a_running_primary() {
+        let a = |v: &[&str]| startup_flag(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(a(&["--display"]), Some(Startup::Display));
+        assert_eq!(a(&["--display", "--join"]), Some(Startup::Display));
+        assert_eq!(a(&["--primary", "--display"]), Some(Startup::Both));
+
+        // A computer never set up: switched on, waiting, a display from the start.
+        let dir = temp("display");
+        let r = apply_startup(Startup::Display, &dir);
+        assert!(r.display, "{r:?}");
+        let me = load(&dir);
+        assert!(me.on && me.role == Role::Alone && !me.adopted());
+        assert!(r.said.contains("waiting"), "{}", r.said);
+        // Again: nothing changes (the same id), still a display.
+        assert!(apply_startup(Startup::Display, &dir).display);
+        assert_eq!(load(&dir), me);
+
+        // Adopted as a display: it keeps its network and primary.
+        let adopted = adopt(&me, &claim(1, 10, 3, None), None, Role::Display).unwrap();
+        save(&dir, &adopted).unwrap();
+        let r = apply_startup(Startup::Display, &dir);
+        assert!(r.display);
+        assert_eq!(load(&dir), adopted);
+        // Adopted as a display but switched off (by hand): on again, same network.
+        let mut off = adopted.clone();
+        off.on = false;
+        save(&dir, &off).unwrap();
+        assert!(apply_startup(Startup::Display, &dir).display);
+        assert_eq!(load(&dir), adopted);
+
+        // The backup stays the backup, with its controls.
+        let backup = set_role(&adopted, Role::Backup).unwrap();
+        save(&dir, &backup).unwrap();
+        let r = apply_startup(Startup::Display, &dir);
+        assert!(!r.display && r.said.contains("backup"), "{r:?}");
+        assert_eq!(load(&dir), backup);
+
+        // A primary that is running is not turned into a display.
+        let primary = become_primary(&me);
+        save(&dir, &primary).unwrap();
+        let r = apply_startup(Startup::Display, &dir);
+        assert!(!r.display && r.said.contains("stays the primary"), "{r:?}");
+        assert_eq!(load(&dir), primary);
+        // Both flags: nothing is done.
+        let r = apply_startup(Startup::Both, &dir);
+        assert!(!r.display);
+        assert_eq!(load(&dir), primary);
+        // A primary switched off leaves its network and waits as a display.
+        save(&dir, &switch_off(&primary)).unwrap();
+        assert!(apply_startup(Startup::Display, &dir).display);
+        let now = load(&dir);
+        assert_eq!(
+            (now.on, now.role, now.network, now.id),
+            (true, Role::Alone, None, me.id)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
