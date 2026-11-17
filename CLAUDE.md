@@ -183,6 +183,42 @@ The README describes the features; this file is about working on the code.
   ignored `three_newqs_run_the_network_test_by_themselves`; `scripts/net_demo.sh` the same by hand. On
   one overloaded machine the test said "Problems found" (up to 9 frames apart around a pause and seek,
   174 main-loop stalls): unknown whether real computers do better. The soak's 10 laps were never run.
+  After the first test on two real computers (0.24.2). Sound in a network: an `ActiveKind::Audio` cue is
+  anchored like any cue; `Voice::keep_to(at)` passes over (`skip_left`, applied by `mix_voice`, the lead
+  first) what a voice is more than `audio::SOUND_SLACK` (40 ms) behind, and never holds it back;
+  `ActiveCue::sound_zero` -> `CueNow::sound` -> `measure::sound_apart_between` (`sound_apart_ms`). By a
+  shared clock the picture's time is `elapsed - seek_base - video_lag` (no audio lead). Test:
+  `engine/net_sound_tests.rs` (`AudioOut::with_manual_device`; 0.24.1 gave 123 ms "apart" with identical
+  picture times: the real test's 118 ms was the sound cue, not the pictures). **R21 (owner's ruling): the
+  network is a reference; a picture never waits for or jumps at the primary.** `net_correct` leaves a cue
+  under `LEAVE_UNDER` (1.5 frames) alone, acts only after `STEADY_BEATS` (4) heartbeats within
+  `STEADY_SPREAD`, at most once per instance (`NetCorrection::fixed`/`said`); `Follower::step` with no
+  shared clock ticks on by its own. Tests: `play_tests.rs` R21 block (`World::state_offset/state_jitter/
+  state_delay/silence`, `jumps`). Drawing rates: `render::FrameTimer` counts idle time between frames
+  (4 fps had read as no late frames); `WaitLog` (one line per 5 s per window; `stuck` -> Mailbox where
+  offered; `NEWQ_PRESENT` overrides); `MonitorReport::drawing_fps/late_permille` (`proto::slow_below`),
+  `measure::MonitorRate`, `net_judge::drawing_findings` (a Problem under half the refresh), `ui/network::
+  slow_drawing`; `Gpu::new` logs every adapter. Unproven: why a Windows laptop's built-in panel drew 4 fps
+  (the wait is `get_current_texture`; guess: hybrid graphics) and whether Mailbox cures it.
+  `src/net/paths.rs`: which address reaches a computer: `kind_of(adapter name)` (Wired/WiFi/Vpn/Other),
+  `rank`/`best` (our wired subnet, Wi-Fi, private, other; a VPN or 100.64/10 last; link-local last). The
+  hub keeps every address a beacon came from (`Peer::heard_from`) and uses the best for sessions, the
+  clock and media; no beacons on VPN adapters; a session on a worse path is logged (`say_worse_paths`),
+  not cut. `StatusReport.path`/`vpn_on`, `NetView.reached`/`adapters`; `ui/network::{address_text,
+  peer_address, own_addresses, vpn_words}`. Never tried with a real VPN. `Show::wait_cards` (`WaitCards`
+  UntilReady/AlsoUnused/Never; `play::{still_ready, card_shows}`): `Playing::ready` latches once in step
+  with the media here, so a screen with nothing playing stays black between cues (the card used to flash
+  whenever `in_step` flickered); set on the Show network page beside `no_transfer_cards`.
+  `src/testmode/fleet.rs`: every test across a show network. `session::across` -> `TestMode::spread`
+  (`Phase::Spreading`, `Fleet::media_ready`, `waited_too_long`: `GONE_LIMIT` 30 s, `STEP_LIMIT` 90 s,
+  `MEDIA_LIMIT` 20 min), then the usual `Run`/`FullRun`; ends through `Phase::Closing` (`ENDING_LIMIT`);
+  `fold_in` adds each computer's verdict (`net_judge::judge_computer` plus `LocalNotes::findings`), files
+  (`computers.csv`, `outputs.csv`) and report part. `NetRun` uses `Fleet`. Followers measure themselves:
+  `net/measure_local.rs` `LocalMeter` (`NetTest::Local`, `NetTest::Mute`). Across computers the ticked
+  screens are separate displays and `plan::spread_pictures` sets `also_on` (alone, mirrors as before);
+  `DisplayChoice.computer`, `gui::remote_key`, `Fleet::live_lines`. The decode comparison is refused in a
+  network; a follower can't start a test (`UiState::following_test` banner). Tests: `network_tests.rs`
+  (`Rig` with `paced`, `launch_across`). Run headless with three NewQs on one machine (Short only).
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:
