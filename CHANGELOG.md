@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.2
+
 - **Test mode is simpler.** One short window: a length (Short, Medium or Long, each saying how
   long it takes), ticks for what to test (*Cue list*, *Timeline*, *Network*: any of them), a tick
   per screen, the sound, and Start. Ticked together the parts run one after another as one test,
@@ -44,7 +46,7 @@ release page, and a release is refused if it has none.
   output stutters, a computer stalls, or a computer's measurements never arrive. Waiting for a
   computer that stops answering or never gets in step ends with a plain message, and your show
   comes back everywhere.
-- **Choose the screens to test, on every computer.** *Show the test on* lists every monitor of
+- **Choose the screens to test, on every computer.** *Show on* lists every monitor of
   this computer and of every connected computer, grouped by computer with *All* and *None*; all
   the ticked ones are tested at once. This applies to the network test too.
 - **Addresses on the Show network page.** Each computer's row shows its address and whether it
