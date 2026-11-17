@@ -127,9 +127,14 @@ fn main() -> anyhow::Result<()> {
         },
         logging::level().name()
     );
-    // `--join` and `--primary`: this computer's place in a show network.
+    // `--join`, `--primary` and `--display`: this computer's place in a show
+    // network. `--display` (what NewQ Display starts) makes it a display
+    // computer from the first moment: no splash, no control window, no question.
+    let mut display = false;
     if let Some(flag) = net::node::startup_flag(&args) {
-        log::info!("{}", net::node::apply_startup(flag, &net::node::node_dir()));
+        let applied = net::node::apply_startup(flag, &net::node::node_dir());
+        log::info!("{}", applied.said);
+        display = applied.display;
     }
     let (show_path, main_window_only) = startup_options(
         std::env::args_os().skip(1),
@@ -141,7 +146,7 @@ fn main() -> anyhow::Result<()> {
     // The user event is how remote-control threads wake the loop.
     let event_loop = EventLoop::<()>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
-    let mut app = app::App::new(show_path, main_window_only, move || {
+    let mut app = app::App::new(show_path, main_window_only, display, move || {
         let _ = proxy.send_event(());
     });
     let ran = event_loop.run_app(&mut app);

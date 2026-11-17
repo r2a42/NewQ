@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NewQ Display
+Comment=Makes this computer a display for a NewQ show network: full screen on every monitor, nothing to set up
+Exec=newq-display
+Icon=newq
+Terminal=false
+Categories=AudioVideo;Video;

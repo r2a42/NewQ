@@ -157,8 +157,11 @@ jobs:
             cargo build --release --locked --target aarch64-apple-darwin
             cargo build --release --locked --target x86_64-apple-darwin
             mkdir -p target/release
-            lipo -create -output target/release/newq \
-              target/aarch64-apple-darwin/release/newq target/x86_64-apple-darwin/release/newq
+            # NewQ and the NewQ Display launcher, each one universal program.
+            for bin in newq newq-display; do
+              lipo -create -output "target/release/$bin" \
+                "target/aarch64-apple-darwin/release/$bin" "target/x86_64-apple-darwin/release/$bin"
+            done
           else
             cargo build --release --locked
           fi
@@ -179,11 +182,14 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
           $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
             Sort-Object FullName -Descending | Select-Object -First 1
-          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 `
-            /tr http://timestamp.digicert.com /td SHA256 /d "NewQ" target/release/newq.exe
-          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
-          & $signtool.FullName verify /pa target/release/newq.exe
-          if ($LASTEXITCODE -ne 0) { throw "signature did not verify" }
+          # NewQ and the NewQ Display launcher.
+          foreach ($exe in @('target/release/newq.exe', 'target/release/newq-display.exe')) {
+            & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 /d "NewQ" $exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+            & $signtool.FullName verify /pa $exe
+            if ($LASTEXITCODE -ne 0) { throw "signature did not verify" }
+          }
           Remove-Item $pfx
 
       # macOS: sign with a Developer ID and notarise when the Apple secrets are

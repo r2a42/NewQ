@@ -5,6 +5,8 @@ edition = "2024"
 description = "A simple, cross-platform cue-based video playback system built on FFmpeg"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+# `cargo run` is NewQ itself; `src/bin/newq-display.rs` is the NewQ Display launcher.
+default-run = "newq"
 keywords = ["theatre", "video", "playback", "cue", "show-control"]
 categories = ["multimedia::video"]
 

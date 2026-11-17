@@ -127,6 +127,17 @@ The README describes the features; this file is about working on the code.
   `engine/cards_tests.rs`, `ui/network_tests.rs`. Tried headless with two NewQs on one machine (output
   windows did not go full screen there: no window manager); never on two computers. Not done: an
   ordered group on a late joiner, timeline jumps got ready on arrival, sound resampled to the clock.
+  NewQ Display: `src/bin/newq-display.rs` (std only; `default-run = "newq"`) finds NewQ (`find`, pure:
+  `NEWQ_PROGRAM`, beside itself, on a Mac `NewQ.app` beside its bundle, /Applications, ~/Applications,
+  else `open -b`) and starts `newq --display`. `node::Startup::Display`/`display_startup`/`Applied`: on and
+  waiting, an adopted display or backup kept, a running primary refused (one switched off released), with
+  `--primary` neither. `Playing::display` -> `play::display_computer` (waiting counts) and
+  `display_windows`: no splash, no recovery offer, Ctrl/Cmd+Q or closing an output quits (`quits`); the
+  card's `hint`. `autostart::args(display)` writes `--display`. `play::vouched_for`/`add_vouched`: a
+  primary adds, once a run, a waiting computer its open show names (never one with a network).
+  Packaged as `NewQ Display.exe`, `newq-display` (+ `.desktop`), `NewQ Display.app` (signed, stapled).
+  Tried under Xvfb with openbox (full screen); without a window manager it stays 960x540 (winit's X11
+  fullscreen needs one). Mac and Windows parts only read and cross-clippied.
   Take control (stage 5; D7, R7): `node::take_control` (Backup -> Primary, term above any seen),
   `remember`/`forget` and `Identity::known` (a primary's computers with their last address, dialled at
   start by `Hub` `recall_known` even without beacons; `keep_known` each tick; `NetAction::Forget`);

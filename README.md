@@ -1058,12 +1058,38 @@ between them. A wired network (an Ethernet switch, ideally one just for the show
 is strongly recommended; Wi-Fi works, but its timing is looser and NewQ says so
 where it matters. Nothing has to be set up on the network itself.
 
+### The quickest way to make a display computer: NewQ Display
+
+Every download has a second program beside NewQ: **NewQ Display** (*NewQ
+Display.app* on a Mac, *NewQ Display.exe* on Windows, `newq-display` on Linux).
+Open it on a computer with projectors or screens and that is all you do there:
+
+- It asks nothing. There is no control window and no start-up picture: every
+  monitor goes full screen at once with a quiet grey card saying the
+  computer's name, its address and *Waiting for a NewQ primary on this
+  network*. A monitor plugged in later gets a card too.
+- On the computer you run the show from, it appears under *Waiting to join* on
+  *Settings ▸ Show network*: *Add to the show* and it is a display computer of
+  your show, with nothing more to choose. From then on it starts by itself when
+  the computer starts, and finds its primary again by itself after either of
+  them restarts (no click on either).
+- **A show remembers its computers.** If you open your show on a different
+  primary (a spare laptop, a new booth computer), the display computers the show
+  uses that are waiting are added by themselves: the show vouches for them. A
+  computer still in another primary's show network is never taken; it shows as
+  *in another show network* until that primary releases it.
+- **To quit it:** Ctrl+Q (Command-Q on a Mac), as its card says. Alt+F4 on
+  Windows does the same.
+- Keep NewQ Display in the same folder as NewQ (on a Mac, put both in
+  *Applications*). It finds NewQ there and starts it as `newq --display`; if it
+  can't find NewQ it says so.
+
 ### Setting it up, step by step
 
 1. **Install NewQ on every computer** and open it once.
-2. **On each display computer** (the ones with projectors or screens): *Settings ▸
-   Show network*, tick *This computer is part of a show network*. That is all you
-   ever do there. NewQ asks the system to let it use the network the first time
+2. **On each display computer** (the ones with projectors or screens): open
+   *NewQ Display* (above), or in NewQ *Settings ▸ Show network*, tick *This
+   computer is part of a show network*. That is all you ever do there. NewQ asks the system to let it use the network the first time
    (allow it). Once the primary has added it, it starts NewQ when the computer
    starts (*Starts at login*), so a computer up in a truss never needs a keyboard
    again.
@@ -1094,6 +1120,12 @@ where it matters. Nothing has to be set up on the network itself.
   the same page (or start it with `newq --join`, handy for setting up several).
   That is all that is ever typed on it: a display computer up in a truss never
   needs a keyboard again. (`newq --primary` does the primary's button.)
+  `newq --display` (what NewQ Display starts) switches it on and makes it a
+  display computer from the first moment, before any primary has added it. It
+  never undoes a computer's place in a show network: one already added stays
+  with its primary, the backup stays the backup (with its controls), and a
+  computer running a show network stays its primary (switch its network off
+  first). `--display` and `--primary` together do neither.
 - **Adding them.** On the primary they appear under *Waiting to join*; *Add to
   the show* makes one a display computer of this show. It then follows only
   this show network until it is released, and remembers it after a restart.
@@ -1210,7 +1242,7 @@ never copy media by hand, and nothing waits for it.
 - **Cameras.** A computer plays a camera cue only if it has that camera (a
   capture card in each display computer); otherwise it shows nothing for it.
 - **Display computers** have no control window. Every monitor they have becomes
-  an output at start-up. Until the computer is in step, and on any monitor the
+  an output at start-up. Ctrl+Q (Command-Q on a Mac) on one quits NewQ there. Until the computer is in step, and on any monitor the
   show doesn't use, a quiet grey card says its name, its address, who runs the
   show and how it is getting on; once in step a monitor with nothing playing is
   black. *Identify* from the primary flashes the name on every output. A change
@@ -1237,7 +1269,8 @@ never copy media by hand, and nothing waits for it.
   again after a restart, even where the network drops announcements. *Forget*
   on an offline computer's row stops looking for one that is gone for good.
 - **Start at login.** A display computer is set to start NewQ when it starts
-  (so one in a truss comes back after a power cut); the primary's row has a
+  (so one in a truss comes back after a power cut, as a display computer:
+  `newq --display`); the primary's row has a
   *Starts at login* tick for every computer, and each computer's own page has
   one. (Written by NewQ itself: a LaunchAgent on a Mac, the Run key on Windows,
   an autostart entry on Linux. Only tried on Linux so far.)

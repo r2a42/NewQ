@@ -6,6 +6,17 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **NewQ Display.** Every download now has a second program, *NewQ Display*: open it on a
+  computer with projectors or screens and it becomes a display computer at once, with nothing
+  asked. Every monitor goes full screen with a card saying its name and that it is waiting for a
+  NewQ primary; on the computer you run the show from it appears under *Waiting to join*, and
+  *Add to the show* is the only click. Ctrl+Q (Command-Q on a Mac) quits it. `newq --display`
+  does the same from the command line, and a display computer now starts at login this way.
+- **Display computers come back by themselves.** One added once finds its primary again after
+  either computer restarts, with no click on either. And a show remembers its computers: open it
+  on another primary and the display computers it uses that are waiting are added by themselves
+  (one still in another primary's show network is never taken).
+
 ## 0.24.0
 
 - **The network test.** On the computer that runs a show network, *Help ▸ Test mode* now offers
@@ -24,8 +35,7 @@ release page, and a release is refused if it has none.
   show from (the primary): add a computer to the show, make it a display or the backup, rename it,
   make it show its name, release it. Nothing is ever typed on the other computers beyond switching
   them on (or starting them with `newq --join`). Displays can be put on another computer's monitor
-  and sound outputs given to other computers. This version only finds the computers and gives
-  them roles. Off unless you turn it on.
+  and sound outputs given to other computers. Off unless you turn it on.
 - **The computers play together.** Every computer of a show network plays the whole show from its
   own copy, in step with the primary by a clock they share: GO, a cue fired, stopped or faded,
   Stop All, pause, and every timeline action (run, pause, seek, jump) happen at the same moment on
@@ -47,7 +57,7 @@ release page, and a release is refused if it has none.
   than half a frame off.
 - **Sound in a show network:** an audio output not given to any computer plays on the primary only
   (it played on every computer before).
-- Test Mode is off while a computer is in a show network.
+- In a show network Test Mode offers only the network test; the other tests are off there.
 - **The show's media reaches every computer by itself.** In a show network the primary sends every
   file of the show to every computer, nearest the playhead first and following the playhead as you
   jump about, then the folders you add under *Settings ▸ Media ▸ Folders to keep on every computer*

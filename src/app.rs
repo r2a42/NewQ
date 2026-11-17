@@ -379,6 +379,7 @@ impl App {
     pub fn new(
         initial_show: Option<PathBuf>,
         main_window_only: bool,
+        display: bool,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> App {
         let mut engine = Engine::new();
@@ -406,7 +407,13 @@ impl App {
         };
         engine.playhead = show.cues.first().map(|c| c.id);
         ui.selected = engine.playhead;
-        let pending_recovery = recovery::pending(ui.show_path.as_deref());
+        // A display computer (`--display`) asks nothing, ever: an unsaved copy
+        // left by a crash is for the computer that edits the show.
+        let pending_recovery = if display {
+            None
+        } else {
+            recovery::pending(ui.show_path.as_deref())
+        };
         ui.check_media(&show);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let remote = Remote::new({
@@ -519,6 +526,7 @@ impl App {
             start_failed: None,
             render_restart: None,
         };
+        app.play.display = display;
         // A follower starts with the show its primary last gave it.
         if open_kept {
             app.play_load_kept();
@@ -691,6 +699,8 @@ impl App {
                 ctl.next_repaint = Some(Instant::now());
             }
         }
+        // A waiting computer the open show names is added with no click.
+        self.add_vouched();
     }
 
     // ---- The media manager (`net::media`) ----
@@ -834,6 +844,11 @@ impl App {
     /// and go. While steady, remember where it is; for a few seconds after a
     /// change, put it back if the system has moved it.
     fn keep_main_window_home(&mut self) {
+        // A display computer's hidden window has no home to go back to (and
+        // putting it back would bring it to the front).
+        if self.is_display_computer() {
+            return;
+        }
         let Some(ctl) = &self.control else { return };
         let here = ctl.window.current_monitor();
         let home_connected = self
@@ -1040,6 +1055,10 @@ impl App {
             && !self.is_display_computer()
         {
             ctl.window.focus_window();
+        }
+        // A display computer's keys (the quit key) go to its outputs.
+        if self.is_display_computer() {
+            window.focus_window();
         }
         self.screens.insert(
             monitor,
@@ -1416,10 +1435,12 @@ impl App {
         }
         // A display computer: every monitor has a window, whether or not the
         // show gives it a display yet (one with none shows its card).
-        if self.is_display_computer() && !self.main_window_only {
-            for m in 0..self.monitors.len() {
-                per_screen.entry(m).or_default();
-            }
+        for m in play::display_windows(
+            self.is_display_computer(),
+            self.main_window_only,
+            self.monitors.len(),
+        ) {
+            per_screen.entry(m).or_default();
         }
         // A display whose number changed because another went (a laptop's lid
         // closing) keeps its window: closing it and opening another leaves the
@@ -2626,7 +2647,7 @@ impl App {
         }
     }
 
-    fn handle_output_key(&mut self, event: &KeyEvent) {
+    fn handle_output_key(&mut self, event_loop: &ActiveEventLoop, event: &KeyEvent) {
         if event.state != ElementState::Pressed || event.repeat {
             return;
         }
@@ -2645,6 +2666,12 @@ impl App {
                 m.control_key()
             },
         };
+        // A display computer has no other window and no menu to quit from:
+        // Ctrl+Q (Command-Q on a Mac), as its card says, with no question.
+        if self.is_display_computer() && play::quits(key, mods) {
+            self.quit_display_computer(event_loop, "the quit key");
+            return;
+        }
         // As in the main window (`ui::output_key`): a cue's hotkey, Space, 0,
         // Esc, and in show mode the arrows.
         if !ui::output_key(key, mods, &mut self.show, &mut self.engine, &mut self.ui) {
@@ -2654,6 +2681,16 @@ impl App {
         if let Some(ctl) = &self.control {
             ctl.window.request_redraw();
         }
+    }
+}
+
+impl App {
+    /// A display computer quits at once: it has no show of its own to save
+    /// (it plays its primary's) and nobody at it to ask.
+    fn quit_display_computer(&mut self, event_loop: &ActiveEventLoop, how: &str) {
+        // (What plays is stopped on the way out, in `exiting`.)
+        log::info!("a display computer: quitting ({how})");
+        event_loop.exit();
     }
 }
 
@@ -3002,6 +3039,11 @@ impl App {
             return;
         };
         match event {
+            // On a display computer (every monitor a window, no controls)
+            // closing one (Alt+F4) quits, as the quit key does.
+            WindowEvent::CloseRequested if self.is_display_computer() => {
+                self.quit_display_computer(event_loop, "its window was closed");
+            }
             WindowEvent::CloseRequested => {
                 // Closing a display's window (e.g. Alt+F4) turns off what's on it.
                 let on_it = self.screens[&m].outputs.clone();
@@ -3027,7 +3069,7 @@ impl App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => self.output_mods = mods.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.handle_output_key(&event),
+            WindowEvent::KeyboardInput { event, .. } => self.handle_output_key(event_loop, &event),
             _ => {}
         }
     }
@@ -3364,7 +3406,10 @@ impl ApplicationHandler for App {
         }
         // The splash goes up first, and the main window's set-up (the graphics
         // card, which is the slow part) waits until it has been drawn.
+        // (Not on a display computer started as one: its monitors go straight
+        // to their cards.)
         if std::env::var_os("NEWQ_NO_SPLASH").is_none()
+            && !self.play.display
             && let Some(splash) = crate::splash::Splash::open(event_loop)
         {
             splash.request_redraw();
@@ -3632,7 +3677,21 @@ fn card_texture(gpu: &Gpu, card: &play::Card, size: (u32, u32)) -> Arc<LayerText
     } else {
         [120, 120, 120, 255]
     };
-    let img = crate::text::render(&cue, (w, h));
+    let mut img = crate::text::render(&cue, (w, h));
+    // The hint: small and dim at the foot, over the same transparent ground.
+    if let Some(hint) = &card.hint {
+        cue.text = hint.clone();
+        cue.size = 0.022;
+        cue.bold = false;
+        cue.valign = crate::show::TextVAlign::Bottom;
+        cue.color = [80, 80, 80, 255];
+        let foot = crate::text::render(&cue, (w, h));
+        if foot.data.len() == img.data.len() {
+            for (a, b) in img.data.iter_mut().zip(&foot.data) {
+                *a = (*a).max(*b);
+            }
+        }
+    }
     let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
     tex.upload_rgba(&gpu.queue, &img.data);
     Arc::new(tex)
