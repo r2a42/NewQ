@@ -353,6 +353,14 @@ impl Rig {
                     in_step: c.follower.in_step,
                 },
             );
+            // Its screen draws at `fps` (as `App::update_outputs` measures).
+            c.measure.drawing(&[crate::net::measure::MonitorRate {
+                index: 0,
+                name: "Projector".into(),
+                refresh_hz: Some(60.0),
+                fps: c.fps,
+                late_permille: 0,
+            }]);
             if let Some(r) = c
                 .measure
                 .report(now, Link::Wired, Some(60.0), Some(0), false)
@@ -858,7 +866,7 @@ fn a_short_test_plays_on_every_computer_and_each_ones_own_measurements_come_back
         assert!(
             c.lines
                 .iter()
-                .any(|l| l.contains("usually 60 frames a second")),
+                .any(|l| l.contains("Monitor 1 (Projector): drew at least 60 frames a second")),
             "{:?}",
             c.lines
         );
@@ -901,14 +909,19 @@ fn a_computer_whose_output_stutters_fails_the_test_and_says_which() {
     let right = d.computers.iter().find(|c| c.name == "Right").unwrap();
     assert_eq!(right.verdict, Verdict::ProblemsFound);
     assert!(
-        right
-            .headline
-            .contains("the output Right 1 drew only about 4 frames a second"),
-        "{}",
-        right.headline
+        right.findings.iter().any(|f| f
+            .text
+            .contains("Right's monitor 1 (Projector) drew about 4 frames a second")),
+        "{:?}",
+        right.findings
     );
     let left = d.computers.iter().find(|c| c.name == "Left").unwrap();
-    assert!(!left.findings.iter().any(|f| f.text.contains("drew only")));
+    assert!(
+        !left
+            .findings
+            .iter()
+            .any(|f| f.text.contains("frames a second for"))
+    );
     r.assert_restored();
 }
 

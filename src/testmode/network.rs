@@ -580,8 +580,6 @@ pub struct NetRun {
     next: usize,
     /// The computers taking part (`fleet`).
     pub fleet: super::fleet::Fleet,
-    /// This computer's own outputs' frame rates.
-    pub outputs: super::fleet::OutputWatch,
     pub stop: bool,
     events: Option<std::io::BufWriter<std::fs::File>>,
     hitches: super::hitches::Hitches,
@@ -646,7 +644,6 @@ impl NetRun {
             script: script(soak),
             next: 0,
             fleet,
-            outputs: Default::default(),
             stop: false,
             events,
             hitches: super::hitches::Hitches::new(started),
@@ -725,8 +722,6 @@ impl NetRun {
             self.fleet.take(from, m, now, &st.net);
         }
         let played = self.played(now);
-        self.outputs
-            .note(played, &super::fleet::own_rates(show, st));
         self.fleet.keep_up(st, now);
         self.write_said();
         match self.stage {
@@ -842,7 +837,7 @@ impl NetRun {
 
     /// The computers' lines while it plays, this computer's first.
     pub fn live_lines(&self, st: &UiState, now: f64) -> Vec<(String, bool)> {
-        let mut v = vec![own_line(&st.net.name, &self.outputs, &self.hitches)];
+        let mut v = vec![own_line(&st.net.name, &st.drawing, &self.hitches)];
         v.extend(self.fleet.live_lines(st, now));
         v
     }
@@ -860,15 +855,10 @@ impl NetRun {
 /// This computer's line in the live window: its outputs and anything wrong.
 pub fn own_line(
     name: &str,
-    outputs: &super::fleet::OutputWatch,
+    drawing: &[crate::net::measure::MonitorRate],
     hitches: &super::hitches::Hitches,
 ) -> (String, bool) {
-    let mut wrong = Vec::new();
-    for (n, fps) in outputs.now() {
-        if fps < super::fleet::STUTTER_FPS {
-            wrong.push(format!("{n} stutters"));
-        }
-    }
+    let (screens, mut wrong) = super::fleet::drawing_text(drawing);
     if !hitches.dropouts.is_empty() {
         wrong.push(format!("{} sound dropouts", hitches.dropouts.len()));
     }
@@ -878,7 +868,7 @@ pub fn own_line(
     (
         format!(
             "{name} (this computer): {}{}",
-            outputs.now_text(),
+            screens,
             if wrong.is_empty() {
                 String::new()
             } else {
@@ -995,7 +985,7 @@ pub fn finish(
             }
         }
     }
-    let own_rates = run.outputs.summary();
+    let (own_rates, _) = net_judge::drawing_findings("This computer", &run.own_drawing);
     if !own_rates.is_empty() {
         report.push_str(&format!("\n{} (this computer):\n", st.net.name));
         for l in own_rates {

@@ -43,8 +43,7 @@ release page, and a release is refused if it has none.
   is wired, Wi-Fi or a VPN; this computer's own addresses are listed, and a follower names its
   primary's address. An offline computer shows its last known address.
 - **The local network before a VPN.** A computer with a VPN on is reached over the local
-  network, not through the VPN, and the page says when a VPN is on. The network test's report
-  now says wired or Wi-Fi where it said "link unknown".
+  network, not through the VPN, and the page says when a VPN is on.
 - **No card between cues.** A display computer's screen with nothing playing stays black once
   the show is ready on it: the waiting card no longer comes back when a cue ends. A new setting,
   *Settings ▸ Show network ▸ Show a card while they wait*, can also show it on screens the show
