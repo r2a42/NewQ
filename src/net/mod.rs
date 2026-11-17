@@ -11,9 +11,13 @@ pub mod discover;
 pub mod hub;
 // The network test's measurements (stage 6).
 pub mod measure;
+// A follower's own measurements while the primary runs a test.
+pub mod measure_local;
 pub mod media;
 pub mod msg;
 pub mod node;
+// Which address reaches a computer best (a LAN before a VPN).
+pub mod paths;
 // The computers playing together (stage 4a): the shared clock in the app,
 // commands, the heartbeat and show sync.
 pub mod play;

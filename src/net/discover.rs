@@ -66,6 +66,8 @@ pub fn broadcast_addresses() -> Vec<Ipv4Addr> {
         .unwrap_or_default()
         .into_iter()
         .filter(|i| !i.is_loopback())
+        // Not on a VPN or tunnel: the show network is the local one.
+        .filter(|i| super::paths::kind_of(&i.name) != super::paths::AdapterKind::Vpn)
         .filter_map(|i| match i.addr {
             if_addrs::IfAddr::V4(v4) => Some(v4.broadcast.unwrap_or_else(|| {
                 // No broadcast address given: work it out from the netmask.

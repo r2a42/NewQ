@@ -200,6 +200,11 @@ pub struct NetView {
     pub identify_until: Option<Instant>,
     /// This computer took control (stage 5) from the primary of this name.
     pub took_control_from: Option<String>,
+    /// The address each computer with a session up is connected on, with the
+    /// port it listens on (the Show network page shows it).
+    pub reached: Vec<(NodeId, std::net::SocketAddr)>,
+    /// This computer's network adapters (`paths`), best first.
+    pub adapters: Vec<super::paths::Adapter>,
 }
 
 impl NetView {
@@ -405,6 +410,11 @@ struct Peer {
     /// Remembered in `node.json` (stage 5): dialled at its last address even
     /// when its beacon isn't heard.
     known: bool,
+    /// Every address its beacon came from lately (a computer with a VPN or
+    /// Wi-Fi as well is heard on each): `addr` is the best (`paths::best`).
+    heard_from: Vec<(IpAddr, Instant)>,
+    /// Said once in the log: its session goes a worse way than `addr`.
+    said_worse: bool,
 }
 
 impl Peer {
@@ -429,6 +439,8 @@ impl Peer {
             dialling: false,
             pending: Vec::new(),
             known: false,
+            heard_from: Vec::new(),
+            said_worse: false,
         }
     }
 
@@ -507,6 +519,10 @@ struct State {
     identify_until: Option<Instant>,
     disk_free: Option<u64>,
     disk_looked: Option<Instant>,
+    /// This computer's adapters (`paths`), looked at with the disk.
+    adapters: Vec<super::paths::Adapter>,
+    /// The kind of adapter this computer's session to its primary goes over.
+    own_path: Option<super::paths::AdapterKind>,
     /// The media manager's report, sent in the status.
     media: Option<Box<crate::net::media::MediaReport>>,
     quit: bool,
@@ -546,6 +562,8 @@ impl State {
             identify_until: None,
             disk_free: None,
             disk_looked: None,
+            adapters: Vec::new(),
+            own_path: None,
             media: None,
             quit: false,
             wake: Arc::new(|| {}),
@@ -811,7 +829,35 @@ impl State {
         p.term = b.term;
         p.on = b.on;
         p.tcp_port = b.tcp_port;
-        p.addr = Some(h.from.ip());
+        // Every address it is heard from lately; the best one is used (a
+        // LAN before its VPN: `paths`).
+        let ip = h.from.ip();
+        p.heard_from
+            .retain(|(a, t)| *a != ip && now.saturating_duration_since(*t) < OFFLINE_AFTER);
+        p.heard_from.push((ip, now));
+        let mut candidates: Vec<IpAddr> = p.addr.into_iter().collect();
+        candidates.extend(p.heard_from.iter().map(|(a, _)| *a));
+        // (The address in use first: an equal one doesn't replace it.)
+        let fresh: Vec<IpAddr> = candidates
+            .iter()
+            .copied()
+            .filter(|a| p.heard_from.iter().any(|(h, _)| h == a))
+            .collect();
+        let best = super::paths::best(&fresh, &self.adapters).unwrap_or(ip);
+        if p.addr != Some(best) {
+            if p.addr.is_some() {
+                log::info!(
+                    "show network: {} is reached at {best} (heard at {})",
+                    p.name,
+                    fresh
+                        .iter()
+                        .map(IpAddr::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            p.addr = Some(best);
+        }
         p.heard = Some(now);
         if b.proto != proto::PROTOCOL {
             p.problem = Some(proto::mismatch_sentence(
@@ -1482,6 +1528,7 @@ impl State {
         if self.net.is_none() {
             return;
         }
+        self.say_worse_paths();
         // Keep-alives, and the silent let go.
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for c in ids {
@@ -1612,14 +1659,16 @@ impl State {
             return;
         };
         conn.last_status = Some(now);
-        let link = conn
-            .session
-            .local
-            .map(|a| a.ip())
+        let local = conn.session.local.map(|a| a.ip());
+        let link = local
             .filter(|ip| !ip.is_loopback())
             .and_then(discover::adapter_with)
             .map_or(Link::Unknown, |n| Link::from_adapter_name(&n));
+        let path = local
+            .and_then(|ip| super::paths::adapter_of(ip, &self.adapters))
+            .map(|a| a.kind);
         self.link = link;
+        self.own_path = path;
         let s = self.own_status();
         self.send(c, &Msg::Status(Box::new(s)));
     }
@@ -1636,6 +1685,8 @@ impl State {
             audio_devices: self.local.audio_devices.clone(),
             disk_free: self.disk_free,
             link: self.link,
+            path: self.own_path,
+            vpn_on: super::paths::vpn_on(&self.adapters),
             clock_error_ms: self.sync.clock_error_ms,
             show_version: self.sync.show_version,
             media_progress: self.media.clone(),
@@ -1869,6 +1920,28 @@ impl State {
         (quiet >= QUIET_AFTER).then_some(quiet.as_secs())
     }
 
+    /// A session that goes a worse way (a VPN) than the computer's best address
+    /// (its LAN, heard since) is said in the log once. It is not cut: the
+    /// next connection (a restart, a drop) takes the better way, and the page
+    /// says so meanwhile.
+    fn say_worse_paths(&mut self) {
+        for p in self.peers.values_mut() {
+            let (Some(c), Some(best)) = (p.conn.and_then(|c| self.conns.get(&c)), p.addr) else {
+                continue;
+            };
+            let now_ip = c.session.peer.ip();
+            let worse = super::paths::worse(now_ip, best, &self.adapters);
+            if worse && !p.said_worse {
+                log::warn!(
+                    "show network: {} is connected through {now_ip}, though {best} is a better \
+                     way (a local network rather than a VPN): it is used from its next connection",
+                    p.name
+                );
+            }
+            p.said_worse = worse;
+        }
+    }
+
     /// Free space on the log folder's disk, now and then (it can take a moment).
     fn look_at_disk(&mut self, now: Instant) {
         if self
@@ -1879,6 +1952,7 @@ impl State {
         }
         self.disk_looked = Some(now);
         self.disk_free = free_space(&self.cfg.dir);
+        self.adapters = super::paths::own_adapters();
     }
 
     fn view(&self) -> NetView {
@@ -1955,6 +2029,25 @@ impl State {
                 .took_from
                 .clone()
                 .filter(|_| self.me.role == Role::Primary),
+            adapters: self.adapters.clone(),
+            reached: self
+                .peers
+                .values()
+                .filter_map(|p| {
+                    let c = self.conns.get(&p.conn?)?;
+                    (!c.closing && (c.welcomed || c.obeying)).then(|| {
+                        // The session's own address (the one in use), and the
+                        // port it listens on, not the far end of a socket it
+                        // dialled from.
+                        let port = if c.target.is_some() || p.tcp_port == 0 {
+                            c.session.peer.port()
+                        } else {
+                            p.tcp_port
+                        };
+                        (p.id, std::net::SocketAddr::new(c.session.peer.ip(), port))
+                    })
+                })
+                .collect(),
         }
     }
 }

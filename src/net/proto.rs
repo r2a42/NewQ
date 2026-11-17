@@ -58,6 +58,14 @@ pub struct StatusReport {
     /// Bytes free on the disk its log folder is on.
     pub disk_free: Option<u64>,
     pub link: Link,
+    // ---- Which way (`net::paths`) ----
+    /// The kind of adapter its connection to the primary goes over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<crate::net::paths::AdapterKind>,
+    /// A VPN or tunnel is up on that computer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vpn_on: bool,
+    // ----
     /// Filled by later stages: the shared clock's error, the show version it
     /// has.
     pub clock_error_ms: Option<f64>,
