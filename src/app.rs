@@ -629,6 +629,17 @@ impl App {
         }
     }
 
+    /// How fast this computer's output window on monitor `i` draws (frames a
+    /// second, while it draws continuously) and its late frames (thousandths).
+    pub(super) fn drawing_on(&self, i: usize) -> (Option<f32>, Option<u32>) {
+        let Some(s) = self.screens.get(&i) else {
+            return (None, None);
+        };
+        let slot = usize::from(s.slot);
+        let fps = crate::render::output_fps(slot);
+        (fps, fps.map(|_| crate::render::output_late(slot)))
+    }
+
     /// The show network: tell it this computer's monitors and sound devices
     /// when they change, pass on what the page asked, and take what it says.
     /// Never waits on the network.
@@ -639,12 +650,20 @@ impl App {
                 .ui
                 .monitors
                 .iter()
-                .map(|m| crate::net::proto::MonitorReport {
-                    identity: m.title().to_string(),
-                    raw: m.name.clone(),
-                    hardware: m.hardware.clone(),
-                    size: m.size,
-                    refresh_hz: m.refresh_hz,
+                .enumerate()
+                .map(|(i, m)| {
+                    let (drawing_fps, late_permille) = self.drawing_on(i);
+                    crate::net::proto::MonitorReport {
+                        identity: m.title().to_string(),
+                        raw: m.name.clone(),
+                        hardware: m.hardware.clone(),
+                        size: m.size,
+                        refresh_hz: m.refresh_hz,
+                        // In whole frames, so the report changes only
+                        // when the rate does.
+                        drawing_fps: drawing_fps.map(f32::round),
+                        late_permille,
+                    }
                 })
                 .collect(),
             audio_devices: self.ui.audio_devices.clone(),
@@ -2287,6 +2306,26 @@ impl App {
                 self.ui.output_fps.insert(*id, f);
             }
         }
+        self.ui.drawing = {
+            let mut v: Vec<crate::net::measure::MonitorRate> = self
+                .ui
+                .monitors
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    let (fps, late) = self.drawing_on(i);
+                    Some(crate::net::measure::MonitorRate {
+                        index: i,
+                        name: m.title().to_string(),
+                        refresh_hz: m.refresh_hz,
+                        fps: fps?,
+                        late_permille: late.unwrap_or(0),
+                    })
+                })
+                .collect();
+            v.sort_by_key(|r| r.index);
+            v
+        };
         self.fps_labels.retain(|id, _| groups.contains_key(id));
 
         self.ui.screens.clear();

@@ -150,6 +150,7 @@ fn two_computers_find_each_other_and_the_primary_adopts_names_and_releases() {
             hardware: None,
             size: (2560, 1440),
             refresh_hz: Some(60.0),
+            ..Default::default()
         }],
         audio_devices: vec!["Speakers".into(), "USB interface".into()],
     });
@@ -1121,4 +1122,19 @@ fn a_paired_display_comes_back_by_itself_after_either_or_both_start_again() {
     let d = start_display(&ddir);
     paired(&p, &d, "both, primary first");
     assert_eq!(node::load(&ddir).network, network);
+}
+
+/// The link a computer reported to its primary is in its own row too (the
+/// network test's report read "link unknown" for a computer whose status
+/// said "Wired", 0.24.1).
+#[test]
+fn a_computers_own_status_says_its_link() {
+    let mut rig = Rig::new();
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let (out, _events) = crossbeam_channel::unbounded();
+    let mut st = State::new(rig.cfg("link"), Identity::default(), tx, out);
+    assert_eq!(st.view().status.link, Link::Unknown);
+    st.link = Link::Wired;
+    assert_eq!(st.view().status.link, Link::Wired);
+    assert_eq!(st.own_status().link, Link::Wired);
 }

@@ -932,6 +932,7 @@ impl App {
                 in_step: self.play.follower.in_step,
             },
         );
+        self.play.measure.drawing(&self.ui.drawing);
         let (link, refresh) = self.net_test_facts();
         let late = Some(crate::render::late_frames_permille());
         if let (Some(p), Some(r)) = (

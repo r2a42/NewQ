@@ -6,6 +6,28 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Sound in a show network keeps to the shared clock.** A sound cue's time on every computer is
+  now the shared clock's, like a picture's. A sound whose player or sound card started it late
+  skips ahead to where it should be (once, as it starts), so two computers' sounds stay within a
+  few hundredths of a second of each other. The network test said a computer was "out of step"
+  by about 7 frames while a sound played: that was the sound, timed by the sound card, not the
+  pictures, which were together. The test now measures pictures and sound separately.
+- **A display computer never stutters for the sake of the network.** The network is a reference,
+  not something a picture waits for. A small difference from the primary is left alone; a real,
+  steady one is put right once, never again and again; and a computer that hears nothing from
+  the primary for a while plays on by its own clock.
+- **The network test catches a display that stutters.** Each computer now reports how fast each
+  of its screens is drawing. A screen drawing far below its refresh rate is a problem in the
+  test ("Assistant's monitor 1 drew about 4 frames a second: it should draw 64"), and the Show
+  network page says so while it happens. Late frames were missed before when every frame was
+  slow; they are counted now.
+- **A screen that keeps the graphics card waiting tries another way of drawing.** If an output
+  window waits at nearly every frame for the system (seen on a laptop's built-in screen run by
+  its other graphics chip), it switches to presenting without waiting for the display, and the
+  log says so. The log now also names every graphics card, and how each output window draws.
+- The network test's report gave "link unknown" for a computer whose status said "Wired"; it
+  now says "wired".
+
 ## 0.24.1
 
 - **NewQ Display.** Every download now has a second program, *NewQ Display*: open it on a

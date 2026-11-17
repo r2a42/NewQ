@@ -280,6 +280,9 @@ pub struct UiState {
     pub stats_to_file: bool,
     /// How fast each output's display window is drawing (set each frame by the app).
     pub output_fps: HashMap<OutputId, f32>,
+    /// This computer's output windows that are drawing continuously, a
+    /// monitor each: how fast, and their late frames (`App::update_outputs`).
+    pub drawing: Vec<crate::net::measure::MonitorRate>,
     /// How fast the main window itself is drawing, and when that was read.
     pub preview_fps: Option<(f32, std::time::Instant)>,
     /// Every enabled output, previewed in the main window (set each frame by the app).

@@ -656,6 +656,10 @@ pub struct NetRun {
     pub stop: bool,
     events: Option<std::io::BufWriter<std::fs::File>>,
     hitches: super::hitches::Hitches,
+    /// This computer's own output windows' drawing while it played, and when
+    /// it was last looked at (shared time).
+    own_drawing: Vec<net_judge::MonitorNotes>,
+    drawing_looked: Option<f64>,
     _awake: KeepAwake,
     wanted: Vec<&'static Asset>,
     /// How long it is meant to play (s).
@@ -749,6 +753,8 @@ impl NetRun {
             stop: false,
             events,
             hitches: super::hitches::Hitches::new(started),
+            own_drawing: Vec::new(),
+            drawing_looked: None,
             _awake: awake,
             wanted,
             planned: if soak {
@@ -845,6 +851,12 @@ impl NetRun {
             }
             Stage::Playing => {
                 let played = self.played(now);
+                // This computer's screens, once a second, as the others
+                // report theirs.
+                if self.drawing_looked.is_none_or(|t| now - t >= 1.0) {
+                    self.drawing_looked = Some(now);
+                    net_judge::note_drawing(&mut self.own_drawing, &st.drawing);
+                }
                 while self.next < self.script.len() && self.script[self.next].0 <= played {
                     let act = self.script[self.next].1;
                     self.next += 1;
@@ -1263,6 +1275,7 @@ pub fn finish(
         f.text = format!("This computer (the primary): {}", f.text);
         f
     }));
+    own.extend(net_judge::drawing_findings("This computer (the primary)", &run.own_drawing).1);
     let notes: Vec<ComputerNotes> = run.computers.values().map(|c| c.notes.clone()).collect();
     // Before playing began there is nothing of the computers to judge.
     let judged: Judged = if run.start.is_some() {

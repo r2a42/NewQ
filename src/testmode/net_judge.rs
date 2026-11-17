@@ -4,7 +4,7 @@
 //! for the report and the window, `network.csv` and the report's network part.
 
 use super::analysis::{Finding, Severity, Verdict};
-use crate::net::measure::{CommandNote, CorrectionNote, Report, Row, StallNote};
+use crate::net::measure::{CommandNote, CorrectionNote, MonitorRate, Report, Row, StallNote};
 use crate::net::proto::Link;
 use std::fmt::Write as _;
 
@@ -38,6 +38,12 @@ pub const GAP_SECS: f64 = 3.0;
 pub const SETTLING_SECS: f64 = 5.0;
 /// Something played on the primary and not here for this long (s): a problem.
 pub const MISSING_PROBLEM_SECS: f64 = 2.0;
+/// A display drawing slowly (`proto::slow_below`) in this many reports (a
+/// second each): a problem; fewer, a note.
+pub const SLOW_DRAWING_PROBLEM_SECS: u32 = 3;
+/// Sounds further apart than this (ms, by what each sound device was sent):
+/// a note. (Each is kept within `audio::SOUND_SLACK` of the shared clock.)
+pub const SOUND_NOTE_MS: f64 = 60.0;
 
 /// What software can't see, said in every report.
 pub const CANNOT_SEE: &str = "What this test can't see: each display draws at its own moment within its refresh, so two projectors without genlock can be up to one refresh apart even when NewQ chose the same frame on both (film the Sync flash to see it). Sound from two computers is not locked to the sample: it is meant for separate rooms or separate speakers, not one sound from two computers. The numbers come from the computers' own clocks; the network itself is measured by the round trips.";
@@ -81,6 +87,50 @@ pub struct ComputerNotes {
     pub log_tail: bool,
     /// Its last report arrived.
     pub ended: bool,
+    /// Its output windows' drawing, a monitor each.
+    pub monitors: Vec<MonitorNotes>,
+}
+
+/// How one of a computer's output windows drew over the test.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MonitorNotes {
+    pub index: usize,
+    pub name: String,
+    pub refresh_hz: Option<f32>,
+    /// Reports (seconds) in which it drew, and the rates of those in which it
+    /// drew slowly.
+    pub drawing: u32,
+    pub slow: Vec<f32>,
+    pub slowest: Option<f32>,
+    pub late_permille: u32,
+}
+
+impl MonitorNotes {
+    pub fn take(&mut self, r: &MonitorRate) {
+        self.name.clone_from(&r.name);
+        self.refresh_hz = r.refresh_hz.or(self.refresh_hz);
+        self.drawing += 1;
+        let slow_below = crate::net::proto::slow_below(self.refresh_hz);
+        if r.fps < slow_below && self.slow.len() < 100_000 {
+            self.slow.push(r.fps);
+        }
+        self.slowest = Some(self.slowest.map_or(r.fps, |s| s.min(r.fps)));
+        self.late_permille = self.late_permille.max(r.late_permille);
+    }
+
+    /// The rate it should draw at: its display's refresh (60 if unknown).
+    pub fn should(&self) -> f32 {
+        self.refresh_hz
+            .filter(|r| r.is_finite() && *r >= 20.0)
+            .unwrap_or(60.0)
+    }
+
+    /// The middle of the slow rates (what it mostly drew at while slow).
+    fn typical_slow(&self) -> Option<f32> {
+        let mut v = self.slow.clone();
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied()
+    }
 }
 
 impl ComputerNotes {
@@ -109,6 +159,7 @@ impl ComputerNotes {
         if let Some(l) = r.late_frames_permille {
             self.late_frames_permille = self.late_frames_permille.max(l);
         }
+        note_drawing(&mut self.monitors, &r.monitors);
         self.ended |= r.last;
     }
 
@@ -130,6 +181,13 @@ impl ComputerNotes {
             .iter()
             .filter(|r| r.locked && r.t >= SETTLING_SECS)
             .filter_map(|r| r.clock_error_ms)
+            .reduce(f64::max)
+    }
+
+    fn worst_sound(&self) -> Option<f64> {
+        self.rows
+            .iter()
+            .filter_map(|r| r.sound_apart_ms)
             .reduce(f64::max)
     }
 
@@ -208,6 +266,62 @@ pub fn transfer_words(t: &Transfer) -> String {
     }
 }
 
+/// A computer's output windows, judged by how fast they drew (R21): a line
+/// each, and a problem for one that drew under half its display's rate for
+/// `SLOW_DRAWING_PROBLEM_SECS` or more (a note for less). `who` names the
+/// computer ("Assistant", "This computer (the primary)").
+pub fn drawing_findings(who: &str, monitors: &[MonitorNotes]) -> (Vec<String>, Vec<Finding>) {
+    let (mut lines, mut f) = (Vec::new(), Vec::new());
+    for m in monitors {
+        let what = format!("{who}'s monitor {} ({})", m.index + 1, m.name);
+        let should = m.should();
+        if let Some(s) = m.slowest {
+            lines.push(format!(
+                "Monitor {} ({}): drew at least {s:.0} frames a second (its display {})",
+                m.index + 1,
+                m.name,
+                m.refresh_hz
+                    .map_or("refresh unknown".into(), |r| format!("runs at {r:.0} Hz"))
+            ));
+        }
+        let Some(typical) = m.typical_slow() else {
+            continue;
+        };
+        let slow = m.slow.len() as u32;
+        if slow >= SLOW_DRAWING_PROBLEM_SECS {
+            f.push(finding(
+                Severity::Problem,
+                format!(
+                    "{what} drew about {typical:.0} frames a second for about {}: it should draw {should:.0}. Its pictures stuttered, whatever the timing says",
+                    span(f64::from(slow))
+                ),
+            ));
+        } else {
+            f.push(finding(
+                Severity::Note,
+                format!("{what} drew only {typical:.0} frames a second for a moment"),
+            ));
+        }
+    }
+    (lines, f)
+}
+
+/// Add what one look at a computer's drawing says to `notes`.
+pub fn note_drawing(notes: &mut Vec<MonitorNotes>, rates: &[MonitorRate]) {
+    for m in rates {
+        if !notes.iter().any(|n| n.index == m.index) {
+            notes.push(MonitorNotes {
+                index: m.index,
+                ..Default::default()
+            });
+            notes.sort_by_key(|n| n.index);
+        }
+        if let Some(n) = notes.iter_mut().find(|n| n.index == m.index) {
+            n.take(m);
+        }
+    }
+}
+
 /// Judge one computer over a test `secs` long.
 pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
     let mut f: Vec<Finding> = Vec::new();
@@ -275,6 +389,23 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
         }
     } else {
         lines.push("Nothing played to compare".into());
+    }
+    // Its displays: a picture that keeps time but is drawn a few frames a
+    // second is no show (R21). Judged whatever the times say.
+    let (more, found) = drawing_findings(&c.name, &c.monitors);
+    lines.extend(more);
+    f.extend(found);
+    if let Some(w) = c.worst_sound() {
+        lines.push(format!("Sound up to {w:.0} ms from the primary's"));
+        if w > SOUND_NOTE_MS {
+            f.push(finding(
+                Severity::Note,
+                format!(
+                    "The sound on {} was up to {w:.0} ms from the primary's (by what each sound device was sent; a device adds its own fixed delay after that)",
+                    c.name
+                ),
+            ));
+        }
     }
     // The clock.
     if let Some(e) = c.worst_clock() {
@@ -521,7 +652,7 @@ pub fn judge(computers: &[ComputerNotes], secs: f64, own: Vec<Finding>) -> Judge
 /// `network.csv`: a row per look of each computer.
 pub fn csv(computers: &[ComputerNotes]) -> String {
     let mut s = String::from(
-        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing\n",
+        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing,sound_apart_ms\n",
     );
     let num = |v: Option<f64>| v.map_or(String::new(), |x| format!("{x:.2}"));
     for c in computers {
@@ -529,7 +660,7 @@ pub fn csv(computers: &[ComputerNotes]) -> String {
         for r in &c.rows {
             let _ = writeln!(
                 s,
-                "{},{:.2},{},{},{},{},{},{},{},{}",
+                "{},{:.2},{},{},{},{},{},{},{},{},{}",
                 csv_field(&c.name),
                 r.t,
                 num(r.clock_error_ms),
@@ -539,7 +670,8 @@ pub fn csv(computers: &[ComputerNotes]) -> String {
                 num(r.apart_ms),
                 num(r.apart_ms.map(|a| a / frame)),
                 r.compared,
-                r.missing
+                r.missing,
+                num(r.sound_apart_ms)
             );
         }
     }
@@ -627,6 +759,7 @@ mod tests {
                 apart_ms: Some(apart),
                 compared: 2,
                 missing: 0,
+                sound_apart_ms: None,
             })
             .collect()
     }
@@ -793,6 +926,82 @@ mod tests {
     }
 
     #[test]
+    fn a_display_drawing_four_frames_a_second_is_a_problem_in_plain_words() {
+        // 0.24.1's first test on two computers: in step by the times, while
+        // the display computer's built-in screen drew about 4 frames a second.
+        let mut c = good("Assistant");
+        let rate = |index, name: &str, refresh, fps| MonitorRate {
+            index,
+            name: name.into(),
+            refresh_hz: Some(refresh),
+            fps,
+            late_permille: if fps < 30.0 { 1000 } else { 0 },
+        };
+        for i in 0..80 {
+            c.take(Report {
+                seq: i + 1,
+                link: Link::Wired,
+                monitors: vec![
+                    rate(0, "B173HAN04.9", 64.0, 3.5 + (i % 3) as f32 * 0.3),
+                    rate(1, "DISPLAY2", 60.0, 59.8),
+                ],
+                ..Default::default()
+            });
+        }
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert_eq!(
+            v.headline,
+            "Assistant's monitor 1 (B173HAN04.9) drew about 4 frames a second for about 80 s: it should draw 64. Its pictures stuttered, whatever the timing says"
+        );
+        assert!(
+            v.lines.iter().any(|l| l
+                == "Monitor 2 (DISPLAY2): drew at least 60 frames a second (its display runs at 60 Hz)"),
+            "{:?}",
+            v.lines
+        );
+        // The other monitor, drawing at its rate, says nothing more; a moment
+        // of slowness is a note.
+        assert_eq!(v.findings.len(), 1, "{:?}", v.findings);
+        let mut c = good("Assistant");
+        c.take(Report {
+            seq: 1,
+            monitors: vec![rate(0, "B173HAN04.9", 64.0, 12.0)],
+            ..Default::default()
+        });
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::PassedWithNotes);
+        assert!(
+            v.findings[0]
+                .text
+                .ends_with("drew only 12 frames a second for a moment")
+        );
+        // A 144 Hz display drawn at 60 (all a window is asked) is fine.
+        let mut c = good("Fast");
+        c.take(Report {
+            seq: 1,
+            monitors: vec![rate(0, "Gaming", 144.0, 59.0)],
+            ..Default::default()
+        });
+        assert_eq!(judge_computer(&c, 120.0).verdict, Verdict::Passed);
+    }
+
+    #[test]
+    fn sounds_far_apart_are_a_note() {
+        let mut c = good("Left");
+        c.rows[10].sound_apart_ms = Some(20.0);
+        assert_eq!(judge_computer(&c, 120.0).verdict, Verdict::Passed);
+        c.rows[11].sound_apart_ms = Some(118.0);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::PassedWithNotes);
+        assert!(
+            v.findings[0]
+                .text
+                .starts_with("The sound on Left was up to 118 ms")
+        );
+    }
+
+    #[test]
     fn reports_are_taken_in_and_a_lost_one_is_counted() {
         let mut c = ComputerNotes::new("Left");
         for seq in [1, 2, 4] {
@@ -823,10 +1032,13 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(
             lines[0],
-            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing"
+            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing,sound_apart_ms"
         );
-        assert_eq!(lines[1], "\"Left, stage\",0.00,0.30,1.20,1,1,6.70,0.40,2,0");
-        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,2,0");
+        assert_eq!(
+            lines[1],
+            "\"Left, stage\",0.00,0.30,1.20,1,1,6.70,0.40,2,0,"
+        );
+        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,2,0,");
         b.commands = commands(40, 1);
         let cs = [a, b];
         let j = judge(&cs, 120.0, vec![]);

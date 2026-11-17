@@ -434,6 +434,9 @@ fn computer_row(
         if let Some(w) = blend_warning(show, p, s) {
             warning(ui, &w);
         }
+        for w in slow_drawing(&p.name, s) {
+            warning(ui, &w);
+        }
     }
     let state = if !p.online {
         RichText::new("Offline: not heard from")
@@ -533,6 +536,25 @@ fn step_words(s: &proto::StatusReport) -> (String, Color32) {
         .clone()
         .unwrap_or_else(|| "Not in step yet".into());
     (text, Color32::from_rgb(220, 160, 40))
+}
+
+/// A plain warning for each of a computer's monitors whose window draws at
+/// under half its display's rate (R21: in time, but stuttering).
+pub fn slow_drawing(name: &str, s: &proto::StatusReport) -> Vec<String> {
+    s.monitors
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.drawing_slowly())
+        .map(|(i, m)| {
+            format!(
+                "⚠ {name}'s monitor {} ({}) is drawing {:.0} frames a second: it should draw {:.0}. Its pictures stutter",
+                i + 1,
+                m.identity,
+                m.drawing_fps.unwrap_or(0.0),
+                m.refresh_hz.unwrap_or(60.0)
+            )
+        })
+        .collect()
 }
 
 /// Half a frame at 60 Hz (ms): a clock further off than this can show a
