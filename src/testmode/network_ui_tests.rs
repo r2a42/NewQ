@@ -83,39 +83,47 @@ fn in_window(notes: &[(String, Rect)], name: &str) -> bool {
 }
 
 #[test]
-fn alone_the_window_says_what_the_network_test_needs() {
+fn alone_the_network_tick_says_what_it_needs() {
     for modern in [false, true] {
         let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
         let notes = draw(modern, &mut show, &mut e, &mut st);
         assert!(
-            has(&notes, "Several computers: the network test"),
+            has(
+                &notes,
+                "Network: Needs another computer in the show network."
+            ),
             "{notes:?}"
         );
-        assert!(has(
-            &notes,
-            "The network test runs on the computer that runs the show network"
-        ));
+        assert!(has(&notes, "Cue list: about 1 minute"), "{notes:?}");
         assert!(!st.test.busy());
     }
 }
 
 #[test]
-fn a_primary_with_a_computer_in_step_is_offered_the_test_first() {
+fn a_primary_with_a_computer_in_step_can_tick_the_network() {
     for modern in [false, true] {
         let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
         st.net = Arc::new(primary_view(false));
         let notes = draw(modern, &mut show, &mut e, &mut st);
         assert!(
-            has(&notes, "No computer of this show network is in step yet"),
+            has(&notes, "Network: Waiting for Left to be in step."),
             "{notes:?}"
         );
         st.net = Arc::new(primary_view(true));
         let notes = draw(modern, &mut show, &mut e, &mut st);
-        assert!(has(&notes, "With Left (in step now)."), "{notes:?}");
-        assert!(!has(&notes, "No computer of this show network"));
-        // First in the window, in sight.
-        assert!(in_window(&notes, "Start the network test"), "{notes:?}");
-        assert!(in_window(&notes, "Network soak"));
+        assert!(!has(&notes, "Network: "), "{notes:?}");
+        assert!(
+            has(
+                &notes,
+                "The cue list and timeline play on Left too, and each measures itself."
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(
+            crate::testmode::choice::and_list(&["Left", "Right", "Rear"]),
+            "Left, Right and Rear"
+        );
+        assert!(has(&notes, "Cue list: about 1 minute"), "{notes:?}");
         // The other tests run across the network too: Left is in step.
         assert!(st.test_refusal().is_none(), "{:?}", st.test_refusal());
         // The decoding comparison is one computer's own.
@@ -189,11 +197,12 @@ fn the_results_give_each_computer_its_verdict_in_words() {
         let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
         let mut test = TestMode::default();
         test.show_done(Done {
+            parts: Vec::new(),
             compare: None,
             full: None,
             computers: Vec::new(),
             network: Some(NetDone {
-                soak: false,
+                laps: 1,
                 computers: j.computers.clone(),
             }),
             flavour: super::super::Flavour::Cues,
@@ -222,6 +231,212 @@ fn the_results_give_each_computer_its_verdict_in_words() {
     }
 }
 
+// ---- The choices, drawn and clicked in the whole window ----
+
+fn click_at(at: Pos2) -> Vec<Vec<egui::Event>> {
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    vec![
+        vec![egui::Event::PointerMoved(at)],
+        vec![press(true)],
+        vec![press(false)],
+    ]
+}
+
+fn rect_of(notes: &[(String, Rect)], name: &str) -> Rect {
+    notes
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, r)| *r)
+        .unwrap_or_else(|| panic!("no {name} in {notes:?}"))
+}
+
+fn on_screen(r: Rect) -> bool {
+    r.is_positive() && Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(r)
+}
+
+#[test]
+fn start_is_in_sight_without_scrolling_alone_and_in_a_network() {
+    for modern in [false, true] {
+        for net in [false, true] {
+            let (mut show, mut e, mut st) =
+                (Show::default(), Engine::for_tests(), UiState::default());
+            if net {
+                st.net = Arc::new(two_monitors(true));
+                st.test.parts.network = true;
+                st.test.parts.timeline = true;
+            }
+            let ctx = egui::Context::default();
+            let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+            let start = rect_of(&notes, "Start");
+            assert!(
+                on_screen(start),
+                "modern {modern}, network {net}: Start at {start:?}"
+            );
+            // Collapsed: More's contents aren't drawn.
+            assert!(!has(&notes, "Check every feature"), "{notes:?}");
+        }
+    }
+}
+
+#[test]
+fn alone_the_network_tick_cant_be_ticked() {
+    for modern in [false, true] {
+        let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
+        let ctx = egui::Context::default();
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+        let at = rect_of(&notes, "Network").center();
+        choices(&ctx, modern, &mut show, &mut e, &mut st, click_at(at));
+        assert!(!st.test.parts.network, "modern {modern}");
+        // The cue list can be unticked: then there is nothing to start.
+        let at = rect_of(&notes, "Cue list").center();
+        choices(&ctx, modern, &mut show, &mut e, &mut st, click_at(at));
+        assert!(!st.test.parts.cue_list);
+        let notes = draw(modern, &mut show, &mut e, &mut st);
+        assert!(has(&notes, "Tick at least one thing to test."), "{notes:?}");
+    }
+}
+
+#[test]
+fn in_a_network_all_three_can_be_ticked() {
+    for modern in [false, true] {
+        let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
+        st.net = Arc::new(primary_view(true));
+        let ctx = egui::Context::default();
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+        for name in ["Timeline", "Network"] {
+            let at = rect_of(&notes, name).center();
+            choices(&ctx, modern, &mut show, &mut e, &mut st, click_at(at));
+        }
+        let p = st.test.parts;
+        assert!(
+            p.cue_list && p.timeline && p.network,
+            "modern {modern}: {p:?}"
+        );
+        let notes = draw(modern, &mut show, &mut e, &mut st);
+        assert!(
+            has(
+                &notes,
+                "Cue list, then timeline, then the network check: about 4 minutes"
+            ),
+            "{notes:?}"
+        );
+        // Remembered for this computer.
+        assert_eq!(st.prefs.test_pick.parts, p);
+    }
+}
+
+#[test]
+fn more_holds_the_feature_check_and_the_decoding_comparison() {
+    for modern in [false, true] {
+        let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
+        let ctx = egui::Context::default();
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+        assert!(!has(&notes, "Compare hardware decoding"));
+        let at = rect_of(&notes, "More").center();
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, click_at(at));
+        for name in ["Check every feature", "Compare hardware decoding"] {
+            assert!(has(&notes, name), "modern {modern}: {name} in {notes:?}");
+        }
+    }
+}
+
+#[test]
+fn a_run_of_several_parts_reads_overall_first_then_a_section_per_part() {
+    use super::net_judge::{ComputerNotes, judge};
+    use crate::testmode::analysis::Verdict;
+    use crate::testmode::choice::{Part, PartPlan};
+    use crate::testmode::sequence::PartDone;
+    let j = judge(&[ComputerNotes::new("Right")], 120.0, Vec::new());
+    let one = |verdict, network: Option<NetDone>, headline: &str| Done {
+        parts: Vec::new(),
+        compare: None,
+        full: None,
+        computers: Vec::new(),
+        network,
+        flavour: super::super::Flavour::Cues,
+        bundle: Default::default(),
+        level: Level::Short,
+        verdict,
+        headline: headline.into(),
+        steady: None,
+        findings: Vec::new(),
+        folder: PathBuf::from("/nowhere"),
+        report: String::new(),
+        laps: 1,
+        elapsed: Duration::from_secs(60),
+        ended: End::Finished,
+    };
+    let plan = |part, laps| PartPlan {
+        part,
+        level: Level::Short,
+        minutes: 0,
+        laps,
+    };
+    let mut whole = one(
+        Verdict::ProblemsFound,
+        None,
+        "Problems were found in: Network.",
+    );
+    whole.parts = vec![
+        PartDone {
+            part: plan(Part::CueList, 1),
+            done: Some(Box::new(one(Verdict::Passed, None, "Everything held up."))),
+            why_not: None,
+        },
+        PartDone {
+            part: plan(Part::Network, 1),
+            done: Some(Box::new(one(
+                j.verdict,
+                Some(NetDone {
+                    laps: 1,
+                    computers: j.computers.clone(),
+                }),
+                &j.headline,
+            ))),
+            why_not: None,
+        },
+    ];
+    for modern in [false, true] {
+        let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
+        let mut test = TestMode::default();
+        let mut d = one(whole.verdict, None, &whole.headline);
+        d.parts = whole
+            .parts
+            .iter()
+            .map(|p| PartDone {
+                part: p.part,
+                done: p.done.as_ref().map(|d| {
+                    let mut c = one(d.verdict, d.network.clone(), &d.headline);
+                    c.computers = d.computers.clone();
+                    Box::new(c)
+                }),
+                why_not: None,
+            })
+            .collect();
+        test.show_done(d);
+        st.test = test;
+        let notes = draw(modern, &mut show, &mut e, &mut st);
+        let at = |text: &str| {
+            notes
+                .iter()
+                .position(|(n, _)| n.contains(text))
+                .unwrap_or_else(|| panic!("no {text} in {notes:?}"))
+        };
+        let (head, cue, net, right) = (
+            at("Problems were found in: Network."),
+            at("part:Cue list (Short): Passed"),
+            at("part:Network test: Problems found"),
+            at("Right: No measurements came from Right"),
+        );
+        assert!(head < cue && cue < net && net < right, "{notes:?}");
+    }
+}
+
 // ---- Every test across the network: the screens of every computer ----
 
 /// The window's choices (`gui::note_choice`): where each tick and button is.
@@ -239,7 +454,10 @@ fn choices(
     let mut frames = events;
     frames.extend([vec![], vec![], vec![]]);
     for (i, ev) in frames.into_iter().enumerate() {
-        ctx.data_mut(|d| d.remove::<Vec<(String, Rect)>>(egui::Id::new("test_choices")));
+        ctx.data_mut(|d| {
+            d.remove::<Vec<(String, Rect)>>(egui::Id::new("test_choices"));
+            d.remove::<Vec<(String, Rect)>>(egui::Id::new("test_net"));
+        });
         let t = ctx.input(|x| x.time) + 1.0 / 60.0 + if i == 0 { 1.0 } else { 0.0 };
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
@@ -249,9 +467,14 @@ fn choices(
         };
         let mut out = ctx.run_ui(input, |ui| crate::ui::draw(ui, show, e, st));
         out.textures_delta.clear();
-        notes = ctx
-            .data(|d| d.get_temp::<Vec<(String, Rect)>>(egui::Id::new("test_choices")))
-            .unwrap_or_default();
+        // The ticks and buttons, then the words.
+        notes = ["test_choices", "test_net"]
+            .into_iter()
+            .flat_map(|k| {
+                ctx.data(|d| d.get_temp::<Vec<(String, Rect)>>(egui::Id::new(k)))
+                    .unwrap_or_default()
+            })
+            .collect();
     }
     notes
 }
@@ -280,9 +503,29 @@ fn every_computers_screens_are_offered_grouped_and_ticked_all_at_once() {
         st.net = Arc::new(two_monitors(true));
         let ctx = egui::Context::default();
         let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
-        let tick = "screen:Left 1: Projector (1920×1080 @ 60 Hz)";
+        let tick = "screen:Left · screen 1 · 1920×1080";
         assert!(has(&notes, tick), "{notes:?}");
-        assert!(has(&notes, "screen:Left 2: Side screen"), "{notes:?}");
+        assert!(
+            has(&notes, "screen:Left · screen 2 · 1920×1080"),
+            "{notes:?}"
+        );
+        let want = [
+            remote_key(LEFT, 0, "Projector"),
+            remote_key(LEFT, 1, "Side screen"),
+        ];
+        // On opening with none ticked, every screen is.
+        for k in &want {
+            assert!(st.prefs.test_displays.contains(k), "modern {modern}");
+        }
+        let none = rect_of(&notes, "None:Left").center();
+        choices(&ctx, modern, &mut show, &mut e, &mut st, click_at(none));
+        assert!(st.prefs.test_displays.is_empty(), "modern {modern}");
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+        assert!(
+            has(&notes, "Tick at least one screen to show the test on."),
+            "{notes:?}"
+        );
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
         // The whole group at once.
         let all = notes
             .iter()
@@ -312,10 +555,6 @@ fn every_computers_screens_are_offered_grouped_and_ticked_all_at_once() {
                 vec![press(false)],
             ],
         );
-        let want = [
-            remote_key(LEFT, 0, "Projector"),
-            remote_key(LEFT, 1, "Side screen"),
-        ];
         for k in &want {
             assert!(
                 st.prefs.test_displays.contains(k),

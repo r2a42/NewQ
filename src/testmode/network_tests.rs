@@ -547,11 +547,12 @@ fn the_test_show_keeps_the_displays_adds_one_per_bare_monitor_and_keeps_the_user
 }
 
 #[test]
-fn a_lap_is_about_two_minutes_and_the_soak_about_twenty() {
-    let one = script(false);
+fn a_lap_is_about_two_minutes_and_the_long_test_about_twenty() {
+    let one = script(1);
+    assert_eq!(script(0), one, "at least one lap");
     assert!(one.iter().all(|(t, _)| *t < LAP_SECS));
     assert!((100.0..=130.0).contains(&LAP_SECS));
-    let soak = script(true);
+    let soak = script(SOAK_LAPS);
     assert_eq!(soak.len(), one.len() * SOAK_LAPS as usize);
     let total = f64::from(SOAK_LAPS) * LAP_SECS;
     assert!((17.0 * 60.0..=22.0 * 60.0).contains(&total));
@@ -962,6 +963,202 @@ fn a_computer_that_drops_out_of_a_short_test_is_reported_and_gets_the_show_back(
         r.step();
     }
     assert_eq!(serde_json::to_string(&r.comps[1].show).unwrap(), r.user);
+}
+
+// ---- Several parts as one test (`sequence`) ----
+
+/// The network part's short script (as `Rig::start`'s).
+fn short_script() -> Vec<(f64, Act)> {
+    vec![
+        (0.0, Act::Begin),
+        (1.0, Act::Fire(Which::Film)),
+        (1.0, Act::Fire(Which::Sound)),
+        (2.0, Act::Fire(Which::Timeline)),
+        (4.0, Act::StopAll(0.5)),
+        (5.0, Act::Fire(Which::FlashAgain)),
+        (6.0, Act::StopAll(0.5)),
+    ]
+}
+
+impl Rig {
+    /// Start a Short run of the cue list then the network check.
+    fn start_combined(&mut self, ff: &Ffmpeg) {
+        use crate::testmode::choice::{Part, PartPlan};
+        use crate::testmode::sequence::Made;
+        let plan = |part| PartPlan {
+            part,
+            level: crate::testmode::Level::Short,
+            minutes: 0,
+            laps: 1,
+        };
+        let peers = self.st.net.peers.clone();
+        let flash = media_dir().join("testsrc_10s.mp4");
+        let net = build(&self.show, &res(), Some(&flash), &peers, &[]);
+        let made = vec![
+            Made::Cues(Box::new(short_lap(&self.show))),
+            Made::Network(Box::new(net), short_script(), 7.0),
+        ];
+        let dir = self.dir.clone();
+        self.test.launch_plan(
+            ff.clone(),
+            vec![plan(Part::CueList), plan(Part::Network)],
+            made,
+            &dir,
+            &mut self.show,
+            &mut self.engine,
+            &mut self.st,
+        );
+        self.current = "test";
+        self.paced = true;
+    }
+}
+
+/// The one zip's thread has gathered the parts into the run's folder.
+fn gathered(d: &Done) {
+    for _ in 0..600 {
+        if d.bundle.get().is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the run's zip was not made");
+}
+
+#[test]
+fn a_cue_list_and_a_network_check_run_as_one_test_with_one_result_and_one_zip() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "combined");
+    r.start_combined(&ff);
+    assert_eq!(
+        r.test.sequence().map(|(i, n, p)| (i, n, p.name())),
+        Some((0, 2, "Cue list"))
+    );
+    let mut saw_network = false;
+    let end = r.now + 240.0;
+    while r.done().is_none() {
+        assert!(
+            r.now < end,
+            "the run was not done within 240 s: {:?} {:?} {:?}",
+            r.test.sequence(),
+            r.test.network_run().map(|n| (n.stage, n.media_lines())),
+            r.test.notice
+        );
+        r.step();
+        if r.done().is_some() {
+            break;
+        }
+        assert!(r.st.test_locked, "the user's show came back between parts");
+        let user = r.user.clone();
+        assert!(
+            r.comps
+                .iter()
+                .all(|c| serde_json::to_string(&c.show).unwrap() != user),
+            "a computer got the user's show back between parts"
+        );
+        if matches!(r.test.view(), View::Network(_)) {
+            // The media manager makes the network part's version.
+            r.current = "network";
+            saw_network = true;
+            assert_eq!(r.test.sequence().map(|(i, ..)| i), Some(1));
+        }
+    }
+    assert!(saw_network, "the network part played");
+    let d = r.done().unwrap();
+    assert_eq!(d.parts.len(), 2, "{}", d.report);
+    let cue = d.parts[0].done.as_ref().expect("the cue list part ran");
+    assert_eq!(cue.computers.len(), 2, "{}", cue.report);
+    let net = d.parts[1].done.as_ref().expect("the network part ran");
+    assert_eq!(
+        net.network.as_ref().map(|n| n.computers.len()),
+        Some(2),
+        "{}",
+        net.report
+    );
+    assert_eq!(d.ended, End::Finished, "{}", d.report);
+    // One report: overall first, then each part in order.
+    let (one, two) = (
+        d.report.find("Part 1 of 2: Cue list (Short)").unwrap(),
+        d.report.find("Part 2 of 2: Network test").unwrap(),
+    );
+    assert!(d.report.starts_with("NewQ Test Mode report") && one < two);
+    // One folder, one zip: the parts' files in it, none overwritten.
+    gathered(d);
+    let names: Vec<String> = std::fs::read_dir(&d.folder)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    for want in [
+        "report.txt",
+        "events.log",
+        "network.csv",
+        "cue-list-network.csv",
+        "laps.csv",
+        "cue-list-computers.csv",
+        "network-computers.csv",
+    ] {
+        assert!(names.iter().any(|n| n == want), "{want} in {names:?}");
+    }
+    let events = std::fs::read_to_string(d.folder.join("events.log")).unwrap();
+    assert!(
+        events.find("===== cue-list").unwrap() < events.find("===== network").unwrap(),
+        "{events}"
+    );
+    assert!(super::super::bundle::zip_path(&d.folder).is_file());
+    r.assert_restored();
+}
+
+#[test]
+fn stopping_a_run_of_parts_in_its_first_part_puts_the_show_back_and_says_what_did_not_run() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "combinedstop");
+    r.start_combined(&ff);
+    r.run_until("the cue list part plays", 60.0, |r| {
+        matches!(r.test.view(), View::Running(_))
+    });
+    r.test.stop();
+    r.run_until("the run ends", 60.0, |r| r.done().is_some());
+    let d = r.done().unwrap();
+    assert_eq!(d.ended, End::Stopped);
+    assert_eq!(d.headline, "You stopped it during the Cue list part.");
+    assert!(d.parts[0].done.is_some());
+    assert!(d.parts[1].done.is_none());
+    assert_eq!(
+        d.parts[1].why_not.as_deref(),
+        Some("Not run: you stopped the test before it.")
+    );
+    gathered(d);
+    r.assert_restored();
+}
+
+#[test]
+fn a_part_that_cannot_start_ends_the_run_with_the_show_back_and_says_which() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "combinedfail");
+    r.start_combined(&ff);
+    // Both computers go while the cue list part ends: the network part
+    // finds none to test with.
+    r.run_until("the cue list part ends", 120.0, |r| {
+        matches!(r.test.view(), View::Closing)
+    });
+    for c in &mut r.comps {
+        c.connected = false;
+    }
+    r.run_until("the run ends", 60.0, |r| r.done().is_some());
+    let d = r.done().unwrap();
+    assert_eq!(d.verdict, Verdict::ProblemsFound, "{}", d.report);
+    assert!(
+        d.headline.starts_with("The Network part did not start: "),
+        "{}",
+        d.headline
+    );
+    assert!(d.parts[1].done.is_none());
+    gathered(d);
+    assert_eq!(serde_json::to_string(&r.show).unwrap(), r.user);
+    assert!(!r.st.test_locked && !r.st.holds_test());
 }
 
 #[test]

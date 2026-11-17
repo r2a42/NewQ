@@ -20,26 +20,31 @@ fn megabytes(b: u64) -> String {
 
 /// Draw the window if it is open (called every frame).
 pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
+    let opened = egui::Id::new("test_window_opened");
     if !st.test.open {
+        ctx.data_mut(|d| d.remove::<bool>(opened));
         return;
     }
     let mut open = true;
     let mut test = std::mem::take(&mut st.test);
-    let refusal = st.test_refusal();
-    let decode_refusal = st.decode_refusal();
-    let live = live_lines(&test, st);
-    let across = super::session::across(st);
-    let net = NetChoice {
-        refusal: super::network::refusal(st),
-        in_network: st.net.me.on,
-        computers: super::network::in_step(&st.net)
-            .iter()
-            .map(|p| p.name.clone())
-            .collect(),
+    let facts = Facts {
+        refusal: st.test_refusal(),
+        decode_refusal: st.decode_refusal(),
+        across: super::session::across(st),
+        net: net_facts(st),
     };
+    let live = live_lines(&test, st);
     let mut apply: Option<bool> = None;
     let screens = screens_of(st);
     let mut selected = st.prefs.test_displays.clone();
+    // Opened with none of the screens offered ticked: all of them are.
+    if !ctx.data(|d| d.get_temp::<bool>(opened)).unwrap_or(false) {
+        ctx.data_mut(|d| d.insert_temp(opened, true));
+        let offered: Vec<&Screen> = screens.iter().filter(|s| !s.is_main).collect();
+        if !test.busy() && !offered.iter().any(|s| selected.contains(&s.choice.key)) {
+            selected.extend(offered.iter().map(|s| s.choice.key.clone()));
+        }
+    }
     let mut sound = (st.prefs.test_sound.clone(), st.prefs.test_muted);
     test.heavy = st.prefs.test_heavy;
     let devices = st.audio_devices.clone();
@@ -59,11 +64,8 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
                         ui,
                         engine,
                         &mut test,
-                        refusal,
-                        decode_refusal,
+                        &facts,
                         &live,
-                        across,
-                        &net,
                         &mut apply,
                         &screens,
                         &mut selected,
@@ -253,16 +255,36 @@ fn live_section(ui: &mut egui::Ui, live: &[(String, bool)]) {
     }
 }
 
+/// What the window knows of this computer and its show network.
+struct Facts {
+    /// Why no test can start now (unsaved show, not in step, a follower).
+    refusal: Option<String>,
+    decode_refusal: Option<String>,
+    /// Tests started here play on every computer of the show network.
+    across: bool,
+    net: super::choice::NetFacts,
+}
+
+fn net_facts(st: &UiState) -> super::choice::NetFacts {
+    let v = &st.net;
+    super::choice::NetFacts {
+        primary: v.me.on && v.is_primary(),
+        computers: v
+            .peers
+            .iter()
+            .filter(|p| p.ours && p.connected)
+            .map(|p| (p.name.clone(), p.status.as_ref().is_some_and(|s| s.in_step)))
+            .collect(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn body(
     ui: &mut egui::Ui,
     engine: &Engine,
     test: &mut super::TestMode,
-    refusal: Option<String>,
-    decode_refusal: Option<String>,
+    facts: &Facts,
     live: &[(String, bool)],
-    across: bool,
-    net: &NetChoice,
     apply: &mut Option<bool>,
     screens: &[Screen],
     selected: &mut Vec<String>,
@@ -272,40 +294,27 @@ fn body(
     let log_dir = crate::crash::log_dir();
     let mut dismiss = false;
     let mut failed = None;
-    match test.view() {
-        View::Idle => {
-            // In a show network only the network test can run: it comes first.
-            if net.in_network {
-                network_section(ui, engine, test, net, &log_dir, chosen(screens, selected));
-                ui.separator();
-            }
-            if across && refusal.is_none() {
-                net_label(
-                    ui,
-                    RichText::new(format!(
-                        "Every test plays on every computer of the show network ({}), and each measures itself.",
-                        net.computers.join(", ")
-                    ))
-                    .color(GREEN),
-                );
-            }
-            idle(
+    // A run of several parts: where it is, over whatever the part shows.
+    let unchanged = match test.sequence() {
+        Some((i, n, part)) if test.busy() => {
+            net_label(
                 ui,
-                engine,
-                test,
-                refusal.as_deref(),
-                decode_refusal.as_deref(),
-                &log_dir,
-                screens,
-                selected,
-                devices,
-                sound,
+                RichText::new(format!("Part {} of {n}: {}", i + 1, part.name()))
+                    .strong()
+                    .color(Color32::LIGHT_BLUE),
             );
-            if !net.in_network {
-                ui.separator();
-                network_section(ui, engine, test, net, &log_dir, chosen(screens, selected));
+            if i > 0 {
+                "Your show comes back when the test ends."
+            } else {
+                "Nothing about your show has changed."
             }
         }
+        _ => "Nothing about your show has changed.",
+    };
+    match test.view() {
+        View::Idle => idle(
+            ui, engine, test, facts, &log_dir, screens, selected, devices, sound,
+        ),
         View::NetPreparing(p) => {
             ui.label(RichText::new("Getting the network test ready").strong());
             ui.horizontal(|ui| {
@@ -315,11 +324,7 @@ fn body(
             if ui.button("Cancel").clicked() {
                 test.stop();
             }
-            ui.label(
-                RichText::new("Nothing about your show has changed.")
-                    .weak()
-                    .small(),
-            );
+            ui.label(RichText::new(unchanged).weak().small());
         }
         View::Network(r) => {
             if network_running(ui, r, live) {
@@ -424,11 +429,7 @@ fn body(
             if ui.button("Cancel").clicked() {
                 test.stop();
             }
-            ui.label(
-                RichText::new("Nothing about your show has changed.")
-                    .weak()
-                    .small(),
-            );
+            ui.label(RichText::new(unchanged).weak().small());
         }
         View::Comparing(c) => {
             comparing(ui, c);
@@ -460,11 +461,7 @@ fn body(
             if ui.button("Cancel").clicked() {
                 test.stop();
             }
-            ui.label(
-                RichText::new("Nothing about your show has changed.")
-                    .weak()
-                    .small(),
-            );
+            ui.label(RichText::new(unchanged).weak().small());
         }
         View::Checking(r) => {
             checking(ui, r);
@@ -488,7 +485,19 @@ fn body(
                 Verdict::PassedWithNotes => (AMBER, "Passed, with notes"),
                 Verdict::ProblemsFound => (RED, "Problems found"),
             };
-            if let Some(cmp) = &d.compare {
+            let combined = !d.parts.is_empty();
+            if combined {
+                // The whole run first, then a section per part.
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(word).size(22.0).strong().color(colour));
+                    ui.label(format!("{} parts, {}", d.parts.len(), clock(d.elapsed)));
+                });
+                net_label(ui, RichText::new(&d.headline).strong());
+                // (The window itself scrolls: no list in a list.)
+                for (i, p) in d.parts.iter().enumerate() {
+                    part_section(ui, i, p);
+                }
+            } else if let Some(cmp) = &d.compare {
                 use super::decode::Advice;
                 let (c, w) = match cmp.advice {
                     Advice::TurnOn => (GREEN, "Turn it on"),
@@ -546,15 +555,11 @@ fn body(
                     ui.label(RichText::new(word).size(22.0).strong().color(colour));
                     ui.label(format!(
                         "{}, {}",
-                        if n.soak {
-                            "Network soak"
-                        } else {
-                            "Network test"
-                        },
+                        super::network::title(n.laps),
                         clock(d.elapsed)
                     ));
                 });
-                network_results(ui, n);
+                computers_results(ui, &n.computers);
             } else if let Some(kinds) = &d.full {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(word).size(22.0).strong().color(colour));
@@ -577,41 +582,37 @@ fn body(
             if !d.computers.is_empty() {
                 computers_results(ui, &d.computers);
             }
-            ui.label(&d.headline);
-            if matches!(d.ended, End::Stopped) {
-                ui.label(RichText::new("You stopped it early.").weak());
+            // What no test across computers can see, said once.
+            let across = d.network.is_some()
+                || !d.computers.is_empty()
+                || d.parts
+                    .iter()
+                    .filter_map(|p| p.done.as_ref())
+                    .any(|p| p.network.is_some() || !p.computers.is_empty());
+            if across {
+                ui.label(RichText::new(super::net_judge::CANNOT_SEE).weak().small());
+            }
+            if !combined {
+                ui.label(&d.headline);
+                if matches!(d.ended, End::Stopped) {
+                    ui.label(RichText::new("You stopped it early.").weak());
+                }
             }
             ui.colored_label(
                 GREEN,
-                if d.network.is_some() || !d.computers.is_empty() {
+                if across {
                     "Your show is back exactly as it was, here and (through the show network) on every computer. Nothing was saved or changed."
                 } else {
                     "Your show is back exactly as it was. Nothing was saved or changed."
                 },
             );
             ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    if d.findings.is_empty() {
-                        ui.label("Nothing to report.");
-                    }
-                    if let Some(t) = d.steady {
-                        ui.colored_label(GREEN, t);
-                    }
-                    for f in &d.findings {
-                        let (c, t) = match f.severity {
-                            Severity::Problem => (RED, "Problem"),
-                            Severity::Note => (Color32::GRAY, "Note"),
-                            Severity::Watch => (Color32::LIGHT_BLUE, "Tracked"),
-                        };
-                        ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(c, t);
-                            ui.label(&f.text);
-                        });
-                    }
-                });
-            ui.separator();
+            if !combined {
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| findings_list(ui, &d.findings, d.steady));
+                ui.separator();
+            }
             // The one file to send: everything above and NewQ's own log.
             match d.bundle.get() {
                 None => {
@@ -690,73 +691,230 @@ fn body(
     }
 }
 
+/// The window before a test: a length, what to test, the screens, the
+/// sound, Start, and the rarely needed things under More.
 #[allow(clippy::too_many_arguments)]
 fn idle(
     ui: &mut egui::Ui,
     engine: &Engine,
     test: &mut super::TestMode,
-    refusal: Option<&str>,
-    decode_refusal: Option<&str>,
+    facts: &Facts,
     log_dir: &std::path::Path,
     screens: &[Screen],
     selected: &mut Vec<String>,
     devices: &[String],
     sound: &mut (Option<String>, bool),
 ) {
-    ui.label("Plays a show of its own to see how this computer copes, then puts yours back exactly as it was.");
-    ui.add_space(6.0);
-    ui.label(RichText::new("Choose a test").strong());
-    choose(ui, test);
-    let can = refusal.is_none() && engine.ff.is_some();
-    if test.debug {
-        ui.label(
-            RichText::new(
-                "About two minutes. Plays every kind of cue once (video, pictures, sound, text, shapes, camera, slides, groups, fades, control, stop, wait, send, timecode, effects, a recording) and checks that each did what it should. Use this one when something seems wrong: send the zip it makes. Nothing leaves this computer.",
-            )
-            .weak(),
-        );
-        ui.add_space(4.0);
-        ui.checkbox(
-            &mut test.download,
-            "Use a real film and pictures (free to use)",
-        );
-        let ids: Vec<&str> = std::iter::once(super::feature::SOURCE_FILM)
-            .chain(super::feature::SOURCE_STILLS)
+    use super::choice;
+    let net_why = choice::network_reason(&facts.net);
+    let net_ok = net_why.is_none();
+    ui.label("Plays a show of its own, then puts yours back exactly as it was.");
+    ui.add_space(4.0);
+
+    // 1. How long.
+    let plan = choice::plan(test.level, test.parts, net_ok);
+    egui::Grid::new("test-choices")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("Length").strong());
+            let r = egui::ComboBox::from_id_salt("test-length")
+                .selected_text(choice::level_item(test.level, test.parts, net_ok))
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for level in Level::ALL {
+                        let r = ui.selectable_label(
+                            test.level == level,
+                            choice::level_item(level, test.parts, net_ok),
+                        );
+                        #[cfg(test)]
+                        note_choice(ui, format!("level:{}", level.label()), &r);
+                        if r.clicked() {
+                            test.set_level(level);
+                        }
+                    }
+                });
+            #[cfg(test)]
+            note_choice(ui, "Length".into(), &r.response);
+            let _ = r;
+            ui.end_row();
+
+            // 2. What to test.
+            ui.label(RichText::new("Test").strong());
+            ui.horizontal(|ui| {
+                let a = ui.checkbox(&mut test.parts.cue_list, "Cue list");
+                let b = ui.checkbox(&mut test.parts.timeline, "Timeline");
+                let c = ui
+                    .add_enabled_ui(net_ok, |ui| {
+                        ui.checkbox(&mut test.parts.network, "Network")
+                    })
+                    .inner;
+                let c = match &net_why {
+                    Some(why) => c.on_disabled_hover_text(why.as_str()),
+                    None => c.on_hover_text(
+                        "How closely every computer keeps in time with this one, with a Sync flash to film.",
+                    ),
+                };
+                #[cfg(test)]
+                {
+                    note_choice(ui, "Cue list".into(), &a);
+                    note_choice(ui, "Timeline".into(), &b);
+                    note_choice(ui, "Network".into(), &c);
+                }
+                let _ = (a, b, c);
+            });
+            ui.end_row();
+        });
+    // Why Network can't be ticked (under the ticks), then one line: what the
+    // run is, and how long.
+    if let Some(why) = &net_why {
+        net_label(ui, RichText::new(format!("Network: {why}")).weak().small());
+    } else if facts.across {
+        let names: Vec<&str> = facts
+            .net
+            .computers
+            .iter()
+            .map(|(n, _)| n.as_str())
             .collect();
-        let wanted: Vec<_> = ids.iter().filter_map(|id| assets::find(id)).collect();
-        let need = assets::download_size(&assets::cache_dir(log_dir), &wanted);
-        ui.label(
-            RichText::new(match (test.download, need) {
-                (true, 0) => "Everything is already on this computer.".to_string(),
-                (true, n) => format!(
-                    "About {} will be downloaded once (the Sintel trailer and three NASA pictures) and kept for the other tests.",
-                    megabytes(n)
-                ),
-                (false, _) => "Plain test pictures and tones will be made on this computer, unless the film and pictures are here already.".to_string(),
-            })
+        net_label(
+            ui,
+            RichText::new(format!(
+                "The cue list and timeline play on {} too, and each measures itself.",
+                choice::and_list(&names)
+            ))
             .weak()
             .small(),
         );
-        ui.separator();
-        displays_section(ui, screens, selected);
-        ui.separator();
-        sound_section(ui, devices, sound);
-        ui.separator();
-        if let Some(why) = refusal {
-            ui.colored_label(AMBER, why);
-        }
-        if engine.ff.is_none() {
-            ui.colored_label(
-                RED,
-                "FFmpeg wasn't found, so there is nothing to play with. See Settings.",
-            );
-        }
-        if ui
-            .add_enabled(
-                can,
-                egui::Button::new(RichText::new("Start the debug test").strong()),
+    }
+    let summary = choice::summary(&plan);
+    if !summary.is_empty() {
+        net_label(ui, RichText::new(summary).weak());
+        ui.collapsing("What does this do?", |ui| {
+            for p in &plan {
+                ui.label(RichText::new(choice::what_it_does(p)).weak().small());
+            }
+            if plan.iter().any(|p| p.part == choice::Part::Timeline) {
+                ui.label(
+                    RichText::new(
+                        "Your hands aren't needed: where the timeline waits for GO, the test presses it.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
+        });
+    }
+    ui.add_space(4.0);
+
+    // 3. Where it shows.
+    let offered = screens.iter().filter(|s| !s.is_main).count();
+    let ticked = chosen(screens, selected).len();
+    displays_section(ui, screens, selected);
+    ui.add_space(4.0);
+
+    // 4. Sound.
+    sound_section(ui, devices, sound);
+    ui.add_space(6.0);
+
+    // 5. Start.
+    let why = choice::start_refusal(&plan, offered, ticked)
+        .map(str::to_string)
+        .or_else(|| facts.refusal.clone())
+        .or_else(|| {
+            engine.ff.is_none().then(|| {
+                "FFmpeg wasn't found, so there is nothing to play with. See Settings.".into()
+            })
+        });
+    if let Some(why) = &why {
+        net_label(ui, RichText::new(why.as_str()).color(AMBER));
+    }
+    let start = ui.add_enabled(
+        why.is_none(),
+        egui::Button::new(RichText::new("Start").strong()).min_size(egui::vec2(120.0, 28.0)),
+    );
+    #[cfg(test)]
+    note_choice(ui, "Start".into(), &start);
+    if start.clicked()
+        && let Some(ff) = engine.ff.clone()
+    {
+        test.start_plan(
+            ff,
+            log_dir,
+            plan,
+            chosen(screens, selected),
+            sound_of(devices, sound),
+        );
+    }
+    ui.add_space(4.0);
+
+    // 6. More: what is rarely needed.
+    let more = egui::CollapsingHeader::new("More")
+        .id_salt("test-more")
+        .default_open(false)
+        .show(ui, |ui| {
+            more(
+                ui, engine, test, facts, log_dir, screens, selected, devices, sound,
             )
-            .clicked()
+        });
+    #[cfg(test)]
+    note_choice(ui, "More".into(), &more.header_response);
+    let _ = more;
+}
+
+/// Under More: the downloads, the heavier lap, the check of every feature,
+/// the decoding comparison and where the files go.
+#[allow(clippy::too_many_arguments)]
+fn more(
+    ui: &mut egui::Ui,
+    engine: &Engine,
+    test: &mut super::TestMode,
+    facts: &Facts,
+    log_dir: &std::path::Path,
+    screens: &[Screen],
+    selected: &[String],
+    devices: &[String],
+    sound: &(Option<String>, bool),
+) {
+    let dir = assets::cache_dir(log_dir);
+    let mut wanted = assets::wanted_for(test.level, Flavour::Cues);
+    for a in assets::wanted_for(test.level, Flavour::Timeline) {
+        if !wanted.iter().any(|w| w.id == a.id) {
+            wanted.push(a);
+        }
+    }
+    let need = assets::download_size(&dir, &wanted);
+    ui.checkbox(
+        &mut test.download,
+        "Download real films and pictures (free to use)",
+    );
+    ui.label(
+        RichText::new(match (test.download, need) {
+            (true, 0) => "They are already on this computer.".to_string(),
+            (true, n) => format!("About {} once, kept for next time.", megabytes(n)),
+            (false, _) => "Plain pictures and tones are made on this computer instead.".into(),
+        })
+        .weak()
+        .small(),
+    );
+    ui.collapsing("Where from?", |ui| {
+        ui.label(
+            RichText::new(format!(
+                "test-videos.co.uk, download.blender.org and images-assets.nasa.gov (Blender films under CC-BY, NASA pictures in the public domain). Kept in {}.",
+                dir.display()
+            ))
+            .weak()
+            .small(),
+        );
+    });
+    ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
+        .on_hover_text("The cue list part blends three more whole-screen films with effects over the others: late frames then show where this computer's limit is.");
+    ui.separator();
+    let can = facts.refusal.is_none() && engine.ff.is_some();
+    ui.horizontal(|ui| {
+        let r = ui.add_enabled(can, egui::Button::new("Check every feature"));
+        #[cfg(test)]
+        note_choice(ui, "Check every feature".into(), &r);
+        if r.clicked()
             && let Some(ff) = engine.ff.clone()
         {
             test.start_full(
@@ -766,198 +924,45 @@ fn idle(
                 sound_of(devices, sound),
             );
         }
-    } else {
-        level_section(
-            ui, engine, test, refusal, log_dir, screens, selected, devices, sound,
+        ui.label(
+            RichText::new("About 2 minutes: every kind of cue, each checked.")
+                .weak()
+                .small(),
+        );
+    });
+    let can_decode = facts.decode_refusal.is_none() && engine.ff.is_some();
+    ui.horizontal(|ui| {
+        let r = ui
+            .add_enabled(can_decode, egui::Button::new("Compare hardware decoding"))
+            .on_disabled_hover_text(facts.decode_refusal.clone().unwrap_or_default());
+        #[cfg(test)]
+        note_choice(ui, "Compare hardware decoding".into(), &r);
+        if r.clicked()
+            && let Some(ff) = engine.ff.clone()
+        {
+            test.start_compare(ff, log_dir, chosen(screens, selected));
+        }
+        ui.label(
+            RichText::new("About 2 minutes: says whether to turn it on.")
+                .weak()
+                .small(),
+        );
+    });
+    if facts.refusal.is_none() && facts.decode_refusal.is_some() {
+        ui.label(
+            RichText::new("The comparison runs on a computer alone, with the show network off.")
+                .weak()
+                .small(),
         );
     }
-    ui.add_space(6.0);
-    ui.separator();
-    ui.label(RichText::new("Does hardware decoding help here?").strong());
     ui.label(
-        RichText::new(
-            "Plays a wall of 4K clips twice, with it off and on, about two minutes, and says which to use. It makes a 4K clip from the downloaded film (or, if this computer can't, plays the 1080p film several times).",
-        )
+        RichText::new(format!(
+            "Each test leaves one zip in {}",
+            log_dir.join("test-mode").join("runs").display()
+        ))
         .weak()
         .small(),
     );
-    if let Some(why) = decode_refusal.filter(|_| refusal.is_none()) {
-        ui.label(RichText::new(why).weak().small());
-    }
-    let can_decode = decode_refusal.is_none() && engine.ff.is_some();
-    if ui
-        .add_enabled(can_decode, egui::Button::new("Compare hardware decoding"))
-        .clicked()
-        && let Some(ff) = engine.ff.clone()
-    {
-        test.start_compare(ff, log_dir, chosen(screens, selected));
-    }
-    ui.label(
-        RichText::new("Sound and pictures go to your show's outputs while it runs. Log files: ")
-            .weak()
-            .small(),
-    );
-    ui.label(
-        RichText::new(log_dir.join("test-mode").join("runs").display().to_string())
-            .weak()
-            .small(),
-    );
-}
-
-/// The Short, Medium and Long tests' choices and their Start button.
-#[allow(clippy::too_many_arguments)]
-fn level_section(
-    ui: &mut egui::Ui,
-    engine: &Engine,
-    test: &mut super::TestMode,
-    refusal: Option<&str>,
-    log_dir: &std::path::Path,
-    screens: &[Screen],
-    selected: &mut Vec<String>,
-    devices: &[String],
-    sound: &mut (Option<String>, bool),
-) {
-    ui.label(RichText::new(test.flavour.summary(test.level)).weak());
-    let lengths = test.level.lengths();
-    if !lengths.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label("Run for");
-            egui::ComboBox::from_id_salt("test-minutes")
-                .selected_text(minutes_text(test.minutes))
-                .show_ui(ui, |ui| {
-                    for &m in lengths {
-                        ui.selectable_value(&mut test.minutes, m, minutes_text(m));
-                    }
-                });
-        });
-    }
-    let wanted = assets::wanted_for(test.level, test.flavour);
-    let dir = assets::cache_dir(log_dir);
-    let need = assets::download_size(&dir, &wanted);
-    ui.add_space(4.0);
-    ui.checkbox(
-        &mut test.download,
-        "Download real films and pictures (free to use)",
-    );
-    if test.download {
-        if need == 0 {
-            ui.label(
-                RichText::new("Everything is already on this computer.")
-                    .weak()
-                    .small(),
-            );
-        } else {
-            ui.label(
-                RichText::new(format!(
-                    "About {} will be downloaded once, from test-videos.co.uk, download.blender.org and images-assets.nasa.gov (Blender films under CC-BY, NASA pictures in the public domain). It is kept in {}.",
-                    megabytes(need),
-                    dir.display()
-                ))
-                .weak()
-                .small(),
-            );
-        }
-    } else {
-        ui.label(
-            RichText::new("Plain test pictures and tones will be made on this computer.")
-                .weak()
-                .small(),
-        );
-    }
-    ui.separator();
-    displays_section(ui, screens, selected);
-    ui.separator();
-    sound_section(ui, devices, sound);
-    ui.separator();
-    if test.flavour == Flavour::Cues {
-        ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
-            .on_hover_text("Adds three whole-screen layers blended one over another, each with effects, to every lap.");
-    } else {
-        ui.label(
-            RichText::new(format!(
-                "Where a pause waits for GO, the test presses it after {:.0} s; it leaves a loop after {} passes. Your hands aren't needed.",
-                super::plan::TIMELINE_HOLD,
-                super::plan::TIMELINE_LOOP_PASSES
-            ))
-            .weak()
-            .small(),
-        );
-    }
-    if test.heavy && test.flavour == Flavour::Cues {
-        ui.label(
-            RichText::new("Three more full-screen films are blended over the others, with effects, and the lap is no longer. Late frames then show where this computer's limit is; they are reported as a note, not a fault. Same downloads.")
-                .weak()
-                .small(),
-        );
-    }
-    ui.separator();
-    if let Some(why) = refusal {
-        ui.colored_label(AMBER, why);
-    }
-    if engine.ff.is_none() {
-        ui.colored_label(
-            RED,
-            "FFmpeg wasn't found, so there is nothing to play with. See Settings.",
-        );
-    }
-    let can = refusal.is_none() && engine.ff.is_some();
-    if ui
-        .add_enabled(
-            can,
-            egui::Button::new(RichText::new("Start the test").strong()),
-        )
-        .clicked()
-        && let Some(ff) = engine.ff.clone()
-    {
-        test.start(
-            ff,
-            log_dir,
-            chosen(screens, selected),
-            sound_of(devices, sound),
-            test.heavy,
-        );
-    }
-}
-
-fn minutes_text(m: u32) -> String {
-    if m >= 60 && m.is_multiple_of(60) {
-        format!("{} hour{}", m / 60, if m == 60 { "" } else { "s" })
-    } else {
-        format!("{m} minutes")
-    }
-}
-
-fn choose(ui: &mut egui::Ui, test: &mut super::TestMode) {
-    for flavour in Flavour::ALL {
-        ui.horizontal(|ui| {
-            for level in Level::ALL {
-                let selected = !test.debug && test.level == level && test.flavour == flavour;
-                let r = ui.selectable_label(selected, flavour.name(level));
-                #[cfg(test)]
-                note_choice(ui, flavour.name(level), &r);
-                if r.clicked() {
-                    test.choose(level, flavour);
-                }
-            }
-            if flavour == Flavour::Cues {
-                ui.separator();
-                let r = ui.selectable_label(test.debug, "Debug test");
-                #[cfg(test)]
-                note_choice(ui, "Debug test".into(), &r);
-                if r.clicked() {
-                    test.debug = true;
-                }
-            }
-        });
-    }
-}
-
-/// What the window knows of the show network, for the network test.
-pub struct NetChoice {
-    pub refusal: Option<String>,
-    pub in_network: bool,
-    /// The computers in step, by name.
-    pub computers: Vec<String>,
 }
 
 /// For the tests: the network test's words and buttons as drawn.
@@ -978,84 +983,11 @@ fn net_label(ui: &mut egui::Ui, text: impl Into<RichText>) {
     note_net(ui, &s, _r.rect);
 }
 
-/// The network test's choice: why it can't run here, or its two Start buttons.
-fn network_section(
-    ui: &mut egui::Ui,
-    engine: &Engine,
-    test: &mut super::TestMode,
-    net: &NetChoice,
-    log_dir: &std::path::Path,
-    displays: Vec<DisplayChoice>,
-) {
-    net_label(
-        ui,
-        RichText::new("Several computers: the network test").strong(),
-    );
-    net_label(
-        ui,
-        RichText::new(
-            "Plays a short show of its own on every display of every computer of the show network and measures how closely each computer keeps to this one: the clock, each GO's arrival, the pictures' timing, corrections and stalls. The test's media is sent to every computer first. It includes a Sync flash you can film with a phone in slow motion across two projectors. Your show is put back on every computer at the end.",
-        )
-        .weak()
-        .small(),
-    );
-    if let Some(why) = &net.refusal {
-        ui.colored_label(AMBER, why.as_str());
-        #[cfg(test)]
-        note_net(ui, why, egui::Rect::NOTHING);
-    } else {
-        net_label(
-            ui,
-            format!("With {} (in step now).", net.computers.join(", ")),
-        );
-    }
-    let can = net.refusal.is_none() && engine.ff.is_some();
-    ui.horizontal(|ui| {
-        let a = ui.add_enabled(
-            can,
-            egui::Button::new(RichText::new("Start the network test").strong()),
-        );
-        let b = ui.add_enabled(can, egui::Button::new("Network soak"));
-        #[cfg(test)]
-        {
-            note_net(ui, "Start the network test", a.rect);
-            note_net(ui, "Network soak", b.rect);
-        }
-        let soak = if a.clicked() {
-            Some(false)
-        } else if b.clicked() {
-            Some(true)
-        } else {
-            None
-        };
-        if let (Some(soak), Some(ff)) = (soak, engine.ff.clone()) {
-            test.network = true;
-            test.soak = soak;
-            test.start_network(ff, log_dir, soak, displays.clone());
-        }
-    });
-    net_label(
-        ui,
-        RichText::new(format!(
-            "The test: about {} minutes. The soak: the same, {} times over, about {} minutes. Send the zip it makes.",
-            (super::network::LAP_SECS / 60.0).round(),
-            super::network::SOAK_LAPS,
-            (super::network::LAP_SECS * f64::from(super::network::SOAK_LAPS) / 60.0).round()
-        ))
-        .weak()
-        .small(),
-    );
-}
-
 /// The network test under way. True when the user asked to stop it.
 fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun, live: &[(String, bool)]) -> bool {
     use super::network::Stage;
     let now = crate::net::time::local_now();
-    let title = if r.soak {
-        "Network soak"
-    } else {
-        "Network test"
-    };
+    let title = super::network::title(r.laps);
     match r.stage {
         Stage::WaitingForMedia => {
             net_label(
@@ -1132,19 +1064,79 @@ fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun, live: &[(Strin
     b.clicked()
 }
 
-/// The network test's results: a line per computer.
-fn network_results(ui: &mut egui::Ui, n: &super::network::NetDone) {
-    computers_results(ui, &n.computers);
+/// What a test found, a line each (and the steady line, if any).
+fn findings_list(ui: &mut egui::Ui, findings: &[super::analysis::Finding], steady: Option<&str>) {
+    if findings.is_empty() {
+        ui.label("Nothing to report.");
+    }
+    if let Some(t) = steady {
+        ui.colored_label(GREEN, t);
+    }
+    for f in findings {
+        let (c, t) = match f.severity {
+            Severity::Problem => (RED, "Problem"),
+            Severity::Note => (Color32::GRAY, "Note"),
+            Severity::Watch => (Color32::LIGHT_BLUE, "Tracked"),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(c, t);
+            ui.label(&f.text);
+        });
+    }
 }
 
-/// A part per computer: its verdict, its headline and its numbers.
+fn verdict_colour(v: Verdict) -> Color32 {
+    match v {
+        Verdict::Passed => GREEN,
+        Verdict::PassedWithNotes => AMBER,
+        Verdict::ProblemsFound => RED,
+    }
+}
+
+/// One part of a run of several: its title and verdict, its headline, each
+/// computer's line (details folded), and what it found (folded).
+fn part_section(ui: &mut egui::Ui, i: usize, p: &super::sequence::PartDone) {
+    use super::sequence::{part_title, part_word};
+    let colour = p
+        .done
+        .as_ref()
+        .map_or(Color32::GRAY, |d| verdict_colour(d.verdict));
+    let title = part_title(&p.part);
+    let word = part_word(p);
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&title).strong());
+        ui.colored_label(colour, &word);
+    });
+    #[cfg(test)]
+    note_net(ui, &format!("part:{title}: {word}"), egui::Rect::NOTHING);
+    let Some(d) = &p.done else {
+        return;
+    };
+    ui.indent(("test-part", i), |ui| {
+        ui.label(&d.headline);
+        if let Some(n) = &d.network {
+            computers_results(ui, &n.computers);
+        } else if !d.computers.is_empty() {
+            computers_results(ui, &d.computers);
+        }
+        let shown = d.findings.len();
+        egui::CollapsingHeader::new(if shown == 0 {
+            "Nothing else to report".to_string()
+        } else {
+            format!("What it found ({shown})")
+        })
+        .id_salt(("test-part-findings", i))
+        .default_open(false)
+        .show(ui, |ui| findings_list(ui, &d.findings, d.steady));
+    });
+}
+
+/// A line per computer: its verdict and headline, its numbers folded under it.
 fn computers_results(ui: &mut egui::Ui, computers: &[super::net_judge::ComputerVerdict]) {
     for c in computers {
-        let colour = match c.verdict {
-            Verdict::Passed => GREEN,
-            Verdict::PassedWithNotes => AMBER,
-            Verdict::ProblemsFound => RED,
-        };
+        let colour = verdict_colour(c.verdict);
+        // The headline wraps; the figures are folded under it.
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&c.name).strong());
             ui.colored_label(colour, &c.headline);
@@ -1155,13 +1147,20 @@ fn computers_results(ui: &mut egui::Ui, computers: &[super::net_judge::ComputerV
             &format!("{}: {}", c.name, c.headline),
             egui::Rect::NOTHING,
         );
-        ui.indent(("net-lines", &c.name), |ui| {
-            for l in &c.lines {
-                ui.label(RichText::new(l).weak().small());
-            }
+        if c.lines.is_empty() {
+            continue;
+        }
+        ui.indent(("net-lines-in", &c.name), |ui| {
+            egui::CollapsingHeader::new(RichText::new("Its figures").small())
+                .id_salt(("net-lines", &c.name, ui.id()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for l in &c.lines {
+                        ui.label(RichText::new(l).weak().small());
+                    }
+                });
         });
     }
-    ui.label(RichText::new(super::net_judge::CANNOT_SEE).weak().small());
 }
 
 /// For the tests: where each choice of test is, and whether it is the one chosen.
@@ -1427,6 +1426,10 @@ fn comparing(ui: &mut egui::Ui, c: &super::decode::Compare) {
 /// A connected monitor, as the Test Mode window offers it.
 pub struct Screen {
     pub choice: DisplayChoice,
+    /// Its tick's words: "Left · screen 1 · 1920×1080".
+    pub short: String,
+    /// The computer it is on, by name ("This computer" alone).
+    pub computer: String,
     /// The main window is on it: a test can't be shown there (outputs never
     /// cover the main window's display), only in the main window's preview.
     pub is_main: bool,
@@ -1466,6 +1469,8 @@ fn screens_of(st: &UiState) -> Vec<Screen> {
                         ),
                         computer: Some(p.id),
                     },
+                    short: format!("{} · screen {} · {}×{}", p.name, i + 1, m.size.0, m.size.1),
+                    computer: p.name.clone(),
                     is_main: false,
                 });
             }
@@ -1476,8 +1481,28 @@ fn screens_of(st: &UiState) -> Vec<Screen> {
 
 fn local_screens(st: &UiState) -> Vec<Screen> {
     let keys = crate::ui::monitor_keys(&st.monitors);
+    let name = if st.net.me.on && !st.net.name.is_empty() {
+        st.net.name.clone()
+    } else {
+        "This computer".to_string()
+    };
     (0..keys.len())
         .map(|i| Screen {
+            short: {
+                let m = &st.monitors[i];
+                if st.net.me.on {
+                    format!("{name} · screen {} · {}×{}", i + 1, m.size.0, m.size.1)
+                } else {
+                    format!(
+                        "Screen {} · {} · {}×{}",
+                        i + 1,
+                        m.title(),
+                        m.size.0,
+                        m.size.1
+                    )
+                }
+            },
+            computer: name.clone(),
             choice: DisplayChoice {
                 computer: None,
                 key: keys[i]
@@ -1510,132 +1535,98 @@ fn sound_of(devices: &[String], sound: &(Option<String>, bool)) -> SoundChoice {
     }
 }
 
+/// The sound, on one line: the device and a Muted tick.
 fn sound_section(ui: &mut egui::Ui, devices: &[String], sound: &mut (Option<String>, bool)) {
-    ui.label(RichText::new("Sound").strong());
+    const SHOWS: &str = "Your show's audio outputs";
     let shown = match &sound.0 {
         Some(d) if devices.iter().any(|x| x == d) => d.clone(),
-        Some(d) => format!("{d} (not connected: the default is used)"),
-        None => "Your show's audio outputs (the default device if it has none)".to_string(),
+        Some(d) => format!("{d} (not connected: the default)"),
+        None => SHOWS.to_string(),
     };
     ui.horizontal(|ui| {
-        ui.label("Play on");
+        ui.label(RichText::new("Sound").strong());
         egui::ComboBox::from_id_salt("test-sound")
             .selected_text(shown)
-            .width(320.0)
+            .width(260.0)
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut sound.0,
-                    None,
-                    "Your show's audio outputs (the default device if it has none)",
-                );
+                ui.selectable_value(&mut sound.0, None, SHOWS);
                 for d in devices {
                     ui.selectable_value(&mut sound.0, Some(d.clone()), d);
                 }
             });
+        ui.checkbox(&mut sound.1, "Muted").on_hover_text(
+            "Nothing is heard, but the sound is still decoded and mixed, so the test costs what it would with sound.",
+        );
     });
-    ui.checkbox(&mut sound.1, "Run muted");
-    ui.label(
-        RichText::new(if sound.1 {
-            "Nothing is heard, but the sound is still decoded, mixed and put through its effects, so the test costs what it would with sound. Meters stay flat."
-        } else {
-            "The test's sound plays on the device above, in place of your show's own audio outputs while it runs; your show is not changed. In the cue tests the 5.1 trailer is mixed down to a stereo pair."
-        })
-        .weak()
-        .small(),
-    );
 }
 
-/// A tick per monitor; with other computers, grouped by computer with
-/// All and None for each.
+/// How many rows of screens show before the list scrolls in its own space.
+const SCREEN_ROWS: usize = 8;
+
+/// A tick per screen, one row each; with other computers, grouped under each
+/// computer's name (this one first), with All and None where a computer has
+/// more than one.
 fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {
-    ui.label(RichText::new("Show the test on").strong());
-    let remote = screens.iter().any(|s| s.choice.computer.is_some());
-    if remote {
-        return network_displays(ui, screens, selected);
-    }
-    let others: Vec<&Screen> = screens.iter().filter(|s| !s.is_main).collect();
-    if others.is_empty() {
-        ui.label(
-            RichText::new(if screens.len() <= 1 {
-                "Only one display is connected, and the main window is on it: the test shows in the main window's Preview pane."
-            } else {
-                "No other display is connected: the test shows in the main window's Preview pane."
-            })
-            .weak()
-            .small(),
-        );
-        return;
-    }
-    for s in &others {
-        let mut on = selected.contains(&s.choice.key);
-        if ui.checkbox(&mut on, &s.choice.label).changed() {
-            selected.retain(|k| k != &s.choice.key);
-            if on {
-                selected.push(s.choice.key.clone());
-            }
-        }
-    }
-    if let Some(m) = screens.iter().find(|s| s.is_main) {
-        ui.label(
-            RichText::new(format!("{} (the main window is here)", m.choice.label))
+    ui.label(RichText::new("Show on").strong());
+    let offered: Vec<&Screen> = screens.iter().filter(|s| !s.is_main).collect();
+    if offered.is_empty() {
+        net_label(
+            ui,
+            RichText::new("Only the main window's screen: the test shows in its Preview pane.")
                 .weak()
                 .small(),
         );
+        return;
     }
-    ui.label(
-        RichText::new(
-            "None ticked: the displays your show has, as they are (the main window's Preview pane if it has none). Ticked: these displays, all showing the same picture, in place of your show's own while the test runs; your show is not changed.",
-        )
-        .weak()
-        .small(),
-    );
-}
-
-/// Every computer's monitors, a group each: this one's (not the main window's),
-/// then the others', by name.
-fn network_displays(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {
     let mut groups: Vec<(Option<crate::show::NodeId>, Vec<&Screen>)> = Vec::new();
-    for s in screens.iter().filter(|s| !s.is_main) {
+    for s in &offered {
         match groups.iter_mut().find(|(c, _)| *c == s.choice.computer) {
             Some((_, v)) => v.push(s),
             None => groups.push((s.choice.computer, vec![s])),
         }
     }
-    for (computer, list) in &groups {
-        let title = match computer {
-            None => "This computer".to_string(),
-            Some(_) => list[0]
-                .choice
-                .label
-                .split_once(' ')
-                .map_or(String::new(), |(n, _)| n.to_string()),
+    let titled = groups.len() > 1 || groups.iter().any(|(c, _)| c.is_some());
+    let rows = offered.len()
+        + if titled {
+            groups.iter().filter(|(_, l)| l.len() > 1).count()
+        } else {
+            0
         };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&title).strong().small());
-            let all = ui.small_button("All");
-            let none = ui.small_button("None");
-            #[cfg(test)]
-            {
-                note_choice(ui, format!("All:{title}"), &all);
-                note_choice(ui, format!("None:{title}"), &none);
-            }
-            if all.clicked() {
-                for s in list {
-                    if !selected.contains(&s.choice.key) {
-                        selected.push(s.choice.key.clone());
+    let mut draw = |ui: &mut egui::Ui| {
+        for (_, list) in &groups {
+            // (A computer with one screen needs no heading: its tick names it.)
+            if titled && list.len() > 1 {
+                let title = &list[0].computer;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).small().strong());
+                    if list.len() > 1 {
+                        let all = ui.small_button("All");
+                        let none = ui.small_button("None");
+                        #[cfg(test)]
+                        {
+                            note_choice(ui, format!("All:{title}"), &all);
+                            note_choice(ui, format!("None:{title}"), &none);
+                        }
+                        if all.clicked() {
+                            for s in list {
+                                if !selected.contains(&s.choice.key) {
+                                    selected.push(s.choice.key.clone());
+                                }
+                            }
+                        }
+                        if none.clicked() {
+                            selected.retain(|k| !list.iter().any(|s| &s.choice.key == k));
+                        }
                     }
-                }
+                });
             }
-            if none.clicked() {
-                selected.retain(|k| !list.iter().any(|s| &s.choice.key == k));
-            }
-        });
-        ui.indent(("test-screens", title.clone()), |ui| {
             for s in list {
                 let mut on = selected.contains(&s.choice.key);
-                let r = ui.checkbox(&mut on, &s.choice.label);
+                let r = ui
+                    .checkbox(&mut on, &s.short)
+                    .on_hover_text(&s.choice.label);
                 #[cfg(test)]
-                note_choice(ui, format!("screen:{}", s.choice.label), &r);
+                note_choice(ui, format!("screen:{}", s.short), &r);
                 if r.changed() {
                     selected.retain(|k| k != &s.choice.key);
                     if on {
@@ -1643,22 +1634,17 @@ fn network_displays(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<St
                     }
                 }
             }
-        });
+        }
+    };
+    if rows > SCREEN_ROWS {
+        egui::ScrollArea::vertical()
+            .id_salt("test-screens")
+            .max_height(SCREEN_ROWS as f32 * 22.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| draw(ui));
+    } else {
+        ui.indent("test-screens", |ui| draw(ui));
     }
-    if let Some(m) = screens.iter().find(|s| s.is_main) {
-        ui.label(
-            RichText::new(format!("{} (the main window is here)", m.choice.label))
-                .weak()
-                .small(),
-        );
-    }
-    ui.label(
-        RichText::new(
-            "Every ticked screen is tested at once and shows the same picture, each in its own window on its own computer. None ticked: your show's own displays. A display computer's screens that aren't ticked stay black. A backup's monitor with its main window on it shows nothing.",
-        )
-        .weak()
-        .small(),
-    );
 }
 
 /// The running count of the main loop's stalls and the sound's dropouts.
@@ -1722,21 +1708,26 @@ mod tests {
             frame(vec![button(true)], st);
             frame(vec![button(false)], st);
         };
-        click("Timeline medium", &mut st);
-        assert_eq!(
-            (st.test.level, st.test.flavour),
-            (Level::Medium, Flavour::Timeline)
-        );
+        use crate::testmode::choice::Parts;
+        click("Timeline", &mut st);
+        click("Length", &mut st);
+        click("level:Medium", &mut st);
+        let both = Parts {
+            cue_list: true,
+            timeline: true,
+            network: false,
+        };
+        assert_eq!((st.test.level, st.test.parts), (Level::Medium, both));
         let saved = crate::prefs::Prefs::load(&dir).test_pick;
         assert_eq!(saved, st.test.pick(), "saved at once");
-        assert_eq!(
-            (saved.level, saved.flavour, saved.debug),
-            (Level::Medium, Flavour::Timeline, false)
-        );
-        click("Debug test", &mut st);
-        assert!(crate::prefs::Prefs::load(&dir).test_pick.debug);
+        assert_eq!((saved.level, saved.parts), (Level::Medium, both));
+        // Alone, the Network tick can't be ticked.
+        click("Network", &mut st);
+        assert!(!st.test.parts.network);
         // Back to the first: the default, and not written.
-        click("Short", &mut st);
+        click("Timeline", &mut st);
+        click("Length", &mut st);
+        click("level:Short", &mut st);
         assert_eq!(
             crate::prefs::Prefs::load(&dir).test_pick,
             Default::default()
@@ -1777,6 +1768,8 @@ mod tests {
                 twins: 1,
                 label: key.into(),
             },
+            short: key.into(),
+            computer: "This computer".into(),
             is_main,
         }
     }

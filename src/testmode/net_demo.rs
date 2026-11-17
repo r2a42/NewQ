@@ -5,7 +5,9 @@
 //! and media store), its identity written beforehand: one primary and display
 //! computers already in its network, so nothing has to be clicked. The primary
 //! is told by `NEWQ_NET_TEST_AUTOSTART` to start the network test once that
-//! many computers are in step; the test then makes its zip as for anyone.
+//! many computers are in step (with `NEWQ_E2E_PARTS`, say `cue,network`, as
+//! `NEWQ_TEST_PARTS`: more than the network, one after another); the test then
+//! makes its zip as for anyone.
 //! Needs a display (Xvfb): each NewQ can have its own (`NEWQ_E2E_DISPLAYS`).
 
 use crate::net::node::{self, Identity, NetworkId, NodeId, Role};
@@ -241,7 +243,13 @@ mod tests {
             &show,
             &displays,
             port,
-            &[("NEWQ_NET_TEST_AUTOSTART", "2".into())],
+            &[
+                ("NEWQ_NET_TEST_AUTOSTART", "2".into()),
+                (
+                    "NEWQ_TEST_PARTS",
+                    std::env::var("NEWQ_E2E_PARTS").unwrap_or_else(|_| "network".into()),
+                ),
+            ],
         )
         .unwrap();
         let zip = demo
@@ -259,7 +267,12 @@ mod tests {
             "{csv}"
         );
         assert!(csv.lines().filter(|l| l.starts_with("Right,")).count() > 50);
-        assert!(read_from_zip(&zip, "computer-Left-newq.log").is_some());
+        // (Run with other parts, a name two parts wrote has the part's in front.)
+        assert!(
+            read_from_zip(&zip, "computer-Left-newq.log")
+                .or_else(|| read_from_zip(&zip, "network-computer-Left-newq.log"))
+                .is_some()
+        );
         assert!(read_from_zip(&zip, "events.log").is_some_and(|e| e.contains("All here")));
         println!("zip: {}", zip.display());
     }

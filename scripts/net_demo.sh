@@ -3,7 +3,8 @@
 # display computers ("Left", "Right", ...), each NewQ with folders of its own,
 # already joined to the primary's network, each on its own Xvfb screen (Linux).
 # With --test the primary runs the network test by itself once they are in
-# step (NEWQ_NET_TEST_AUTOSTART) and the script prints where the zip is.
+# step (NEWQ_NET_TEST_AUTOSTART) and the script prints where the zip is;
+# NEWQ_TEST_PARTS=cue,timeline,network ticks more than the network (Short).
 #
 #   scripts/net_demo.sh [--test] [displays] [path/to/newq]
 #

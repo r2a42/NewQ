@@ -67,23 +67,65 @@ pub struct Prefs {
     pub timeline_follow: TimelineFollow,
 }
 
-/// A test chosen in Test Mode's window: a level of a flavour, or the debug test.
+/// What Test Mode's window has chosen: a length and what to test.
+///
+/// In the file as `{"level": .., "parts": {..}}`. A file from before the
+/// ticks (0.24 and earlier) has a `flavour` and maybe `debug`: a cue test is
+/// the cue list ticked, a timeline test the timeline (the debug test is now
+/// under More and isn't remembered). For those versions the file also says
+/// `flavour` Timeline when only the timeline is ticked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "PickFile", into = "PickFile")]
 pub struct TestPick {
     pub level: crate::testmode::Level,
-    #[serde(default)]
-    pub flavour: crate::testmode::Flavour,
+    pub parts: crate::testmode::choice::Parts,
+}
+
+/// `TestPick` as the file has it, old and new.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct PickFile {
+    level: crate::testmode::Level,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flavour: Option<crate::testmode::Flavour>,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub debug: bool,
+    debug: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parts: Option<crate::testmode::choice::Parts>,
+}
+
+impl From<PickFile> for TestPick {
+    fn from(f: PickFile) -> TestPick {
+        use crate::testmode::Flavour;
+        let parts = f.parts.unwrap_or(crate::testmode::choice::Parts {
+            cue_list: f.flavour != Some(Flavour::Timeline),
+            timeline: f.flavour == Some(Flavour::Timeline),
+            network: false,
+        });
+        TestPick {
+            level: f.level,
+            parts,
+        }
+    }
+}
+
+impl From<TestPick> for PickFile {
+    fn from(p: TestPick) -> PickFile {
+        let only_timeline = p.parts.timeline && !p.parts.cue_list;
+        PickFile {
+            level: p.level,
+            flavour: only_timeline.then_some(crate::testmode::Flavour::Timeline),
+            debug: false,
+            parts: Some(p.parts),
+        }
+    }
 }
 
 impl Default for TestPick {
-    /// What the window starts with: the short cue test.
+    /// What the window starts with: the short cue list test.
     fn default() -> TestPick {
         TestPick {
             level: crate::testmode::Level::Short,
-            flavour: crate::testmode::Flavour::Cues,
-            debug: false,
+            parts: crate::testmode::choice::Parts::default(),
         }
     }
 }
@@ -185,8 +227,11 @@ mod tests {
             timeline_follow: TimelineFollow::Centre,
             test_pick: TestPick {
                 level: crate::testmode::Level::Medium,
-                flavour: crate::testmode::Flavour::Timeline,
-                debug: false,
+                parts: crate::testmode::choice::Parts {
+                    cue_list: false,
+                    timeline: true,
+                    network: false,
+                },
             },
         };
         p.save(&dir).unwrap();
@@ -232,21 +277,58 @@ mod tests {
         assert_eq!(Prefs::load(&dir).log_level, crate::logging::LogLevel::Trace);
         std::fs::write(dir.join(FILE), "{\"log_level\":\"chatty\"}").unwrap();
         assert_eq!(Prefs::load(&dir), Prefs::default());
-        // The test chosen in Test Mode: its words in the file, read back.
+        // The test chosen in Test Mode: its words in the file, read back, and
+        // what an older NewQ reads of them (only the timeline: its flavour).
+        let text = serde_json::to_string(&p).unwrap();
         assert!(
-            serde_json::to_string(&p)
-                .unwrap()
-                .contains("\"test_pick\":{\"level\":\"Medium\",\"flavour\":\"Timeline\"}")
+            text.contains("\"test_pick\":{\"level\":\"Medium\",\"flavour\":\"Timeline\",\"parts\":{\"cue_list\":false,\"timeline\":true,\"network\":false}}"),
+            "{text}"
         );
-        std::fs::write(
-            dir.join(FILE),
-            "{\"test_pick\":{\"level\":\"Long\",\"debug\":true}}",
-        )
-        .unwrap();
-        let pick = Prefs::load(&dir).test_pick;
-        assert_eq!(pick.level, crate::testmode::Level::Long);
-        assert_eq!(pick.flavour, crate::testmode::Flavour::Cues);
-        assert!(pick.debug);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_test_chosen_before_the_ticks_is_chosen_again_as_ticks() {
+        use crate::testmode::Level;
+        use crate::testmode::choice::Parts;
+        let dir = std::env::temp_dir().join(format!("newq_prefs_pick_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read = |json: &str| {
+            std::fs::write(dir.join(FILE), json).unwrap();
+            Prefs::load(&dir).test_pick
+        };
+        let ticks = |cue_list, timeline, network| Parts {
+            cue_list,
+            timeline,
+            network,
+        };
+        // 0.24's words: a level of a flavour, or the debug test.
+        let p = read("{\"test_pick\":{\"level\":\"Long\",\"debug\":true}}");
+        assert_eq!((p.level, p.parts), (Level::Long, ticks(true, false, false)));
+        let p = read("{\"test_pick\":{\"level\":\"Medium\",\"flavour\":\"Timeline\"}}");
+        assert_eq!(
+            (p.level, p.parts),
+            (Level::Medium, ticks(false, true, false))
+        );
+        let p = read("{\"test_pick\":{\"level\":\"Short\",\"flavour\":\"Cues\"}}");
+        assert_eq!(p, TestPick::default());
+        // Today's: the ticks win over a flavour written for older versions.
+        let p = read(
+            "{\"test_pick\":{\"level\":\"Short\",\"flavour\":\"Timeline\",\"parts\":{\"cue_list\":true,\"timeline\":true,\"network\":true}}}",
+        );
+        assert_eq!(p.parts, ticks(true, true, true));
+        // Round trip, and the default isn't written.
+        let mut prefs = Prefs::default();
+        prefs.test_pick.parts = ticks(true, false, true);
+        prefs.save(&dir).unwrap();
+        assert_eq!(Prefs::load(&dir).test_pick, prefs.test_pick);
+        let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(!text.contains("flavour"), "{text}");
+        assert!(
+            !serde_json::to_string(&Prefs::default())
+                .unwrap()
+                .contains("test_pick")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

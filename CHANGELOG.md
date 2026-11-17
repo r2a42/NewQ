@@ -6,6 +6,14 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Test mode is simpler.** One short window: a length (Short, Medium or Long, each saying how
+  long it takes), ticks for what to test (*Cue list*, *Timeline*, *Network*: any of them), a tick
+  per screen, the sound, and Start. Ticked together the parts run one after another as one test,
+  with one result (overall first, then a section per part), one report and one zip; your show
+  is put aside once and back once. *Network* is greyed, with the reason, until this computer runs
+  a show network with a computer in step; at Long it is the old network soak. The debug test
+  (*Check every feature*), the hardware decoding comparison and the download choice are under
+  *More*. Your last choice is remembered, including the test you chose before this version.
 - **Sound in a show network keeps to the shared clock.** A sound cue's time on every computer is
   now the shared clock's, like a picture's. A sound whose player or sound card started it late
   skips ahead to where it should be (once, as it starts), so two computers' sounds stay within a

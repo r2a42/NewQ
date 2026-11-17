@@ -925,13 +925,25 @@ impl App {
         if since.elapsed() < Duration::from_secs(8) {
             return;
         }
+        // `NEWQ_TEST_PARTS` (say `cue,network`) ticks more than the network.
+        let parts = crate::testmode::choice::parse_parts(
+            &std::env::var("NEWQ_TEST_PARTS").unwrap_or_default(),
+        );
+        if (parts.cue_list || parts.timeline) && self.ui.test_refusal().is_some() {
+            return;
+        }
         if let Some(ff) = self.engine.ff.clone() {
             self.play.autostarted = true;
-            log::info!("NEWQ_NET_TEST_AUTOSTART: the network test starts");
+            log::info!("NEWQ_NET_TEST_AUTOSTART: the test starts ({parts:?})");
             self.ui.test.download = false;
-            self.ui
-                .test
-                .start_network(ff, &crate::crash::log_dir(), false, Vec::new());
+            let plan = crate::testmode::choice::plan(crate::testmode::Level::Short, parts, true);
+            self.ui.test.start_plan(
+                ff,
+                &crate::crash::log_dir(),
+                plan,
+                Vec::new(),
+                Default::default(),
+            );
         }
     }
 
