@@ -18,6 +18,10 @@ on:
         description: "Existing tag to (re)build and publish, e.g. v0.1.0. Leave empty for a dry run."
         required: false
         default: ""
+      mac_unsigned:
+        description: "Build the Mac download without the Developer ID and notarisation (ad-hoc signed), e.g. while Apple's servers are down."
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -111,8 +115,12 @@ jobs:
         env:
           MAC_CERT: ${{ secrets.MACOS_CERT_P12 }}
           WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX }}
+          MAC_UNSIGNED: ${{ inputs.mac_unsigned }}
         run: |
-          echo "mac=$([ -n "$MAC_CERT" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          mac=no
+          if [ -n "$MAC_CERT" ] && [ "$MAC_UNSIGNED" != "true" ]; then mac=yes; fi
+          [ "$MAC_UNSIGNED" = "true" ] && echo "The Mac download is ad-hoc signed this time (asked for)."
+          echo "mac=$mac" >> "$GITHUB_OUTPUT"
           echo "windows=$([ -n "$WIN_CERT" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
