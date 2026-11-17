@@ -89,6 +89,46 @@ pub struct Show {
     /// computer shows black instead of the "Media transferring" card.
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_transfer_cards: bool,
+    /// What a display computer's screens show while they wait for the show
+    /// (its name, address and how it stands): `WaitCards`.
+    #[serde(default, skip_serializing_if = "WaitCards::is_default")]
+    pub wait_cards: WaitCards,
+}
+
+/// When a display computer shows its card (its name, address, who runs the
+/// show and how it stands) on its screens. Once the show is ready, a screen
+/// with nothing playing is black whatever this says; Identify shows the name
+/// whatever it says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaitCards {
+    /// Until the computer is first in step with the show and has its media.
+    #[default]
+    UntilReady,
+    /// As `UntilReady`, and always on screens the show doesn't use.
+    AlsoUnused,
+    /// Never once the computer is in a show network: black from start-up.
+    Never,
+}
+
+impl WaitCards {
+    pub const ALL: [WaitCards; 3] = [
+        WaitCards::UntilReady,
+        WaitCards::AlsoUnused,
+        WaitCards::Never,
+    ];
+
+    pub fn is_default(&self) -> bool {
+        *self == WaitCards::UntilReady
+    }
+
+    /// What the setting's menu says.
+    pub fn label(self) -> &'static str {
+        match self {
+            WaitCards::UntilReady => "Until the show is ready",
+            WaitCards::AlsoUnused => "Until ready, and on screens the show doesn't use",
+            WaitCards::Never => "Never (black)",
+        }
+    }
 }
 
 /// A named audio output, on one of the machine's audio devices.
@@ -263,6 +303,7 @@ impl Default for Show {
             remote: RemoteSettings::default(),
             library_folders: Vec::new(),
             no_transfer_cards: false,
+            wait_cards: WaitCards::UntilReady,
         };
         let id = OutputId(show.alloc_id());
         show.outputs.push(OutputConfig::new(id, "Display 1".into()));
@@ -7611,6 +7652,24 @@ mod tests {
         let back: Show = serde_json::from_str(&json).unwrap();
         assert_eq!(back.library_folders, show.library_folders);
         assert!(back.no_transfer_cards);
+    }
+
+    #[test]
+    fn the_wait_card_setting_follows_the_show_and_is_not_written_at_its_default() {
+        let show = Show::default();
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(!json.contains("wait_cards"), "{json}");
+        // A show from before the setting: the card until ready, as it was.
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.wait_cards, WaitCards::UntilReady);
+        for w in WaitCards::ALL {
+            let show = Show {
+                wait_cards: w,
+                ..Show::default()
+            };
+            let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+            assert_eq!(back.wait_cards, w);
+        }
     }
 
     #[test]

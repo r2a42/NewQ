@@ -535,8 +535,125 @@ fn the_media_page_keeps_library_folders_and_the_card_setting() {
         assert!(w.find("net_rects", "library_folder:1").is_some());
         w.press(&mut show, &mut st, "net_rects", "library_remove:1");
         assert_eq!(show.library_folders, [PathBuf::from("/Content/Looks")]);
+    }
+}
+
+#[test]
+fn the_cards_on_display_computers_are_set_side_by_side_on_the_network_page() {
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, primary_view());
         w.press(&mut show, &mut st, "net_rects", "transfer_cards");
-        assert!(show.no_transfer_cards);
+        assert!(show.no_transfer_cards, "modern {modern}");
+        w.press(&mut show, &mut st, "net_rects", "wait_cards");
+        w.press(&mut show, &mut st, "net_rects", "wait_cards:Never (black)");
+        assert_eq!(show.wait_cards, crate::show::WaitCards::Never);
+        // A follower's come from the primary: not offered there.
+        st.net = Arc::new(follower_view(Role::Display));
+        w.settle(&mut show, &mut st);
+        assert!(w.find("net_rects", "wait_cards").is_none());
+        // Alone: offered, for when the show runs in a network.
+        st.net = Arc::new(NetView::default());
+        w.settle(&mut show, &mut st);
+        assert!(w.find("net_rects", "transfer_cards").is_some());
+    }
+}
+
+#[test]
+fn every_computer_shows_its_address_and_way_and_a_vpn_is_said() {
+    use crate::net::paths::Adapter;
+    let mut v = primary_view();
+    v.adapters = vec![
+        Adapter::new(
+            "Ethernet",
+            "10.0.0.1".parse().unwrap(),
+            "255.255.255.0".parse().unwrap(),
+        ),
+        Adapter::new(
+            "utun3",
+            "10.8.0.2".parse().unwrap(),
+            "255.255.255.0".parse().unwrap(),
+        ),
+    ];
+    // Left's session is on the LAN, its port not the usual one.
+    v.reached = vec![(LEFT, "10.0.0.2:47821".parse().unwrap())];
+    // An offline computer remembered at its last address.
+    let gone = NodeId(0x400);
+    v.peers.push(PeerView {
+        id: gone,
+        name: "Gone".into(),
+        online: false,
+        connected: false,
+        addr: None,
+        status: None,
+        ..v.peers[0].clone()
+    });
+    v.me.known = vec![crate::net::node::Known {
+        id: gone,
+        name: "Gone".into(),
+        role: Role::Display,
+        addr: Some("10.0.0.9".into()),
+        port: crate::net::discover::DEFAULT_PORT,
+    }];
+    assert_eq!(
+        peer_address(&v, LEFT),
+        Some(("10.0.0.2, port 47821".to_string(), false))
+    );
+    assert_eq!(peer_address(&v, gone), Some(("10.0.0.9".to_string(), true)));
+    assert_eq!(
+        path_to(&v, LEFT),
+        Some(crate::net::paths::AdapterKind::Wired)
+    );
+    assert_eq!(
+        own_addresses(&v.adapters, Some(47820)),
+        vec!["Wired · 10.0.0.1", "VPN · 10.8.0.2"]
+    );
+    let vpn = vpn_words(&v).unwrap();
+    assert!(
+        vpn.contains(
+            "A VPN is on: it can slow the show network. NewQ is using the wired network (10.0.0.1)."
+        ),
+        "{vpn}"
+    );
+    for modern in [false, true] {
+        let (w, _, _) = window(modern, SettingsPage::Network, v.clone());
+        let names: Vec<String> = w.rects("net_rects").into_iter().map(|(n, _)| n).collect();
+        for want in [
+            format!("address:{LEFT}:Wired · 10.0.0.2, port 47821"),
+            format!("address:{gone}:last at 10.0.0.9"),
+            "address:me:Wired · 10.0.0.1".to_string(),
+            "own_address:This computer's addresses: Wired · 10.0.0.1 · VPN · 10.8.0.2".to_string(),
+        ] {
+            let r = w
+                .find("net_rects", &want)
+                .unwrap_or_else(|| panic!("{want}: {names:?}"));
+            assert!(
+                Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(r) || r == Rect::NOTHING,
+                "{want} is in the window"
+            );
+        }
+        assert!(
+            names.iter().any(|n| n.starts_with("vpn:A VPN is on")),
+            "{names:?}"
+        );
+    }
+    // A computer connected through the VPN is said.
+    v.reached = vec![(LEFT, "10.8.0.5:47820".parse().unwrap())];
+    assert!(
+        vpn_words(&v)
+            .unwrap()
+            .contains("Left is connected through a VPN")
+    );
+    // A follower names its primary with the address.
+    let mut f = follower_view(Role::Display);
+    f.reached = vec![(LEFT, "10.0.0.1:47820".parse().unwrap())];
+    for modern in [false, true] {
+        let (w, _, _) = window(modern, SettingsPage::Network, f.clone());
+        assert!(w.find("net_rects", "said").is_some());
+        assert!(
+            w.find("net_rects", "primary_at: (10.0.0.1)").is_some(),
+            "{:?}",
+            w.rects("net_rects")
+        );
     }
 }
 
