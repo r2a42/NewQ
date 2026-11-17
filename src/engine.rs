@@ -248,6 +248,10 @@ pub struct VideoState {
     /// The picture effects now (see `fx::VideoFx`).
     pub fx: VideoFx,
     spawned_at: Instant,
+    /// The time in the file's picture (from where its decoders began) last
+    /// asked of the player: what the audience sees, which a shared clock keeps
+    /// the same on every computer.
+    picture_at: f64,
 }
 
 pub struct ImageState {
@@ -598,6 +602,11 @@ pub struct ActiveCue {
     /// sum of ticks, nor its sound device's count. None otherwise (always, in
     /// the app as it is).
     anchor: Option<f64>,
+    /// Ticking by a shared clock, a cue whose sound is playing: the shared time
+    /// at which its sound's own time was 0, by what its device has been sent
+    /// (`Voice::reached`). Its sound keeps to `anchor` within `SOUND_SLACK`
+    /// (`Voice::keep_to`); the network test compares this between computers.
+    sound_zero: Option<f64>,
     /// A timeline's clip: its own time less its clock's time (`clock_time`) as
     /// it was started or jumped, where both were exact. By a shared clock its
     /// time is kept at its clock's plus this (`pinned`).
@@ -2838,6 +2847,7 @@ impl Engine {
             crossed_by: None,
             joined: false,
             anchor: None,
+            sound_zero: None,
             clock_offset: 0.0,
             card: None,
         });
@@ -2929,6 +2939,7 @@ impl Engine {
             crossed_by: None,
             joined: false,
             anchor: None,
+            sound_zero: None,
             clock_offset: 0.0,
             card: None,
         };
@@ -3072,6 +3083,7 @@ impl Engine {
                                     color: m.color,
                                     fx: VideoFx::at(&m.effects, 0.0),
                                     spawned_at: Instant::now(),
+                                    picture_at: 0.0,
                                 }))
                             }
                             PreparedKind::Image(loader) => ActiveKind::Image(ImageState {
@@ -3520,9 +3532,10 @@ impl Engine {
     /// a running timeline's clock is `now` less the shared time it was at 0
     /// (`Run::anchor`), however late its clips were cued. A cue fired between
     /// two ticks began at the earlier one's time, so to start something at
-    /// shared time T, tick to T and fire it then. A sound's own position is
-    /// still its device's (a picture with sound follows the anchor, not the
-    /// sound). Never called by the app: `tick` alone is as it always was.
+    /// shared time T, tick to T and fire it then. A sound cue's time is the
+    /// clock's too; what its device plays is kept to it (`Voice::keep_to`: a
+    /// sound that started late skips ahead), and a picture with sound follows
+    /// the clock, not the sound. Alone, the app calls `tick`, as it always did.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn tick_shared(&mut self, show: &Show, now: f64) {
         let s = self.sync.get_or_insert(SharedTime { now });
@@ -3533,7 +3546,7 @@ impl Engine {
         // Started since the last tick (by GO, or at its end), or let go by a
         // timeline: they began, or go on, from its time.
         for a in &mut self.active {
-            if a.anchor.is_none() && a.run.is_none() && !matches!(a.kind, ActiveKind::Audio(_)) {
+            if a.anchor.is_none() && a.run.is_none() {
                 a.anchor = Some(prev - a.elapsed);
             }
         }
@@ -3645,10 +3658,7 @@ impl Engine {
                     for a in self.active.iter_mut().skip(before) {
                         if let (Some(_), Some(zero), Some(clock)) = (a.run, a.clip_zero, clock) {
                             a.clock_offset = a.elapsed - (clock - zero).max(0.0);
-                        } else if a.anchor.is_none()
-                            && a.run.is_none()
-                            && !matches!(a.kind, ActiveKind::Audio(_))
-                        {
+                        } else if a.anchor.is_none() && a.run.is_none() {
                             a.anchor = Some(now - late - a.elapsed);
                         }
                     }
@@ -3819,11 +3829,30 @@ impl Engine {
                             Some(vo) if !vo.finished() => Some(vo.clock_with_lead()),
                             _ => None,
                         };
+                        // (By a shared clock, the cue's time is the picture's: its
+                        // sound plays its lead as silence from the same moment,
+                        // so the lead is not added, on a computer that plays the
+                        // sound or one that doesn't.)
                         let t = on_the_clock.unwrap_or_else(|| {
-                            let lead = if v.voice.is_some() { audio_lead } else { 0.0 };
+                            let lead = if v.voice.is_some() && pinned.is_none() {
+                                audio_lead
+                            } else {
+                                0.0
+                            };
                             a.elapsed - a.seek_base + lead
                         });
-                        v.player.update((t - video_lag).max(0.0));
+                        v.picture_at = (t - video_lag).max(0.0);
+                        v.player.update(v.picture_at);
+                        // Its sound keeps to the clock as far as a sound can.
+                        a.sound_zero = match (&v.voice, pinned, shared) {
+                            (Some(vo), Some(_), Some(now)) if !vo.finished() => {
+                                if let Some(behind) = vo.keep_to(a.elapsed - a.seek_base) {
+                                    sound_caught_up(cue, behind);
+                                }
+                                Some(now - a.seek_base - vo.reached())
+                            }
+                            _ => None,
+                        };
                         let audio_done = v.voice.as_ref().is_none_or(|vo| vo.finished());
                         // A camera never ends by itself; "run for" ends it.
                         if v.player.is_live() && a.duration.is_some_and(|d| a.elapsed >= d) {
@@ -3960,7 +3989,21 @@ impl Engine {
                         vo.set_paused(voice_paused);
                     }
                     if a.started {
-                        a.elapsed = a.seek_base + vo.clock();
+                        // By a shared clock, its time is the clock's, and the sound
+                        // is kept to it; alone, its time is its device's.
+                        match (pinned, shared) {
+                            (Some(t), Some(now)) => {
+                                a.elapsed = t;
+                                if !vo.finished()
+                                    && let Some(behind) = vo.keep_to(t - a.seek_base)
+                                {
+                                    sound_caught_up(cue, behind);
+                                }
+                                a.sound_zero = Some(now - a.seek_base - vo.reached());
+                            }
+                            _ if a.anchor.is_some() => a.sound_zero = None,
+                            _ => a.elapsed = a.seek_base + vo.clock(),
+                        }
                         // Once the released loop has gone on, its end is known.
                         if vo.released()
                             && let Some(at) = vo.tail_begins()
@@ -4822,6 +4865,7 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
                     color: i.color,
                     fx: i.fx,
                     spawned_at: s.spawned_at,
+                    picture_at: 0.0,
                 }));
             }
             ActiveKind::Wait if s.voice.is_some() => {
@@ -4866,6 +4910,15 @@ fn apply_seek(a: &mut ActiveCue, paused: bool) -> Option<&'static str> {
     }
     a.restart_auto_fade();
     note
+}
+
+/// A sound kept to a shared clock skipped ahead (`Voice::keep_to`).
+fn sound_caught_up(cue: Option<&Cue>, behind: f64) {
+    log::debug!(
+        "cue {}: its sound was {:.0} ms behind the shared clock and skipped ahead",
+        cue.map(|c| c.number.as_str()).unwrap_or("?"),
+        behind * 1000.0
+    );
 }
 
 fn completed_follow(a: &mut ActiveCue, cue: Option<&Cue>, follow: &mut Vec<CueId>) {

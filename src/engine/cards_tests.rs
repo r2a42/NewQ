@@ -314,6 +314,7 @@ fn a_carded_cue_of_unknown_length_ends_when_the_primarys_does() {
                 cue: id,
                 anchor: 100.0,
                 stopping: false,
+                sound: None,
             }],
             ..Default::default()
         };

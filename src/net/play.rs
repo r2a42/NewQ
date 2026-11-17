@@ -154,6 +154,12 @@ pub struct CueNow {
     /// Fading out to its end.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stopping: bool,
+    /// Its sound, playing on this computer: the shared time at which the
+    /// sound's own time was 0 by what its device has been sent (it keeps to
+    /// `anchor` within `audio::SOUND_SLACK`). For the network test; a NewQ
+    /// before 0.24.2 neither sends nor reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<f64>,
 }
 
 /// Where a timeline's run is, as the heartbeat has it.
@@ -593,7 +599,13 @@ impl Follower {
         show_hash: Option<u64>,
     ) {
         let Some(now) = now else {
-            engine.tick(show, dt);
+            // No shared clock (it started again): what plays goes on by this
+            // computer's own (R21: never waits for the primary), from the
+            // shared time it was at.
+            match engine.net_shared_time() {
+                Some(was) if dt.is_finite() && dt >= 0.0 => engine.tick_shared(show, was + dt),
+                _ => engine.tick(show, dt),
+            }
             self.in_step = false;
             return;
         };
