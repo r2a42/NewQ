@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.1
+
 - **NewQ Display.** Every download now has a second program, *NewQ Display*: open it on a
   computer with projectors or screens and it becomes a display computer at once, with nothing
   asked. Every monitor goes full screen with a card saying its name and that it is waiting for a
