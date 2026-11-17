@@ -10,6 +10,7 @@ use super::*;
 use crate::engine::NetMode;
 use crate::net::hub::NetView;
 use crate::net::measure::{Measurer, NetTest, Sample};
+use crate::net::media::MediaReport;
 use crate::net::node::{Identity, NetworkId, Role};
 use crate::net::play::{Follower, Leader, Out, PlayState, Timed, show_hash};
 use crate::net::proto::{Link, MonitorReport, StatusReport};
@@ -136,6 +137,13 @@ struct Comp {
     delay: f64,
     /// It ran the end of the test (its last report and log were sent).
     ended: bool,
+    // ---- Every test across the network: what it measures of itself ----
+    local: crate::net::measure_local::LocalMeter,
+    /// The frame rate its output reports.
+    fps: f32,
+    /// The most cues it had playing at once.
+    played: usize,
+    next_row: f64,
 }
 
 struct Rig {
@@ -152,6 +160,9 @@ struct Rig {
     current: &'static str,
     /// The computers have the test's media (else it never comes).
     media_comes: bool,
+    /// Each step takes as long as it stands for: a test that keeps its own
+    /// time by the computer's clock (the cue tests' laps) sees it pass.
+    paced: bool,
 }
 
 impl Rig {
@@ -181,6 +192,10 @@ impl Rig {
                     wire: Vec::new(),
                     delay: 0.0,
                     ended: false,
+                    local: Default::default(),
+                    fps: 60.0,
+                    played: 0,
+                    next_row: 0.0,
                 }
             })
             .collect();
@@ -209,6 +224,7 @@ impl Rig {
             user,
             current: "user",
             media_comes: true,
+            paced: false,
         };
         // Into step before the test.
         for _ in 0..60 {
@@ -240,6 +256,9 @@ impl Rig {
     }
 
     fn step(&mut self) {
+        if self.paced {
+            std::thread::sleep(std::time::Duration::from_secs_f64(DT));
+        }
         self.now += DT;
         let now = self.now;
         self.view();
@@ -284,10 +303,16 @@ impl Rig {
                     continue;
                 }
                 match m {
-                    NetTest::Begin { run, start } => c.measure.begin(*run, *start),
+                    NetTest::Begin { run, start } => {
+                        c.measure.begin(*run, *start);
+                        c.local.begin(*run, *start);
+                    }
                     NetTest::End { run } => {
                         if let Some(r) = c.measure.end(*run, now, Link::Wired, Some(60.0)) {
                             self.test.net_in.push((c.id, NetTest::Report(Box::new(r))));
+                        }
+                        if let Some(r) = c.local.end(*run, now, Vec::new(), None, 8192) {
+                            self.test.net_in.push((c.id, NetTest::Local(Box::new(r))));
                         }
                         self.test.net_in.push((
                             c.id,
@@ -334,6 +359,33 @@ impl Rig {
             {
                 self.test.net_in.push((c.id, NetTest::Report(Box::new(r))));
             }
+            // What it measures of itself (made up but for what plays).
+            c.played = c.played.max(c.engine.active.len());
+            if c.local.running().is_some() && now >= c.next_row {
+                c.next_row = now + 0.5;
+                let row = crate::stats::Sample {
+                    rss_mb: 300,
+                    cpu_pct: 20.0,
+                    ffmpeg: 2,
+                    inputs: crate::stats::Inputs {
+                        playing: c.engine.active.len(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                c.local.sample(now, &row);
+            }
+            let rates = vec![crate::net::measure_local::OutputRate::new(
+                &format!("{} 1", c.name),
+                c.fps,
+                Some(60.0),
+            )];
+            if let Some(r) = c
+                .local
+                .report(now, rates, Some("Speakers".into()), 8192, false)
+            {
+                self.test.net_in.push((c.id, NetTest::Local(Box::new(r))));
+            }
         }
         // The test's own look.
         self.test
@@ -344,7 +396,7 @@ impl Rig {
     fn start(&mut self) {
         let peers = self.st.net.peers.clone();
         let flash = media_dir().join("testsrc_10s.mp4");
-        let built = build(&self.show, &res(), Some(&flash), &peers);
+        let built = build(&self.show, &res(), Some(&flash), &peers, &[]);
         let dir = self.dir.clone();
         self.test
             .launch_network(built, &dir, &mut self.show, &mut self.engine, &mut self.st)
@@ -432,7 +484,7 @@ fn the_test_show_keeps_the_displays_adds_one_per_bare_monitor_and_keeps_the_user
     let mut p = peer(left, "Left", true, true, None);
     p.status.as_mut().unwrap().monitors.push(monitor("Side"));
     let flash = PathBuf::from("/m/flash.mp4");
-    let b = build(&show, &res(), Some(&flash), &[p]);
+    let b = build(&show, &res(), Some(&flash), &[p], &[]);
     assert!(is_test_show(&b.show) && b.show.own_layers);
     // The user's displays, and one for Left's second monitor.
     assert_eq!(b.show.outputs.len(), show.outputs.len() + 1);
@@ -478,7 +530,7 @@ fn the_test_show_keeps_the_displays_adds_one_per_bare_monitor_and_keeps_the_user
     // The original isn't touched, and a show of the user's isn't the test's.
     assert!(!is_test_show(&show));
     // No flash: the film in its place, said.
-    let b = build(&show, &res(), None, &[]);
+    let b = build(&show, &res(), None, &[], &[]);
     assert!(
         b.notes
             .iter()
@@ -710,4 +762,234 @@ fn a_follower_that_drops_out_is_reported_and_gets_the_show_back_when_it_returns(
         r.step();
     }
     assert_eq!(serde_json::to_string(&r.comps[1].show).unwrap(), r.user);
+}
+
+// ---- Every test across the network (`fleet`) ----
+
+/// A short cue test: a film, a picture and a sound, one after another.
+fn short_lap(user: &Show) -> crate::testmode::plan::Built {
+    let mut show = user.clone();
+    show.cues.clear();
+    show.lists.clear();
+    show.name = "Test Mode: Short".into();
+    show.own_layers = true;
+    let mut ids = Vec::new();
+    for (ty, file, secs) in [
+        (CueType::Video, "testsrc_10s.mp4", 3.0),
+        (CueType::Image, "color_red.png", 2.0),
+        (CueType::Audio, "tone_5s.wav", 2.0),
+    ] {
+        let mut c = show.make_cue(ty, Some(media_dir().join(file)), show.cues.len());
+        c.continue_mode = ContinueMode::AutoFollow;
+        if let Some(m) = c.kind.media_mut() {
+            m.end = Some(secs);
+        }
+        ids.push(c.id);
+        show.cues.push(c);
+    }
+    if let Some(c) = show.cues.last_mut() {
+        c.continue_mode = ContinueMode::DoNotContinue;
+    }
+    crate::testmode::plan::spread_pictures(&mut show);
+    crate::testmode::plan::Built {
+        cues: show.cues.len(),
+        show,
+        first: ids[0],
+        repeats: false,
+        lap_secs: 7.0,
+        notes: Vec::new(),
+        used: Vec::new(),
+        timeline: None,
+    }
+}
+
+impl Rig {
+    /// Start a Short cue test across the network.
+    fn start_short(&mut self, ff: &Ffmpeg) {
+        let built = short_lap(&self.show);
+        let dir = self.dir.clone();
+        self.test.launch_across(
+            ff.clone(),
+            built,
+            &dir,
+            crate::testmode::Level::Short,
+            &mut self.show,
+            &mut self.engine,
+            &mut self.st,
+        );
+        assert!(!is_test_show(&self.show) && self.show.name == "Test Mode: Short");
+        self.current = "test";
+        self.paced = true;
+    }
+
+    fn spreading(&self) -> bool {
+        matches!(self.test.view(), View::Spreading(..))
+    }
+}
+
+#[test]
+fn a_short_test_plays_on_every_computer_and_each_ones_own_measurements_come_back() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "short");
+    r.start_short(&ff);
+    // The computers get the test show first; nothing plays meanwhile.
+    for _ in 0..30 {
+        r.step();
+    }
+    assert!(r.spreading() || matches!(r.test.view(), View::Running(_)));
+    assert!(r.comps.iter().all(|c| c.show.name == "Test Mode: Short"));
+    r.run_until("the test plays", 30.0, |r| {
+        matches!(r.test.view(), View::Running(_))
+    });
+    r.run_until("the test ends", 90.0, |r| r.done().is_some());
+    let d = r.done().unwrap();
+    assert_eq!(d.computers.len(), 2, "{}", d.report);
+    for c in &r.comps {
+        assert!(c.played > 0, "{} played nothing", c.name);
+    }
+    for c in &d.computers {
+        assert!(
+            c.lines.iter().any(|l| l.contains("memory up to 300 MB")),
+            "{}: {:?}",
+            c.name,
+            c.lines
+        );
+        assert!(
+            c.lines
+                .iter()
+                .any(|l| l.contains("usually 60 frames a second")),
+            "{:?}",
+            c.lines
+        );
+        assert!(
+            !c.findings
+                .iter()
+                .any(|f| f.text.contains("No measurements")),
+            "{:?}",
+            c.findings
+        );
+    }
+    let report = std::fs::read_to_string(d.folder.join("report.txt")).unwrap();
+    assert!(
+        report.contains("The other computers")
+            && report.contains("  Left — ")
+            && report.contains("  Right — "),
+        "{report}"
+    );
+    assert!(report.contains("What the test adds on each computer"));
+    let csv = std::fs::read_to_string(d.folder.join("computers.csv")).unwrap();
+    assert!(
+        csv.lines().filter(|l| l.starts_with("Left,")).count() >= 4,
+        "{csv}"
+    );
+    assert!(d.folder.join("outputs.csv").is_file());
+    assert!(d.folder.join("computer-Right-newq.log").is_file());
+    r.assert_restored();
+}
+
+#[test]
+fn a_computer_whose_output_stutters_fails_the_test_and_says_which() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "stutter");
+    r.comps[1].fps = 4.0;
+    r.start_short(&ff);
+    r.run_until("the test ends", 120.0, |r| r.done().is_some());
+    let d = r.done().unwrap();
+    assert_eq!(d.verdict, Verdict::ProblemsFound, "{}", d.report);
+    let right = d.computers.iter().find(|c| c.name == "Right").unwrap();
+    assert_eq!(right.verdict, Verdict::ProblemsFound);
+    assert!(
+        right
+            .headline
+            .contains("the output Right 1 drew only about 4 frames a second"),
+        "{}",
+        right.headline
+    );
+    let left = d.computers.iter().find(|c| c.name == "Left").unwrap();
+    assert!(!left.findings.iter().any(|f| f.text.contains("drew only")));
+    r.assert_restored();
+}
+
+#[test]
+fn a_computer_that_drops_out_of_a_short_test_is_reported_and_gets_the_show_back() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "shortdrop");
+    r.start_short(&ff);
+    r.run_until("the test plays", 30.0, |r| {
+        matches!(r.test.view(), View::Running(_))
+    });
+    for _ in 0..(1.0 / DT) as usize {
+        r.step();
+    }
+    r.comps[1].connected = false;
+    r.run_until("the test ends", 90.0, |r| r.done().is_some());
+    let d = r.done().unwrap();
+    let right = d.computers.iter().find(|c| c.name == "Right").unwrap();
+    assert_eq!(
+        right.verdict,
+        Verdict::ProblemsFound,
+        "{:?}",
+        right.findings
+    );
+    assert!(
+        right
+            .findings
+            .iter()
+            .any(|f| f.text.contains("Right dropped out")),
+        "{:?}",
+        right.findings
+    );
+    r.assert_restored();
+    assert!(!r.comps[1].show.name.contains("Tonight"));
+    r.comps[1].connected = true;
+    for _ in 0..5 {
+        r.step();
+    }
+    assert_eq!(serde_json::to_string(&r.comps[1].show).unwrap(), r.user);
+}
+
+#[test]
+fn cancelling_a_short_test_while_its_media_travels_puts_the_show_back_everywhere() {
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "shortcancel");
+    r.media_comes = false;
+    r.start_short(&ff);
+    for _ in 0..120 {
+        r.step();
+    }
+    assert!(r.spreading());
+    let lines = r.test.fleet().unwrap().media_lines();
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.ends_with("getting the list of media")),
+        "{lines:?}"
+    );
+    r.test.stop();
+    for _ in 0..3 {
+        r.step();
+    }
+    assert!(matches!(r.test.view(), View::Idle));
+    assert!(
+        r.test
+            .notice
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("Cancelled"),
+        "{:?}",
+        r.test.notice
+    );
+    r.assert_restored();
+    // And quitting NewQ mid-test, alone or across: the show is back too.
+    r.media_comes = true;
+    r.start_short(&ff);
+    for _ in 0..30 {
+        r.step();
+    }
+    r.test.shutdown(&mut r.show, &mut r.engine, &mut r.st);
+    r.assert_restored();
 }

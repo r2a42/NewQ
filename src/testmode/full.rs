@@ -209,6 +209,8 @@ pub struct FullRun {
     settling: Option<Instant>,
     panics_before: u32,
     ff: Option<Ffmpeg>,
+    /// This computer's outputs' frame rates.
+    pub outputs: super::fleet::OutputWatch,
 }
 
 /// Whether a streaming server can be run for the check: the program is with
@@ -320,22 +322,52 @@ fn judge_recording(ff: Option<&Ffmpeg>, dir: &Path, said: &[String]) -> feature:
     }
 }
 
-/// Start the check: put the user's show aside and the check's in its place.
+/// The check's show and parts, from the user's show: the displays and sound
+/// chosen in the window, as the other tests use them. Across a show network
+/// (`spread`) the chosen displays each show the picture (`plan::spread_pictures`).
+pub fn plan_for(
+    prep: &FullPrep,
+    media: &Media,
+    show: &Show,
+    st: &UiState,
+    spread: bool,
+) -> feature::Plan {
+    let mut base = show.clone();
+    super::plan::use_displays_as(&mut base, &prep.displays, !spread);
+    super::plan::use_sound(&mut base, &prep.sound);
+    let mut plan = feature::build(&base, media, hosting_possible(st));
+    if spread {
+        super::plan::spread_pictures(&mut plan.show);
+    }
+    plan
+}
+
+/// Whether the check runs muted.
+pub fn muted(prep: &FullPrep) -> bool {
+    prep.sound.muted
+}
+
+/// Start the check: put the user's show aside and the check's in its place;
+/// or, across a show network, with the check's show already in place
+/// (`placed`: the user's show put aside, and the plan) once every computer
+/// has it.
 pub fn launch(
     prep: FullPrep,
     media: Media,
+    placed: Option<(TestStash, feature::Plan)>,
     show: &mut Show,
     engine: &mut Engine,
     st: &mut UiState,
 ) -> Result<FullRun, String> {
-    if let Some(why) = st.test_refusal() {
-        return Err(why.to_string());
-    }
-    // The displays and sound chosen in the window, as the other tests use them.
-    let mut base = show.clone();
-    super::plan::use_displays(&mut base, &prep.displays);
-    super::plan::use_sound(&mut base, &prep.sound);
-    let plan = feature::build(&base, &media, hosting_possible(st));
+    let (stash, plan) = match placed {
+        Some((stash, plan)) => (Some(stash), plan),
+        None => {
+            if let Some(why) = st.test_refusal() {
+                return Err(why);
+            }
+            (None, plan_for(&prep, &media, show, st, false))
+        }
+    };
     let folder = prep.folder.clone();
     let stats = StatsLog::create(
         &folder.join("stats.csv"),
@@ -377,7 +409,10 @@ pub fn launch(
     let planned = plan.secs;
     let parts = plan.parts.len();
     // The point of no return: the user's show is put aside.
-    let stash = st.begin_test(show, engine, plan.show);
+    let stash = match stash {
+        Some(s) => s,
+        None => st.begin_test(show, engine, plan.show),
+    };
     crate::media::audio::set_muted(prep.sound.muted);
     engine.set_log_tap(true);
     engine.log(format!("Test mode: the sound {}", prep.sound.describe()));
@@ -411,10 +446,19 @@ pub fn launch(
         settling: None,
         panics_before: crate::crash::panic_count(),
         ff: engine.ff.clone(),
+        outputs: Default::default(),
     })
 }
 
 impl FullRun {
+    /// Lines from the computers of a show network, into events.log.
+    pub fn said(&mut self, lines: Vec<(f64, String)>) {
+        for (_, l) in lines {
+            let t = self.started.elapsed().as_secs_f64();
+            self.log_at(t, &l);
+        }
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
@@ -743,6 +787,7 @@ pub fn could_not_start(folder: &Path, log_dir: &Path, why: &str) -> Done {
         level: super::Level::Short,
         full: Some(Vec::new()),
         network: None,
+        computers: Vec::new(),
         verdict: Verdict::ProblemsFound,
         headline: format!("The full check could not start: {why}"),
         steady: None,
@@ -807,6 +852,7 @@ pub fn finish(
     show: &mut Show,
     engine: &mut Engine,
     st: &mut UiState,
+    fleet: Option<(Box<super::fleet::Fleet>, f64)>,
 ) -> Done {
     let elapsed = run.elapsed();
     let t_end = elapsed.as_secs_f64();
@@ -840,6 +886,7 @@ pub fn finish(
         run.log_at(t, &line);
     }
     findings.extend(run.hitches.findings(hours, run.sound_device.as_deref()));
+    findings.extend(run.outputs.findings("This computer"));
     let panics = crate::crash::panic_count().saturating_sub(run.panics_before);
     if panics > 0 {
         findings.insert(
@@ -905,8 +952,19 @@ pub fn finish(
             ),
         });
     }
+    // Across a show network: each computer's part. The recording, the
+    // streaming server and the sends are this computer's alone (as in any
+    // show network: only the computer that runs the show sends and records).
+    let across = fleet.is_some();
+    let (computers, part) = super::fleet::fold_in(fleet, &mut findings, &run.folder, &st.net);
+    if across {
+        findings.push(Finding {
+            severity: Severity::Note,
+            text: "The recording, the streaming server and the send cues' messages were checked on this computer only: in a show network only the computer that runs the show records, streams and sends. The other computers played every other part along with it.".into(),
+        });
+    }
     let verdict = Verdict::of(&findings);
-    let report = compose(
+    let mut report = compose(
         &run,
         &end,
         elapsed,
@@ -915,6 +973,7 @@ pub fn finish(
         &results,
         &freeze_files,
     );
+    report.push_str(&part);
     let _ = std::fs::write(run.folder.join("report.txt"), &report);
     drop(run.events.take());
     let headline = match (&end, verdict) {
@@ -935,6 +994,7 @@ pub fn finish(
         level: super::Level::Short,
         full: Some(feature::by_kind(&results)),
         network: None,
+        computers,
         verdict,
         headline,
         steady: None,

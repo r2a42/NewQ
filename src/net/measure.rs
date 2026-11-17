@@ -33,6 +33,12 @@ pub enum NetTest {
     Report(Box<Report>),
     /// A computer to its primary: the end of its own `newq.log`.
     LogTail { run: u64, text: String },
+    // ---- Every test across the network (`net::measure_local`) ----
+    /// A computer to its primary: what it measured of itself (memory,
+    /// processor, frame rates, dropouts) since its last such report.
+    Local(Box<super::measure_local::LocalReport>),
+    /// Primary to its computers: play the test's sound muted (or not).
+    Mute { run: u64, muted: bool },
 }
 
 /// What one computer measured over about a second.

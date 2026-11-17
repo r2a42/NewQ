@@ -9,6 +9,7 @@ use crate::net::proto::{Link, StatusReport};
 use crate::testmode::session::{Done, End};
 use crate::testmode::{Level, TestMode};
 use egui::{Pos2, RawInput, Rect, vec2};
+use std::time::Duration;
 
 const SIZE: egui::Vec2 = vec2(1280.0, 760.0);
 const PRIMARY: NodeId = NodeId(0x10);
@@ -115,11 +116,13 @@ fn a_primary_with_a_computer_in_step_is_offered_the_test_first() {
         // First in the window, in sight.
         assert!(in_window(&notes, "Start the network test"), "{notes:?}");
         assert!(in_window(&notes, "Network soak"));
-        // The other tests say why they wait.
+        // The other tests run across the network too: Left is in step.
+        assert!(st.test_refusal().is_none(), "{:?}", st.test_refusal());
+        // The decoding comparison is one computer's own.
         assert!(
-            st.test_refusal()
+            st.decode_refusal()
                 .unwrap()
-                .contains("except for the network test")
+                .contains("runs on a computer alone")
         );
     }
 }
@@ -137,6 +140,7 @@ fn waiting_for_the_media_says_how_far_each_computer_has_got_and_cancel_puts_the_
             &HashMap::new(),
             Some(Path::new("/m/flash.mp4")),
             &st.net.peers.clone(),
+            &[],
         );
         let mut test = std::mem::take(&mut st.test);
         test.launch_network(built, &dir, &mut show, &mut e, &mut st)
@@ -187,6 +191,7 @@ fn the_results_give_each_computer_its_verdict_in_words() {
         test.show_done(Done {
             compare: None,
             full: None,
+            computers: Vec::new(),
             network: Some(NetDone {
                 soak: false,
                 computers: j.computers.clone(),
@@ -214,5 +219,114 @@ fn the_results_give_each_computer_its_verdict_in_words() {
             has(&notes, "Right: No measurements came from Right"),
             "{notes:?}"
         );
+    }
+}
+
+// ---- Every test across the network: the screens of every computer ----
+
+/// The window's choices (`gui::note_choice`): where each tick and button is.
+fn choices(
+    ctx: &egui::Context,
+    modern: bool,
+    show: &mut Show,
+    e: &mut Engine,
+    st: &mut UiState,
+    events: Vec<Vec<egui::Event>>,
+) -> Vec<(String, Rect)> {
+    st.prefs.new_layout = modern;
+    st.test.open = true;
+    let mut notes = Vec::new();
+    let mut frames = events;
+    frames.extend([vec![], vec![], vec![]]);
+    for (i, ev) in frames.into_iter().enumerate() {
+        ctx.data_mut(|d| d.remove::<Vec<(String, Rect)>>(egui::Id::new("test_choices")));
+        let t = ctx.input(|x| x.time) + 1.0 / 60.0 + if i == 0 { 1.0 } else { 0.0 };
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            time: Some(t),
+            events: ev,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| crate::ui::draw(ui, show, e, st));
+        out.textures_delta.clear();
+        notes = ctx
+            .data(|d| d.get_temp::<Vec<(String, Rect)>>(egui::Id::new("test_choices")))
+            .unwrap_or_default();
+    }
+    notes
+}
+
+fn two_monitors(in_step: bool) -> NetView {
+    let mut v = primary_view(in_step);
+    let m = |name: &str| crate::net::proto::MonitorReport {
+        identity: name.into(),
+        raw: name.into(),
+        hardware: None,
+        size: (1920, 1080),
+        refresh_hz: Some(60.0),
+    };
+    if let Some(s) = v.peers[0].status.as_mut() {
+        s.monitors = vec![m("Projector"), m("Side screen")];
+    }
+    v
+}
+
+#[test]
+fn every_computers_screens_are_offered_grouped_and_ticked_all_at_once() {
+    use crate::testmode::gui::remote_key;
+    for modern in [false, true] {
+        let (mut show, mut e, mut st) = (Show::default(), Engine::for_tests(), UiState::default());
+        st.net = Arc::new(two_monitors(true));
+        let ctx = egui::Context::default();
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+        let tick = "screen:Left 1: Projector (1920×1080 @ 60 Hz)";
+        assert!(has(&notes, tick), "{notes:?}");
+        assert!(has(&notes, "screen:Left 2: Side screen"), "{notes:?}");
+        // The whole group at once.
+        let all = notes
+            .iter()
+            .find(|(n, _)| n == "All:Left")
+            .map(|(_, r)| *r)
+            .expect("All for Left");
+        assert!(
+            Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(all),
+            "modern {modern}: All is in the window: {all:?}"
+        );
+        let at = all.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        choices(
+            &ctx,
+            modern,
+            &mut show,
+            &mut e,
+            &mut st,
+            vec![
+                vec![egui::Event::PointerMoved(at)],
+                vec![press(true)],
+                vec![press(false)],
+            ],
+        );
+        let want = [
+            remote_key(LEFT, 0, "Projector"),
+            remote_key(LEFT, 1, "Side screen"),
+        ];
+        for k in &want {
+            assert!(
+                st.prefs.test_displays.contains(k),
+                "modern {modern}: {:?}",
+                st.prefs.test_displays
+            );
+        }
+        // Left gone: its ticks are kept for when it comes back, and nothing
+        // of it is offered or used meanwhile.
+        st.net = Arc::new(primary_view(true));
+        let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+        assert!(!has(&notes, "screen:Left"), "{notes:?}");
+        assert!(st.prefs.test_displays.contains(&want[0]));
     }
 }

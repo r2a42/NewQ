@@ -3,6 +3,7 @@
 mod modern;
 mod net_media;
 mod network;
+pub(crate) use network::{own_addresses, path_to, peer_address};
 mod settings;
 mod timeline;
 
@@ -542,19 +543,50 @@ impl UiState {
         self.json_stale = true;
     }
 
-    /// Why a test can't start now, if it can't.
-    pub fn test_refusal(&self) -> Option<&'static str> {
+    /// Why a test can't start now, if it can't. In a show network the tests
+    /// run across it: started on the computer that runs the show, once every
+    /// connected computer is in step (`testmode::fleet`).
+    pub fn test_refusal(&self) -> Option<String> {
         if let Some(why) = self.test_refusal_base() {
-            Some(why)
-        } else if self.net.me.on && (self.net.is_primary() || self.net.me.adopted()) {
-            // (A test show would be played on the other computers too: the
-            // network test is the one for that, `testmode::network::refusal`.)
-            Some(
-                "Test Mode is off while this computer is in a show network, except for the network test below. Switch the show network off (Settings ▸ Show network) to run the others.",
-            )
-        } else {
-            None
+            return Some(why.to_string());
         }
+        let v = &self.net;
+        if v.me.on && v.me.adopted() && !v.is_primary() {
+            let who = v.following.as_ref().map_or_else(
+                || "the computer that runs the show".to_string(),
+                |f| f.name.clone(),
+            );
+            return Some(format!(
+                "Tests are started from the computer that runs the show ({who}). A test started there plays on this computer too, and this computer measures itself for it."
+            ));
+        }
+        if v.is_primary() {
+            let waiting: Vec<&str> = v
+                .peers
+                .iter()
+                .filter(|p| p.ours && p.connected)
+                .filter(|p| !p.status.as_ref().is_some_and(|s| s.in_step))
+                .map(|p| p.name.as_str())
+                .collect();
+            if !waiting.is_empty() {
+                return Some(format!(
+                    "Wait until every computer of the show network is in step (Settings ▸ Show network): {} not yet. The test plays on all of them.",
+                    waiting.join(", ")
+                ));
+            }
+        }
+        None
+    }
+
+    /// Why the hardware decoding comparison can't start now: it is about
+    /// one computer's own decoding, so it runs only on a computer alone.
+    pub fn decode_refusal(&self) -> Option<String> {
+        if let Some(why) = self.test_refusal_base() {
+            return Some(why.to_string());
+        }
+        (self.net.me.on && (self.net.is_primary() || self.net.me.adopted())).then(|| {
+            "The hardware decoding comparison is about one computer's own decoding, so it runs on a computer alone: switch the show network off for a moment (Settings ▸ Show network) on the computer you want to compare, and back on afterwards.".to_string()
+        })
     }
 
     /// Why no test at all can start now (the show, a dialog), if one can't.

@@ -58,6 +58,10 @@ pub struct TestMode {
     )>,
     // ----
     phase: Phase,
+    /// The computers of a show network taking part (every test but the
+    /// network test's own, which keeps its own), from the moment the test
+    /// show is put in place until the test is done.
+    fleet: Option<Box<super::fleet::Fleet>>,
 }
 
 impl Default for TestMode {
@@ -77,6 +81,7 @@ impl Default for TestMode {
             net_in: Vec::new(),
             net_out: Vec::new(),
             phase: Phase::Idle,
+            fleet: None,
         }
     }
 }
@@ -92,7 +97,49 @@ enum Phase {
     /// The network test: its media being made ready here, and it running.
     NetPrep(Box<super::network::NetPrep>),
     Network(Box<super::network::NetRun>),
+    /// Across a show network: the test show is in place, on its way to the
+    /// computers with its media (`TestMode::fleet`).
+    Spreading(Box<Spread>),
+    /// Across a show network: it has ended and played its last; the
+    /// computers' last reports are awaited (`fleet::ENDING_LIMIT`).
+    Closing(Box<Closing>),
     Done(Box<Done>),
+}
+
+/// A test across a show network, its show in place, waiting for every
+/// computer to have it and its media and to be in step.
+pub struct Spread {
+    then: Then,
+    stash: Option<TestStash>,
+    pub started: Instant,
+    /// What the window calls it ("Short", "The debug test").
+    pub name: String,
+    stop: bool,
+}
+
+/// What a spreading test launches once every computer is ready.
+enum Then {
+    Level {
+        prep: Box<Prep>,
+        built: Box<plan::Built>,
+    },
+    Full {
+        prep: Box<super::full::FullPrep>,
+        media: Box<super::feature::Media>,
+        plan: Box<super::feature::Plan>,
+    },
+}
+
+/// A test across a show network that has ended, before its account.
+pub struct Closing {
+    what: Closed,
+    end: End,
+    since: f64,
+}
+
+enum Closed {
+    Level(Box<Run>),
+    Full(Box<super::full::FullRun>),
 }
 
 /// The media being made ready.
@@ -163,6 +210,8 @@ pub struct Run {
     sound_device: Option<String>,
     /// A timeline test's driver and what it watches.
     pub timeline: Option<Box<TimelineRun>>,
+    /// This computer's outputs' frame rates.
+    pub outputs: super::fleet::OutputWatch,
 }
 
 /// A timeline test's part of a run (see `testmode::timeline`).
@@ -382,7 +431,7 @@ fn identity_of(text: &str) -> String {
 
 /// What the window has shown during a run (see `Seen`).
 #[derive(Default)]
-struct FindingLog {
+pub(super) struct FindingLog {
     seen: Vec<Seen>,
 }
 
@@ -390,7 +439,7 @@ impl FindingLog {
     /// Take note of what the window is showing at `t` seconds. Returns the
     /// lines for `events.log`: one for each finding that has appeared, and for
     /// each that has gone (whether or not it lasted).
-    fn update(&mut self, t: f64, current: &[Finding]) -> Vec<String> {
+    pub(super) fn update(&mut self, t: f64, current: &[Finding]) -> Vec<String> {
         let mut lines = Vec::new();
         for f in current {
             let id = identity_of(&f.text);
@@ -432,7 +481,7 @@ impl FindingLog {
     }
 
     /// Mark what is no longer among `current` as gone; returns the log lines.
-    fn close(&mut self, t: f64, current: &[Finding]) -> Vec<String> {
+    pub(super) fn close(&mut self, t: f64, current: &[Finding]) -> Vec<String> {
         let mut lines = Vec::new();
         for s in &mut self.seen {
             if s.ended.is_none() && !current.iter().any(|f| identity_of(&f.text) == s.identity) {
@@ -450,7 +499,7 @@ impl FindingLog {
     /// Findings for the report from what was shown and has gone: those of
     /// `Watch` and `Problem` kind that the final account doesn't have in
     /// its own words.
-    fn gone(&self, final_findings: &[Finding]) -> Vec<Finding> {
+    pub(super) fn gone(&self, final_findings: &[Finding]) -> Vec<Finding> {
         self.seen
             .iter()
             .filter(|s| s.severity != Severity::Note)
@@ -506,6 +555,8 @@ pub struct Done {
     pub full: Option<Vec<(&'static str, usize, usize, usize)>>,
     /// It was the network test: each computer's verdict.
     pub network: Option<super::network::NetDone>,
+    /// Another test across a show network: each other computer's verdict.
+    pub computers: Vec<super::net_judge::ComputerVerdict>,
     /// The one zip of everything, being made or made (see `bundle`).
     pub bundle: super::bundle::Bundle,
     pub level: Level,
@@ -542,6 +593,9 @@ pub enum View<'a> {
     Checking(&'a super::full::FullRun),
     NetPreparing(&'a super::network::NetPrep),
     Network(&'a super::network::NetRun),
+    Spreading(&'a Spread, &'a super::fleet::Fleet),
+    /// A test across a show network playing: its computers.
+    Closing,
     Done(&'a Done),
 }
 
@@ -625,8 +679,18 @@ impl TestMode {
             Phase::Full(r) => View::Checking(r),
             Phase::NetPrep(p) => View::NetPreparing(p),
             Phase::Network(r) => View::Network(r),
+            Phase::Spreading(s) => match &self.fleet {
+                Some(f) => View::Spreading(s, f),
+                None => View::Idle,
+            },
+            Phase::Closing(_) => View::Closing,
             Phase::Done(d) => View::Done(d),
         }
+    }
+
+    /// The computers of a test across a show network, while it runs.
+    pub fn fleet(&self) -> Option<&super::fleet::Fleet> {
+        self.fleet.as_deref()
     }
 
     /// Whether a test is being prepared or run (the window can't be changed).
@@ -640,6 +704,8 @@ impl TestMode {
                 | Phase::Full(_)
                 | Phase::NetPrep(_)
                 | Phase::Network(_)
+                | Phase::Spreading(_)
+                | Phase::Closing(_)
         )
     }
 
@@ -775,22 +841,26 @@ impl TestMode {
             Phase::Full(r) => r.stop = true,
             Phase::NetPrep(p) => p.cancel(),
             Phase::Network(r) => r.request_stop(),
+            Phase::Spreading(s) => s.stop = true,
             _ => {}
         }
     }
 
     /// Begin the network test (or soak): its media made ready here first.
-    pub fn start_network(&mut self, ff: Ffmpeg, log_dir: &Path, soak: bool) {
+    pub fn start_network(
+        &mut self,
+        ff: Ffmpeg,
+        log_dir: &Path,
+        soak: bool,
+        displays: Vec<DisplayChoice>,
+    ) {
         if self.busy() {
             return;
         }
         self.notice = None;
-        self.phase = Phase::NetPrep(Box::new(super::network::NetPrep::start(
-            ff,
-            log_dir,
-            soak,
-            self.download,
-        )));
+        let mut prep = super::network::NetPrep::start(ff, log_dir, soak, self.download);
+        prep.displays = displays;
+        self.phase = Phase::NetPrep(Box::new(prep));
     }
 
     /// Start the network test with a show already made (the tests of the test).
@@ -839,9 +909,139 @@ impl TestMode {
 
     /// `update`, at the primary's shared time `now` (the tests set it).
     pub fn update_at(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState, now: f64) {
-        let inbox = std::mem::take(&mut self.net_in);
+        let mut inbox = std::mem::take(&mut self.net_in);
+        // A test across the show network: what the computers sent, and
+        // telling one that came back to measure.
+        if let Some(f) = &mut self.fleet {
+            for (from, m) in std::mem::take(&mut inbox) {
+                f.take(from, m, now, &st.net);
+            }
+            f.keep_up(st, now);
+        }
+        match &mut self.phase {
+            Phase::Running(r) => {
+                let t = r.started.elapsed().as_secs_f64();
+                r.outputs.note(t, &super::fleet::own_rates(show, st));
+            }
+            Phase::Full(r) => {
+                let t = r.started.elapsed().as_secs_f64();
+                r.outputs.note(t, &super::fleet::own_rates(show, st));
+            }
+            _ => {}
+        }
+        self.update_phase(show, engine, st, now, inbox);
+        if let Some(f) = &mut self.fleet {
+            self.net_out.append(&mut f.out);
+            let said = std::mem::take(&mut f.said);
+            match &mut self.phase {
+                Phase::Running(r) => {
+                    for (_, l) in said {
+                        let t = r.started.elapsed().as_secs_f64();
+                        r.log_at(t, &l);
+                    }
+                }
+                Phase::Full(r) => r.said(said),
+                _ => {}
+            }
+        }
+        if !self.busy() && !matches!(self.phase, Phase::Done(_)) {
+            self.fleet = None;
+        }
+    }
+
+    fn update_phase(
+        &mut self,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+        now: f64,
+        inbox: Vec<(crate::net::node::NodeId, crate::net::measure::NetTest)>,
+    ) {
         match &mut self.phase {
             Phase::Idle | Phase::Done(_) => {}
+            Phase::Spreading(s) => {
+                let Some(f) = &mut self.fleet else {
+                    self.phase = Phase::Idle;
+                    return;
+                };
+                let first = f.first_look(now);
+                let why = if s.stop {
+                    Some(End::Stopped)
+                } else {
+                    f.waited_too_long(st, s.started).map(End::Failed)
+                };
+                if let Some(end) = why {
+                    // Nothing played: the user's show back, here and so everywhere.
+                    if let Some(stash) = s.stash.take() {
+                        st.end_test(show, engine, stash);
+                    }
+                    let name = s.name.clone();
+                    self.fleet = None;
+                    self.phase = Phase::Idle;
+                    self.notice = Some(match end {
+                        End::Failed(why) => format!(
+                            "The {name} test did not start: {why}. Your show is back on every computer; nothing was changed."
+                        ),
+                        _ => "Cancelled. Your show is back on every computer; nothing was changed."
+                            .into(),
+                    });
+                    return;
+                }
+                if !(f.media_ready(st) && now - first >= 2.0) {
+                    return;
+                }
+                f.begin(now);
+                let Phase::Spreading(s) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                    return;
+                };
+                let Spread { then, stash, .. } = *s;
+                let Some(stash) = stash else {
+                    return;
+                };
+                match then {
+                    Then::Level { prep, built } => {
+                        match launch(*prep, Some((stash, *built)), show, engine, st) {
+                            Ok(run) => self.phase = Phase::Running(Box::new(run)),
+                            Err(e) => self.notice = Some(e),
+                        }
+                    }
+                    Then::Full { prep, media, plan } => {
+                        let (folder, log_dir) = (prep.folder.clone(), prep.log_dir().to_path_buf());
+                        match super::full::launch(
+                            *prep,
+                            *media,
+                            Some((stash, *plan)),
+                            show,
+                            engine,
+                            st,
+                        ) {
+                            Ok(run) => self.phase = Phase::Full(Box::new(run)),
+                            Err(e) => {
+                                self.phase = Phase::Done(Box::new(super::full::could_not_start(
+                                    &folder, &log_dir, &e,
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            Phase::Closing(c) => {
+                let done = self.fleet.as_ref().is_none_or(|f| {
+                    f.all_in(st, now) || now - c.since > super::fleet::ENDING_LIMIT
+                });
+                if !done {
+                    return;
+                }
+                let Phase::Closing(c) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                    return;
+                };
+                let fleet = self.fleet.take().map(|f| (f, now));
+                let Closing { what, end, .. } = *c;
+                self.phase = Phase::Done(Box::new(match what {
+                    Closed::Level(r) => finish(*r, end, show, engine, st, fleet),
+                    Closed::Full(r) => super::full::finish(*r, end, show, engine, st, fleet),
+                }));
+            }
             Phase::NetPrep(p) => {
                 let Some((res, flash)) = p.ready() else {
                     return;
@@ -857,7 +1057,8 @@ impl TestMode {
                     log::warn!("network test: the Sync flash couldn't be made: {e}");
                 }
                 let peers = st.net.peers.clone();
-                let built = super::network::build(show, &res, flash.as_deref().ok(), &peers);
+                let built =
+                    super::network::build(show, &res, flash.as_deref().ok(), &peers, &p.displays);
                 match super::network::NetRun::launch(
                     built,
                     p.soak,
@@ -873,7 +1074,7 @@ impl TestMode {
             }
             Phase::Network(r) => {
                 let end = r.tick(show, engine, st, now, inbox);
-                self.net_out.append(&mut r.out);
+                self.net_out.append(&mut r.fleet.out);
                 if let Some(end) = end {
                     let Phase::Network(r) = std::mem::replace(&mut self.phase, Phase::Idle) else {
                         return;
@@ -939,7 +1140,34 @@ impl TestMode {
                     )));
                     return;
                 }
-                match launch(*p, show, engine, st) {
+                // Across a show network: the show is put in place and sent
+                // first; the test begins once every computer is ready.
+                if across(st) {
+                    if let Some(why) = st.test_refusal() {
+                        self.notice = Some(why);
+                        return;
+                    }
+                    let built = build(&p, show, true);
+                    let files = super::fleet::files_of(&built.show, None);
+                    let name = p.flavour.name(p.level);
+                    let muted = p.sound.muted;
+                    let test_show = built.show.clone();
+                    self.spread(
+                        Then::Level {
+                            prep: p,
+                            built: Box::new(built),
+                        },
+                        test_show,
+                        files,
+                        name,
+                        muted,
+                        show,
+                        engine,
+                        st,
+                    );
+                    return;
+                }
+                match launch(*p, None, show, engine, st) {
                     Ok(run) => self.phase = Phase::Running(Box::new(run)),
                     Err(e) => {
                         log::error!("test mode: {e}");
@@ -966,7 +1194,22 @@ impl TestMode {
                     let Phase::Running(r) = std::mem::replace(&mut self.phase, Phase::Idle) else {
                         return;
                     };
-                    self.phase = Phase::Done(Box::new(finish(*r, end, show, engine, st)));
+                    match &mut self.fleet {
+                        Some(f) => {
+                            // The computers stop with this one, then send their last.
+                            engine.stop_all(0.0);
+                            f.end(now);
+                            self.phase = Phase::Closing(Box::new(Closing {
+                                what: Closed::Level(r),
+                                end,
+                                since: now,
+                            }));
+                        }
+                        None => {
+                            self.phase =
+                                Phase::Done(Box::new(finish(*r, end, show, engine, st, None)))
+                        }
+                    }
                 }
             }
             Phase::FullPrep(p) => {
@@ -982,12 +1225,35 @@ impl TestMode {
                 }
                 // A show that has changed meanwhile is a reason to wait, not a failure.
                 if let Some(why) = st.test_refusal() {
-                    self.notice = Some(why.to_string());
+                    self.notice = Some(why);
                     return;
                 }
                 let (folder, log_dir) = (p.folder.clone(), p.log_dir().to_path_buf());
+                if across(st)
+                    && let Ok(media) = made.clone()
+                {
+                    let plan = super::full::plan_for(&p, &media, show, st, true);
+                    let test_show = plan.show.clone();
+                    let files = super::fleet::files_of(&plan.show, None);
+                    let muted = super::full::muted(&p);
+                    self.spread(
+                        Then::Full {
+                            prep: p,
+                            media: Box::new(media),
+                            plan: Box::new(plan),
+                        },
+                        test_show,
+                        files,
+                        "debug".into(),
+                        muted,
+                        show,
+                        engine,
+                        st,
+                    );
+                    return;
+                }
                 let launched =
-                    made.and_then(|media| super::full::launch(*p, media, show, engine, st));
+                    made.and_then(|media| super::full::launch(*p, media, None, show, engine, st));
                 match launched {
                     Ok(run) => self.phase = Phase::Full(Box::new(run)),
                     Err(e) => {
@@ -1005,8 +1271,22 @@ impl TestMode {
                     let Phase::Full(r) = std::mem::replace(&mut self.phase, Phase::Idle) else {
                         return;
                     };
-                    self.phase =
-                        Phase::Done(Box::new(super::full::finish(*r, end, show, engine, st)));
+                    match &mut self.fleet {
+                        Some(f) => {
+                            engine.stop_all(0.0);
+                            f.end(now);
+                            self.phase = Phase::Closing(Box::new(Closing {
+                                what: Closed::Full(r),
+                                end,
+                                since: now,
+                            }));
+                        }
+                        None => {
+                            self.phase = Phase::Done(Box::new(super::full::finish(
+                                *r, end, show, engine, st, None,
+                            )))
+                        }
+                    }
                 }
             }
         }
@@ -1015,9 +1295,29 @@ impl TestMode {
     /// The program is closing: end a test properly so the show is back and
     /// the files are complete.
     pub fn shutdown(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+        // The computers are told it is over (their show comes back with ours).
+        let now = crate::net::time::local_now();
+        let mut fleet = self.fleet.take();
+        if let Some(f) = &mut fleet {
+            f.end(now);
+            self.net_out.append(&mut f.out);
+        }
+        let fleet = fleet.map(|f| (f, now));
         match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Running(r) => {
-                self.phase = Phase::Done(Box::new(finish(*r, End::Quit, show, engine, st)));
+                self.phase = Phase::Done(Box::new(finish(*r, End::Quit, show, engine, st, fleet)));
+            }
+            Phase::Spreading(mut s) => {
+                if let Some(stash) = s.stash.take() {
+                    st.end_test(show, engine, stash);
+                }
+            }
+            Phase::Closing(c) => {
+                let Closing { what, end, .. } = *c;
+                self.phase = Phase::Done(Box::new(match what {
+                    Closed::Level(r) => finish(*r, end, show, engine, st, fleet),
+                    Closed::Full(r) => super::full::finish(*r, end, show, engine, st, fleet),
+                }));
             }
             Phase::Comparing(c) => {
                 let (elapsed, folder) = (c.elapsed(), c.folder.clone());
@@ -1031,9 +1331,8 @@ impl TestMode {
             Phase::NetPrep(p) => p.cancel(),
             Phase::Network(mut r) => {
                 // The computers are told it is over; the show comes back here.
-                r.out
-                    .push((None, crate::net::measure::NetTest::End { run: r.run }));
-                self.net_out.append(&mut r.out);
+                r.fleet.end(now);
+                self.net_out.append(&mut r.fleet.out);
                 self.phase = Phase::Done(Box::new(super::network::finish(
                     *r,
                     End::Quit,
@@ -1050,11 +1349,116 @@ impl TestMode {
                     show,
                     engine,
                     st,
+                    fleet,
                 )));
             }
             other => self.phase = other,
         }
     }
+
+    /// Put a test's show in place and send it, with its media, to the
+    /// computers of the show network; it begins once they are all ready.
+    #[allow(clippy::too_many_arguments)]
+    fn spread(
+        &mut self,
+        then: Then,
+        test_show: Show,
+        files: Vec<(String, u64)>,
+        name: String,
+        muted: bool,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+    ) {
+        let fleet = super::fleet::Fleet::new(st, files, muted);
+        log::info!(
+            "test mode: the {name} test goes to {} first ({} files)",
+            fleet.names(),
+            fleet.files.len()
+        );
+        let stash = st.begin_test(show, engine, test_show);
+        self.fleet = Some(Box::new(fleet));
+        self.phase = Phase::Spreading(Box::new(Spread {
+            then,
+            stash: Some(stash),
+            started: Instant::now(),
+            name,
+            stop: false,
+        }));
+    }
+
+    /// Start a test across the network with a show already made (the tests
+    /// of the test): it is put in place and waits for the computers.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_across(
+        &mut self,
+        ff: Ffmpeg,
+        built: plan::Built,
+        log_dir: &Path,
+        level: Level,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+    ) {
+        let prep = Prep {
+            fetch: assets::start(ff, assets::cache_dir(log_dir), Vec::new(), false),
+            compare: false,
+            displays: Vec::new(),
+            sound: SoundChoice::default(),
+            heavy: false,
+            level,
+            flavour: Flavour::Cues,
+            minutes: 0,
+            wanted: Vec::new(),
+            log_dir: log_dir.to_path_buf(),
+        };
+        let files = super::fleet::files_of(&built.show, None);
+        let test_show = built.show.clone();
+        self.spread(
+            Then::Level {
+                prep: Box::new(prep),
+                built: Box::new(built),
+            },
+            test_show,
+            files,
+            level.label().into(),
+            false,
+            show,
+            engine,
+            st,
+        );
+    }
+}
+
+/// Whether a test started here runs across a show network: this computer
+/// runs one, with computers connected to it.
+pub fn across(st: &UiState) -> bool {
+    st.net.is_primary() && st.net.peers.iter().any(|p| p.ours && p.connected)
+}
+
+/// The test show for `prep`, from the user's `show`; `spread` across a show
+/// network (every chosen display shows each picture, `plan::spread_pictures`).
+fn build(prep: &Prep, show: &Show, spread: bool) -> plan::Built {
+    let resolved = prep.fetch.status.lock().resolved.clone();
+    let mut built = match prep.flavour {
+        Flavour::Cues => plan::build_with_as(
+            show,
+            prep.level,
+            &resolved,
+            &prep.displays,
+            &prep.sound,
+            prep.heavy,
+            !spread,
+        ),
+        Flavour::Timeline => {
+            plan::build_timeline(show, prep.level, &resolved, &prep.displays, &prep.sound)
+        }
+    };
+    if spread {
+        plan::spread_pictures(&mut built.show);
+    }
+    built
 }
 
 // ----- Starting -------------------------------------------------------------------
@@ -1102,6 +1506,7 @@ fn compare_done(
     Done {
         full: None,
         network: None,
+        computers: Vec::new(),
         flavour: Flavour::Cues,
         bundle: super::bundle::Bundle::start(
             folder.clone(),
@@ -1131,27 +1536,23 @@ fn compare_done(
     }
 }
 
+/// Start a test; `placed`, across a show network, is the user's show put
+/// aside and the test show already in place.
 fn launch(
     prep: Prep,
+    placed: Option<(TestStash, plan::Built)>,
     show: &mut Show,
     engine: &mut Engine,
     st: &mut UiState,
 ) -> Result<Run, String> {
-    if let Some(why) = st.test_refusal() {
-        return Err(why.to_string());
-    }
     let resolved = prep.fetch.status.lock().resolved.clone();
-    let built = match prep.flavour {
-        Flavour::Cues => plan::build_with(
-            show,
-            prep.level,
-            &resolved,
-            &prep.displays,
-            &prep.sound,
-            prep.heavy,
-        ),
-        Flavour::Timeline => {
-            plan::build_timeline(show, prep.level, &resolved, &prep.displays, &prep.sound)
+    let (stash, built) = match placed {
+        Some((stash, built)) => (Some(stash), built),
+        None => {
+            if let Some(why) = st.test_refusal() {
+                return Err(why);
+            }
+            (None, build(&prep, show, false))
         }
     };
     let name = prep.flavour.name(prep.level);
@@ -1202,7 +1603,10 @@ fn launch(
     let media_notes = built.notes.clone();
     let awake = KeepAwake::new("NewQ is running a test");
     // The point of no return: the user's show is put aside.
-    let stash = st.begin_test(show, engine, built.show);
+    let stash = match stash {
+        Some(s) => s,
+        None => st.begin_test(show, engine, built.show),
+    };
     crate::media::audio::set_muted(prep.sound.muted);
     engine.set_log_tap(true);
     engine.log(format!("Test mode: the sound {}", prep.sound.describe()));
@@ -1270,6 +1674,7 @@ fn launch(
         memory: MemoryWatch::new(),
         hitches: super::hitches::Hitches::new(started),
         sound_device: super::hitches::working_device(engine),
+        outputs: Default::default(),
     })
 }
 
@@ -1285,6 +1690,7 @@ impl Run {
             f.extend(super::analysis::analyse_timeline(&tl.watch.notes, &clean));
         }
         f.extend(self.hitches.findings(hours, self.sound_device.as_deref()));
+        f.extend(self.outputs.findings("This computer"));
         f
     }
 
@@ -1517,7 +1923,14 @@ impl Run {
 
 // ----- Ending -------------------------------------------------------------------------
 
-fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut UiState) -> Done {
+fn finish(
+    mut run: Run,
+    end: End,
+    show: &mut Show,
+    engine: &mut Engine,
+    st: &mut UiState,
+    fleet: Option<(Box<super::fleet::Fleet>, f64)>,
+) -> Done {
     let elapsed = run.elapsed();
     engine.stop_all(0.0);
     // The user's show comes back before anything else is done.
@@ -1674,8 +2087,11 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
     }
     let gone = run.finding_log.gone(&findings);
     findings.extend(gone);
+    // Across a show network: each computer's part.
+    let (computers, part) = super::fleet::fold_in(fleet, &mut findings, &run.folder, &st.net);
     let verdict = Verdict::of(&findings);
-    let report = compose(&run, &end, elapsed, verdict, &findings, show);
+    let mut report = compose(&run, &end, elapsed, verdict, &findings, show);
+    report.push_str(&part);
     let _ = std::fs::write(run.folder.join("report.txt"), &report);
     let _ = std::fs::write(
         run.folder.join("media-credits.txt"),
@@ -1692,6 +2108,7 @@ fn finish(mut run: Run, end: End, show: &mut Show, engine: &mut Engine, st: &mut
         compare: None,
         full: None,
         network: None,
+        computers,
         flavour: run.flavour,
         bundle: super::bundle::Bundle::start(
             run.folder.clone(),

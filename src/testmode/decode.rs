@@ -456,8 +456,8 @@ impl Compare {
                     Ok(Ok(m)) => m,
                 };
                 self.rx = None;
-                if let Some(why) = st.test_refusal() {
-                    return Some(End::Failed(why.to_string()));
+                if let Some(why) = st.decode_refusal() {
+                    return Some(End::Failed(why));
                 }
                 self.encoder = Some(made.encoder.clone());
                 self.engaged = made.engaged.clone();
