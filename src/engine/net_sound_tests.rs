@@ -155,10 +155,13 @@ fn a_sound_that_starts_late_on_one_computer_catches_up_and_the_pictures_never_di
         };
         let skipped = reached(&f, sound) - f.card.frames as f64 / RATE;
         // (It skips each time it is more than `SOUND_SLACK` behind, so up to
-        // that is left when its card begins.)
+        // that is left when its card begins. How late the card really began
+        // is measured: a busy machine's loop wakes later than asked.)
+        let late = f.began.expect("its card began") - fire_at;
+        assert!(late >= late_by, "{late}");
         assert!(
-            skipped > late_by - SOUND_SLACK - 0.005 && skipped < late_by + 0.02,
-            "the follower's sound skipped {skipped:.3} s"
+            skipped > late - SOUND_SLACK - 0.005 && skipped < late + 0.02,
+            "the follower's sound skipped {skipped:.3} s, its card {late:.3} s late"
         );
         let p_skipped = reached(&p, sound) - (p.card.frames as f64 / RATE - fire_at);
         assert!(
