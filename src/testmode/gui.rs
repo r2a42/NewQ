@@ -48,21 +48,29 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
         .collapsible(false)
         .default_width(520.0)
         .show(ctx, |ui| {
-            body(
-                ui,
-                engine,
-                &mut test,
-                refusal,
-                decode_refusal,
-                &live,
-                across,
-                &net,
-                &mut apply,
-                &screens,
-                &mut selected,
-                &devices,
-                &mut sound,
-            );
+            // Taller than the screen with every computer's screens listed:
+            // it scrolls, so the Start button is always within reach.
+            egui::ScrollArea::vertical()
+                .max_height((ctx.content_rect().height() - 140.0).max(200.0))
+                .min_scrolled_height((ctx.content_rect().height() - 140.0).clamp(200.0, 620.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    body(
+                        ui,
+                        engine,
+                        &mut test,
+                        refusal,
+                        decode_refusal,
+                        &live,
+                        across,
+                        &net,
+                        &mut apply,
+                        &screens,
+                        &mut selected,
+                        &devices,
+                        &mut sound,
+                    );
+                });
         });
     if !open {
         if test.busy() {

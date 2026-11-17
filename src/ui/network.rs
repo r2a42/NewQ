@@ -566,15 +566,6 @@ fn computer_row(
     ui.horizontal(|ui| {
         dot(ui, p.online);
         rename_field(ui, p.id, &p.name, v, st, actions);
-        if let Some((a, last)) = peer_address(v, p.id) {
-            let text = match (last, path_to(v, p.id)) {
-                (true, _) => format!("last at {a}"),
-                (false, Some(k)) => format!("{} · {a}", k.label()),
-                (false, None) => a,
-            };
-            let r = ui.label(RichText::new(&text).monospace());
-            note(ui, format!("address:{}:{text}", p.id), r.rect);
-        }
         let usable = p.connected;
         ui.add_enabled_ui(usable, |ui| {
             let r = egui::ComboBox::from_id_salt(("net_role", p.id.0))
@@ -618,6 +609,19 @@ fn computer_row(
             });
         });
     });
+    // Its address (on a line of its own: the row above is full at 1280 wide).
+    if let Some((a, last)) = peer_address(v, p.id) {
+        let text = match (last, path_to(v, p.id)) {
+            (true, _) => format!("last at {a}"),
+            (false, Some(k)) => format!("{} · {a}", k.label()),
+            (false, None) => a,
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let r = ui.label(RichText::new(&text).monospace());
+            note(ui, format!("address:{}:{text}", p.id), r.rect);
+        });
+    }
     // ---- Playing together (stage 4a): in step, clock, start at login ----
     if p.connected
         && let Some(s) = &p.status
@@ -1024,6 +1028,13 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         .following
         .as_ref()
         .map_or_else(|| "The primary".to_string(), |f| f.name.clone());
+    // Its address too: what a follower can be asked for over the phone.
+    let at = v
+        .following
+        .as_ref()
+        .and_then(|f| peer_address(v, f.id))
+        .map(|(a, _)| format!(" ({a})"))
+        .unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
         let what = if v.me.role == Role::Backup {
             "this computer is its backup, following its show"
@@ -1032,17 +1043,28 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         };
         let r = ui.label(
             RichText::new(format!(
-                "🔒 {who} runs the show: {what}, and its controls are locked here."
+                "🔒 {who}{at} runs the show: {what}, and its controls are locked here."
             ))
             .strong(),
         );
         note(ui, "locked_banner", r.rect);
+        note(ui, format!("locked_at:{at}"), egui::Rect::NOTHING);
         // "In step" says nothing true while the primary isn't heard.
         let heard = v.following.as_ref().is_none_or(|f| f.online) && quiet_words(v).is_none();
         if let Some(s) = v.status.standing.as_ref().filter(|_| heard) {
             ui.label(RichText::new(s).weak());
         }
     });
+    // A test the primary runs (every test plays on every computer).
+    if st.following_test {
+        let r = ui.label(
+            RichText::new(format!(
+                "{who} is running a test: this computer plays along and measures itself. The results are on {who}."
+            ))
+            .color(Color32::LIGHT_BLUE),
+        );
+        note(ui, "following_test", r.rect);
+    }
     // A second row: whether the primary is heard, and what can be done here.
     ui.horizontal(|ui| {
         // ---- Take control (stage 5): the primary gone quiet ----

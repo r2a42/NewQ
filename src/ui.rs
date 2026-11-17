@@ -231,6 +231,9 @@ pub struct UiState {
     /// on the Show network page.
     pub start_at_login: bool,
     pub start_at_login_request: Option<bool>,
+    /// A follower: the primary is running a test that this computer plays
+    /// along with and measures itself for (set by the app each pass).
+    pub following_test: bool,
     /// The media manager as it last published (set by the app each pass).
     pub media: std::sync::Arc<crate::net::media::MediaView>,
     /// Messages the media rows asked to send to a computer (the app passes them on).
