@@ -209,6 +209,23 @@ The README describes the features; this file is about working on the code.
   UntilReady/AlsoUnused/Never; `play::{still_ready, card_shows}`): `Playing::ready` latches once in step
   with the media here, so a screen with nothing playing stays black between cues (the card used to flash
   whenever `in_step` flickered); set on the Show network page beside `no_transfer_cards`.
+  Test Mode's window and several parts in one test (0.24.2). `testmode/choice.rs` (pure): `Parts` (the Cue
+  list / Timeline / Network ticks, kept in `Prefs::test_pick`; `PickFile` reads 0.24's flavour/debug), `Part`,
+  `PartPlan`, `plan(level, parts, network_ok)` (Medium and Long are the whole run's time: network laps 1/3/10
+  via `network_laps`, the rest shared, at least 20 minutes each), `total_secs`, `summary`, `level_item`,
+  `network_reason`, `start_refusal`, `parse_parts` (`NEWQ_TEST_PARTS` for `NEWQ_NET_TEST_AUTOSTART`).
+  `testmode/sequence.rs`: `TestMode::start_plan` runs several parts one after another (one part alone runs as
+  before); `UiState::test_carry` (`TestCarry`): while `keep` is set `end_test` holds the stash and the next
+  `begin_test` hands it back (`release_test`/`holds_test` are the safety net in `sequence_step`); while
+  `parts_run` is set a part's `part_bundle` makes no zip; `Sequence::finish` builds one `Done` with `parts:
+  Vec<PartDone>`; `gather` (on the zip's thread, `Bundle::start_after`) joins report.txt and events.log and
+  moves the other files by `file_names` (a shared name gets the part's slug, except the part's own
+  `<slug>.csv`). `network.rs`: `laps: u32` (was `soak`). `gui.rs`: `idle`/`more` (the debug test, the decode
+  comparison, downloads, heavier load), `Facts`, `displays_section` (a tick per screen, by computer; all
+  ticked on opening when none are; Start needs one), `part_section`, `computers_results`. Tests:
+  `sequence.rs`, `network_tests.rs` (`Rig::start_combined`, `TestMode::launch_plan` with `sequence::Made`),
+  `network_ui_tests.rs`. A combined Short run was tried headless with three NewQs on one machine; Medium and
+  Long combined were never run to their end.
   `src/testmode/fleet.rs`: every test across a show network. `session::across` -> `TestMode::spread`
   (`Phase::Spreading`, `Fleet::media_ready`, `waited_too_long`: `GONE_LIMIT` 30 s, `STEP_LIMIT` 90 s,
   `MEDIA_LIMIT` 20 min), then the usual `Run`/`FullRun`; ends through `Phase::Closing` (`ENDING_LIMIT`);
