@@ -140,6 +140,7 @@ fn monitor(name: &str, w: u32, h: u32) -> MonitorReport {
         hardware: None,
         size: (w, h),
         refresh_hz: Some(60.0),
+        ..Default::default()
     }
 }
 
@@ -819,4 +820,25 @@ fn a_primary_that_took_control_says_what_media_it_lacks() {
         );
         assert!(w.find("net_rects", "media_lacking_here").is_some());
     }
+}
+
+/// A display computer whose built-in screen draws 4 frames a second says so
+/// on the primary's page; one drawing at its rate says nothing.
+#[test]
+fn a_monitor_drawing_slowly_is_said_on_the_page() {
+    let mut s = proto::StatusReport {
+        monitors: vec![
+            monitor("B173HAN04.9", 1920, 1080),
+            monitor("DISPLAY2", 1920, 1080),
+        ],
+        ..Default::default()
+    };
+    assert!(super::slow_drawing("Assistant", &s).is_empty());
+    s.monitors[0].refresh_hz = Some(64.0);
+    s.monitors[0].drawing_fps = Some(4.0);
+    s.monitors[1].drawing_fps = Some(60.0);
+    assert_eq!(
+        super::slow_drawing("Assistant", &s),
+        vec!["⚠ Assistant's monitor 1 (B173HAN04.9) is drawing 4 frames a second: it should draw 64. Its pictures stutter".to_string()]
+    );
 }

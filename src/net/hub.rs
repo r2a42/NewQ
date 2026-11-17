@@ -522,6 +522,9 @@ struct State {
     clock_network: Option<node::NetworkId>,
     /// The primary this computer took control from.
     took_from: Option<String>,
+    /// How this computer reached the computer it last reported to (its own
+    /// row says so too, and the network test's report).
+    link: Link,
 }
 
 impl State {
@@ -553,6 +556,7 @@ impl State {
             started: Instant::now(),
             clock_network: None,
             took_from: None,
+            link: Link::Unknown,
         }
     }
 
@@ -1615,8 +1619,8 @@ impl State {
             .filter(|ip| !ip.is_loopback())
             .and_then(discover::adapter_with)
             .map_or(Link::Unknown, |n| Link::from_adapter_name(&n));
-        let mut s = self.own_status();
-        s.link = link;
+        self.link = link;
+        let s = self.own_status();
         self.send(c, &Msg::Status(Box::new(s)));
     }
 
@@ -1631,7 +1635,7 @@ impl State {
             monitors: self.local.monitors.clone(),
             audio_devices: self.local.audio_devices.clone(),
             disk_free: self.disk_free,
-            link: Link::Unknown,
+            link: self.link,
             clock_error_ms: self.sync.clock_error_ms,
             show_version: self.sync.show_version,
             media_progress: self.media.clone(),

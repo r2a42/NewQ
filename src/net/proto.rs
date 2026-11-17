@@ -92,9 +92,24 @@ pub struct MonitorReport {
     pub hardware: Option<String>,
     pub size: (u32, u32),
     pub refresh_hz: Option<f32>,
+    /// How fast NewQ's window on it is drawing, in whole frames a second,
+    /// while it draws continuously (None: no window there, or nothing moving).
+    /// A NewQ before 0.24.2 neither sends nor reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing_fps: Option<f32>,
+    /// Of that window's last frames, how many in a thousand were late (took
+    /// clearly longer than a refresh).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub late_permille: Option<u32>,
 }
 
 impl MonitorReport {
+    /// Its window draws at under half the rate its display refreshes at (60
+    /// at most is asked): a picture that stutters ("a slide show").
+    pub fn drawing_slowly(&self) -> bool {
+        self.drawing_fps
+            .is_some_and(|f| f < slow_below(self.refresh_hz))
+    }
     pub fn key(&self) -> crate::show::MonitorKey {
         crate::show::MonitorKey {
             identity: self.identity.clone(),
@@ -102,6 +117,17 @@ impl MonitorReport {
             hardware: self.hardware.clone(),
         }
     }
+}
+
+/// A window drawing at fewer frames a second than this, on a display that
+/// refreshes at `refresh_hz`, stutters visibly: half the refresh (at most 60
+/// is asked of a window, so 30 at most).
+pub fn slow_below(refresh_hz: Option<f32>) -> f32 {
+    refresh_hz
+        .filter(|r| r.is_finite() && *r >= 20.0)
+        .unwrap_or(60.0)
+        .min(60.0)
+        * 0.5
 }
 
 /// How a computer reaches the network, where that can be told.
@@ -449,6 +475,7 @@ mod tests {
                     hardware: Some("DEL:1".into()),
                     size: (1920, 1080),
                     refresh_hz: Some(60.0),
+                    ..Default::default()
                 }],
                 audio_devices: vec!["Speakers".into()],
                 disk_free: Some(5),

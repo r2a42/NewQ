@@ -77,6 +77,7 @@ fn monitor(name: &str) -> MonitorReport {
         hardware: None,
         size: (1920, 1080),
         refresh_hz: Some(60.0),
+        ..Default::default()
     }
 }
 
