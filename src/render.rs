@@ -117,6 +117,12 @@ pub fn output_fps(monitor: usize) -> Option<f32> {
         .then(|| FPS[i].load(Ordering::Relaxed) as f32 / 10.0)
 }
 
+/// The output window in render slot `slot`: how many of its last frames
+/// were late, in thousandths (0 when it isn't drawing).
+pub fn output_late(slot: usize) -> u32 {
+    LATE[slot % LATE.len()].load(Ordering::Relaxed)
+}
+
 /// The worst of the outputs: how much of the time frames are late, in
 /// thousandths, while something is playing.
 pub fn late_frames_permille() -> u32 {
@@ -139,6 +145,8 @@ struct FrameTimer {
     refresh: Option<Duration>,
     quickest: Option<Duration>,
     last_start: Option<Instant>,
+    /// How long the last frame took.
+    last_took: Duration,
     frames: u32,
     late: u32,
 }
@@ -156,13 +164,20 @@ impl FrameTimer {
     /// A frame that began at `start` took `took`. Returns the share of late
     /// frames, in thousandths, each time a window of frames has been seen.
     fn frame(&mut self, start: Instant, took: Duration) -> Option<u32> {
-        let gap = self.last_start.map(|l| start.duration_since(l));
+        // The time nothing was asked of the window: from the end of the last
+        // frame to the start of this one. (Not from start to start: a window
+        // whose every frame waits 250 ms for the system is drawing all the
+        // time, four frames a second, not showing a still picture.)
+        let idle = self
+            .last_start
+            .map(|l| start.duration_since(l).saturating_sub(self.last_took));
         self.last_start = Some(start);
-        if gap.is_none_or(|g| g > Duration::from_millis(150)) {
+        self.last_took = took;
+        if idle.is_none_or(|g| g > Duration::from_millis(150)) {
             // Not playing continuously: start counting again.
             self.frames = 0;
             self.late = 0;
-            return gap.map(|_| 0);
+            return idle.map(|_| 0);
         }
         let quickest = self.quickest.map_or(took, |q| q.min(took));
         self.quickest = Some(quickest);
@@ -301,6 +316,32 @@ fn output_loop(
     let mut timer = FrameTimer::with_refresh(refresh_of(&window));
     let late = &LATE[slot_index(slot)];
     let mut fps = crate::fps::FpsMeter::default();
+    let monitor = window
+        .current_monitor()
+        .and_then(|m| m.name())
+        .unwrap_or_else(|| "an unknown display".into());
+    // What the next log needs to tell a slow window's cause: the display, how
+    // it presents, and whether the window covers the display.
+    let modes = surface.get_capabilities(&gpu.adapter).present_modes;
+    if let Some(want) = present_override(&modes)
+        && want != config.present_mode
+    {
+        config.present_mode = want;
+        gpu.configure(&surface, &config);
+    }
+    log::info!(
+        "output {slot:?} on {monitor}: {}x{}, presents {:?} (offered {modes:?}), frame latency {}, display refresh {}, {}",
+        config.width,
+        config.height,
+        config.present_mode,
+        config.desired_maximum_frame_latency,
+        refresh_of(&window).map_or("unknown".into(), |r| format!(
+            "{:.2} Hz",
+            1.0 / r.as_secs_f64()
+        )),
+        placement(&window)
+    );
+    let mut waits = WaitLog::default();
     loop {
         let (size, groups, blend) = match mailbox.take() {
             OutputJob::Quit => break,
@@ -317,14 +358,32 @@ fn output_loop(
         let Some(frame) = acquire(&gpu, &surface, &config) else {
             continue;
         };
-        // The system holds this up while it rearranges displays; saying so
-        // explains a freeze that no part of NewQ's own work accounts for.
-        if asked.elapsed() > Duration::from_millis(100) {
+        // How long the graphics system made this window wait for a picture
+        // to draw into (`get_current_texture`: on Direct3D 12 the swap
+        // chain's frame-latency wait, which ends when the display or the
+        // compositor has taken an earlier frame). The system holds this up
+        // while it rearranges displays; a window held up at every frame is
+        // drawing a few frames a second.
+        let waited = asked.elapsed();
+        let refresh = timer.refresh.unwrap_or(Duration::from_micros(16_667));
+        if let Some(line) = waits.note(Instant::now(), waited, refresh) {
+            log::warn!("{line} on {slot:?} ({monitor}, {:?})", config.present_mode);
+        }
+        // Held up at most frames, on vsync: present without waiting for the
+        // display (the compositor shows the newest) and say so.
+        if waits.stuck()
+            && config.present_mode != wgpu::PresentMode::Mailbox
+            && modes.contains(&wgpu::PresentMode::Mailbox)
+            && std::env::var_os("NEWQ_PRESENT").is_none()
+        {
             log::warn!(
-                "waiting for a frame to draw on {:?} took {} ms",
-                slot,
-                asked.elapsed().as_millis()
+                "output {slot:?} on {monitor} waited for most of its frames: it presents without waiting for the display (Mailbox) from now on"
             );
+            config.present_mode = wgpu::PresentMode::Mailbox;
+            drop(frame);
+            gpu.configure(&surface, &config);
+            waits = WaitLog::default();
+            continue;
         }
         let view = frame.texture.create_view(&Default::default());
         let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
@@ -362,6 +421,115 @@ fn output_loop(
         }
     }
     late.store(0, Ordering::Relaxed);
+}
+
+/// `NEWQ_PRESENT=fifo|mailbox|immediate`: how output windows present, for
+/// trying a display that draws slowly (only a mode the window offers).
+fn present_override(offered: &[wgpu::PresentMode]) -> Option<wgpu::PresentMode> {
+    let want = match std::env::var("NEWQ_PRESENT")
+        .ok()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fifo" => wgpu::PresentMode::Fifo,
+        "mailbox" => wgpu::PresentMode::Mailbox,
+        "immediate" => wgpu::PresentMode::Immediate,
+        _ => return None,
+    };
+    offered.contains(&want).then_some(want)
+}
+
+/// Where the window is against its display, for the log.
+fn placement(w: &Window) -> String {
+    let inner = w.inner_size();
+    let pos = w.outer_position().ok();
+    let on = w.current_monitor();
+    let covers = match (&on, pos) {
+        (Some(m), Some(p)) => {
+            let (mp, ms) = (m.position(), m.size());
+            p.x <= mp.x && p.y <= mp.y && inner.width >= ms.width && inner.height >= ms.height
+        }
+        _ => false,
+    };
+    format!(
+        "window {}x{} at {:?}, {}{}",
+        inner.width,
+        inner.height,
+        pos.map(|p| (p.x, p.y)),
+        if covers {
+            "covers its display"
+        } else {
+            "does not cover its display"
+        },
+        if w.fullscreen().is_some() {
+            ", full screen"
+        } else {
+            ""
+        }
+    )
+}
+
+/// A window's waits for a picture to draw into: a line for the log at most
+/// once every `WaitLog::EVERY` (how many, the worst), and whether it has been
+/// held up at most of its recent frames.
+#[derive(Default)]
+struct WaitLog {
+    since: Option<Instant>,
+    count: u32,
+    worst: Duration,
+    /// The last frames: whether each waited past three refreshes.
+    recent: std::collections::VecDeque<bool>,
+}
+
+impl WaitLog {
+    const EVERY: Duration = Duration::from_secs(5);
+    /// A wait this long is worth saying.
+    const SAY_OVER: Duration = Duration::from_millis(100);
+    /// Frames looked at for `stuck`.
+    const RECENT: usize = 30;
+
+    /// Note a wait; the line to log, if one is due.
+    fn note(&mut self, now: Instant, waited: Duration, refresh: Duration) -> Option<String> {
+        self.recent.push_back(waited > refresh * 3);
+        if self.recent.len() > Self::RECENT {
+            self.recent.pop_front();
+        }
+        if waited > Self::SAY_OVER {
+            self.count += 1;
+            self.worst = self.worst.max(waited);
+        }
+        let due = self
+            .since
+            .is_none_or(|s| now.duration_since(s) >= Self::EVERY);
+        if self.count == 0 || !due {
+            return None;
+        }
+        let line = if self.count == 1 {
+            format!(
+                "waiting for a frame to draw took {} ms",
+                self.worst.as_millis()
+            )
+        } else {
+            format!(
+                "waiting for a frame to draw took over {} ms {} times in {} s, the worst {} ms",
+                Self::SAY_OVER.as_millis(),
+                self.count,
+                self.since
+                    .map_or(0, |s| now.duration_since(s).as_secs().max(1)),
+                self.worst.as_millis()
+            )
+        };
+        self.since = Some(now);
+        self.count = 0;
+        self.worst = Duration::ZERO;
+        Some(line)
+    }
+
+    /// Held up past three refreshes at most of its last frames.
+    fn stuck(&self) -> bool {
+        self.recent.len() >= Self::RECENT
+            && self.recent.iter().filter(|w| **w).count() * 3 >= Self::RECENT * 2
+    }
 }
 
 /// Which of the lateness counters a window's own slot uses.
@@ -935,6 +1103,47 @@ mod late_tests {
         }
         let share = run(&mut t, &slow).unwrap();
         assert!((450..=550).contains(&share), "{share}");
+    }
+
+    #[test]
+    fn a_window_that_waits_a_quarter_second_for_every_frame_is_all_late() {
+        // 0.24.1 on a laptop's built-in screen: each frame waited 250 to 290 ms
+        // for the system, back to back. That is four frames a second, every
+        // one late, not a still picture.
+        let mut t = FrameTimer::with_refresh(Some(Duration::from_micros(15_625)));
+        let slow: Vec<(u64, u64)> = (0..130).map(|i| (270 + i % 20, 268 + i % 20)).collect();
+        assert_eq!(run(&mut t, &slow), Some(1000));
+    }
+
+    #[test]
+    fn waits_are_said_once_every_five_seconds_with_a_count_and_the_worst() {
+        let mut w = WaitLog::default();
+        let t = Instant::now();
+        let refresh = Duration::from_micros(15_625);
+        let mut lines = Vec::new();
+        // Four frames a second for 12 s, each waiting about 260 ms.
+        for i in 0..48u64 {
+            let at = t + Duration::from_millis(i * 250);
+            let waited = Duration::from_millis(250 + i % 40);
+            if let Some(l) = w.note(at, waited, refresh) {
+                lines.push(l);
+            }
+        }
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "waiting for a frame to draw took 250 ms");
+        assert!(
+            lines[1].starts_with("waiting for a frame to draw took over 100 ms 20 times in 5 s"),
+            "{}",
+            lines[1]
+        );
+        assert!(w.stuck(), "held up at every frame");
+        // Quick frames say nothing and are not stuck.
+        let mut q = WaitLog::default();
+        for i in 0..100u64 {
+            let at = t + Duration::from_millis(i * 16);
+            assert!(q.note(at, Duration::from_millis(15), refresh).is_none());
+        }
+        assert!(!q.stuck());
     }
 
     #[test]

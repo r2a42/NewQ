@@ -87,6 +87,22 @@ impl Gpu {
         window: Arc<Window>,
     ) -> Result<(Gpu, wgpu::Surface<'static>)> {
         let surface = instance.create_surface(window)?;
+        // Every graphics card the system offers, for the log: on a laptop with
+        // two, a display wired to the other one is drawn across to it.
+        for a in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+            let i = a.get_info();
+            log::info!(
+                "graphics adapter offered: {} ({:?}, {:?}){}",
+                i.name,
+                i.device_type,
+                i.backend,
+                if a.is_surface_supported(&surface) {
+                    ", can draw to the main window"
+                } else {
+                    ""
+                }
+            );
+        }
         let adapter =
             pollster::block_on(
                 instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -99,7 +115,7 @@ impl Gpu {
                 }),
             )
             .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
-        log::info!("GPU: {:?}", adapter.get_info());
+        log::info!("GPU (the one used): {:?}", adapter.get_info());
         {
             let i = adapter.get_info();
             let _ = GPU_NAME.set(format!("{} ({:?}, {:?})", i.name, i.backend, i.device_type));
