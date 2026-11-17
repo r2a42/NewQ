@@ -959,6 +959,8 @@ impl App {
             self.net_test_autostart();
         }
         let primary = self.ui.net.me.primary;
+        self.ui.following_test =
+            self.play.mode == NetMode::Follower && self.play.measure.running().is_some();
         if let Some((run, rx)) = &self.play.tail
             && let Ok(text) = rx.try_recv()
         {

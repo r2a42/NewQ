@@ -655,6 +655,16 @@ fn every_computer_shows_its_address_and_way_and_a_vpn_is_said() {
             w.rects("net_rects")
         );
     }
+    // A follower's window is locked: its banner names the primary's address,
+    // and says when the primary runs a test that it plays along with.
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = locked_window(modern, f.clone());
+        assert!(w.find("net_rects", "locked_at: (10.0.0.1)").is_some());
+        assert!(w.find("net_rects", "following_test").is_none());
+        st.following_test = true;
+        w.settle(&mut show, &mut st);
+        assert!(w.find("net_rects", "following_test").is_some());
+    }
 }
 
 #[test]
