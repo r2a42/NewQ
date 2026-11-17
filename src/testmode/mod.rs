@@ -5,11 +5,14 @@
 //! the numbers, and `gui` is the window. Each level comes in two flavours:
 //! the cue tests (a lap of cues handing over to each other) and the timeline
 //! tests (`plan::build_timeline`, a timeline list and group that `timeline`
-//! drives, pressing GO where a pause waits for it).
+//! drives, pressing GO where a pause waits for it). The window asks for a
+//! length and what to test (`choice`); several parts ticked run one after
+//! another as one test (`sequence`).
 
 pub mod analysis;
 pub mod assets;
 pub mod bundle;
+pub mod choice;
 pub mod decode;
 pub mod feature;
 pub mod fleet;
@@ -22,6 +25,7 @@ pub mod net_judge;
 pub mod network;
 pub mod plan;
 pub mod selftest;
+pub mod sequence;
 pub mod session;
 pub mod syncflash;
 pub mod timeline;
@@ -65,8 +69,6 @@ pub enum Flavour {
 }
 
 impl Flavour {
-    pub const ALL: [Flavour; 2] = [Flavour::Cues, Flavour::Timeline];
-
     /// What the test is called: "Medium", or "Timeline medium".
     pub fn name(self, level: Level) -> String {
         match self {

@@ -1328,8 +1328,8 @@ never copy media by hand, and nothing waits for it.
 
 ### Every test on every computer
 
-On a primary with computers in step, every test of *Help ▸ Test mode* (*Short*,
-*Medium*, *Long*, their timeline versions and the *Debug test*) runs across the
+On a primary with computers in step, every test of *Help ▸ Test mode* (the *Cue
+list* and *Timeline* parts and *More ▸ Check every feature*) runs across the
 show network: the test show and its media go to every computer first (the window
 shows each one's progress), then the primary plays it and every computer plays
 along, each measuring itself as a computer alone would be measured (memory,
@@ -1343,15 +1343,16 @@ each a problem, never a silent pass. Your show comes back on every computer in
 every ending (done, Stop, Cancel, NewQ closed, a computer dropping out and
 returning).
 
-- **Show the test on** lists every monitor of this computer and of every
-  connected computer, grouped by computer with *All* and *None* for each. Every
+- **Show on** lists every screen of this computer and of every
+  connected computer, grouped by computer (*All* and *None* where a computer has
+  more than one). Every
   ticked screen is tested at once and shows the same picture, each in its own
   window on its own computer (so each really draws). A display computer's
   screens that aren't ticked stay black. The ticks are remembered on this
   computer; a computer or monitor that has gone is skipped until it is back.
 - **On the primary only**: the debug test's recording, streaming server and send
   cues (in a show network only the primary records, streams and sends), as the
-  report says. *Run muted* mutes every computer.
+  report says. *Muted* mutes every computer.
 - **The hardware decoding comparison** is about one computer's own decoding, so
   it runs on a computer alone: switch the show network off for a moment on the
   computer you want to compare.
@@ -1368,15 +1369,16 @@ returning).
 
 ### The network test
 
-Before a show, run the network test from the primary: *Help ▸ Test mode*, then
-*Start the network test* (about 2 minutes) or *Network soak* (the same, ten times
-over, about 20 minutes). It is offered on a primary with at least one computer
-*In step*; elsewhere the window says what it needs. No command line.
+Before a show, run the network test from the primary: *Help ▸ Test mode*, tick
+*Network* and press *Start*. It plays one lap at *Short* (about 2 minutes), three
+at *Medium* and ten at *Long* (about 20 minutes; this was the *Network soak*).
+The tick is offered on a primary with at least one computer *In step*; elsewhere
+it is greyed, with the reason under it. Tick *Cue list* or *Timeline* too and they
+run first, as one test. No command line.
 
 - **What it does.** It puts your show aside and plays a short show of its own on
-  the screens ticked under *Show the test on*, or with none ticked on every display
-  of every computer (your displays, and any monitor of a display computer the
-  show doesn't use yet): a Sync flash, a film with sound, a
+  the screens ticked under *Show on* (with a display computer's monitor the show
+  doesn't use yet given a display of its own): a Sync flash, a film with sound, a
   timeline with a seek, a pause, Stop All. First its media goes to every computer
   through the show network, and the window shows each computer's progress until
   all of it is there, and how fast it came.
@@ -1776,16 +1778,48 @@ displays from the *Displays* page of the settings.
 
 ## Test mode: try this computer before the show
 
-*Help ▸ Test mode…* plays a show of its own to find out how this computer copes, with
-nothing to type: no command line, no files to find. Choose *Short*, *Medium*, *Long*,
-their timeline versions (*Timeline short*, *Timeline medium*, *Timeline long*) or *Debug
-test* and press Start. The window remembers the test you chose last on this computer.
+*Help ▸ Test mode…* plays a show of its own to find out how this computer copes, then puts
+your show back exactly as it was. Nothing to type. The window asks, top to bottom:
 
-### The debug test: every kind of cue, and one file to send
+- **Length**: *Short* (a few minutes), *Medium* (about an hour) or *Long* (about 8 hours,
+  overnight). Each item says how long it takes with what is ticked, and the line under the
+  ticks says what will run (*Cue list, then timeline, then the network check: about 4
+  minutes*). *What does this do?* opens a few words on each part.
+- **Test**: *Cue list*, *Timeline*, *Network*, any of them. Ticked together they run one
+  after another (in that order) as one test. *Network* can be ticked only on the computer
+  that runs a show network, with another computer in step; otherwise it is greyed and the
+  line under it says why. In a show network the cue list and timeline play on every
+  computer too, and the window says so.
+- **Show on**: a tick per screen (never the one the main window is on), grouped under each
+  computer's name in a show network. Opening the window with none ticked ticks them all;
+  *Start* needs at least one. With only the main window's screen, the test shows in its
+  Preview pane.
+- **Sound**: the device the test plays on (your show's own audio outputs unless you choose
+  one) and *Muted*.
 
-About two minutes. It cuts its clips and pictures from the same free film and NASA
+Then *Start*. *More* holds what is rarely needed: *Download real films and pictures* (on
+unless you untick it; *Where from?* names the sources), *Heavier load for the graphics card*,
+*Check every feature* (the debug test, below) and *Compare hardware decoding* (below). The
+window remembers the length, the ticks, the screens and the sound on this computer.
+
+At *Medium* and *Long* the time is the whole run's: the network part plays 3 laps (Medium) or
+10 (Long), and the cue list and timeline parts share what is left of the hour or of the eight
+hours.
+
+**Several parts, one test.** While it plays the window says *Part 2 of 3: Timeline*. The result
+gives the overall verdict first, then a section per part: its verdict, each computer's line
+(its figures folded under it) and what it found (folded). Your show is put aside once, before
+the first part, and back once, after the last: also when you stop it, when a part can't go on
+and when NewQ is closed. A part stopped or failed ends the run; the parts after it are listed
+as not run. The one zip has one `report.txt` and one `events.log` with a section per part; a
+file two parts both wrote has the part's name in front (`cue-list-stats.csv`,
+`timeline-stats.csv`).
+
+### Check every feature (the debug test), and one file to send
+
+Under *More*. About two minutes. It cuts its clips and pictures from the same free film and NASA
 pictures the longer tests use (the Sintel trailer and three Apollo photographs, about 12 MB,
-downloaded once if *Use a real film and pictures* is ticked; otherwise it makes plain ones
+downloaded once if *Download real films and pictures* is ticked; otherwise it makes plain ones
 on this computer with FFmpeg), plays a show that uses every kind
 of cue, one part at a time, and checks that each part *did what it should*: not only
 that NewQ didn't fall over.
@@ -1849,18 +1883,17 @@ and ends with 0 (passed), 1 (a part failed) or 2 (it could not run). The recordi
 the server need the app's graphics and are listed as not run. CI runs it on Linux,
 Windows and macOS and keeps the zip.
 
-### The longer tests
+### The cue list part
 
-| Test | Length | What it does |
-|---|---|---|
-| Short | about a minute | One lap of everything: clips at 24, 30 and 60 fps, a slide show of large pictures, layers with effects and a moving picture, a 5.1 trailer with a downmix. |
-| Medium | 30 minutes to 2 hours (1 by default) | The same lap with a second trailer through sound effects, round and round: the run that finds a slow leak. |
-| Long | 4 to 12 hours (8 by default) | A longer lap with H.265, a 30 MB 10-second clip, six large pictures, more effects and a burst of twenty quick cues, for an overnight run. |
+| Length | What it plays |
+|---|---|
+| Short | One lap of everything (about a minute): clips at 24, 30 and 60 fps, a slide show of large pictures, layers with effects and a moving picture, a 5.1 trailer with a downmix. |
+| Medium | The same lap with a second trailer through sound effects, round and round: the run that finds a slow leak. |
+| Long | A longer lap with H.265, a 30 MB 10-second clip, six large pictures, more effects and a burst of twenty quick cues, for an overnight run. |
 
-### The timeline tests
+### The timeline part
 
-*Timeline short*, *Timeline medium* and *Timeline long* (the second row of choices) play
-timelines instead of a run of cues, for the same lengths as Short, Medium and Long, with
+The *Timeline* tick plays timelines instead of a run of cues, with
 the same downloads (less the 5.1 trailer), displays, sound, mute, memory guard, report
 and zip. The show is a timeline list called *Programme*, which the window's cue list shows
 as its tracks while it plays, and from Medium on a timeline group, *Interval*, in the main
@@ -1868,13 +1901,13 @@ list after it. Nobody needs to touch anything: where a pause waits for GO, the t
 presses GO after 5 seconds (through the same GO the transport has); it leaves a loop
 after three passes, just after the loop has gone back so every lap is the same length.
 
-| Test | A lap | What it plays |
+| Length | A lap | What it plays |
 |---|---|---|
-| Timeline short | about a minute, once | A title over *Big Buck Bunny* (60 fps) butted to *Sintel* (24 fps), *Jellyfish* (29.97 fps) crossfading over the overlap, the Apollo 11 picture under a caption, the Blue Marble brought up from unseen by a fade cue, a pause GO ends, a closing title and a Stop that fades it all out; the Sintel trailer's sound under it all. |
-| Timeline medium | about 2½ minutes, round and round | All that, plus a third track (a picture in the picture with speed and opacity keyframes), the Sintel trailer split in two (held over the join) and frozen by a pause that holds everything, Curiosity on Mars also on the second display (with two displays ticked; the second shows Earthrise under it), the Jellyfish looping until GO, a Jump to a marker past a part, then the *Interval* group (a still pushing in under a title, a pause, a film). |
-| Timeline long | about 3 minutes, round and round | All that, plus a 25 Mbit/s film under four pictures at once (two H.265) each with an effect, Mars blurring, the trailer's sound through EQ and reverb, Mars and Andromeda in the group, and four seeks a lap while it runs (to a marker and back, twice). |
+| Short | about a minute, once | A title over *Big Buck Bunny* (60 fps) butted to *Sintel* (24 fps), *Jellyfish* (29.97 fps) crossfading over the overlap, the Apollo 11 picture under a caption, the Blue Marble brought up from unseen by a fade cue, a pause GO ends, a closing title and a Stop that fades it all out; the Sintel trailer's sound under it all. |
+| Medium | about 2½ minutes, round and round | All that, plus a third track (a picture in the picture with speed and opacity keyframes), the Sintel trailer split in two (held over the join) and frozen by a pause that holds everything, Curiosity on Mars also on the second display (with two displays ticked; the second shows Earthrise under it), the Jellyfish looping until GO, a Jump to a marker past a part, then the *Interval* group (a still pushing in under a title, a pause, a film). |
+| Long | about 3 minutes, round and round | All that, plus a 25 Mbit/s film under four pictures at once (two H.265) each with an effect, Mars blurring, the trailer's sound through EQ and reverb, Mars and Andromeda in the group, and four seeks a lap while it runs (to a marker and back, twice). |
 
-With two or more displays ticked, the timeline tests give each display its own picture
+With two or more displays ticked, the timeline part gives each display its own picture
 instead of mirroring the first. What they measure, on top of the usual figures:
 
 | Finding | Problem when | Tracked when |
@@ -1940,33 +1973,23 @@ lap checks and the figures around then aren't a fair measure. (On a Mac, an hour
 69 minutes by the wall clock because the Mac slept and woke briefly, and one lap took twice as
 long.)
 
-**Which display.** *Show the test on* lists the connected displays (not the one the main
-window is on, which an output never covers; in a show network, every computer's, see
-[Every test on every computer](#every-test-on-every-computer)). Tick one or more and the test plays on them,
-all showing the same picture, in place of your show's own displays while it runs; tick none
-and it uses the displays your show has, or the main window's Preview pane if it has none.
-The choice is remembered for this computer, the comparison below uses it too, and
-`system.txt` of each run says where the test was shown.
+**Which display.** The ticked screens all show the same picture, in place of your show's own
+displays while the test runs (in a show network, see
+[Every test on every computer](#every-test-on-every-computer)). The comparison below uses them
+too, and `system.txt` of each run says where the test was shown.
 
-**Which sound.** *Sound* chooses the audio device the test plays on (your show's own
-audio outputs while it runs are replaced by that one device; your show is not changed), and
-*Run muted* plays the whole test without a sound: everything is still decoded, mixed and put
-through its effects, so it costs what it would with sound, and only the device is sent
-silence (the meters stay flat). Both are remembered for this computer and written in
-`system.txt`. When the run is long enough to judge memory and nothing is rising, the window and
-the report say *Memory and cache use steady during this test*; a run too short to tell says
-nothing about leaks.
+**Which sound.** The chosen device takes the place of your show's own audio outputs while the
+test runs (your show is not changed). *Muted* plays it without a sound: everything is still
+decoded, mixed and put through its effects, so it costs what it would with sound. When the run is
+long enough to judge memory and nothing is rising, the window and the report say *Memory and
+cache use steady during this test*.
 
-**Heavier load.** *Heavier load for the graphics card* adds three more whole-screen films to
-the layered part of every lap, blended one over another at partial opacity, each with an effect
-(sharpen, vignette, negative, a blur) and a changing speed, so the graphics card draws many
-more covered pixels and the processor decodes up to seven films at once. The lap is no longer
-and nothing more is downloaded. Late frames in this test are where the computer's limit is, so
-the report lists them as a note, not a problem; run the ordinary test to see whether the
-computer copes with a normal show. (A 4K film was not added: the free ones are gigabytes.)
+**Heavier load.** *More ▸ Heavier load for the graphics card* adds three more whole-screen
+films, each with an effect, to the cue list part's layered lap, so up to seven films decode at
+once. Late frames then show where the computer's limit is, and are a note, not a problem.
 
-**Does hardware decoding help here?** *Compare hardware decoding* (below the Start
-button) plays a wall of four 4K H.264 clips twice, about two minutes in all, with
+**Does hardware decoding help here?** *More ▸ Compare hardware decoding* (on a computer
+alone) plays a wall of four 4K H.264 clips twice, about two minutes in all, with
 hardware decoding off and then on. It makes the 4K clip from the downloaded film with
 an H.264 encoder this computer has (x264, else the system's), measures the processor
 use of NewQ and FFmpeg, late frames and the longest stall of each trial, and says
@@ -1980,7 +2003,7 @@ saved over it, and its autosave copy is left alone. A show with unsaved changes 
 start a test (save first), and the test show can't be edited or saved. If you close
 NewQ mid-test it ends properly first.
 
-**The log.** Each run has a folder `test-mode/runs/DATE_TIME_LEVEL` in the log folder
+**The log.** Each run has a folder `test-mode/runs/DATE_TIME_PARTS` in the log folder
 (and a zip of it beside it, as above) holding `report.txt` (verdict, findings, laps, measurements, media and credits),
 `stats.csv` (a row every 2 to 15 seconds), `laps.csv`, `events.log` (what the engine
 said, with times), `system.txt` (OS, processor, graphics, displays, sound, FFmpeg) and

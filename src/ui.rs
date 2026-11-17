@@ -401,6 +401,9 @@ pub struct UiState {
     pub test: crate::testmode::TestMode,
     /// A test show is in place of the show: nothing may be saved, opened or edited.
     pub test_locked: bool,
+    /// Between the parts of a Test Mode run: the user's show stays put aside
+    /// (see `TestCarry`).
+    pub test_carry: TestCarry,
     /// The timeline editor: whether it is wanted, what it shows, its zoom and drags.
     pub timeline: timeline::EditorState,
 }
@@ -417,6 +420,20 @@ pub struct TestStash {
     show_mode: bool,
     cue_filter: String,
     lists: crate::engine::ListState,
+}
+
+/// The parts of one Test Mode run (`testmode::sequence`) put the user's show
+/// aside once and back once. While `keep` is set, `end_test` keeps the stash
+/// here (`held`) and leaves the test show in place; the next `begin_test`
+/// swaps in its test show and hands the same stash back. `release_test`
+/// puts the show back for good.
+#[derive(Default)]
+pub struct TestCarry {
+    /// A part is running that more parts follow.
+    pub keep: bool,
+    held: Option<TestStash>,
+    /// A run of several parts is under way: a part makes no zip of its own.
+    pub parts_run: bool,
 }
 
 /// Cues being dragged in the cue list.
@@ -496,6 +513,8 @@ impl UiState {
         test_show: Show,
     ) -> TestStash {
         engine.stop_all(0.0);
+        // A part after the first: the user's show is already put aside.
+        let held = self.test_carry.held.take();
         let stash = TestStash {
             show: std::mem::replace(show, test_show),
             selected: self.selected.take(),
@@ -522,12 +541,18 @@ impl UiState {
         self.confirm_edit_mode = false;
         self.capture_hotkey = None;
         self.test_locked = true;
-        stash
+        // (The stash just made holds the last part's test show: let it go.)
+        held.unwrap_or(stash)
     }
 
-    /// Put the show back as `begin_test` found it.
+    /// Put the show back as `begin_test` found it; between the parts of a run
+    /// (`TestCarry::keep`), keep it put aside and the test show in place.
     pub fn end_test(&mut self, show: &mut Show, engine: &mut Engine, stash: TestStash) {
         engine.stop_all(0.0);
+        if self.test_carry.keep {
+            self.test_carry.held = Some(stash);
+            return;
+        }
         *show = stash.show;
         engine.restore_list_state(stash.lists);
         self.selected = stash.selected;
@@ -544,6 +569,19 @@ impl UiState {
         self.test_locked = false;
         self.scrubs.clear();
         self.json_stale = true;
+    }
+
+    /// Whether the user's show is put aside between the parts of a run.
+    pub fn holds_test(&self) -> bool {
+        self.test_carry.held.is_some()
+    }
+
+    /// Put back for good a show kept between the parts of a run (if one is).
+    pub fn release_test(&mut self, show: &mut Show, engine: &mut Engine) {
+        self.test_carry.keep = false;
+        if let Some(stash) = self.test_carry.held.take() {
+            self.end_test(show, engine, stash);
+        }
     }
 
     /// Why a test can't start now, if it can't. In a show network the tests
@@ -12346,6 +12384,46 @@ mod tests {
     }
 
     #[test]
+    fn the_parts_of_one_run_put_the_show_aside_once_and_back_once() {
+        let (mut show, mut e, mut st) = running();
+        let before = serde_json::to_string(&show).unwrap();
+        st.cue_filter = "x".into();
+        let part = |name: &str| {
+            let mut s = Show {
+                name: name.into(),
+                ..Default::default()
+            };
+            let c = s.make_cue(CueType::Wait, None, 0);
+            s.cues.push(c);
+            s
+        };
+        // The first part: more follow, so its end keeps the show aside.
+        st.test_carry.keep = true;
+        let stash = st.begin_test(&mut show, &mut e, part("one"));
+        st.end_test(&mut show, &mut e, stash);
+        assert!(st.holds_test() && st.test_locked);
+        assert_eq!(show.name, "one", "the test show stays in place");
+        // The last part gets the same stash back from its own begin.
+        st.test_carry.keep = false;
+        let stash = st.begin_test(&mut show, &mut e, part("two"));
+        assert!(!st.holds_test());
+        assert_eq!(show.name, "two");
+        st.end_test(&mut show, &mut e, stash);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        assert!(!st.test_locked && st.cue_filter == "x");
+        // A run that ends between parts is put back by `release_test`.
+        st.test_carry.keep = true;
+        let stash = st.begin_test(&mut show, &mut e, part("three"));
+        st.end_test(&mut show, &mut e, stash);
+        st.release_test(&mut show, &mut e);
+        assert!(!st.holds_test() && !st.test_locked && !st.test_carry.keep);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        // Nothing held: nothing to do.
+        st.release_test(&mut show, &mut e);
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+    }
+
+    #[test]
     fn quitting_during_a_test_does_not_ask_to_save_the_test_show() {
         let (show, _e, mut st) = running();
         st.dirty = true;
@@ -12792,27 +12870,28 @@ mod tests {
 
     #[test]
     fn test_mode_opens_on_the_test_last_chosen_on_this_computer() {
-        use crate::testmode::{Flavour, Level};
+        use crate::testmode::Level;
+        use crate::testmode::choice::Parts;
         let (mut show, mut e, mut st) = running();
         assert_eq!(st.test.level, Level::Short);
+        assert_eq!(st.test.parts, Parts::default());
+        let ticks = Parts {
+            cue_list: false,
+            timeline: true,
+            network: true,
+        };
         st.prefs.test_pick = crate::prefs::TestPick {
             level: Level::Long,
-            flavour: Flavour::Timeline,
-            debug: false,
+            parts: ticks,
         };
         apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
         assert!(st.test.open);
-        assert_eq!(
-            (st.test.level, st.test.flavour),
-            (Level::Long, Flavour::Timeline)
-        );
-        assert!(!st.test.debug);
-        assert_eq!(st.test.minutes, Level::Long.default_minutes());
+        assert_eq!((st.test.level, st.test.parts), (Level::Long, ticks));
         apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
-        // The debug test, as chosen.
-        st.prefs.test_pick.debug = true;
+        // Another choice made meanwhile is the one chosen on opening again.
+        st.prefs.test_pick.level = Level::Medium;
         apply(Action::ToggleTestMode, &mut show, &mut e, &mut st);
-        assert!(st.test.debug);
+        assert_eq!(st.test.level, Level::Medium);
     }
 
     #[test]

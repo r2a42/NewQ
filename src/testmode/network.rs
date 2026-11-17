@@ -55,7 +55,8 @@ pub const MEDIA: [&str; 5] = [
     "sintel_trailer",
     "sintel_sound",
 ];
-/// The soak plays the lap this many times (about 20 minutes).
+/// The Long network test (once the soak) plays the lap this many times
+/// (about 20 minutes).
 pub const SOAK_LAPS: u32 = 10;
 /// The name the test show goes by (a follower doesn't keep it as its show).
 pub const SHOW_NAME: &str = "NewQ network test";
@@ -135,9 +136,9 @@ pub fn lap() -> Vec<(f64, Act)> {
 /// A lap lasts this long (s).
 pub const LAP_SECS: f64 = 115.0;
 
-/// The script of the whole test: one lap, or `SOAK_LAPS` of them.
-pub fn script(soak: bool) -> Vec<(f64, Act)> {
-    let laps = if soak { SOAK_LAPS } else { 1 };
+/// The script of the whole test: `laps` laps (at least one).
+pub fn script(laps: u32) -> Vec<(f64, Act)> {
+    let laps = laps.max(1);
     let mut v = Vec::new();
     for n in 0..laps {
         for (t, a) in lap() {
@@ -471,7 +472,8 @@ pub type Ready = (HashMap<&'static str, Resolved>, Result<PathBuf, String>);
 
 /// The media being made ready on this computer.
 pub struct NetPrep {
-    pub soak: bool,
+    /// Laps to play (one; more at the longer lengths).
+    pub laps: u32,
     pub fetch: Fetch,
     flash: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>>,
     cancel: Arc<AtomicBool>,
@@ -484,7 +486,7 @@ pub struct NetPrep {
 }
 
 impl NetPrep {
-    pub fn start(ff: Ffmpeg, log_dir: &Path, soak: bool, download: bool) -> NetPrep {
+    pub fn start(ff: Ffmpeg, log_dir: &Path, laps: u32, download: bool) -> NetPrep {
         let wanted: Vec<&'static Asset> = MEDIA.iter().filter_map(|id| assets::find(id)).collect();
         let dir = assets::cache_dir(log_dir);
         let fetch = assets::start(ff.clone(), dir.clone(), wanted.clone(), download);
@@ -502,7 +504,7 @@ impl NetPrep {
             *flash.lock() = Some(Err("no thread to make it on".into()));
         }
         NetPrep {
-            soak,
+            laps,
             fetch,
             flash,
             cancel,
@@ -567,7 +569,8 @@ pub enum Stage {
 
 /// The network test under way.
 pub struct NetRun {
-    pub soak: bool,
+    /// Laps of the script.
+    pub laps: u32,
     pub stage: Stage,
     pub started: Instant,
     pub folder: PathBuf,
@@ -598,7 +601,7 @@ impl NetRun {
     /// computers are those of the network now (`st.net`).
     pub fn launch(
         built: Built,
-        soak: bool,
+        laps: u32,
         log_dir: &Path,
         wanted: Vec<&'static Asset>,
         show: &mut Show,
@@ -608,11 +611,7 @@ impl NetRun {
         if let Some(why) = refusal(st) {
             return Err(why);
         }
-        let folder = super::session::run_folder_named(
-            log_dir,
-            if soak { "network-soak" } else { "network-test" },
-            unix_now(),
-        );
+        let folder = super::session::run_folder_named(log_dir, &folder_name(laps), unix_now());
         std::fs::create_dir_all(&folder).map_err(|e| {
             format!(
                 "Can't make the folder for the test's files ({}): {e}. Nothing was changed.",
@@ -632,7 +631,7 @@ impl NetRun {
         let stash = st.begin_test(show, engine, built.show);
         engine.set_log_tap(true);
         let mut run = NetRun {
-            soak,
+            laps,
             stage: Stage::WaitingForMedia,
             started,
             folder,
@@ -641,7 +640,7 @@ impl NetRun {
             cues: built.cues,
             notes: built.notes,
             displays: built.displays,
-            script: script(soak),
+            script: script(laps),
             next: 0,
             fleet,
             stop: false,
@@ -651,11 +650,7 @@ impl NetRun {
             drawing_looked: None,
             _awake: awake,
             wanted,
-            planned: if soak {
-                f64::from(SOAK_LAPS) * LAP_SECS
-            } else {
-                LAP_SECS
-            },
+            planned: f64::from(laps.max(1)) * LAP_SECS,
         };
         let line = format!(
             "Network test begins with {} ({} files, {}); waiting for the media to reach them",
@@ -886,7 +881,7 @@ fn megabytes(b: u64) -> String {
 /// What the window shows of a network test that has ended.
 #[derive(Clone, Debug)]
 pub struct NetDone {
-    pub soak: bool,
+    pub laps: u32,
     pub computers: Vec<net_judge::ComputerVerdict>,
 }
 
@@ -965,11 +960,7 @@ pub fn finish(
     }
     let about = format!(
         "{} from {} with {}. Media: {}.",
-        if run.soak {
-            "Network soak"
-        } else {
-            "Network test"
-        },
+        title(run.laps),
         st.net.name,
         run.fleet.names(),
         run.fleet.transfers_line()
@@ -1010,19 +1001,20 @@ pub fn finish(
         let _ = f.flush();
     }
     Done {
+        parts: Vec::new(),
         compare: None,
         full: None,
         computers: Vec::new(),
         network: Some(NetDone {
-            soak: run.soak,
+            laps: run.laps,
             computers: judged.computers.clone(),
         }),
         flavour: super::Flavour::Cues,
-        bundle: super::bundle::Bundle::start(
+        bundle: super::session::part_bundle(
+            st,
             run.folder.clone(),
             run.log_dir.clone(),
             matches!(end, End::Quit),
-            super::bundle::TIDY,
         ),
         level: super::Level::Short,
         verdict: judged.verdict,
@@ -1034,6 +1026,24 @@ pub fn finish(
         laps: 0,
         elapsed,
         ended: end,
+    }
+}
+
+/// What the window and the report call a network test of `laps` laps.
+pub fn title(laps: u32) -> String {
+    if laps <= 1 {
+        "Network test".into()
+    } else {
+        format!("Network test, {laps} laps")
+    }
+}
+
+/// Its run folder's name.
+fn folder_name(laps: u32) -> String {
+    if laps <= 1 {
+        "network-test".into()
+    } else {
+        format!("network-{laps}-laps")
     }
 }
 

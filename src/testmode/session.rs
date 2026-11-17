@@ -40,15 +40,11 @@ pub struct TestMode {
     pub decode_secs: u64,
     /// The heavier lap for the graphics card (remembered by the window).
     pub heavy: bool,
-    /// The window has the debug test (the full check) chosen, not a level.
-    pub debug: bool,
+    /// What the window has ticked to test (`choice`).
+    pub parts: super::choice::Parts,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
     // ---- The network test (`network`) ----
-    /// The window has the network test chosen.
-    pub network: bool,
-    /// The network soak (about 20 minutes) rather than the test (about 2).
-    pub soak: bool,
     /// From the computers of the show network (the app puts them here).
     pub net_in: Vec<(crate::net::node::NodeId, crate::net::measure::NetTest)>,
     /// For the computers (the app sends them; None: to all).
@@ -62,6 +58,8 @@ pub struct TestMode {
     /// network test's own, which keeps its own), from the moment the test
     /// show is put in place until the test is done.
     fleet: Option<Box<super::fleet::Fleet>>,
+    /// Several parts run one after another as one test (`sequence`).
+    seq: Option<Box<super::sequence::Sequence>>,
 }
 
 impl Default for TestMode {
@@ -74,14 +72,13 @@ impl Default for TestMode {
             download: true,
             decode_secs: super::decode::TRIAL_SECS,
             heavy: false,
-            debug: false,
+            parts: super::choice::Parts::default(),
             notice: None,
-            network: false,
-            soak: false,
             net_in: Vec::new(),
             net_out: Vec::new(),
             phase: Phase::Idle,
             fleet: None,
+            seq: None,
         }
     }
 }
@@ -557,6 +554,9 @@ pub struct Done {
     pub full: Option<Vec<(&'static str, usize, usize, usize)>>,
     /// It was the network test: each computer's verdict.
     pub network: Option<super::network::NetDone>,
+    /// A run of several parts: each part's own account, in order, and
+    /// those that didn't run (`sequence`). Empty for a test of one part.
+    pub parts: Vec<super::sequence::PartDone>,
     /// Another test across a show network: each other computer's verdict.
     pub computers: Vec<super::net_judge::ComputerVerdict>,
     /// The one zip of everything, being made or made (see `bundle`).
@@ -607,15 +607,6 @@ impl Level {
             Level::Short => 0,
             Level::Medium => 60,
             Level::Long => 480,
-        }
-    }
-
-    /// The lengths the window offers, in minutes (none for the Short test).
-    pub fn lengths(self) -> &'static [u32] {
-        match self {
-            Level::Short => &[],
-            Level::Medium => &[30, 60, 120],
-            Level::Long => &[240, 480, 720],
         }
     }
 
@@ -726,11 +717,15 @@ impl TestMode {
         }
     }
 
-    /// Choose a test: its level and flavour.
+    /// Choose a test of one part: its level and flavour.
+    #[cfg(test)]
     pub fn choose(&mut self, level: Level, flavour: Flavour) {
-        self.debug = false;
-        self.network = false;
         self.flavour = flavour;
+        self.parts = super::choice::Parts {
+            cue_list: flavour == Flavour::Cues,
+            timeline: flavour == Flavour::Timeline,
+            network: false,
+        };
         self.set_level(level);
     }
 
@@ -738,8 +733,7 @@ impl TestMode {
     pub fn pick(&self) -> crate::prefs::TestPick {
         crate::prefs::TestPick {
             level: self.level,
-            flavour: self.flavour,
-            debug: self.debug,
+            parts: self.parts,
         }
     }
 
@@ -748,8 +742,126 @@ impl TestMode {
         if self.busy() || self.pick() == pick {
             return;
         }
-        self.choose(pick.level, pick.flavour);
-        self.debug = pick.debug;
+        self.set_level(pick.level);
+        self.parts = pick.parts;
+    }
+
+    /// Where a run of several parts is: the part playing (from 0), of how
+    /// many, and which.
+    pub fn sequence(&self) -> Option<(usize, usize, super::choice::Part)> {
+        self.seq.as_ref().map(|s| s.at())
+    }
+
+    /// Start what the window chose: the parts of `plan` one after another,
+    /// as one test (one part alone runs as it always has).
+    pub fn start_plan(
+        &mut self,
+        ff: Ffmpeg,
+        log_dir: &Path,
+        plan: Vec<super::choice::PartPlan>,
+        displays: Vec<DisplayChoice>,
+        sound: SoundChoice,
+    ) {
+        if self.busy() || plan.is_empty() {
+            return;
+        }
+        let first = plan[0];
+        let go = super::sequence::Go {
+            ff,
+            log_dir: log_dir.to_path_buf(),
+            displays,
+            sound,
+            heavy: self.heavy,
+        };
+        self.seq =
+            (plan.len() > 1).then(|| Box::new(super::sequence::Sequence::new(plan, go.clone())));
+        self.start_part(first, &go);
+    }
+
+    /// Begin one part.
+    fn start_part(&mut self, p: super::choice::PartPlan, go: &super::sequence::Go) {
+        self.level = p.level;
+        match p.part.flavour() {
+            Some(flavour) => {
+                self.flavour = flavour;
+                self.minutes = p.minutes;
+                self.start(
+                    go.ff.clone(),
+                    &go.log_dir,
+                    go.displays.clone(),
+                    go.sound.clone(),
+                    go.heavy,
+                );
+            }
+            None => self.start_network(go.ff.clone(), &go.log_dir, p.laps, go.displays.clone()),
+        }
+    }
+
+    /// A run of several parts, after each look: the user's show kept aside
+    /// between parts, the next part begun once one has finished, and the
+    /// whole run's account once the last is done or one ended it early.
+    fn sequence_step(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+        let Some(seq) = &mut self.seq else {
+            // (Never left aside with no run to bring it back.)
+            if st.holds_test() && !self.busy() {
+                st.release_test(show, engine);
+            }
+            st.test_carry.parts_run = false;
+            return;
+        };
+        match &self.phase {
+            Phase::Done(_) => {
+                let Phase::Done(done) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+                    return;
+                };
+                let finished = done.ended == End::Finished;
+                seq.record(*done);
+                if finished
+                    && !seq.quit
+                    && let Some(next) = seq.next_part()
+                {
+                    let go = seq.go.clone();
+                    self.notice = None;
+                    #[cfg(test)]
+                    if let Some(made) = seq.made.pop_front() {
+                        self.launch_made(made, &go, show, engine, st);
+                        return;
+                    }
+                    self.start_part(next, &go);
+                    return;
+                }
+                self.end_sequence(show, engine, st, None);
+            }
+            Phase::Idle => {
+                // The part ended before it began (cancelled, refused).
+                let why = self
+                    .notice
+                    .clone()
+                    .unwrap_or_else(|| "it did not start".into());
+                self.end_sequence(show, engine, st, Some(why));
+            }
+            _ => {}
+        }
+    }
+
+    /// The run of several parts is over: the user's show back (if a part
+    /// left it aside) and the one account.
+    fn end_sequence(
+        &mut self,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+        unstarted: Option<String>,
+    ) {
+        st.release_test(show, engine);
+        st.test_carry.parts_run = false;
+        let Some(seq) = self.seq.take() else {
+            return;
+        };
+        if let Some(done) = seq.finish(unstarted) {
+            self.notice = None;
+            self.phase = Phase::Done(Box::new(done));
+        }
     }
 
     /// Begin: make the media ready (downloading what is missing).
@@ -835,6 +947,9 @@ impl TestMode {
 
     /// Stop what is under way: cancel the preparation, or end the test.
     pub fn stop(&mut self) {
+        if let Some(s) = &mut self.seq {
+            s.stopped = true;
+        }
         match &mut self.phase {
             Phase::Preparing(p) => p.fetch.cancel(),
             Phase::Running(r) => r.stop = true,
@@ -853,16 +968,79 @@ impl TestMode {
         &mut self,
         ff: Ffmpeg,
         log_dir: &Path,
-        soak: bool,
+        laps: u32,
         displays: Vec<DisplayChoice>,
     ) {
         if self.busy() {
             return;
         }
         self.notice = None;
-        let mut prep = super::network::NetPrep::start(ff, log_dir, soak, self.download);
+        let mut prep = super::network::NetPrep::start(ff, log_dir, laps, self.download);
         prep.displays = displays;
         self.phase = Phase::NetPrep(Box::new(prep));
+    }
+
+    /// Start a run of several parts with their shows already made (the
+    /// tests of the test): the first is launched now, the others in turn.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_plan(
+        &mut self,
+        ff: Ffmpeg,
+        plan: Vec<super::choice::PartPlan>,
+        mut made: Vec<super::sequence::Made>,
+        log_dir: &Path,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+    ) {
+        let go = super::sequence::Go {
+            ff,
+            log_dir: log_dir.to_path_buf(),
+            displays: Vec::new(),
+            sound: SoundChoice::default(),
+            heavy: false,
+        };
+        let first = made.remove(0);
+        let mut seq = super::sequence::Sequence::new(plan, go.clone());
+        seq.made = made.into();
+        self.seq = Some(Box::new(seq));
+        st.test_carry.keep = true;
+        st.test_carry.parts_run = true;
+        self.launch_made(first, &go, show, engine, st);
+    }
+
+    #[cfg(test)]
+    fn launch_made(
+        &mut self,
+        made: super::sequence::Made,
+        go: &super::sequence::Go,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+    ) {
+        use super::sequence::Made;
+        match made {
+            Made::Cues(built) => self.launch_across(
+                go.ff.clone(),
+                *built,
+                &go.log_dir,
+                Level::Short,
+                show,
+                engine,
+                st,
+            ),
+            Made::Network(built, script, planned) => {
+                match self.launch_network(*built, &go.log_dir, show, engine, st) {
+                    Ok(()) => {
+                        if let Some(r) = self.network_run_mut() {
+                            r.shorten(script, planned);
+                        }
+                    }
+                    Err(e) => self.notice = Some(e),
+                }
+            }
+        }
     }
 
     /// Start the network test with a show already made (the tests of the test).
@@ -875,8 +1053,7 @@ impl TestMode {
         engine: &mut Engine,
         st: &mut UiState,
     ) -> Result<(), String> {
-        let run =
-            super::network::NetRun::launch(built, false, log_dir, Vec::new(), show, engine, st)?;
+        let run = super::network::NetRun::launch(built, 1, log_dir, Vec::new(), show, engine, st)?;
         self.phase = Phase::Network(Box::new(run));
         Ok(())
     }
@@ -911,6 +1088,10 @@ impl TestMode {
 
     /// `update`, at the primary's shared time `now` (the tests set it).
     pub fn update_at(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState, now: f64) {
+        // Between the parts of a run the user's show stays aside: a part
+        // that more follow keeps it when it ends, and makes no zip of its own.
+        st.test_carry.keep = self.seq.as_ref().is_some_and(|s| s.more_follow());
+        st.test_carry.parts_run = self.seq.is_some();
         let mut inbox = std::mem::take(&mut self.net_in);
         // A test across the show network: what the computers sent, and
         // telling one that came back to measure.
@@ -934,6 +1115,7 @@ impl TestMode {
             _ => {}
         }
         self.update_phase(show, engine, st, now, inbox);
+        self.sequence_step(show, engine, st);
         if let Some(f) = &mut self.fleet {
             self.net_out.append(&mut f.out);
             let said = std::mem::take(&mut f.said);
@@ -1065,7 +1247,7 @@ impl TestMode {
                     super::network::build(show, &res, flash.as_deref().ok(), &peers, &p.displays);
                 match super::network::NetRun::launch(
                     built,
-                    p.soak,
+                    p.laps,
                     &p.log_dir,
                     p.wanted.clone(),
                     show,
@@ -1299,6 +1481,21 @@ impl TestMode {
     /// The program is closing: end a test properly so the show is back and
     /// the files are complete.
     pub fn shutdown(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+        // Nothing is kept aside for a next part: the show comes back now.
+        st.test_carry.keep = false;
+        if let Some(s) = &mut self.seq {
+            s.quit = true;
+        }
+        self.shutdown_part(show, engine, st);
+        if self.seq.is_some() {
+            self.sequence_step(show, engine, st);
+        }
+        if self.seq.is_some() || st.holds_test() {
+            self.end_sequence(show, engine, st, Some("NewQ was closed".into()));
+        }
+    }
+
+    fn shutdown_part(&mut self, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
         // The computers are told it is over (their show comes back with ours).
         let now = crate::net::time::local_now();
         let mut fleet = self.fleet.take();
@@ -1497,6 +1694,21 @@ pub(super) fn run_folder_named(log_dir: &Path, name: &str, secs: i64) -> PathBuf
         .join(format!("{}_{name}", utc_stamp(secs)))
 }
 
+/// A test's zip: made now, or, for a part of a longer run, with the whole
+/// run's (`sequence`).
+pub(super) fn part_bundle(
+    st: &UiState,
+    folder: PathBuf,
+    log_dir: PathBuf,
+    wait: bool,
+) -> super::bundle::Bundle {
+    if st.test_carry.parts_run {
+        super::bundle::Bundle::with_the_run()
+    } else {
+        super::bundle::Bundle::start(folder, log_dir, wait, super::bundle::TIDY)
+    }
+}
+
 fn compare_done(
     result: CompareResult,
     findings: Vec<Finding>,
@@ -1508,6 +1720,7 @@ fn compare_done(
     use super::decode::Advice;
     let verdict = Verdict::of(&findings);
     Done {
+        parts: Vec::new(),
         full: None,
         network: None,
         computers: Vec::new(),
@@ -2110,18 +2323,19 @@ fn finish(
         (_, Verdict::ProblemsFound) => "Problems were found.".into(),
     };
     Done {
+        parts: Vec::new(),
         compare: None,
         full: None,
         network: None,
         computers,
         flavour: run.flavour,
-        bundle: super::bundle::Bundle::start(
+        bundle: part_bundle(
+            st,
             run.folder.clone(),
             run.log_path
                 .parent()
                 .map_or_else(crate::crash::log_dir, Path::to_path_buf),
             matches!(end, End::Quit),
-            super::bundle::TIDY,
         ),
         level: run.level,
         verdict,

@@ -19,15 +19,33 @@ impl Bundle {
         self.0.lock().clone()
     }
 
-    /// Make the zip for the run in `folder`. On a thread unless `wait` (the
-    /// program is closing and there is no later).
+    /// A part of a longer run: its files go in the run's one zip.
+    pub fn with_the_run() -> Bundle {
+        Bundle(Arc::new(parking_lot::Mutex::new(Some(Err(
+            "it goes in the whole run's zip".into(),
+        )))))
+    }
+
     /// Make the zip (on a thread unless `wait`). With `tidy`, the run's folder
     /// is removed once the zip holds it, so the zip is the one thing a test
     /// leaves; a zip that fails leaves the folder as it is.
     pub fn start(folder: PathBuf, log_dir: PathBuf, wait: bool, tidy: bool) -> Bundle {
+        Bundle::start_after(|| {}, folder, log_dir, wait, tidy)
+    }
+
+    /// `start`, doing `first` on the same thread before the zip is made
+    /// (gathering a run's parts into its folder, `sequence::gather`).
+    pub fn start_after(
+        first: impl FnOnce() + Send + 'static,
+        folder: PathBuf,
+        log_dir: PathBuf,
+        wait: bool,
+        tidy: bool,
+    ) -> Bundle {
         let bundle = Bundle::default();
         let slot = bundle.0.clone();
         let work = move || {
+            first();
             crate::logging::flush();
             let result = make(&folder, &log_dir);
             match &result {
