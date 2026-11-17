@@ -12,6 +12,7 @@ pub mod assets;
 pub mod bundle;
 pub mod decode;
 pub mod feature;
+pub mod fleet;
 pub mod full;
 pub mod gui;
 pub mod hitches;

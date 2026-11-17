@@ -1136,6 +1136,20 @@ Open it on a computer with projectors or screens and that is all you do there:
   *Identify* shows the computer's name big on its screen for a few seconds;
   *Release* sends it back to waiting. On the other computer the page and the
   status bar say which primary it follows.
+- **Addresses.** Each computer's row shows the address it is connected on and
+  the kind of network (*Wired · 192.168.1.20*; the port only when it isn't the
+  usual 47820); one offline shows its last known address. The page shows this
+  computer's own addresses, one per network connection, so you can read them
+  out, and a follower's page names its primary with its address.
+- **The local network, not a VPN.** A computer with a VPN on (or Wi-Fi as well
+  as a cable) is heard on several addresses; NewQ uses the best: the same wired
+  network as this computer first, then Wi-Fi, a VPN last, and never a VPN while
+  a local way exists. The shared clock and the media use the same address. The
+  page says when a VPN is on, here or on another computer (*A VPN is on: it can
+  slow the show network. NewQ is using the wired network (192.168.1.10).*), and
+  when a computer is connected through one. A VPN that inspects local traffic
+  can still slow the local network itself: turn it off for the show if the
+  round trips on the page are more than a few milliseconds.
 - **Displays and sound on other computers.** On the primary, *Displays* offers
   each computer's monitors beside its own: a display given another computer's
   monitor opens no window on this one (its picture is still in the preview).
@@ -1176,9 +1190,21 @@ never copy media by hand, and nothing waits for it.
   isn't mounted) can't reach anyone: its displays say *Media not found* and the
   primary's media manager lists it (*Settings ▸ Media ▸ Open the media
   manager…*), where it is found as ever.
-- **Black instead of cards.** *Settings ▸ Media ▸ Show transfer cards on the
-  displays*: off, a display shows black where the card would be, for a show in
-  front of an audience.
+- **Cards on display computers' screens.** *Settings ▸ Show network ▸ Cards on
+  display computers' screens* has the two cards side by side, both kept in the
+  show so every computer follows them:
+  - *Show a card while they wait*: the waiting card is a display computer's
+    name, address and how it stands, so it can be found and set up. *Until the
+    show is ready* (the default) shows it until the computer is first in step
+    with its media; *Until ready, and on screens the show doesn't use* keeps it
+    on unused screens; *Never (black)* never shows it once the computer has been
+    added to a show, so one that restarts mid-show comes up black (a computer no
+    show has added yet still shows it, or nobody could find it). Once a computer
+    is ready, a screen with nothing playing is black between cues whatever is
+    chosen: the card never comes back when a cue ends. *Identify* always shows
+    the name.
+  - *Show transfer cards on the displays*: off, a display shows black where
+    *Media transferring* would be, for a show in front of an audience.
 - **The library.** *Settings ▸ Media ▸ Folders to keep on every computer*: add a
   folder of content you might use (at load-in, all of it). It goes to every
   computer after the files the show uses, so a file is already everywhere when
@@ -1300,6 +1326,46 @@ never copy media by hand, and nothing waits for it.
 - **Only the primary sends** (above): a send cue or MIDI out fires once, from the
   primary.
 
+### Every test on every computer
+
+On a primary with computers in step, every test of *Help ▸ Test mode* (*Short*,
+*Medium*, *Long*, their timeline versions and the *Debug test*) runs across the
+show network: the test show and its media go to every computer first (the window
+shows each one's progress), then the primary plays it and every computer plays
+along, each measuring itself as a computer alone would be measured (memory,
+processor, FFmpeg processes, the frame rate of each output, stalls, sound
+dropouts) and how it keeps to the primary (clock, round trip, each GO's lead, how
+far apart, corrections). While it runs the window has a line per computer: in
+step or not, each output's frames a second, and anything wrong. The result has a
+part per computer and one verdict; an output that draws only a few frames a
+second, a computer that stalls, and a computer whose measurements never came are
+each a problem, never a silent pass. Your show comes back on every computer in
+every ending (done, Stop, Cancel, NewQ closed, a computer dropping out and
+returning).
+
+- **Show the test on** lists every monitor of this computer and of every
+  connected computer, grouped by computer with *All* and *None* for each. Every
+  ticked screen is tested at once and shows the same picture, each in its own
+  window on its own computer (so each really draws). A display computer's
+  screens that aren't ticked stay black. The ticks are remembered on this
+  computer; a computer or monitor that has gone is skipped until it is back.
+- **On the primary only**: the debug test's recording, streaming server and send
+  cues (in a show network only the primary records, streams and sends), as the
+  report says. *Run muted* mutes every computer.
+- **The hardware decoding comparison** is about one computer's own decoding, so
+  it runs on a computer alone: switch the show network off for a moment on the
+  computer you want to compare.
+- **Time limits**: a computer that stops answering while the test waits for it
+  (30 s), all the media there but a computer not in step (90 s), media that never
+  arrives (20 minutes) each end the wait with a sentence saying what was waited
+  for; your show is put back.
+- **What the test adds** on each computer: the screens ticked for it, a look at
+  memory and processor every 2 s on a thread of its own, and a short report over
+  the network every second. Nothing is drawn on the outputs for the test, so the
+  frame rates are what a show would get.
+- A computer that follows (a display or backup computer) can't start a test: its
+  window says tests are started from the computer that runs the show.
+
 ### The network test
 
 Before a show, run the network test from the primary: *Help ▸ Test mode*, then
@@ -1308,8 +1374,9 @@ over, about 20 minutes). It is offered on a primary with at least one computer
 *In step*; elsewhere the window says what it needs. No command line.
 
 - **What it does.** It puts your show aside and plays a short show of its own on
-  every display of every computer (your displays, and any monitor of a display
-  computer the show doesn't use yet): a Sync flash, a film with sound, a
+  the screens ticked under *Show the test on*, or with none ticked on every display
+  of every computer (your displays, and any monitor of a display computer the
+  show doesn't use yet): a Sync flash, a film with sound, a
   timeline with a seek, a pause, Stop All. First its media goes to every computer
   through the show network, and the window shows each computer's progress until
   all of it is there, and how fast it came.
@@ -1874,7 +1941,8 @@ lap checks and the figures around then aren't a fair measure. (On a Mac, an hour
 long.)
 
 **Which display.** *Show the test on* lists the connected displays (not the one the main
-window is on, which an output never covers). Tick one or more and the test plays on them,
+window is on, which an output never covers; in a show network, every computer's, see
+[Every test on every computer](#every-test-on-every-computer)). Tick one or more and the test plays on them,
 all showing the same picture, in place of your show's own displays while it runs; tick none
 and it uses the displays your show has, or the main window's Preview pane if it has none.
 The choice is remembered for this computer, the comparison below uses it too, and

@@ -136,7 +136,7 @@ pub enum NetEvent {
 }
 
 /// A computer as the page shows it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PeerView {
     pub id: NodeId,
     pub name: String,

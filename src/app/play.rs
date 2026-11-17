@@ -70,6 +70,9 @@ pub(super) struct Playing {
     pub vouched: HashSet<NodeId>,
     /// The card drawn on each monitor (its words and texture).
     pub cards: HashMap<usize, (Card, std::sync::Arc<crate::gpu::LayerTexture>)>,
+    /// This display computer has been in step with its show, its media here:
+    /// its screens are black between cues from then on (`card_shows`).
+    ready: bool,
     // ---- The network test (stage 6) ----
     measure: crate::net::measure::Measurer,
     /// The end of this computer's log, being read for the primary.
@@ -79,6 +82,13 @@ pub(super) struct Playing {
     /// `NEWQ_NET_TEST_AUTOSTART` was looked at (and acted on).
     autostarted: bool,
     auto_ready: Option<Instant>,
+    // ---- Every test across the network (`net::measure_local`) ----
+    /// What this follower measures of itself during a test.
+    local: crate::net::measure_local::LocalMeter,
+    /// Its rows of measurements (on a thread of their own).
+    local_stats: Option<crate::stats::StatsLog>,
+    /// The primary's test asked for its sound muted here.
+    test_muted: bool,
 }
 
 impl Playing {
@@ -581,6 +591,38 @@ pub(super) fn display_windows(
     }
 }
 
+/// Whether a display computer is ready (`Playing::ready`) after this look:
+/// it stays ready through anything but being released. Pure, for the tests.
+pub(super) fn still_ready(
+    was: bool,
+    adopted: bool,
+    standing: Option<Standing>,
+    media_here: bool,
+) -> bool {
+    adopted && (was || (standing == Some(Standing::InStep) && media_here))
+}
+
+/// Whether a display computer's screen shows its card: always while it waits
+/// for a primary to add it (else nobody could find it); once added, as the
+/// show's setting says, and never on a screen in use once it is ready. Pure,
+/// for the tests.
+pub(super) fn card_shows(
+    setting: crate::show::WaitCards,
+    adopted: bool,
+    ready: bool,
+    has_display: bool,
+) -> bool {
+    use crate::show::WaitCards;
+    if !adopted {
+        return true;
+    }
+    match setting {
+        WaitCards::Never => false,
+        WaitCards::UntilReady => !ready,
+        WaitCards::AlsoUnused => !ready || !has_display,
+    }
+}
+
 /// The card's words: the computer's name, its address, who runs the show and
 /// where it stands. Pure, for the tests.
 pub(super) fn card_text(
@@ -716,7 +758,17 @@ impl App {
         }
         let clock = self.net.clock().now();
         let standing = self.play.standing(clock.is_some_and(|n| n.locked));
-        if has_display && standing == Some(Standing::InStep) {
+        // Ready once in step with its media here; from then on a screen with
+        // nothing playing is black, whatever comes and goes (a cue ending
+        // can put it out of step for a heartbeat: the card must not flash
+        // up in front of an audience).
+        let adopted = v.me.adopted();
+        let media_here = self.ui.media.own.as_ref().is_none_or(|own| {
+            let used = &own.progress.used;
+            used.bytes_here >= used.bytes_wanted
+        });
+        self.play.ready = still_ready(self.play.ready, adopted, standing, media_here);
+        if !card_shows(self.show.wait_cards, adopted, self.play.ready, has_display) {
             return None;
         }
         let address = self.own_address();
@@ -794,6 +846,18 @@ impl App {
                     let _ = crate::crumbs::take_stalls();
                 }
                 self.play.measure.begin(run, start);
+                // ---- and how it copes itself ----
+                if self.play.local.running() != Some(run) {
+                    self.play.local_stats = Some(crate::stats::StatsLog::in_memory(
+                        Duration::from_secs(crate::net::measure_local::ROW_EVERY),
+                        crate::crash::log_dir().join("newq.log"),
+                    ));
+                }
+                self.play.local.begin(run, start);
+            }
+            NetTest::Mute { run: _, muted } => {
+                self.play.test_muted = muted;
+                crate::media::audio::set_muted(muted);
             }
             NetTest::End { run } => {
                 let now = self.net.clock().now().map_or(local_now(), |n| n.time);
@@ -805,6 +869,16 @@ impl App {
                         false,
                     );
                 }
+                let (outputs, device, ram) = self.local_facts();
+                if let Some(r) = self.play.local.end(run, now, outputs, device, ram) {
+                    self.net.tell(
+                        Some(from),
+                        Msg::NetTest(Box::new(NetTest::Local(Box::new(r)))),
+                        false,
+                    );
+                }
+                self.play.local_stats = None;
+                self.unmute_test();
                 self.play.measuring_since = None;
                 // The end of the log, read on a thread (it can be large).
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -857,7 +931,7 @@ impl App {
             self.ui.test.download = false;
             self.ui
                 .test
-                .start_network(ff, &crate::crash::log_dir(), false);
+                .start_network(ff, &crate::crash::log_dir(), false, Vec::new());
         }
     }
 
@@ -909,6 +983,9 @@ impl App {
         {
             self.play.measure = Default::default();
             self.play.measuring_since = None;
+            self.play.local = Default::default();
+            self.play.local_stats = None;
+            self.unmute_test();
             return;
         }
         let clock = self.net.clock();
@@ -945,12 +1022,123 @@ impl App {
                 false,
             );
         }
+        // ---- How it copes itself (Test Mode's own measurements) ----
+        let engine = &self.engine;
+        if let Some(stats) = &mut self.play.local_stats
+            && let Some(row) = stats.frame(Instant::now(), || crate::stats::Inputs {
+                playing: engine.active.len(),
+                started_total: engine.started_total(),
+                layers: engine.picture_layers(),
+                late_permille: crate::render::late_frames_permille(),
+                audio_permille: engine
+                    .audio
+                    .device_status(None)
+                    .map_or(0, |d| d.load_permille),
+                audio_errors: crate::media::audio::stream_errors(),
+            })
+        {
+            self.play.local.sample(now, &row);
+        }
+        self.play
+            .local
+            .errors(now, crate::media::audio::stream_errors());
+        let (outputs, device, ram) = self.local_facts();
+        if let (Some(p), Some(r)) = (
+            primary,
+            self.play.local.report(now, outputs, device, ram, false),
+        ) {
+            self.net.tell(
+                Some(p),
+                Msg::NetTest(Box::new(NetTest::Local(Box::new(r)))),
+                false,
+            );
+        }
+    }
+
+    /// This computer's outputs' frame rates, its working sound device and
+    /// its memory, for its own measurements.
+    fn local_facts(
+        &self,
+    ) -> (
+        Vec<crate::net::measure_local::OutputRate>,
+        Option<String>,
+        u64,
+    ) {
+        (
+            crate::testmode::fleet::own_rates(&self.show, &self.ui),
+            crate::testmode::hitches::working_device(&self.engine),
+            self.play.ram_mb(),
+        )
+    }
+
+    /// The sound back on, if a test muted it here.
+    fn unmute_test(&mut self) {
+        if std::mem::take(&mut self.play.test_muted) {
+            crate::media::audio::set_muted(false);
+        }
+    }
+}
+
+impl Playing {
+    /// This computer's memory in MB (looked at once).
+    fn ram_mb(&self) -> u64 {
+        static RAM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *RAM.get_or_init(|| {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_memory();
+            sys.total_memory() >> 20
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn once_ready_a_display_computers_screens_stay_black_between_cues() {
+        use crate::show::WaitCards;
+        // Getting the show: the card, on every screen.
+        let mut ready = false;
+        for st in [
+            Standing::WaitingForClock,
+            Standing::WaitingForShow,
+            Standing::GettingReady,
+        ] {
+            ready = still_ready(ready, true, Some(st), true);
+            assert!(!ready);
+            assert!(card_shows(WaitCards::UntilReady, true, ready, true));
+        }
+        // In step but its media still coming: still the card.
+        assert!(!still_ready(ready, true, Some(Standing::InStep), false));
+        ready = still_ready(ready, true, Some(Standing::InStep), true);
+        assert!(ready);
+        // A cue ends: out of step for a heartbeat, then back. Black throughout.
+        for st in [
+            Standing::GettingReady,
+            Standing::InStep,
+            Standing::GettingReady,
+        ] {
+            ready = still_ready(ready, true, Some(st), true);
+            assert!(
+                !card_shows(WaitCards::UntilReady, true, ready, true),
+                "{st:?}"
+            );
+            assert!(!card_shows(WaitCards::UntilReady, true, ready, false));
+        }
+        // "On screens the show doesn't use too": those keep it.
+        assert!(card_shows(WaitCards::AlsoUnused, true, ready, false));
+        assert!(!card_shows(WaitCards::AlsoUnused, true, ready, true));
+        // Never: black from the first moment once it is a show's computer...
+        assert!(!card_shows(WaitCards::Never, true, false, true));
+        assert!(!card_shows(WaitCards::Never, true, false, false));
+        // ...but a computer no primary has added shows it, so it can be found.
+        for w in WaitCards::ALL {
+            assert!(card_shows(w, false, false, true));
+        }
+        // Released: ready no more.
+        assert!(!still_ready(true, false, None, true));
+    }
 
     #[test]
     fn a_display_card_says_who_and_where_and_how_it_stands() {

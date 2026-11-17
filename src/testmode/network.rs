@@ -28,25 +28,24 @@
 
 use super::analysis::{Finding, Severity, Verdict};
 use super::assets::{self, Asset, Fetch, Resolved};
-use super::net_judge::{self, ComputerNotes, Judged, Transfer};
+use super::net_judge::{self, ComputerNotes, Judged};
+use super::plan::DisplayChoice;
 use super::session::{Done, End, unix_now};
 use crate::awake::KeepAwake;
 use crate::engine::Engine;
 use crate::media::ffmpeg::Ffmpeg;
 use crate::net::hub::{NetView, PeerView};
 use crate::net::measure::NetTest;
-use crate::net::media::manager::{MediaReport, MediaView};
 use crate::net::node::NodeId;
-use crate::net::store::paths::path_key;
 use crate::show::*;
 use crate::timeline::TimelineKey;
 use crate::ui::{TestStash, UiState};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// The media the test plays (with the Sync flash, made here).
 pub const MEDIA: [&str; 5] = [
@@ -56,18 +55,12 @@ pub const MEDIA: [&str; 5] = [
     "sintel_trailer",
     "sintel_sound",
 ];
-/// How long the media may take to reach every computer before the test gives up.
-pub const MEDIA_LIMIT: Duration = Duration::from_secs(20 * 60);
-/// After the end, the computers' last reports are waited for this long.
-pub const ENDING_LIMIT: f64 = 8.0;
 /// The soak plays the lap this many times (about 20 minutes).
 pub const SOAK_LAPS: u32 = 10;
 /// The name the test show goes by (a follower doesn't keep it as its show).
 pub const SHOW_NAME: &str = "NewQ network test";
 /// The list that holds the user's media, never played.
 pub const KEPT_LIST: &str = "Your show's media (kept, not played)";
-/// A computer silent this long is said in the window to be away (s).
-const AWAY_SECS: f64 = 3.0;
 
 /// Whether `show` is the network test's own (a follower doesn't keep it for
 /// its next start).
@@ -188,6 +181,7 @@ pub fn build(
     res: &HashMap<&'static str, Resolved>,
     flash: Option<&Path>,
     peers: &[PeerView],
+    chosen: &[DisplayChoice],
 ) -> Built {
     let mut show = original.clone();
     show.cues.clear();
@@ -196,8 +190,10 @@ pub fn build(
     show.name = SHOW_NAME.into();
     show.own_layers = true;
     let mut notes = Vec::new();
-    // A display for each monitor of a computer that has none on it.
-    for p in peers.iter().filter(|p| p.ours) {
+    // The monitors ticked in the window, else every monitor: the user's
+    // displays and one for each monitor of a computer that has none on it.
+    super::plan::use_displays_as(&mut show, chosen, false);
+    for p in peers.iter().filter(|p| p.ours && chosen.is_empty()) {
         let Some(s) = &p.status else { continue };
         for (i, m) in s.monitors.iter().enumerate() {
             let used = show.outputs.iter().any(|o| {
@@ -465,56 +461,8 @@ pub fn build(
     }
 }
 
-// ----- Media on the computers ---------------------------------------------------
-
-/// Where a computer's copy of the test's files stands.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MediaState {
-    /// It hasn't the primary's list of them yet.
-    Waiting,
-    /// On their way: bytes still to come, of all the test's.
-    Coming {
-        left: u64,
-        total: u64,
-    },
-    Here,
-}
-
-/// From a computer's media report: does it have the test's `files` of the
-/// version `current` the primary serves?
-pub fn media_state(
-    r: Option<&MediaReport>,
-    current: Option<&str>,
-    files: &[(String, u64)],
-) -> MediaState {
-    let total: u64 = files.iter().map(|(_, s)| s).sum();
-    let Some(r) = r else {
-        return MediaState::Waiting;
-    };
-    if current.is_none() || r.progress.manifest_id.as_deref() != current {
-        return MediaState::Waiting;
-    }
-    let keys: Vec<String> = files.iter().map(|(f, _)| path_key(f)).collect();
-    let left: u64 = r
-        .lacking
-        .iter()
-        .filter(|l| keys.contains(&path_key(&l.path)))
-        .map(|l| l.total.saturating_sub(l.done).max(1))
-        .sum();
-    if left == 0 {
-        MediaState::Here
-    } else {
-        MediaState::Coming { left, total }
-    }
-}
-
-/// A computer's transfer, as the test watched it.
-#[derive(Clone, Copy, Debug, Default)]
-struct Watched {
-    /// When it first had the list, and how much was then still to come.
-    first: Option<(Instant, u64)>,
-    done: Option<Instant>,
-}
+#[cfg(test)]
+pub use super::fleet::{MediaState, media_state};
 
 // ----- Preparing ----------------------------------------------------------------
 
@@ -531,6 +479,8 @@ pub struct NetPrep {
     pub log_dir: PathBuf,
     pub wanted: Vec<&'static Asset>,
     pub since: Instant,
+    /// The monitors ticked in the window (none: every monitor).
+    pub displays: Vec<DisplayChoice>,
 }
 
 impl NetPrep {
@@ -560,6 +510,7 @@ impl NetPrep {
             log_dir: log_dir.to_path_buf(),
             wanted,
             since: Instant::now(),
+            displays: Vec::new(),
         }
     }
 
@@ -614,45 +565,23 @@ pub enum Stage {
     Ending { since: f64 },
 }
 
-/// One computer taking part.
-pub struct Computer {
-    pub id: NodeId,
-    pub notes: ComputerNotes,
-    /// Shared time of the last report (None: none yet).
-    last_heard: Option<f64>,
-    watched: Watched,
-    pub media: MediaState,
-    pub log_tail: Option<String>,
-}
-
 /// The network test under way.
 pub struct NetRun {
     pub soak: bool,
-    pub run: u64,
     pub stage: Stage,
     pub started: Instant,
-    /// The shared time the script began (Playing on).
-    pub start: Option<f64>,
     pub folder: PathBuf,
     log_dir: PathBuf,
     stash: Option<TestStash>,
     pub cues: Cues,
-    pub files: Vec<(String, u64)>,
     pub notes: Vec<String>,
     pub displays: Vec<String>,
     script: Vec<(f64, Act)>,
     next: usize,
-    /// The media version served when the test began (the test's is the next).
-    before: Option<String>,
-    pub computers: BTreeMap<NodeId, Computer>,
-    /// When the primary's list of the test's media was first seen.
-    version_seen: Option<Instant>,
-    /// The shared time of the first look.
-    first_look: Option<f64>,
-    /// When each computer was last told to measure (shared time).
-    told: HashMap<NodeId, f64>,
-    /// For the computers: messages the app sends (`TestMode::net_out`).
-    pub out: Vec<(Option<NodeId>, NetTest)>,
+    /// The computers taking part (`fleet`).
+    pub fleet: super::fleet::Fleet,
+    /// This computer's own outputs' frame rates.
+    pub outputs: super::fleet::OutputWatch,
     pub stop: bool,
     events: Option<std::io::BufWriter<std::fs::File>>,
     hitches: super::hitches::Hitches,
@@ -695,61 +624,29 @@ impl NetRun {
         let events = std::fs::File::create(folder.join("events.log"))
             .ok()
             .map(std::io::BufWriter::new);
-        let computers: BTreeMap<NodeId, Computer> = st
-            .net
-            .peers
-            .iter()
-            .filter(|p| p.ours && p.connected)
-            .map(|p| {
-                let mut notes = ComputerNotes::new(&p.name);
-                if let Some(s) = &p.status {
-                    notes.link = s.link;
-                    notes.refresh_hz = s
-                        .monitors
-                        .iter()
-                        .filter_map(|m| m.refresh_hz)
-                        .reduce(f32::max);
-                }
-                (
-                    p.id,
-                    Computer {
-                        id: p.id,
-                        notes,
-                        last_heard: None,
-                        watched: Watched::default(),
-                        media: MediaState::Waiting,
-                        log_tail: None,
-                    },
-                )
-            })
-            .collect();
-        let _ = std::fs::write(folder.join("computers.txt"), computers_text(&st.net));
+        let fleet = super::fleet::Fleet::new(st, built.files.clone(), false);
+        let _ = std::fs::write(
+            folder.join("computers.txt"),
+            super::fleet::computers_text(&st.net),
+        );
         let awake = KeepAwake::new("NewQ is running a network test");
-        let before = st.media.current.clone();
         let started = Instant::now();
         let stash = st.begin_test(show, engine, built.show);
         engine.set_log_tap(true);
         let mut run = NetRun {
             soak,
-            run: crate::net::node::random_u64(),
             stage: Stage::WaitingForMedia,
             started,
-            start: None,
             folder,
             log_dir: log_dir.to_path_buf(),
             stash: Some(stash),
             cues: built.cues,
-            files: built.files,
             notes: built.notes,
             displays: built.displays,
             script: script(soak),
             next: 0,
-            before,
-            computers,
-            told: HashMap::new(),
-            first_look: None,
-            version_seen: None,
-            out: Vec::new(),
+            fleet,
+            outputs: Default::default(),
             stop: false,
             events,
             hitches: super::hitches::Hitches::new(started),
@@ -763,16 +660,11 @@ impl NetRun {
                 LAP_SECS
             },
         };
-        let names: Vec<&str> = run
-            .computers
-            .values()
-            .map(|c| c.notes.name.as_str())
-            .collect();
         let line = format!(
             "Network test begins with {} ({} files, {}); waiting for the media to reach them",
-            names.join(", "),
-            run.files.len(),
-            megabytes(run.files.iter().map(|f| f.1).sum())
+            run.fleet.names(),
+            run.fleet.files.len(),
+            megabytes(run.fleet.files.iter().map(|f| f.1).sum())
         );
         run.log(&line);
         for n in run.notes.clone() {
@@ -794,9 +686,18 @@ impl NetRun {
         log::info!("network test: {text}");
     }
 
+    /// What the fleet has to say, into events.log.
+    fn write_said(&mut self) {
+        for (t, line) in std::mem::take(&mut self.fleet.said) {
+            if let Some(f) = &mut self.events {
+                let _ = writeln!(f, "[{t:>9.3}] {line}");
+            }
+        }
+    }
+
     /// Seconds played (Playing on).
     pub fn played(&self, now: f64) -> f64 {
-        self.start.map_or(0.0, |s| (now - s).max(0.0))
+        self.fleet.played(now)
     }
 
     /// One look, at shared time `now` (the primary's own clock), with the
@@ -821,36 +722,30 @@ impl NetRun {
             }
         }
         for (from, m) in inbox {
-            self.take(from, m, now, &st.net);
+            self.fleet.take(from, m, now, &st.net);
         }
+        let played = self.played(now);
+        self.outputs
+            .note(played, &super::fleet::own_rates(show, st));
+        self.fleet.keep_up(st, now);
+        self.write_said();
         match self.stage {
             Stage::WaitingForMedia => {
                 if self.stop {
                     return Some(End::Stopped);
                 }
-                let first = *self.first_look.get_or_insert(now);
+                let first = self.fleet.first_look(now);
                 // (A moment for the show to reach the computers first.)
-                if self.media_ready(st) && now - first >= 2.0 {
-                    let line = self.transfers_line();
-                    self.log(&format!("All here. {line}"));
-                    self.begin(now);
-                } else if self.started.elapsed() > MEDIA_LIMIT {
-                    let lacking: Vec<String> = self
-                        .computers
-                        .values()
-                        .filter(|c| c.media != MediaState::Here)
-                        .map(|c| c.notes.name.clone())
-                        .collect();
-                    return Some(End::Failed(format!(
-                        "the test's media hadn't reached {} after {} minutes",
-                        lacking.join(", "),
-                        MEDIA_LIMIT.as_secs() / 60
-                    )));
+                if self.fleet.media_ready(st) && now - first >= 2.0 {
+                    self.stage = Stage::Playing;
+                    self.fleet.begin(now);
+                    self.write_said();
+                } else if let Some(why) = self.fleet.waited_too_long(st, self.started) {
+                    return Some(End::Failed(why));
                 }
                 None
             }
             Stage::Playing => {
-                let played = self.played(now);
                 // This computer's screens, once a second, as the others
                 // report theirs.
                 if self.drawing_looked.is_none_or(|t| now - t >= 1.0) {
@@ -862,155 +757,22 @@ impl NetRun {
                     self.next += 1;
                     self.act(show, engine, act, played);
                 }
-                // A computer that came back (or joined) is told again.
-                let begin = NetTest::Begin {
-                    run: self.run,
-                    start: self.start.unwrap_or(now),
-                };
-                for p in st.net.peers.iter().filter(|p| p.ours && p.connected) {
-                    let told = self.told.get(&p.id).copied();
-                    let quiet = self
-                        .computers
-                        .get(&p.id)
-                        .and_then(|c| c.last_heard)
-                        .is_none_or(|h| now - h > AWAY_SECS);
-                    if quiet && told.is_none_or(|t| now - t > AWAY_SECS) {
-                        self.told.insert(p.id, now);
-                        self.out.push((Some(p.id), begin.clone()));
-                    }
-                }
                 if self.stop || self.next >= self.script.len() && played >= self.planned {
                     self.finish_playing(engine, now);
                 }
                 None
             }
-            Stage::Ending { since } => {
-                let all_in = self.computers.iter().all(|(id, c)| {
-                    (c.notes.ended && c.log_tail.is_some())
-                        || !st.net.peers.iter().any(|p| p.id == *id && p.connected)
-                });
-                (all_in || now - since > ENDING_LIMIT).then_some(if self.stop {
-                    End::Stopped
-                } else {
-                    End::Finished
-                })
-            }
-        }
-    }
-
-    /// Every computer has the test's files (and the test show).
-    fn media_ready(&mut self, st: &UiState) -> bool {
-        let m: &MediaView = &st.media;
-        let current = m
-            .current
-            .as_deref()
-            .filter(|c| Some(*c) != self.before.as_deref());
-        let hashing = m.hashing.is_some();
-        let now = Instant::now();
-        if current.is_some() && !hashing && self.version_seen.is_none() {
-            self.version_seen = Some(now);
-        }
-        let version_seen = self.version_seen.unwrap_or(now);
-        let mut all = !self.computers.is_empty();
-        for c in self.computers.values_mut() {
-            let p = st.net.peers.iter().find(|p| p.id == c.id);
-            let report = p
-                .and_then(|p| p.status.as_ref())
-                .and_then(|s| s.media_progress.as_deref());
-            let state = if hashing {
-                MediaState::Waiting
+            Stage::Ending { .. } => self.fleet.all_in(st, now).then_some(if self.stop {
+                End::Stopped
             } else {
-                media_state(report, current, &self.files)
-            };
-            if c.watched.first.is_none() && state != MediaState::Waiting {
-                let left = match state {
-                    MediaState::Coming { left, .. } => left,
-                    _ => 0,
-                };
-                c.watched.first = Some((now, left));
-            }
-            if state == MediaState::Here && c.watched.done.is_none() {
-                c.watched.done = Some(now);
-                let (t0, left) = c.watched.first.unwrap_or((now, 0));
-                // All there at the first look: it came within the time since
-                // the primary listed it (or had it from an earlier test).
-                let total: u64 = self.files.iter().map(|f| f.1).sum();
-                c.notes.transfer = Some(if left == 0 {
-                    Transfer {
-                        bytes: total,
-                        secs: now.duration_since(version_seen).as_secs_f64().max(0.1),
-                        within: true,
-                    }
-                } else {
-                    Transfer {
-                        bytes: left,
-                        secs: now.duration_since(t0).as_secs_f64().max(0.1),
-                        within: false,
-                    }
-                });
-            }
-            c.media = state;
-            let show_in = p
-                .and_then(|p| p.status.as_ref())
-                .is_some_and(|s| s.in_step && p.is_some_and(|p| p.connected));
-            all &= state == MediaState::Here && show_in;
+                End::Finished
+            }),
         }
-        all
     }
 
     /// The window's line while the media is on its way.
     pub fn media_lines(&self) -> Vec<String> {
-        self.computers
-            .values()
-            .map(|c| match c.media {
-                MediaState::Waiting => format!("{}: getting the list of media", c.notes.name),
-                MediaState::Coming { left, total } => {
-                    let done = total.saturating_sub(left);
-                    format!(
-                        "{}: {:.0} % ({} of {})",
-                        c.notes.name,
-                        done as f64 * 100.0 / total.max(1) as f64,
-                        megabytes(done),
-                        megabytes(total)
-                    )
-                }
-                MediaState::Here => match &c.notes.transfer {
-                    Some(t) => format!(
-                        "{}: all here, {}",
-                        c.notes.name,
-                        net_judge::transfer_words(t)
-                    ),
-                    None => format!("{}: all here", c.notes.name),
-                },
-            })
-            .collect()
-    }
-
-    fn transfers_line(&self) -> String {
-        self.computers
-            .values()
-            .map(|c| match &c.notes.transfer {
-                Some(t) => format!("{}: {}", c.notes.name, net_judge::transfer_words(t)),
-                None => format!("{}: already there", c.notes.name),
-            })
-            .collect::<Vec<_>>()
-            .join("; ")
-    }
-
-    fn begin(&mut self, now: f64) {
-        self.stage = Stage::Playing;
-        self.start = Some(now);
-        self.out.push((
-            None,
-            NetTest::Begin {
-                run: self.run,
-                start: now,
-            },
-        ));
-        for id in self.computers.keys() {
-            self.told.insert(*id, now);
-        }
-        self.log("The computers are measuring; the test plays");
+        self.fleet.media_lines()
     }
 
     fn act(&mut self, show: &Show, engine: &mut Engine, act: Act, played: f64) {
@@ -1061,9 +823,9 @@ impl NetRun {
             return;
         }
         engine.stop_all(0.5);
-        self.out.push((None, NetTest::End { run: self.run }));
+        self.fleet.end(now);
         self.stage = Stage::Ending { since: now };
-        self.log("The test is over; waiting for the computers' last reports");
+        self.write_said();
     }
 
     /// A shorter script (the tests of the test).
@@ -1078,100 +840,11 @@ impl NetRun {
         self.stop = true;
     }
 
-    /// A message from a computer.
-    fn take(&mut self, from: NodeId, m: NetTest, now: f64, net: &NetView) {
-        let t = self.played(now);
-        let c = self.computers.entry(from).or_insert_with(|| Computer {
-            id: from,
-            notes: ComputerNotes::new(&net.name_of(from)),
-            last_heard: None,
-            watched: Watched::default(),
-            media: MediaState::Here,
-            log_tail: None,
-        });
-        match m {
-            NetTest::Report(r) if r.run == self.run => {
-                if let Some(h) = c.last_heard {
-                    let gap = now - h;
-                    if gap > net_judge::GAP_SECS {
-                        let at = self.start.map_or(0.0, |s| (h - s).max(0.0));
-                        c.notes.gaps.push((at, gap));
-                    }
-                }
-                c.last_heard = Some(now);
-                let lines: Vec<String> = r
-                    .commands
-                    .iter()
-                    .filter(|k| k.lead_ms < 0.0)
-                    .map(|k| {
-                        format!(
-                            "{}: command {} arrived {:.1} ms late",
-                            c.notes.name, k.seq, -k.lead_ms
-                        )
-                    })
-                    .chain(
-                        r.corrections
-                            .iter()
-                            .map(|k| format!("{}: put right: {}", c.notes.name, k.what)),
-                    )
-                    .chain(r.stalls.iter().map(|s| {
-                        format!(
-                            "{}: its main loop stalled for {} ms ({})",
-                            c.notes.name, s.ms, s.part
-                        )
-                    }))
-                    .collect();
-                c.notes.take(*r);
-                for l in lines {
-                    if let Some(f) = &mut self.events {
-                        let _ = writeln!(f, "[{t:>9.3}] {l}");
-                    }
-                }
-            }
-            NetTest::LogTail { run, text } if run == self.run => {
-                c.notes.log_tail = true;
-                c.log_tail = Some(text);
-            }
-            _ => {}
-        }
-    }
-
-    /// The computers' lines while it plays: how far apart, now.
-    pub fn live_lines(&self, now: f64) -> Vec<(String, bool)> {
-        self.computers
-            .values()
-            .map(|c| {
-                let away = c.last_heard.is_none_or(|h| now - h > AWAY_SECS);
-                let frame = c.notes.frame_ms();
-                let last = c.notes.rows.iter().rev().find(|r| r.apart_ms.is_some());
-                let worst = c
-                    .notes
-                    .rows
-                    .iter()
-                    .filter_map(|r| r.apart_ms)
-                    .reduce(f64::max);
-                let late = c.notes.commands.iter().filter(|k| k.lead_ms < 0.0).count();
-                let text = if away && self.played(now) > 3.0 {
-                    format!("{}: not heard from", c.notes.name)
-                } else {
-                    format!(
-                        "{}: {} apart now, worst {}; clock ±{}; {} commands, {} late",
-                        c.notes.name,
-                        last.and_then(|r| r.apart_ms)
-                            .map_or("–".into(), |a| format!("{:.1} frames", a / frame)),
-                        worst.map_or("–".into(), |a| format!("{:.1} frames", a / frame)),
-                        c.notes
-                            .rows
-                            .last()
-                            .and_then(|r| r.clock_error_ms)
-                            .map_or("–".into(), |e| format!("{e:.1} ms")),
-                        c.notes.commands.len(),
-                        late
-                    )
-                };
-                (text, away || late > 0)
-            })
-            .collect()
+    /// The computers' lines while it plays, this computer's first.
+    pub fn live_lines(&self, st: &UiState, now: f64) -> Vec<(String, bool)> {
+        let mut v = vec![own_line(&st.net.name, &self.outputs, &self.hitches)];
+        v.extend(self.fleet.live_lines(st, now));
+        v
     }
 
     /// Put the user's show back (at once, whatever happens next).
@@ -1184,46 +857,36 @@ impl NetRun {
     }
 }
 
-/// The computers as the primary sees them, for `computers.txt`.
-fn computers_text(v: &NetView) -> String {
-    let mut s = format!(
-        "This computer: {} (NewQ {})\n\n",
-        v.name,
-        crate::net::proto::VERSION
-    );
-    for p in v.peers.iter().filter(|p| p.ours) {
-        s.push_str(&format!(
-            "{}: {}, NewQ {}, {}\n",
-            p.name,
-            p.role.described(),
-            p.version,
-            if p.connected {
-                "connected"
-            } else {
-                "not connected"
-            }
-        ));
-        if let Some(st) = &p.status {
-            s.push_str(&format!(
-                "  link {:?}, clock ±{} ms, round trip {} ms, {}\n",
-                st.link,
-                st.clock_error_ms.map_or("?".into(), |e| format!("{e:.2}")),
-                st.rtt_ms.map_or("?".into(), |e| format!("{e:.2}")),
-                st.standing.clone().unwrap_or_default()
-            ));
-            for (i, m) in st.monitors.iter().enumerate() {
-                s.push_str(&format!(
-                    "  monitor {}: {} {}x{} {}\n",
-                    i + 1,
-                    m.identity,
-                    m.size.0,
-                    m.size.1,
-                    m.refresh_hz.map_or("?".into(), |r| format!("{r:.2} Hz"))
-                ));
-            }
+/// This computer's line in the live window: its outputs and anything wrong.
+pub fn own_line(
+    name: &str,
+    outputs: &super::fleet::OutputWatch,
+    hitches: &super::hitches::Hitches,
+) -> (String, bool) {
+    let mut wrong = Vec::new();
+    for (n, fps) in outputs.now() {
+        if fps < super::fleet::STUTTER_FPS {
+            wrong.push(format!("{n} stutters"));
         }
     }
-    s
+    if !hitches.dropouts.is_empty() {
+        wrong.push(format!("{} sound dropouts", hitches.dropouts.len()));
+    }
+    if let Some(s) = hitches.stalls.iter().map(|s| s.ms).max() {
+        wrong.push(format!("held up {s} ms"));
+    }
+    (
+        format!(
+            "{name} (this computer): {}{}",
+            outputs.now_text(),
+            if wrong.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", wrong.join(", "))
+            }
+        ),
+        !wrong.is_empty(),
+    )
 }
 
 fn megabytes(b: u64) -> String {
@@ -1251,18 +914,7 @@ pub fn finish(
     let elapsed = run.started.elapsed();
     let played = run.played(now);
     run.log(&format!("Ended ({end:?}); your show is back"));
-    // A computer silent at the end dropped out then.
-    if run.start.is_some() {
-        for c in run.computers.values_mut() {
-            if let Some(h) = c.last_heard
-                && !c.notes.ended
-                && now - h > net_judge::GAP_SECS
-            {
-                let at = run.start.map_or(0.0, |s| (h - s).max(0.0));
-                c.notes.gaps.push((at, now - h));
-            }
-        }
-    }
+    run.fleet.close_gaps(now);
     let mut own: Vec<Finding> = Vec::new();
     if let End::Failed(why) = &end {
         own.push(Finding {
@@ -1276,10 +928,37 @@ pub fn finish(
         f
     }));
     own.extend(net_judge::drawing_findings("This computer (the primary)", &run.own_drawing).1);
-    let notes: Vec<ComputerNotes> = run.computers.values().map(|c| c.notes.clone()).collect();
+    let notes: Vec<ComputerNotes> = run
+        .fleet
+        .computers
+        .values()
+        .map(|c| c.notes.clone())
+        .collect();
     // Before playing began there is nothing of the computers to judge.
-    let judged: Judged = if run.start.is_some() {
-        net_judge::judge(&notes, played, own)
+    let judged: Judged = if run.fleet.start.is_some() {
+        let mut j = net_judge::judge(&notes, played, own);
+        // Each computer's own measurements, judged as Test Mode judges this one.
+        let per = run.fleet.verdicts(played);
+        for (a, b) in j.computers.iter_mut().zip(per) {
+            for f in b.findings.iter().skip(a.findings.len()) {
+                j.findings.push(f.clone());
+            }
+            *a = b;
+        }
+        j.verdict = Verdict::of(&j.findings);
+        let bad = j
+            .computers
+            .iter()
+            .filter(|c| c.verdict == Verdict::ProblemsFound)
+            .count();
+        if bad > 0 {
+            j.headline = format!(
+                "{bad} of {} computer{} had problems.",
+                j.computers.len(),
+                if j.computers.len() == 1 { "" } else { "s" }
+            );
+        }
+        j
     } else {
         Judged {
             verdict: Verdict::of(&own),
@@ -1302,14 +981,27 @@ pub fn finish(
             "Network test"
         },
         st.net.name,
-        run.computers
-            .values()
-            .map(|c| c.notes.name.clone())
-            .collect::<Vec<_>>()
-            .join(", "),
-        run.transfers_line()
+        run.fleet.names(),
+        run.fleet.transfers_line()
     );
     let mut report = net_judge::report(&judged, &notes, played, &about);
+    // Each computer's own measurements (memory, processor, frame rates).
+    for c in &judged.computers {
+        let lines: Vec<&String> = c.lines.iter().skip(1).collect();
+        if !lines.is_empty() {
+            report.push_str(&format!("\n{}, measured there:\n", c.name));
+            for l in lines {
+                report.push_str(&format!("  {l}\n"));
+            }
+        }
+    }
+    let own_rates = run.outputs.summary();
+    if !own_rates.is_empty() {
+        report.push_str(&format!("\n{} (this computer):\n", st.net.name));
+        for l in own_rates {
+            report.push_str(&format!("  {l}\n"));
+        }
+    }
     if !run.notes.is_empty() {
         report.push_str("\nNotes\n");
         for n in &run.notes {
@@ -1318,34 +1010,19 @@ pub fn finish(
     }
     report.push_str(&format!("\nDisplays: {}\n", run.displays.join(", ")));
     let _ = std::fs::write(run.folder.join("report.txt"), &report);
-    let _ = std::fs::write(run.folder.join("network.csv"), net_judge::csv(&notes));
+    run.fleet.write(&run.folder, &st.net);
     let _ = std::fs::write(
         run.folder.join("media-credits.txt"),
         assets::credits(&run.wanted),
     );
-    for c in run.computers.values() {
-        if let Some(t) = &c.log_tail {
-            let name: String = c
-                .notes
-                .name
-                .chars()
-                .map(|ch| {
-                    if ch.is_ascii_alphanumeric() || ch == '-' {
-                        ch
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let _ = std::fs::write(run.folder.join(format!("computer-{name}-newq.log")), t);
-        }
-    }
+    run.write_said();
     if let Some(f) = &mut run.events {
         let _ = f.flush();
     }
     Done {
         compare: None,
         full: None,
+        computers: Vec::new(),
         network: Some(NetDone {
             soak: run.soak,
             computers: judged.computers.clone(),

@@ -202,6 +202,8 @@ pub struct DisplayChoice {
     pub twins: u32,
     /// What to call it on screen.
     pub label: String,
+    /// The computer of the show network it is on (None: this one).
+    pub computer: Option<crate::show::NodeId>,
 }
 
 /// Where the test's sound goes.
@@ -256,7 +258,7 @@ pub(super) fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
 
 /// `use_displays`; with `mirror` false each display after the first has a
 /// picture of its own (the timeline tests show clips "also on" it).
-fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirror: bool) {
+pub(super) fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirror: bool) {
     let Some(first) = displays.first() else {
         return;
     };
@@ -266,6 +268,10 @@ fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirror: bool) {
         if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
             o.monitor = Some(d.reference.clone());
             o.twins = d.twins;
+            o.computer = d.computer;
+            if d.computer.is_some() {
+                o.name = d.label.clone();
+            }
         }
     };
     assign(show, main, first);
@@ -280,6 +286,32 @@ fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirror: bool) {
                 display: main,
                 area: [0.0, 0.0, 1.0, 1.0],
             });
+        }
+    }
+}
+
+/// Across a show network: every picture shown on the test's first display
+/// is shown on each of the other displays too (`MediaCue::also_on`), in place
+/// of the mirrors `use_displays` makes. Each display is its own window on its
+/// own computer, each drawing the same picture, decoded once per computer.
+/// Done once the test show is built (its displays from `use_displays_as`
+/// without mirrors).
+pub fn spread_pictures(show: &mut Show) {
+    let pictures: Vec<crate::show::OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| o.enabled && !o.is_sub_display() && o.part_of.is_none())
+        .map(|o| o.id)
+        .collect();
+    let Some(&first) = pictures.first() else {
+        return;
+    };
+    for c in &mut show.cues {
+        let Some(m) = c.kind.media_mut() else {
+            continue;
+        };
+        if m.output.is_none_or(|o| o == first) {
+            m.also_on = pictures[1..].to_vec();
         }
     }
 }
@@ -371,6 +403,7 @@ pub fn build(
 }
 
 /// `build`, with the sound going where `sound` says.
+#[cfg(test)]
 pub fn build_with(
     original: &Show,
     level: Level,
@@ -379,11 +412,25 @@ pub fn build_with(
     sound: &SoundChoice,
     heavy: bool,
 ) -> Built {
+    build_with_as(original, level, res, displays, sound, heavy, true)
+}
+
+/// `build_with`; with `mirror` false the chosen displays after the first are
+/// displays of their own (across a show network, `spread_pictures`).
+pub fn build_with_as(
+    original: &Show,
+    level: Level,
+    res: &HashMap<&'static str, Resolved>,
+    displays: &[DisplayChoice],
+    sound: &SoundChoice,
+    heavy: bool,
+    mirror: bool,
+) -> Built {
     let mut show = original.clone();
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
-    use_displays(&mut show, displays);
+    use_displays_as(&mut show, displays, mirror);
     use_sound(&mut show, sound);
     show.name = format!("Test Mode: {}", level.label());
     let audio = show.audio_outputs.first().map(|a| a.id);
@@ -1669,6 +1716,7 @@ mod tests {
 
     fn choice(name: &str, i: usize) -> DisplayChoice {
         DisplayChoice {
+            computer: None,
             key: name.into(),
             reference: crate::show::DisplayRef {
                 name: name.into(),

@@ -26,6 +26,9 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     let mut open = true;
     let mut test = std::mem::take(&mut st.test);
     let refusal = st.test_refusal();
+    let decode_refusal = st.decode_refusal();
+    let live = live_lines(&test, st);
+    let across = super::session::across(st);
     let net = NetChoice {
         refusal: super::network::refusal(st),
         in_network: st.net.me.on,
@@ -50,6 +53,9 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
                 engine,
                 &mut test,
                 refusal,
+                decode_refusal,
+                &live,
+                across,
                 &net,
                 &mut apply,
                 &screens,
@@ -205,12 +211,49 @@ pub fn stats_window(ctx: &egui::Context, st: &mut UiState) {
     }
 }
 
+/// Each computer's line while a test runs: in step or not, each output's
+/// frames a second, and anything wrong (the flag: something is).
+fn live_lines(test: &super::TestMode, st: &UiState) -> Vec<(String, bool)> {
+    let now = crate::net::time::local_now();
+    let name = if st.net.me.on {
+        st.net.name.clone()
+    } else {
+        "This computer".to_string()
+    };
+    let mut v = match test.view() {
+        View::Network(r) => return r.live_lines(st, now),
+        View::Running(r) => vec![super::network::own_line(&name, &r.outputs, &r.hitches)],
+        View::Checking(r) => vec![super::network::own_line(&name, &r.outputs, &r.hitches)],
+        _ => Vec::new(),
+    };
+    if let Some(f) = test.fleet() {
+        v.extend(f.live_lines(st, now));
+    }
+    v
+}
+
+/// The live lines, each in its colour.
+fn live_section(ui: &mut egui::Ui, live: &[(String, bool)]) {
+    for (line, warn) in live {
+        if *warn {
+            ui.colored_label(AMBER, line);
+        } else {
+            ui.label(RichText::new(line).small());
+        }
+        #[cfg(test)]
+        note_net(ui, line, egui::Rect::NOTHING);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn body(
     ui: &mut egui::Ui,
     engine: &Engine,
     test: &mut super::TestMode,
-    refusal: Option<&'static str>,
+    refusal: Option<String>,
+    decode_refusal: Option<String>,
+    live: &[(String, bool)],
+    across: bool,
     net: &NetChoice,
     apply: &mut Option<bool>,
     screens: &[Screen],
@@ -225,15 +268,34 @@ fn body(
         View::Idle => {
             // In a show network only the network test can run: it comes first.
             if net.in_network {
-                network_section(ui, engine, test, net, &log_dir);
+                network_section(ui, engine, test, net, &log_dir, chosen(screens, selected));
                 ui.separator();
             }
+            if across && refusal.is_none() {
+                net_label(
+                    ui,
+                    RichText::new(format!(
+                        "Every test plays on every computer of the show network ({}), and each measures itself.",
+                        net.computers.join(", ")
+                    ))
+                    .color(GREEN),
+                );
+            }
             idle(
-                ui, engine, test, refusal, &log_dir, screens, selected, devices, sound,
+                ui,
+                engine,
+                test,
+                refusal.as_deref(),
+                decode_refusal.as_deref(),
+                &log_dir,
+                screens,
+                selected,
+                devices,
+                sound,
             );
             if !net.in_network {
                 ui.separator();
-                network_section(ui, engine, test, net, &log_dir);
+                network_section(ui, engine, test, net, &log_dir, chosen(screens, selected));
             }
         }
         View::NetPreparing(p) => {
@@ -252,9 +314,46 @@ fn body(
             );
         }
         View::Network(r) => {
-            if network_running(ui, r) {
+            if network_running(ui, r, live) {
                 test.stop();
             }
+        }
+        View::Spreading(s, f) => {
+            net_label(
+                ui,
+                RichText::new(format!("{} test: sending it to the computers", s.name)).strong(),
+            );
+            ui.horizontal(|ui| {
+                ui.spinner();
+                net_label(
+                    ui,
+                    format!(
+                        "Waiting until every computer has the test's media and is in step ({})",
+                        clock(s.started.elapsed())
+                    ),
+                );
+            });
+            for line in f.media_lines() {
+                net_label(ui, line);
+            }
+            let b = ui.button("Cancel");
+            #[cfg(test)]
+            note_net(ui, "Cancel", b.rect);
+            if b.clicked() {
+                test.stop();
+            }
+            net_label(
+                ui,
+                RichText::new("Cancelling puts your show back on every computer.")
+                    .weak()
+                    .small(),
+            );
+        }
+        View::Closing => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                net_label(ui, "Collecting the computers' last measurements and logs…");
+            });
         }
         View::Preparing(p) => {
             let st = p.fetch.status.lock();
@@ -332,6 +431,10 @@ fn body(
         }
         View::Running(r) => {
             running(ui, r);
+            if !live.is_empty() {
+                ui.separator();
+                live_section(ui, live);
+            }
             ui.separator();
             if ui.button("Stop the test").clicked() {
                 test.stop();
@@ -357,6 +460,10 @@ fn body(
         }
         View::Checking(r) => {
             checking(ui, r);
+            if !live.is_empty() {
+                ui.separator();
+                live_section(ui, live);
+            }
             ui.separator();
             if ui.button("Stop the test").clicked() {
                 test.stop();
@@ -458,13 +565,17 @@ fn body(
                     ));
                 });
             }
+            // Across a show network: a part per computer.
+            if !d.computers.is_empty() {
+                computers_results(ui, &d.computers);
+            }
             ui.label(&d.headline);
             if matches!(d.ended, End::Stopped) {
                 ui.label(RichText::new("You stopped it early.").weak());
             }
             ui.colored_label(
                 GREEN,
-                if d.network.is_some() {
+                if d.network.is_some() || !d.computers.is_empty() {
                     "Your show is back exactly as it was, here and (through the show network) on every computer. Nothing was saved or changed."
                 } else {
                     "Your show is back exactly as it was. Nothing was saved or changed."
@@ -576,7 +687,8 @@ fn idle(
     ui: &mut egui::Ui,
     engine: &Engine,
     test: &mut super::TestMode,
-    refusal: Option<&'static str>,
+    refusal: Option<&str>,
+    decode_refusal: Option<&str>,
     log_dir: &std::path::Path,
     screens: &[Screen],
     selected: &mut Vec<String>,
@@ -661,8 +773,12 @@ fn idle(
         .weak()
         .small(),
     );
+    if let Some(why) = decode_refusal.filter(|_| refusal.is_none()) {
+        ui.label(RichText::new(why).weak().small());
+    }
+    let can_decode = decode_refusal.is_none() && engine.ff.is_some();
     if ui
-        .add_enabled(can, egui::Button::new("Compare hardware decoding"))
+        .add_enabled(can_decode, egui::Button::new("Compare hardware decoding"))
         .clicked()
         && let Some(ff) = engine.ff.clone()
     {
@@ -686,7 +802,7 @@ fn level_section(
     ui: &mut egui::Ui,
     engine: &Engine,
     test: &mut super::TestMode,
-    refusal: Option<&'static str>,
+    refusal: Option<&str>,
     log_dir: &std::path::Path,
     screens: &[Screen],
     selected: &mut Vec<String>,
@@ -861,6 +977,7 @@ fn network_section(
     test: &mut super::TestMode,
     net: &NetChoice,
     log_dir: &std::path::Path,
+    displays: Vec<DisplayChoice>,
 ) {
     net_label(
         ui,
@@ -906,7 +1023,7 @@ fn network_section(
         if let (Some(soak), Some(ff)) = (soak, engine.ff.clone()) {
             test.network = true;
             test.soak = soak;
-            test.start_network(ff, log_dir, soak);
+            test.start_network(ff, log_dir, soak, displays.clone());
         }
     });
     net_label(
@@ -923,7 +1040,7 @@ fn network_section(
 }
 
 /// The network test under way. True when the user asked to stop it.
-fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun) -> bool {
+fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun, live: &[(String, bool)]) -> bool {
     use super::network::Stage;
     let now = crate::net::time::local_now();
     let title = if r.soak {
@@ -981,15 +1098,7 @@ fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun) -> bool {
                     .color(Color32::LIGHT_BLUE),
                 );
             }
-            for (line, warn) in r.live_lines(now) {
-                if warn {
-                    ui.colored_label(AMBER, &line);
-                    #[cfg(test)]
-                    note_net(ui, &line, egui::Rect::NOTHING);
-                } else {
-                    net_label(ui, line);
-                }
-            }
+            live_section(ui, live);
         }
         Stage::Ending { .. } => {
             ui.horizontal(|ui| {
@@ -1017,7 +1126,12 @@ fn network_running(ui: &mut egui::Ui, r: &super::network::NetRun) -> bool {
 
 /// The network test's results: a line per computer.
 fn network_results(ui: &mut egui::Ui, n: &super::network::NetDone) {
-    for c in &n.computers {
+    computers_results(ui, &n.computers);
+}
+
+/// A part per computer: its verdict, its headline and its numbers.
+fn computers_results(ui: &mut egui::Ui, computers: &[super::net_judge::ComputerVerdict]) {
+    for c in computers {
         let colour = match c.verdict {
             Verdict::Passed => GREEN,
             Verdict::PassedWithNotes => AMBER,
@@ -1310,11 +1424,54 @@ pub struct Screen {
     pub is_main: bool,
 }
 
+/// What a monitor of another computer is remembered by (`Prefs::test_displays`):
+/// the computer's id, its place in that computer's list and what it is.
+pub fn remote_key(id: crate::show::NodeId, index: usize, what: &str) -> String {
+    format!("{id}/{}/{what}", index + 1)
+}
+
+/// The monitors offered: this computer's, then, on a primary with computers,
+/// each connected computer's (from its status report), grouped by computer.
 fn screens_of(st: &UiState) -> Vec<Screen> {
+    let mut v = local_screens(st);
+    if st.net.is_primary() {
+        for p in st.net.peers.iter().filter(|p| p.ours && p.connected) {
+            let Some(s) = &p.status else { continue };
+            let keys: Vec<crate::show::MonitorKey> = s.monitors.iter().map(|m| m.key()).collect();
+            for (i, m) in s.monitors.iter().enumerate() {
+                let what = m.hardware.clone().unwrap_or_else(|| m.identity.clone());
+                v.push(Screen {
+                    choice: DisplayChoice {
+                        key: remote_key(p.id, i, &what),
+                        reference: keys[i].reference(i),
+                        twins: crate::show::twins_of(&keys, i),
+                        label: format!(
+                            "{} {}: {} ({}×{}{})",
+                            p.name,
+                            i + 1,
+                            m.identity,
+                            m.size.0,
+                            m.size.1,
+                            m.refresh_hz
+                                .map(|r| format!(" @ {r:.0} Hz"))
+                                .unwrap_or_default()
+                        ),
+                        computer: Some(p.id),
+                    },
+                    is_main: false,
+                });
+            }
+        }
+    }
+    v
+}
+
+fn local_screens(st: &UiState) -> Vec<Screen> {
     let keys = crate::ui::monitor_keys(&st.monitors);
     (0..keys.len())
         .map(|i| Screen {
             choice: DisplayChoice {
+                computer: None,
                 key: keys[i]
                     .hardware
                     .clone()
@@ -1380,8 +1537,14 @@ fn sound_section(ui: &mut egui::Ui, devices: &[String], sound: &mut (Option<Stri
     );
 }
 
+/// A tick per monitor; with other computers, grouped by computer with
+/// All and None for each.
 fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {
     ui.label(RichText::new("Show the test on").strong());
+    let remote = screens.iter().any(|s| s.choice.computer.is_some());
+    if remote {
+        return network_displays(ui, screens, selected);
+    }
     let others: Vec<&Screen> = screens.iter().filter(|s| !s.is_main).collect();
     if others.is_empty() {
         ui.label(
@@ -1414,6 +1577,76 @@ fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<St
     ui.label(
         RichText::new(
             "None ticked: the displays your show has, as they are (the main window's Preview pane if it has none). Ticked: these displays, all showing the same picture, in place of your show's own while the test runs; your show is not changed.",
+        )
+        .weak()
+        .small(),
+    );
+}
+
+/// Every computer's monitors, a group each: this one's (not the main window's),
+/// then the others', by name.
+fn network_displays(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {
+    let mut groups: Vec<(Option<crate::show::NodeId>, Vec<&Screen>)> = Vec::new();
+    for s in screens.iter().filter(|s| !s.is_main) {
+        match groups.iter_mut().find(|(c, _)| *c == s.choice.computer) {
+            Some((_, v)) => v.push(s),
+            None => groups.push((s.choice.computer, vec![s])),
+        }
+    }
+    for (computer, list) in &groups {
+        let title = match computer {
+            None => "This computer".to_string(),
+            Some(_) => list[0]
+                .choice
+                .label
+                .split_once(' ')
+                .map_or(String::new(), |(n, _)| n.to_string()),
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&title).strong().small());
+            let all = ui.small_button("All");
+            let none = ui.small_button("None");
+            #[cfg(test)]
+            {
+                note_choice(ui, format!("All:{title}"), &all);
+                note_choice(ui, format!("None:{title}"), &none);
+            }
+            if all.clicked() {
+                for s in list {
+                    if !selected.contains(&s.choice.key) {
+                        selected.push(s.choice.key.clone());
+                    }
+                }
+            }
+            if none.clicked() {
+                selected.retain(|k| !list.iter().any(|s| &s.choice.key == k));
+            }
+        });
+        ui.indent(("test-screens", title.clone()), |ui| {
+            for s in list {
+                let mut on = selected.contains(&s.choice.key);
+                let r = ui.checkbox(&mut on, &s.choice.label);
+                #[cfg(test)]
+                note_choice(ui, format!("screen:{}", s.choice.label), &r);
+                if r.changed() {
+                    selected.retain(|k| k != &s.choice.key);
+                    if on {
+                        selected.push(s.choice.key.clone());
+                    }
+                }
+            }
+        });
+    }
+    if let Some(m) = screens.iter().find(|s| s.is_main) {
+        ui.label(
+            RichText::new(format!("{} (the main window is here)", m.choice.label))
+                .weak()
+                .small(),
+        );
+    }
+    ui.label(
+        RichText::new(
+            "Every ticked screen is tested at once and shows the same picture, each in its own window on its own computer. None ticked: your show's own displays. A display computer's screens that aren't ticked stay black. A backup's monitor with its main window on it shows nothing.",
         )
         .weak()
         .small(),
@@ -1526,6 +1759,7 @@ mod tests {
     fn screen(key: &str, is_main: bool) -> Screen {
         Screen {
             choice: DisplayChoice {
+                computer: None,
                 key: key.into(),
                 reference: crate::show::DisplayRef {
                     name: key.into(),
@@ -1537,6 +1771,28 @@ mod tests {
             },
             is_main,
         }
+    }
+
+    #[test]
+    fn the_ticked_screens_of_other_computers_are_used_and_a_gone_ones_ignored() {
+        let left = crate::show::NodeId(0x20);
+        let mut far = screen(&remote_key(left, 0, "Projector"), false);
+        far.choice.computer = Some(left);
+        let screens = [screen("A", true), screen("B", false), far];
+        let sel = vec![
+            "B".to_string(),
+            remote_key(left, 0, "Projector"),
+            // A computer that has gone, and a monitor of Left's unplugged.
+            remote_key(crate::show::NodeId(0x99), 0, "Wall"),
+            remote_key(left, 1, "Side screen"),
+        ];
+        let got = chosen(&screens, &sel);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].computer, Some(left));
+        assert_eq!(
+            remote_key(left, 0, "Projector"),
+            "0000000000000020/1/Projector"
+        );
     }
 
     #[test]

@@ -27,6 +27,29 @@ release page, and a release is refused if it has none.
   log says so. The log now also names every graphics card, and how each output window draws.
 - The network test's report gave "link unknown" for a computer whose status said "Wired"; it
   now says "wired".
+- **Every test on every computer.** On the computer that runs a show network, every test in
+  *Help ▸ Test mode* (Short, Medium, Long, the timeline tests and the debug test) now plays on
+  every computer of the network, not only the network test. Each computer measures itself
+  (memory, processor, frame rate per output, stalls, sound dropouts) and how it keeps in step,
+  and the result has a part per computer. While it runs, a line per computer says whether it is in
+  step and how many frames a second each of its outputs draws. A test no longer passes while an
+  output stutters, a computer stalls, or a computer's measurements never arrive. Waiting for a
+  computer that stops answering or never gets in step ends with a plain message, and your show
+  comes back everywhere.
+- **Choose the screens to test, on every computer.** *Show the test on* lists every monitor of
+  this computer and of every connected computer, grouped by computer with *All* and *None*; all
+  the ticked ones are tested at once. This applies to the network test too.
+- **Addresses on the Show network page.** Each computer's row shows its address and whether it
+  is wired, Wi-Fi or a VPN; this computer's own addresses are listed, and a follower names its
+  primary's address. An offline computer shows its last known address.
+- **The local network before a VPN.** A computer with a VPN on is reached over the local
+  network, not through the VPN, and the page says when a VPN is on. The network test's report
+  now says wired or Wi-Fi where it said "link unknown".
+- **No card between cues.** A display computer's screen with nothing playing stays black once
+  the show is ready on it: the waiting card no longer comes back when a cue ends. A new setting,
+  *Settings ▸ Show network ▸ Show a card while they wait*, can also show it on screens the show
+  doesn't use, or never (black from start-up). It sits beside *Show transfer cards*, which moved
+  there from the Media page.
 
 ## 0.24.1
 
