@@ -1100,7 +1100,10 @@ Open it on a computer with projectors or screens and that is all you do there:
 1. **Install NewQ on every computer** and open it once.
 2. **On each display computer** (the ones with projectors or screens): open
    *NewQ Display* (above), or in NewQ *Settings ▸ Show network*, tick *This
-   computer is part of a show network*. That is all you ever do there. NewQ asks the system to let it use the network the first time
+   computer is part of a show network*. With NewQ Display that is all you ever
+   do there; joined from NewQ's own window, it keeps that window (locked) once
+   added, until you press *Open as a display computer* on its banner or open it
+   with NewQ Display from then on. NewQ asks the system to let it use the network the first time
    (allow it). To have it come back by itself after a power cut, tick *Starts
    at login* on its row on the primary (or on the computer itself), so a
    computer up in a truss never needs a keyboard again.
@@ -1129,8 +1132,10 @@ Open it on a computer with projectors or screens and that is all you do there:
   show network from this computer*. It becomes the *primary*.
 - **Every other computer:** tick *This computer is part of a show network* on
   the same page (or start it with `newq --join`, handy for setting up several).
-  That is all that is ever typed on it: a display computer up in a truss never
-  needs a keyboard again. (`newq --primary` does the primary's button.)
+  Added as a display, NewQ opened this way keeps its control window (locked);
+  its screens become the display computer's only through NewQ Display, start at
+  login, or the banner's *Open as a display computer*. (`newq --primary` does
+  the primary's button.)
   `newq --display` (what NewQ Display starts) switches it on and makes it a
   display computer from the first moment, before any primary has added it. It
   never undoes a computer's place in a show network: one already added stays

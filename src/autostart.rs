@@ -167,37 +167,51 @@ pub fn is_set() -> bool {
     entry().is_some()
 }
 
-/// The entry as written (the Run value's command, the file's text), if any.
-pub fn entry() -> Option<String> {
+/// The entry as written, if any: the name it is listed under (on a Mac, which
+/// lists no name of ours, `RUN_VALUE_DISPLAY`) and its text (the Run value's
+/// command, the file).
+pub fn entry() -> Option<(&'static str, String)> {
     #[cfg(windows)]
     {
-        windows::read(RUN_VALUE_DISPLAY).or_else(|| windows::read(RUN_VALUE))
+        windows::read(RUN_VALUE_DISPLAY)
+            .map(|t| (RUN_VALUE_DISPLAY, t))
+            .or_else(|| windows::read(RUN_VALUE).map(|t| (RUN_VALUE, t)))
     }
     #[cfg(not(windows))]
     {
-        std::fs::read_to_string(entry_path()?).ok()
+        let text = std::fs::read_to_string(entry_path()?).ok()?;
+        let named = cfg!(target_os = "macos") || text.contains("\nName=NewQ Display\n");
+        Some((if named { RUN_VALUE_DISPLAY } else { RUN_VALUE }, text))
     }
 }
 
-/// Whether an entry found at start is to be written again as a display
-/// computer's: there, on a display computer, and without `--display` (NewQ
-/// 0.24.0 wrote it so, and a plain start is no longer display mode). Pure,
-/// for the tests.
-pub fn old_entry_to_fix(entry: Option<&str>, display_computer: bool) -> bool {
-    display_computer && entry.is_some_and(|e| !starts_as_display(e))
+/// Whether an entry found at start on a display computer is to be written
+/// again: one NewQ 0.24.0 wrote without `--display` (a plain start is no
+/// longer display mode), or one 0.24.1 and 0.24.2 wrote under the name `NewQ`
+/// (it is listed as `NewQ Display` now). Never when there is none. Pure, for
+/// the tests.
+pub fn old_entry_to_fix(entry: Option<(&str, &str)>, display_computer: bool) -> bool {
+    display_computer
+        && entry.is_some_and(|(name, text)| !starts_as_display(text) || name != RUN_VALUE_DISPLAY)
 }
 
-/// An entry NewQ 0.24.0 wrote on a display computer, written again with
-/// `--display` (`old_entry_to_fix`), so the next login starts display mode.
-/// Nothing is switched on that wasn't.
-pub fn fix_old_entry(display_computer: bool) {
-    if !old_entry_to_fix(entry().as_deref(), display_computer) {
-        return;
+/// An older entry on a display computer written again (`old_entry_to_fix`),
+/// with `--display`, named `NewQ Display`, for this NewQ. Nothing is switched
+/// on that wasn't. Returns whether the entry it found lacked `--display`:
+/// this start may then be that login's, so it is display mode too.
+pub fn fix_old_entry(display_computer: bool) -> bool {
+    let found = entry();
+    if !old_entry_to_fix(
+        found.as_ref().map(|(n, t)| (*n, t.as_str())),
+        display_computer,
+    ) {
+        return false;
     }
     match set(true, true) {
-        Ok(()) => log::info!("start at login: an older entry written again to start display mode"),
+        Ok(()) => log::info!("start at login: an older entry written again as NewQ Display"),
         Err(e) => log::warn!("start at login: an older entry couldn't be written again: {e}"),
     }
+    found.is_some_and(|(_, t)| !starts_as_display(&t))
 }
 
 /// Start at login, or not (`display`: as a display computer, `args`).
@@ -401,17 +415,19 @@ mod tests {
     fn an_older_entry_on_a_display_computer_is_written_again_with_display() {
         let old = run_value(Path::new(r"C:\NewQ\newq.exe"), args(false));
         let new = run_value(Path::new(r"C:\NewQ\newq.exe"), args(true));
-        assert!(old_entry_to_fix(Some(&old), true));
-        assert!(!old_entry_to_fix(Some(&new), true));
+        // 0.24.0: no --display, named NewQ.
+        assert!(old_entry_to_fix(Some(("NewQ", &old)), true));
+        // 0.24.1 and 0.24.2: --display, but named NewQ: renamed.
+        assert!(old_entry_to_fix(Some(("NewQ", &new)), true));
+        // Ours: left alone.
+        assert!(!old_entry_to_fix(Some(("NewQ Display", &new)), true));
         assert!(
-            !old_entry_to_fix(Some(&old), false),
+            !old_entry_to_fix(Some(("NewQ", &old)), false),
             "not a display computer"
         );
         assert!(!old_entry_to_fix(None, true), "never switched on by itself");
         let agent = launch_agent(Path::new("/Applications/NewQ.app/Contents/MacOS/newq"), &[]);
-        assert!(old_entry_to_fix(Some(&agent), true));
-        let entry = desktop_entry(Path::new("/opt/newq"), args(true));
-        assert!(!old_entry_to_fix(Some(&entry), true));
+        assert!(old_entry_to_fix(Some(("NewQ Display", &agent)), true));
     }
 
     #[test]

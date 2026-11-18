@@ -12,8 +12,9 @@ release page, and a release is refused if it has none.
 - **Start at login is never switched on by itself.** Adding a display computer no longer sets it
   to start at login. Tick *Starts at login* on its row on the primary, or on the computer itself;
   untick it to remove it. NewQ says where the system lists it (on Windows, Task Manager ▸ Startup
-  apps, now named *NewQ Display*; the old *NewQ* entry is removed). An entry 0.24.0 wrote on a
-  display computer is mended so it still starts as one.
+  apps, now named *NewQ Display*; the old *NewQ* entry is removed). An entry 0.24 wrote on a
+  display computer is renamed *NewQ Display* the next time NewQ opens there, and one that 0.24.0
+  wrote (which started NewQ plainly) still starts it as a display computer.
 - **Each screen's card says which screen it is**: *Assistant · Screen 1*, *Screen 2*, numbered as
   the primary numbers that computer's monitors, even when there is only one. Identify shows the
   number too.

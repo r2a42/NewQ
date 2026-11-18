@@ -432,14 +432,16 @@ impl App {
             move || wake()
         });
         ui.net = net.view();
-        // An entry NewQ 0.24.0 wrote on a display computer started it plain;
-        // only `--display` starts display mode now, so it is written again
-        // with it (nothing is switched on that wasn't).
-        crate::autostart::fix_old_entry(
+        // An entry an older NewQ wrote on a display computer is written again
+        // as NewQ Display with `--display` (nothing is switched on that
+        // wasn't). One 0.24.0 wrote started NewQ plain, and only `--display`
+        // starts display mode now: this start may be that login's, so it is
+        // display mode too (once: the entry has `--display` from now on).
+        let display = crate::autostart::fix_old_entry(
             ui.net.me.on
                 && ui.net.me.adopted()
                 && ui.net.me.role == crate::net::node::Role::Display,
-        );
+        ) || display;
         ui.start_at_login = crate::autostart::is_set();
         let follows = ui.net.me.on && ui.net.me.adopted();
         let open_kept = follows && ui.show_path.is_none();
