@@ -149,10 +149,24 @@ pub fn after_failed_switches(failed: u32) -> Option<Duration> {
         0 => Some(Duration::ZERO),
         1 => Some(Duration::from_secs(30)),
         2 => Some(Duration::from_secs(120)),
-        3 => Some(Duration::from_secs(480)),
+        n if n < GIVE_UP_AFTER => Some(Duration::from_secs(480)),
         _ => None,
     }
 }
+
+/// The count of failed switches after one more. With no device lost this
+/// run (NewQ started in software beside a card that can't draw to its
+/// windows: a VM, a remote session, Xvfb), once is enough: give up.
+pub fn failed_switch(failed: u32, lost_this_run: bool) -> u32 {
+    if lost_this_run {
+        failed + 1
+    } else {
+        GIVE_UP_AFTER
+    }
+}
+
+/// Failed switches after which the card is no longer hoped for.
+const GIVE_UP_AFTER: u32 = 4;
 
 /// Whether to rebuild the graphics onto hardware now: drawing in software,
 /// a look found a hardware adapter, and the wait after earlier failed
@@ -364,6 +378,16 @@ mod tests {
         assert!(switch_back(true, true, 1, Some(Duration::from_secs(30))));
         assert!(!switch_back(true, true, 2, Some(Duration::from_secs(60))));
         assert!(switch_back(true, true, 3, Some(Duration::from_secs(480))));
+        // A switch that failed with no loss this run (started in software
+        // beside a card that can't draw): give up at once.
+        assert_eq!(failed_switch(0, true), 1);
+        let gave_up = failed_switch(0, false);
+        assert!(!switch_back(
+            true,
+            true,
+            gave_up,
+            Some(Duration::from_secs(100_000))
+        ));
         // And give up after four.
         assert!(!switch_back(
             true,

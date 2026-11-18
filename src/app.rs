@@ -1186,6 +1186,9 @@ impl App {
             self.to_hardware = false;
             if let Some(why) = lost {
                 crate::gpu::note_device_lost();
+                // A loss is a new situation: earlier failed switches (or
+                // giving up on a card that couldn't draw) don't count.
+                self.software = None;
                 self.engine.problem(format!(
                     "The graphics device was lost ({why}): the graphics driver probably restarted or was updated. Restarting the displays"
                 ));
@@ -1242,8 +1245,12 @@ impl App {
         };
         // A new instance each time: an old one's list of adapters is the
         // system's when it was made (Windows), so it never sees the card back.
-        // A software renderer only once the card has had a moment to return.
-        let allow_software = crate::adapters::settles_for_software(rec.since.elapsed());
+        // After a loss, a software renderer only once the card has had a
+        // moment to return. Moving to a card that was seen: whatever is
+        // there now at once (the look can't tell whether the card draws to
+        // the window; if it can't, that costs one blink, not seconds dark).
+        let allow_software =
+            rec.to_hardware || crate::adapters::settles_for_software(rec.since.elapsed());
         let instance = crate::gpu::instance_for(self.display_handle.clone());
         let (gpu, surface) = match Gpu::new(instance, ctl.window.clone(), allow_software) {
             Ok(made) => made,
@@ -1303,8 +1310,21 @@ impl App {
         if gpu.is_software() {
             let watch = self.software.get_or_insert_with(SoftwareWatch::new);
             if to_hardware {
-                watch.failed += 1;
+                watch.failed = crate::adapters::failed_switch(
+                    watch.failed,
+                    crate::gpu::drawing_in_software().is_some_and(|s| s.lost),
+                );
                 watch.last_switch = Some(Instant::now());
+                match crate::adapters::after_failed_switches(watch.failed) {
+                    Some(wait) => log::warn!(
+                        "the graphics card offered could not draw the windows ({} tries); trying again in {} s at the soonest",
+                        watch.failed,
+                        wait.as_secs()
+                    ),
+                    None => log::warn!(
+                        "the graphics card offered could not draw the windows: staying in software (restart NewQ to try again)"
+                    ),
+                }
             }
             let said = crate::gpu::drawing_in_software()
                 .map(|s| s.sentence("This computer"))
