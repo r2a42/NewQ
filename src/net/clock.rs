@@ -13,9 +13,17 @@
 //! that differ steadily (an asymmetric path) shift every sample alike; nothing
 //! can see that, and it stays as an error of half the difference.
 //!
-//! The time given never goes back. Until it is locked it may jump forward to a
-//! better estimate; once locked it is slewed (run a little fast or slow, at most
-//! `Settings::max_slew` apart) rather than jumped.
+//! The time given never goes back, with one exception. Until it is locked it
+//! may jump forward to a better estimate; once locked it is slewed (run a
+//! little fast or slow, at most `Settings::max_slew` apart) rather than jumped.
+//! The exception: unlocked, a correction back of more than
+//! `Settings::big_step` (the primary's clock restarted, or answers from two
+//! clocks) is never chased at `max_slew_unlocked` (an hour's step would take
+//! four days): while nothing plays here (`set_idle`) the clock is put back at
+//! once (`SharedNow::back_steps` counts it, so the app starts its engine's
+//! shared time afresh); while something plays it runs on at the fitted rate,
+//! unlocked, and the step waits for a quiet moment (R21: a picture never jumps
+//! at the primary).
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -67,6 +75,21 @@ pub struct SharedNow {
     pub error: f64,
     /// Settled: corrections since have been small, and are slewed.
     pub locked: bool,
+    /// Times the clock was put back (a big step taken while idle); the app
+    /// starts its engine's shared time afresh when this changes.
+    pub back_steps: u32,
+}
+
+/// The largest clock error reported, in milliseconds: beyond it a figure
+/// only says "far off", and an unlocked clock reports none (`report_ms`).
+pub const REPORT_CAP_MS: f64 = 1000.0;
+
+impl SharedNow {
+    /// The error for a status report and the network test: none while not
+    /// locked (the page says "not locked"), at most `REPORT_CAP_MS`.
+    pub fn report_ms(&self) -> Option<f64> {
+        (self.locked && self.error.is_finite()).then(|| (self.error * 1000.0).min(REPORT_CAP_MS))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +118,9 @@ pub struct Settings {
     pub unlock_error: f64,
     /// How fast the drift may wander from the fit (per second of age).
     pub drift_doubt: f64,
+    /// Unlocked, a correction back of more than this (seconds) is not
+    /// slewed: put back at once while idle, else held (see the top).
+    pub big_step: f64,
 }
 
 impl Default for Settings {
@@ -112,6 +138,7 @@ impl Default for Settings {
             lock_error: 0.001,
             unlock_error: 0.025,
             drift_doubt: 1e-6,
+            big_step: 0.25,
         }
     }
 }
@@ -169,6 +196,12 @@ pub struct SharedClock {
     suspects: Vec<Sample>,
     /// Corrections made (for the trial's report): steps and their sizes.
     pub steps: u32,
+    /// Nothing plays here (the app says so each pass): a big step back may
+    /// be taken at once.
+    idle: bool,
+    /// A big step back waiting for a quiet moment (seconds, negative).
+    held: f64,
+    back_steps: u32,
 }
 
 impl Default for SharedClock {
@@ -197,7 +230,16 @@ impl SharedClock {
             given: Cell::new(f64::NEG_INFINITY),
             suspects: Vec::new(),
             steps: 0,
+            idle: false,
+            held: 0.0,
+            back_steps: 0,
         }
+    }
+
+    /// Whether nothing plays on this computer now (cues, waits, timelines):
+    /// a big step back is then taken at once rather than held.
+    pub fn set_idle(&mut self, idle: bool) {
+        self.idle = idle;
     }
 
     pub fn locked(&self) -> bool {
@@ -236,12 +278,14 @@ impl SharedClock {
         }
         let time = self.raw(local).max(self.given.get());
         self.given.set(time);
-        let left = self.slew.abs() * (self.slew_until - local).max(0.0);
+        // What is still to be slewed, and a step held back, are as far off.
+        let left = self.slew.abs() * (self.slew_until - local).max(0.0) + self.held.abs();
         let error = self.bound + self.s.drift_doubt * (local - self.bound_at).abs() + left;
         Some(SharedNow {
             time,
             error,
             locked: self.locked,
+            back_steps: self.back_steps,
         })
     }
 
@@ -301,7 +345,21 @@ impl SharedClock {
         self.base_local = local;
         self.base_shared = current;
         self.rate = rate;
-        if !self.locked && e > 0.0 {
+        self.held = 0.0;
+        if !self.locked && e < -self.s.big_step {
+            if self.idle {
+                // Nothing plays: put back at once (the one way it goes back).
+                self.base_shared = target;
+                self.given.set(f64::NEG_INFINITY);
+                self.back_steps += 1;
+                self.steps += 1;
+            } else {
+                // Something plays: not chased; runs on at the fitted rate.
+                self.held = e;
+            }
+            self.slew = 0.0;
+            self.slew_until = local;
+        } else if !self.locked && e > 0.0 {
             // Before it is locked, forward is a jump.
             self.base_shared += e;
             self.slew = 0.0;
@@ -518,5 +576,100 @@ mod tests {
         let local = 60.0 * (1.0 + 20e-6) - 1.0;
         let now = c.now(local).unwrap();
         assert!((now.time - 60.0).abs() < 200e-6, "{}", now.time - 60.0);
+    }
+
+    /// Two clocks 43 minutes apart answering in turn (two NewQs with one
+    /// identity, second test): what it does with the big step back.
+    fn two_clocks(idle: bool) -> (SharedClock, Vec<SharedNow>) {
+        let mut c = SharedClock::default();
+        c.set_idle(idle);
+        let mut seen = Vec::new();
+        let mut t: f64 = 0.0;
+        // First the clock that is 2600 s ahead, long enough to lock.
+        while t < 30.0 {
+            let ex = shifted(t, 0.0, 0.0, 0.001, 0.001, 2600.0);
+            c.update(ex, ex.t4);
+            t += 0.1;
+        }
+        assert!(c.locked());
+        // Then only the right one (the follower now asks the right port).
+        while t < 120.0 {
+            let ex = exchange(t, 0.0, 0.0, 0.001, 0.001);
+            c.update(ex, ex.t4);
+            seen.push(c.now(ex.t4 + 0.01).unwrap());
+            t += 0.1;
+        }
+        (c, seen)
+    }
+
+    #[test]
+    fn a_big_step_back_while_idle_is_taken_at_once() {
+        let (c, seen) = two_clocks(true);
+        let last = seen.last().unwrap();
+        // (The last answer came at about 120 s, read 10 ms later.)
+        assert!((last.time - 120.0).abs() < 0.02, "{last:?}");
+        assert!(last.locked, "locked again: {last:?}");
+        assert_eq!(last.back_steps, 1, "put back once");
+        assert!(last.error < 0.005, "{last:?}");
+        assert!(last.report_ms().is_some_and(|e| e < 5.0));
+        // Within a few seconds of the right clock only.
+        let back = seen.iter().position(|n| n.back_steps == 1).unwrap();
+        assert!(back < 60, "after {back} answers");
+        assert!(c.steps >= 1);
+    }
+
+    #[test]
+    fn a_big_step_back_while_playing_is_held_not_chased_and_reported_as_not_locked() {
+        let (mut c, seen) = two_clocks(false);
+        // Never put back while something plays, never back at all.
+        assert!(seen.iter().all(|n| n.back_steps == 0));
+        assert!(seen.windows(2).all(|w| w[1].time >= w[0].time));
+        // Not chased at 1 %: it runs on at its rate, about 2600 s ahead.
+        let last = *seen.last().unwrap();
+        assert!((last.time - 120.0 - 2600.0).abs() < 1.0, "{last:?}");
+        // Not locked, so no figure is reported (the page says "not locked"),
+        // though the bound itself says how far off it is.
+        assert!(!last.locked);
+        assert_eq!(last.report_ms(), None);
+        assert!(last.error > 2000.0, "{last:?}");
+        // Once nothing plays, it is put back at the next answer.
+        c.set_idle(true);
+        let ex = exchange(120.0, 0.0, 0.0, 0.001, 0.001);
+        c.update(ex, ex.t4);
+        let n = c.now(ex.t4).unwrap();
+        assert_eq!(n.back_steps, 1);
+        assert!((n.time - 120.0).abs() < 0.01, "{n:?}");
+    }
+
+    #[test]
+    fn a_small_step_back_unlocked_is_still_slewed() {
+        // 100 ms back before it ever locked: under `big_step`, slewed at
+        // most 1 % (about 10 s), never put back.
+        let mut c = SharedClock::default();
+        c.set_idle(true);
+        let ex = shifted(0.0, 0.0, 0.0, 0.001, 0.001, 0.1);
+        c.update(ex, ex.t4);
+        let mut last = f64::NEG_INFINITY;
+        let mut t: f64 = 0.1;
+        while t < 30.0 {
+            let ex = exchange(t, 0.0, 0.0, 0.001, 0.001);
+            c.update(ex, ex.t4);
+            let n = c.now(ex.t4).unwrap();
+            assert!(n.time >= last && n.back_steps == 0);
+            last = n.time;
+            t += 0.1;
+        }
+        assert!((last - 29.9).abs() < 0.005, "{last}");
+    }
+
+    #[test]
+    fn the_reported_error_is_capped() {
+        let n = SharedNow {
+            time: 1.0,
+            error: 5.0,
+            locked: true,
+            back_steps: 0,
+        };
+        assert_eq!(n.report_ms(), Some(REPORT_CAP_MS));
     }
 }

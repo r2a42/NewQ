@@ -22,7 +22,7 @@ use super::proto::{self, Beacon, FrameError, Hello, Link, MonitorReport, Msg, St
 use super::session::{ConnId, Session, SessionEvent};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +41,17 @@ pub const EVERY: Duration = Duration::from_secs(1);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(10);
 /// How long "Identify" shows the name.
 pub const IDENTIFY_SECONDS: f32 = 8.0;
+/// An adoption with no session after this long is said on the computer's row
+/// (with why the last try failed), rather than "Adding…" for ever.
+pub const ADOPT_PATIENCE: Duration = Duration::from_secs(10);
+/// A failed dial to the same computer with the same error is logged at info
+/// at most this often (each one at debug).
+const DIAL_LOG_EVERY: Duration = Duration::from_secs(30);
+/// One id beaconing from two ports, turn about, this many times within
+/// `TWIN_WINDOW`, is two NewQs with one identity (a restart moves the port
+/// once).
+const TWIN_SWITCHES: usize = 3;
+pub const TWIN_WINDOW: Duration = Duration::from_secs(10);
 
 /// Where the hub keeps its file and which ports it uses.
 #[derive(Clone, Debug)]
@@ -159,6 +170,8 @@ pub struct PeerView {
     pub problem: Option<String>,
     /// An adoption asked for and not yet answered.
     pub adopting: bool,
+    /// Two NewQs answer with its identity (from two ports): a sentence.
+    pub twin: Option<String>,
 }
 
 /// An address added by hand, and what became of it.
@@ -205,6 +218,10 @@ pub struct NetView {
     pub reached: Vec<(NodeId, std::net::SocketAddr)>,
     /// This computer's network adapters (`paths`), best first.
     pub adapters: Vec<super::paths::Adapter>,
+    /// Another NewQ with this computer's identity is heard: a sentence.
+    pub twin: Option<String>,
+    /// A follower: where it asks for the shared time.
+    pub clock_with: Option<SocketAddr>,
 }
 
 impl NetView {
@@ -415,6 +432,19 @@ struct Peer {
     heard_from: Vec<(IpAddr, Instant)>,
     /// Said once in the log: its session goes a worse way than `addr`.
     said_worse: bool,
+    /// Its operating system, from its beacon (may be empty).
+    system: String,
+    /// The ports its beacons said lately, in the order they came.
+    beacon_ports: VecDeque<(u16, Instant)>,
+    /// Said in the log: two NewQs answer with its id (the two ports).
+    twin_said: Option<(u16, u16)>,
+    /// When the page asked to adopt it (cleared by its welcome).
+    adopt_asked: Option<Instant>,
+    /// Why the last dial failed, and what was last logged of it.
+    dial_error: Option<String>,
+    dial_logged: Option<(String, Instant)>,
+    /// `problem` is this hub's "can't reach" sentence.
+    reach_problem: bool,
 }
 
 impl Peer {
@@ -441,6 +471,13 @@ impl Peer {
             known: false,
             heard_from: Vec::new(),
             said_worse: false,
+            system: String::new(),
+            beacon_ports: VecDeque::new(),
+            twin_said: None,
+            adopt_asked: None,
+            dial_error: None,
+            dial_logged: None,
+            reach_problem: false,
         }
     }
 
@@ -541,6 +578,9 @@ struct State {
     /// How this computer reached the computer it last reported to (its own
     /// row says so too, and the network test's report).
     link: Link,
+    /// Another NewQ beaconing with this computer's id: where, when last
+    /// heard, and how many of its beacons came.
+    twin_self: Option<(SocketAddr, Instant, u32)>,
 }
 
 impl State {
@@ -575,6 +615,7 @@ impl State {
             clock_network: None,
             took_from: None,
             link: Link::Unknown,
+            twin_self: None,
         }
     }
 
@@ -663,6 +704,7 @@ impl State {
             show_version: self.sync.show_version,
             term: self.me.term,
             on: self.me.on,
+            system: std::env::consts::OS.into(),
         }
     }
 
@@ -811,10 +853,58 @@ impl State {
 
     fn heard(&mut self, h: Heard, now: Instant) {
         let b = h.beacon;
-        if b.id == self.me.id || self.net.is_none() {
+        let Some(own_port) = self.net.as_ref().map(|n| n.port) else {
+            return;
+        };
+        if b.id == self.me.id {
+            // Its own beacon comes back; one with this id from another port
+            // is a second NewQ with this computer's identity.
+            if b.tcp_port != 0 && b.tcp_port != own_port {
+                let at = SocketAddr::new(h.from.ip(), b.tcp_port);
+                let count = match self.twin_self {
+                    Some((was, _, n)) if was == at => n.saturating_add(1),
+                    _ => 1,
+                };
+                if count == TWIN_SWITCHES as u32 {
+                    log::warn!(
+                        "show network: another NewQ with this computer's identity is running (it listens at {at}; this one on port {own_port})"
+                    );
+                }
+                self.twin_self = Some((at, now, count));
+            }
             return;
         }
+        // The port the session with it says it listens on: a beacon from
+        // another port is another NewQ with its id, and moves nothing.
+        let pinned = self.pinned_port(b.id);
         let p = self.peers.entry(b.id).or_insert_with(|| Peer::new(b.id));
+        p.beacon_ports.push_back((b.tcp_port, now));
+        while p.beacon_ports.len() > 64
+            || p.beacon_ports
+                .front()
+                .is_some_and(|(_, t)| now.saturating_duration_since(*t) > TWIN_WINDOW)
+        {
+            p.beacon_ports.pop_front();
+        }
+        let twin = twin_ports(&p.beacon_ports, now);
+        if let Some((a, c)) = twin
+            && p.twin_said != twin
+        {
+            log::warn!(
+                "show network: two NewQs answer as {} at {}, from ports {a} and {c}: one is left over on that computer{}",
+                p.name,
+                h.from.ip(),
+                match pinned {
+                    Some(port) => format!("; this computer keeps to the one on port {port}"),
+                    None => String::new(),
+                }
+            );
+            p.twin_said = twin;
+        }
+        if pinned.is_some_and(|port| port != b.tcp_port) {
+            return;
+        }
+        p.system = b.system;
         // Heard again after a silence (a computer started again): dialled at
         // once rather than after the pause its silence grew (stage 5).
         if !p.heard_lately(now) && p.conn.is_none() && !p.dialling {
@@ -912,6 +1002,7 @@ impl State {
             network: self.me.network,
             term: self.me.term,
             nonce,
+            tcp_port: self.net.as_ref().map_or(0, |n| n.port),
         });
         conn.session.send(&hello);
         self.conns.insert(id, conn);
@@ -925,7 +1016,18 @@ impl State {
                 Target::Peer(id) => {
                     if let Some(p) = self.peers.get_mut(&id) {
                         p.failed(now);
-                        log::debug!("show network: {} can't be reached: {e}", p.name);
+                        // Each failure at debug; at info the first, a new
+                        // error, and the same one again every 30 s.
+                        let say = p.dial_logged.as_ref().is_none_or(|(was, t)| {
+                            *was != e || now.saturating_duration_since(*t) >= DIAL_LOG_EVERY
+                        });
+                        if say {
+                            log::info!("show network: {} can't be reached: {e}", p.name);
+                            p.dial_logged = Some((e.clone(), now));
+                        } else {
+                            log::debug!("show network: {} can't be reached: {e}", p.name);
+                        }
+                        p.dial_error = Some(e);
                     }
                 }
                 Target::Manual(a) => {
@@ -1026,6 +1128,13 @@ impl State {
             p.addr = Some(ip);
             p.tcp_port = their_port;
         }
+        // The port it says it listens on holds for as long as this session
+        // does (a beacon from another port is another NewQ with its id).
+        if h.tcp_port != 0 {
+            p.tcp_port = h.tcp_port;
+        }
+        p.dial_error = None;
+        p.dial_logged = None;
         if let Some(a) = manual
             && let Some(m) = self.manual.iter_mut().find(|m| m.addr == Some(a))
         {
@@ -1167,6 +1276,8 @@ impl State {
                 if let Some(p) = from.and_then(|id| self.peers.get_mut(&id)) {
                     p.backoff = Duration::from_millis(500);
                     p.problem = None;
+                    p.reach_problem = false;
+                    p.adopt_asked = None;
                     let pending = std::mem::take(&mut p.pending);
                     for msg in pending {
                         self.send(c, &msg);
@@ -1177,6 +1288,8 @@ impl State {
                 conn.closing = true;
                 if let Some(p) = from.and_then(|id| self.peers.get_mut(&id)) {
                     p.problem = Some(text);
+                    p.reach_problem = false;
+                    p.adopt_asked = None;
                     p.pending.clear();
                     p.next_dial = now + MAX_BACKOFF;
                 }
@@ -1373,12 +1486,14 @@ impl State {
                     return;
                 };
                 p.problem = None;
+                p.reach_problem = false;
                 let up = p
                     .conn
                     .filter(|c| self.conns.get(c).is_some_and(|c| c.welcomed));
                 match up {
                     Some(c) => self.send(c, &msg),
                     None => {
+                        p.adopt_asked = Some(now);
                         p.pending = vec![msg];
                         p.next_dial = now;
                         p.backoff = Duration::from_millis(500);
@@ -1569,6 +1684,15 @@ impl State {
         if self.me.role == Role::Primary {
             self.dial(now);
             self.keep_known();
+            self.say_unreached(now);
+        }
+        if let Some((at, last, n)) = self.twin_self
+            && now.saturating_duration_since(last) > TWIN_WINDOW
+        {
+            if n >= TWIN_SWITCHES as u32 {
+                log::info!("show network: the other NewQ with this identity (at {at}) is gone");
+            }
+            self.twin_self = None;
         }
         self.keep_clock();
         // Computers of other networks, or waiting, long gone are forgotten.
@@ -1596,7 +1720,28 @@ impl State {
                 && (p.network == mine || (p.network.is_none() && p.on));
             if let (true, Some(ip)) = (want, p.addr) {
                 p.dialling = true;
-                wanted.push((Target::Peer(p.id), vec![SocketAddr::new(ip, p.tcp_port)]));
+                // The address in use first, then every other one its beacons
+                // came from lately, best first (a VPN or Wi-Fi address may be
+                // the one that answers, or the one that doesn't).
+                let mut heard: Vec<IpAddr> = p
+                    .heard_from
+                    .iter()
+                    .filter(|(_, t)| now.saturating_duration_since(*t) < OFFLINE_AFTER)
+                    .map(|(a, _)| *a)
+                    .collect();
+                heard = super::paths::by_rank(&heard, &self.adapters);
+                heard.retain(|a| *a != ip);
+                heard.insert(0, ip);
+                let tries = heard
+                    .into_iter()
+                    .map(|a| {
+                        (
+                            SocketAddr::new(a, p.tcp_port),
+                            Some(super::paths::way_words(a, &self.adapters)),
+                        )
+                    })
+                    .collect();
+                wanted.push((Target::Peer(p.id), tries));
             }
         }
         // Addresses added by hand that no session has reached yet.
@@ -1621,10 +1766,10 @@ impl State {
             m.busy = true;
             let tries = if a.port() == 0 {
                 discover::ports(self.cfg.port_base, self.cfg.port_span)
-                    .map(|p| SocketAddr::new(a.ip(), p))
+                    .map(|p| (SocketAddr::new(a.ip(), p), None))
                     .collect()
             } else {
-                vec![a]
+                vec![(a, None)]
             };
             wanted.push((Target::Manual(a), tries));
         }
@@ -1635,7 +1780,9 @@ impl State {
                 .name("net-dial".into())
                 .spawn(move || {
                     let mut last = String::from("no address");
-                    for a in addrs {
+                    // Each named address tried, with how it failed.
+                    let mut tried: Vec<String> = Vec::new();
+                    for (a, way) in addrs {
                         // Not this NewQ's own listener.
                         if a.ip().is_loopback() && Some(a.port()) == me_port {
                             continue;
@@ -1645,10 +1792,20 @@ impl State {
                                 let _ = tx.send(Event::Dialled(target, Ok(s)));
                                 return;
                             }
-                            Err(e) => last = e.to_string(),
+                            Err(e) => {
+                                last = e.to_string();
+                                if let Some(way) = way {
+                                    tried.push(format!("{a} ({way}): {e}"));
+                                }
+                            }
                         }
                     }
-                    let _ = tx.send(Event::Dialled(target, Err(last)));
+                    let why = if tried.is_empty() {
+                        last
+                    } else {
+                        tried.join("; ")
+                    };
+                    let _ = tx.send(Event::Dialled(target, Err(why)));
                 });
         }
     }
@@ -1735,24 +1892,109 @@ impl State {
         }
     }
 
-    /// A follower keeps a shared clock with its primary over UDP (`time.rs`),
-    /// asking at the primary's port where its beacon was heard; anyone else
-    /// keeps none. A new primary starts the clock afresh; the same one found
-    /// at another address keeps it.
+    /// The port computer `id`'s session (up, not closing) says it listens on.
+    fn pinned_port(&self, id: NodeId) -> Option<u16> {
+        let c = self.conns.get(&self.peers.get(&id)?.conn?)?;
+        (!c.closing)
+            .then_some(())
+            .and(c.hello.as_ref())
+            .map(|h| h.tcp_port)
+            .filter(|p| *p != 0)
+    }
+
+    /// Primary: an adoption with no session after `ADOPT_PATIENCE` is said on
+    /// the computer's row (it keeps being tried), with the dial's error.
+    fn say_unreached(&mut self, now: Instant) {
+        for p in self.peers.values_mut() {
+            let welcomed = p
+                .conn
+                .and_then(|c| self.conns.get(&c))
+                .is_some_and(|c| c.welcomed && !c.closing);
+            let overdue = p
+                .adopt_asked
+                .is_some_and(|t| now.saturating_duration_since(t) >= ADOPT_PATIENCE);
+            if p.pending.is_empty() || welcomed || !overdue {
+                continue;
+            }
+            if p.problem.is_some() && !p.reach_problem {
+                // Its own sentence (another version, a refusal) stays.
+                continue;
+            }
+            let at = p
+                .addr
+                .filter(|_| p.tcp_port != 0)
+                .map(|a| SocketAddr::new(a, p.tcp_port));
+            let s = unreached_sentence(
+                &p.name,
+                at,
+                p.dial_error.as_deref(),
+                p.heard_lately(now),
+                &p.system,
+            );
+            if p.problem.as_deref() != Some(s.as_str()) {
+                log::info!("show network: adding {}: {s}", p.name);
+                p.problem = Some(s);
+                p.reach_problem = true;
+            }
+        }
+    }
+
+    /// A follower keeps a shared clock with its primary over UDP (`time.rs`);
+    /// anyone else keeps none. While the session with the primary holds, the
+    /// clock is asked at the port its hello said it listens on (a second NewQ
+    /// with the primary's identity beacons from another port and is never
+    /// asked); with no session, where it was asked before; else (a primary
+    /// that says no port, from an older NewQ) where its beacon was heard. A
+    /// new primary starts the clock afresh; the same one found at another
+    /// address keeps it. Every change of address is logged.
     fn keep_clock(&mut self) {
         let primary = self
             .me
             .primary
             .filter(|_| self.me.adopted() && self.me.role != Role::Primary);
-        let target = primary.and_then(|id| {
+        let session = primary.and_then(|id| {
+            let p = self.peers.get(&id)?;
+            let c = self.conns.get(&p.conn?)?;
+            (!c.closing && c.obeying).then_some((p, c))
+        });
+        let said = session.and_then(|(p, c)| {
+            let port = c.hello.as_ref().map(|h| h.tcp_port).filter(|p| *p != 0)?;
+            Some(SocketAddr::new(
+                p.addr.unwrap_or_else(|| c.session.peer.ip()),
+                port,
+            ))
+        });
+        let beacon = primary.and_then(|id| {
             let p = self.peers.get(&id)?;
             let ip = p.addr?;
             (p.tcp_port != 0).then(|| SocketAddr::new(ip, p.tcp_port))
         });
+        let kept = self
+            .keeper
+            .as_ref()
+            .filter(|(was, _)| Some(*was) == primary)
+            .and_then(|(_, k)| k.target());
+        let target = if session.is_some() {
+            said.or(beacon)
+        } else {
+            kept.or(beacon)
+        };
         match (primary, target) {
             (Some(id), Some(to)) => match &self.keeper {
                 Some((was, k)) if *was == id => {
-                    if k.target() != Some(to) {
+                    if let Some(old) = k.target()
+                        && old != to
+                    {
+                        log::info!(
+                            "show network: the shared clock is now kept with {to} (was {old}){}",
+                            if said == Some(to) {
+                                ", the port the primary's session says"
+                            } else {
+                                ", where its beacon was heard"
+                            }
+                        );
+                        k.aim(to);
+                    } else if k.target().is_none() {
                         k.aim(to);
                     }
                 }
@@ -1979,6 +2221,17 @@ impl State {
                     status: p.status.clone(),
                     problem: p.problem.clone(),
                     adopting: !p.pending.is_empty(),
+                    twin: twin_ports(&p.beacon_ports, now).map(|(a, b)| {
+                        let at = p.addr.map_or_else(String::new, |ip| format!(" at {ip}"));
+                        format!(
+                            "Two copies of NewQ answer as {}{at} (ports {a} and {b}): close the one left over on that computer.{}",
+                            p.name,
+                            match self.pinned_port(p.id) {
+                                Some(port) => format!(" This computer keeps to the one on port {port}."),
+                                None => String::new(),
+                            }
+                        )
+                    }),
                 }
             })
             .collect();
@@ -2030,6 +2283,18 @@ impl State {
                 .clone()
                 .filter(|_| self.me.role == Role::Primary),
             adapters: self.adapters.clone(),
+            twin: self
+                .twin_self
+                .filter(|(_, last, n)| {
+                    *n >= TWIN_SWITCHES as u32
+                        && now.saturating_duration_since(*last) <= TWIN_WINDOW
+                })
+                .map(|(at, _, _)| {
+                    format!(
+                        "Another copy of NewQ with this computer's identity is open (it listens at {at}). Close one of them: the other computers can't tell them apart."
+                    )
+                }),
+            clock_with: self.keeper.as_ref().and_then(|(_, k)| k.target()),
             reached: self
                 .peers
                 .values()
@@ -2039,7 +2304,10 @@ impl State {
                         // The session's own address (the one in use), and the
                         // port it listens on, not the far end of a socket it
                         // dialled from.
-                        let port = if c.target.is_some() || p.tcp_port == 0 {
+                        let said = c.hello.as_ref().map_or(0, |h| h.tcp_port);
+                        let port = if said != 0 {
+                            said
+                        } else if c.target.is_some() || p.tcp_port == 0 {
                             c.session.peer.port()
                         } else {
                             p.tcp_port
@@ -2050,6 +2318,48 @@ impl State {
                 .collect(),
         }
     }
+}
+
+/// Two ports one id's beacons went back and forth between, at least
+/// `TWIN_SWITCHES` times, in the last `TWIN_WINDOW` (oldest first): two NewQs
+/// with one identity. A NewQ started again moves its port once, which isn't.
+fn twin_ports(ports: &VecDeque<(u16, Instant)>, now: Instant) -> Option<(u16, u16)> {
+    let fresh: Vec<u16> = ports
+        .iter()
+        .filter(|(_, t)| now.saturating_duration_since(*t) <= TWIN_WINDOW)
+        .map(|(p, _)| *p)
+        .collect();
+    let switches = fresh.windows(2).filter(|w| w[0] != w[1]).count();
+    if switches < TWIN_SWITCHES {
+        return None;
+    }
+    let a = *fresh.first()?;
+    let b = *fresh.iter().find(|p| **p != a)?;
+    Some((a.min(b), a.max(b)))
+}
+
+/// What a computer's row says when an adoption has had no session for
+/// `ADOPT_PATIENCE`: where it was tried and why it failed (the dial's own
+/// words). The firewall is named only as one possibility, and only for a
+/// computer that says it runs Windows.
+fn unreached_sentence(
+    name: &str,
+    at: Option<SocketAddr>,
+    error: Option<&str>,
+    heard: bool,
+    system: &str,
+) -> String {
+    let place = at.map_or_else(String::new, |a| format!(" at {a}"));
+    let mut s = match error {
+        // The error names each address tried and its way (`dial`).
+        Some(e) => format!("Can't reach {name}: tried {e}."),
+        None if !heard => format!("{name} isn't heard on the network any more."),
+        None => format!("{name}{place} hasn't answered yet."),
+    };
+    if system == "windows" {
+        s.push_str(" One possibility: Windows Firewall on it is blocking NewQ (allow NewQ there; its question may be hidden behind the full-screen card).");
+    }
+    s
 }
 
 /// The listener's thread: accepted connections go to the hub until `stop`.

@@ -38,6 +38,12 @@ pub struct Hello {
     pub term: u64,
     /// What the other side's passcode proof is made over (see `Key::proof`).
     pub nonce: u64,
+    /// The port this NewQ accepts sessions (and clock asks) on: a session's
+    /// far end may be a port it dialled from. 0 from an older NewQ.
+    /// A follower keeps its clock with this port for as long as the session
+    /// holds, whatever beacons say (a second NewQ with the same identity).
+    #[serde(default)]
+    pub tcp_port: u16,
 }
 
 /// What one computer tells another about itself, every second and on a change
@@ -410,6 +416,9 @@ pub struct Beacon {
     pub term: u64,
     /// Switched on and open to being adopted or run.
     pub on: bool,
+    /// Its operating system (`std::env::consts::OS`; empty from an older
+    /// NewQ), for what the page says when it can't be reached.
+    pub system: String,
 }
 
 /// What starts every beacon datagram.
@@ -446,6 +455,7 @@ mod tests {
             network: Some(NetworkId(9)),
             term: 2,
             nonce: 77,
+            tcp_port: 47821,
         }
     }
 
@@ -581,6 +591,7 @@ mod tests {
             show_version: None,
             term: 1,
             on: true,
+            system: "windows".into(),
         };
         let data = encode_beacon(&b);
         assert!(data.len() < MAX_BEACON);

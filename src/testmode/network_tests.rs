@@ -110,6 +110,7 @@ fn peer(id: NodeId, name: &str, connected: bool, in_step: bool, media: Option<&s
         }),
         problem: None,
         adopting: false,
+        twin: None,
     }
 }
 

@@ -45,6 +45,7 @@ fn primary_view(in_step: bool) -> NetView {
             }),
             problem: None,
             adopting: false,
+            twin: None,
         }],
         ..Default::default()
     }

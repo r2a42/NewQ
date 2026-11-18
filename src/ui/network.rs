@@ -156,7 +156,7 @@ pub fn badge(v: &NetView) -> Option<Badge> {
     if !v.me.on {
         return None;
     }
-    if v.problem.is_some() {
+    if v.problem.is_some() || v.twin.is_some() || v.peers.iter().any(|p| p.twin.is_some()) {
         return make_badge("⚠", STOP_RED);
     }
     if v.is_primary() {
@@ -295,6 +295,18 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
         }
         if let Some(p) = &v.problem {
             warning(ui, &format!("⚠ {p}"));
+        }
+        // Another NewQ with this identity, here or on a computer it follows.
+        if let Some(t) = &v.twin {
+            warning(ui, &format!("⚠ {t}"));
+        }
+        if let Some(t) = v
+            .following
+            .as_ref()
+            .and_then(|f| v.peer(f.id))
+            .and_then(|p| p.twin.as_ref())
+        {
+            warning(ui, &format!("⚠ {t}"));
         }
         if !v.me.on {
             return;
@@ -512,6 +524,9 @@ fn computers(ui: &mut Ui, show: &Show, v: &NetView, st: &mut UiState, actions: &
                 if let Some(t) = &p.problem {
                     warning(ui, &format!("⚠ {t}"));
                 }
+                if let Some(t) = &p.twin {
+                    warning(ui, &format!("⚠ {t}"));
+                }
             }
             hint(
                 ui,
@@ -721,6 +736,9 @@ fn computer_row(
     if let Some(t) = &p.problem {
         warning(ui, &format!("⚠ {t}"));
     }
+    if let Some(t) = &p.twin {
+        warning(ui, &format!("⚠ {t}"));
+    }
     super::net_media::computer_rows(ui, p, st, actions);
 }
 
@@ -755,6 +773,9 @@ fn facts(s: &proto::StatusReport, p: Option<&PeerView>) -> String {
         && p.is_some()
     {
         parts.push(format!("clock ±{e:.2} ms"));
+    } else if p.is_some() && s.primary.is_some() && !s.clock_locked {
+        // A follower's clock not settled reports no figure.
+        parts.push("clock not locked".into());
     }
     parts.join(" · ")
 }

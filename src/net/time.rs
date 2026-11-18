@@ -97,6 +97,11 @@ impl ClockHandle {
         self.0.lock().clock.locked()
     }
 
+    /// Whether nothing plays on this computer now (`SharedClock::set_idle`).
+    pub fn set_idle(&self, idle: bool) {
+        self.0.lock().clock.set_idle(idle);
+    }
+
     /// Where this follower's shared clock is now, for carrying it on as the
     /// primary's (a backup taking control, D7). None before any exchange.
     pub fn continued(&self) -> Option<Continued> {

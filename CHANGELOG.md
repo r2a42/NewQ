@@ -37,6 +37,22 @@ release page, and a release is refused if it has none.
   log since the test began (all its parts), named in the report and in the Test window. A
   display computer makes no zip of its own.
 - The test's report says each computer's problem once, and its screens as "Stage-PC screen 1".
+- **Only one NewQ opens on a computer.** Opening NewQ again (another copy, NewQ Display, NewQ given
+  a show file) brings the NewQ that is open to the front and opens that show in it,
+  asking first about unsaved changes. In the second test a forgotten copy left open on the
+  primary answered in its name, and a display computer kept its clock with one and then the
+  other: that was most of the "out of step" seen.
+- **Two NewQs with one identity are said plainly.** If a computer is heard from two NewQs at
+  once, its row, its own page and the computers that follow it say so in red, and the display
+  computers keep their clock with the NewQ they are connected to, never the other.
+- **"Adding…" no longer waits for ever.** When *Add to the show* can't connect within about 10
+  seconds, the computer's row says why: each address tried (wired, Wi-Fi, a VPN such as
+  Tailscale), and what went wrong. The primary now tries every address the computer was heard
+  on, not just one. On a Windows computer it mentions that Windows Firewall may be blocking NewQ.
+- **The clock figure is no longer nonsense.** A computer whose clock isn't settled reports *not
+  locked* instead of a number (the second test showed 2,605,312 ms). A clock that is a long
+  way ahead of the primary's is put right at once while nothing plays, and never chased slowly
+  for minutes while a cue runs.
 
 ## 0.24.2
 

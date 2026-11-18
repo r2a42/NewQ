@@ -45,6 +45,9 @@ const SYNCED: &str = "synced-show.newq";
 #[derive(Default)]
 pub(super) struct Playing {
     mode: NetMode,
+    /// The shared clock's `back_steps` last seen (a big step back taken while
+    /// nothing played: the engine's shared time starts afresh).
+    back_steps: u32,
     leader: Option<Leader>,
     follower: Follower,
     // The primary's show, as sent.
@@ -141,7 +144,19 @@ impl App {
             NetMode::Off => self.engine.tick(&self.show, dt),
             NetMode::Primary => self.play_primary(),
             NetMode::Follower => {
-                let clock = self.net.clock().now();
+                let handle = self.net.clock();
+                handle.set_idle(!self.engine.is_active());
+                let clock = handle.now();
+                if let Some(n) = clock
+                    && n.back_steps != self.play.back_steps
+                {
+                    // The clock was put back (nothing was playing): the
+                    // engine's shared time, which never goes back, starts
+                    // again from it rather than standing still that long.
+                    self.play.back_steps = n.back_steps;
+                    log::info!("show network: the shared clock was put back to the primary's");
+                    self.engine.net_leave_shared();
+                }
                 let shared = clock
                     .filter(|n| n.locked || self.engine.net_shared_time().is_some())
                     .map(|n| n.time);
@@ -461,7 +476,10 @@ impl App {
                 let n = clock.now();
                 let locked = n.is_some_and(|n| n.locked);
                 SyncFacts {
-                    clock_error_ms: n.map(|n| (n.error * 1000.0 * 100.0).round() / 100.0),
+                    // None while not locked (the page says so), capped.
+                    clock_error_ms: n
+                        .and_then(|n| n.report_ms())
+                        .map(|e| (e * 100.0).round() / 100.0),
                     clock_locked: locked,
                     rtt_ms: clock
                         .worst_rtt()
@@ -861,7 +879,9 @@ impl App {
             address.as_deref(),
             primary,
             standing,
-            clock.map(|n| (n.error * 1000.0 * 10.0).round() / 10.0),
+            clock
+                .and_then(|n| n.report_ms())
+                .map(|e| (e * 10.0).round() / 10.0),
         );
         // The media manager's progress while files are still coming.
         if let Some(own) = &self.ui.media.own {
@@ -1123,7 +1143,7 @@ impl App {
         self.play.measure.sample(
             now,
             Sample {
-                clock_error_ms: Some(n.error * 1000.0),
+                clock_error_ms: n.report_ms(),
                 rtt_ms: clock.worst_rtt().map(|r| r * 1000.0),
                 locked: n.locked,
                 in_step: self.play.follower.in_step,
@@ -1399,6 +1419,7 @@ mod tests {
             status: None,
             problem: None,
             adopting: false,
+            twin: None,
         };
         let mut v = NetView {
             me: Identity {
@@ -1488,6 +1509,7 @@ mod tests {
             status: None,
             problem: None,
             adopting: false,
+            twin: None,
         });
         assert_eq!(mode_of(&v), NetMode::Primary, "one adopted, even offline");
         v.me.role = Role::Display;
