@@ -30,6 +30,13 @@ release page, and a release is refused if it has none.
   mixing, and a dropout that came with the system calling late says so: *the system called
   for sound late, not NewQ's mixing: another program or the sound device's power saving; a
   larger buffer may help*.
+- **Cues that follow one another stay together across a show network.** A cue started by the one
+  before it (auto-follow, the next cue of a "play in order" group, what follows a group or a
+  timeline) now starts on every computer where the one before ended by the shared clock. Each
+  computer used to start it at the first frame it drew after the end, so one drawing at 60 frames
+  a second and one at 165 drifted a few milliseconds further apart at every cue, until a cue was
+  about 26 ms off and "put right" (the network test's *in step with the primary again … moved
+  -26 ms* lines). Playing alone is unchanged.
 
 ## 0.24.3
 

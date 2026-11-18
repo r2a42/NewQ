@@ -71,6 +71,8 @@ struct Node {
     last_local: Option<f64>,
     /// At its last tick: its clock, the cue's time and the timeline's.
     note: Option<Note>,
+    /// Its frames per second (`TICK_HZ` unless a test sets it).
+    hz: f64,
 }
 
 impl Node {
@@ -94,6 +96,7 @@ impl Node {
             asks: Vec::new(),
             last_local: None,
             note: None,
+            hz: TICK_HZ,
         }
     }
 
@@ -402,6 +405,7 @@ impl World {
                 let mut fresh = Node::new(c, false, &mut self.rng);
                 fresh.phase = self.nodes[i].phase;
                 fresh.k = self.nodes[i].k;
+                fresh.hz = self.nodes[i].hz;
                 self.nodes[i] = fresh;
             }
             Ev::Sample => {
@@ -427,6 +431,7 @@ impl World {
                 let mut fresh = Node::new(c, false, &mut self.rng);
                 fresh.phase = self.nodes[j].phase;
                 fresh.k = self.nodes[j].k;
+                fresh.hz = self.nodes[j].hz;
                 self.nodes[j] = fresh;
                 self.dead[j] = false;
                 self.q.push(now, Ev::Tick(j));
@@ -472,7 +477,7 @@ impl World {
         n.k += 1;
         let next = n
             .clock
-            .true_at(n.clock.local(0.0) + n.phase + n.k as f64 / TICK_HZ);
+            .true_at(n.clock.local(0.0) + n.phase + n.k as f64 / n.hz);
         self.q.push(next.max(now), Ev::Tick(i));
         let local = n.clock.local(now);
         let dt = n.last_local.map_or(0.0, |l| local - l);
@@ -1226,4 +1231,131 @@ fn a_command_after_the_clock_was_put_back_starts_near_zero() {
         fe < 1.0 && (fe - pe).abs() < 0.05,
         "primary {pe}, here {fe}"
     );
+}
+
+// ---- Cues the engine starts by itself start at the same shared time ----
+
+/// A show of cues that start one another: a chain of auto-follows, a "play
+/// in order" group and a cue with a pre-wait, every length a frame's odd
+/// fraction. The first cue, the group, and the long cue the chain ends on.
+/// (A timeline group's clips that keep to its clock are files: that is
+/// `a_chain_of_films_and_sounds_starts_each_cue_together_at_any_frame_rate`.)
+fn chained_show() -> (Show, CueId, CueId, CueId) {
+    use crate::show::{ContinueMode, CueKind, CueType, GroupMode};
+    let mut show = Show::default();
+    let wait = |show: &mut Show, len: f64, parent: Option<CueId>, pre_wait: f64| {
+        let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+        if let CueKind::Wait(w) = &mut c.kind {
+            w.duration = len;
+        }
+        c.parent = parent;
+        c.pre_wait = pre_wait;
+        if parent.is_none() {
+            c.continue_mode = ContinueMode::AutoFollow;
+        }
+        let id = c.id;
+        show.cues.push(c);
+        id
+    };
+    let group = |show: &mut Show, mode: GroupMode| {
+        let mut g = show.make_cue(CueType::Group, None, show.cues.len());
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = mode;
+        }
+        g.continue_mode = ContinueMode::AutoFollow;
+        let id = g.id;
+        show.cues.push(g);
+        id
+    };
+    let first = wait(&mut show, 1.013, None, 0.0);
+    for len in [2.371, 0.917, 3.333, 1.709, 2.051, 1.111, 0.777] {
+        wait(&mut show, len, None, 0.0);
+    }
+    let in_order = group(&mut show, GroupMode::Playlist);
+    for len in [1.293, 0.871, 1.507, 2.229, 1.013] {
+        wait(&mut show, len, Some(in_order), 0.0);
+    }
+    wait(&mut show, 0.919, None, 0.333);
+    for len in [1.237, 0.613] {
+        wait(&mut show, len, None, 0.0);
+    }
+    let last = wait(&mut show, 1000.0, None, 0.0);
+    show.cues.last_mut().expect("a cue").continue_mode = ContinueMode::DoNotContinue;
+    (show, first, in_order, last)
+}
+
+/// The largest difference (seconds) between the primary's anchor of a cue,
+/// or of a timeline's clock, and a follower's, of those both play now.
+fn anchors_apart(w: &World) -> f64 {
+    let p = w.nodes[w.primary].engine.net_state(0.0);
+    let mut worst: f64 = 0.0;
+    for n in w.nodes.iter().skip(1) {
+        let f = n.engine.net_state(0.0);
+        for c in &p.cues {
+            if let Some(h) = f.cues.iter().find(|h| h.cue == c.cue) {
+                worst = worst.max((h.anchor - c.anchor).abs());
+            }
+        }
+        for r in &p.runs {
+            if let (Some(a), Some(b)) = (
+                r.anchor,
+                f.runs
+                    .iter()
+                    .find(|h| h.key == r.key)
+                    .and_then(|h| h.anchor),
+            ) {
+                worst = worst.max((a - b).abs());
+            }
+        }
+    }
+    worst
+}
+
+/// Issue 23 of the 0.24.3 test: a primary drawing at 60 Hz and a follower
+/// at 165 Hz (and the other way round, and alike). GO starts the first cue
+/// at one shared time on both; every cue after it is started by the engine
+/// itself, when the one before ends, and each must begin at the same shared
+/// time on both (where the one before ended by the shared clock), not at
+/// whichever frame each noticed the end in: that put the follower a few ms
+/// further ahead at each link until a cue was 27 ms off and "put right".
+#[test]
+fn cues_that_follow_one_another_start_together_at_any_frame_rate() {
+    for (seed, hz_p, hz_f) in [(23, 60.0, 165.0), (24, 120.0, 60.0), (25, 60.0, 60.0)] {
+        let (show, first, in_order, last) = chained_show();
+        let mut w = World::new(1, Network::wired(), seed);
+        w.ts.show = show;
+        w.nodes[0].hz = hz_p;
+        w.nodes[1].hz = hz_f;
+        w.run(4.0);
+        assert!(w.locked(4.0), "the follower didn't lock");
+        w.nodes[0].engine.playhead = Some(first);
+        w.acts(&[(4.5, Act::Go)]);
+        let mut worst: f64 = 0.0;
+        let mut saw_group = false;
+        let mut t = 4.5;
+        while t < 45.0 {
+            t += 0.05;
+            w.run(t);
+            worst = worst.max(anchors_apart(&w));
+            saw_group |= w.nodes[1]
+                .engine
+                .active
+                .iter()
+                .any(|a| a.cue_id == in_order);
+        }
+        assert!(saw_group, "the group played");
+        for n in &w.nodes {
+            assert!(
+                n.engine.active.iter().any(|a| a.cue_id == last),
+                "the chain reached its last cue ({hz_p} and {hz_f} Hz)"
+            );
+        }
+        let f = w.nodes[1].follower.as_ref().expect("a follower");
+        assert_eq!(f.corrections, 0, "{hz_p} and {hz_f} Hz: {:?}", f.corrected);
+        assert!(
+            worst < 0.002,
+            "{hz_p} and {hz_f} Hz: {:.1} ms apart",
+            worst * 1000.0
+        );
+    }
 }
