@@ -20,8 +20,9 @@ release page, and a release is refused if it has none.
   window, or a short one, drew the display's picture out of shape (a round Earth looked like
   an egg), and changing the pane's size changed the squeeze. The preview now always keeps the
   display's own shape, as large as the pane allows, with black bars beside it or above and
-  below; so do the timeline workspace's monitor and a sub display's area editor. A display
-  showing part of another's picture is previewed as that display shows it.
+  below; so do the timeline workspace's monitor, the Operator view's preview and a sub
+  display's area editor. A display showing part of another's picture is previewed in that
+  part's shape, no longer stretched.
 - **Test Mode no longer blames NewQ's mixing for the system calling for sound late.** On a
   Mac the report said *Mixing the sound took up to 144% of the time it has* when NewQ's mixing
   took almost nothing and the system had asked for sound late. The sound's load now counts
