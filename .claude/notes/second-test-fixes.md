@@ -15,6 +15,11 @@ computers are in; then read the logs, add what they show, and fix in order of ha
    192.168.x.x") with the dial's own error, and log each failed dial. Neither log covers that
    moment, so the firewall is a guess (the duplicate identity of item 7 is a rival cause): name
    it only as one possibility on Windows.
+   Owner (2026-11-18): a second NewQ *was* open on the Mac (item 7 confirmed). For "Adding…" they
+   allowed NewQ in the firewall (no change at once), then turned off **Tailscale** and **Wi-Fi**
+   on the laptop; one of those let it connect. So: when a dial fails, try every address the
+   computer's beacons came from (`Peer::heard_from`, best first) before giving up, and name the
+   address tried and the adapters seen (a VPN such as Tailscale, Wi-Fi) in the row's reason.
 2. **Display computer: the firewall prompt is hidden behind the full-screen card.** Consider the
    card saying "Not reached by a primary yet: Windows may be blocking NewQ" when beacons go out
    but no primary has connected for a while, or checking for an inbound firewall rule at start
