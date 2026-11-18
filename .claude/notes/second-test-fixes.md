@@ -156,6 +156,16 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    keep the display's aspect and fit inside the pane with bars. (Earlier guess, Retina points vs
    HDMI pixels, now second.)
 
+## Status (2026-11-18): owner: "do everything in the fix list before the next version"
+
+Done in 0.24.3: 1, 2, 3, 4, 5, 6a, 6b, 7, 8, 9, 11 (measurement), 12, 13, 16, 17, 18, the
+"leave the network" key (6a's banner). Moot: 6 (0.24.3 was signed), 14, 25.
+In progress (agents): 21 + 24 (preview aspect, sound wording), 22 (GPU recovery), 23 (26 ms offset).
+Next: 20 (remove old start-at-login entries once, with a note; the owner's "everything" is the yes),
+26 (generated network load in Test Mode), 10 + 15 (Mac main-loop stalls on the minute, the 100 Hz
+monitor at 81-85 fps), the takeover sound output, 19 (test the suspected Watch path; nothing to fix
+unless it reproduces).
+
 ## Seen in the 0.24.3 run (2026-11-18)
 
 22. **Display computer (WNO-2) drew about one frame every 10-15 s and its two screens were out of
