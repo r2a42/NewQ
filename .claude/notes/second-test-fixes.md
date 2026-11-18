@@ -155,3 +155,11 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    pillarboxing or scaling it to fit. So the preview is stretched to the pane's shape; it should
    keep the display's aspect and fit inside the pane with bars. (Earlier guess, Retina points vs
    HDMI pixels, now second.)
+
+## Seen in the 0.24.3 run (2026-11-18)
+
+22. **Display computer (WNO-2) drew about one frame every 10-15 s and its two screens were out of
+   step** (owner). The same laptop drew 162-165 fps on 0.24.2, so suspect something new in 0.24.3
+   first: the clock's big-step jump (`SharedNow::jumps` -> `Engine::net_shift_shared`, logged as
+   "the shared clock jumped to the primary's") firing again and again, the single-instance or
+   handoff checks, the not-reached card, or the per-screen card numbering. Read WNO-2's log first.
