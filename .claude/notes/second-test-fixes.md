@@ -244,3 +244,10 @@ Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then
    passed 3/3 alone. Likely cause: the playhead (`p.at.playhead`) is set after `same_show`, so a
    loaded machine lets the followers start pulling in the default order before the `MediaOrder`
    arrives. Root-cause it and make the test wait for the order (or set it first); no retry loops.
+28. **Another load-sensitive test**: `engine::timeline::tests::a_video_that_runs_out_during_a_free_run_pause_ends_loops_or_holds_as_it_is_set_to`
+   (tests.rs:988) failed once in a full run under load, passed alone. Root-cause with item 27.
+29. **Forward compatibility of `NetTest`** (found while building item 26): `NetTest` has no catch-all
+   for kinds it doesn't know and `session.rs` closes the session on a frame it can't read, so a newer
+   NewQ sending `Local`/`Whole`/`Mute` (0.24.2+) to an older one drops that session again and again.
+   Give `NetTest` (and any other tagged enum inside `Msg`) an `Unknown` catch-all like `Msg::Unknown`,
+   and test that an unknown kind is ignored, not fatal.
