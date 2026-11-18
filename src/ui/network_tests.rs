@@ -1051,3 +1051,32 @@ fn two_newqs_with_one_identity_and_an_unlocked_clock_are_said() {
     let said = facts(&s, Some(&p));
     assert!(said.contains("clock ±0.05 ms") && !said.contains("not locked"));
 }
+
+/// The one-time start-at-login clean-up removed an older NewQ's entry: the
+/// computer says so beside its tick for a while, until it is ticked again.
+#[test]
+fn a_computer_whose_start_at_login_was_cleaned_up_says_so() {
+    let now = std::time::Instant::now();
+    let mut st = UiState::default();
+    assert_eq!(super::login_note(&st, now), None, "nothing removed");
+    st.login_note_since = Some(now);
+    assert_eq!(
+        super::login_note(&st, now),
+        Some(crate::autostart::SWITCHED_OFF)
+    );
+    assert!(super::login_note(&st, now + super::LOGIN_NOTE_FOR).is_none());
+    st.start_at_login = true;
+    assert!(super::login_note(&st, now).is_none(), "ticked again");
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = locked_window(modern, follower_view(Role::Display));
+        st.login_note_since = Some(std::time::Instant::now());
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", "banner_login_note").is_some(),
+            "modern {modern}"
+        );
+        st.start_at_login = true;
+        w.settle(&mut show, &mut st);
+        assert!(w.find("net_rects", "banner_login_note").is_none());
+    }
+}

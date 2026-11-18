@@ -470,16 +470,31 @@ impl App {
             move || wake()
         });
         ui.net = net.view();
-        // An entry an older NewQ wrote on a display computer is written again
-        // as NewQ Display with `--display` (nothing is switched on that
-        // wasn't). One 0.24.0 wrote started NewQ plain, and only `--display`
-        // starts display mode now: this start may be that login's, so it is
-        // display mode too (once: the entry has `--display` from now on).
-        let display = crate::autostart::fix_old_entry(
+        // Start at login only ever on someone's word: the first start of this
+        // NewQ removes an entry an older one left (0.24.0 to 0.24.2 made them
+        // by themselves), once, and says so; one ticked since is kept (on a
+        // display computer written again with `--display` if it lacks it).
+        // An entry that started NewQ plain on a display computer: this start
+        // may be that login's, so it is display mode too.
+        let looked = crate::autostart::look_at_start(
+            ui.prefs.start_at_login_cleaned,
             ui.net.me.on
                 && ui.net.me.adopted()
                 && ui.net.me.role == crate::net::node::Role::Display,
-        ) || display;
+        );
+        let display = looked.display || display;
+        if looked.cleaned && !ui.prefs.start_at_login_cleaned {
+            ui.prefs.start_at_login_cleaned = true;
+            if let Some(dir) = &ui.layout_dir
+                && let Err(e) = ui.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
+        if looked.removed {
+            ui.login_note_since = Some(Instant::now());
+            engine.log(crate::autostart::SWITCHED_OFF);
+        }
         ui.start_at_login = crate::autostart::is_set();
         let follows = ui.net.me.on && ui.net.me.adopted();
         let open_kept = follows && ui.show_path.is_none();

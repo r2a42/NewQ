@@ -1352,9 +1352,12 @@ never copy media by hand, and nothing waits for it.
   removed. Where it is, to see or turn it off there: on Windows, Task Manager ▸
   *Startup apps*, listed as *NewQ Display* (*NewQ* for another computer); on a
   Mac, *System Settings ▸ General ▸ Login Items*, under *Allow in the
-  Background*; on Linux, `~/.config/autostart/newq.desktop`. An entry an older
-  NewQ wrote on a display computer without `--display` is written again with it
-  the next time NewQ opens there. (Written by NewQ itself: a LaunchAgent on a
+  Background*; on Linux, `~/.config/autostart/newq.desktop`. NewQ 0.24.0 to
+  0.24.2 switched it on by themselves for a display computer (and 0.24.3 kept
+  it): the first time a later NewQ opens on a computer it removes any entry an
+  older one left, once, and says so for a while (*Start at login was switched
+  off (an older NewQ had switched it on by itself); tick it to have it back*).
+  A tick set from then on is kept. (Written by NewQ itself: a LaunchAgent on a
   Mac, the Run key on Windows, an autostart entry on Linux. Only tried on Linux
   so far.)
 - **The other computers' controls are locked**, with a line saying who runs the

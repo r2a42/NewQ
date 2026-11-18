@@ -924,6 +924,10 @@ impl App {
         if let Some(p) = &v.problem {
             hint.push(p.clone());
         }
+        // The one-time start-at-login clean-up removed an older NewQ's entry.
+        if let Some(n) = crate::ui::login_note(&self.ui, Instant::now()) {
+            hint.push(n.to_string());
+        }
         hint.push(quit_words().to_string());
         Some(Card {
             text,
