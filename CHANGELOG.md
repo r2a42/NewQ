@@ -6,6 +6,20 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Only NewQ Display opens a display computer's screens.** Opening NewQ itself on a computer
+  that has been a display computer now shows its normal window, locked, with a line saying whose
+  show it belongs to and two buttons: *Open as a display computer* and *Leave the show network*.
+- **Start at login is never switched on by itself.** Adding a display computer no longer sets it
+  to start at login. Tick *Starts at login* on its row on the primary, or on the computer itself;
+  untick it to remove it. NewQ says where the system lists it (on Windows, Task Manager ▸ Startup
+  apps, now named *NewQ Display*; the old *NewQ* entry is removed). An entry 0.24.0 wrote on a
+  display computer is mended so it still starts as one.
+- **Each screen's card says which screen it is**: *Assistant · Screen 1*, *Screen 2*, numbered as
+  the primary numbers that computer's monitors, even when there is only one. Identify shows the
+  number too.
+- **A display computer that no primary has reached says so** on its card after about 20 seconds,
+  and that the firewall on that computer may be blocking NewQ.
+
 ## 0.24.2
 
 - **Test mode is simpler.** One short window: a length (Short, Medium or Long, each saying how

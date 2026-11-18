@@ -1066,13 +1066,24 @@ Open it on a computer with projectors or screens and that is all you do there:
 
 - It asks nothing. There is no control window and no start-up picture: every
   monitor goes full screen at once with a quiet grey card saying the
-  computer's name, its address and *Waiting for a NewQ primary on this
-  network*. A monitor plugged in later gets a card too.
+  computer's name and which of its screens it is (*Assistant · Screen 1*,
+  *Screen 2*…, numbered as the primary's Displays menu and Test Mode number that
+  computer's monitors, even when there is only one), its address and *Waiting
+  for a NewQ primary on this network*. A monitor plugged in later gets a card
+  too.
+- If no primary has reached it after about 20 seconds, the card says so: *Not
+  reached by a primary yet*. If the primary lists the computer but can't add it,
+  the firewall on the display computer may be blocking NewQ (on Windows its
+  "allow access" question can hide behind the full-screen card: Alt+Tab).
 - On the computer you run the show from, it appears under *Waiting to join* on
   *Settings ▸ Show network*: *Add to the show* and it is a display computer of
-  your show, with nothing more to choose. From then on it starts by itself when
-  the computer starts, and finds its primary again by itself after either of
-  them restarts (no click on either).
+  your show, with nothing more to choose. It finds its primary again by itself
+  after either of them restarts (no click on either).
+- **Only NewQ Display opens display mode.** Opening NewQ itself on a display
+  computer shows its normal window (locked: the show is run from the primary),
+  with a line saying it is a display computer of the primary's show and two
+  buttons: *Open as a display computer* (display mode now) and *Leave the show
+  network*.
 - **A show remembers its computers.** If you open your show on a different
   primary (a spare laptop, a new booth computer), the display computers the show
   uses that are waiting are added by themselves: the show vouches for them. A
@@ -1090,9 +1101,9 @@ Open it on a computer with projectors or screens and that is all you do there:
 2. **On each display computer** (the ones with projectors or screens): open
    *NewQ Display* (above), or in NewQ *Settings ▸ Show network*, tick *This
    computer is part of a show network*. That is all you ever do there. NewQ asks the system to let it use the network the first time
-   (allow it). Once the primary has added it, it starts NewQ when the computer
-   starts (*Starts at login*), so a computer up in a truss never needs a keyboard
-   again.
+   (allow it). To have it come back by itself after a power cut, tick *Starts
+   at login* on its row on the primary (or on the computer itself), so a
+   computer up in a truss never needs a keyboard again.
 3. **On the computer you run the show from:** open your show, then *Settings ▸
    Show network ▸ Run the show network from this computer*.
 4. **Add the computers:** they appear under *Waiting to join*; *Add to the show*
@@ -1294,12 +1305,19 @@ never copy media by hand, and nothing waits for it.
 - **A primary remembers its computers** (with their addresses) and finds them
   again after a restart, even where the network drops announcements. *Forget*
   on an offline computer's row stops looking for one that is gone for good.
-- **Start at login.** A display computer is set to start NewQ when it starts
-  (so one in a truss comes back after a power cut, as a display computer:
-  `newq --display`); the primary's row has a
-  *Starts at login* tick for every computer, and each computer's own page has
-  one. (Written by NewQ itself: a LaunchAgent on a Mac, the Run key on Windows,
-  an autostart entry on Linux. Only tried on Linux so far.)
+- **Start at login.** Never switched on by itself: the primary's row has a
+  *Starts at login* tick for every computer, and the computer itself has one
+  (on its locked window's banner, or *Settings ▸ Show network*). Ticked, NewQ
+  starts when the computer starts, a display computer as one (`newq --display`),
+  so one in a truss comes back after a power cut; unticked, the entry is
+  removed. Where it is, to see or turn it off there: on Windows, Task Manager ▸
+  *Startup apps*, listed as *NewQ Display* (*NewQ* for another computer); on a
+  Mac, *System Settings ▸ General ▸ Login Items*, under *Allow in the
+  Background*; on Linux, `~/.config/autostart/newq.desktop`. An entry an older
+  NewQ wrote on a display computer without `--display` is written again with it
+  the next time NewQ opens there. (Written by NewQ itself: a LaunchAgent on a
+  Mac, the Run key on Windows, an autostart entry on Linux. Only tried on Linux
+  so far.)
 - **The other computers' controls are locked**, with a line saying who runs the
   show; *Leave the show network* takes one out.
 - **Blended pictures.** The primary warns when a computer that shares a blended

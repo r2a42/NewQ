@@ -179,6 +179,15 @@ pub fn badge(v: &NetView) -> Option<Badge> {
     }
 }
 
+/// The start-at-login tick's words: a display computer comes back as one.
+pub fn at_login_label(display: bool) -> &'static str {
+    if display {
+        "Start as a display computer when this computer starts"
+    } else {
+        "Start NewQ when this computer starts"
+    }
+}
+
 /// "120 GB free".
 pub fn space(bytes: u64) -> String {
     const GB: f64 = 1_000_000_000.0;
@@ -355,17 +364,25 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
                 ui.label(RichText::new(s).strong());
             }
         }
-        // Start at login (D8): on by itself for a display computer.
+        // Start at login (D8): only when ticked, here or on the primary.
+        let display = v.me.role == Role::Display;
         let mut at_login = st.start_at_login;
         let r = ui
-            .checkbox(&mut at_login, "Start NewQ when this computer starts")
+            .checkbox(&mut at_login, at_login_label(display))
             .on_hover_text(
                 "For a computer out of reach (a display computer in a truss): it comes back by \
-                 itself after a power cut. The primary can set this too.",
+                 itself after a power cut. The primary can set this too, from this computer's \
+                 row.",
             );
         note(ui, "start_at_login", r.rect);
         if r.changed() {
             st.start_at_login_request = Some(at_login);
+        }
+        if st.start_at_login {
+            hint(
+                ui,
+                &crate::autostart::where_words(std::env::consts::OS, display),
+            );
         }
         // Its name: what the others call it.
         ui.horizontal(|ui| {
@@ -631,7 +648,20 @@ fn computer_row(
             let r = ui.label(RichText::new(text).color(color).small());
             note(ui, format!("step:{}", p.id), r.rect);
             let mut at_login = s.start_at_login;
-            let r = ui.checkbox(&mut at_login, RichText::new("Starts at login").small());
+            let r = ui
+                .checkbox(&mut at_login, RichText::new("Starts at login").small())
+                .on_hover_text(format!(
+                    "NewQ starts by itself when {} starts{}, so it comes back after a power cut. \
+                     Set only here or on that computer, never by itself; untick to remove it \
+                     (listed there as \"{}\").",
+                    p.name,
+                    if p.role == Role::Display {
+                        ", as a display computer"
+                    } else {
+                        ""
+                    },
+                    crate::autostart::name(p.role == Role::Display)
+                ));
             note(ui, format!("at_login:{}", p.id), r.rect);
             if r.changed() {
                 actions.push(Action::Net(NetAction::StartAtLogin(p.id, at_login)));
@@ -1022,8 +1052,9 @@ pub fn locked(st: &UiState) -> bool {
 
 /// The line across the top of a follower's window: who runs the show, where
 /// this computer stands, and the one thing that can be done here.
-pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
-    let v = &st.net;
+pub fn locked_banner(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+    let net = st.net.clone();
+    let v = &*net;
     let who = v
         .following
         .as_ref()
@@ -1036,10 +1067,10 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         .map(|(a, _)| format!(" ({a})"))
         .unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
-        let what = if v.me.role == Role::Backup {
-            "this computer is its backup, following its show"
-        } else {
-            "this computer follows its show"
+        let what = match v.me.role {
+            Role::Backup => "this computer is its backup, following its show",
+            Role::Display => "this computer is one of its display computers",
+            _ => "this computer follows its show",
         };
         let r = ui.label(
             RichText::new(format!(
@@ -1065,6 +1096,45 @@ pub fn locked_banner(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         );
         note(ui, "following_test", r.rect);
     }
+    // A display computer opened as NewQ rather than NewQ Display (only that
+    // starts display mode): say so, and offer display mode now.
+    if v.me.role == Role::Display {
+        ui.horizontal_wrapped(|ui| {
+            let r = ui.label(format!(
+                "Opened as NewQ, so this window shows and this computer plays only the displays \
+                 {who}'s show gives it. NewQ Display opens it as a display computer: a window on \
+                 every screen, no controls."
+            ));
+            note(ui, "paired_display", r.rect);
+            let r = ui.button("Open as a display computer").on_hover_text(
+                "Every screen of this computer becomes an output and this window hides, as \
+                     when NewQ Display opens it. Ctrl+Q (Command-Q on a Mac) quits.",
+            );
+            note(ui, "open_as_display", r.rect);
+            if r.clicked() {
+                st.open_as_display_request = true;
+            }
+        });
+    }
+    // Start at login, set here or from the primary (never by itself).
+    ui.horizontal_wrapped(|ui| {
+        let display = v.me.role == Role::Display;
+        let mut at_login = st.start_at_login;
+        let r = ui
+            .checkbox(&mut at_login, at_login_label(display))
+            .on_hover_text(crate::autostart::where_words(std::env::consts::OS, display));
+        note(ui, "banner_start_at_login", r.rect);
+        if r.changed() {
+            st.start_at_login_request = Some(at_login);
+        }
+        if st.start_at_login {
+            ui.label(
+                RichText::new(crate::autostart::where_words(std::env::consts::OS, display))
+                    .weak()
+                    .small(),
+            );
+        }
+    });
     // A second row: whether the primary is heard, and what can be done here.
     ui.horizontal(|ui| {
         // ---- Take control (stage 5): the primary gone quiet ----
