@@ -185,8 +185,15 @@ unless it reproduces).
    software adapter retry for the hardware one every few seconds and switch back; (b) if only a
    software adapter is left, say so loudly (card, primary's row, report: "this computer lost its
    graphics card"); (c) a surface that isn't configured is skipped and reconfigured, not a panic.
-   Why the driver reset is unknown (Windows Event Viewer, System log, around 15:37, e.g. nvlddmkm
-   4101, would say); the owner may know what happened on the laptop then.
+   **Why (Windows Event Viewer, from the owner):** at 15:37:18 UserPnp 20003, Driver Management added
+   the services `nvlddmkm` and `NVDisplay.ContainerLocalSystem` for the RTX 5060 (VEN_10DE DEV_2D59):
+   Windows installed or updated the NVIDIA driver mid-show (most likely Windows Update), which
+   reloads the driver and drops the device; at 15:37:46 WHEA-Logger 17, corrected PCIe errors on the
+   GPU's audio function (DEV_22EB) as it came back. Not NewQ's doing; NewQ's recovery is what failed.
+   Advice for show computers (README): stop Windows Update installing drivers (Settings ▸ Windows
+   Update ▸ Advanced options, or the policy "Do not include drivers with Windows Updates") and pause
+   updates before a show. Possible later: NewQ warns on a display computer when Windows may install
+   drivers by itself.
 23. **Steady -26 to -27 ms corrections on WNO-2** (42 in the cue-list part, clock locked, error
    0.4 ms): its cues seem to start about 26 ms off the primary's, just over `LEAVE_UNDER` (1.5
    frames at 60 Hz = 25 ms), so each is corrected once. Look for a fixed offset (video lag, first
