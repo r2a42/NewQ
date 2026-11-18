@@ -5,10 +5,13 @@
 //! keeps to the primary (`Measurer`) and sends what it saw once a second as a
 //! `NetTest::Report`: its shared clock's error and round trip, how much lead
 //! each command had left when it arrived (negative: it came after its time),
-//! the corrections it made (`Engine::net_correct`), how far apart its cues'
-//! times were from the primary's at each heartbeat, its main loop's stalls and
-//! late frames. At `NetTest::End` it sends the last of them and the end of its
-//! own log. A NewQ without the network test reads these as `Msg::Unknown`.
+//! the corrections it made (`Engine::net_correct`), how far apart its cues
+//! were from the primary's at each heartbeat (when they began, and what the
+//! screens show: `Row::shown_apart_ms`), its main loop's stalls and late
+//! frames. At `NetTest::End` it sends the last of them and its own log since
+//! the test began (`LogMark`; `NetTest::Whole` names the test a part belongs
+//! to, so a test of several parts gets one log). A NewQ without the network
+//! test reads these as `Msg::Unknown`.
 //!
 //! Everything here is pure (times come in as arguments); the app feeds it
 //! (`app/play.rs`) and the tests feed it from a simulated network.
@@ -31,7 +34,8 @@ pub enum NetTest {
     End { run: u64 },
     /// A computer to its primary: what it measured since its last report.
     Report(Box<Report>),
-    /// A computer to its primary: the end of its own `newq.log`.
+    /// A computer to its primary: its own `newq.log` since the test began
+    /// (`log_since`; at most `LOG_WHOLE`, the end kept).
     LogTail { run: u64, text: String },
     // ---- Every test across the network (`net::measure_local`) ----
     /// A computer to its primary: what it measured of itself (memory,
@@ -39,6 +43,10 @@ pub enum NetTest {
     Local(Box<super::measure_local::LocalReport>),
     /// Primary to its computers: play the test's sound muted (or not).
     Mute { run: u64, muted: bool },
+    /// Primary to its computers (after `Begin`): run `run` is a part of the
+    /// test `test`, so the log sent at its end goes back to the start of that
+    /// test's first part, not of this part alone (`LogMark`).
+    Whole { run: u64, test: u64 },
 }
 
 /// What one computer measured over about a second.
@@ -49,7 +57,9 @@ pub struct Report {
     /// Counts this computer's reports of the run (a gap is a lost one).
     pub seq: u32,
     pub link: Link,
-    /// The fastest refresh of its monitors (Hz), for "frames apart".
+    /// A refresh of its monitors (Hz): the slowest since 0.24.3, the fastest
+    /// before. The primary counts frames at the slowest screen that drew
+    /// (`monitors`), at this only when none did.
     pub refresh_hz: Option<f32>,
     pub rows: Vec<Row>,
     pub commands: Vec<CommandNote>,
@@ -92,8 +102,14 @@ pub struct Row {
     pub locked: bool,
     /// The last heartbeat agreed with what plays here.
     pub in_step: bool,
-    /// The largest difference between a cue's time here and on the primary
-    /// at the heartbeats since the last row (ms); None: nothing to compare.
+    /// The largest difference between when a cue (or a timeline's clock)
+    /// began here and on the primary, by the shared clock, at the heartbeats
+    /// since the last row (ms); None: nothing to compare. A cue a command
+    /// started carries the primary's time, so this reads near 0 even when the
+    /// clock here is wrong: `shown_apart_ms` is what the screens show.
+    /// (`network.csv` calls it `began_apart_ms`.) A difference seen at one
+    /// heartbeat alone isn't counted (a loop going round between the
+    /// primary's heartbeat and the look here).
     pub apart_ms: Option<f64>,
     /// Cues (and timelines) compared, and those playing there but not here.
     pub compared: u32,
@@ -104,6 +120,15 @@ pub struct Row {
     /// pictures') time by the shared clock.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sound_apart_ms: Option<f64>,
+    /// The largest difference between a cue's time on the screens here and on
+    /// the primary's, at the heartbeats since the last row (ms): each cue's
+    /// time now by this computer's shared clock, against the primary's time
+    /// as its heartbeat says it was, less half a round trip for the
+    /// heartbeat's way here (`seen_offset`). So it holds the clock's own
+    /// error, which `apart_ms` can't see. None: nothing to compare, or a NewQ
+    /// before 0.24.3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_apart_ms: Option<f64>,
 }
 
 /// A command as it arrived.
@@ -137,8 +162,10 @@ pub struct StallNote {
 pub const ROW_EVERY: f64 = 0.5;
 /// A report is sent this often (seconds).
 pub const SEND_EVERY: f64 = 1.0;
-/// The most of a computer's log sent at the end (bytes).
-pub const LOG_TAIL: usize = 256 * 1024;
+/// The most of a computer's log sent at the end of a part (bytes): its log
+/// since the test began, the end kept if longer. A display computer's log for
+/// an hour is some tens of KB; this goes as one frame, after the part.
+pub const LOG_WHOLE: usize = 4 * 1024 * 1024;
 /// At most this many notes of each kind in one report (a burst is cut).
 const MAX_NOTES: usize = 200;
 
@@ -168,7 +195,27 @@ pub struct Measurer {
     corrections_seen: Option<u64>,
     /// Its output windows' drawing since the last report.
     rates: Vec<MonitorRate>,
+    /// The last heartbeat compared (its shared time) and how far apart each
+    /// key was then (began, shown; ms), so that a difference counts only when
+    /// seen twice in a row.
+    last_beat: Option<(f64, Beat)>,
+    shown_apart: Option<f64>,
 }
+
+/// How far apart each key was at a heartbeat (began, shown; ms).
+type Beat = HashMap<Key, (f64, Option<f64>)>;
+
+/// What is compared at a heartbeat: the `n`th instance (oldest first) of a
+/// cue, or a timeline's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Key {
+    Cue(crate::show::CueId, usize),
+    Run(crate::timeline::TimelineKey),
+}
+
+/// Heartbeats come four a second: one further than this (s) after the last
+/// compared is too late to confirm what that one saw.
+const BEATS_IN_A_ROW: f64 = 1.0;
 
 impl Measurer {
     /// Start measuring for `run` (again: the same run is not started twice).
@@ -208,14 +255,44 @@ impl Measurer {
     }
 
     /// The primary's heartbeat, and what plays here at the same shared time.
-    pub fn heartbeat(&mut self, theirs: &PlayState, ours: &PlayState) {
+    /// `seen` is this computer's clock less the primary's, as this heartbeat
+    /// shows it (`seen_offset`; None without a clock): with it, what the
+    /// screens show is compared too. A difference counts only when the last
+    /// heartbeat compared (within `BEATS_IN_A_ROW`) showed one for the same
+    /// cue too, and then the smaller of the two: a loop going round between
+    /// the primary's heartbeat and the look here, or a heartbeat that waited
+    /// to be read, makes one at a single heartbeat.
+    pub fn heartbeat(&mut self, theirs: &PlayState, ours: &PlayState, seen: Option<f64>) {
         if self.run.is_none() {
             return;
         }
-        let (apart, compared, missing) = apart_between(theirs, ours);
-        if let Some(a) = apart {
-            self.apart = Some(self.apart.map_or(a, |w: f64| w.max(a)));
+        let (pairs, compared, missing) = pairs_between(theirs, ours);
+        let now: Beat = pairs
+            .into_iter()
+            .map(|(k, d)| {
+                (
+                    k,
+                    ((d * 1000.0).abs(), seen.map(|e| ((e - d) * 1000.0).abs())),
+                )
+            })
+            .collect();
+        let before = self
+            .last_beat
+            .take()
+            .filter(|(t, _)| (theirs.time - t).abs() <= BEATS_IN_A_ROW)
+            .map(|(_, m)| m)
+            .unwrap_or_default();
+        let most = |w: Option<f64>, a: f64| Some(w.map_or(a, |w: f64| w.max(a)));
+        for (k, (began, shown)) in &now {
+            let Some((b0, s0)) = before.get(k) else {
+                continue;
+            };
+            self.apart = most(self.apart, began.min(*b0));
+            if let (Some(s), Some(s0)) = (shown, s0) {
+                self.shown_apart = most(self.shown_apart, s.min(*s0));
+            }
         }
+        self.last_beat = Some((theirs.time, now));
         self.compared = self.compared.max(compared);
         self.missing = self.missing.max(missing);
         if let Some(a) = sound_apart_between(theirs, ours) {
@@ -291,6 +368,7 @@ impl Measurer {
             compared: std::mem::take(&mut self.compared),
             missing: std::mem::take(&mut self.missing),
             sound_apart_ms: self.sound_apart.take().map(round2),
+            shown_apart_ms: self.shown_apart.take().map(round2),
         };
         if self.pending.rows.len() < MAX_NOTES {
             self.pending.rows.push(row);
@@ -349,8 +427,31 @@ fn round2(x: f64) -> f64 {
 /// How far apart what the primary plays and what plays here are: the largest
 /// difference of a cue's (or a running timeline's) zero time, in ms, how many
 /// were compared, and how many play there and not here. Cues are matched by
-/// cue, oldest first; one that is stopping is left out.
+/// cue, oldest first; one that is stopping is left out. (The tests'; the
+/// measurer uses `pairs_between`.)
+#[cfg(test)]
 pub fn apart_between(theirs: &PlayState, ours: &PlayState) -> (Option<f64>, u32, u32) {
+    let (pairs, compared, missing) = pairs_between(theirs, ours);
+    let worst = pairs
+        .iter()
+        .map(|(_, d)| (d * 1000.0).abs())
+        .reduce(f64::max);
+    (worst, compared, missing)
+}
+
+/// This computer's shared clock less the primary's, as a heartbeat shows it:
+/// made at the primary's shared time `theirs`, taken in here at `here` by
+/// this computer's shared clock, after a way of about half the round trip
+/// `rtt` (seconds). The heartbeat's own waits (to be sent, to be read here)
+/// count as clock error, so it errs towards "apart".
+pub fn seen_offset(here: f64, theirs: f64, rtt: Option<f64>) -> f64 {
+    here - theirs - rtt.unwrap_or(0.0).max(0.0) / 2.0
+}
+
+/// What `apart_between` compares, each with its signed difference (s): when
+/// it began here less when it began there (later here: positive). What the
+/// screens show differs by `seen_offset` less that.
+pub fn pairs_between(theirs: &PlayState, ours: &PlayState) -> (Vec<(Key, f64)>, u32, u32) {
     let mut here: HashMap<crate::show::CueId, Vec<f64>> = HashMap::new();
     for c in ours.cues.iter().filter(|c| !c.stopping) {
         here.entry(c.cue).or_default().push(c.anchor);
@@ -362,7 +463,7 @@ pub fn apart_between(theirs: &PlayState, ours: &PlayState) -> (Option<f64>, u32,
     for c in theirs.cues.iter().filter(|c| !c.stopping) {
         there.entry(c.cue).or_default().push(c.anchor);
     }
-    let (mut worst, mut compared, mut missing) = (None::<f64>, 0u32, 0u32);
+    let (mut pairs, mut compared, mut missing) = (Vec::new(), 0u32, 0u32);
     for (cue, mut list) in there {
         list.sort_by(f64::total_cmp);
         let mine = here.get(&cue);
@@ -370,8 +471,7 @@ pub fn apart_between(theirs: &PlayState, ours: &PlayState) -> (Option<f64>, u32,
             match mine.and_then(|m| m.get(n)) {
                 Some(b) => {
                     compared += 1;
-                    let d = ((b - a) * 1000.0).abs();
-                    worst = Some(worst.map_or(d, |w| w.max(d)));
+                    pairs.push((Key::Cue(cue, n), b - a));
                 }
                 None => missing += 1,
             }
@@ -388,10 +488,9 @@ pub fn apart_between(theirs: &PlayState, ours: &PlayState) -> (Option<f64>, u32,
             continue;
         };
         compared += 1;
-        let d = ((b - a) * 1000.0).abs();
-        worst = Some(worst.map_or(d, |w| w.max(d)));
+        pairs.push((Key::Run(r.key), b - a));
     }
-    (worst, compared, missing)
+    (pairs, compared, missing)
 }
 
 /// How far apart the sounds playing on both are, by what each computer's
@@ -438,28 +537,98 @@ pub fn correction_ms(words: &str) -> Option<f64> {
     None
 }
 
-/// The last `max` bytes of the file at `path`, from the start of a line.
-pub fn log_tail(path: &Path, max: usize) -> String {
+/// Where a computer's log for a test begins: the size of `newq.log` when the
+/// test's first part began here, kept for the parts that follow (the
+/// primary's `NetTest::Whole`). A test of one part: where it began.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LogMark {
+    /// The run that began last, and the log's size then.
+    began: Option<(u64, u64)>,
+    /// The test of several parts, and the log's size when its first began.
+    whole: Option<(u64, u64)>,
+    /// The run that is a part of `whole`.
+    part: Option<u64>,
+}
+
+impl LogMark {
+    /// Run `run` began, with the log `len` bytes long.
+    pub fn begin(&mut self, run: u64, len: u64) {
+        if self.began.is_none_or(|(r, _)| r != run) {
+            self.began = Some((run, len));
+        }
+    }
+
+    /// Run `run` (which began) is a part of test `test`.
+    pub fn whole(&mut self, run: u64, test: u64) {
+        let Some((r, len)) = self.began.filter(|(r, _)| *r == run) else {
+            return;
+        };
+        if self.whole.is_none_or(|(t, _)| t != test) {
+            self.whole = Some((test, len));
+        }
+        self.part = Some(r);
+    }
+
+    /// Where the log for run `run` begins (bytes into `newq.log`).
+    pub fn from(&self, run: u64) -> u64 {
+        match (self.part, self.whole, self.began) {
+            (Some(p), Some((_, len)), _) if p == run => len,
+            (_, _, Some((r, len))) if r == run => len,
+            _ => 0,
+        }
+    }
+}
+
+/// The first line of a log `log_since` cut at its start.
+pub const LEFT_OUT: &str =
+    "(The start of this computer's log for the test is left out: there was more than is sent.)";
+
+/// `newq.log` in `dir` from `from` bytes on (after the end of
+/// `newq.earlier.log` from there, if the log was put aside since), at most
+/// `max` bytes, the end kept and then from the start of a line.
+pub fn log_since(dir: &Path, from: u64, max: usize) -> String {
+    let now = dir.join("newq.log");
+    let len = std::fs::metadata(&now).map_or(0, |m| m.len());
+    let (mut text, mut cut) = if len < from {
+        // Put aside since: the earlier part from the mark, then all of this.
+        let (a, cut) = read_from(&dir.join("newq.earlier.log"), from, max);
+        let (b, cut_too) = read_from(&now, 0, max);
+        (a + &b, cut || cut_too)
+    } else {
+        read_from(&now, from, max)
+    };
+    if text.len() > max {
+        let mut at = text.len() - max;
+        while !text.is_char_boundary(at) {
+            at += 1;
+        }
+        text = text[at..].to_string();
+        cut = true;
+    }
+    if cut {
+        if let Some(i) = text.find('\n') {
+            text = text[i + 1..].to_string();
+        }
+        text.insert_str(0, &format!("{LEFT_OUT}\n"));
+    }
+    text
+}
+
+/// The file at `path` from `from` bytes on, at most its last `max` bytes,
+/// and whether that left some out.
+fn read_from(path: &Path, from: u64, max: usize) -> (String, bool) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
-        return String::new();
+        return (String::new(), false);
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let from = len.saturating_sub(max as u64);
-    if f.seek(SeekFrom::Start(from)).is_err() {
-        return String::new();
+    let start = from.max(len.saturating_sub(max as u64));
+    if start >= len || f.seek(SeekFrom::Start(start)).is_err() {
+        return (String::new(), false);
     }
     let mut buf = Vec::new();
     let _ = f.take(max as u64).read_to_end(&mut buf);
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    if from > 0 {
-        match text.find('\n') {
-            Some(i) => text[i + 1..].to_string(),
-            None => text,
-        }
-    } else {
-        text
-    }
+    (String::from_utf8_lossy(&buf).into_owned(), start > from)
 }
 
 #[cfg(test)]
@@ -558,7 +727,17 @@ mod tests {
         m.corrections(100.0, 4, &[]);
         m.command(Some(100.2), 1, 100.25);
         m.command(Some(100.4), 2, 100.39);
-        m.heartbeat(&state(&[(1, 100.0)], None), &state(&[(1, 100.003)], None));
+        // A difference counts once seen at two heartbeats in a row.
+        m.heartbeat(
+            &state(&[(1, 100.0)], None),
+            &state(&[(1, 100.003)], None),
+            None,
+        );
+        m.heartbeat(
+            &state(&[(1, 100.0)], None),
+            &state(&[(1, 100.003)], None),
+            None,
+        );
         m.corrections(
             100.5,
             6,
@@ -628,20 +807,128 @@ mod tests {
         assert!(r.monitors.is_empty());
     }
 
+    fn at(mut s: PlayState, time: f64) -> PlayState {
+        s.time = time;
+        s
+    }
+
+    fn row(m: &mut Measurer, now: f64) -> Row {
+        m.sample(now, Sample::default());
+        m.report(now, Link::Wired, None, None, true)
+            .unwrap()
+            .rows
+            .pop()
+            .unwrap()
+    }
+
     #[test]
-    fn a_log_tail_starts_at_a_line_and_is_bounded() {
-        let dir = std::env::temp_dir().join(format!("newq_tail_{}", std::process::id()));
+    fn a_wrong_clock_shows_in_what_the_screens_show_not_in_when_cues_began() {
+        // 0.24.2's test: the cue a command started carries the primary's time
+        // here too, so "began" read 0 while this computer's clock was 40 ms
+        // ahead of the primary's: its screens were 40 ms ahead.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        let theirs = state(&[(1, 10.0)], Some(5.0));
+        let ours = state(&[(1, 10.0)], Some(5.0));
+        for t in [20.0, 20.25] {
+            // Taken in 41 ms after it was made by the primary's clock, with a
+            // round trip of 2 ms: 40 ms off.
+            let seen = seen_offset(t + 0.041, t, Some(0.002));
+            m.heartbeat(&at(theirs.clone(), t), &at(ours.clone(), t), Some(seen));
+        }
+        let r = row(&mut m, 20.3);
+        assert_eq!(r.apart_ms, Some(0.0));
+        assert_eq!(r.shown_apart_ms, Some(40.0));
+        // A cue that began 40 ms late here, with the clock 40 ms ahead, shows
+        // the same frame as the primary's.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        let ours = state(&[(1, 10.04)], None);
+        for t in [20.0, 20.25] {
+            let seen = seen_offset(t + 0.041, t, Some(0.002));
+            m.heartbeat(
+                &at(state(&[(1, 10.0)], None), t),
+                &at(ours.clone(), t),
+                Some(seen),
+            );
+        }
+        let r = row(&mut m, 20.3);
+        assert_eq!(r.apart_ms, Some(40.0));
+        assert_eq!(r.shown_apart_ms, Some(0.0));
+    }
+
+    #[test]
+    fn a_difference_at_one_heartbeat_alone_is_not_counted() {
+        // 0.24.2's timeline test: a loop going round (6 s) between the
+        // primary's heartbeat and the look here read as 990 frames apart.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        let beat = |m: &mut Measurer, t: f64, ours: f64| {
+            m.heartbeat(
+                &at(state(&[], Some(100.0)), t),
+                &at(state(&[], Some(ours)), t),
+                Some(0.0),
+            );
+        };
+        beat(&mut m, 10.0, 100.0);
+        beat(&mut m, 10.25, 106.0);
+        beat(&mut m, 10.5, 100.002);
+        let r = row(&mut m, 10.6);
+        assert_eq!(r.apart_ms, Some(2.0), "the smaller of two in a row");
+        assert_eq!(r.shown_apart_ms, Some(2.0));
+        // One that stays is counted from its second heartbeat.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        beat(&mut m, 10.0, 106.0);
+        assert_eq!(row(&mut m, 10.1).apart_ms, None);
+        m.begin(2, 0.0);
+        beat(&mut m, 11.0, 106.0);
+        beat(&mut m, 11.25, 106.0);
+        assert_eq!(row(&mut m, 11.3).apart_ms, Some(6000.0));
+        // Heartbeats too far apart don't confirm each other.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        beat(&mut m, 10.0, 106.0);
+        beat(&mut m, 12.0, 106.0);
+        assert_eq!(row(&mut m, 12.1).apart_ms, None);
+    }
+
+    #[test]
+    fn a_tests_log_goes_back_to_its_first_part_and_the_log_put_aside_is_read() {
+        let mut k = LogMark::default();
+        assert_eq!(k.from(1), 0);
+        // A test of one part: from where it began.
+        k.begin(1, 100);
+        k.begin(1, 150);
+        assert_eq!(k.from(1), 100);
+        // Parts of one test: each from where the first began.
+        k.begin(2, 500);
+        k.whole(2, 77);
+        assert_eq!(k.from(2), 500);
+        k.begin(3, 900);
+        k.whole(3, 77);
+        assert_eq!(k.from(3), 500);
+        // Another test starts afresh.
+        k.begin(4, 1200);
+        k.whole(4, 78);
+        assert_eq!(k.from(4), 1200);
+        k.begin(5, 1300);
+        assert_eq!(k.from(5), 1300, "alone, no Whole");
+
+        let dir = std::env::temp_dir().join(format!("newq_since_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("newq.log");
-        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
-        std::fs::write(&p, &text).unwrap();
-        let t = log_tail(&p, 100);
-        assert!(
-            t.len() <= 100 && t.starts_with("line ") && t.ends_with("line 999\n"),
-            "{t}"
-        );
-        assert_eq!(log_tail(&p, 1 << 20), text);
-        assert_eq!(log_tail(&dir.join("none"), 100), "");
+        std::fs::write(dir.join("newq.log"), "a\nb\nc\n").unwrap();
+        assert_eq!(log_since(&dir, 2, 1000), "b\nc\n");
+        // Put aside since the mark: the earlier part from it, then the new.
+        std::fs::write(dir.join("newq.earlier.log"), "0123456789\nx\n").unwrap();
+        std::fs::write(dir.join("newq.log"), "new\n").unwrap();
+        assert_eq!(log_since(&dir, 11, 1000), "x\nnew\n");
+        // Too long: the end, from a line, said.
+        let long: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("newq.log"), &long).unwrap();
+        let t = log_since(&dir, 0, 60);
+        assert!(t.starts_with("(The start of this computer's log"), "{t}");
+        assert!(t.ends_with("line 99\n") && t.contains("\nline "), "{t}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

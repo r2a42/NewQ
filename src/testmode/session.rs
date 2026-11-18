@@ -60,6 +60,9 @@ pub struct TestMode {
     fleet: Option<Box<super::fleet::Fleet>>,
     /// Several parts run one after another as one test (`sequence`).
     seq: Option<Box<super::sequence::Sequence>>,
+    /// That test's id, for the computers of a show network (`Fleet::test`):
+    /// each sends its log from the first part on. 0: a test of one part.
+    test_id: u64,
 }
 
 impl Default for TestMode {
@@ -79,6 +82,7 @@ impl Default for TestMode {
             phase: Phase::Idle,
             fleet: None,
             seq: None,
+            test_id: 0,
         }
     }
 }
@@ -781,6 +785,11 @@ impl TestMode {
             sound,
             heavy: self.heavy,
         };
+        self.test_id = if plan.len() > 1 {
+            crate::net::node::random_u64()
+        } else {
+            0
+        };
         self.seq =
             (plan.len() > 1).then(|| Box::new(super::sequence::Sequence::new(plan, go.clone())));
         self.start_part(first, &go);
@@ -1010,6 +1019,7 @@ impl TestMode {
             heavy: false,
         };
         let first = made.remove(0);
+        self.test_id = crate::net::node::random_u64();
         let mut seq = super::sequence::Sequence::new(plan, go.clone());
         seq.made = made.into();
         self.seq = Some(Box::new(seq));
@@ -1061,7 +1071,9 @@ impl TestMode {
         engine: &mut Engine,
         st: &mut UiState,
     ) -> Result<(), String> {
-        let run = super::network::NetRun::launch(built, 1, log_dir, Vec::new(), show, engine, st)?;
+        let mut run =
+            super::network::NetRun::launch(built, 1, log_dir, Vec::new(), show, engine, st)?;
+        run.fleet.test = self.test_id;
         self.phase = Phase::Network(Box::new(run));
         Ok(())
     }
@@ -1262,7 +1274,10 @@ impl TestMode {
                     engine,
                     st,
                 ) {
-                    Ok(run) => self.phase = Phase::Network(Box::new(run)),
+                    Ok(mut run) => {
+                        run.fleet.test = self.test_id;
+                        self.phase = Phase::Network(Box::new(run));
+                    }
                     Err(e) => self.notice = Some(e),
                 }
             }
@@ -1579,7 +1594,8 @@ impl TestMode {
         engine: &mut Engine,
         st: &mut UiState,
     ) {
-        let fleet = super::fleet::Fleet::new(st, files, muted);
+        let mut fleet = super::fleet::Fleet::new(st, files, muted);
+        fleet.test = self.test_id;
         log::info!(
             "test mode: the {name} test goes to {} first ({} files)",
             fleet.names(),

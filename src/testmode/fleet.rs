@@ -273,6 +273,21 @@ pub struct Computer {
 }
 
 impl Computer {
+    /// Where its log is in the zip, in a sentence (the report's).
+    pub fn log_words(&self) -> String {
+        let name = &self.notes.name;
+        if self.log_tail.is_some() {
+            format!(
+                "{name}'s own log is in this zip: {} (all of it since the test began)",
+                log_path(name)
+            )
+        } else {
+            format!(
+                "{name}'s own log did not come back: it is newq.log in NewQ's log folder on {name} (Settings ▸ General ▸ Recovery and logs shows where)"
+            )
+        }
+    }
+
     fn new(id: NodeId, name: &str) -> Computer {
         Computer {
             id,
@@ -319,6 +334,10 @@ impl Computer {
 /// The computers of a test across the show network.
 pub struct Fleet {
     pub run: u64,
+    /// The test this run is a part of (several parts, one after another:
+    /// `TestMode::test_id`), so each computer sends its log from the first
+    /// part on (`NetTest::Whole`); 0: a test of one part.
+    pub test: u64,
     pub computers: BTreeMap<NodeId, Computer>,
     /// The files the test plays (as the show names them) and their sizes.
     pub files: Vec<(String, u64)>,
@@ -358,17 +377,19 @@ impl Fleet {
                 let mut c = Computer::new(p.id, &p.name);
                 if let Some(s) = &p.status {
                     c.notes.link = s.link;
+                    // (Frames are counted at the slowest screen.)
                     c.notes.refresh_hz = s
                         .monitors
                         .iter()
                         .filter_map(|m| m.refresh_hz)
-                        .reduce(f32::max);
+                        .reduce(f32::min);
                 }
                 (p.id, c)
             })
             .collect();
         Fleet {
             run: crate::net::node::random_u64(),
+            test: 0,
             computers,
             files,
             before: st.media.current.clone(),
@@ -595,6 +616,10 @@ impl Fleet {
                 start: self.start.unwrap_or(now),
             },
         ));
+        if self.test != 0 {
+            let test = self.test;
+            self.out.push((None, NetTest::Whole { run, test }));
+        }
         if self.muted {
             self.out.push((None, NetTest::Mute { run, muted: true }));
         }
@@ -621,6 +646,10 @@ impl Fleet {
             if quiet && told.is_none_or(|t| now - t > AWAY_SECS) {
                 self.told.insert(p.id, now);
                 self.out.push((Some(p.id), begin.clone()));
+                if self.test != 0 {
+                    let test = self.test;
+                    self.out.push((Some(p.id), NetTest::Whole { run, test }));
+                }
                 if self.muted {
                     self.out
                         .push((Some(p.id), NetTest::Mute { run, muted: true }));
@@ -791,7 +820,7 @@ impl Fleet {
                     .rows
                     .iter()
                     .rev()
-                    .find_map(|r| r.apart_ms)
+                    .find_map(|r| c.notes.apart_of(r))
                     .map_or(String::new(), |a| {
                         format!(", {:.1} frames apart", a / frame)
                     });
@@ -847,7 +876,13 @@ impl Fleet {
         for v in verdicts {
             let _ = writeln!(s);
             let _ = writeln!(s, "  {} — {}", v.name, v.verdict.label());
-            let _ = writeln!(s, "    {}", v.headline);
+            // With problems the headline is the first of them, listed below.
+            if v.verdict != Verdict::ProblemsFound {
+                let _ = writeln!(s, "    {}", v.headline);
+            }
+            if let Some(c) = self.computers.values().find(|c| c.notes.name == v.name) {
+                let _ = writeln!(s, "    {}", c.log_words());
+            }
             for l in &v.lines {
                 let _ = writeln!(s, "    {l}");
             }
@@ -875,10 +910,11 @@ impl Fleet {
         let _ = std::fs::write(folder.join("computers.txt"), computers_text(net));
         for c in self.computers.values() {
             if let Some(t) = &c.log_tail {
-                let _ = std::fs::write(
-                    folder.join(format!("computer-{}-newq.log", file_name(&c.notes.name))),
-                    t,
-                );
+                let path = folder.join(log_path(&c.notes.name));
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(path, t);
             }
         }
     }
@@ -965,6 +1001,16 @@ fn csv_field(s: &str) -> String {
         s.to_string()
     }
 }
+
+/// Where a computer's own log goes in a test's folder and zip:
+/// `computers/<name>/newq.log`. A test of several parts keeps the longest (each
+/// part's goes back to the test's start: `sequence::gather`).
+pub fn log_path(name: &str) -> String {
+    format!("{COMPUTERS}/{}/newq.log", file_name(name))
+}
+
+/// The folder of a test's folder that holds the computers' logs.
+pub const COMPUTERS: &str = "computers";
 
 fn file_name(name: &str) -> String {
     name.chars()
