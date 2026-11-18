@@ -10,6 +10,19 @@ use crate::net::hub::{NetAction, NetView, PeerView};
 use crate::net::node::{NodeId, Role};
 use crate::net::proto::{self, Link};
 
+/// How long a computer whose start-at-login entry the one-time clean-up
+/// removed says so (status bar, a display computer's card).
+pub const LOGIN_NOTE_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The note on a computer whose start-at-login entry the one-time clean-up
+/// removed (`autostart::SWITCHED_OFF`): for `LOGIN_NOTE_FOR`, and gone once
+/// it is ticked again. Pure but for `st`, for the tests.
+pub fn login_note(st: &UiState, now: std::time::Instant) -> Option<&'static str> {
+    let since = st.login_note_since?;
+    (!st.start_at_login && now.saturating_duration_since(since) < LOGIN_NOTE_FOR)
+        .then_some(crate::autostart::SWITCHED_OFF)
+}
+
 /// The page's fields being typed in.
 #[derive(Default)]
 pub struct Editing {
@@ -395,6 +408,9 @@ fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<A
                 ui,
                 &crate::autostart::where_words(std::env::consts::OS, display),
             );
+        } else if let Some(n) = login_note(st, std::time::Instant::now()) {
+            let r = ui.label(RichText::new(n).color(Color32::from_rgb(220, 160, 40)));
+            note(ui, "login_note", r.rect);
         }
         // Its name: what the others call it.
         ui.horizontal(|ui| {
@@ -1159,6 +1175,13 @@ pub fn locked_banner(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
                     .weak()
                     .small(),
             );
+        } else if let Some(n) = login_note(st, std::time::Instant::now()) {
+            let r = ui.label(
+                RichText::new(n)
+                    .color(Color32::from_rgb(220, 160, 40))
+                    .small(),
+            );
+            note(ui, "banner_login_note", r.rect);
         }
     });
     // A second row: whether the primary is heard, and what can be done here.

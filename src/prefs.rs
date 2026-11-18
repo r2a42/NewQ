@@ -69,6 +69,11 @@ pub struct Prefs {
     /// How the timeline editor's view keeps a running playhead in sight.
     #[serde(default, skip_serializing_if = "TimelineFollow::is_page")]
     pub timeline_follow: TimelineFollow,
+    /// The start-at-login entries older NewQs made by themselves were removed
+    /// on this computer, once (`autostart::at_start`): every entry since was
+    /// ticked by someone and is kept.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub start_at_login_cleaned: bool,
 }
 
 /// What Test Mode's window has chosen: a length and what to test.
@@ -230,6 +235,7 @@ mod tests {
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,
             timeline_follow: TimelineFollow::Centre,
+            start_at_login_cleaned: true,
             test_pick: TestPick {
                 level: crate::testmode::Level::Medium,
                 parts: crate::testmode::choice::Parts {
@@ -271,6 +277,12 @@ mod tests {
         assert!(!json.contains("clicker"), "{json}");
         assert!(!json.contains("log_level"), "{json}");
         assert!(!json.contains("timeline"), "{json}");
+        assert!(!json.contains("start_at_login"), "{json}");
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"start_at_login_cleaned\":true")
+        );
         assert!(
             serde_json::to_string(&p)
                 .unwrap()

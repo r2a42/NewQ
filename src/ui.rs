@@ -5,7 +5,7 @@ mod preview;
 pub(crate) use preview::part_shape;
 mod net_media;
 mod network;
-pub(crate) use network::{own_addresses, path_to, peer_address};
+pub(crate) use network::{login_note, own_addresses, path_to, peer_address};
 mod settings;
 mod timeline;
 
@@ -238,6 +238,9 @@ pub struct UiState {
     /// on the Show network page.
     pub start_at_login: bool,
     pub start_at_login_request: Option<bool>,
+    /// When this start removed the entry an older NewQ had made by itself
+    /// (`autostart::SWITCHED_OFF`, `network::login_note`).
+    pub login_note_since: Option<std::time::Instant>,
     /// A display computer opened as NewQ: its banner's *Open as a display
     /// computer* was pressed (the app switches to display mode).
     pub open_as_display_request: bool,
@@ -2401,8 +2404,13 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
             .unwrap_or_else(|| "unsaved show".into());
         ui.label(format!("{}{}", path, if st.dirty { " •" } else { "" }));
         ui.separator();
+        if let Some(note) = network::login_note(st, std::time::Instant::now()) {
+            ui.label(RichText::new(note).color(PLAYHEAD));
+            ui.separator();
+        }
         if let Some((t, msg)) = engine.messages.back()
             && t.elapsed().as_secs() < 30
+            && msg != crate::autostart::SWITCHED_OFF
         {
             ui.label(RichText::new(msg).color(PLAYHEAD));
         }

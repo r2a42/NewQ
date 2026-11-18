@@ -13,6 +13,14 @@ release page, and a release is refused if it has none.
   downloading or saving anything. The running window shows the rate with each computer; the
   report says whether it was on and how much went each way, so a run with it and one without
   can be compared. Off unless chosen; remembered on this computer.
+- **Start at login is switched off where an older NewQ had switched it on by itself.** NewQ
+  0.24.0 to 0.24.2 set a computer to start at login when it was made a display computer, and
+  0.24.3 kept those settings. The first start of this version removes any start-at-login entry
+  an older NewQ left, once, and that computer says so for two minutes (in the status bar, and
+  on a display computer's screens while they show its card): *Start at login was switched off
+  (an older NewQ had switched it on by itself); tick it to have it back*. On the primary that
+  computer's tick reads off. A tick you set from now on is never taken away. (A tick set by
+  hand in 0.24.3 can't be told apart from one made by itself, so it goes too, once.)
 - **NewQ no longer stays on the computer's software renderer after the graphics card resets.** A
   Windows laptop whose displays were rearranged mid-test had its graphics driver reset, and NewQ
   took the only thing offered at that moment, *Microsoft Basic Render Driver*, and kept it: a

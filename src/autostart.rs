@@ -7,6 +7,11 @@
 //! wrote `NewQ`), or a Linux autostart entry
 //! (`~/.config/autostart/newq.desktop`). The contents are made by pure
 //! functions (tested); the writing was tried on Linux only.
+//!
+//! NewQ 0.24.0 to 0.24.2 switched it on by themselves for a display computer
+//! (and 0.24.3 kept those entries): the first start of a later NewQ removes
+//! any entry it finds, once (`at_start`, `Prefs::start_at_login_cleaned`),
+//! and says so (`SWITCHED_OFF`).
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +48,7 @@ pub fn run_values(on: bool, display: bool) -> (Option<&'static str>, &'static [&
 }
 
 /// Whether an entry starts NewQ as a display computer (0.24.0 wrote one
-/// without `--display`: `fix_old_entry`). Pure, for the tests.
+/// without `--display`: `look_at_start`). Pure, for the tests.
 pub fn starts_as_display(entry: &str) -> bool {
     entry.contains("--display")
 }
@@ -186,32 +191,99 @@ pub fn entry() -> Option<(&'static str, String)> {
 }
 
 /// Whether an entry found at start on a display computer is to be written
-/// again: one NewQ 0.24.0 wrote without `--display` (a plain start is no
-/// longer display mode), or one 0.24.1 and 0.24.2 wrote under the name `NewQ`
-/// (it is listed as `NewQ Display` now). Never when there is none. Pure, for
-/// the tests.
+/// again: one without `--display` (a plain start is no longer display mode),
+/// or one under the name `NewQ` (it is listed as `NewQ Display` now). Never
+/// when there is none. Pure, for the tests.
 pub fn old_entry_to_fix(entry: Option<(&str, &str)>, display_computer: bool) -> bool {
     display_computer
         && entry.is_some_and(|(name, text)| !starts_as_display(text) || name != RUN_VALUE_DISPLAY)
 }
 
-/// An older entry on a display computer written again (`old_entry_to_fix`),
-/// with `--display`, named `NewQ Display`, for this NewQ. Nothing is switched
-/// on that wasn't. Returns whether the entry it found lacked `--display`:
-/// this start may then be that login's, so it is display mode too.
-pub fn fix_old_entry(display_computer: bool) -> bool {
+/// What is done with the entry found when NewQ starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtStart {
+    /// Nothing to do.
+    Leave,
+    /// The first start of this NewQ found one: an older NewQ made it (0.24.0
+    /// to 0.24.2 switched it on by themselves when a computer was made a
+    /// display computer, and 0.24.3 kept those, renamed), and nothing in it
+    /// tells a chosen one apart, so it is removed, once
+    /// (`Prefs::start_at_login_cleaned`), with a note (`SWITCHED_OFF`).
+    Remove,
+    /// One chosen since, on a display computer, written again as NewQ Display
+    /// with `--display` (`old_entry_to_fix`): nothing is switched on that
+    /// wasn't.
+    Rewrite,
+}
+
+/// What to do with the entry found at start (`entry`: its name and text).
+/// `cleaned`: the one-time clean-up has been done on this computer (this
+/// NewQ never writes an entry by itself, so every entry since was ticked by
+/// someone and is never removed). Pure, for the tests.
+pub fn at_start(entry: Option<(&str, &str)>, cleaned: bool, display_computer: bool) -> AtStart {
+    if entry.is_none() {
+        AtStart::Leave
+    } else if !cleaned {
+        AtStart::Remove
+    } else if old_entry_to_fix(entry, display_computer) {
+        AtStart::Rewrite
+    } else {
+        AtStart::Leave
+    }
+}
+
+/// The one-line note on a computer whose entry the clean-up removed.
+pub const SWITCHED_OFF: &str = "Start at login was switched off (an older NewQ had switched it \
+                                on by itself); tick it to have it back";
+
+/// What `look_at_start` did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Looked {
+    /// The one-time clean-up is done (`Prefs::start_at_login_cleaned` is to
+    /// be set): false only when an entry couldn't be removed (tried again at
+    /// the next start).
+    pub cleaned: bool,
+    /// An older entry was removed: the computer says so (`SWITCHED_OFF`).
+    pub removed: bool,
+    /// The entry found started NewQ without `--display` on a display
+    /// computer: this start may be that login's, so it is display mode too.
+    pub display: bool,
+}
+
+/// The entry found at start dealt with (`at_start`).
+pub fn look_at_start(cleaned: bool, display_computer: bool) -> Looked {
     let found = entry();
-    if !old_entry_to_fix(
+    let plain = display_computer && found.as_ref().is_some_and(|(_, t)| !starts_as_display(t));
+    let mut looked = Looked {
+        cleaned: true,
+        removed: false,
+        display: plain,
+    };
+    match at_start(
         found.as_ref().map(|(n, t)| (*n, t.as_str())),
+        cleaned,
         display_computer,
     ) {
-        return false;
+        AtStart::Leave => {}
+        AtStart::Remove => match set(false, display_computer) {
+            Ok(()) => {
+                log::info!(
+                    "start at login: the entry an older NewQ made ({}) removed, once",
+                    found.as_ref().map_or("", |(n, _)| *n)
+                );
+                looked.removed = true;
+            }
+            Err(e) => {
+                log::warn!("start at login: an older NewQ's entry couldn't be removed: {e}");
+                looked.cleaned = false;
+            }
+        },
+        AtStart::Rewrite => match set(true, true) {
+            Ok(()) => log::info!("start at login: the entry written again as NewQ Display"),
+            Err(e) => log::warn!("start at login: the entry couldn't be written again: {e}"),
+        },
     }
-    match set(true, true) {
-        Ok(()) => log::info!("start at login: an older entry written again as NewQ Display"),
-        Err(e) => log::warn!("start at login: an older entry couldn't be written again: {e}"),
-    }
-    found.is_some_and(|(_, t)| !starts_as_display(&t))
+    looked
 }
 
 /// Start at login, or not (`display`: as a display computer, `args`).
@@ -409,25 +481,70 @@ mod tests {
     }
 
     /// 0.24.0 wrote a display computer's entry without `--display`; 0.24.1
-    /// and later with it. Only the older one is written again, only on a
-    /// display computer, and only if there is one.
+    /// and later with it. Once the clean-up is done, only an older-looking
+    /// one is written again, only on a display computer, and only if there
+    /// is one.
     #[test]
-    fn an_older_entry_on_a_display_computer_is_written_again_with_display() {
+    fn a_chosen_entry_on_a_display_computer_is_written_again_with_display() {
         let old = run_value(Path::new(r"C:\NewQ\newq.exe"), args(false));
         let new = run_value(Path::new(r"C:\NewQ\newq.exe"), args(true));
-        // 0.24.0: no --display, named NewQ.
         assert!(old_entry_to_fix(Some(("NewQ", &old)), true));
-        // 0.24.1 and 0.24.2: --display, but named NewQ: renamed.
         assert!(old_entry_to_fix(Some(("NewQ", &new)), true));
-        // Ours: left alone.
         assert!(!old_entry_to_fix(Some(("NewQ Display", &new)), true));
-        assert!(
-            !old_entry_to_fix(Some(("NewQ", &old)), false),
-            "not a display computer"
-        );
+        assert!(!old_entry_to_fix(Some(("NewQ", &old)), false));
         assert!(!old_entry_to_fix(None, true), "never switched on by itself");
         let agent = launch_agent(Path::new("/Applications/NewQ.app/Contents/MacOS/newq"), &[]);
         assert!(old_entry_to_fix(Some(("NewQ Display", &agent)), true));
+        assert_eq!(at_start(Some(("NewQ", &old)), true, true), AtStart::Rewrite);
+        assert_eq!(
+            at_start(Some(("NewQ Display", &new)), true, true),
+            AtStart::Leave
+        );
+        assert_eq!(at_start(Some(("NewQ", &old)), true, false), AtStart::Leave);
+    }
+
+    /// The first start of this NewQ removes whatever entry an older one left
+    /// (0.24.0-0.24.2 made them unasked, 0.24.3 kept them renamed: none can
+    /// be told from a chosen one), on any computer; after that, an entry is
+    /// someone's choice and is never removed; with none, nothing is written.
+    #[test]
+    fn an_older_entry_is_removed_once_and_a_chosen_one_never() {
+        let exe = Path::new("/opt/newq");
+        let entries = [
+            ("NewQ", run_value(exe, args(false))),
+            ("NewQ", run_value(exe, args(true))),
+            ("NewQ Display", run_value(exe, args(true))),
+            ("NewQ Display", launch_agent(exe, args(true))),
+            ("NewQ", desktop_entry(exe, args(false))),
+        ];
+        for (name, text) in &entries {
+            for display in [true, false] {
+                assert_eq!(
+                    at_start(Some((name, text)), false, display),
+                    AtStart::Remove,
+                    "{name}: {text}"
+                );
+                assert_ne!(
+                    at_start(Some((name, text)), true, display),
+                    AtStart::Remove,
+                    "chosen since: {name}: {text}"
+                );
+            }
+        }
+        for cleaned in [true, false] {
+            for display in [true, false] {
+                assert_eq!(at_start(None, cleaned, display), AtStart::Leave);
+            }
+        }
+    }
+
+    #[test]
+    fn the_note_says_it_was_switched_off_and_how_to_have_it_back() {
+        assert_eq!(
+            SWITCHED_OFF,
+            "Start at login was switched off (an older NewQ had switched it on by itself); \
+             tick it to have it back"
+        );
     }
 
     #[test]
