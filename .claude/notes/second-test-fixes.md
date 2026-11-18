@@ -46,4 +46,51 @@ computers are in; then read the logs, add what they show, and fix in order of ha
 
 ## From the logs
 
-(to fill in when the zips arrive)
+Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook Pro M4 Pro on
+10.1.81.160 and 2.0.0.100; display computer **WNO-2**, a different Windows laptop from 0.24.1's
+"Assistant": RTX 5060, monitors 165 Hz and 60 Hz, wired). Windows logs still to come.
+
+7. **Two NewQs on the Mac with one identity: the likely cause of nearly every sync problem.**
+   The Mac's NewQ listened on port **47821** in both runs that day (`listening on port 47821`),
+   so something already held 47820: another NewQ, most likely the copy opened from
+   `~/Documents/newq` the evening before and left running. WNO-2 kept its clock with
+   **2.0.0.100:47820**, the other copy. Both read the same `node.json` (same NodeId), so their
+   beacons carry one id with two ports; `hub.rs::keep_clock` aims at `peers[primary].tcp_port`,
+   which follows whichever beacon came last. Seen: the clock lock flapped 182 / 251 / 54 times
+   in the three parts (locked ~65 % of rows), the cue-list part drifted 5-24 ms apart and was
+   "put right" 27 times (moves of -26 to -41 ms, once +184 ms), the reported clock error was
+   2,605,312 ms whenever it was unlocked. Fixes: (a) **one NewQ per node folder**: a lock on the
+   node folder at start; a second copy says so and offers to bring the first forward or open
+   alone (tests already use separate `NEWQ_NODE_DIR`s); (b) the hub notices one id beaconing from
+   two ports/addresses and warns on both computers instead of switching between them; (c) the
+   clock keeper aims at the session's own peer address and port, not the latest beacon's.
+   Confirm with WNO-2's own log (its `keeping the shared clock with` lines) before fixing.
+8. **The clock error figure is nonsense when unlocked** (2,605,312 ms = 43 min). Find what the
+   bound adds up while unlocked (`clock.rs::now`: `left` = slew × time remaining after a huge
+   backward `e`, consistent with answers from two clocks); report "not locked" rather than a
+   number, and cap the report's figure.
+9. **"Frames apart" counts at the follower's fastest display** (165 Hz): 24 ms reads as 4
+   frames. Count at the slowest display a cue is on, or at the primary's show frame rate, and
+   say which.
+10. **Mac: main-loop stalls of 100-180 ms "making the pictures"**, several right after a whole
+   minute (09:35:00, 09:55:00, 10:06:00, 10:09:00, 10:10:00), with the slowest picture a 1080p
+   "Layer: sliding, speed ramp" at 130 ms. Each came with **sound dropouts** on the MacBook
+   speakers (19 in all; NewQ's mixing took 11.1 ms of a 10.7 ms buffer: 512 frames is tight).
+   Check what runs on the minute (stats sampler, clock cue redraw, the second NewQ?) and
+   whether the speed-ramp cue's work is on the main thread; consider a larger sound buffer on
+   built-in speakers.
+11. **Timeline: one clip 33.5 s late** ("Earthrise (second display)", lap 12 at 25:49), and once
+   "not every clip was ready in time" (lap 3, "Title: The Pacific" 1.5 s late; WNO-2 then
+   started Earthrise 69.77 s in and stopped it 2 s later). Lap 12 is the unfinished last lap:
+   check whether 33.5 s is the measurement (the clock not at 0 when the lap began) before
+   treating it as real.
+12. **Timeline part: WNO-2 "worst 1650 frames apart" (10 s) for about 4 s**, around the same
+   lap-3 moment. Probably the late Earthrise above; check.
+13. **Network part was good**: 1.8 ms apart at worst over 6 min, 0 late commands. Sound up to
+   174 ms from the primary's (sound ahead is never held back, by design).
+14. **WNO-2 drew at its displays' rates** (162-165 fps at 165 Hz, 59-60 at 60 Hz): no stutter on
+   this laptop. The 0.24.1 4-fps laptop ("Assistant", RTX 4050) was not in this test, so that
+   question stays open.
+15. The Mac's external monitor (VA24EHF at 100 Hz) drew about 85 fps in the network part.
+16. Report wording: "WNO-2 1 / WNO-2 2" in the displays line; the per-computer lines repeat the
+   problems twice; the clock-error "use a wire" advice is wrong when the link is wired.
