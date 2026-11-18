@@ -1456,6 +1456,9 @@ mod tests {
                     std::thread::sleep(wait);
                 }
             }
+            // Inputs are stamped by the wall clock, so the file is as long as
+            // the writing really took: a busy machine writes 60 frames late.
+            let took = began.elapsed().as_secs_f64();
             sink.finish();
             feeder.join().unwrap();
             let file = std::fs::read_dir(&sub)
@@ -1479,14 +1482,18 @@ mod tests {
                 text.contains("Video: h264") && text.contains("Audio: aac"),
                 "{file:?}: {text}"
             );
-            // About two seconds long (60 frames at 30 a second).
+            // About two seconds long (60 frames at 30 a second), or as long as
+            // the writing took.
             let secs = text
                 .split("Duration: 00:00:")
                 .nth(1)
                 .and_then(|r| r.get(..5))
                 .and_then(|r| r.parse::<f64>().ok())
                 .unwrap_or(0.0);
-            assert!((1.5..3.2).contains(&secs), "{file:?} is {secs} s: {text}");
+            assert!(
+                (1.5..took.max(2.0) + 1.2).contains(&secs),
+                "{file:?} is {secs} s, written in {took:.2} s: {text}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
