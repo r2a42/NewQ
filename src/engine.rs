@@ -70,8 +70,10 @@ const DEFAULT_OUTPUT_SIZE: (u32, u32) = (1920, 1080);
 /// A dip reveals anyway if the incoming cue hasn't started after this long.
 const REVEAL_TIMEOUT: f64 = 3.0;
 /// Ticking by a shared clock, a cue seen to end past its length is taken to
-/// have ended at its length (`ended_at`), up to this much before the tick
-/// that saw it (more is a stall, or a file that ran on past its length).
+/// have ended at its length (`ended_at`), and what follows it is placed there,
+/// if that is no more than this before the tick that saw it; more is a stall,
+/// or a file that ran on past its length, or a group's child that ended long
+/// before the last one was stopped, and what follows starts at the tick.
 const ENDED_LATE_MAX: f64 = 0.25;
 /// How long the shared time a cue ended at is kept for what it leads to (a
 /// group's next child, seen at the next tick).
@@ -4305,7 +4307,7 @@ impl Engine {
             let mark = self.net_mark();
             self.fire_next(show, id);
             if let Some(end) = end {
-                self.net_backdate(&mark, end);
+                self.chain_backdate(&mark, end);
             }
         }
         self.crumbs.lap("starting what follows");
@@ -4429,7 +4431,12 @@ impl Engine {
                         && c.duration.is_some_and(|d| d - c.elapsed <= t)
                 })
             {
-                let due = c.anchor.zip(c.duration).map(|(zero, d)| zero + d - t);
+                // (Never before the child itself began: a crossfade longer
+                // than the child.)
+                let due = c
+                    .anchor
+                    .zip(c.duration)
+                    .map(|(zero, d)| (zero + d - t).max(zero));
                 early.push((next, t));
                 to_fire.push((a.instance, next, due));
                 continue;
@@ -4473,10 +4480,22 @@ impl Engine {
             let mark = self.net_mark();
             self.fire(show, child);
             if let Some(due) = due {
-                self.net_backdate(&mark, due);
+                self.chain_backdate(&mark, due);
             }
         }
         done
+    }
+
+    /// What a cue that ended (or a group's child that is due) started since
+    /// `mark` is placed at `due`, where it ended by the shared clock, when that
+    /// is no more than `ENDED_LATE_MAX` before this tick.
+    fn chain_backdate(&mut self, mark: &net::StartMark, due: f64) {
+        if self
+            .net_shared_time()
+            .is_some_and(|now| now - due <= ENDED_LATE_MAX)
+        {
+            self.net_backdate(mark, due);
+        }
     }
 
     /// Keep the next cue(s) at the playhead decoded and ready, so GO is instant.
@@ -5017,8 +5036,10 @@ fn ended_at(a: &ActiveCue, now: Option<f64>, on_clock: Option<f64>) -> Option<f6
         Some(left) if a.clocked => -left,
         _ => a.duration.map_or(0.0, |d| a.elapsed - d),
     };
-    let over = if over.is_finite() {
-        over.clamp(0.0, ENDED_LATE_MAX)
+    // Further past it than a frame or two is a stall, or a file that ran on
+    // past its length: what follows starts at this tick, as it always did.
+    let over = if over.is_finite() && over <= ENDED_LATE_MAX {
+        over.max(0.0)
     } else {
         0.0
     };
