@@ -1268,12 +1268,10 @@ never copy media by hand, and nothing waits for it.
   clock has settled (a second or so) it starts nothing new, and says so; while
   it isn't settled the page says *not locked* rather than a figure. A computer
   asks the primary for the time at the port the primary's connection gives,
-  whatever else answers with its name. If the primary's clock moves back a long
-  way (it was restarted), a computer puts its clock back at once while nothing
-  plays on it; while something plays it carries on at its own pace and puts the
-  clock right at the next quiet moment (at most half a minute later; what plays
-  carries on from where it is), never running fast or slow for minutes to catch
-  up.
+  whatever else answers with its name. If a computer's clock turns out to be a
+  long way off the primary's (a quarter of a second or more, before it has
+  settled), it is put right at once rather than run fast or slow for minutes to
+  catch up, and what plays on that computer carries on from where it is.
 - **Everything at the same moment.** Whatever you do on the primary that changes
   what plays (GO, firing, stopping or fading a cue, Stop All, Panic, pause, a
   timeline's run, pause, stop and seek, a slide show's step, a hotkey, OSC, MIDI,
