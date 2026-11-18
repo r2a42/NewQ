@@ -646,6 +646,12 @@ fn body(
                         .weak()
                         .small(),
                     );
+                    if across {
+                        let text = logs_inside(d);
+                        ui.label(RichText::new(&text).small());
+                        #[cfg(test)]
+                        note_net(ui, &text, egui::Rect::NOTHING);
+                    }
                 }
                 Some(Err(why)) => {
                     ui.colored_label(AMBER, format!("The zip could not be made: {why}"));
@@ -1132,6 +1138,26 @@ fn part_section(ui: &mut egui::Ui, i: usize, p: &super::sequence::PartDone) {
     });
 }
 
+/// The finished window's line on the other computers' logs: each is in the
+/// zip (`fleet::log_path`), since a display computer makes no zip of its own.
+pub fn logs_inside(d: &super::session::Done) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    let all = std::iter::once(d).chain(d.parts.iter().filter_map(|p| p.done.as_deref()));
+    for done in all {
+        let net = done.network.iter().flat_map(|n| n.computers.iter());
+        for c in net.chain(done.computers.iter()) {
+            if !names.contains(&c.name.as_str()) {
+                names.push(&c.name);
+            }
+        }
+    }
+    let paths: Vec<String> = names.iter().map(|n| super::fleet::log_path(n)).collect();
+    format!(
+        "Every computer's own log is inside the zip too ({}): the other computers make no zip of their own, so this one file is all there is to send.",
+        paths.join(", ")
+    )
+}
+
 /// A line per computer: its verdict and headline, its numbers folded under it.
 fn computers_results(ui: &mut egui::Ui, computers: &[super::net_judge::ComputerVerdict]) {
     for c in computers {
@@ -1457,7 +1483,7 @@ fn screens_of(st: &UiState) -> Vec<Screen> {
                         reference: keys[i].reference(i),
                         twins: crate::show::twins_of(&keys, i),
                         label: format!(
-                            "{} {}: {} ({}×{}{})",
+                            "{} screen {}: {} ({}×{}{})",
                             p.name,
                             i + 1,
                             m.identity,

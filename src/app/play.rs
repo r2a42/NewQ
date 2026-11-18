@@ -78,8 +78,10 @@ pub(super) struct Playing {
     ready: bool,
     // ---- The network test (stage 6) ----
     measure: crate::net::measure::Measurer,
-    /// The end of this computer's log, being read for the primary.
+    /// This computer's log since the test began, being read for the primary.
     tail: Option<(u64, std::sync::mpsc::Receiver<String>)>,
+    /// Where in the log the test began (`LogMark`).
+    log_mark: crate::net::measure::LogMark,
     /// When the measuring began (it ends by itself if never told to).
     measuring_since: Option<Instant>,
     /// `NEWQ_NET_TEST_AUTOSTART` was looked at (and acted on).
@@ -293,7 +295,13 @@ impl App {
                 // ---- The network test: how far apart, at this heartbeat ----
                 if self.play.measure.running().is_some() && self.play.follower.has_done(&s) {
                     let ours = self.engine.net_state(s.time);
-                    self.play.measure.heartbeat(&s, &ours);
+                    // This computer's clock against the primary's, as this
+                    // heartbeat shows it: what the screens show is compared.
+                    let clock = self.net.clock();
+                    let seen = clock.now().map(|n| {
+                        crate::net::measure::seen_offset(n.time, s.time, clock.worst_rtt())
+                    });
+                    self.play.measure.heartbeat(&s, &ours, seen);
                 }
                 self.play.follower.heard(*s)
             }
@@ -933,6 +941,11 @@ impl App {
                     let _ = crate::crumbs::take_stalls();
                 }
                 self.play.measure.begin(run, start);
+                // Where its log for the test begins.
+                crate::logging::flush();
+                let log = crate::crash::log_dir().join("newq.log");
+                let len = std::fs::metadata(&log).map_or(0, |m| m.len());
+                self.play.log_mark.begin(run, len);
                 // ---- and how it copes itself ----
                 if self.play.local.running() != Some(run) {
                     self.play.local_stats = Some(crate::stats::StatsLog::in_memory(
@@ -946,6 +959,7 @@ impl App {
                 self.play.test_muted = muted;
                 crate::media::audio::set_muted(muted);
             }
+            NetTest::Whole { run, test } => self.play.log_mark.whole(run, test),
             NetTest::End { run } => {
                 let now = self.net.clock().now().map_or(local_now(), |n| n.time);
                 let (link, refresh) = self.net_test_facts();
@@ -967,16 +981,19 @@ impl App {
                 self.play.local_stats = None;
                 self.unmute_test();
                 self.play.measuring_since = None;
-                // The end of the log, read on a thread (it can be large).
+                // Its log since the test began, read on a thread (it can be
+                // large).
                 let (tx, rx) = std::sync::mpsc::channel();
-                let path = crate::crash::log_dir().join("newq.log");
+                let dir = crate::crash::log_dir();
+                let from = self.play.log_mark.from(run);
                 crate::logging::flush();
                 let _ = std::thread::Builder::new()
                     .name("net-test-log".into())
                     .spawn(move || {
-                        let _ = tx.send(crate::net::measure::log_tail(
-                            &path,
-                            crate::net::measure::LOG_TAIL,
+                        let _ = tx.send(crate::net::measure::log_since(
+                            &dir,
+                            from,
+                            crate::net::measure::LOG_WHOLE,
                         ));
                     });
                 self.play.tail = Some((run, rx));
@@ -1034,7 +1051,9 @@ impl App {
         }
     }
 
-    /// This computer's link and its monitors' fastest refresh.
+    /// This computer's link and its monitors' slowest refresh (frames apart
+    /// are counted at the slowest screen: a difference of less than one of
+    /// its refreshes can't be seen there).
     fn net_test_facts(&self) -> (Link, Option<f32>) {
         (
             self.ui.net.status.link,
@@ -1042,7 +1061,7 @@ impl App {
                 .monitors
                 .iter()
                 .filter_map(|m| m.refresh_hz)
-                .reduce(f32::max),
+                .reduce(f32::min),
         )
     }
 

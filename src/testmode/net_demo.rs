@@ -270,12 +270,8 @@ mod tests {
             "{csv}"
         );
         assert!(csv.lines().filter(|l| l.starts_with("Right,")).count() > 50);
-        // (Run with other parts, a name two parts wrote has the part's in front.)
-        assert!(
-            read_from_zip(&zip, "computer-Left-newq.log")
-                .or_else(|| read_from_zip(&zip, "network-computer-Left-newq.log"))
-                .is_some()
-        );
+        // Each computer's own log, one for the whole test.
+        assert!(read_from_zip(&zip, "computers/Left/newq.log").is_some());
         assert!(read_from_zip(&zip, "events.log").is_some_and(|e| e.contains("All here")));
         println!("zip: {}", zip.display());
     }

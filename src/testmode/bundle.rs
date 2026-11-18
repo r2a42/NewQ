@@ -96,6 +96,25 @@ pub fn contents(folder: &Path, log_dir: &Path) -> Vec<(String, PathBuf)> {
         // (The excerpt is the same log again, which goes in whole.)
         .filter(|(name, _)| name != "newq-log-excerpt.txt" && !name.ends_with(".part"))
         .collect();
+    // Each computer's own log, across a show network (`fleet::log_path`).
+    let computers = folder.join(super::fleet::COMPUTERS);
+    for e in std::fs::read_dir(&computers)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let log = e.path().join("newq.log");
+        if log.is_file() {
+            files.push((
+                format!(
+                    "{}/{}/newq.log",
+                    super::fleet::COMPUTERS,
+                    e.file_name().to_string_lossy()
+                ),
+                log,
+            ));
+        }
+    }
     files.sort();
     for name in [
         "newq.log",

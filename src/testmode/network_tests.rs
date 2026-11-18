@@ -135,6 +135,11 @@ struct Comp {
     wire: Vec<(f64, Timed)>,
     /// Extra delay on its commands (s).
     delay: f64,
+    /// Its shared clock less the primary's (s): a clock that is wrong.
+    clock_off: f64,
+    /// Its log, and where the test's part of it begins (as the app keeps it).
+    log: String,
+    mark: crate::net::measure::LogMark,
     /// It ran the end of the test (its last report and log were sent).
     ended: bool,
     // ---- Every test across the network: what it measures of itself ----
@@ -191,6 +196,9 @@ impl Rig {
                     connected: true,
                     wire: Vec::new(),
                     delay: 0.0,
+                    clock_off: 0.0,
+                    log: String::new(),
+                    mark: Default::default(),
                     ended: false,
                     local: Default::default(),
                     fps: 60.0,
@@ -306,7 +314,11 @@ impl Rig {
                     NetTest::Begin { run, start } => {
                         c.measure.begin(*run, *start);
                         c.local.begin(*run, *start);
+                        c.mark.begin(*run, c.log.len() as u64);
+                        c.log
+                            .push_str(&format!("{}: measuring run {run}\n", c.name));
                     }
+                    NetTest::Whole { run, test } => c.mark.whole(*run, *test),
                     NetTest::End { run } => {
                         if let Some(r) = c.measure.end(*run, now, Link::Wired, Some(60.0)) {
                             self.test.net_in.push((c.id, NetTest::Report(Box::new(r))));
@@ -314,11 +326,13 @@ impl Rig {
                         if let Some(r) = c.local.end(*run, now, Vec::new(), None, 8192) {
                             self.test.net_in.push((c.id, NetTest::Local(Box::new(r))));
                         }
+                        c.log.push_str(&format!("{}: run {run} ended\n", c.name));
+                        let from = c.mark.from(*run) as usize;
                         self.test.net_in.push((
                             c.id,
                             NetTest::LogTail {
                                 run: *run,
-                                text: format!("{}'s log\n", c.name),
+                                text: c.log[from.min(c.log.len())..].to_string(),
                             },
                         ));
                         c.ended = true;
@@ -329,7 +343,10 @@ impl Rig {
             for s in &beats {
                 if c.measure.running().is_some() && c.follower.has_done(s) {
                     let ours = c.engine.net_state(s.time);
-                    c.measure.heartbeat(s, &ours);
+                    // Its clock against the primary's, as the heartbeat shows
+                    // it (it arrives at once here).
+                    let seen = crate::net::measure::seen_offset(now + c.clock_off, s.time, None);
+                    c.measure.heartbeat(s, &ours, Some(seen));
                 }
                 c.follower.heard(s.clone());
             }
@@ -341,7 +358,7 @@ impl Rig {
                 self.leader.ack(c.id, epoch, seq);
             }
             c.follower
-                .step(&mut c.engine, &c.show, Some(now), DT, c.has);
+                .step(&mut c.engine, &c.show, Some(now + c.clock_off), DT, c.has);
             c.measure
                 .corrections(now, c.follower.corrections, &c.follower.corrected);
             c.measure.sample(
@@ -648,7 +665,16 @@ fn the_measurements_of_two_followers_reach_the_primary_and_the_show_comes_back_e
         "{report}"
     );
     assert!(report.contains(" 0 late"), "{report}");
-    assert!(d.folder.join("computer-Left-newq.log").is_file());
+    // Each computer's own log, named in the report.
+    let log = std::fs::read_to_string(d.folder.join("computers/Left/newq.log")).unwrap();
+    assert!(
+        log.starts_with("Left: measuring run") && log.contains("ended"),
+        "{log}"
+    );
+    assert!(
+        report.contains("Left's own log is in this zip: computers/Left/newq.log"),
+        "{report}"
+    );
     assert!(d.folder.join("events.log").is_file());
     let events = std::fs::read_to_string(d.folder.join("events.log")).unwrap();
     assert!(
@@ -690,6 +716,61 @@ fn a_follower_whose_commands_come_late_is_reported_late() {
         right.headline
     );
     assert_eq!(d.verdict, Verdict::ProblemsFound);
+    r.assert_restored();
+}
+
+#[test]
+fn a_follower_whose_clock_is_wrong_is_out_of_step_on_its_screens_though_its_cues_began_on_time() {
+    // 0.24.2's network part read "1.8 ms apart" while the clock was wrong:
+    // commands carry the primary's time, so when cues began agreed. Here
+    // Right's clock is 60 ms ahead, so it plays everything 60 ms early.
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "wrongclock");
+    r.comps[1].clock_off = 0.060;
+    r.start();
+    r.run_until("the test ends", 90.0, |r| r.done().is_some());
+    let d = r.done().unwrap();
+    let right = d
+        .network
+        .as_ref()
+        .unwrap()
+        .computers
+        .iter()
+        .find(|c| c.name == "Right")
+        .unwrap();
+    assert_eq!(
+        right.verdict,
+        Verdict::ProblemsFound,
+        "{:?}",
+        right.findings
+    );
+    assert!(
+        right.headline.starts_with("Out of step: Right"),
+        "{}",
+        right.headline
+    );
+    let csv = std::fs::read_to_string(d.folder.join("network.csv")).unwrap();
+    let head: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap();
+    let (shown, began) = (col("shown_apart_ms"), col("began_apart_ms"));
+    let rows: Vec<Vec<&str>> = csv
+        .lines()
+        .filter(|l| l.starts_with("Right,"))
+        .map(|l| l.split(',').collect())
+        .collect();
+    let num = |s: &str| s.parse::<f64>().ok();
+    let shown_ms: Vec<f64> = rows.iter().filter_map(|r| num(r[shown])).collect();
+    let began_ms: Vec<f64> = rows.iter().filter_map(|r| num(r[began])).collect();
+    assert!(!shown_ms.is_empty() && !began_ms.is_empty(), "{csv}");
+    // Most of the time: began together, shown 60 ms apart.
+    let mid = |v: &[f64]| {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    assert!(mid(&began_ms) < 5.0, "began {began_ms:?}");
+    assert!((mid(&shown_ms) - 60.0).abs() < 5.0, "shown {shown_ms:?}");
     r.assert_restored();
 }
 
@@ -893,7 +974,11 @@ fn a_short_test_plays_on_every_computer_and_each_ones_own_measurements_come_back
         "{csv}"
     );
     assert!(d.folder.join("outputs.csv").is_file());
-    assert!(d.folder.join("computer-Right-newq.log").is_file());
+    assert!(d.folder.join("computers/Right/newq.log").is_file());
+    assert!(
+        report.contains("Right's own log is in this zip: computers/Right/newq.log"),
+        "{report}"
+    );
     r.assert_restored();
 }
 
@@ -1104,6 +1189,18 @@ fn a_cue_list_and_a_network_check_run_as_one_test_with_one_result_and_one_zip() 
     assert!(
         events.find("===== cue-list").unwrap() < events.find("===== network").unwrap(),
         "{events}"
+    );
+    // One log per computer for the whole test: both parts, each once.
+    for c in ["Left", "Right"] {
+        let log = std::fs::read_to_string(d.folder.join(format!("computers/{c}/newq.log")))
+            .unwrap_or_else(|e| panic!("{c}'s log: {e} in {names:?}"));
+        assert_eq!(log.matches("measuring run").count(), 2, "{log}");
+        assert_eq!(log.matches("ended").count(), 2, "{log}");
+        assert!(log.starts_with(&format!("{c}: measuring run")), "{log}");
+    }
+    assert!(
+        names.iter().all(|n| !n.contains("computer-")),
+        "no log per part: {names:?}"
     );
     assert!(super::super::bundle::zip_path(&d.folder).is_file());
     r.assert_restored();

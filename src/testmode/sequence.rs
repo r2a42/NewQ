@@ -388,6 +388,7 @@ pub fn gather(folder: &Path, parts: &[(&'static str, PathBuf)], report: &str) {
             let _ = std::fs::remove_file(&src);
         }
     }
+    gather_logs(folder, parts);
     let mut events = String::new();
     for (slug, dir) in parts {
         let text = std::fs::read_to_string(dir.join("events.log")).unwrap_or_default();
@@ -402,10 +403,124 @@ pub fn gather(folder: &Path, parts: &[(&'static str, PathBuf)], report: &str) {
     }
 }
 
+/// Each computer's own log (`fleet::log_path`) from the parts into the run's
+/// folder, one per computer: each part's goes back to the test's start, so a
+/// later one holds the earlier (`merge_logs`).
+fn gather_logs(folder: &Path, parts: &[(&'static str, PathBuf)]) {
+    use super::fleet::COMPUTERS;
+    for (_, dir) in parts {
+        let names: Vec<std::ffi::OsString> = std::fs::read_dir(dir.join(COMPUTERS))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name())
+            .collect();
+        for name in names {
+            let src = dir.join(COMPUTERS).join(&name).join("newq.log");
+            let dst = folder.join(COMPUTERS).join(&name).join("newq.log");
+            if src == dst {
+                continue;
+            }
+            let Ok(later) = std::fs::read_to_string(&src) else {
+                continue;
+            };
+            let earlier = std::fs::read_to_string(&dst).unwrap_or_default();
+            if let Some(d) = dst.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&dst, merge_logs(&earlier, &later));
+        }
+    }
+}
+
+/// One computer's log from two parts of a test, `earlier`'s then `later`'s:
+/// where `later` begins with lines `earlier` ends with (it always should:
+/// each part's goes back to the test's start), those once; else both, with
+/// a line between (NewQ started again there between the parts).
+pub fn merge_logs(earlier: &str, later: &str) -> String {
+    if earlier.is_empty() || later.starts_with(earlier) {
+        return later.to_string();
+    }
+    let a: Vec<&str> = earlier.lines().collect();
+    // (A log cut at its start says so on its first line: `measure::LEFT_OUT`.)
+    let b: Vec<&str> = later
+        .lines()
+        .skip_while(|l| l.starts_with(crate::net::measure::LEFT_OUT))
+        .collect();
+    // The most of `earlier`'s last lines that `later` begins with.
+    let overlap = (1..=a.len().min(b.len()))
+        .rev()
+        .find(|&k| a[a.len() - k] == b[0] && a[a.len() - k..] == b[..k])
+        .unwrap_or(0);
+    let mut out = earlier.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if overlap == 0 {
+        out.push_str(
+            "===== The next part's log (it doesn't go on from the above: NewQ started again on this computer, or its log was put aside) =====\n",
+        );
+        out.push_str(later);
+    } else {
+        for l in &b[overlap..] {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testmode::Level;
+
+    #[test]
+    fn each_computers_log_comes_once_whole_from_the_parts() {
+        assert_eq!(merge_logs("", "a\n"), "a\n");
+        assert_eq!(merge_logs("a\nb\n", "a\nb\nc\n"), "a\nb\nc\n");
+        // A later one cut at its start (longer than is sent): joined where
+        // they meet.
+        let cut = format!("{}\nb\nc\nd\n", crate::net::measure::LEFT_OUT);
+        assert_eq!(merge_logs("a\nb\nc\n", &cut), "a\nb\nc\nd\n");
+        // NewQ started again between: both, said.
+        let m = merge_logs("a\n", "x\n");
+        assert!(m.starts_with("a\n=====") && m.ends_with("\nx\n"), "{m}");
+
+        let root = std::env::temp_dir().join(format!("newq_gather_logs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (one, two, run) = (root.join("one"), root.join("two"), root.join("run"));
+        for (dir, text) in [(&one, "a\nb\n"), (&two, "a\nb\nc\n")] {
+            let d = dir.join("computers").join("Left");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("newq.log"), text).unwrap();
+            std::fs::write(dir.join("report.txt"), "r").unwrap();
+        }
+        let only = one.join("computers").join("Right");
+        std::fs::create_dir_all(&only).unwrap();
+        std::fs::write(only.join("newq.log"), "r\n").unwrap();
+        gather(
+            &run,
+            &[("cue-list", one.clone()), ("network", two.clone())],
+            "all",
+        );
+        let read = |p: &str| std::fs::read_to_string(run.join(p)).unwrap();
+        assert_eq!(read("computers/Left/newq.log"), "a\nb\nc\n");
+        assert_eq!(read("computers/Right/newq.log"), "r\n");
+        assert!(!one.exists() && !two.exists(), "the parts' folders go");
+        // And the zip holds them under that name.
+        let names: Vec<String> = crate::testmode::bundle::contents(&run, &root.join("nologs"))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(
+            names.contains(&"computers/Left/newq.log".to_string()),
+            "{names:?}"
+        );
+        assert!(names.contains(&"computers/Right/newq.log".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn plan(part: Part) -> PartPlan {
         PartPlan {

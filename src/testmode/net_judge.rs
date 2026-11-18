@@ -36,6 +36,10 @@ pub const LATE_FRAMES_NOTE: u32 = 20;
 pub const GAP_SECS: f64 = 3.0;
 /// The clock may still be settling for this long after the test begins (s).
 pub const SETTLING_SECS: f64 = 5.0;
+/// A clock error bound over this (ms) is no measure: the clock has lost track
+/// of the primary's (0.24.2 sent 2,605,312 ms, still marked locked, just
+/// before the lock went). Such a row counts as not locked.
+pub const CLOCK_LOST_MS: f64 = 1000.0;
 /// Something played on the primary and not here for this long (s): a problem.
 pub const MISSING_PROBLEM_SECS: f64 = 2.0;
 /// A display drawing slowly (`proto::slow_below`) in this many reports (a
@@ -44,6 +48,9 @@ pub const SLOW_DRAWING_PROBLEM_SECS: u32 = 3;
 /// Sounds further apart than this (ms, by what each sound device was sent):
 /// a note. (Each is kept within `audio::SOUND_SLACK` of the shared clock.)
 pub const SOUND_NOTE_MS: f64 = 60.0;
+
+/// How the network figures are made, said in every network report.
+pub const HOW_MEASURED: &str = "How it is measured: at each of the primary's heartbeats (four a second) each computer compares every playing cue's time on its screens, by its own shared clock, with the primary's, as the heartbeat says it was when it was made, allowing half a round trip for its way (\"apart on the screens\": it holds the clock's own error, and errs towards apart by the heartbeat's waits). A difference counts only when two heartbeats in a row show it (a loop going round between the primary's heartbeat and the computer's look shows at one). It notes the largest twice a second. Frames are counted at the computer's slowest screen that drew: a difference shorter than one of its refreshes can't be seen there. \"Began\" compares when each cue began by the shared clock: a command carries the primary's time, so it can't see a wrong clock. Each command's lead is how long before its shared time it arrived. The clock error is the clock's own bound while locked, usually well above the real error; a bound over a second means the clock had lost track, and counts as not locked. network.csv has every row.";
 
 /// What software can't see, said in every report.
 pub const CANNOT_SEE: &str = "What this test can't see: each display draws at its own moment within its refresh, so two projectors without genlock can be up to one refresh apart even when NewQ chose the same frame on both (film the Sync flash to see it). Sound from two computers is not locked to the sample: it is meant for separate rooms or separate speakers, not one sound from two computers. The numbers come from the computers' own clocks; the network itself is measured by the round trips.";
@@ -163,23 +170,80 @@ impl ComputerNotes {
         self.ended |= r.last;
     }
 
-    /// Milliseconds of a frame at its displays' refresh (60 Hz if unknown).
+    /// The refresh frames are counted at (Hz), and whether it is a screen's
+    /// that drew: the slowest of its screens that drew for the test, else the
+    /// refresh it reported, else 60. A difference shorter than one refresh of
+    /// the slowest screen can't be seen there; counted at the fastest (165 Hz
+    /// in 0.24.2's test), 24 ms read as 4 frames on a 60 Hz projector.
+    pub fn frame_hz(&self) -> (f64, bool) {
+        let ok = |r: &f32| r.is_finite() && *r >= 20.0;
+        let slowest = self
+            .monitors
+            .iter()
+            .filter(|m| m.drawing > 0)
+            .filter_map(|m| m.refresh_hz.filter(ok))
+            .reduce(f32::min);
+        match (slowest, self.refresh_hz.filter(ok)) {
+            (Some(r), _) => (f64::from(r), true),
+            (None, Some(r)) => (f64::from(r), false),
+            (None, None) => (60.0, false),
+        }
+    }
+
+    /// Milliseconds of a frame at `frame_hz`.
     pub fn frame_ms(&self) -> f64 {
-        1000.0
-            / self
-                .refresh_hz
-                .filter(|r| r.is_finite() && *r >= 20.0)
-                .map_or(60.0, f64::from)
+        1000.0 / self.frame_hz().0
+    }
+
+    /// "60 Hz, its slowest screen" (what frames are counted at).
+    pub fn frame_words(&self) -> String {
+        match self.frame_hz() {
+            (r, true) => format!("{r:.0} Hz, its slowest screen"),
+            (r, false) if self.refresh_hz.is_some() => format!("{r:.0} Hz"),
+            _ => "60 Hz (its screens' refresh unknown)".into(),
+        }
+    }
+
+    /// Whether what the screens show was measured (0.24.3 on): the rows'
+    /// `shown_apart_ms`, which hold the clock's error; else when the cues
+    /// began (`apart_ms`), which can't see it.
+    pub fn shown_measured(&self) -> bool {
+        self.rows.iter().any(|r| r.shown_apart_ms.is_some())
+    }
+
+    /// A row's "apart": what the screens show where measured, else when the
+    /// cues began.
+    pub fn apart_of(&self, r: &Row) -> Option<f64> {
+        if self.shown_measured() {
+            r.shown_apart_ms
+        } else {
+            r.apart_ms
+        }
     }
 
     fn worst_apart(&self) -> Option<f64> {
+        self.rows
+            .iter()
+            .filter_map(|r| self.apart_of(r))
+            .reduce(f64::max)
+    }
+
+    fn worst_began(&self) -> Option<f64> {
         self.rows.iter().filter_map(|r| r.apart_ms).reduce(f64::max)
+    }
+
+    /// A row in which the clock kept to the primary's: locked, with a bound
+    /// that is a measure (`CLOCK_LOST_MS`).
+    pub fn clock_kept(r: &Row) -> bool {
+        r.locked
+            && r.clock_error_ms
+                .is_none_or(|e| e.is_finite() && e <= CLOCK_LOST_MS)
     }
 
     fn worst_clock(&self) -> Option<f64> {
         self.rows
             .iter()
-            .filter(|r| r.locked && r.t >= SETTLING_SECS)
+            .filter(|r| Self::clock_kept(r) && r.t >= SETTLING_SECS)
             .filter_map(|r| r.clock_error_ms)
             .reduce(f64::max)
     }
@@ -333,12 +397,7 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
         Link::WiFi => "on Wi-Fi",
         Link::Unknown => "link unknown",
     };
-    let refresh = c
-        .refresh_hz
-        .map_or("refresh unknown, 60 Hz assumed".into(), |r| {
-            format!("{r:.0} Hz")
-        });
-    lines.push(format!("{link}, displays at {refresh}"));
+    lines.push(format!("{link}; frames counted at {}", c.frame_words()));
     if let Some(t) = &c.transfer {
         lines.push(format!("Media: {}", transfer_words(t)));
     }
@@ -356,18 +415,29 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
             findings: f,
         };
     }
-    // How far apart.
+    // How far apart: what the screens show (by this computer's clock against
+    // the primary's heartbeats), where measured.
+    let shown = c.shown_measured();
     let worst = c.worst_apart();
     let worst_frames = worst.map(|w| w / frame);
     if let (Some(w), Some(wf)) = (worst, worst_frames) {
         lines.push(format!(
-            "Worst {w:.1} ms apart ({wf:.2} frames), over {} rows",
-            c.rows.iter().filter(|r| r.apart_ms.is_some()).count()
+            "Worst {w:.1} ms apart {}({wf:.2} frames), over {} rows",
+            if shown { "on the screens " } else { "" },
+            c.rows.iter().filter(|r| c.apart_of(r).is_some()).count()
         ));
+        if shown && let Some(b) = c.worst_began() {
+            lines.push(format!(
+                "Cues began within {b:.1} ms of the primary's (by the shared clock, which this doesn't check)"
+            ));
+        }
         let over = c
             .rows
             .iter()
-            .filter(|r| r.apart_ms.is_some_and(|a| a / frame > APART_PROBLEM_FRAMES))
+            .filter(|r| {
+                c.apart_of(r)
+                    .is_some_and(|a| a / frame > APART_PROBLEM_FRAMES)
+            })
             .count();
         if over >= APART_PROBLEM_ROWS {
             f.push(finding(
@@ -407,9 +477,10 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
             ));
         }
     }
-    // The clock.
+    // The clock: its bound while it kept to the primary's; the rest is time
+    // not locked.
     if let Some(e) = c.worst_clock() {
-        lines.push(format!("Clock error up to {e:.1} ms"));
+        lines.push(format!("Clock error up to {e:.1} ms while locked"));
         let why = if wifi {
             "Wi-Fi"
         } else {
@@ -419,8 +490,13 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
             f.push(finding(
                 Severity::Problem,
                 format!(
-                    "Clock error up to {e:.0} ms on {}: {why}. Half a frame or more; use a wire",
-                    c.name
+                    "Clock error up to {e:.0} ms on {}: {why}. Half a frame or more{}",
+                    c.name,
+                    if c.link == Link::Wired {
+                        ""
+                    } else {
+                        "; use a wire"
+                    }
                 ),
             ));
         } else if e > CLOCK_NOTE_MS {
@@ -433,7 +509,7 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
     let unlocked = c
         .rows
         .iter()
-        .filter(|r| r.t >= SETTLING_SECS && !r.locked)
+        .filter(|r| r.t >= SETTLING_SECS && !ComputerNotes::clock_kept(r))
         .count();
     if unlocked > 0 {
         f.push(finding(
@@ -481,9 +557,14 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
             .reduce(f64::max)
             .unwrap_or(0.0);
         let text = format!(
-            "Late commands on {}: {} of {n} arrived after their time (up to {worst:.0} ms); they were put right, but a picture may have jumped. Use a wire, or a quieter network",
+            "Late commands on {}: {} of {n} arrived after their time (up to {worst:.0} ms); they were put right, but a picture may have jumped. {}",
             c.name,
-            late.len()
+            late.len(),
+            if c.link == Link::Wired {
+                "A quieter network, or a less busy computer, would help"
+            } else {
+                "Use a wire, or a quieter network"
+            }
         );
         let problem = late.len() > LATE_PROBLEM_COUNT
             || (late.len() as f64 / n.max(1) as f64) > LATE_PROBLEM_SHARE;
@@ -652,21 +733,26 @@ pub fn judge(computers: &[ComputerNotes], secs: f64, own: Vec<Finding>) -> Judge
 /// `network.csv`: a row per look of each computer.
 pub fn csv(computers: &[ComputerNotes]) -> String {
     let mut s = String::from(
-        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing,sound_apart_ms\n",
+        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,shown_apart_ms,shown_apart_frames,began_apart_ms,began_apart_frames,compared,missing,sound_apart_ms\n",
     );
     let num = |v: Option<f64>| v.map_or(String::new(), |x| format!("{x:.2}"));
     for c in computers {
         let frame = c.frame_ms();
         for r in &c.rows {
+            // A bound past `CLOCK_LOST_MS` is no measure: left empty, and the
+            // row not locked.
+            let kept = ComputerNotes::clock_kept(r);
             let _ = writeln!(
                 s,
-                "{},{:.2},{},{},{},{},{},{},{},{},{}",
+                "{},{:.2},{},{},{},{},{},{},{},{},{},{},{}",
                 csv_field(&c.name),
                 r.t,
-                num(r.clock_error_ms),
+                num(r.clock_error_ms.filter(|e| *e <= CLOCK_LOST_MS)),
                 num(r.rtt_ms),
-                u8::from(r.locked),
+                u8::from(kept),
                 u8::from(r.in_step),
+                num(r.shown_apart_ms),
+                num(r.shown_apart_ms.map(|a| a / frame)),
                 num(r.apart_ms),
                 num(r.apart_ms.map(|a| a / frame)),
                 r.compared,
@@ -698,7 +784,10 @@ pub fn report(j: &Judged, computers: &[ComputerNotes], secs: f64, about: &str) -
     let _ = writeln!(s);
     for (c, notes) in j.computers.iter().zip(computers) {
         let _ = writeln!(s, "{} — {}", c.name, c.verdict.label());
-        let _ = writeln!(s, "  {}", c.headline);
+        // With problems the headline is the first of them, listed below.
+        if c.verdict != Verdict::ProblemsFound {
+            let _ = writeln!(s, "  {}", c.headline);
+        }
         for l in &c.lines {
             let _ = writeln!(s, "  {l}");
         }
@@ -737,10 +826,7 @@ pub fn report(j: &Judged, computers: &[ComputerNotes], secs: f64, about: &str) -
     }
     let _ = writeln!(s, "{CANNOT_SEE}");
     let _ = writeln!(s);
-    let _ = writeln!(
-        s,
-        "How it is measured: each computer compares, at each of the primary's heartbeats (four a second), the time each playing cue began by the shared clock with the primary's, and notes the largest difference twice a second (\"apart\"); frames are at its displays' refresh. Each command's lead is how long before its shared time it arrived. The clock error is the clock's own bound, usually well above the real error. network.csv has every row."
-    );
+    let _ = writeln!(s, "{HOW_MEASURED}");
     s
 }
 
@@ -760,6 +846,7 @@ mod tests {
                 compared: 2,
                 missing: 0,
                 sound_apart_ms: None,
+                shown_apart_ms: None,
             })
             .collect()
     }
@@ -832,7 +919,7 @@ mod tests {
             "{}",
             v.headline
         );
-        assert!(v.headline.contains("Use a wire"));
+        assert!(v.headline.contains("A quieter network"));
     }
 
     #[test]
@@ -902,6 +989,141 @@ mod tests {
         let v = judge_computer(&ComputerNotes::new("Right"), 120.0);
         assert_eq!(v.verdict, Verdict::ProblemsFound);
         assert!(v.headline.starts_with("No measurements came from Right"));
+    }
+
+    #[test]
+    fn a_clock_bound_that_is_no_measure_is_time_not_locked_and_wired_is_not_told_to_use_a_wire() {
+        // 0.24.2: rows still marked locked carried 2,605,312 ms just before
+        // the lock went; the report said "Clock error up to 2605312 ms ...
+        // use a wire" on a wired computer.
+        let mut c = good("Stage-PC");
+        for r in &mut c.rows[100..140] {
+            r.clock_error_ms = Some(2_605_312.28);
+        }
+        for r in &mut c.rows[140..160] {
+            r.locked = false;
+            r.clock_error_ms = Some(2_605_300.0);
+        }
+        let v = judge_computer(&c, 120.0);
+        let texts: Vec<&str> = v.findings.iter().map(|f| f.text.as_str()).collect();
+        assert!(
+            texts.contains(&"Stage-PC's clock was not locked to the primary's for about 30 s"),
+            "{texts:?}"
+        );
+        assert!(texts.iter().all(|t| !t.contains("2605")), "{texts:?}");
+        assert!(
+            v.lines
+                .contains(&"Clock error up to 0.3 ms while locked".to_string()),
+            "{:?}",
+            v.lines
+        );
+        let text = csv(std::slice::from_ref(&c));
+        assert!(!text.contains("2605"));
+        assert!(
+            text.lines().nth(101).unwrap().contains(",1.20,0,1,"),
+            "{text}"
+        );
+        // A bound of half a frame on a wire: no "use a wire"; on Wi-Fi, yes.
+        let mut c = good("Left");
+        c.rows = rows(240, 6.7, 12.0);
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(
+            v.headline,
+            "Clock error up to 12 ms on Left: a busy network or computer. Half a frame or more"
+        );
+        c.commands = commands(40, 5);
+        let v = judge_computer(&c, 120.0);
+        assert!(
+            v.findings
+                .iter()
+                .all(|f| !f.text.contains("use a wire") && !f.text.contains("Use a wire")),
+            "{:?}",
+            v.findings
+        );
+        c.link = Link::WiFi;
+        let v = judge_computer(&c, 120.0);
+        assert!(v.findings.iter().any(|f| f.text.ends_with("; use a wire")));
+        assert!(
+            v.findings
+                .iter()
+                .any(|f| f.text.ends_with("Use a wire, or a quieter network"))
+        );
+    }
+
+    #[test]
+    fn frames_are_counted_at_the_slowest_screen_that_drew() {
+        // 0.24.2: 24 ms read as 4 frames at a 165 Hz screen, beside a 60 Hz one.
+        let mut c = good("Stage-PC");
+        c.refresh_hz = Some(165.0);
+        for r in &mut c.rows {
+            r.apart_ms = Some(24.0);
+        }
+        let rate = |index, refresh| MonitorRate {
+            index,
+            name: format!("M{index}"),
+            refresh_hz: Some(refresh),
+            fps: refresh,
+            late_permille: 0,
+        };
+        // Reported alone (no screen drew): at its reported refresh.
+        let has = |v: &ComputerVerdict, t: &str| v.lines.iter().any(|l| l.contains(t));
+        assert!(has(&judge_computer(&c, 120.0), "(3.96 frames)"));
+        c.take(Report {
+            seq: 1,
+            link: Link::Wired,
+            monitors: vec![rate(0, 165.0), rate(1, 60.0)],
+            ..Default::default()
+        });
+        assert_eq!(c.frame_hz(), (60.0, true));
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(
+            v.lines[0],
+            "wired; frames counted at 60 Hz, its slowest screen"
+        );
+        assert!(has(&v, "(1.44 frames)"), "{:?}", v.lines);
+        assert_eq!(v.verdict, Verdict::PassedWithNotes, "{:?}", v.findings);
+    }
+
+    #[test]
+    fn what_the_screens_show_is_judged_where_measured_and_began_kept_as_a_figure() {
+        // 0.24.2's network part: "1.8 ms apart" by when cues began, while the
+        // clock was wrong. Now the screens' difference is judged.
+        let mut c = good("Stage-PC");
+        for r in &mut c.rows {
+            r.apart_ms = Some(1.8);
+            r.shown_apart_ms = Some(42.0);
+        }
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert!(
+            v.headline
+                .starts_with("Out of step: Stage-PC was more than 2 frames apart")
+        );
+        assert!(v.headline.ends_with("worst 2.5 frames"), "{}", v.headline);
+        let has = |t: &str| v.lines.iter().any(|l| l.starts_with(t));
+        assert!(
+            has("Worst 42.0 ms apart on the screens (2.52 frames)"),
+            "{:?}",
+            v.lines
+        );
+        assert!(has("Cues began within 1.8 ms of the primary's"));
+        // Without the screens' measure (a NewQ before 0.24.3): when they began.
+        for r in &mut c.rows {
+            r.shown_apart_ms = None;
+        }
+        assert_eq!(judge_computer(&c, 120.0).verdict, Verdict::Passed);
+    }
+
+    #[test]
+    fn a_computer_with_problems_says_each_once_in_the_report() {
+        let mut c = good("Stage-PC");
+        for r in &mut c.rows {
+            r.apart_ms = Some(60.0);
+        }
+        let cs = [c];
+        let j = judge(&cs, 120.0, vec![]);
+        let r = report(&j, &cs, 120.0, "Network test");
+        assert_eq!(r.matches("Out of step: Stage-PC").count(), 1, "{r}");
     }
 
     #[test]
@@ -1032,13 +1254,13 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(
             lines[0],
-            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,apart_ms,apart_frames,compared,missing,sound_apart_ms"
+            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,shown_apart_ms,shown_apart_frames,began_apart_ms,began_apart_frames,compared,missing,sound_apart_ms"
         );
         assert_eq!(
             lines[1],
-            "\"Left, stage\",0.00,0.30,1.20,1,1,6.70,0.40,2,0,"
+            "\"Left, stage\",0.00,0.30,1.20,1,1,,,6.70,0.40,2,0,"
         );
-        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,2,0,");
+        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,,,2,0,");
         b.commands = commands(40, 1);
         let cs = [a, b];
         let j = judge(&cs, 120.0, vec![]);

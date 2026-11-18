@@ -965,16 +965,15 @@ pub fn finish(
         run.fleet.names(),
         run.fleet.transfers_line()
     );
+    // (Each computer's own measurements are among its lines already.)
     let mut report = net_judge::report(&judged, &notes, played, &about);
-    // Each computer's own measurements (memory, processor, frame rates).
-    for c in &judged.computers {
-        let lines: Vec<&String> = c.lines.iter().skip(1).collect();
-        if !lines.is_empty() {
-            report.push_str(&format!("\n{}, measured there:\n", c.name));
-            for l in lines {
-                report.push_str(&format!("  {l}\n"));
-            }
+    if !run.fleet.computers.is_empty() {
+        report.push_str("\nEach computer's own log\n");
+        for c in run.fleet.computers.values() {
+            report.push_str(&format!("  {}\n", c.log_words()));
         }
+        report
+            .push_str("  (A display computer makes no zip of its own: its log comes back here.)\n");
     }
     let (own_rates, _) = net_judge::drawing_findings("This computer", &run.own_drawing);
     if !own_rates.is_empty() {

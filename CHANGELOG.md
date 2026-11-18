@@ -20,6 +20,23 @@ release page, and a release is refused if it has none.
   number too.
 - **A display computer that no primary has reached says so** on its card after about 20 seconds,
   and that the firewall on that computer may be blocking NewQ.
+- **The network test measures what the screens show.** It compared when each cue began on each
+  computer, which a command stamps with the primary's time, so a computer whose clock was wrong
+  still read "1.8 ms apart". It now compares each cue's time on the screens, by the computer's
+  own clock against the primary's heartbeats, and judges by that (`network.csv` keeps both:
+  `shown_apart_ms` and `began_apart_ms`).
+- **No more "Clock error up to 2605312 ms".** While a computer's clock isn't locked to the
+  primary's, its error isn't a figure: the report says for how long it wasn't locked instead.
+  *Use a wire* is no longer said to a computer that is wired.
+- **Frames apart are counted at the slowest screen.** A computer with a 165 Hz and a 60 Hz screen
+  had 24 ms read as 4 frames; it is counted at 60 Hz now (1.4 frames), and the report says which.
+- **No false "1650 frames apart" in the timeline test.** A timeline's loop going round between
+  the primary's heartbeat and the display computer's look read as the whole loop apart for a
+  moment; a difference must now be seen twice in a row.
+- **Each computer's log is one file in the test's zip**: `computers/<name>/newq.log`, the whole
+  log since the test began (all its parts), named in the report and in the Test window. A
+  display computer makes no zip of its own.
+- The test's report says each computer's problem once, and its screens as "Stage-PC screen 1".
 
 ## 0.24.2
 

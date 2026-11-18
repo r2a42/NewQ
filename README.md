@@ -1406,21 +1406,33 @@ run first, as one test. No command line.
   through the show network, and the window shows each computer's progress until
   all of it is there, and how fast it came.
 - **What it measures**, on each computer: how far its clock may be off and the
-  round trip to the primary, how early each GO arrived (or how late), every
-  correction it made to keep in step, how far its cues' times were from the
-  primary's (in milliseconds and in frames at its displays' refresh), its own
-  stalls and late frames, and whether it is wired or on Wi-Fi.
+  round trip to the primary (and for how long its clock was not locked to the
+  primary's), how early each GO arrived (or how late), every correction it made
+  to keep in step, how far what its screens show was from the primary's, its
+  own stalls and late frames, and whether it is wired or on Wi-Fi. *Apart on
+  the screens* compares each cue's time now by the computer's own clock with
+  the primary's as its heartbeat says, so a clock that is wrong shows there;
+  *began* (also in `network.csv`) compares when cues began, which a wrong clock
+  can't upset. Frames are counted at the computer's slowest screen: a
+  difference shorter than one of its refreshes can't be seen on it. A
+  difference seen at one heartbeat alone (a loop going round between the two
+  looks) isn't counted.
 - **The answer**, per computer, in plain words: *In step: worst 0.4 frames apart
   over 2 min*, or what went wrong (*Late commands: 3 of 40 arrived after their
-  time; use a wire*, *Clock error up to 6 ms: Wi-Fi*, *dropped out of the network
-  for 12 s*), and one verdict for all. It says too what software can't see (the
+  time; use a wire*, *Clock error up to 6 ms: Wi-Fi*, *clock not locked to the
+  primary's for about 2 min*, *dropped out of the network for 12 s*), and one
+  verdict for all. Each problem is said once. *Use a wire* is said only to a
+  computer that isn't wired. It says too what software can't see (the
   displays' refresh, sound between computers).
 - **Your show comes back** on every computer at the end, after *Stop*, and to a
   computer that dropped out once it is back.
 - **Send the zip.** The test makes one zip (*Show the zip in its folder*): the
   report, `network.csv` (every computer's measurements twice a second),
-  `events.log`, the end of each computer's own log, and this computer's log.
-  Send that one file.
+  `events.log`, this computer's log, and **each computer's own log** since the
+  test began, as `computers/<name>/newq.log` (one per computer for the whole
+  test, however many parts; the report names it). A display computer makes no
+  zip of its own: everything comes back to the primary's, so that one file is
+  all there is to send.
 - **The Sync flash: see it with your own eyes.** The test starts with it, and
   shows it again later: a big frame number, a yellow bar stepping along a row of
   sixty slots, one slot a frame, and a white flash at the start of every second,
@@ -1836,7 +1848,8 @@ the first part, and back once, after the last: also when you stop it, when a par
 and when NewQ is closed. A part stopped or failed ends the run; the parts after it are listed
 as not run. The one zip has one `report.txt` and one `events.log` with a section per part; a
 file two parts both wrote has the part's name in front (`cue-list-stats.csv`,
-`timeline-stats.csv`).
+`timeline-stats.csv`). Across a show network each computer's own log is in it once, for the
+whole test: `computers/<name>/newq.log`.
 
 ### Check every feature (the debug test), and one file to send
 
