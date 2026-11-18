@@ -191,8 +191,9 @@ stays on the computer until you send it yourself.
   a few big blurs ask a lot of a slow graphics card, and long reverbs and echoes
   take a little memory when a cue starts. NewQ watches for trouble and says so in
   the status bar: *graphics behind* when frames start arriving late while effects
-  are running, and *audio at N% of its time* when mixing the sound takes most of
-  the time it has (above about 90% it breaks up). Adding or removing a *sound*
+  are running, and *audio at N% of its time* when NewQ's mixing of the sound takes most of
+  the time it has (above about 90% it breaks up; measured over a few buffers, so a moment
+  the system held the sound up doesn't count as NewQ's mixing). Adding or removing a *sound*
   effect applies the next time the cue plays; everything else is live.
 - **Live audio:** *Cue ▸ Add Live audio cue* plays an audio input (a Dante Virtual
   Soundcard or Dante interface, a mixer's USB output, a line input) on one of the
@@ -1998,7 +1999,9 @@ in `events.log` with its time and, for a stall, what the loop was doing (the sho
 making the pictures, the test's own measuring, drawing the window), how much of it the main
 thread spent working and whether the whole program was held up. The window counts both as
 the test runs, `stats.csv` has an `audio_errors` column, and the report gives a line for each
-(*No audio dropouts on …* when there were none):
+(*No audio dropouts on …* when there were none). A dropout that came with the system calling
+for sound late while NewQ's mixing was quick is said so (another program or the sound
+device's power saving held it up; a larger buffer may help), not put down to NewQ's mixing:
 
 | Finding | Problem when | Tracked when |
 |---|---|---|

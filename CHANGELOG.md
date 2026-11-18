@@ -22,6 +22,13 @@ release page, and a release is refused if it has none.
   display's own shape, as large as the pane allows, with black bars beside it or above and
   below; so do the timeline workspace's monitor and a sub display's area editor. A display
   showing part of another's picture is previewed as that display shows it.
+- **Test Mode no longer blames NewQ's mixing for the system calling for sound late.** On a
+  Mac the report said *Mixing the sound took up to 144% of the time it has* when NewQ's mixing
+  took almost nothing and the system had asked for sound late. The sound's load now counts
+  NewQ's mixing over a few buffers, so one call the system held up doesn't read as slow
+  mixing, and a dropout that came with the system calling late says so: *the system called
+  for sound late, not NewQ's mixing: another program or the sound device's power saving; a
+  larger buffer may help*.
 
 ## 0.24.3
 
