@@ -1089,7 +1089,7 @@ fn the_tests_network_load_goes_both_ways_on_its_own_connection_and_stops() {
     }
     going("closed", &|t| !t.connected);
     let t = server.totals()[&did].clone();
-    let line = crate::net::load::report_lines(LoadLevel::Light, &[("Left".into(), Some(t))]);
+    let line = crate::net::load::report_lines(LoadLevel::Light, &[("Left".into(), Some(t))], None);
     assert!(line[1].starts_with("  Left: to it "), "{line:?}");
 }
 

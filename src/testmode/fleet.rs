@@ -656,16 +656,17 @@ impl Fleet {
             start: self.start.unwrap_or(now),
             load: self.load.as_ref().map(|l| l.ask()),
         };
-        // A computer gone from the network: its load is cut.
+        // A computer released from the network: its load is cut. (One whose
+        // session blips keeps it: under load is when sessions blip.)
         if let Some(l) = &self.load {
-            let here: Vec<NodeId> = st
+            let ours: Vec<NodeId> = st
                 .net
                 .peers
                 .iter()
-                .filter(|p| p.ours && p.connected)
+                .filter(|p| p.ours)
                 .map(|p| p.id)
                 .collect();
-            l.keep_only(&here);
+            l.keep_only(&ours);
         }
         for p in st.net.peers.iter().filter(|p| p.ours && p.connected) {
             // A computer that lost its graphics card says so in its status.
@@ -946,7 +947,8 @@ impl Fleet {
             .values()
             .map(|c| (c.notes.name.clone(), totals.get(&c.id).cloned()))
             .collect();
-        crate::net::load::report_lines(self.load_level, &each)
+        let played = self.start.zip(self.ended).map(|(s, e)| (e - s).max(0.0));
+        crate::net::load::report_lines(self.load_level, &each, played)
     }
 
     /// The window's line while it runs: the rate each way now.
