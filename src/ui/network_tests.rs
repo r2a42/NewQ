@@ -186,6 +186,7 @@ fn primary_view() -> NetView {
         }),
         problem: None,
         adopting: false,
+        twin: None,
     };
     let new = PeerView {
         id: NEW,

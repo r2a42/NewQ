@@ -455,6 +455,7 @@ fn a_newq_of_another_protocol_is_named_and_not_spoken_to() {
         show_version: None,
         term: 0,
         on: true,
+        system: String::new(),
     };
     let udp = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
     let began = Instant::now();
@@ -502,6 +503,7 @@ fn a_newq_of_another_protocol_is_named_and_not_spoken_to() {
             network: None,
             term: 0,
             nonce: 1,
+            tcp_port: 0,
         }))
         .unwrap();
         v["proto"] = (proto::PROTOCOL + 1).into();
@@ -1137,4 +1139,157 @@ fn a_computers_own_status_says_its_link() {
     st.link = Link::Wired;
     assert_eq!(st.view().status.link, Link::Wired);
     assert_eq!(st.own_status().link, Link::Wired);
+}
+
+// ---- Second test's fixes: one identity twice, an adoption that can't connect ----
+
+/// A second NewQ with the primary's identity (its `node.json` copied, as a
+/// stray copy on the same computer shares it) on another port: every computer
+/// says so, and the display keeps its clock with the one its session is with.
+#[test]
+fn a_second_newq_with_the_primarys_identity_is_noticed_and_never_followed() {
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let (pid, _did) = (id_of(&p), id_of(&d));
+    let pport = p.view().port.unwrap();
+    let dv = until(&d, "the display's clock to be kept", |v| {
+        v.clock_with.is_some() && v.following.as_ref().is_some_and(|f| f.online)
+    });
+    assert_eq!(dv.clock_with.unwrap().port(), pport);
+    // The stray copy: the same node.json in another folder.
+    let twin_dir = rig.dirs[0].with_extension("twin");
+    let _ = std::fs::remove_dir_all(&twin_dir);
+    std::fs::create_dir_all(&twin_dir).unwrap();
+    std::fs::copy(rig.dirs[0].join(node::FILE), twin_dir.join(node::FILE)).unwrap();
+    rig.dirs.push(twin_dir.clone());
+    let t = restart(twin_dir, rig.base);
+    let tport = until(&t, "the copy listening", |v| v.port.is_some())
+        .port
+        .unwrap();
+    assert_ne!(tport, pport);
+    assert_eq!(id_of(&t), pid, "one identity");
+    // Both copies say another NewQ has their identity; the display says two
+    // answer as the primary, and keeps to the one it is connected to.
+    let pv = until(&p, "the primary to see the copy", |v| v.twin.is_some());
+    assert!(
+        pv.twin.as_deref().unwrap().contains(&tport.to_string()),
+        "{:?}",
+        pv.twin
+    );
+    until(&t, "the copy to see the primary", |v| v.twin.is_some());
+    let dv = until(&d, "the display to see two primaries", |v| {
+        peer(v, pid).is_some_and(|x| x.twin.is_some())
+    });
+    let said = peer(&dv, pid).unwrap().twin.clone().unwrap();
+    assert!(said.contains(&format!("port {pport}")), "{said}");
+    // For a while beacons come from both: the clock never moves to the copy.
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(4) {
+        let v = d.view();
+        assert_eq!(v.clock_with.map(|a| a.port()), Some(pport), "{v:#?}");
+        let reached = v
+            .reached
+            .iter()
+            .find(|(id, _)| *id == pid)
+            .map(|r| r.1.port());
+        assert_eq!(reached, Some(pport));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The copy closed: the warnings go.
+    drop(t);
+    until(&p, "the primary's warning to go", |v| v.twin.is_none());
+    until(&d, "the display's warning to go", |v| {
+        peer(v, pid).is_some_and(|x| x.twin.is_none())
+    });
+}
+
+/// "Add to the show" on a computer that beacons but can't be connected to
+/// (a firewall, a VPN address): after `ADOPT_PATIENCE` its row says why,
+/// naming each address tried and the way it goes, and the firewall only for a
+/// Windows computer.
+#[test]
+fn an_adoption_that_cant_connect_says_why_on_the_row() {
+    let mut rig = Rig::new();
+    let p = rig.hub("Booth");
+    p.ask(NetAction::BecomePrimary);
+    let port = until(&p, "listening", |v| v.port.is_some()).port.unwrap();
+    // A port nothing listens on.
+    let closed = TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let beacon = Beacon {
+        proto: proto::PROTOCOL,
+        version: proto::VERSION.into(),
+        id: NodeId(0xbeef),
+        name: "WNO-2".into(),
+        role: Role::Alone,
+        network: None,
+        tcp_port: closed,
+        show_version: None,
+        term: 0,
+        on: true,
+        system: "windows".into(),
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let beaconing = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let udp = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+            while !stop.load(Ordering::Relaxed) {
+                let _ = udp.send_to(&proto::encode_beacon(&beacon), ("127.0.0.1", port));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    until(&p, "the computer to be heard waiting", |v| {
+        peer(v, NodeId(0xbeef)).is_some_and(|x| x.waiting)
+    });
+    p.ask(NetAction::Adopt(NodeId(0xbeef)));
+    let asked = Instant::now();
+    let v = until(&p, "the row to say why", |v| {
+        peer(v, NodeId(0xbeef)).is_some_and(|x| x.problem.is_some())
+    });
+    assert!(asked.elapsed() >= ADOPT_PATIENCE - Duration::from_millis(500));
+    let x = peer(&v, NodeId(0xbeef)).unwrap();
+    assert!(x.adopting, "still being tried");
+    let said = x.problem.clone().unwrap();
+    assert!(
+        said.starts_with("Can't reach WNO-2: tried ")
+            && said.contains(&format!("127.0.0.1:{closed} (this computer)"))
+            && said.contains("Windows Firewall"),
+        "{said}"
+    );
+    stop.store(true, Ordering::Relaxed);
+    beaconing.join().unwrap();
+}
+
+#[test]
+fn the_row_names_the_firewall_only_on_windows_and_says_when_nothing_was_tried() {
+    let at: SocketAddr = "10.0.0.5:47820".parse().unwrap();
+    let s = unreached_sentence("A", Some(at), None, true, "macos");
+    assert_eq!(s, "A at 10.0.0.5:47820 hasn't answered yet.");
+    let s = unreached_sentence("A", Some(at), None, false, "");
+    assert_eq!(s, "A isn't heard on the network any more.");
+    let s = unreached_sentence("A", None, Some("x (wired): refused"), true, "linux");
+    assert_eq!(s, "Can't reach A: tried x (wired): refused.");
+}
+
+#[test]
+fn a_port_changing_once_is_a_restart_back_and_forth_is_two_newqs() {
+    let now = Instant::now();
+    let seq =
+        |ports: &[u16]| -> VecDeque<(u16, Instant)> { ports.iter().map(|p| (*p, now)).collect() };
+    assert_eq!(twin_ports(&seq(&[1, 1, 1, 2, 2, 2]), now), None);
+    assert_eq!(twin_ports(&seq(&[1, 2, 1, 2]), now), Some((1, 2)));
+    assert_eq!(twin_ports(&seq(&[2, 1, 1, 2, 2, 1]), now), Some((1, 2)));
+    // Old ones don't count.
+    let old: VecDeque<(u16, Instant)> = [1, 2, 1, 2]
+        .iter()
+        .map(|p| (*p, now.checked_sub(TWIN_WINDOW * 2).unwrap_or(now)))
+        .collect();
+    if now.checked_sub(TWIN_WINDOW * 2).is_some() {
+        assert_eq!(twin_ports(&old, now), None);
+    }
 }

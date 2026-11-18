@@ -1145,6 +1145,20 @@ Open it on a computer with projectors or screens and that is all you do there:
 - **Adding them.** On the primary they appear under *Waiting to join*; *Add to
   the show* makes one a display computer of this show. It then follows only
   this show network until it is released, and remembers it after a restart.
+  The primary tries every address the computer was heard on (wired, Wi-Fi, a
+  VPN), best first. If it still can't connect after about 10 seconds, the row
+  says so, with each address tried, the kind of network and why it failed
+  (*Can't reach WNO-2: tried 192.168.1.22:47820 (wired): connection refused.*);
+  for a Windows computer it adds that Windows Firewall may be blocking NewQ
+  there (its question can hide behind the full-screen card). It keeps trying.
+- **One NewQ per computer.** Opening NewQ while it is already open (another
+  copy, another download, NewQ Display) brings the open one to the front, hands
+  it the show you opened, if any (it asks about unsaved changes first, as
+  *File ▸ Open* does), and the second copy closes with a short message. Two
+  copies would share the computer's place in a show network. If two NewQs with
+  one identity are heard anyway (one copied from another computer's settings,
+  or an older NewQ left open), every page says so in red, and the other
+  computers keep to the one they are connected to.
 - **A row per computer** on the primary: online or not, its role (*Display* or
   *Backup*, chosen from the menu and written on that computer at once), its
   name (*Rename*), NewQ version (a different one is said plainly), wired or
@@ -1249,7 +1263,14 @@ never copy media by hand, and nothing waits for it.
   several times a second. The primary's page says how far each computer's clock
   may be off (*clock ±0.05 ms* on a good wired network; on one computer, as when
   trying it out, it is the noise of the computer itself). Until a computer's
-  clock has settled (a second or so) it starts nothing new, and says so.
+  clock has settled (a second or so) it starts nothing new, and says so; while
+  it isn't settled the page says *not locked* rather than a figure. A computer
+  asks the primary for the time at the port the primary's connection gives,
+  whatever else answers with its name. If the primary's clock moves back a long
+  way (it was restarted), a computer puts its clock back at once while nothing
+  plays on it; while something plays it carries on at its own pace and puts the
+  clock right at the next quiet moment, never running fast or slow for minutes
+  to catch up.
 - **Everything at the same moment.** Whatever you do on the primary that changes
   what plays (GO, firing, stopping or fading a cue, Stop All, Panic, pause, a
   timeline's run, pause, stop and seek, a slide show's step, a hotkey, OSC, MIDI,

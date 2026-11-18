@@ -201,6 +201,54 @@ pub fn best(candidates: &[IpAddr], own: &[Adapter]) -> Option<IpAddr> {
         .map(|(_, ip)| *ip)
 }
 
+/// The addresses a computer was heard from, best first (`rank`; equal ones
+/// in the order given), without repeats.
+pub fn by_rank(candidates: &[IpAddr], own: &[Adapter]) -> Vec<IpAddr> {
+    let mut v: Vec<IpAddr> = Vec::new();
+    for ip in candidates {
+        if !v.contains(ip) {
+            v.push(*ip);
+        }
+    }
+    v.sort_by_key(|ip| rank(*ip, own));
+    v
+}
+
+/// What way an address of another computer is reached, in words for the
+/// page: by the kind of our adapter on its subnet, else by its range.
+pub fn way_words(ip: IpAddr, own: &[Adapter]) -> &'static str {
+    let IpAddr::V4(v4) = ip else {
+        return "IPv6";
+    };
+    if v4.is_loopback() {
+        return "this computer";
+    }
+    if v4.is_link_local() {
+        return "link-local";
+    }
+    if let Some(a) = own
+        .iter()
+        .filter(|a| a.holds(v4))
+        .min_by_key(|a| rank_own(a))
+    {
+        return match a.kind {
+            AdapterKind::Wired => "wired",
+            AdapterKind::WiFi => "Wi-Fi",
+            AdapterKind::Vpn => "VPN",
+            AdapterKind::Other => "local network",
+        };
+    }
+    let o = v4.octets();
+    if o[0] == 100 && (64..128).contains(&o[1]) {
+        return "VPN such as Tailscale";
+    }
+    if v4.is_private() {
+        "another local network"
+    } else {
+        "internet"
+    }
+}
+
 /// Whether a connection to `now` should give way to `better`: it is a VPN's
 /// or another clearly worse way (a local path has appeared).
 pub fn worse(now: IpAddr, better: IpAddr, own: &[Adapter]) -> bool {
@@ -283,6 +331,31 @@ mod tests {
         assert!(worse(ip("10.8.0.9"), ip("192.168.1.206"), &own));
         assert!(!worse(ip("192.168.50.20"), ip("192.168.1.20"), &own));
         assert!(!worse(ip("192.168.1.20"), ip("10.8.0.9"), &own));
+    }
+
+    #[test]
+    fn every_address_heard_is_tried_best_first_and_named_by_its_way() {
+        let own = [
+            ad("utun3", "10.8.0.2", "255.255.255.0"),
+            ad("Wi-Fi", "192.168.50.7", "255.255.255.0"),
+            ad("Ethernet", "192.168.1.10", "255.255.255.0"),
+        ];
+        let heard = [
+            ip("100.101.1.1"),
+            ip("192.168.50.20"),
+            ip("192.168.1.20"),
+            ip("192.168.50.20"),
+        ];
+        assert_eq!(
+            by_rank(&heard, &own),
+            vec![ip("192.168.1.20"), ip("192.168.50.20"), ip("100.101.1.1")]
+        );
+        assert_eq!(way_words(ip("192.168.1.20"), &own), "wired");
+        assert_eq!(way_words(ip("192.168.50.20"), &own), "Wi-Fi");
+        assert_eq!(way_words(ip("10.8.0.9"), &own), "VPN");
+        assert_eq!(way_words(ip("100.101.1.1"), &own), "VPN such as Tailscale");
+        assert_eq!(way_words(ip("172.16.4.4"), &own), "another local network");
+        assert_eq!(way_words(ip("127.0.0.1"), &own), "this computer");
     }
 
     #[test]
