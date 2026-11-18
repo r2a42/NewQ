@@ -354,6 +354,12 @@ impl Measurer {
 
     /// Note a row if one is due.
     pub fn sample(&mut self, now: f64, s: Sample) {
+        // The shared clock can be put back (a big step taken at once): a row
+        // due further ahead than one interval is due now, not when the clock
+        // catches up again.
+        if self.next_row > now + ROW_EVERY {
+            self.next_row = now;
+        }
         if self.run.is_none() || now < self.next_row {
             return;
         }
@@ -385,6 +391,9 @@ impl Measurer {
         last: bool,
     ) -> Option<Report> {
         let (run, _) = self.run?;
+        if self.next_send > now + SEND_EVERY {
+            self.next_send = now;
+        }
         if !last && now < self.next_send {
             return None;
         }
@@ -805,6 +814,19 @@ mod tests {
         // The next report starts afresh.
         let r = m.report(2.0, Link::Wired, None, None, false).unwrap();
         assert!(r.monitors.is_empty());
+    }
+
+    #[test]
+    fn rows_and_reports_carry_on_after_the_clock_is_put_back() {
+        let mut m = Measurer::default();
+        m.begin(1, 100.0);
+        m.sample(100.0, Sample::default());
+        assert!(m.report(100.0, Link::Wired, None, None, false).is_some());
+        // The shared clock is put back 40 s at once: the next row and report
+        // are due at the new time, not 40 s later.
+        m.sample(60.5, Sample::default());
+        let r = m.report(60.5, Link::Wired, None, None, false);
+        assert_eq!(r.map(|r| r.rows.len()), Some(1));
     }
 
     fn at(mut s: PlayState, time: f64) -> PlayState {

@@ -196,6 +196,9 @@ impl LocalMeter {
         last: bool,
     ) -> Option<LocalReport> {
         let (run, _) = self.run?;
+        if self.next_send > now + SEND_EVERY {
+            self.next_send = now;
+        }
         if !last && now < self.next_send {
             return None;
         }
