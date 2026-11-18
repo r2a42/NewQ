@@ -139,3 +139,8 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
 19. **Lap 12: Earthrise 33.5 s late on WNO-2's display** (= the 34 s pause less its 0.5 s place):
    cause unknown. `timeline.csv` now says what a late clip waited for ("(waited: …)"); read it
    after the next real run.
+20. **0.24.3 kept the start-at-login entry 0.24.2 had made by itself** (owner, 2026-11-18: the tick
+   was on when the laptop was added). `autostart::fix_old_entry` renames a 0.24 entry instead of
+   removing it, so a choice nobody made survives. Proposed: remove entries older versions made,
+   once, with a one-line note on that computer ("Start at login was switched off; tick it here to
+   have it back"). Waiting on the owner's yes.
