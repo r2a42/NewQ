@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.3
+
 - **A picture on a timeline no longer flashes up a second copy on a display computer** when the
   timeline goes back round a loop (or jumps) and its clips take a while to be ready. While the
   timeline got them ready, the primary told the other computers that the picture it was keeping
