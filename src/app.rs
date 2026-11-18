@@ -239,6 +239,8 @@ pub struct App {
     /// For testing the recovery: when to destroy the graphics device
     /// (`NEWQ_LOSE_GPU_AFTER`, in seconds).
     lose_gpu_at: Option<Instant>,
+    /// When a second copy's requests (`node::take_handoffs`) were last looked for.
+    handoff_looked: Option<Instant>,
     control: Option<ControlWindow>,
     popouts: Vec<PopoutWindow>,
     /// Pop-out render threads that are shutting down.
@@ -462,6 +464,7 @@ impl App {
             sleep_watch: crate::awake::SleepWatch::new(),
             battery_logged: None,
             remote_seen: (RemoteSettings::default(), Instant::now()),
+            handoff_looked: None,
             show,
             engine,
             ui,
@@ -2965,6 +2968,43 @@ impl App {
         }
     }
 
+    /// A second copy of NewQ was started (it left a request in the node
+    /// folder and closed, `main.rs`): come to the front, and open the show it
+    /// was given (asking first about unsaved changes, as File ▸ Open does).
+    /// Looked for twice a second.
+    fn take_handoffs(&mut self) {
+        let now = Instant::now();
+        if self
+            .handoff_looked
+            .is_some_and(|t| now.saturating_duration_since(t) < Duration::from_millis(500))
+        {
+            return;
+        }
+        self.handoff_looked = Some(now);
+        for h in crate::net::node::take_handoffs(&crate::net::node::node_dir()) {
+            log::info!(
+                "NewQ was started again while open: this one comes to the front{}",
+                h.show
+                    .as_ref()
+                    .map(|p| format!(" and opens {}", p.display()))
+                    .unwrap_or_default()
+            );
+            if self.is_display_computer() {
+                // Its control window stays hidden: its screens come forward.
+                if let Some(w) = self.screens.values().next() {
+                    w.window.focus_window();
+                }
+            } else if let Some(ctl) = &mut self.control {
+                ctl.window.set_minimized(false);
+                ctl.window.focus_window();
+                ctl.next_repaint = Some(now);
+            }
+            if let Some(p) = h.show {
+                self.ui.handed_show = Some(p);
+            }
+        }
+    }
+
     /// Start NewQ again (asked by the primary): a new copy with the same
     /// arguments, then this one ends as a quit does.
     fn restart_self(&mut self, event_loop: &ActiveEventLoop) {
@@ -2981,7 +3021,12 @@ impl App {
         if play::restart_adds_display(self.play.display, &args) {
             args.push("--display".into());
         }
-        match std::process::Command::new(exe).args(args).spawn() {
+        match std::process::Command::new(exe)
+            .args(args)
+            // It waits for this one to let go of the node folder (main.rs).
+            .env(crate::net::node::RESTARTING_ENV, "1")
+            .spawn()
+        {
             Ok(_) => {
                 log::info!("starting NewQ again, as the primary asked");
                 event_loop.exit();
@@ -3163,6 +3208,7 @@ impl App {
         }
         // No call of the engine's own is under way between passes.
         self.engine.net_settle();
+        self.take_handoffs();
         let now = Instant::now();
         if let Some(s) = &self.splash
             && crate::splash::due(

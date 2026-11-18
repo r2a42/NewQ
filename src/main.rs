@@ -83,6 +83,59 @@ fn startup_options(
     (show, main_only)
 }
 
+/// Hold the node folder's lock (`net::node::lock_node_dir`). Another NewQ
+/// holding it: say so and end (the exit code). A lock that can't be tried is
+/// no reason not to start.
+fn hold_node_folder() -> Result<Option<net::node::NodeLock>, i32> {
+    let dir = net::node::node_dir();
+    // Started again by its primary: the old copy is still closing.
+    let wait = if std::env::var_os(net::node::RESTARTING_ENV).is_some() {
+        std::time::Duration::from_secs(20)
+    } else {
+        std::time::Duration::ZERO
+    };
+    match net::node::lock_node_dir(&dir, wait) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(net::node::LockRefused::Held) => {
+            // Hand the show (if one was given) to the open NewQ, which looks
+            // for requests about twice a second and comes to the front.
+            let (show, _) = startup_options(std::env::args_os().skip(1), false);
+            let show = show.map(|p| std::path::absolute(&p).unwrap_or(p));
+            let left = net::node::hand_over(&dir, &net::node::Handoff { show: show.clone() });
+            let began = std::time::Instant::now();
+            let taken = match &left {
+                Ok(path) => loop {
+                    if !path.exists() {
+                        break true;
+                    }
+                    if began.elapsed() > std::time::Duration::from_secs(3) {
+                        // Not taken: it isn't left to surprise a later NewQ.
+                        let _ = std::fs::remove_file(path);
+                        break false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                },
+                Err(_) => false,
+            };
+            let words = net::node::already_open_words(show.as_deref(), taken);
+            eprintln!("{} ({})", words.replace("\n\n", " "), dir.display());
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Info)
+                .set_title("NewQ is already open")
+                .set_description(words)
+                .show();
+            Err(3)
+        }
+        Err(net::node::LockRefused::Untried(e)) => {
+            eprintln!(
+                "NewQ couldn't lock {} ({e}); starting anyway",
+                dir.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // A copy of this program started to talk to NDI's library for the show
     // (see ndi.rs): it does that and nothing else.
@@ -108,6 +161,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(code) = testmode::selftest::run_if_asked(&args) {
         std::process::exit(code);
     }
+    // One NewQ per node folder (this computer's place in a show network):
+    // taken before the log is begun, so a second copy doesn't put the open
+    // one's log aside, and before `node.json` is written.
+    let node_lock = match hold_node_folder() {
+        Ok(lock) => lock,
+        Err(code) => std::process::exit(code),
+    };
     // The log goes to a file in the log folder (and to the console where
     // there is one), at the level of `NEWQ_LOG` or, once the settings of
     // this computer are read, the one chosen there.
@@ -127,6 +187,11 @@ fn main() -> anyhow::Result<()> {
         },
         logging::level().name()
     );
+    if node_lock.is_none() {
+        log::warn!(
+            "the node folder couldn't be locked: a second NewQ on this computer wouldn't be stopped"
+        );
+    }
     // `--join`, `--primary` and `--display`: this computer's place in a show
     // network. `--display` (what NewQ Display starts) makes it a display
     // computer from the first moment: no splash, no control window, no question.
@@ -152,6 +217,8 @@ fn main() -> anyhow::Result<()> {
     let ran = event_loop.run_app(&mut app);
     log::info!("NewQ is closing");
     logging::flush();
+    // Held until here: a NewQ started again may take it now.
+    drop(node_lock);
     ran?;
     if let Some(why) = app.start_failed() {
         anyhow::bail!("{why}");
