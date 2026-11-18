@@ -289,9 +289,14 @@ struct LoadMeter {
 
 impl LoadMeter {
     /// One buffer's mixing took `used` of its time (1 = all of it); the load in
-    /// thousandths.
+    /// thousandths. A buffer counts as all of its time at most, so a call held
+    /// up for half a second still adds only one buffer's worth.
     fn note(&mut self, used: f32) -> u32 {
-        let used = if used.is_finite() { used.max(0.0) } else { 0.0 };
+        let used = if used.is_finite() {
+            used.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         self.steady += (used - self.steady) / STEADY_BUFFERS;
         self.worst = self.steady.max(self.worst * 0.99);
         (self.worst * 1000.0) as u32
@@ -1810,14 +1815,16 @@ where
             }));
         },
         move |e| {
-            let n = told.errors.fetch_add(1, Ordering::Relaxed) + 1;
-            STREAM_ERRORS.fetch_add(1, Ordering::Relaxed);
             let (work, gap) = told.recent_worst();
             let frames = told.frames.load(Ordering::Relaxed);
             let period = f64::from(frames) * 1000.0 / f64::from(sample_rate.max(1));
+            // The late count first: a look between the two then finds a late one
+            // waiting for its dropout, never a dropout counted without it.
             if frames > 0 && cause(work, gap, period) == Some(Cause::SystemLate) {
                 STREAM_ERRORS_LATE.fetch_add(1, Ordering::Relaxed);
             }
+            let n = told.errors.fetch_add(1, Ordering::Relaxed) + 1;
+            STREAM_ERRORS.fetch_add(1, Ordering::Relaxed);
             log::error!(
                 "{}",
                 error_text(&name, &e.to_string(), n, frames, sample_rate, work, gap)
@@ -2163,8 +2170,14 @@ mod tests {
         }
         let held = m.note(1.4);
         assert!(held < 200, "{held}");
-        for _ in 0..3 {
-            m.note(0.01);
+        // Nor by one held up for half a second (47 buffers' time), nor by the
+        // Mac's 32 ms.
+        for used in [47.0, 3.0] {
+            for _ in 0..300 {
+                m.note(0.01);
+            }
+            let held = m.note(used);
+            assert!(held < 200, "{used}: {held}");
         }
         // Mixing that really takes 90% of every buffer reads as that.
         let mut m = LoadMeter::default();
