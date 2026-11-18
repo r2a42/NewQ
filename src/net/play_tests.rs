@@ -1123,7 +1123,7 @@ fn late_and_bunched_heartbeats_change_nothing_on_the_screen() {
 
 // ---- Second test, item 8: the follower's clock put back a long way ----
 
-/// What the app does when its shared clock was put back (`back_steps`): the
+/// What the app does when its shared clock was put back (`SharedNow::jumps`): the
 /// engine's shared times move with it (`net_shift_shared`), and a cue and a
 /// timeline playing carry on from where they are: no jump, no standing still.
 #[test]
@@ -1173,4 +1173,57 @@ fn a_clock_put_back_moves_nothing_that_plays() {
         (cue, pos) = (c, p);
     }
     assert_eq!(e.net_shared_time(), Some(at));
+}
+
+/// A follower whose clock was far ahead (it kept it with a stray copy of the
+/// primary) and is put back: with the engine's times moved with it, a GO the
+/// primary times by its clock starts the cue here at its start, as on the
+/// primary, not 43 minutes in.
+#[test]
+fn a_command_after_the_clock_was_put_back_starts_near_zero() {
+    let ts = trial_show();
+    let show = &ts.show;
+    let mut p = Engine::for_tests();
+    p.net_set_mode(NetMode::Primary);
+    let mut f = Engine::for_tests();
+    f.net_set_mode(NetMode::Follower);
+    let mut fo = Follower::default();
+    let mut leader = Leader::new(1);
+    let dt = 0.02;
+    let mut at = 5000.0;
+    p.tick_shared(show, at);
+    for _ in 0..50 {
+        at += dt;
+        fo.step(&mut f, show, Some(at + 2600.0), dt, Some(1));
+        p.tick_shared(show, at);
+    }
+    // The clock is put back to the primary's: the app moves the engine's times.
+    at += dt;
+    let was = f.net_shared_time().unwrap();
+    f.net_shift_shared(at - (was + dt));
+    fo.step(&mut f, show, Some(at), dt, Some(1));
+    p.tick_shared(show, at);
+    // GO on the primary.
+    p.fire(show, ts.cue);
+    for o in leader.issue(p.net_take(), at, 0.05, &[NodeId(1)]) {
+        if let Out::Command(None, t) = o {
+            fo.receive(t, &mut f, show);
+        }
+    }
+    for _ in 0..25 {
+        at += dt;
+        leader.step(&mut p, show, at);
+        fo.step(&mut f, show, Some(at), dt, Some(1));
+    }
+    let elapsed = |e: &Engine| {
+        e.active
+            .iter()
+            .find(|a| a.cue_id == ts.cue)
+            .map(|a| a.elapsed)
+    };
+    let (pe, fe) = (elapsed(&p).unwrap(), elapsed(&f).expect("started here"));
+    assert!(
+        fe < 1.0 && (fe - pe).abs() < 0.05,
+        "primary {pe}, here {fe}"
+    );
 }

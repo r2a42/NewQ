@@ -203,7 +203,7 @@ impl Engine {
     }
 
     /// The shared clock was put back (or on) by `by` seconds (a follower's
-    /// clock that was far off, `SharedClock::back_steps`): every shared time
+    /// clock that was far off, `SharedNow::jumps`): every shared time
     /// the engine holds moves with it, so what plays carries on exactly where
     /// it is, neither jumping nor standing still.
     pub fn net_shift_shared(&mut self, by: f64) {
