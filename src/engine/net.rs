@@ -202,6 +202,28 @@ impl Engine {
         self.sync.map(|s| s.now)
     }
 
+    /// The shared clock was put back (or on) by `by` seconds (a follower's
+    /// clock that was far off, `SharedClock::back_steps`): every shared time
+    /// the engine holds moves with it, so what plays carries on exactly where
+    /// it is, neither jumping nor standing still.
+    pub fn net_shift_shared(&mut self, by: f64) {
+        if !by.is_finite() {
+            return;
+        }
+        if let Some(s) = &mut self.sync {
+            s.now += by;
+        }
+        for a in &mut self.active {
+            if let Some(x) = &mut a.anchor {
+                *x += by;
+            }
+            if let Some(x) = &mut a.sound_zero {
+                *x += by;
+            }
+        }
+        self.runs.net_shift(by);
+    }
+
     /// Back to ticking by `dt` alone: anchors are let go, so times are sums of
     /// ticks again from where they are.
     pub fn net_leave_shared(&mut self) {

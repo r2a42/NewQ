@@ -39,7 +39,7 @@ release page, and a release is refused if it has none.
 - The test's report says each computer's problem once, and its screens as "Stage-PC screen 1".
 - **Only one NewQ opens on a computer.** Opening NewQ again (another copy, NewQ Display, NewQ given
   a show file) brings the NewQ that is open to the front and opens that show in it,
-  asking first about unsaved changes. In the second test a forgotten copy left open on the
+  asking first about unsaved changes (not while something plays). In the second test a forgotten copy left open on the
   primary answered in its name, and a display computer kept its clock with one and then the
   other: that was most of the "out of step" seen.
 - **Two NewQs with one identity are said plainly.** If a computer is heard from two NewQs at
@@ -52,7 +52,8 @@ release page, and a release is refused if it has none.
 - **The clock figure is no longer nonsense.** A computer whose clock isn't settled reports *not
   locked* instead of a number (the second test showed 2,605,312 ms). A clock that is a long
   way ahead of the primary's is put right at once while nothing plays, and never chased slowly
-  for minutes while a cue runs.
+  for minutes while a cue runs (it is put right within half a minute, and what plays carries
+  on from where it is).
 
 ## 0.24.2
 

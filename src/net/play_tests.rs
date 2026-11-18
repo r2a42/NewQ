@@ -1120,3 +1120,57 @@ fn late_and_bunched_heartbeats_change_nothing_on_the_screen() {
     let f = w.nodes[1].follower.as_ref().unwrap();
     assert_eq!(f.corrections, 0, "{:?}", f.corrected);
 }
+
+// ---- Second test, item 8: the follower's clock put back a long way ----
+
+/// What the app does when its shared clock was put back (`back_steps`): the
+/// engine's shared times move with it (`net_shift_shared`), and a cue and a
+/// timeline playing carry on from where they are: no jump, no standing still.
+#[test]
+fn a_clock_put_back_moves_nothing_that_plays() {
+    let ts = trial_show();
+    let show = &ts.show;
+    let mut e = Engine::for_tests();
+    let dt = 0.02;
+    let mut at = 5000.0;
+    e.tick_shared(show, at);
+    e.fire(show, ts.cue);
+    e.fire(show, ts.group);
+    let read = |e: &Engine| {
+        let cue = e
+            .active
+            .iter()
+            .find(|a| a.cue_id == ts.cue)
+            .map(|a| a.elapsed)
+            .expect("the cue plays");
+        let (state, pos) = e
+            .timeline_clock(TimelineKey::Group(ts.group))
+            .expect("the timeline runs");
+        assert_eq!(state, RunState::Running);
+        (cue, pos)
+    };
+    for _ in 0..100 {
+        at += dt;
+        e.tick_shared(show, at);
+    }
+    let (mut cue, mut pos) = read(&e);
+    assert!(cue > 1.5 && pos > 1.5, "{cue} {pos}");
+    // The clock is put back 43 minutes (as the app does, by the step less
+    // the tick to come).
+    let was = e.net_shared_time().unwrap();
+    at -= 2600.0;
+    e.net_shift_shared(at + dt - (was + dt));
+    for _ in 0..100 {
+        at += dt;
+        e.tick_shared(show, at);
+        let (c, p) = read(&e);
+        assert!(((c - cue) - dt).abs() < 1e-6, "the cue moved {}", c - cue);
+        assert!(
+            ((p - pos) - dt).abs() < 1e-6,
+            "the timeline moved {}",
+            p - pos
+        );
+        (cue, pos) = (c, p);
+    }
+    assert_eq!(e.net_shared_time(), Some(at));
+}

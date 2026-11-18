@@ -12981,6 +12981,38 @@ mod tests {
         }
     }
 
+    /// A show handed over by a second copy of NewQ (`App::take_handoffs`) is
+    /// opened on the next frame, as File ▸ Open does.
+    #[test]
+    fn a_show_handed_over_by_a_second_newq_is_opened() {
+        let (mut show, mut e, mut st) = running();
+        let path = std::env::temp_dir().join(format!(
+            "newq-handed-{}-{}.newq",
+            std::process::id(),
+            crate::net::node::random_u64()
+        ));
+        let mut other = Show::default();
+        let mut c = other.make_cue(CueType::Wait, None, 0);
+        c.name = "Handed over".into();
+        other.cues.push(c);
+        other.save(&path).unwrap();
+        // Unchanged since it was loaded: no question.
+        st.saved_json = serde_json::to_string(&show).ok();
+        st.handed_show = Some(path.clone());
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 800.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(input, |ui| draw(ui, &mut show, &mut e, &mut st));
+        out.textures_delta.clear();
+        assert!(st.handed_show.is_none());
+        assert_eq!(st.show_path.as_deref(), Some(path.as_path()));
+        assert!(show.cues.iter().any(|c| c.name == "Handed over"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn the_main_window_and_every_popped_out_pane_draw() {
         let (mut show, mut e, mut st) = running();

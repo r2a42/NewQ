@@ -579,6 +579,26 @@ mod tests {
     }
 
     #[test]
+    fn an_older_newqs_hello_and_beacon_still_read_with_no_port_or_system() {
+        let mut v = serde_json::to_value(Msg::Hello(hello())).unwrap();
+        assert!(v.as_object_mut().unwrap().remove("tcp_port").is_some());
+        match serde_json::from_value::<Msg>(v).unwrap() {
+            Msg::Hello(h) => assert_eq!(h.tcp_port, 0),
+            m => panic!("{m:?}"),
+        }
+        let mut b = serde_json::to_value(Beacon {
+            id: NodeId(3),
+            system: "macos".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        b.as_object_mut().unwrap().remove("system");
+        let mut data = MAGIC.to_vec();
+        data.extend(serde_json::to_vec(&b).unwrap());
+        assert_eq!(decode_beacon(&data).unwrap().system, "");
+    }
+
+    #[test]
     fn beacons_go_and_come_back_and_strangers_are_ignored() {
         let b = Beacon {
             proto: PROTOCOL,

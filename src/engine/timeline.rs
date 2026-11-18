@@ -345,6 +345,18 @@ impl Runs {
         }
     }
 
+    /// The shared clock moved by `by` (`Engine::net_shift_shared`).
+    pub(super) fn net_shift(&mut self, by: f64) {
+        for r in self.map.values_mut() {
+            if let Some(a) = &mut r.anchor {
+                *a += by;
+            }
+        }
+        if let Some(s) = &mut self.stepping_at {
+            *s += by;
+        }
+    }
+
     /// No longer ticking by a shared clock.
     pub(super) fn net_unanchor(&mut self) {
         for r in self.map.values_mut() {

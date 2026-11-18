@@ -1154,7 +1154,9 @@ Open it on a computer with projectors or screens and that is all you do there:
 - **One NewQ per computer.** Opening NewQ while it is already open (another
   copy, another download, NewQ Display) brings the open one to the front, hands
   it the show you opened, if any (it asks about unsaved changes first, as
-  *File ▸ Open* does), and the second copy closes with a short message. Two
+  *File ▸ Open* does; never while something plays, a test runs or the computer
+  follows a primary: the status bar says so), and the second copy closes with a
+  short message. Two
   copies would share the computer's place in a show network. If two NewQs with
   one identity are heard anyway (one copied from another computer's settings,
   or an older NewQ left open), every page says so in red, and the other
@@ -1269,8 +1271,9 @@ never copy media by hand, and nothing waits for it.
   whatever else answers with its name. If the primary's clock moves back a long
   way (it was restarted), a computer puts its clock back at once while nothing
   plays on it; while something plays it carries on at its own pace and puts the
-  clock right at the next quiet moment, never running fast or slow for minutes
-  to catch up.
+  clock right at the next quiet moment (at most half a minute later; what plays
+  carries on from where it is), never running fast or slow for minutes to catch
+  up.
 - **Everything at the same moment.** Whatever you do on the primary that changes
   what plays (GO, firing, stopping or fading a cue, Stop All, Panic, pause, a
   timeline's run, pause, stop and seek, a slide show's step, a hotkey, OSC, MIDI,
