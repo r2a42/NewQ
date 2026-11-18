@@ -254,9 +254,17 @@ impl TimelineRun {
         }
         for a in &n.arrivals[self.written.1..] {
             let value = a.late.map_or("never".to_string(), |l| format!("{l:.4}"));
+            // A late clip says what it waited for (`ClipUp::waiting`).
+            let waited = match (a.late, a.waited) {
+                (Some(l), Some(w)) if l > super::analysis::LATE_PROBLEM => {
+                    format!(" (waited: {w})")
+                }
+                (None, Some(w)) => format!(" (waited: {w})"),
+                _ => String::new(),
+            };
             let _ = writeln!(
                 f,
-                "{:.3},clip_late,{lap},{value},\"{}\"",
+                "{:.3},clip_late,{lap},{value},\"{}{waited}\"",
                 a.at,
                 a.name.replace('"', "'")
             );

@@ -598,6 +598,8 @@ pub struct Arrival {
     /// Seconds on the clock after its place that its first frame or sound came;
     /// None: it never came up.
     pub late: Option<f64>,
+    /// What it was first seen waiting for (`ClipUp::waiting`), if it waited.
+    pub waited: Option<&'static str>,
 }
 
 /// A time a timeline stood still getting its clips ready (`RunState::Cueing`).
@@ -810,6 +812,7 @@ mod tests {
             at: 20.0,
             name: name.into(),
             late,
+            waited: None,
         }
     }
 
