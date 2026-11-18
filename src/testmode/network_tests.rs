@@ -666,6 +666,8 @@ fn the_measurements_of_two_followers_reach_the_primary_and_the_show_comes_back_e
         "{report}"
     );
     assert!(report.contains(" 0 late"), "{report}");
+    // Not chosen: the network load says so, for comparing with a run that had it.
+    assert!(report.contains("\nNetwork load: off"), "{report}");
     // Each computer's own log, named in the report.
     let log = std::fs::read_to_string(d.folder.join("computers/Left/newq.log")).unwrap();
     assert!(
