@@ -87,6 +87,12 @@ const MAX_JUMPS: u32 = 8;
 /// its track abuts it: the one before is kept up until it comes in.
 const JOIN_GAP: f64 = 0.05;
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: no run's clips are ever all ready, so each cueing takes `CUE_LIMIT`.
+    static NEVER_CUED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Where a seek to the start of a timeline goes: a seek to exactly 0 is "from
 /// the top" and parks with nothing up (`timeline_seek`), so the editor's ruler
 /// and a remote's jump ask for a hair past it, which shows the first frame
@@ -1001,7 +1007,8 @@ impl Engine {
                 )
             {
                 // No longer a clip of a run: it plays on by itself meanwhile,
-                // replacing nothing.
+                // replacing nothing (but it is still the timeline's).
+                a.outgoing_of = a.run;
                 a.run = None;
                 a.entry = None;
                 a.follow(None);
@@ -1052,6 +1059,7 @@ impl Engine {
                     r.outgoing_since.get_or_insert_with(Instant::now);
                 }
                 if let Some(a) = self.active.iter_mut().find(|a| a.instance == i) {
+                    a.outgoing_of = a.run.or(a.outgoing_of);
                     a.run = None;
                     a.entry = None;
                     a.follow(None);
@@ -1259,6 +1267,10 @@ impl Engine {
     /// Whether every clip of the run `instance` that has been started has its
     /// first frame (or sound): none waiting for its file, none still starting.
     fn run_cued(&self, instance: u64) -> bool {
+        #[cfg(test)]
+        if NEVER_CUED.with(|n| n.get()) {
+            return false;
+        }
         let i = Some(instance);
         !self
             .pending
