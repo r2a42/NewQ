@@ -194,3 +194,9 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    itself is a display reconfiguration plus a DXGI device suspension; whether the transfer played
    a part is unknown. Idea (not asked for): a Test Mode option that loads the network on purpose
    (the media server pushing a large file between computers during the run) so this is repeatable.
+   **Owner (2026-11-18): yes**, but no big file download: stream arbitrary generated data between the
+   computers over the LAN during the run (a load generator, not real media). Queued after the three
+   running agents.
+   Owner on the Mac's sound dropouts (item 24): don't try to fix them unless it's easy; nobody was
+   listening, so it's unknown whether they were audible. The running agent only corrects the report's
+   wording (system called late vs NewQ's mixing).
