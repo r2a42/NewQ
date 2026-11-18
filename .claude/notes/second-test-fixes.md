@@ -199,17 +199,24 @@ unless it reproduces).
    frames at 60 Hz = 25 ms), so each is corrected once. Look for a fixed offset (video lag, first
    frame, present latency) on one side.
    **Cause found** (not a fixed offset: `began_apart_ms` in cue-list-network.csv climbs at each new
-   cue, 1.6, 2.3, 5.4, 12, 16 … 26 ms, then drops to 0 after each correction). A cue the engine
-   starts itself (auto-follow, a "play in order" group's next child, what follows a group or a
-   timeline group) was anchored at the tick that noticed the cue before it had ended, not at the
-   shared time it ended: a film or a sound is seen to end a frame or two after its length (its
-   decoder's or device's end), a group's child a tick later still. The Mac ticked at 60 Hz, the
-   laptop at 161, so the laptop's chain ran ahead by a few ms per cue. Reproduced: simulated
-   60/165 Hz chain of waits gave "cue 12 (Wait) moved -27 ms"; real media at 60/165 Hz drifted
-   10, 25, 30, 42 ms over four links. Fixed: `engine.rs::ended_at` (the cue's anchor + length, or
-   its clock's end, up to `ENDED_LATE_MAX` back), `Engine::net_ended` for a group's next child and
-   a group's end, `net_mark`/`net_backdate` (shared with `net_apply`'s late commands). A Wait (or
-   other non-file) clip of a timeline group still runs by its own ticks, not its clock.
+   cue, 1.6, 2.3, 5.4, 12, 16 ... 26 ms, then drops to 0 after each correction; single links of 24-32
+   ms where a timeline group ends and the next cue follows). A cue the engine starts itself
+   (auto-follow, a "play in order" group's next child, what follows a group or a timeline group)
+   was anchored at the tick that noticed the cue before it had ended, not at the shared time it
+   ended: a film or a sound is seen to end a frame or two after its length (its decoder's or
+   device's end), a group a tick later still. Each computer ticks at its own rate (the laptop's
+   screens were 165 and 60 Hz, the Mac's 120 and 100 Hz; neither main loop's rate is in the data),
+   so whichever notices ends sooner runs ahead a few ms per cue: consistent with WNO-2 ahead.
+   Reproduced before the fix: simulated chain of waits, 60/165 Hz: "cue 12 (Wait) moved -27 ms"
+   (120/60 Hz: "+29 ms", the sign flips); real media at 60/165 Hz (film, sound, timeline group of a
+   film and a sound, film, sound with a pre-wait, wait): -1.4, +2.4, -22.7 (the link out of the
+   timeline group: 25 ms in one link), -35.0, -52.9 ms. After: 0.0 ms on every link. Fixed:
+   `engine.rs::ended_at` (the cue's anchor + length, or its clock's end), `Engine::net_ended` for a
+   group's next child and a group's end, `chain_backdate` (only up to `ENDED_LATE_MAX`, 0.25 s, back;
+   further is a stall and starts at the tick as before), `net_mark`/`net_backdate` (shared with
+   `net_apply`'s late commands). Still tick-quantised: a dip's reveal (`midpoints`), a cue waiting
+   for its file to be read, and a Wait (or other non-file) clip of a timeline group, which runs by
+   its own ticks rather than its clock.
 24. **The Mac's sound dropouts are the system calling late, not NewQ's mixing**: 124 stream errors
    in newq.log, starting 14:51 before the test with nothing playing; "NewQ's mixing took at most
    0.0 ms … the longest time between two calls for sound was 32 ms". The report's "Mixing the sound
