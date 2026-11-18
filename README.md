@@ -412,6 +412,9 @@ stays on the computer until you send it yourself.
   display can't cover the monitor NewQ's main window is on; it stays in the
   main window and the panel says so. The main window has a live preview of
   any display or sub display; with more than one, a menu above it picks which.
+  The preview keeps the display's own shape at any size of its pane (a sub display
+  that shows part of another's picture: that part's shape), as large as fits, with
+  black bars beside it or above and below.
   *Test pattern* shows a picture for lining a display up, with a dropdown of
   twelve beside it (choosing one turns the pattern on; it works the same on
   sub displays, and the choice is saved with the show). *Colour bars and

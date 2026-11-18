@@ -460,6 +460,7 @@ fn the_workspace_is_comfortable_at_1280_by_760_in_both_interfaces() {
             mesh: None,
             slice: [0.0, 0.0, 1.0, 1.0],
             canvas: (1920, 1080),
+            picture: (1920, 1080),
         });
         // Seven clips, four files: more than the bin shows at once.
         for (i, name) in ["D", "E", "F"].into_iter().enumerate() {
@@ -499,6 +500,13 @@ fn the_workspace_is_comfortable_at_1280_by_760_in_both_interfaces() {
         assert!(
             monitor.width() >= 280.0 && monitor.height() >= 150.0,
             "{what}: {monitor:?}"
+        );
+        // The display's own shape inside it, never stretched to the panel's.
+        let picture: Rect = noted(&m, "ws_picture").expect("the picture is drawn");
+        assert!(
+            (picture.width() / picture.height() - 16.0 / 9.0).abs() < 0.01
+                && monitor.expand(0.5).contains_rect(picture),
+            "{what}: {picture:?} in {monitor:?}"
         );
         // The clip's timeline rows are at the top of the inspector, in sight.
         let rows: Rect = noted(&m, "ws_rows").unwrap();

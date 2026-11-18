@@ -2456,10 +2456,7 @@ impl App {
             // The preview is the shape of what the display shows: the part of
             // the picture, not all of it.
             let preview_canvas = match part {
-                Some(p) => (
-                    ((canvas.0 as f32 * p.area[2]).round() as u32).max(1),
-                    ((canvas.1 as f32 * p.area[3]).round() as u32).max(1),
-                ),
+                Some(p) => ui::part_shape(canvas, p.area),
                 None => canvas,
             };
             self.ui.previews.push(PreviewOutput {
@@ -2470,6 +2467,7 @@ impl App {
                 mesh,
                 slice,
                 canvas: preview_canvas,
+                picture: canvas,
             });
         }
 

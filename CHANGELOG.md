@@ -16,6 +16,12 @@ release page, and a release is refused if it has none.
   row on the Show network page and the test report say "lost its graphics card and is drawing
   in software: pictures will be very slow". An output window that meets a display change in the
   middle of a frame now skips that frame instead of stopping and starting again.
+- **The Preview pane no longer squeezes the picture.** A narrow pane at the edge of the
+  window, or a short one, drew the display's picture out of shape (a round Earth looked like
+  an egg), and changing the pane's size changed the squeeze. The preview now always keeps the
+  display's own shape, as large as the pane allows, with black bars beside it or above and
+  below; so do the timeline workspace's monitor and a sub display's area editor. A display
+  showing part of another's picture is previewed as that display shows it.
 
 ## 0.24.3
 
