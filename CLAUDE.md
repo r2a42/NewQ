@@ -591,6 +591,10 @@ The README describes the features; this file is about working on the code.
   staples and zips. Without the secrets it ad-hoc signs as before. A step's own `env` can't be used in
   its `if`, hence the `signing` step's outputs. Works: used for every release since 0.16.0 (the
   notarisation wait is about 30 minutes).
+  When Apple's servers are down, dispatch `release.yml` itself with `tag` and `mac_unsigned: true`:
+  the Mac download is ad-hoc signed and `scripts/release_notes.sh` (used by `prepare` and `publish`)
+  puts the matching macOS paragraph on the page (`<!--mac-signed-->`/`<!--mac-adhoc-->` blocks in
+  `.github/release_notes.md`). 0.24.2 was released that way.
 - Windows signing: the `Sign newq.exe` step in `release.yml` runs only with the secrets
   `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD`. Untested, and a placeholder: new certificates
   are hardware-backed and can't be exported as a .pfx (SignPath or a cloud service is the way).

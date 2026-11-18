@@ -74,10 +74,10 @@ jobs:
         if: env.TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          MAC_UNSIGNED: ${{ inputs.mac_unsigned }}
         run: |
           # What changed (this version's section of CHANGELOG.md), then the downloads.
-          { echo "## What's new"; echo; scripts/changelog_section.sh "$TAG"; echo; \
-            sed "s/{{TAG}}/$TAG/g" .github/release_notes.md; } > notes.md
+          scripts/release_notes.sh "$TAG" "$MAC_UNSIGNED" > notes.md
           # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
@@ -289,6 +289,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          MAC_UNSIGNED: ${{ inputs.mac_unsigned }}
         run: |
           mkdir dist
           gh release download "$TAG" --dir dist --clobber
@@ -297,8 +298,7 @@ jobs:
           (cd dist && sha256sum * > SHA256SUMS.txt)
           gh release upload "$TAG" dist/SHA256SUMS.txt --clobber
           # What changed (this version's section of CHANGELOG.md), then the downloads.
-          { echo "## What's new"; echo; scripts/changelog_section.sh "$TAG"; echo; \
-            sed "s/{{TAG}}/$TAG/g" .github/release_notes.md; } > notes.md
+          scripts/release_notes.sh "$TAG" "$MAC_UNSIGNED" > notes.md
           # A tag with a suffix (v0.2.0-rc1) is a pre-release, not the latest release.
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
