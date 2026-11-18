@@ -128,3 +128,14 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    no zip of their own, by design.
 16. Report wording: "WNO-2 1 / WNO-2 2" in the displays line; the per-computer lines repeat the
    problems twice; the clock-error "use a wire" advice is wrong when the link is wired.
+
+## Found while fixing (2026-11-18)
+
+18. **A timeline clip loses its run tag while a loop's cueing runs out of time** (lap 3, 367.7 s:
+   cueing took the full 2.0 s `CUE_LIMIT`). The primary's `net_state` then listed "Earthrise"
+   as a cue not on a timeline (`a.run == None`), and WNO-2's `net_correct` started a copy
+   "69.77 s in" and stopped it 2 s later. Fix in the engine (keep the run tag through a cueing
+   that runs out of time), and a follower never starts a timeline clip as a free cue.
+19. **Lap 12: Earthrise 33.5 s late on WNO-2's display** (= the 34 s pause less its 0.5 s place):
+   cause unknown. `timeline.csv` now says what a late clip waited for ("(waited: …)"); read it
+   after the next real run.
