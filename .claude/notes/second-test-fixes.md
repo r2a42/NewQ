@@ -29,6 +29,19 @@ computers are in; then read the logs, add what they show, and fix in order of ha
    Screen 1", "Screen 2"), even when the computer has only one, matching the numbering the
    primary's Test mode *Show on* list and Displays menu use for that computer's monitors.
    (`app/play.rs` draws `card`/`card_text` per monitor; Identify already flashes the name.)
+6a. **Plain `newq.exe` opens as a display computer once the computer has been one** (owner,
+   2026-11-18). `app/play.rs::display_computer`: `Role::Display => started_as_display ||
+   (me.on && me.adopted())`, so the role kept in `node.json` decides, not how NewQ was started.
+   Owner's rule: only the launcher (NewQ Display, `--display`) starts display mode; NewQ itself
+   opens the normal window (and should then offer to leave the show network or keep following
+   with the control window shown). Mind start at login, which runs `newq --display` (fine) and
+   the D8 tests that assume an adopted Display hides the control window.
+6b. **Start at login turns itself on, unasked.** `play_role_changed`: being adopted as a Display
+   calls `set_start_at_login(true)`, which writes the value `NewQ` under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (`autostart.rs`; a LaunchAgent on a Mac,
+   `~/.config/autostart` on Linux), not a Startup-folder shortcut, so the owner didn't find it.
+   Make it opt-in (the Show network page's *Starts at login* and the primary's toggle), say in
+   NewQ where it is and how to turn it off, and name the entry "NewQ Display".
 6. Optional: rebuild 0.24.2's Mac download signed and notarised once Apple's servers are back.
 
 ## Known before this test (still open)
