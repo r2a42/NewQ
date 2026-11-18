@@ -194,6 +194,9 @@ pub struct ClipUp {
     pub due: f64,
     /// It has its first frame (or its sound has begun).
     pub up: bool,
+    /// While not up, what it waits for, in words (Test Mode's timeline.csv
+    /// says it for a late clip).
+    pub waiting: Option<&'static str>,
 }
 
 /// One timeline's run.
@@ -2665,6 +2668,17 @@ impl Engine {
                     instance: a.instance,
                     due: a.clip_zero? + a.lead.max(0.0),
                     up: a.started && a.seeking.is_none(),
+                    waiting: if a.seeking.is_some() {
+                        Some("getting ready after a jump")
+                    } else if a.started {
+                        None
+                    } else {
+                        Some(match a.kind {
+                            ActiveKind::Image(_) => "its picture still loading",
+                            ActiveKind::Video(_) => "its video not started",
+                            _ => "its sound not started",
+                        })
+                    },
                 })
             })
             .collect()

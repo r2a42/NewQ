@@ -286,6 +286,8 @@ struct Due {
     cue: CueId,
     due: f64,
     at: f64,
+    /// What it was first seen waiting for.
+    waited: Option<&'static str>,
 }
 
 /// The engine's limit on getting a seek's clips ready (`CUE_LIMIT`), less a
@@ -455,6 +457,7 @@ impl Watch {
                             cue: c.cue,
                             due: c.due,
                             at: t,
+                            waited: None,
                         },
                     );
                 }
@@ -467,13 +470,17 @@ impl Watch {
         let run_on: HashSet<u64> = clips.iter().map(|c| c.instance).collect();
         let mut done = Vec::new();
         // (Each timeline's own: another's clips are not among `clips`.)
-        for (instance, d) in self.due.iter().filter(|(_, d)| d.key == key) {
+        for (instance, d) in self.due.iter_mut().filter(|(_, d)| d.key == key) {
             if let Some(c) = clips.iter().find(|c| c.instance == *instance) {
+                if d.waited.is_none() {
+                    d.waited = c.waiting;
+                }
                 if c.up {
                     self.notes.arrivals.push(Arrival {
                         at: d.at,
                         name: name(d.cue),
                         late: Some((pos - d.due).max(0.0)),
+                        waited: d.waited,
                     });
                     self.came.push(d.cue);
                     done.push(*instance);
@@ -489,6 +496,7 @@ impl Watch {
                         at: d.at,
                         name: name(d.cue),
                         late: None,
+                        waited: d.waited,
                     });
                 }
                 done.push(*instance);
