@@ -237,6 +237,9 @@ pub struct UiState {
     /// A follower: the primary is running a test that this computer plays
     /// along with and measures itself for (set by the app each pass).
     pub following_test: bool,
+    /// A show a second copy of NewQ was started with (`App::take_handoffs`):
+    /// opened on the next frame as File ▸ Open would.
+    pub handed_show: Option<PathBuf>,
     /// The media manager as it last published (set by the app each pass).
     pub media: std::sync::Arc<crate::net::media::MediaView>,
     /// Messages the media rows asked to send to a computer (the app passes them on).
@@ -1003,6 +1006,9 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         st.history.reset(json);
     }
     let mut actions: Vec<Action> = Vec::new();
+    if let Some(path) = st.handed_show.take() {
+        actions.push(Action::OpenShowFile(path, true));
+    }
     poll_collect(ui.ctx(), show, st);
     poll_folder_search(ui.ctx(), show, st);
     poll_dialog(ui.ctx(), show, st, &mut actions);

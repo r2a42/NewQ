@@ -754,6 +754,198 @@ pub fn rename(me: &Identity, name: &str) -> Identity {
     }
 }
 
+// ---- One NewQ per node folder (second test, item 7a) ----
+
+/// The file a running NewQ holds locked in its node folder, so a second copy
+/// can't share the identity (two copies with one id beaconing from two ports
+/// had a display computer keep its clock with each in turn).
+pub const LOCK_FILE: &str = "node.lock";
+
+/// The node folder held by this NewQ until it ends (the system lets go of the
+/// lock however it ends, a crash included).
+#[derive(Debug)]
+pub struct NodeLock {
+    _file: std::fs::File,
+}
+
+/// Why the node folder couldn't be held.
+#[derive(Debug)]
+pub enum LockRefused {
+    /// Another NewQ holds it: this copy must not start.
+    Held,
+    /// The lock couldn't be tried (a folder that can't be written to, a disk
+    /// without locks): NewQ starts anyway, as before.
+    Untried(String),
+}
+
+/// Hold `dir`'s lock, trying again for up to `wait` while another holds it (a
+/// NewQ started again by its primary starts before the old one has gone).
+pub fn lock_node_dir(dir: &Path, wait: std::time::Duration) -> Result<NodeLock, LockRefused> {
+    std::fs::create_dir_all(dir).map_err(|e| LockRefused::Untried(e.to_string()))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(LOCK_FILE))
+        .map_err(|e| LockRefused::Untried(e.to_string()))?;
+    let began = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(NodeLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if began.elapsed() >= wait {
+                    return Err(LockRefused::Held);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(LockRefused::Untried(e.to_string()));
+            }
+        }
+    }
+}
+
+/// Set by a NewQ that starts itself again for its child, which then waits for
+/// the old one to let go of the node folder.
+pub const RESTARTING_ENV: &str = "NEWQ_RESTARTING";
+
+/// What a second copy says before it closes, when the open NewQ took its
+/// request (`hand_over`): it was brought to the front, with the show if any.
+pub fn already_open_words(show: Option<&Path>, taken: bool) -> String {
+    let mut s = String::from("NewQ is already open on this computer: only one can run at a time.");
+    match (taken, show) {
+        (true, Some(p)) => s.push_str(&format!(
+            "\n\nThe open NewQ was brought to the front and asked to open {}.",
+            p.display()
+        )),
+        (true, None) => s.push_str("\n\nThe open NewQ was brought to the front."),
+        (false, Some(_)) => s.push_str(
+            "\n\nSwitch to it (in the taskbar or the Dock) and open the show from its File menu.",
+        ),
+        (false, None) => s.push_str("\n\nSwitch to it (in the taskbar or the Dock)."),
+    }
+    s
+}
+
+// ---- A second copy hands its request to the open one ----
+
+/// The folder (in the node folder) a second copy leaves its request in: one
+/// small file each, written aside and renamed into place, so the open NewQ
+/// never reads half of one.
+pub const HANDOFF_DIR: &str = "handoff";
+
+/// What a second copy asks of the open NewQ: come to the front, and open this
+/// show if one was given.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Handoff {
+    #[serde(default)]
+    pub show: Option<PathBuf>,
+}
+
+/// Leave `h` for the open NewQ; the file's path (to see whether it was taken).
+pub fn hand_over(dir: &Path, h: &Handoff) -> std::io::Result<PathBuf> {
+    let folder = dir.join(HANDOFF_DIR);
+    std::fs::create_dir_all(&folder)?;
+    let name = format!("{}-{}", std::process::id(), random_u64());
+    let aside = folder.join(format!("{name}.writing"));
+    let path = folder.join(format!("{name}.json"));
+    std::fs::write(&aside, serde_json::to_vec(h).unwrap_or_default())?;
+    std::fs::rename(&aside, &path)?;
+    Ok(path)
+}
+
+/// The open NewQ: the requests left since it last looked (each removed), in
+/// no particular order. Files being written, and ones that can't be read, are
+/// left (an unreadable one is removed).
+pub fn take_handoffs(dir: &Path) -> Vec<Handoff> {
+    let Ok(entries) = std::fs::read_dir(dir.join(HANDOFF_DIR)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let read = std::fs::read(&path);
+        let _ = std::fs::remove_file(&path);
+        if let Ok(h) = read.and_then(|b| serde_json::from_slice(&b).map_err(std::io::Error::other))
+        {
+            out.push(h);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_second_holder_of_the_node_folder_is_refused_until_the_first_lets_go() {
+        let d = std::env::temp_dir().join(format!(
+            "newq-node-lock-{}-{}",
+            std::process::id(),
+            random_u64()
+        ));
+        let first = lock_node_dir(&d, Duration::ZERO).expect("the first holds it");
+        // A second (another open of the file, as another process would) is refused.
+        assert!(matches!(
+            lock_node_dir(&d, Duration::from_millis(250)),
+            Err(LockRefused::Held)
+        ));
+        // Another folder is another computer's place: no conflict.
+        let other = d.join("other");
+        let _second = lock_node_dir(&other, Duration::ZERO).expect("another folder");
+        // Let go (as a process ending does), it can be held again; one waiting
+        // gets it once the first has gone.
+        let waiter = {
+            let d = d.clone();
+            std::thread::spawn(move || lock_node_dir(&d, Duration::from_secs(10)).is_ok())
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        drop(first);
+        assert!(waiter.join().unwrap(), "the waiting one got it");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_second_copy_hands_its_show_to_the_open_one_once() {
+        let d = std::env::temp_dir().join(format!(
+            "newq-node-handoff-{}-{}",
+            std::process::id(),
+            random_u64()
+        ));
+        assert!(take_handoffs(&d).is_empty(), "no folder yet");
+        let show = Handoff {
+            show: Some(PathBuf::from("/shows/my show.newq")),
+        };
+        let left = hand_over(&d, &show).unwrap();
+        assert!(left.exists());
+        hand_over(&d, &Handoff::default()).unwrap();
+        // One being written is not read; rubbish is dropped.
+        std::fs::write(d.join(HANDOFF_DIR).join("x.writing"), b"{").unwrap();
+        std::fs::write(d.join(HANDOFF_DIR).join("bad.json"), b"{").unwrap();
+        let mut got = take_handoffs(&d);
+        got.sort_by_key(|h| h.show.is_some());
+        assert_eq!(got, vec![Handoff::default(), show]);
+        assert!(!left.exists(), "taken: the second copy sees it gone");
+        assert!(!d.join(HANDOFF_DIR).join("bad.json").exists());
+        assert!(take_handoffs(&d).is_empty(), "each taken once");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_second_copy_says_what_became_of_its_request() {
+        let p = PathBuf::from("a.newq");
+        assert!(already_open_words(Some(&p), true).contains("asked to open a.newq"));
+        assert!(already_open_words(None, true).contains("brought to the front"));
+        assert!(already_open_words(Some(&p), false).contains("File menu"));
+        assert!(!already_open_words(None, false).contains("File menu"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
