@@ -209,6 +209,38 @@ The README describes the features; this file is about working on the code.
   UntilReady/AlsoUnused/Never; `play::{still_ready, card_shows}`): `Playing::ready` latches once in step
   with the media here, so a screen with nothing playing stays black between cues (the card used to flash
   whenever `in_step` flickered); set on the Show network page beside `no_transfer_cards`.
+  After the second real test (0.24.3; list in `.claude/notes/second-test-fixes.md`). **One NewQ per
+  node folder**, every app mode: `node::lock_node_dir` holds `<node dir>/node.lock` (std
+  `File::try_lock`, released by the OS however NewQ ends), taken in `main.rs::hold_node_folder`
+  before the log and `node.json`; helper modes exit before it. A second copy hands its show over
+  (`node::hand_over`, `<node dir>/handoff/*.json`) and exits with code 3; the open one's
+  `App::take_handoffs` comes forward and opens it (refused by `handed_show_refused` while something
+  plays, a test runs or it follows). Every self-restart sets `node::RESTARTING_ENV` (the new copy
+  waits up to 20 s). Several NewQs on one machine need separate `NEWQ_NODE_DIR`s. Hub: `Hello.tcp_port`
+  and `Beacon.system` (serde default); while a session holds, a peer's beacons from another port are
+  ignored (`pinned_port`); `keep_clock` aims at `(p.addr, hello.tcp_port)` and logs every re-aim
+  (`NetView.clock_with`); one id switching between two ports (`twin_ports`) or this computer's own id
+  from another port (`twin_self`) is `PeerView.twin`/`NetView.twin`. `dial` tries every heard address
+  best first (`paths::by_rank`, `way_words`); after `ADOPT_PATIENCE` the row says why
+  (`unreached_sentence`, Windows Firewall named only for a Windows beacon). Clock: unlocked, a step
+  back over `Settings::big_step` is taken at once; `SharedNow::jumps` -> `Engine::net_shift_shared`
+  moves anchors so what plays carries on (R21); `SharedNow::report_ms` is None while unlocked, capped
+  at `REPORT_CAP_MS`. Display computers: display mode (`play::display_computer`) only for a start with
+  `--display` (NewQ Display, start at login); NewQ started plainly on an adopted Display
+  (`play::paired_display`) shows its control window, locked, and `network::locked_banner` offers
+  *Open as a display computer* (`App::open_as_display`, `restart_adds_display`), *Leave the show
+  network* and a start-at-login tick. Start at login is never set by itself: the primary's row
+  (`Msg::StartAtLogin`) or the computer's own tick; Windows value `NewQ Display` for a display
+  computer, else `NewQ` (`autostart::name`/`run_values`, `where_words`, `fix_old_entry` for 0.24's).
+  Cards: `screen_name` "Name · Screen N" (N = index in `ui.monitors` + 1); `NOT_REACHED_AFTER` (20 s)
+  with no peer connected adds `not_reached_words`. Network test: `Row::shown_apart_ms` (each cue's
+  time on the screens by the follower's clock against the heartbeat, `seen_offset`) is what the
+  verdict uses; `began_apart_ms` (old `apart_ms`) can't see a wrong clock; a key counts only when two
+  heartbeats in a row differ; `net_judge::CLOCK_LOST_MS`, `frame_hz` (slowest screen that drew), no
+  "use a wire" on a wire; each computer's whole log since the test began (`LogMark`, `log_since`,
+  `NetTest::Whole`) is `computers/<name>/newq.log` in the primary's zip (`fleet::log_path`,
+  `sequence::gather_logs`); `ClipUp::waiting` gives timeline.csv's "(waited: …)"; measure rows and
+  reports reset their due time when the shared clock is put back.
   Test Mode's window and several parts in one test (0.24.2). `testmode/choice.rs` (pure): `Parts` (the Cue
   list / Timeline / Network ticks, kept in `Prefs::test_pick`; `PickFile` reads 0.24's flavour/debug), `Part`,
   `PartPlan`, `plan(level, parts, network_ok)` (Medium and Long are the whole run's time: network laps 1/3/10
