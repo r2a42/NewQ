@@ -241,6 +241,10 @@ The README describes the features; this file is about working on the code.
   `NetTest::Whole`) is `computers/<name>/newq.log` in the primary's zip (`fleet::log_path`,
   `sequence::gather_logs`); `ClipUp::waiting` gives timeline.csv's "(waited: …)"; measure rows and
   reports reset their due time when the shared clock is put back.
+  `ActiveCue::outgoing_of`: the run a seek or a loop going round let go of a clip from (kept up in
+  `Run::outgoing`, `run` None); `plays_by_itself()` (no run, not outgoing) is what `net_state` lists
+  and what `net_correct` counts as its own; `net_correct` never starts a cue `model::key_of` places on
+  a timeline. Tests: `engine/timeline/tests.rs` (`NEVER_CUED`, cfg(test) in `run_cued`).
   Test Mode's window and several parts in one test (0.24.2). `testmode/choice.rs` (pure): `Parts` (the Cue
   list / Timeline / Network ticks, kept in `Prefs::test_pick`; `PickFile` reads 0.24's flavour/debug), `Part`,
   `PartPlan`, `plan(level, parts, network_ok)` (Medium and Long are the whole run's time: network laps 1/3/10
