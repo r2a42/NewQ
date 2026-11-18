@@ -15,9 +15,18 @@ SmartScreen may warn: choose *More info → Run anyway*.
 **Linux:** extract and run `./newq`. Needs ALSA (`libasound2`) and a
 Vulkan- or OpenGL-capable graphics driver.
 
+<!--mac-signed-->
 **macOS:** unzip and move `NewQ.app` to Applications. The app is signed and
 notarised by Apple; the first time, macOS says it was downloaded from the
 Internet: choose *Open*.
+<!--/mac-signed-->
+<!--mac-adhoc-->
+**macOS:** unzip and move `NewQ.app` to Applications. This Mac download is
+**not signed by Apple** (Apple's signing service was unavailable when it was
+built), so macOS refuses it at first: right-click `NewQ.app` (and
+`NewQ Display.app`) and choose *Open*, or use *Open Anyway* in System Settings ▸
+Privacy & Security. In Terminal, `xattr -cr /Applications/NewQ.app` does the same.
+<!--/mac-adhoc-->
 
 `SHA256SUMS.txt` lists checksums for every file.
 
