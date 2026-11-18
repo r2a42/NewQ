@@ -3000,7 +3000,18 @@ impl App {
                 ctl.next_repaint = Some(now);
             }
             if let Some(p) = h.show {
-                self.ui.handed_show = Some(p);
+                if let Some(why) = handed_show_refused(
+                    self.engine.is_active(),
+                    self.ui.test_locked,
+                    self.ui.net.me.on && self.ui.net.me.adopted() && !self.ui.net.is_primary(),
+                ) {
+                    self.engine.log(format!(
+                        "NewQ was opened again with {}: not opened here, {why}",
+                        p.display()
+                    ));
+                } else {
+                    self.ui.handed_show = Some(p);
+                }
             }
         }
     }
@@ -3824,6 +3835,22 @@ fn card_group(texture: Arc<LayerTexture>, size: (u32, u32)) -> OutputGroup {
     }
 }
 
+/// Why a show handed over by a second copy of NewQ is not opened, if it isn't:
+/// never in the middle of a show (something plays), a test, or on a computer
+/// following a primary (its show comes from there). The window still comes
+/// forward and the status bar says so.
+fn handed_show_refused(playing: bool, testing: bool, following: bool) -> Option<&'static str> {
+    if following {
+        Some("this computer plays the primary's show")
+    } else if testing {
+        Some("a test is running: open it from the File menu afterwards")
+    } else if playing {
+        Some("something is playing: open it from the File menu when you are ready")
+    } else {
+        None
+    }
+}
+
 /// Ask whether to take back the changes a crashed session left in `rec`.
 fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, ui: &mut UiState) {
     let restore = rfd::MessageDialog::new()
@@ -3898,6 +3925,14 @@ mod tests {
             .into_iter()
             .map(|(id, t)| (id, t.map(|t| t.monitor)))
             .collect()
+    }
+
+    #[test]
+    fn a_handed_show_never_replaces_one_that_plays_or_is_tested_or_followed() {
+        assert_eq!(handed_show_refused(false, false, false), None);
+        assert!(handed_show_refused(true, false, false).is_some_and(|w| w.contains("playing")));
+        assert!(handed_show_refused(false, true, false).is_some_and(|w| w.contains("test")));
+        assert!(handed_show_refused(true, true, true).is_some_and(|w| w.contains("primary")));
     }
 
     #[test]

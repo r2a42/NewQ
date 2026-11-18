@@ -1005,3 +1005,30 @@ fn a_monitor_drawing_slowly_is_said_on_the_page() {
         vec!["⚠ Assistant's monitor 1 (B173HAN04.9) is drawing 4 frames a second: it should draw 64. Its pictures stutter".to_string()]
     );
 }
+
+/// Two NewQs with one identity (second test): the badge turns red and the page
+/// draws the warning in both interfaces; a follower whose clock isn't settled
+/// says "clock not locked" rather than a figure.
+#[test]
+fn two_newqs_with_one_identity_and_an_unlocked_clock_are_said() {
+    let mut v = primary_view();
+    v.peers[0].twin = Some("Two copies of NewQ answer as Left".into());
+    assert_eq!(badge(&v).map(|b| b.text), Some("⚠".to_string()));
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, v.clone());
+        w.settle(&mut show, &mut st);
+    }
+    let mut own = primary_view();
+    own.twin = Some("Another copy of NewQ with this computer's identity is open".into());
+    assert_eq!(badge(&own).map(|b| b.text), Some("⚠".to_string()));
+    let mut s = primary_view().peers[0].status.clone().unwrap();
+    s.primary = Some(ME);
+    s.clock_locked = false;
+    s.clock_error_ms = None;
+    let p = primary_view().peers[0].clone();
+    assert!(facts(&s, Some(&p)).contains("clock not locked"));
+    s.clock_locked = true;
+    s.clock_error_ms = Some(0.05);
+    let said = facts(&s, Some(&p));
+    assert!(said.contains("clock ±0.05 ms") && !said.contains("not locked"));
+}

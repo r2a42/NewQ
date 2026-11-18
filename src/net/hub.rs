@@ -862,7 +862,9 @@ impl State {
             if b.tcp_port != 0 && b.tcp_port != own_port {
                 let at = SocketAddr::new(h.from.ip(), b.tcp_port);
                 let count = match self.twin_self {
-                    Some((was, _, n)) if was == at => n.saturating_add(1),
+                    // By port alone: on a LAN its beacons come from each of
+                    // its addresses in turn.
+                    Some((was, _, n)) if was.port() == at.port() => n.saturating_add(1),
                     _ => 1,
                 };
                 if count == TWIN_SWITCHES as u32 {

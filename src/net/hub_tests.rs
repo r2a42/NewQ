@@ -1293,3 +1293,52 @@ fn a_port_changing_once_is_a_restart_back_and_forth_is_two_newqs() {
         assert_eq!(twin_ports(&old, now), None);
     }
 }
+
+/// Another NewQ with this computer's id, heard (as on a LAN) from each of its
+/// addresses in turn: still noticed, counted by its port.
+#[test]
+fn this_computers_identity_from_another_port_is_noticed_whatever_address_it_comes_from() {
+    let mut rig = Rig::new();
+    let h = rig.hub("Booth");
+    h.ask(NetAction::SetOn(true));
+    let v = until(&h, "listening", |v| v.port.is_some());
+    let port = v.port.unwrap();
+    let other = if port == rig.base { port + 1 } else { port - 1 };
+    let beacon = Beacon {
+        proto: proto::PROTOCOL,
+        version: proto::VERSION.into(),
+        id: v.me.id,
+        name: "Booth".into(),
+        role: Role::Alone,
+        network: None,
+        tcp_port: other,
+        show_version: None,
+        term: 0,
+        on: true,
+        system: String::new(),
+    };
+    let data = proto::encode_beacon(&beacon);
+    let socks: Vec<UdpSocket> = ["127.0.0.1", "127.0.0.2"]
+        .iter()
+        .filter_map(|a| UdpSocket::bind((*a, 0)).ok())
+        .collect();
+    assert!(!socks.is_empty());
+    let began = Instant::now();
+    let mut k = 0;
+    loop {
+        let _ = socks[k % socks.len()].send_to(&data, ("127.0.0.1", port));
+        k += 1;
+        let v = h.view();
+        if let Some(t) = &v.twin {
+            assert!(t.contains(&other.to_string()), "{t}");
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(60), "{v:#?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Its own beacons (its own port) never count.
+    drop(socks);
+    until(&h, "the warning to go once the other is quiet", |v| {
+        v.twin.is_none()
+    });
+}
