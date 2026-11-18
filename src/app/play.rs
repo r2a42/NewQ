@@ -45,9 +45,9 @@ const SYNCED: &str = "synced-show.newq";
 #[derive(Default)]
 pub(super) struct Playing {
     mode: NetMode,
-    /// The shared clock's `back_steps` last seen (a big step back taken: the
-    /// engine's shared times move with it).
-    back_steps: u32,
+    /// The shared clock's `jumps` last seen (a jump of more than
+    /// `clock::Settings::big_step`: the engine's shared times move with it).
+    clock_jumps: u32,
     leader: Option<Leader>,
     follower: Follower,
     // The primary's show, as sent.
@@ -144,24 +144,24 @@ impl App {
             NetMode::Off => self.engine.tick(&self.show, dt),
             NetMode::Primary => self.play_primary(),
             NetMode::Follower => {
-                let handle = self.net.clock();
-                handle.set_idle(!self.engine.is_active());
-                let clock = handle.now();
+                let clock = self.net.clock().now();
                 if let Some(n) = clock
-                    && n.back_steps != self.play.back_steps
+                    && n.jumps != self.play.clock_jumps
                 {
-                    // The clock was put back (when nothing played, or after
-                    // `max_hold`): the engine's shared times move with it
-                    // rather than standing still that long, so each cue and
-                    // timeline carries on exactly where it is
-                    // (`a_clock_put_back_moves_nothing_that_plays`).
-                    self.play.back_steps = n.back_steps;
+                    // The clock jumped (put back, rather than chased for
+                    // days): the engine's shared times move with it rather
+                    // than standing still that long (or jumping), so each cue
+                    // and timeline carries on exactly where it is
+                    // (`a_clock_put_back_moves_nothing_that_plays`), and a
+                    // command timed by the primary's clock lands where it
+                    // belongs (`a_command_after_the_clock_was_put_back_starts_near_zero`).
+                    self.play.clock_jumps = n.jumps;
                     let by = self
                         .engine
                         .net_shared_time()
                         .map_or(0.0, |was| n.time - (was + dt.max(0.0)));
                     log::info!(
-                        "show network: the shared clock was put back to the primary's ({by:+.3} s)"
+                        "show network: the shared clock jumped to the primary's ({by:+.3} s)"
                     );
                     self.engine.net_shift_shared(by);
                 }

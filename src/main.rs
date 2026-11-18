@@ -117,6 +117,15 @@ fn hold_node_folder() -> Result<Option<net::node::NodeLock>, i32> {
                 },
                 Err(_) => false,
             };
+            // Not taken: the other one may be closing (a restart whose new
+            // copy wasn't marked, a quit under way). It is waited for a
+            // little; once it has gone this copy starts as usual.
+            if !taken
+                && let Ok(lock) = net::node::lock_node_dir(&dir, std::time::Duration::from_secs(5))
+            {
+                eprintln!("the NewQ that was open has closed: this one starts");
+                return Ok(Some(lock));
+            }
             let words = net::node::already_open_words(show.as_deref(), taken);
             eprintln!("{} ({})", words.replace("\n\n", " "), dir.display());
             rfd::MessageDialog::new()
