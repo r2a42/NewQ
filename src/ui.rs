@@ -744,6 +744,11 @@ enum Action {
     MediaTo(crate::net::node::NodeId, crate::net::proto::Msg),
     /// A folder added to the media manager's library.
     AddLibraryFolder(PathBuf),
+    /// After a takeover: a sound output given by name to the old primary
+    /// (the computer) is played by this one, the primary now, instead
+    /// (`AudioOutputConfig::move_to`). Allowed in show mode: it puts the
+    /// sound back in the middle of one.
+    PlaySoundHere(AudioOutputId, crate::net::node::NodeId),
     Go,
     /// The Space key: on a timeline being worked on, its play/pause; else GO
     /// (`space_key`). With the timeline of an editor the pointer was over.
@@ -2404,6 +2409,11 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
             .unwrap_or_else(|| "unsaved show".into());
         ui.label(format!("{}{}", path, if st.dirty { " •" } else { "" }));
         ui.separator();
+        // Sound left with the primary this computer took control from.
+        if let Some(line) = st.sound_after_takeover_line(show) {
+            ui.label(RichText::new(line).color(STOP_RED));
+            ui.separator();
+        }
         if let Some(note) = network::login_note(st, std::time::Instant::now()) {
             ui.label(RichText::new(note).color(PLAYHEAD));
             ui.separator();
@@ -11414,6 +11424,16 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::CloseSettings => close_settings(st),
         Action::Net(a) => st.net_requests.push(a),
         Action::MediaTo(to, msg) => st.media_requests.push((to, msg)),
+        Action::PlaySoundHere(id, old) => {
+            let me = st.net.me.id;
+            if let Some(o) = show.audio_outputs.iter_mut().find(|o| o.id == id) {
+                o.move_to(old, me);
+                engine.log(format!(
+                    "Sound output {} plays on this computer now",
+                    o.name
+                ));
+            }
+        }
         Action::AddLibraryFolder(dir) => {
             if !show.library_folders.contains(&dir) {
                 show.library_folders.push(dir);

@@ -1335,7 +1335,14 @@ never copy media by hand, and nothing waits for it.
   still there or comes back, becomes the backup and locks. Sends, OSC, MIDI,
   timecode, the web remote, clock triggers and recordings move to the new
   primary; so do sound outputs and displays given to no computer in particular
-  (one given to a named computer stays with that computer). The new primary
+  (one given to a named computer stays with that computer). A sound output
+  given by name to the old primary stays with it too (it may still be there,
+  with the sound system plugged into it): the new primary's status bar and its
+  *Show network* page say so, and *Play it here instead* gives it to the new
+  primary in the old one's place (the other computers given it keep it). The
+  page also says when an output is set to a sound device the new primary hasn't
+  (the old primary's): it plays nothing there until one is chosen under
+  *Settings ▸ Audio outputs*. The new primary
   sends the media from its own copy: a file it hadn't finished copying shows a
   *Media not found* card on it (its page says how many), while the computers
   that have it play it and send it on. The show it runs is the one the old

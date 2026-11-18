@@ -1080,3 +1080,116 @@ fn a_computer_whose_start_at_login_was_cleaned_up_says_so() {
         assert!(w.find("net_rects", "banner_login_note").is_none());
     }
 }
+
+/// After taking control, sound given by name to the old primary stays with
+/// it (it may still be there with the sound system): the page and the status
+/// bar say so, and *Play it here instead* moves it; a device this computer
+/// hasn't is said too.
+#[test]
+fn a_primary_that_took_control_says_where_the_sound_stayed_and_moves_it() {
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = window(modern, SettingsPage::Network, primary_view());
+        let out = show.add_audio_output();
+        show.audio_outputs[0].device = Some("Desk".into());
+        // Given on LEFT, the old primary, to itself and a display computer.
+        show.audio_outputs[0].set_plays_on(NEW, true, LEFT);
+        st.audio_devices = vec!["Built-in".into()];
+        st.net = Arc::new(follower_view(Role::Backup));
+        st.took_control();
+        st.net = Arc::new(primary_view());
+        assert_eq!(
+            super::sound_after_takeover(&show, ME, Some(LEFT), &st.audio_devices),
+            vec![super::SoundLeft::OnOld(out)]
+        );
+        assert!(
+            st.sound_after_takeover_line(&show)
+                .is_some_and(|l| l.contains("1 sound output is not played")),
+            "{:?}",
+            st.sound_after_takeover_line(&show)
+        );
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", &format!("sound_left:{}", out.0))
+                .is_some()
+        );
+        w.press(
+            &mut show,
+            &mut st,
+            "net_rects",
+            &format!("sound_here:{}", out.0),
+        );
+        assert_eq!(
+            show.audio_outputs[0].computers,
+            vec![NEW, ME],
+            "modern {modern}"
+        );
+        // Played here now, but on the old primary's device, which this
+        // computer hasn't: said, with no button.
+        w.settle(&mut show, &mut st);
+        assert_eq!(
+            super::sound_after_takeover(&show, ME, Some(LEFT), &st.audio_devices),
+            vec![super::SoundLeft::NoDevice(out, "Desk".into())]
+        );
+        assert!(
+            w.find("net_rects", &format!("sound_left:{}", out.0))
+                .is_some()
+        );
+        assert!(
+            w.find("net_rects", &format!("sound_here:{}", out.0))
+                .is_none()
+        );
+        st.audio_devices.push("Desk".into());
+        w.settle(&mut show, &mut st);
+        assert!(
+            w.find("net_rects", &format!("sound_left:{}", out.0))
+                .is_none()
+        );
+        assert_eq!(st.sound_after_takeover_line(&show), None);
+    }
+    let words = super::sound_left_words(
+        &super::SoundLeft::OnOld(crate::show::AudioOutputId(1)),
+        "Main",
+        "Booth",
+    );
+    assert_eq!(
+        words,
+        "Sound output \u{201c}Main\u{201d} is given to Booth, which ran the show before, not to \
+         this computer: it doesn't play here."
+    );
+}
+
+/// A backup that took control with nothing else left in the show (the old
+/// primary gone, no display adopted) plays alone, so no switch to Primary
+/// called `took_control`: the page still says where the sound stayed, from
+/// what the hub publishes.
+#[test]
+fn a_primary_alone_after_taking_control_still_says_where_the_sound_stayed() {
+    let (mut w, mut show, mut st) = window(false, SettingsPage::Network, primary_view());
+    let out = show.add_audio_output();
+    show.audio_outputs[0].set_plays_on(NEW, true, LEFT);
+    let mut v = primary_view();
+    v.peers.clear();
+    v.took_control_from = Some("Booth".into());
+    v.took_control_from_id = Some(LEFT);
+    st.net = Arc::new(v);
+    assert_eq!(st.took_control_from(), Some(("Booth".into(), Some(LEFT))));
+    assert!(st.sound_after_takeover_line(&show).is_some());
+    w.settle(&mut show, &mut st);
+    w.press(
+        &mut show,
+        &mut st,
+        "net_rects",
+        &format!("sound_here:{}", out.0),
+    );
+    assert_eq!(show.audio_outputs[0].computers, vec![NEW, ME]);
+    assert_eq!(st.sound_after_takeover_line(&show), None);
+    // Not said on a computer that didn't take control, whatever its devices.
+    let plain = UiState {
+        net: Arc::new(primary_view()),
+        audio_devices: vec!["Built-in".into()],
+        ..Default::default()
+    };
+    show.audio_outputs[0].device = Some("Desk".into());
+    assert_eq!(plain.took_control_from(), None);
+    assert_eq!(plain.sound_after_takeover_line(&show), None);
+}

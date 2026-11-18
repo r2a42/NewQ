@@ -213,8 +213,11 @@ pub struct NetView {
     pub status: StatusReport,
     /// Its name is to be shown big until then.
     pub identify_until: Option<Instant>,
-    /// This computer took control (stage 5) from the primary of this name.
+    /// This computer took control (stage 5) from the primary of this name,
+    /// and its id when known (a sound output given to it stays with it:
+    /// `network::sound_after_takeover`).
     pub took_control_from: Option<String>,
+    pub took_control_from_id: Option<NodeId>,
     /// The address each computer with a session up is connected on, with the
     /// port it listens on (the Show network page shows it).
     pub reached: Vec<(NodeId, std::net::SocketAddr)>,
@@ -575,8 +578,10 @@ struct State {
     started: Instant,
     /// The network the follower's clock was kept in.
     clock_network: Option<node::NetworkId>,
-    /// The primary this computer took control from.
+    /// The primary this computer took control from (its id, when known, and
+    /// its name).
     took_from: Option<String>,
+    took_from_id: Option<NodeId>,
     /// How this computer reached the computer it last reported to (its own
     /// row says so too, and the network test's report).
     link: Link,
@@ -616,6 +621,7 @@ impl State {
             started: Instant::now(),
             clock_network: None,
             took_from: None,
+            took_from_id: None,
             link: Link::Unknown,
             twin_self: None,
         }
@@ -2061,6 +2067,7 @@ impl State {
             );
         }
         self.primary_clock.carry_on(carried);
+        self.took_from_id = self.me.primary.filter(|p| *p != self.me.id);
         self.took_from = Some(
             self.me
                 .primary
@@ -2287,6 +2294,7 @@ impl State {
                 .took_from
                 .clone()
                 .filter(|_| self.me.role == Role::Primary),
+            took_control_from_id: self.took_from_id.filter(|_| self.me.role == Role::Primary),
             adapters: self.adapters.clone(),
             twin: self
                 .twin_self
