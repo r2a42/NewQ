@@ -61,6 +61,9 @@ for i in $(seq $((${#NAMES[@]} - 1)) -1 0); do
   if [ "$i" = 0 ]; then
     args=("$BASE/show.newq")
     [ "$TEST" = 1 ] && envs=(NEWQ_NET_TEST_AUTOSTART="$N")
+  else
+    # Display mode only as NewQ Display starts it (a plain start shows the window).
+    args=(--display)
   fi
   env "${envs[@]+"${envs[@]}"}" DISPLAY=":$((91 + i))" NEWQ_NODE_DIR="$dir/node" \
     XDG_STATE_HOME="$dir/state" NEWQ_NET_PORT="$PORT" NEWQ_NO_SPLASH=1 NEWQ_MUTE=1 \
