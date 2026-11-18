@@ -147,4 +147,9 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
 21. **The Preview pane's aspect ratio is sometimes wrong** (owner, 2026-11-18). Not yet known: which
    display it was showing, its size and shape against the pane's, whether in the classic or new
    interface, and whether it was during a test. Owner: don't start fixing until the logs from the
-   0.24.3 run are in.
+   0.24.3 run are in. Owner's detail: it was previewing the **HDMI monitor on the MacBook** (the
+   VA24EHF, 1920x1080, which the 0.24.2 run's report showed at 100 Hz) and the picture was
+   **squeezed horizontally: the Earth (a square NASA still) looked like an egg**. So the preview drew
+   that display's picture narrower than its 16:9. Suspects: the preview using the Mac window's
+   points vs that display's pixels (a Retina main screen at scale 2 next to a scale-1 HDMI one), or
+   the preview's frame aspect taken from another display.
