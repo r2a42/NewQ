@@ -24,7 +24,12 @@ computers are in; then read the logs, add what they show, and fix in order of ha
    workflow: a choice to build the Mac download ad-hoc signed"). It needs a PR to `main`; the
    branch first needs restarting from `main` (one force-push of the session branch, owner's
    go-ahead needed).
-5. Optional: rebuild 0.24.2's Mac download signed and notarised once Apple's servers are back.
+5. **Number each screen's card on a display computer** (owner, 2026-11-18). Every output's
+   waiting card now looks the same; each should say which screen it is (e.g. "Assistant ·
+   Screen 1", "Screen 2"), even when the computer has only one, matching the numbering the
+   primary's Test mode *Show on* list and Displays menu use for that computer's monitors.
+   (`app/play.rs` draws `card`/`card_text` per monitor; Identify already flashes the name.)
+6. Optional: rebuild 0.24.2's Mac download signed and notarised once Apple's servers are back.
 
 ## Known before this test (still open)
 
