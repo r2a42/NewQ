@@ -559,6 +559,11 @@ pub struct ActiveCue {
     own_layer: bool,
     /// The timeline run (its instance) this is a clip of, if one started it.
     run: Option<u64>,
+    /// The run (its instance) a seek or a loop going round let go of this clip
+    /// from: it is kept up, no longer the run's, until the run's new clips are
+    /// cued (`Run::outgoing`). Still a timeline's, never a cue playing by
+    /// itself: the show network neither lists nor restarts it as one.
+    outgoing_of: Option<u64>,
     /// Where on its timeline this clip's slot ends (its start plus its length).
     ends_at: Option<f64>,
     /// Its fade-out and end are kept by the timeline's clock, not by its content
@@ -634,6 +639,12 @@ struct Seek {
 }
 
 impl ActiveCue {
+    /// A cue playing by itself: no timeline run's clip, nor one a run's seek
+    /// let go of and keeps up meanwhile (`outgoing_of`).
+    pub(super) fn plays_by_itself(&self) -> bool {
+        self.run.is_none() && self.outgoing_of.is_none()
+    }
+
     /// Its time by a shared clock at `now` (`Engine::tick_shared`), if it keeps
     /// to one: one with an anchor (moved on while it is paused or held, so its
     /// time stands meanwhile), or a clip of a run whose clock follows the shared
@@ -2834,6 +2845,7 @@ impl Engine {
             extra_hold: 0.0,
             own_layer: false,
             run: None,
+            outgoing_of: None,
             ends_at: None,
             clocked: false,
             detached: false,
@@ -2926,6 +2938,7 @@ impl Engine {
             extra_hold: 0.0,
             own_layer: false,
             run: None,
+            outgoing_of: None,
             ends_at: None,
             clocked: false,
             detached: false,

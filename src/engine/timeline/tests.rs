@@ -3951,3 +3951,102 @@ fn the_clips_up_say_where_each_was_due_and_whether_it_has_come() {
     // A clip that is no timeline's is not among them.
     assert!(e.timeline_clips_up(TimelineKey::List(99)).is_empty());
 }
+
+// ----- A seek's outgoing clips and the show network --------------------------------
+
+/// The cues a heartbeat lists as playing by themselves that are a timeline's clips.
+fn listed_clips(e: &Engine, show: &Show) -> Vec<CueId> {
+    e.net_state(0.0)
+        .cues
+        .iter()
+        .map(|c| c.cue)
+        .filter(|id| model::key_of(show, *id).is_some())
+        .collect()
+}
+
+/// Second real test, lap 3: a loop going round cued for the whole `CUE_LIMIT`,
+/// and meanwhile what the run had played, kept up for it, was listed in the
+/// primary's heartbeat as cues playing by themselves (a follower then started
+/// a copy of one part way and stopped it 2 s later).
+#[test]
+fn a_clip_kept_up_through_a_loops_slow_cueing_is_still_the_timelines() {
+    let (show, g, [bed, ..]) = looped_show(false);
+    let k = key(g);
+    let out = show.outputs[0].id;
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(out, (64, 36));
+    e.fire(&show, g);
+    run_while(&mut e, &show, k, 0.1, |e| view(e, &show, k).pos < 4.5);
+    let first = instance(&e, bed);
+    assert!(first != 0 && listed_clips(&e, &show).is_empty());
+    // The loop goes round, and its clips are never all ready.
+    NEVER_CUED.with(|n| n.set(true));
+    let t0 = Instant::now();
+    while state(&mut e, &show, k) != RunState::Cueing {
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the loop never went round"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        e.tick(&show, 0.1);
+    }
+    assert_eq!(view(&mut e, &show, k).pos, 1.0);
+    let kept = e
+        .active
+        .iter()
+        .find(|a| a.instance == first)
+        .expect("the bed kept up while the loop cues");
+    assert!(kept.run.is_none() && kept.outgoing_of.is_some());
+    // Through the whole cueing, which runs out of time, no clip is listed.
+    let since = Instant::now();
+    while state(&mut e, &show, k) == RunState::Cueing {
+        assert!(since.elapsed() < Duration::from_secs(10), "cued for ever");
+        assert_eq!(listed_clips(&e, &show), Vec::<CueId>::new());
+        std::thread::sleep(Duration::from_millis(5));
+        e.tick(&show, 0.0);
+    }
+    NEVER_CUED.with(|n| n.set(false));
+    assert!(since.elapsed() >= CUE_LIMIT - Duration::from_millis(100));
+    assert_eq!(state(&mut e, &show, k), RunState::Running);
+    // What was kept up has gone; what plays is the run's.
+    assert!(e.active.iter().all(|a| a.instance != first));
+    assert!(e.active.iter().all(|a| a.outgoing_of.is_none()));
+    assert!(active(&e, bed).is_some_and(|a| a.run.is_some()));
+    ticks(&mut e, &show, 0.1, 5);
+    assert!(listed_clips(&e, &show).is_empty());
+}
+
+/// A follower never starts a timeline's clip as a cue of its own, whatever the
+/// primary's heartbeat lists: starting it is the run's job. A cue that is no
+/// timeline's is still started part way.
+#[test]
+fn a_follower_never_starts_a_timelines_clip_by_itself() {
+    let (mut show, _g, [bed, ..]) = looped_show(false);
+    let c = text(&mut show, None);
+    let free = top(&mut show, c, 0, 0.0);
+    let out = show.outputs[0].id;
+    let mut e = Engine::for_tests();
+    e.output_sizes.insert(out, (64, 36));
+    let s = crate::net::play::PlayState {
+        time: 5.0,
+        cues: [bed, free]
+            .into_iter()
+            .map(|cue| crate::net::play::CueNow {
+                cue,
+                anchor: 0.5,
+                stopping: false,
+                sound: None,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut doubts = crate::engine::NetCorrection::default();
+    let mut done = Vec::new();
+    for _ in 0..3 {
+        done.extend(e.net_correct(&show, &s, 5.0, &mut doubts));
+        e.tick(&show, 0.0);
+    }
+    assert!(active(&e, bed).is_none(), "{done:?}");
+    assert!(active(&e, free).is_some(), "{done:?}");
+    assert_eq!(done.len(), 1, "{done:?}");
+}

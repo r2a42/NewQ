@@ -19,6 +19,7 @@
 use super::{ActiveKind, Engine, StartAt};
 use crate::net::play::{Command, CueNow, PlayState, RunNow, RunWord};
 use crate::show::{CueId, CueKind, Show};
+use crate::timeline::model;
 use crate::timeline::{PauseFreeze, TimelineKey};
 use std::collections::{HashMap, HashSet};
 
@@ -342,7 +343,7 @@ impl Engine {
         let mut cues: Vec<CueNow> = self
             .active
             .iter()
-            .filter(|a| a.run.is_none())
+            .filter(|a| a.plays_by_itself())
             .map(|a| CueNow {
                 cue: a.cue_id,
                 anchor: a.anchor.unwrap_or(now - a.elapsed),
@@ -418,7 +419,7 @@ impl Engine {
             theirs.entry(c.cue).or_default().push(c);
         }
         let mut ours: HashMap<CueId, Vec<(u64, f64, bool)>> = HashMap::new();
-        for a in self.active.iter().filter(|a| a.run.is_none()) {
+        for a in self.active.iter().filter(|a| a.plays_by_itself()) {
             ours.entry(a.cue_id).or_default().push((
                 a.instance,
                 a.anchor.unwrap_or(now - a.elapsed),
@@ -446,10 +447,13 @@ impl Engine {
             for (n, c) in live.iter().enumerate() {
                 match here_live.get(n) {
                     None => {
-                        // Not one this engine starts by itself part way.
+                        // Not one this engine starts by itself part way (a
+                        // timeline's clip is its run's to start, never a cue
+                        // of its own).
                         if s.time - c.anchor < SETTLING
                             || !restartable(show, *cue)
                             || timeline_groups.contains(cue)
+                            || model::key_of(show, *cue).is_some()
                         {
                             continue;
                         }

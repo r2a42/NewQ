@@ -6,6 +6,12 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A picture on a timeline no longer flashes up a second copy on a display computer** when the
+  timeline goes back round a loop (or jumps) and its clips take a while to be ready. While the
+  timeline got them ready, the primary told the other computers that the picture it was keeping
+  up meanwhile was playing on its own, and a display computer started its own copy of it for a
+  couple of seconds. A display computer now never starts a timeline's clip by itself: the
+  timeline does.
 - **Only NewQ Display opens a display computer's screens.** Opening NewQ itself on a computer
   that has been a display computer now shows its normal window, locked, with a line saying whose
   show it belongs to and two buttons: *Open as a display computer* and *Leave the show network*.
