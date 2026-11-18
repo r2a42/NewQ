@@ -246,24 +246,28 @@ fn monitor(ui: &mut Ui, st: &mut UiState) {
         st.preview_output = Some(chosen);
     }
     let e = &st.previews[i];
-    let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
     // As much of the panel as the picture needs (the panel's height is the
-    // bin's line).
-    let w = ui.available_width();
-    let h = (w / aspect).min(ui.available_height()).max(40.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    // bin's line), the display's own shape inside it.
+    let at = ui.cursor().min;
+    let w = ui.available_width().min(ui.clip_rect().right() - at.x);
+    let visible = ui.available_height().min(ui.clip_rect().bottom() - at.y);
+    let space = super::super::preview::space_size(e.canvas, w, visible, f32::INFINITY);
+    let (rect, _) = ui.allocate_exact_size(space, egui::Sense::hover());
+    let picture = super::super::preview::fit_picture(e.canvas, rect);
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("ws_monitor"), rect));
-    let picture =
-        egui::Rect::from_center_size(rect.center(), egui::vec2(h * aspect, h).min(rect.size()));
+    ui.data_mut(|d| {
+        d.insert_temp(egui::Id::new("ws_monitor"), rect);
+        d.insert_temp(egui::Id::new("ws_picture"), picture);
+    });
     ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
-    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+    super::super::preview::outline(ui, picture, rect);
+    ui.painter().add(super::super::preview::callback(
         picture,
         super::super::OutputPreview {
             groups: vec![super::super::OutputGroup {
                 layers: e.layers.clone(),
                 geometry: super::super::Geometry {
-                    canvas: e.canvas,
+                    canvas: e.picture,
                     warp: e.warp,
                     pin: e.warp,
                     mesh: e.mesh.clone(),

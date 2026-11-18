@@ -1,6 +1,8 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 mod modern;
+mod preview;
+pub(crate) use preview::part_shape;
 mod net_media;
 mod network;
 pub(crate) use network::{own_addresses, path_to, peer_address};
@@ -71,8 +73,13 @@ pub struct PreviewOutput {
     pub mesh: Option<std::sync::Arc<crate::mesh::Mesh>>,
     /// The part of a shared picture it shows, as the mesh sees it.
     pub slice: [f32; 4],
-    /// Pixel size of the output's canvas (its display or sub display).
+    /// Pixel size of the output's canvas (its display or sub display): the
+    /// preview's shape. For a display showing part of another's picture, the
+    /// part's size.
     pub canvas: (u32, u32),
+    /// Pixel size of the picture its layers are laid out on: `canvas`, or for a
+    /// part, the other display's whole picture (the warp then takes the part).
+    pub picture: (u32, u32),
 }
 
 /// A playing cue's bar, moved by hand: where it was moved to, kept on
@@ -4535,7 +4542,8 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
         _ => "main window only".to_string(),
     };
     let mut chosen = id;
-    ui.horizontal(|ui| {
+    // Wrapped: a row wider than a narrow pane would widen the ui past it.
+    ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new(fps_reading(st, id).unwrap_or_else(|| "not drawing".into()))
                 .monospace()
@@ -4581,24 +4589,26 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     let e = &st.previews[i];
     // Leave room around the screen to drag corners past its edges.
     let margin = if editing { 14.0 } else { 0.0 };
-    let full_w = ui.available_width() - 2.0 * margin;
-    // Tall sub displays are previewed narrower, not taller.
-    let aspect = (e.canvas.0 as f32 / e.canvas.1.max(1) as f32).max(0.1);
-    let h = (full_w / aspect).min(full_w * if editing { 1.2 } else { 0.75 });
-    let w = h * aspect;
-    let (outer, _) = ui.allocate_exact_size(
-        Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
-        Sense::hover(),
-    );
-    let rect = outer.shrink(margin);
-    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+    // The display's own shape, as large as the pane in sight allows; tall sub
+    // displays are previewed narrower, not taller.
+    let space = preview::space(ui, e.canvas, margin, if editing { 1.2 } else { 0.75 });
+    let (outer, _) = ui.allocate_exact_size(space + Vec2::splat(2.0 * margin), Sense::hover());
+    // Black bars beside or above and below the picture.
+    let bars = outer.shrink(margin);
+    let rect = preview::fit_picture(e.canvas, bars);
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("preview_picture"), rect));
+    ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
+    if !editing {
+        preview::outline(ui, rect, bars);
+    }
+    ui.painter().add(preview::callback(
         rect,
         OutputPreview {
             groups: vec![OutputGroup {
                 layers: e.layers.clone(),
                 geometry: Geometry {
-                    canvas: e.canvas,
+                    canvas: e.picture,
                     warp: e.warp,
                     pin: e.warp,
                     mesh: e.mesh.clone(),
@@ -6681,16 +6691,18 @@ fn area_editor(
 ) {
     let (sw, sh) = (screen_size.0 as f32, screen_size.1 as f32);
     let margin = 10.0;
-    let w = ui.available_width() - 2.0 * margin;
-    let h = (w * sh / sw).min(w * 1.5);
-    let (outer, _) = ui.allocate_exact_size(
-        Vec2::new(w + 2.0 * margin, h + 2.0 * margin),
-        Sense::hover(),
-    );
-    let rect = outer.shrink(margin);
-    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
+    // The display's shape (a tall one narrower), at its size whatever is in
+    // sight, so the handles don't move as the page scrolls.
+    let width = ui
+        .available_width()
+        .min(ui.clip_rect().right() - ui.cursor().min.x);
+    let space = preview::space_size(screen_size, width - 2.0 * margin, f32::INFINITY, 1.5);
+    let (outer, _) = ui.allocate_exact_size(space + Vec2::splat(2.0 * margin), Sense::hover());
+    let bars = outer.shrink(margin);
+    let rect = preview::fit_picture(screen_size, bars);
+    ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
     if let Some((_, groups)) = monitor.and_then(|m| st.screens.get(&m)) {
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+        ui.painter().add(preview::callback(
             rect,
             OutputPreview {
                 groups: groups.clone(),
@@ -14480,6 +14492,7 @@ mod tests {
             mesh: None,
             slice: Geometry::WHOLE,
             canvas: (1920, 1080),
+            picture: (1920, 1080),
         }
     }
 
@@ -14499,6 +14512,83 @@ mod tests {
             "editing something not shown"
         );
         assert_eq!(preview_index(&[], None, None), None);
+    }
+
+    /// Draw the Preview pane in `pane` (in a scroll area, as docked) of a
+    /// window `screen_px` pixels big at `ppp` pixels a point; where the picture went.
+    fn drawn_preview(st: &mut UiState, screen_px: Vec2, ppp: f32, pane: Rect) -> Rect {
+        let ctx = egui::Context::default();
+        ctx.set_zoom_factor(ppp);
+        let mut show = Show::default();
+        for n in 0..3 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen_px / ppp)),
+                time: Some(1.0 + n as f64 * 0.01),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| {
+                let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(pane));
+                pane_ui.set_clip_rect(pane);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(&mut pane_ui, |ui| output_previews(ui, &mut show, st));
+            });
+            o.textures_delta.clear();
+        }
+        ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("preview_picture")))
+            .expect("the picture is drawn")
+    }
+
+    #[test]
+    fn the_preview_keeps_the_displays_shape_at_any_pane_size() {
+        // A 1920x1080 HDMI display (and a square one), previewed in panes of
+        // the main window at its right edge, on a Retina screen and a plain one.
+        for canvas in [(1920, 1080), (1080, 1080)] {
+            let mut st = UiState::default();
+            let mut p = preview(1);
+            p.canvas = canvas;
+            p.picture = canvas;
+            st.previews.push(p);
+            let want = canvas.0 as f32 / canvas.1 as f32;
+            for ppp in [1.0, 2.0] {
+                let screen_px = vec2(1280.0, 760.0) * ppp;
+                let right = 1280.0;
+                // Narrow and tall, very narrow, wide and short, short at the bottom.
+                for pane in [
+                    Rect::from_min_max(pos2(right - 220.0, 120.0), pos2(right, 600.0)),
+                    Rect::from_min_max(pos2(right - 120.0, 120.0), pos2(right, 700.0)),
+                    Rect::from_min_max(pos2(380.0, 120.0), pos2(right, 330.0)),
+                    Rect::from_min_max(pos2(846.0, 600.0), pos2(right, 760.0)),
+                ] {
+                    let what = format!("{canvas:?} at {ppp}x in {pane:?}");
+                    let r = drawn_preview(&mut st, screen_px, ppp, pane);
+                    assert!(
+                        (r.width() / r.height() - want).abs() < 0.01 * want,
+                        "{what}: drawn {r:?}"
+                    );
+                    assert!(
+                        pane.expand(0.5).contains_rect(r),
+                        "{what}: {r:?} runs out of the pane"
+                    );
+                    // What egui gives the GPU as the viewport (clamped to the
+                    // window) keeps the shape too.
+                    let px = egui::PaintCallbackInfo {
+                        viewport: r,
+                        clip_rect: pane,
+                        pixels_per_point: ppp,
+                        screen_size_px: [screen_px.x as u32, screen_px.y as u32],
+                    }
+                    .viewport_in_pixels();
+                    let got = px.width_px as f32 / px.height_px.max(1) as f32;
+                    assert!(
+                        (got - want).abs() < 2.0 / px.height_px.max(1) as f32 * want + 0.01,
+                        "{what}: the viewport is {}x{}",
+                        px.width_px,
+                        px.height_px
+                    );
+                }
+            }
+        }
     }
 
     /// Run frames of the Active panel under `events` (with Shift held if
