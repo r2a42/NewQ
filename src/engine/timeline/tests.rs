@@ -3998,10 +3998,19 @@ fn a_clip_kept_up_through_a_loops_slow_cueing_is_still_the_timelines() {
         .expect("the bed kept up while the loop cues");
     assert!(kept.run.is_none() && kept.outgoing_of.is_some());
     // Through the whole cueing, which runs out of time, no clip is listed.
+    // (A follower in the same state, comparing with itself, leaves it be: the
+    // clip kept up is not a cue of its own there either, to be stopped.)
+    let mut doubts = crate::engine::NetCorrection::default();
     let since = Instant::now();
     while state(&mut e, &show, k) == RunState::Cueing {
         assert!(since.elapsed() < Duration::from_secs(10), "cued for ever");
         assert_eq!(listed_clips(&e, &show), Vec::<CueId>::new());
+        let s = e.net_state(0.0);
+        assert_eq!(
+            e.net_correct(&show, &s, 0.0, &mut doubts),
+            Vec::<String>::new()
+        );
+        assert!(e.active.iter().any(|a| a.instance == first));
         std::thread::sleep(Duration::from_millis(5));
         e.tick(&show, 0.0);
     }
