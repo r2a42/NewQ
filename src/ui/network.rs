@@ -30,8 +30,93 @@ pub struct Editing {
     passcode: String,
     /// A computer being renamed, and the name so far.
     renaming: Option<(NodeId, String)>,
-    /// This computer took control (stage 5): who from, for the page's note.
+    /// This computer took control (stage 5): who from, for the page's note,
+    /// and its id when known (`sound_after_takeover`).
     pub took_control_from: Option<String>,
+    pub took_control_from_id: Option<NodeId>,
+}
+
+/// What the primary that took control says of a sound output after it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SoundLeft {
+    /// Given by name to the old primary and not to this computer: it plays
+    /// there, not here (`AudioOutputConfig::left_with`).
+    OnOld(crate::show::AudioOutputId),
+    /// Played here, on a device of this name that this computer hasn't (the
+    /// old primary's: `device` is whichever computer is the primary's).
+    NoDevice(crate::show::AudioOutputId, String),
+}
+
+/// The sound outputs a primary that took control from `old` is to hear of
+/// (`devices`: this computer's sound devices). Pure, for the tests.
+pub fn sound_after_takeover(
+    show: &Show,
+    me: NodeId,
+    old: Option<NodeId>,
+    devices: &[String],
+) -> Vec<SoundLeft> {
+    show.audio_outputs
+        .iter()
+        .filter_map(|o| {
+            if old.is_some_and(|old| o.left_with(old, me)) {
+                Some(SoundLeft::OnOld(o.id))
+            } else {
+                o.device_missing(me, true, devices)
+                    .map(|d| SoundLeft::NoDevice(o.id, d))
+            }
+        })
+        .collect()
+}
+
+impl UiState {
+    /// While this computer is the primary it took control to be: the old
+    /// primary's name and id (as the switch saw them, else as the hub has
+    /// them: with no computer adopted the switch is to Off, not Primary).
+    pub fn took_control_from(&self) -> Option<(String, Option<NodeId>)> {
+        if !self.net.is_primary() {
+            return None;
+        }
+        let id = self
+            .net_edit
+            .took_control_from_id
+            .or(self.net.took_control_from_id);
+        self.net_edit
+            .took_control_from
+            .clone()
+            .or_else(|| self.net.took_control_from.clone())
+            .map(|n| (n, id))
+    }
+
+    /// The status bar's line while this computer, having taken control, plays
+    /// some sound nowhere here (`sound_after_takeover`); the Show network page
+    /// says which and offers the move.
+    pub fn sound_after_takeover_line(&self, show: &Show) -> Option<String> {
+        let (_, old) = self.took_control_from()?;
+        let left = sound_after_takeover(show, self.net.me.id, old, &self.audio_devices);
+        (!left.is_empty()).then(|| {
+            format!(
+                "Show network: {} sound output{} not played on this computer: see Settings, Show \
+                 network",
+                left.len(),
+                if left.len() == 1 { " is" } else { "s are" }
+            )
+        })
+    }
+}
+
+/// What the page says of one (`output`: its name, `old`: the old primary's).
+pub fn sound_left_words(left: &SoundLeft, output: &str, old: &str) -> String {
+    match left {
+        SoundLeft::OnOld(_) => format!(
+            "Sound output \u{201c}{output}\u{201d} is given to {old}, which ran the show before, \
+             not to this computer: it doesn't play here."
+        ),
+        SoundLeft::NoDevice(_, d) => format!(
+            "Sound output \u{201c}{output}\u{201d} is set to the device \u{201c}{d}\u{201d}, \
+             which this computer hasn't: it plays nothing here. Choose one under Settings, \
+             Audio outputs."
+        ),
+    }
 }
 
 /// An address as the page writes it: "10.0.0.2", with its port only when it
@@ -489,6 +574,34 @@ fn computers(ui: &mut Ui, show: &Show, v: &NetView, st: &mut UiState, actions: &
                 .color(Color32::from_rgb(220, 160, 40)),
             );
             note(ui, "took_control_note", r.rect);
+        }
+        if let Some((from, old)) = st.took_control_from() {
+            let from = from.as_str();
+            for left in sound_after_takeover(show, v.me.id, old, &st.audio_devices) {
+                let (SoundLeft::OnOld(id) | SoundLeft::NoDevice(id, _)) = &left;
+                let output = show
+                    .audio_outputs
+                    .iter()
+                    .find(|o| o.id == *id)
+                    .map_or("", |o| o.name.as_str());
+                ui.horizontal_wrapped(|ui| {
+                    let r = ui.label(
+                        RichText::new(sound_left_words(&left, output, from))
+                            .color(Color32::from_rgb(220, 160, 40)),
+                    );
+                    note(ui, format!("sound_left:{}", id.0), r.rect);
+                    if let (SoundLeft::OnOld(id), Some(old)) = (&left, old) {
+                        let r = ui.button("Play it here instead").on_hover_text(format!(
+                            "This computer plays it from now on, in place of {from}; the other \
+                             computers given it keep it."
+                        ));
+                        note(ui, format!("sound_here:{}", id.0), r.rect);
+                        if r.clicked() {
+                            actions.push(Action::PlaySoundHere(*id, old));
+                        }
+                    }
+                });
+            }
         }
         let backups = ours.iter().filter(|p| p.role == Role::Backup).count();
         if backups > 1 {
@@ -1064,6 +1177,12 @@ impl UiState {
                 .or_else(|| self.net.me.primary_name.clone())
                 .unwrap_or_else(|| "the old primary".into()),
         );
+        // Called on the switch (the view may still be the follower's, whose
+        // primary is the old one).
+        self.net_edit.took_control_from_id =
+            self.net
+                .took_control_from_id
+                .or(self.net.me.primary.filter(|p| *p != self.net.me.id));
         self.show_path = None;
         // Unlike any show: unsaved until saved.
         self.saved_json = Some(String::new());

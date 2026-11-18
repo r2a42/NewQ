@@ -13,6 +13,14 @@ release page, and a release is refused if it has none.
   downloading or saving anything. The running window shows the rate with each computer; the
   report says whether it was on and how much went each way, so a run with it and one without
   can be compared. Off unless chosen; remembered on this computer.
+- **After a backup takes control, it says where the sound went and can take it over.** A
+  sound output given to the old primary and another computer stayed with the old primary, so
+  the new primary played none of it and nothing said so. It still stays (the old primary may
+  be there with the sound system plugged in), but the new primary's status bar and *Show
+  network* page now say *Sound output "…" is given to Booth, which ran the show before, not to
+  this computer*, with **Play it here instead**, which gives it to the new primary in Booth's
+  place. The page also says when an output is set to a sound device the new primary hasn't
+  (the old primary's), which plays nothing there until another is chosen.
 - **Start at login is switched off where an older NewQ had switched it on by itself.** NewQ
   0.24.0 to 0.24.2 set a computer to start at login when it was made a display computer, and
   0.24.3 kept those settings. The first start of this version removes any start-at-login entry

@@ -815,6 +815,11 @@ fn the_backup_takes_control_and_the_old_primary_comes_back_as_the_backup() {
     b.ask(NetAction::TakeControl);
     let bv = until(&b, "the backup to run the show", |v| v.is_primary());
     assert_eq!(bv.me.term, term + 1);
+    assert_eq!(
+        bv.took_control_from_id,
+        Some(pid),
+        "who from, for the sound left with it"
+    );
     assert_eq!(node::load(&rig.dirs[2]).role, Role::Primary, "kept");
     until(&d, "the display to follow the new primary", |v| {
         v.following

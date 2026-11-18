@@ -202,6 +202,43 @@ impl AudioOutputConfig {
             self.computers.clear();
         }
     }
+
+    /// After a takeover (stage 5): whether it is given by name to `old`, the
+    /// primary `me` took control from, and not to `me`, so the new primary
+    /// plays none of it. One given to no computer follows the primary and
+    /// isn't. A named one stays where it was put (the old primary may still be
+    /// there with the sound system on it): the page offers `move_to`.
+    pub fn left_with(&self, old: NodeId, me: NodeId) -> bool {
+        old != me && self.computers.contains(&old) && !self.computers.contains(&me)
+    }
+
+    /// Played by the primary `me` in place of computer `old` (its *Play it
+    /// here instead*): the other computers given it keep it. Left with this
+    /// one alone it is written as no computer, and a device chosen for it on
+    /// `me` becomes the primary's `device`.
+    pub fn move_to(&mut self, old: NodeId, me: NodeId) {
+        if !self.computers.contains(&old) {
+            return;
+        }
+        if !self.computers.contains(&me) {
+            self.computers.push(me);
+        }
+        self.computers.retain(|c| *c != old);
+        self.devices_on.remove(&old);
+        if self.computers == [me] {
+            self.computers.clear();
+            if let Some(d) = self.devices_on.remove(&me) {
+                self.device = Some(d);
+            }
+        }
+    }
+
+    /// The device it is set to on computer `me` when this computer hasn't one
+    /// of that name (`devices`: those it has; none listed yet: unknown).
+    pub fn device_missing(&self, me: NodeId, primary: bool, devices: &[String]) -> Option<String> {
+        let name = self.device_here(me, primary)??;
+        (!devices.is_empty() && !devices.contains(&name)).then_some(name)
+    }
 }
 
 fn no_delay(v: &u32) -> bool {
@@ -5307,6 +5344,69 @@ mod tests {
         o.set_plays_on(other, false, me);
         assert!(o.computers.is_empty(), "back to the primary alone");
         assert!(o.devices_on.is_empty(), "its device forgotten");
+    }
+
+    /// What a takeover does to sound (stage 5): `old` ran the show, `new`
+    /// (its backup) took control, `display` is a display computer.
+    #[test]
+    fn after_a_takeover_sound_named_for_the_old_primary_stays_and_can_be_moved() {
+        let (old, new, display) = (NodeId(1), NodeId(2), NodeId(3));
+        let mut show = Show::default();
+        show.add_audio_output();
+        let mut o = show.audio_outputs[0].clone();
+        o.device = Some("Desk".into());
+        // Given to no computer: the primary's, whoever it is. The old one,
+        // now the backup (a follower), plays none of it.
+        assert_eq!(o.device_here(new, true), Some(Some("Desk".into())));
+        assert_eq!(o.device_here(old, false), None);
+        assert!(!o.left_with(old, new));
+        // Given to the primary and a display computer on the old primary
+        // (`set_plays_on` writes the primary by its id then): the new primary
+        // got none of it, and the old one, back as the backup, plays it on its
+        // system default (`device` is the primary's).
+        o.set_plays_on(display, true, old);
+        assert_eq!(o.computers, vec![old, display]);
+        assert_eq!(
+            o.device_here(new, true),
+            None,
+            "no sound on the new primary"
+        );
+        assert_eq!(o.device_here(old, false), Some(None));
+        assert!(o.left_with(old, new));
+        assert!(!o.left_with(old, old));
+        // Moved: the new primary plays it on `device`, the display keeps it.
+        let mut moved = o.clone();
+        moved.devices_on.insert(old, "Old USB".into());
+        moved.move_to(old, new);
+        assert_eq!(moved.computers, vec![display, new]);
+        assert!(!moved.devices_on.contains_key(&old));
+        assert_eq!(moved.device_here(new, true), Some(Some("Desk".into())));
+        assert!(!moved.left_with(old, new));
+        // Given to the old primary alone but for one display that was
+        // unticked since: back to "the primary", with the device chosen here.
+        let mut alone = o.clone();
+        alone.computers = vec![old, new];
+        alone.devices_on.insert(new, "Booth USB".into());
+        assert!(
+            !alone.left_with(old, new),
+            "the new primary plays it already"
+        );
+        alone.move_to(old, new);
+        assert!(alone.computers.is_empty());
+        assert!(alone.devices_on.is_empty());
+        assert_eq!(alone.device_here(new, true), Some(Some("Booth USB".into())));
+        // Not given to the old primary: nothing moves.
+        let mut other = o.clone();
+        other.computers = vec![display];
+        other.move_to(old, new);
+        assert_eq!(other.computers, vec![display]);
+        // A device this computer hasn't (the old primary's): said, but only
+        // once the devices here are known.
+        let here = ["Built-in".to_string()];
+        assert_eq!(moved.device_missing(new, true, &here), Some("Desk".into()));
+        assert_eq!(moved.device_missing(new, true, &[]), None);
+        assert_eq!(moved.device_missing(new, true, &["Desk".to_string()]), None);
+        assert_eq!(o.device_missing(new, true, &here), None, "not played here");
     }
 
     #[test]
