@@ -106,6 +106,9 @@ pub fn start(
             for (k, v) in extra {
                 cmd.env(k, v);
             }
+        } else {
+            // A display computer: display mode comes only from `--display`.
+            cmd.arg("--display");
         }
         if let Some(d) = displays.get(i) {
             cmd.env("DISPLAY", d);
