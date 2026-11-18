@@ -978,6 +978,10 @@ pub fn finish(
     );
     // (Each computer's own measurements are among its lines already.)
     let mut report = net_judge::report(&judged, &notes, played, &about);
+    report.push('\n');
+    for l in run.fleet.load_lines() {
+        report.push_str(&format!("{l}\n"));
+    }
     if !run.fleet.computers.is_empty() {
         report.push_str("\nEach computer's own log\n");
         for c in run.fleet.computers.values() {

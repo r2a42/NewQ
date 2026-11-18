@@ -9,6 +9,8 @@
 pub mod clock;
 pub mod discover;
 pub mod hub;
+// Test Mode's generated network load (both ways, its own connections).
+pub mod load;
 // The network test's measurements (stage 6).
 pub mod measure;
 // A follower's own measurements while the primary runs a test.

@@ -97,6 +97,8 @@ pub(super) struct Playing {
     local_stats: Option<crate::stats::StatsLog>,
     /// The primary's test asked for its sound muted here.
     test_muted: bool,
+    /// The test's network load with the primary (`net::load`), while measuring.
+    load: Option<crate::net::load::LoadClient>,
 }
 
 impl Playing {
@@ -962,7 +964,8 @@ impl App {
             return;
         }
         match t {
-            NetTest::Begin { run, start } => {
+            NetTest::Begin { run, start, load } => {
+                self.net_load(from, run, load);
                 if self.play.measure.running() != Some(run) {
                     self.play.measuring_since = Some(Instant::now());
                     // Stalls from before the test aren't its.
@@ -1009,6 +1012,7 @@ impl App {
                 self.play.local_stats = None;
                 self.unmute_test();
                 self.play.measuring_since = None;
+                self.play.load = None;
                 // Its log since the test began, read on a thread (it can be
                 // large).
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -1121,6 +1125,7 @@ impl App {
             }
         }
         if self.play.measure.running().is_none() {
+            self.play.load = None;
             return;
         }
         if self.play.mode != NetMode::Follower
@@ -1133,6 +1138,7 @@ impl App {
             self.play.measuring_since = None;
             self.play.local = Default::default();
             self.play.local_stats = None;
+            self.play.load = None;
             self.unmute_test();
             return;
         }
@@ -1203,6 +1209,33 @@ impl App {
                 false,
             );
         }
+    }
+
+    /// The primary's test asks for (or no longer for) the network load: dial
+    /// it, on a thread, once a run (again if the last connection ended).
+    fn net_load(&mut self, from: NodeId, run: u64, ask: Option<crate::net::load::LoadAsk>) {
+        let Some(ask) = ask else {
+            self.play.load = None;
+            return;
+        };
+        if self
+            .play
+            .load
+            .as_ref()
+            .is_some_and(|c| c.run() == run && !c.ended())
+        {
+            return;
+        }
+        let Some(addr) = self.ui.net.peer(from).and_then(|p| p.addr) else {
+            log::info!("network load: the primary's address isn't known; none here");
+            return;
+        };
+        self.play.load = Some(crate::net::load::LoadClient::start(
+            std::net::SocketAddr::new(addr, ask.port),
+            self.ui.net.me.id,
+            run,
+            &ask,
+        ));
     }
 
     /// This computer's outputs' frame rates, its working sound device and

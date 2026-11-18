@@ -40,6 +40,9 @@ pub struct TestMode {
     pub decode_secs: u64,
     /// The heavier lap for the graphics card (remembered by the window).
     pub heavy: bool,
+    /// How hard a test across the show network loads it (`net::load`;
+    /// remembered by the window, read by `Fleet::new` from `Prefs`).
+    pub load: crate::net::load::LoadLevel,
     /// What the window has ticked to test (`choice`).
     pub parts: super::choice::Parts,
     /// Why the last Start did nothing, for the window.
@@ -75,6 +78,7 @@ impl Default for TestMode {
             download: true,
             decode_secs: super::decode::TRIAL_SECS,
             heavy: false,
+            load: crate::net::load::LoadLevel::Off,
             parts: super::choice::Parts::default(),
             notice: None,
             net_in: Vec::new(),

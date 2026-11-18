@@ -1474,6 +1474,19 @@ run first, as one test. No command line.
   slow motion. In any one frame of the video, the two numbers should be the same,
   or one apart (that is the refresh, above); the bars should be in the same slot
   or the next. Two or more apart is worth sending with the zip.
+- **Load the network on purpose.** *More ▸ Load the network while testing* (Off,
+  *Light* about 50 Mbit/s, *Heavy* about 400 Mbit/s, or *As fast as it goes*)
+  streams made-up bytes both ways between the primary and each computer, on a
+  connection of their own, for as long as the test plays: the same strain as a
+  big file copy over the network during a show, but nothing is downloaded or
+  saved. It applies to every test that runs across the show network, so run
+  once with it and once without and compare the round trips and late commands.
+  The running window shows the rate with each computer now; the report says
+  whether it was on and how much went each way (MB and the average Mbit/s per
+  computer), or that a computer never connected for it (an older NewQ, a
+  firewall). Greyed, with the reason, without another computer in the network;
+  remembered on this computer, off unless chosen. Any trouble just stops it,
+  with a line in the log.
 
 ## Timelines
 
@@ -1868,6 +1881,7 @@ your show back exactly as it was. Nothing to type. The window asks, top to botto
 
 Then *Start*. *More* holds what is rarely needed: *Download real films and pictures* (on
 unless you untick it; *Where from?* names the sources), *Heavier load for the graphics card*,
+*Load the network while testing* (in a show network: the network test, above),
 *Check every feature* (the debug test, below) and *Compare hardware decoding* (below). The
 window remembers the length, the ticks, the screens and the sound on this computer.
 
