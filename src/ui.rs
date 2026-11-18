@@ -1465,7 +1465,7 @@ fn pane_ui(
             });
         }
         Pane::Cart => scrolled(ui, &mut |ui| cart(ui, show, engine, actions)),
-        Pane::Preview => scrolled(ui, &mut |ui| output_previews(ui, show, st)),
+        Pane::Preview => scrolled(ui, &mut |ui| output_previews(ui, show, st, true)),
         Pane::Active => scrolled(ui, &mut |ui| active_panel(ui, show, engine, st, actions)),
         Pane::Settings => {
             let locked = st.show_mode;
@@ -4528,7 +4528,9 @@ pub fn fps_reading(st: &UiState, id: OutputId) -> Option<String> {
         .map(|(f, _)| format!("{} in this window", crate::fps::text(f)))
 }
 
-fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
+/// `fill`: the pane is the preview's own, so the picture takes the height
+/// left in sight; else (a column with more below) its own height.
+fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
     let Some(i) = preview_index(&st.previews, st.preview_output, st.geometry_edit) else {
         return;
     };
@@ -4591,7 +4593,15 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     let margin = if editing { 14.0 } else { 0.0 };
     // The display's own shape, as large as the pane in sight allows; tall sub
     // displays are previewed narrower, not taller.
-    let space = preview::space(ui, e.canvas, margin, if editing { 1.2 } else { 0.75 });
+    let tall = if editing { 1.2 } else { 0.75 };
+    let space = if fill {
+        preview::space(ui, e.canvas, margin, tall)
+    } else {
+        let width = ui
+            .available_width()
+            .min(ui.clip_rect().right() - ui.cursor().min.x);
+        preview::space_size(e.canvas, width - 2.0 * margin, f32::INFINITY, tall)
+    };
     let (outer, _) = ui.allocate_exact_size(space + Vec2::splat(2.0 * margin), Sense::hover());
     // Black bars beside or above and below the picture.
     let bars = outer.shrink(margin);
@@ -14516,7 +14526,7 @@ mod tests {
 
     /// Draw the Preview pane in `pane` (in a scroll area, as docked) of a
     /// window `screen_px` pixels big at `ppp` pixels a point; where the picture went.
-    fn drawn_preview(st: &mut UiState, screen_px: Vec2, ppp: f32, pane: Rect) -> Rect {
+    fn drawn_preview(st: &mut UiState, screen_px: Vec2, ppp: f32, pane: Rect, fill: bool) -> Rect {
         let ctx = egui::Context::default();
         ctx.set_zoom_factor(ppp);
         let mut show = Show::default();
@@ -14531,7 +14541,7 @@ mod tests {
                 pane_ui.set_clip_rect(pane);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(&mut pane_ui, |ui| output_previews(ui, &mut show, st));
+                    .show(&mut pane_ui, |ui| output_previews(ui, &mut show, st, fill));
             });
             o.textures_delta.clear();
         }
@@ -14561,7 +14571,7 @@ mod tests {
                     Rect::from_min_max(pos2(846.0, 600.0), pos2(right, 760.0)),
                 ] {
                     let what = format!("{canvas:?} at {ppp}x in {pane:?}");
-                    let r = drawn_preview(&mut st, screen_px, ppp, pane);
+                    let r = drawn_preview(&mut st, screen_px, ppp, pane, true);
                     assert!(
                         (r.width() / r.height() - want).abs() < 0.01 * want,
                         "{what}: drawn {r:?}"
@@ -14589,6 +14599,14 @@ mod tests {
                 }
             }
         }
+        // In the Operator view's column (more below it): the picture's own
+        // height across the column, whatever is in sight, scrolled if need be.
+        let mut st = UiState::default();
+        st.previews.push(preview(1));
+        let column = Rect::from_min_max(pos2(900.0, 600.0), pos2(1280.0, 760.0));
+        let r = drawn_preview(&mut st, vec2(1280.0, 760.0), 1.0, column, false);
+        assert!(r.width() > 350.0 && r.height() > 190.0, "{r:?}");
+        assert!((r.width() / r.height() - 16.0 / 9.0).abs() < 0.01, "{r:?}");
     }
 
     /// Run frames of the Active panel under `events` (with Shift held if
