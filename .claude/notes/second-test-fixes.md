@@ -77,7 +77,9 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    alone (tests already use separate `NEWQ_NODE_DIR`s); (b) the hub notices one id beaconing from
    two ports/addresses and warns on both computers instead of switching between them; (c) the
    clock keeper aims at the session's own peer address and port, not the latest beacon's.
-   Confirm with WNO-2's own log (its `keeping the shared clock with` lines) before fixing.
+   **Confirmed by WNO-2's own log**: for the whole test it kept the clock with
+   `2.0.0.100:47820` (09:29:17); after a restart at 10:35, with the stray copy gone, it chose
+   `2.0.0.100:47821`, the real primary.
 8. **The clock error figure is nonsense when unlocked** (2,605,312 ms = 43 min). Find what the
    bound adds up while unlocked (`clock.rs::now`: `left` = slew × time remaining after a huge
    backward `e`, consistent with answers from two clocks); report "not locked" rather than a
@@ -105,5 +107,11 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    this laptop. The 0.24.1 4-fps laptop ("Assistant", RTX 4050) was not in this test, so that
    question stays open.
 15. The Mac's external monitor (VA24EHF at 100 Hz) drew about 85 fps in the network part.
+17. **The display computers' logs are already in the primary's zip**
+   (`<part>-computer-WNO-2-newq.log`, the end of its log per part), but the owner didn't find
+   them and sent the files separately. Make it obvious: one `computers/<name>/newq.log` with the
+   whole log since the test began, the report naming it ("WNO-2's own log is in this zip"), and
+   the Test window's finish line saying every computer's log is inside. Display computers make
+   no zip of their own, by design.
 16. Report wording: "WNO-2 1 / WNO-2 2" in the displays line; the per-computer lines repeat the
    problems twice; the clock-error "use a wire" advice is wrong when the link is wired.
