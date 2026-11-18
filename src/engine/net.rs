@@ -786,3 +786,7 @@ impl Engine {
 #[cfg(test)]
 #[path = "net_sound_tests.rs"]
 mod sound_tests;
+
+#[cfg(test)]
+#[path = "net_chain_tests.rs"]
+mod chain_tests;
