@@ -163,3 +163,27 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    first: the clock's big-step jump (`SharedNow::jumps` -> `Engine::net_shift_shared`, logged as
    "the shared clock jumped to the primary's") firing again and again, the single-instance or
    handoff checks, the not-reached card, or the per-screen card numbering. Read WNO-2's log first.
+   **Cause found in the 0.24.3 zip** (`computers/WNO-2/newq.log`): at 15:37:44 Windows reconfigured
+   the displays (one pseudo-display "WinDisc" 3840x1080, then `\\.\DISPLAY6/7`) and DXGI reported the
+   device suspended (0x887A0005). NewQ's device-loss recovery (`watch_gpu`) then picked **Microsoft
+   Basic Render Driver (Cpu)**, the only adapter offered at that instant, and stayed on it to the end:
+   uploads took 10.9 and 13.1 s, every frame waited ~1 s, and the laptop dropped out of the network
+   during the long stalls. An output render thread also panicked once ("Surface is not configured
+   for presentation", survived and restarted). Before 15:37 the laptop was fine: cue-list part
+   clock locked throughout (error up to 0.4 ms), 161 and 60 fps. Fixes: (a) never run outputs on a
+   software adapter if a hardware one exists: prefer hardware at every rebuild, and while on a
+   software adapter retry for the hardware one every few seconds and switch back; (b) if only a
+   software adapter is left, say so loudly (card, primary's row, report: "this computer lost its
+   graphics card"); (c) a surface that isn't configured is skipped and reconfigured, not a panic.
+   Why the driver reset is unknown (Windows Event Viewer, System log, around 15:37, e.g. nvlddmkm
+   4101, would say); the owner may know what happened on the laptop then.
+23. **Steady -26 to -27 ms corrections on WNO-2** (42 in the cue-list part, clock locked, error
+   0.4 ms): its cues seem to start about 26 ms off the primary's, just over `LEAVE_UNDER` (1.5
+   frames at 60 Hz = 25 ms), so each is corrected once. Look for a fixed offset (video lag, first
+   frame, present latency) on one side.
+24. **The Mac's sound dropouts are the system calling late, not NewQ's mixing**: 124 stream errors
+   in newq.log, starting 14:51 before the test with nothing playing; "NewQ's mixing took at most
+   0.0 ms … the longest time between two calls for sound was 32 ms". The report's "Mixing the sound
+   took up to 144% of the time it has" reads the gap as load: say "the system called for sound late"
+   instead. Possible causes: MacBook speakers' power saving, another app; a larger buffer may help.
+25. No timeline clip came up more than 0.5 s late in this run (the 33.5 s one didn't recur).
