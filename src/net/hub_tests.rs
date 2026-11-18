@@ -153,6 +153,7 @@ fn two_computers_find_each_other_and_the_primary_adopts_names_and_releases() {
             ..Default::default()
         }],
         audio_devices: vec!["Speakers".into(), "USB interface".into()],
+        software: None,
     });
     let pv = until(&p, "the display's monitors", |v| {
         peer(v, did)

@@ -215,6 +215,8 @@ pub struct Run {
     /// when it was last looked at (seconds into the test).
     pub drawing: Vec<super::net_judge::MonitorNotes>,
     drawing_looked: Option<f64>,
+    /// This computer drew in software (`gpu::drawing_in_software`).
+    pub software: Option<crate::adapters::SoftwareDrawing>,
 }
 
 /// A timeline test's part of a run (see `testmode::timeline`).
@@ -1129,6 +1131,10 @@ impl TestMode {
                 if r.drawing_looked.is_none_or(|l| t - l >= 1.0) {
                     r.drawing_looked = Some(t);
                     super::net_judge::note_drawing(&mut r.drawing, &st.drawing);
+                    super::net_judge::note_software(
+                        &mut r.software,
+                        crate::gpu::drawing_in_software(),
+                    );
                 }
             }
             Phase::Full(r) => r.note_drawing(&st.drawing),
@@ -1917,6 +1923,7 @@ fn launch(
         sound_device: super::hitches::working_device(engine),
         drawing: Vec::new(),
         drawing_looked: None,
+        software: None,
     })
 }
 
@@ -1932,6 +1939,10 @@ impl Run {
             f.extend(super::analysis::analyse_timeline(&tl.watch.notes, &clean));
         }
         f.extend(self.hitches.findings(hours, self.sound_device.as_deref()));
+        f.extend(super::net_judge::software_finding(
+            "This computer",
+            self.software.as_ref(),
+        ));
         f.extend(super::net_judge::drawing_findings("This computer", &self.drawing).1);
         f
     }
@@ -2615,7 +2626,7 @@ pub(super) fn system_report(
     p(format!("Memory: {} MB", sys.total_memory() >> 20));
     p(format!(
         "Graphics: {}",
-        crate::gpu::GPU_NAME.get().map_or("unknown", String::as_str)
+        crate::gpu::gpu_name().unwrap_or_else(|| "unknown".into())
     ));
     for m in &st.monitors {
         p(format!(

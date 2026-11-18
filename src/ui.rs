@@ -2306,6 +2306,7 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
                      the lid open.",
             );
         }
+        crate::adapters::status(ui);
         network::status(ui, st);
         net_media::status(ui, st);
         if st.keeping_awake {

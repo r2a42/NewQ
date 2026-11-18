@@ -56,24 +56,126 @@ impl<T> Mailbox<T> {
     }
 }
 
+/// Whether a window's surface is configured, as far as its render thread
+/// knows. A display change (Windows rearranging its displays, a driver
+/// reset) can make a configure fail; wgpu then panics on the next
+/// `get_current_texture` of a surface that was never configured ("Surface is
+/// not configured for presentation"). So a frame is skipped, and the
+/// configure tried again a little later, until it takes.
+struct Ready {
+    /// Names the window in the log.
+    what: String,
+    ok: bool,
+    /// It has been said that it isn't configured (so "again" can be said).
+    said: bool,
+    last_try: Option<Instant>,
+}
+
+/// How often a surface that would not configure is tried again.
+const RETRY_CONFIGURE: Duration = Duration::from_millis(250);
+
+impl Ready {
+    fn new(what: impl Into<String>) -> Ready {
+        Ready {
+            what: what.into(),
+            ok: false,
+            said: false,
+            last_try: None,
+        }
+    }
+
+    /// Note whether a configure took, logging only a change.
+    fn note(&mut self, ok: bool, why: &str) {
+        if ok != self.ok {
+            if ok {
+                if self.said {
+                    log::info!("{}: its surface is configured again", self.what);
+                }
+            } else {
+                self.said = true;
+                log::warn!(
+                    "{}: its surface is not configured ({why}); skipping frames until it is",
+                    self.what
+                );
+            }
+        }
+        self.ok = ok;
+        self.last_try = Some(Instant::now());
+    }
+
+    fn configure(
+        &mut self,
+        gpu: &Gpu,
+        surface: &wgpu::Surface,
+        config: &wgpu::SurfaceConfiguration,
+        why: &str,
+    ) -> bool {
+        let ok = gpu.try_configure(surface, config);
+        self.note(ok, why);
+        ok
+    }
+
+    /// Configured, or configured now (at most every `RETRY_CONFIGURE`).
+    fn ensure(
+        &mut self,
+        gpu: &Gpu,
+        surface: &wgpu::Surface,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> bool {
+        if self.ok {
+            return true;
+        }
+        if self.last_try.is_some_and(|t| t.elapsed() < RETRY_CONFIGURE) {
+            return false;
+        }
+        self.configure(gpu, surface, config, "it would not configure")
+    }
+}
+
+/// The surface's next picture, if there is one to draw into: skipped (None)
+/// while the device is lost or the surface can't be configured, never a
+/// panic of the render thread.
 fn acquire(
     gpu: &Gpu,
     surface: &wgpu::Surface,
     config: &wgpu::SurfaceConfiguration,
+    ready: &mut Ready,
 ) -> Option<wgpu::SurfaceTexture> {
-    match surface.get_current_texture() {
-        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
-            Some(f)
-        }
-        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-            gpu.configure(surface, config);
-            match surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(f)
-                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => Some(f),
-                _ => None,
+    // The main thread rebuilds everything once it has seen the loss.
+    if gpu.lost.why().is_some() || !ready.ensure(gpu, surface, config) {
+        return None;
+    }
+    let get = || crate::crash::catch_expected(|| surface.get_current_texture());
+    match get() {
+        Ok(
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f),
+        ) => Some(f),
+        Ok(wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) => {
+            if !ready.configure(gpu, surface, config, "the surface was outdated or lost") {
+                return None;
+            }
+            match get() {
+                Ok(
+                    wgpu::CurrentSurfaceTexture::Success(f)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(f),
+                ) => Some(f),
+                Ok(_) => None,
+                Err(()) => {
+                    ready.note(false, "getting its picture failed");
+                    None
+                }
             }
         }
-        _ => None,
+        Ok(wgpu::CurrentSurfaceTexture::Validation) => {
+            ready.note(false, "getting its picture failed validation");
+            None
+        }
+        // Timeout, occluded: try at the next frame.
+        Ok(_) => None,
+        Err(()) => {
+            ready.note(false, "getting its picture failed");
+            None
+        }
     }
 }
 
@@ -82,12 +184,13 @@ fn resize(
     surface: &wgpu::Surface,
     config: &mut wgpu::SurfaceConfiguration,
     size: (u32, u32),
+    ready: &mut Ready,
 ) {
     let size = (size.0.max(1), size.1.max(1));
     if (config.width, config.height) != size {
         config.width = size.0;
         config.height = size.1;
-        gpu.configure(surface, config);
+        ready.configure(gpu, surface, config, "a resize would not configure");
     }
 }
 
@@ -342,6 +445,8 @@ fn output_loop(
         placement(&window)
     );
     let mut waits = WaitLog::default();
+    let mut ready = Ready::new(format!("output {slot:?} on {monitor}"));
+    ready.configure(&gpu, &surface, &config, "it would not configure at start");
     loop {
         let (size, groups, blend) = match mailbox.take() {
             OutputJob::Quit => break,
@@ -353,9 +458,9 @@ fn output_loop(
         };
         let started = Instant::now();
         crate::crash::test_panic("render");
-        resize(&gpu, &surface, &mut config, size);
+        resize(&gpu, &surface, &mut config, size, &mut ready);
         let asked = Instant::now();
-        let Some(frame) = acquire(&gpu, &surface, &config) else {
+        let Some(frame) = acquire(&gpu, &surface, &config, &mut ready) else {
             continue;
         };
         // How long the graphics system made this window wait for a picture
@@ -381,7 +486,7 @@ fn output_loop(
             );
             config.present_mode = wgpu::PresentMode::Mailbox;
             drop(frame);
-            gpu.configure(&surface, &config);
+            ready.configure(&gpu, &surface, &config, "Mailbox would not configure");
             waits = WaitLog::default();
             continue;
         }
@@ -933,6 +1038,8 @@ fn control_loop(
     // one it doesn't have (egui believes an earlier renderer holds it) would
     // panic; skipping it just leaves a stale patch until egui sends it whole.
     let mut known: std::collections::HashSet<egui::TextureId> = Default::default();
+    let mut ready = Ready::new("a control window");
+    ready.configure(&gpu, &surface, &config, "it would not configure at start");
     loop {
         let mut f = match mailbox.take() {
             ControlJob::Quit => break,
@@ -949,12 +1056,12 @@ fn control_loop(
             }
         }
         let freed: Vec<egui::TextureId> = f.textures.free.drain().collect();
-        resize(&gpu, &surface, &mut config, f.size);
+        resize(&gpu, &surface, &mut config, f.size, &mut ready);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [config.width, config.height],
             pixels_per_point: f.pixels_per_point,
         };
-        if let Some(frame) = acquire(&gpu, &surface, &config) {
+        if let Some(frame) = acquire(&gpu, &surface, &config, &mut ready) {
             let view = frame.texture.create_view(&Default::default());
             let mut encoder = gpu
                 .device

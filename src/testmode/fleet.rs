@@ -637,6 +637,11 @@ impl Fleet {
             start: self.start.unwrap_or(now),
         };
         for p in st.net.peers.iter().filter(|p| p.ours && p.connected) {
+            // A computer that lost its graphics card says so in its status.
+            if let Some(c) = self.computers.get_mut(&p.id) {
+                let soft = p.status.as_ref().and_then(|s| s.software_drawing.clone());
+                net_judge::note_software(&mut c.notes.software, soft);
+            }
             let told = self.told.get(&p.id).copied();
             let quiet = self
                 .computers

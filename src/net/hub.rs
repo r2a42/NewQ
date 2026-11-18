@@ -118,6 +118,8 @@ pub enum NetAction {
 pub struct LocalFacts {
     pub monitors: Vec<MonitorReport>,
     pub audio_devices: Vec<String>,
+    /// Its windows are drawn in software (`gpu::drawing_in_software`).
+    pub software: Option<crate::adapters::SoftwareDrawing>,
 }
 
 /// How this computer is playing with the others, told to the hub by the app
@@ -1842,6 +1844,7 @@ impl State {
             term: self.me.term,
             monitors: self.local.monitors.clone(),
             audio_devices: self.local.audio_devices.clone(),
+            software_drawing: self.local.software.clone(),
             disk_free: self.disk_free,
             link: self.link,
             path: self.own_path,

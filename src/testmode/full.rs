@@ -212,6 +212,8 @@ pub struct FullRun {
     /// This computer's screens' drawing, and when it was last looked at.
     pub drawing: Vec<super::net_judge::MonitorNotes>,
     drawing_looked: Option<f64>,
+    /// This computer drew in software (`gpu::drawing_in_software`).
+    pub software: Option<crate::adapters::SoftwareDrawing>,
 }
 
 /// Whether a streaming server can be run for the check: the program is with
@@ -449,6 +451,7 @@ pub fn launch(
         ff: engine.ff.clone(),
         drawing: Vec::new(),
         drawing_looked: None,
+        software: None,
     })
 }
 
@@ -459,6 +462,7 @@ impl FullRun {
         if self.drawing_looked.is_none_or(|l| t - l >= 1.0) {
             self.drawing_looked = Some(t);
             super::net_judge::note_drawing(&mut self.drawing, now);
+            super::net_judge::note_software(&mut self.software, crate::gpu::drawing_in_software());
         }
     }
 
@@ -898,6 +902,10 @@ pub fn finish(
         run.log_at(t, &line);
     }
     findings.extend(run.hitches.findings(hours, run.sound_device.as_deref()));
+    findings.extend(super::net_judge::software_finding(
+        "This computer",
+        run.software.as_ref(),
+    ));
     findings.extend(super::net_judge::drawing_findings("This computer", &run.drawing).1);
     let panics = crate::crash::panic_count().saturating_sub(run.panics_before);
     if panics > 0 {

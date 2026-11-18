@@ -590,6 +590,8 @@ pub struct NetRun {
     /// it was last looked at (shared time).
     own_drawing: Vec<net_judge::MonitorNotes>,
     drawing_looked: Option<f64>,
+    /// This computer drew in software (`gpu::drawing_in_software`).
+    own_software: Option<crate::adapters::SoftwareDrawing>,
     _awake: KeepAwake,
     wanted: Vec<&'static Asset>,
     /// How long it is meant to play (s).
@@ -647,6 +649,7 @@ impl NetRun {
             events,
             hitches: super::hitches::Hitches::new(started),
             own_drawing: Vec::new(),
+            own_software: None,
             drawing_looked: None,
             _awake: awake,
             wanted,
@@ -741,6 +744,10 @@ impl NetRun {
                 if self.drawing_looked.is_none_or(|t| now - t >= 1.0) {
                     self.drawing_looked = Some(now);
                     net_judge::note_drawing(&mut self.own_drawing, &st.drawing);
+                    net_judge::note_software(
+                        &mut self.own_software,
+                        crate::gpu::drawing_in_software(),
+                    );
                 }
                 while self.next < self.script.len() && self.script[self.next].0 <= played {
                     let act = self.script[self.next].1;
@@ -912,6 +919,10 @@ pub fn finish(
         f.text = format!("This computer (the primary): {}", f.text);
         f
     }));
+    own.extend(net_judge::software_finding(
+        "This computer (the primary)",
+        run.own_software.as_ref(),
+    ));
     own.extend(net_judge::drawing_findings("This computer (the primary)", &run.own_drawing).1);
     let notes: Vec<ComputerNotes> = run
         .fleet

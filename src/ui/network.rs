@@ -795,8 +795,13 @@ fn step_words(s: &proto::StatusReport) -> (String, Color32) {
 /// A plain warning for each of a computer's monitors whose window draws at
 /// under half its display's rate (R21: in time, but stuttering).
 pub fn slow_drawing(name: &str, s: &proto::StatusReport) -> Vec<String> {
-    s.monitors
-        .iter()
+    let software = s
+        .software_drawing
+        .as_ref()
+        .map(|d| format!("⚠ {}", d.sentence(name)));
+    software
+        .into_iter()
+        .chain(s.monitors.iter()
         .enumerate()
         .filter(|(_, m)| m.drawing_slowly())
         .map(|(i, m)| {
@@ -807,7 +812,7 @@ pub fn slow_drawing(name: &str, s: &proto::StatusReport) -> Vec<String> {
                 m.drawing_fps.unwrap_or(0.0),
                 m.refresh_hz.unwrap_or(60.0)
             )
-        })
+        }))
         .collect()
 }
 

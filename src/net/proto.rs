@@ -61,6 +61,11 @@ pub struct StatusReport {
     pub monitors: Vec<MonitorReport>,
     /// Its audio output devices, named as its audio settings list them.
     pub audio_devices: Vec<String>,
+    /// Its windows are drawn in software: it lost its graphics card (or has
+    /// none NewQ can use) and its pictures are very slow. A NewQ before 0.24.4
+    /// neither sends nor reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub software_drawing: Option<crate::adapters::SoftwareDrawing>,
     /// Bytes free on the disk its log folder is on.
     pub disk_free: Option<u64>,
     pub link: Link,
@@ -596,6 +601,36 @@ mod tests {
         let mut data = MAGIC.to_vec();
         data.extend(serde_json::to_vec(&b).unwrap());
         assert_eq!(decode_beacon(&data).unwrap().system, "");
+    }
+
+    /// Drawing in software is told only when it happens, and a status from a
+    /// NewQ that doesn't know of it (or an older one reading a newer) reads.
+    #[test]
+    fn drawing_in_software_is_in_the_status_only_when_so() {
+        let plain = serde_json::to_value(StatusReport::default()).unwrap();
+        assert!(plain.get("software_drawing").is_none());
+        let back: StatusReport = serde_json::from_value(plain).unwrap();
+        assert_eq!(back.software_drawing, None);
+        let soft = StatusReport {
+            software_drawing: Some(crate::adapters::SoftwareDrawing {
+                adapter: "Microsoft Basic Render Driver".into(),
+                lost: true,
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(Msg::Status(Box::new(soft.clone()))).unwrap();
+        assert_eq!(v["software_drawing"]["lost"], true);
+        match serde_json::from_value::<Msg>(v.clone()).unwrap() {
+            Msg::Status(s) => assert_eq!(*s, soft),
+            m => panic!("{m:?}"),
+        }
+        // An older NewQ's own struct, without the field, still reads it.
+        #[derive(serde::Deserialize)]
+        struct Older {
+            #[allow(dead_code)]
+            name: String,
+        }
+        let _: Older = serde_json::from_value(v).unwrap();
     }
 
     #[test]
