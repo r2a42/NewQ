@@ -231,6 +231,9 @@ pub struct UiState {
     /// on the Show network page.
     pub start_at_login: bool,
     pub start_at_login_request: Option<bool>,
+    /// A display computer opened as NewQ: its banner's *Open as a display
+    /// computer* was pressed (the app switches to display mode).
+    pub open_as_display_request: bool,
     /// A follower: the primary is running a test that this computer plays
     /// along with and measures itself for (set by the app each pass).
     pub following_test: bool,

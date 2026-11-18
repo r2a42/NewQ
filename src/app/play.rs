@@ -70,6 +70,9 @@ pub(super) struct Playing {
     pub vouched: HashSet<NodeId>,
     /// The card drawn on each monitor (its words and texture).
     pub cards: HashMap<usize, (Card, std::sync::Arc<crate::gpu::LayerTexture>)>,
+    /// Since when no computer has had a session with this one (a display
+    /// computer's card: `not_reached_words`).
+    unreached_since: Option<Instant>,
     /// This display computer has been in step with its show, its media here:
     /// its screens are black between cues from then on (`card_shows`).
     ready: bool,
@@ -511,15 +514,17 @@ impl App {
     }
 
     /// Start at login on this computer (`autostart.rs`), as the primary asked
-    /// or the page ticked.
+    /// or the page ticked: only ever on someone's word, never by itself (a
+    /// computer made a display is not set to start at login).
     pub(super) fn set_start_at_login(&mut self, on: bool) {
-        // A display computer comes back as one (`--display`): no splash,
-        // nothing asked, its cards at once.
+        // A display computer comes back as one (`--display`, display mode):
+        // no splash, nothing asked, its cards at once.
         let display = self.play.display || self.ui.net.me.role == Role::Display;
         match crate::autostart::set(on, display) {
             Ok(()) => log::info!(
-                "start at login {}",
-                if on { "switched on" } else { "switched off" }
+                "start at login {} ({})",
+                if on { "switched on" } else { "switched off" },
+                crate::autostart::name(display)
             ),
             Err(e) => self
                 .engine
@@ -528,13 +533,23 @@ impl App {
         self.ui.start_at_login = crate::autostart::is_set();
     }
 
-    /// A role this computer was given that the primary might want it to have
-    /// at login: a display computer starts at login unless told otherwise.
-    pub(super) fn play_role_changed(&mut self, role: Role) {
-        if role == Role::Display && !crate::autostart::is_set() {
-            self.set_start_at_login(true);
+    /// NewQ opened normally on a display computer of a show network (its
+    /// banner's *Open as a display computer*): display mode from now on, as if
+    /// NewQ Display had started it. The control window hides and every monitor
+    /// gets its window (`keep_control_hidden`, `reconcile_outputs`).
+    pub(super) fn open_as_display(&mut self) {
+        if !self.play.display {
+            log::info!("show network: opened as a display computer from the control window");
+            self.play.display = true;
         }
     }
+}
+
+/// Whether NewQ, started again (`restart_self`), needs `--display` added to
+/// its arguments: it is in display mode now but wasn't started so (the
+/// banner's *Open as a display computer*). Pure, for the tests.
+pub(super) fn restart_adds_display(display: bool, args: &[std::ffi::OsString]) -> bool {
+    display && !args.iter().any(|a| a == "--display")
 }
 
 // ---- Display computers (D8) ----
@@ -564,16 +579,59 @@ pub(super) fn quits(key: egui::Key, mods: egui::Modifiers) -> bool {
     key == egui::Key::Q && mods.command && !mods.alt && !mods.shift
 }
 
-/// A display computer: one the primary made a display (switched on and
-/// adopted), or one started as a display (`--display`) that is waiting for a
-/// primary or is its display. Given another role (the backup) it is not:
-/// its control window shows, as for any backup. Pure, for the tests.
+/// Display mode (no control window, every monitor an output): only a NewQ
+/// started as a display (`--display`: NewQ Display, or start at login on a
+/// display computer) that is waiting for a primary or is its display. NewQ
+/// started normally opens its control window even on a computer a primary
+/// made a display (it follows, locked, and its banner offers display mode or
+/// leaving: `paired_display`). Given another role (the backup) it is not: its
+/// control window shows, as for any backup. Pure, for the tests.
 pub(super) fn display_computer(me: &Identity, started_as_display: bool) -> bool {
-    match me.role {
-        Role::Display => started_as_display || (me.on && me.adopted()),
-        Role::Alone => started_as_display,
-        Role::Primary | Role::Backup => false,
+    started_as_display && matches!(me.role, Role::Display | Role::Alone)
+}
+
+/// A display computer of a show network opened as NewQ, not as NewQ Display:
+/// its control window shows (locked, as any follower's) and its banner says
+/// what it is and offers display mode or leaving the network. Pure, for the
+/// tests.
+pub(super) fn paired_display(me: &Identity, started_as_display: bool) -> bool {
+    me.on && me.adopted() && me.role == Role::Display && !started_as_display
+}
+
+/// How long a display computer goes without any computer reaching it (no
+/// session up) before its card says so (`not_reached_words`).
+pub(super) const NOT_REACHED_AFTER: Duration = Duration::from_secs(20);
+
+/// Since when nothing has reached this computer, after this look: reset by a
+/// session up, started by the first look without one. Pure, for the tests.
+pub(super) fn unreached_since(
+    was: Option<Instant>,
+    reached: bool,
+    now: Instant,
+) -> Option<Instant> {
+    if reached {
+        None
+    } else {
+        Some(was.unwrap_or(now))
     }
+}
+
+/// The card's words for a display computer that no primary has reached for
+/// `NOT_REACHED_AFTER` (it announces itself, but no session came): plain,
+/// with the firewall named as one possibility, Windows' own only on Windows.
+/// `primary`: the one it belongs to, if any. Pure, for the tests.
+pub(super) fn not_reached_words(primary: Option<&str>, windows: bool) -> String {
+    let first = match primary {
+        Some(p) => format!("Not reached by the primary ({p}) for a while."),
+        None => "Not reached by a primary yet.".to_string(),
+    };
+    let wall = if windows {
+        "Windows Firewall on this computer may be blocking NewQ: look for its \"allow access\" \
+         question (press Alt+Tab), or allow NewQ in Windows Security, Firewall."
+    } else {
+        "the firewall on this computer may be blocking NewQ."
+    };
+    format!("{first}\nIf the primary lists this computer but can't add it, {wall}")
 }
 
 /// The windows a display computer has: one per connected monitor, whatever
@@ -623,16 +681,25 @@ pub(super) fn card_shows(
     }
 }
 
-/// The card's words: the computer's name, its address, who runs the show and
-/// where it stands. Pure, for the tests.
+/// Which screen of its computer a monitor is, as the primary numbers them (its
+/// Displays menu, Test Mode's *Show on*: the computer's report lists the
+/// monitors in this order): "Assistant · Screen 1", even with one. Pure, for
+/// the tests.
+pub(super) fn screen_name(name: &str, monitor: usize) -> String {
+    format!("{name} · Screen {}", monitor + 1)
+}
+
+/// The card's words: the computer's name and which of its screens this is,
+/// its address, who runs the show and where it stands. Pure, for the tests.
 pub(super) fn card_text(
     name: &str,
+    monitor: usize,
     address: Option<&str>,
     primary: Option<(&str, bool)>,
     standing: Option<Standing>,
     clock_ms: Option<f64>,
 ) -> String {
-    let mut lines = vec![name.to_string()];
+    let mut lines = vec![screen_name(name, monitor)];
     if let Some(a) = address {
         lines.push(a.to_string());
     }
@@ -711,6 +778,15 @@ impl App {
         display_computer(&self.ui.net.me, self.play.display)
     }
 
+    /// Whether any computer has a session with this one now (once a pass,
+    /// before the cards are made: `not_reached_words`).
+    pub(super) fn note_reached(&mut self) {
+        let v = &self.ui.net;
+        let reached = !v.me.on || v.peers.iter().any(|p| p.connected);
+        self.play.unreached_since =
+            unreached_since(self.play.unreached_since, reached, Instant::now());
+    }
+
     /// This computer's address on the network, for its card (looked at now
     /// and then: a cable plugged in, an address given).
     pub(super) fn own_address(&mut self) -> Option<String> {
@@ -735,20 +811,18 @@ impl App {
     /// The card on one monitor of this computer, if any: the name big while
     /// the primary asks it to Identify (on every output, whatever the role);
     /// on a display computer, the quiet card until it is in step, and always on
-    /// a monitor the show gives no display.
-    pub(super) fn card(&mut self, has_display: bool) -> Option<Card> {
+    /// a monitor the show gives no display. `monitor`: which of this
+    /// computer's monitors (the card numbers it: `screen_name`).
+    pub(super) fn card(&mut self, monitor: usize, has_display: bool) -> Option<Card> {
         let v = self.ui.net.clone();
         if let Some(until) = v.identify_until
             && Instant::now() < until
         {
             // Flashing: on half a second, dimmer the next.
             let on = (local_now() * 2.0) as i64 % 2 == 0;
+            let text = format!("{}\nScreen {}", v.name, monitor + 1);
             return Some(Card {
-                text: if on {
-                    v.name.clone()
-                } else {
-                    format!("{} ", v.name)
-                },
+                text: if on { text } else { format!("{text} ") },
                 big: true,
                 hint: None,
             });
@@ -775,6 +849,7 @@ impl App {
         let primary = v.following.as_ref().map(|f| (f.name.as_str(), f.online));
         let mut text = card_text(
             &v.name,
+            monitor,
             address.as_deref(),
             primary,
             standing,
@@ -786,6 +861,18 @@ impl App {
             if used.bytes_wanted > 0 && used.bytes_here < used.bytes_wanted {
                 text.push_str(&format!("\nMedia {:.0} % here", used.percent()));
             }
+        }
+        // Announcing itself, but no primary has come for a while: say so
+        // (a firewall's question can hide behind this full-screen card).
+        if v.port.is_some()
+            && self
+                .play
+                .unreached_since
+                .is_some_and(|t| t.elapsed() >= NOT_REACHED_AFTER)
+        {
+            let primary = v.following.as_ref().map(|f| f.name.as_str());
+            text.push_str("\n\n");
+            text.push_str(&not_reached_words(primary, cfg!(windows)));
         }
         let waiting = !v.me.adopted();
         let mut hint = Vec::new();
@@ -1158,6 +1245,7 @@ mod tests {
     fn a_display_card_says_who_and_where_and_how_it_stands() {
         let t = card_text(
             "Left",
+            0,
             Some("10.0.0.2"),
             Some(("Booth", true)),
             Some(Standing::GettingReady),
@@ -1165,10 +1253,11 @@ mod tests {
         );
         assert_eq!(
             t,
-            "Left\n10.0.0.2\n\nRun from Booth\nGetting ready · clock ±0.2 ms"
+            "Left · Screen 1\n10.0.0.2\n\nRun from Booth\nGetting ready · clock ±0.2 ms"
         );
         let t = card_text(
             "Left",
+            1,
             None,
             None,
             Some(Standing::WaitingForClock),
@@ -1176,16 +1265,61 @@ mod tests {
         );
         assert_eq!(
             t,
-            "Left\n\nWaiting for the primary\nWaiting for the primary's clock"
+            "Left · Screen 2\n\nWaiting for the primary\nWaiting for the primary's clock"
         );
-        let t = card_text("Left", None, Some(("Booth", false)), None, None);
+        let t = card_text("Left", 0, None, Some(("Booth", false)), None, None);
         assert!(t.contains("Waiting for the primary (Booth)"), "{t}");
         // Started as a display and not added yet: any primary on the network.
-        let t = card_text("Left", Some("10.0.0.2"), None, None, None);
+        let t = card_text("Left", 0, Some("10.0.0.2"), None, None, None);
         assert_eq!(
             t,
-            "Left\n10.0.0.2\n\nWaiting for a NewQ primary on this network"
+            "Left · Screen 1\n10.0.0.2\n\nWaiting for a NewQ primary on this network"
         );
+    }
+
+    /// Every screen's card says which it is, numbered as the primary numbers
+    /// that computer's monitors (from 1, in the order its report lists them),
+    /// even when there is only one.
+    #[test]
+    fn each_screens_card_has_its_number() {
+        assert_eq!(screen_name("Assistant", 0), "Assistant · Screen 1");
+        assert_eq!(screen_name("Assistant", 2), "Assistant · Screen 3");
+        let cards: Vec<String> = (0..3)
+            .map(|m| card_text("Assistant", m, None, None, None, None))
+            .collect();
+        assert!(cards[0] != cards[1] && cards[1] != cards[2]);
+        assert!(cards[1].starts_with("Assistant · Screen 2\n"));
+    }
+
+    #[test]
+    fn a_display_computer_not_reached_for_a_while_says_so_calmly() {
+        let t0 = Instant::now();
+        // The first look without a session starts the count; a session ends it.
+        let since = unreached_since(None, false, t0);
+        assert_eq!(since, Some(t0));
+        let later = t0 + Duration::from_secs(5);
+        assert_eq!(unreached_since(since, false, later), Some(t0));
+        assert_eq!(unreached_since(since, true, later), None);
+        // Waiting for any primary, or for its own.
+        let w = not_reached_words(None, false);
+        assert!(w.starts_with("Not reached by a primary yet.\n"), "{w}");
+        assert!(w.contains("the firewall on this computer may be blocking NewQ"));
+        assert!(!w.contains("Windows"));
+        let w = not_reached_words(Some("Booth"), true);
+        assert!(w.starts_with("Not reached by the primary (Booth) for a while."));
+        assert!(w.contains("Windows Firewall"), "{w}");
+        assert!(w.contains("If the primary lists this computer but can't add it"));
+    }
+
+    /// Started again as the primary asked: display mode chosen from the
+    /// banner comes back as display mode.
+    #[test]
+    fn a_restart_keeps_display_mode() {
+        let plain: Vec<std::ffi::OsString> = vec!["show.newq".into()];
+        assert!(restart_adds_display(true, &plain));
+        assert!(!restart_adds_display(false, &plain));
+        let shown: Vec<std::ffi::OsString> = vec!["--display".into()];
+        assert!(!restart_adds_display(true, &shown));
     }
 
     #[test]
@@ -1209,10 +1343,15 @@ mod tests {
         };
         let adopted = node::adopt(&waiting, &claim, None, Role::Display).unwrap();
         assert!(display_computer(&adopted, true));
-        assert!(display_computer(&adopted, false));
+        assert!(!paired_display(&adopted, true));
+        // ...but only display mode when started as one (NewQ Display, start at
+        // login): opened as NewQ, its control window shows, and says so.
+        assert!(!display_computer(&adopted, false));
+        assert!(paired_display(&adopted, false));
         // Made the backup: its controls show, however it was started.
         let backup = node::set_role(&adopted, Role::Backup).unwrap();
         assert!(!display_computer(&backup, true));
+        assert!(!paired_display(&backup, false));
         // Released by the primary: started as a display, it waits as one again.
         let released = node::release(&adopted);
         assert!(display_computer(&released, true));

@@ -870,6 +870,41 @@ fn the_backup_takes_control_with_one_confirming_click() {
     assert!(w.find("net_rects", "take_control").is_none());
 }
 
+/// A display computer opened as NewQ (not NewQ Display) shows its window,
+/// locked, says what it is and offers display mode or leaving; its start at
+/// login can be set there though the rest of the window is locked.
+#[test]
+fn a_display_computer_opened_as_newq_offers_display_mode_or_leaving() {
+    for modern in [false, true] {
+        let (mut w, mut show, mut st) = locked_window(modern, follower_view(Role::Display));
+        let screen = Rect::from_min_size(Pos2::ZERO, SIZE);
+        let said = w
+            .find("net_rects", "paired_display")
+            .expect("the display computer's line");
+        assert!(screen.contains_rect(said), "{said:?}");
+        w.press(&mut show, &mut st, "net_rects", "open_as_display");
+        assert!(st.open_as_display_request, "modern {modern}");
+        assert!(st.net_requests.is_empty());
+        w.press(&mut show, &mut st, "net_rects", "banner_start_at_login");
+        assert_eq!(st.start_at_login_request, Some(true));
+        w.press(&mut show, &mut st, "net_rects", "leave_network");
+        assert_eq!(st.net_requests, vec![NetAction::SetOn(false)]);
+        // None of it overlaps the banner's first line.
+        let banner = w.find("net_rects", "locked_banner").unwrap();
+        let open = w.find("net_rects", "open_as_display").unwrap();
+        assert!(!open.intersects(banner) && screen.contains_rect(open));
+    }
+    // A backup has no such line, but its own start at login.
+    let (mut w, mut show, mut st) = locked_window(false, follower_view(Role::Backup));
+    assert!(w.find("net_rects", "paired_display").is_none());
+    w.press(&mut show, &mut st, "net_rects", "banner_start_at_login");
+    assert_eq!(st.start_at_login_request, Some(true));
+    assert_eq!(
+        super::at_login_label(true),
+        "Start as a display computer when this computer starts"
+    );
+}
+
 #[test]
 fn the_backup_says_when_the_primary_has_gone_quiet() {
     let mut v = follower_view(Role::Backup);

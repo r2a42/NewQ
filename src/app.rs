@@ -432,6 +432,14 @@ impl App {
             move || wake()
         });
         ui.net = net.view();
+        // An entry NewQ 0.24.0 wrote on a display computer started it plain;
+        // only `--display` starts display mode now, so it is written again
+        // with it (nothing is switched on that wasn't).
+        crate::autostart::fix_old_entry(
+            ui.net.me.on
+                && ui.net.me.adopted()
+                && ui.net.me.role == crate::net::node::Role::Display,
+        );
         ui.start_at_login = crate::autostart::is_set();
         let follows = ui.net.me.on && ui.net.me.adopted();
         let open_kept = follows && ui.show_path.is_none();
@@ -527,6 +535,12 @@ impl App {
             render_restart: None,
         };
         app.play.display = display;
+        if play::paired_display(&app.ui.net.me, display) {
+            log::info!(
+                "show network: a display computer opened as NewQ: the control window shows \
+                 (NewQ Display, or its banner, opens display mode)"
+            );
+        }
         // A follower starts with the show its primary last gave it.
         if open_kept {
             app.play_load_kept();
@@ -678,7 +692,6 @@ impl App {
         for ev in self.net.take_events() {
             match ev {
                 NetEvent::RoleChanged { role, .. } => {
-                    self.play_role_changed(role);
                     let v = self.net.view();
                     let follows = v
                         .following
@@ -710,6 +723,9 @@ impl App {
         self.play_send_show();
         if let Some(on) = self.ui.start_at_login_request.take() {
             self.set_start_at_login(on);
+        }
+        if std::mem::take(&mut self.ui.open_as_display_request) {
+            self.open_as_display();
         }
         let now = self.net.view();
         if !Arc::ptr_eq(&now, &self.ui.net) {
@@ -2336,8 +2352,9 @@ impl App {
             .iter()
             .map(|(m, s)| (*m, !s.outputs.is_empty()))
             .collect();
+        self.note_reached();
         for (m, has_display) in monitors {
-            cards.insert(m, self.card(has_display));
+            cards.insert(m, self.card(m, has_display));
         }
         for (m, screen) in &mut self.screens {
             let mut list: Vec<OutputGroup> = screen
@@ -2957,10 +2974,12 @@ impl App {
                 return;
             }
         };
-        match std::process::Command::new(exe)
-            .args(std::env::args_os().skip(1))
-            .spawn()
-        {
+        let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        // Opened as a display computer from the control window: back as one.
+        if play::restart_adds_display(self.play.display, &args) {
+            args.push("--display".into());
+        }
+        match std::process::Command::new(exe).args(args).spawn() {
             Ok(_) => {
                 log::info!("starting NewQ again, as the primary asked");
                 event_loop.exit();
