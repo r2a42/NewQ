@@ -72,11 +72,12 @@ impl Hitches {
         lines: &mut Vec<(f64, String)>,
     ) {
         let t = now.saturating_duration_since(self.started).as_secs_f64();
-        // (The late count is bumped just before the total: never more of them.)
+        // The late count is bumped just before the total, so one seen before
+        // its dropout waits for it.
         let mut late_left = late
             .saturating_sub(self.errors_late)
             .min(count.saturating_sub(self.errors));
-        self.errors_late = late;
+        self.errors_late += late_left;
         while self.errors < count {
             self.errors += 1;
             self.dropouts.push(t);
@@ -159,8 +160,19 @@ mod tests {
             "{:?}",
             lines
         );
+        // A late one counted a moment before its dropout is put to it then.
+        lines.clear();
+        h.noted_errors(7, 3, t0 + Duration::from_secs(91), &mut lines);
+        assert!(lines.is_empty());
+        h.noted_errors(8, 3, t0 + Duration::from_secs(92), &mut lines);
+        assert_eq!(h.dropouts_late, 2);
+        assert!(
+            lines[0].1.contains("the system called for sound late"),
+            "{:?}",
+            lines
+        );
         let [stalls, sound] = h.summary(Some("Speakers"));
-        assert!(sound.contains("2 on Speakers"), "{sound}");
+        assert!(sound.contains("3 on Speakers"), "{sound}");
         assert!(stalls.contains("never") || stalls.contains("held up"));
     }
 }

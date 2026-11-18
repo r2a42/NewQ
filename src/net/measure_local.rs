@@ -192,10 +192,11 @@ impl LocalMeter {
                 added += 1;
             }
         }
+        // (A late one counted just before its dropout waits for it.)
         let late_new = late.saturating_sub(seen_late).min(added);
         self.pending.dropouts_late += late_new as u32;
         self.errors = Some(count.max(seen));
-        self.errors_late = Some(late.max(seen_late));
+        self.errors_late = Some(seen_late + late_new);
     }
 
     /// The report to send now, if one is due (or `last`).
