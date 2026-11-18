@@ -185,6 +185,8 @@ pub fn own_rates(show: &Show, st: &UiState) -> Vec<OutputRate> {
 pub struct LocalNotes {
     pub samples: Vec<LocalSample>,
     pub dropouts: Vec<f64>,
+    /// How many of them came with the system calling for sound late.
+    pub dropouts_late: usize,
     pub outputs: OutputWatch,
     pub sound_device: Option<String>,
     pub ram_mb: u64,
@@ -198,6 +200,7 @@ impl LocalNotes {
         let t = r.samples.last().map(|s| s.t);
         self.samples.extend(r.samples);
         self.dropouts.extend(r.dropouts);
+        self.dropouts_late += r.dropouts_late as usize;
         if let Some(t) = t.or_else(|| self.samples.last().map(|s| s.t)) {
             self.outputs.note(t, &r.outputs);
         }
@@ -217,6 +220,7 @@ impl LocalNotes {
         let mut f = analysis::analyse(&samples, &[], 0.0, &[], hours);
         f.extend(analysis::analyse_dropouts(
             &self.dropouts,
+            self.dropouts_late,
             hours,
             self.sound_device.as_deref(),
         ));
@@ -1152,6 +1156,7 @@ mod tests {
             seq: 1,
             samples: vec![row(1.0, 20), row(3.0, 1500)],
             dropouts: vec![2.0, 2.1, 2.2],
+            dropouts_late: 3,
             outputs: vec![rate("Left 1", 3.0)],
             sound_device: Some("Speakers".into()),
             ram_mb: 16384,
@@ -1173,8 +1178,9 @@ mod tests {
             "{text:?}"
         );
         assert!(
-            text.iter()
-                .any(|t| t.starts_with("Left: ") && t.contains("dropout")),
+            text.iter().any(|t| t.starts_with("Left: ")
+                && t.contains("dropout")
+                && t.contains("the system called for sound late, not NewQ's mixing")),
             "{text:?}"
         );
         assert_eq!(v.verdict, Verdict::ProblemsFound);

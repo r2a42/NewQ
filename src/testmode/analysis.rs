@@ -305,12 +305,12 @@ pub fn analyse(
         .unwrap_or(0);
     if audio > 600 {
         out.push(problem(format!(
-            "Mixing the sound took up to {}% of the time it has: above about 90% it breaks up.",
+            "NewQ's mixing of the sound took up to {}% of the time it has: above about 90% it breaks up. Fewer sound effects or sounds at once would help.",
             audio / 10
         )));
     } else if audio > 400 {
         out.push(note(format!(
-            "Mixing the sound took up to {}% of its time.",
+            "NewQ's mixing of the sound took up to {}% of its time.",
             audio / 10
         )));
     }
@@ -513,9 +513,27 @@ pub fn stall_summary(stalls: &[StallNote]) -> String {
     }
 }
 
+/// What the dropouts are put down to, as a sentence, when `late` of `n` came
+/// with the system calling for sound late while NewQ's mixing was quick
+/// (`audio::cause`).
+pub fn dropout_cause(n: usize, late: usize) -> String {
+    const LATE: &str = "the system called for sound late, not NewQ's mixing: another program or the sound device's power saving; a larger buffer may help";
+    match late.min(n) {
+        0 => "newq.log says, for each, whether NewQ's mixing was slow or the system called for sound late".into(),
+        l if l == n => format!("Each time {LATE}"),
+        l => format!("{l} of them: {LATE}; newq.log says what the others were"),
+    }
+}
+
 /// The finding for the sound device's dropouts (stream errors), at `times`
-/// seconds into a run `hours` long, on `device` (None: no working device).
-pub fn analyse_dropouts(times: &[f64], hours: f64, device: Option<&str>) -> Vec<Finding> {
+/// seconds into a run `hours` long, `late` of them with the system calling for
+/// sound late, on `device` (None: no working device).
+pub fn analyse_dropouts(
+    times: &[f64],
+    late: usize,
+    hours: f64,
+    device: Option<&str>,
+) -> Vec<Finding> {
     if times.is_empty() {
         return Vec::new();
     }
@@ -530,7 +548,7 @@ pub fn analyse_dropouts(times: &[f64], hours: f64, device: Option<&str>) -> Vec<
         .collect::<Vec<_>>()
         .join(", ");
     let text = format!(
-        "The sound device{} reported {n} dropout{} (a buffer underrun: the sound broke up for a moment), at {at}{}{}. newq.log says, for each, whether NewQ's mixing was slow or the system called for sound late.",
+        "The sound device{} reported {n} dropout{} (a buffer underrun: the sound broke up for a moment), at {at}{}{}. {}.",
         device.map_or(String::new(), |d| format!(" ({d})")),
         if n == 1 { "" } else { "s" },
         if n > 10 { " and later" } else { "" },
@@ -539,6 +557,7 @@ pub fn analyse_dropouts(times: &[f64], hours: f64, device: Option<&str>) -> Vec<
         } else {
             String::new()
         },
+        dropout_cause(n, late),
     );
     let bad = burst || per_hour(n, hours) > DROPOUTS_PER_HOUR;
     vec![if bad { problem(text) } else { watch(text) }]
@@ -1317,7 +1336,7 @@ mod tests {
     #[test]
     fn dropouts_are_tracked_and_too_many_or_a_burst_are_a_problem() {
         let mac = [885.8, 917.2, 2250.7, 2492.9, 2714.4, 2854.4];
-        let f = analyse_dropouts(&mac[..2], 1.0, Some("MacBook Pro Speakers"));
+        let f = analyse_dropouts(&mac[..2], 0, 1.0, Some("MacBook Pro Speakers"));
         assert_eq!(f[0].severity, Severity::Watch);
         assert!(
             f[0].text
@@ -1328,14 +1347,14 @@ mod tests {
         assert!(f[0].text.contains("at 14:45, 15:17"), "{}", f[0].text);
         // Six in an hour is more than four.
         assert_eq!(
-            analyse_dropouts(&mac, 1.0, None)[0].severity,
+            analyse_dropouts(&mac, 0, 1.0, None)[0].severity,
             Severity::Problem
         );
         // Three within ten seconds, in a long run.
-        let f = analyse_dropouts(&[100.0, 104.0, 109.0], 8.0, None);
+        let f = analyse_dropouts(&[100.0, 104.0, 109.0], 0, 8.0, None);
         assert_eq!(f[0].severity, Severity::Problem);
         assert!(f[0].text.contains("3 or more within 10 s"), "{}", f[0].text);
-        assert!(analyse_dropouts(&[], 1.0, None).is_empty());
+        assert!(analyse_dropouts(&[], 0, 1.0, None).is_empty());
         assert_eq!(
             dropout_summary(&[], Some("Speakers")),
             "No audio dropouts on Speakers."
@@ -1343,6 +1362,48 @@ mod tests {
         assert_eq!(
             dropout_summary(&mac, Some("Speakers")),
             "Audio dropouts: 6 on Speakers."
+        );
+    }
+
+    #[test]
+    fn dropouts_with_the_system_calling_late_are_not_put_down_to_the_mixing() {
+        let mac = [885.8, 917.2, 2250.7];
+        // Every one with the system calling late (the 0.24.3 Mac's).
+        let f = analyse_dropouts(&mac, 3, 1.0, Some("MacBook Pro Speakers"));
+        let t = &f[0].text;
+        assert!(
+            t.contains("Each time the system called for sound late, not NewQ's mixing: another program or the sound device's power saving; a larger buffer may help."),
+            "{t}"
+        );
+        assert!(!t.contains("newq.log says"), "{t}");
+        // Some of them.
+        let t = &analyse_dropouts(&mac, 2, 1.0, None)[0].text;
+        assert!(
+            t.contains("2 of them: the system called for sound late"),
+            "{t}"
+        );
+        assert!(t.contains("newq.log says what the others were"), "{t}");
+        // None known: the log tells each.
+        let t = &analyse_dropouts(&mac, 0, 1.0, None)[0].text;
+        assert!(
+            t.contains("newq.log says, for each, whether NewQ's mixing was slow"),
+            "{t}"
+        );
+        assert!(!t.contains("Each time"), "{t}");
+        // More late than dropouts (counted a moment apart) is all of them.
+        assert_eq!(dropout_cause(1, 5), dropout_cause(1, 1));
+    }
+
+    #[test]
+    fn the_mixing_load_finding_names_newqs_mixing() {
+        let mut s = steady(100);
+        s[50].inputs.audio_permille = 700;
+        let f = analyse(&s, &[], 0.0, &[], 1.0);
+        assert!(
+            f.iter().any(|f| f.severity == Severity::Problem
+                && f.text
+                    .starts_with("NewQ's mixing of the sound took up to 70% of the time it has")),
+            "{f:?}"
         );
     }
 }

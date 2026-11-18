@@ -236,9 +236,66 @@ impl Stats {
 /// Stream errors reported by every device since NewQ started (Test Mode counts
 /// them: each is a moment the sound broke up).
 static STREAM_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// ...of which the system called for sound late while NewQ's mixing was quick.
+static STREAM_ERRORS_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn stream_errors() -> u64 {
     STREAM_ERRORS.load(Ordering::Relaxed)
+}
+
+/// The stream errors that came with the system calling for sound late, not
+/// with NewQ's mixing being slow (`cause`).
+pub fn stream_errors_late() -> u64 {
+    STREAM_ERRORS_LATE.load(Ordering::Relaxed)
+}
+
+/// Why the sound broke up, as far as the last buffers' timings tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// The system called for sound late (another program, the device's power
+    /// saving) while NewQ's mixing was quick.
+    SystemLate,
+    /// NewQ's mixing took most of a buffer's time.
+    MixingSlow,
+}
+
+/// The cause of a break-up from the worst `work` (NewQ's mixing of a buffer)
+/// and `gap` (between two calls for sound) of the last buffers, against a
+/// buffer's `period` (all ms). None when neither stands out.
+pub fn cause(work: f64, gap: f64, period: f64) -> Option<Cause> {
+    if gap > period * 1.5 && work < period * 0.5 {
+        Some(Cause::SystemLate)
+    } else if work >= period * 0.8 {
+        Some(Cause::MixingSlow)
+    } else {
+        None
+    }
+}
+
+/// How many buffers the mixing load is averaged over.
+const STEADY_BUFFERS: f32 = 8.0;
+
+/// The mixing load the status bar and Test Mode show: the time NewQ's mixing
+/// takes of the time a buffer gives it, averaged over about `STEADY_BUFFERS`
+/// buffers, the worst lately (falling slowly). Averaged because the time is
+/// the clock's: one call the system held up part way (its thread put aside)
+/// reads as a buffer that took longer than it had, though NewQ's mixing was
+/// quick (a Mac's "144%" with nothing playing).
+#[derive(Default)]
+struct LoadMeter {
+    steady: f32,
+    worst: f32,
+}
+
+impl LoadMeter {
+    /// One buffer's mixing took `used` of its time (1 = all of it); the load in
+    /// thousandths.
+    fn note(&mut self, used: f32) -> u32 {
+        let used = if used.is_finite() { used.max(0.0) } else { 0.0 };
+        self.steady += (used - self.steady) / STEADY_BUFFERS;
+        self.worst = self.steady.max(self.worst * 0.99);
+        (self.worst * 1000.0) as u32
+    }
 }
 
 /// What a device's stream error says in the log, with what the mixing was
@@ -251,10 +308,12 @@ fn error_text(name: &str, e: &str, n: u32, frames: u32, rate: u32, work: f64, ga
         t.push_str(&format!(
             "; {frames} frames a buffer, {period:.1} ms; over the last buffers NewQ's mixing took at most {work:.1} ms of one, and the longest time between two calls for sound was {gap:.1} ms"
         ));
-        if gap > period * 1.5 && work < period * 0.5 {
-            t.push_str(": the system called late, NewQ's mixing was not slow");
-        } else if work >= period * 0.8 {
-            t.push_str(": NewQ's mixing was too slow");
+        match cause(work, gap, period) {
+            Some(Cause::SystemLate) => {
+                t.push_str(": the system called late, NewQ's mixing was not slow")
+            }
+            Some(Cause::MixingSlow) => t.push_str(": NewQ's mixing was too slow"),
+            None => {}
         }
     }
     t.push(')');
@@ -1699,7 +1758,7 @@ where
     let channels = config.channels as usize;
     let rate = config.sample_rate as f32;
     // The load is the worst of the last second or so: it falls slowly.
-    let mut worst = 0.0f32;
+    let mut load = LoadMeter::default();
     let mut voices: Vec<MixVoice> = Vec::with_capacity(64);
     // Room for a big buffer up front, so the callback never has to ask for more.
     let mut mix: Vec<f32> = Vec::with_capacity(16_384 * channels);
@@ -1744,8 +1803,7 @@ where
                 let work = began.elapsed();
                 stats.note_buffer(frames, work, gap);
                 let used = work.as_secs_f32() / (frames as f32 / rate).max(1e-6);
-                worst = used.max(worst * 0.99);
-                stats.load.store((worst * 1000.0) as u32, Ordering::Relaxed);
+                stats.load.store(load.note(used), Ordering::Relaxed);
                 // Peaks fall by half about every 0.3 s.
                 let fall = 0.5f32.powf(frames as f32 / rate / 0.3);
                 update_peaks(&stats.peaks, &mix, channels, master, fall);
@@ -1756,6 +1814,10 @@ where
             STREAM_ERRORS.fetch_add(1, Ordering::Relaxed);
             let (work, gap) = told.recent_worst();
             let frames = told.frames.load(Ordering::Relaxed);
+            let period = f64::from(frames) * 1000.0 / f64::from(sample_rate.max(1));
+            if frames > 0 && cause(work, gap, period) == Some(Cause::SystemLate) {
+                STREAM_ERRORS_LATE.fetch_add(1, Ordering::Relaxed);
+            }
             log::error!(
                 "{}",
                 error_text(&name, &e.to_string(), n, frames, sample_rate, work, gap)
@@ -2077,6 +2139,47 @@ mod tests {
             error_text("S", "x", 1, 0, 48_000, 0.0, 0.0),
             "audio stream error on S: x (1 so far)"
         );
+    }
+
+    #[test]
+    fn a_break_up_is_put_down_to_the_system_or_to_the_mixing() {
+        let period = 512.0 * 1000.0 / 48_000.0;
+        // The Mac's: mixing at most 0.0 ms, 32 ms between two calls.
+        assert_eq!(cause(0.0, 32.0, period), Some(Cause::SystemLate));
+        // Mixing that takes most of the buffer, called on time or not.
+        assert_eq!(cause(10.0, 11.0, period), Some(Cause::MixingSlow));
+        assert_eq!(cause(9.0, 32.0, period), Some(Cause::MixingSlow));
+        // Neither stands out.
+        assert_eq!(cause(1.0, 11.0, period), None);
+    }
+
+    #[test]
+    fn the_mixing_load_is_not_raised_by_one_call_the_system_held_up() {
+        // Quick mixing with one call held up for 15 ms of a 10.7 ms buffer:
+        // the clock says 140% for that buffer, the load stays low.
+        let mut m = LoadMeter::default();
+        for _ in 0..100 {
+            m.note(0.01);
+        }
+        let held = m.note(1.4);
+        assert!(held < 200, "{held}");
+        for _ in 0..3 {
+            m.note(0.01);
+        }
+        // Mixing that really takes 90% of every buffer reads as that.
+        let mut m = LoadMeter::default();
+        let mut got = 0;
+        for _ in 0..100 {
+            got = m.note(0.9);
+        }
+        assert!((880..=900).contains(&got), "{got}");
+        // ...and falls slowly once it is over, so a sample a little later sees it.
+        for _ in 0..20 {
+            got = m.note(0.05);
+        }
+        assert!(got > 700, "{got}");
+        // Nothing that isn't a number gets in.
+        assert!(LoadMeter::default().note(f32::NAN) == 0);
     }
 
     #[test]

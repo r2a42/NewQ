@@ -122,6 +122,9 @@ pub struct LocalReport {
     pub samples: Vec<LocalSample>,
     /// Seconds into the test of each sound dropout since the last report.
     pub dropouts: Vec<f64>,
+    /// How many of them came with the system calling for sound late, not with
+    /// NewQ's mixing being slow (`audio::cause`; none from 0.24.3 and before).
+    pub dropouts_late: u32,
     /// Each of its output windows now: its name, frames a second and refresh.
     pub outputs: Vec<OutputRate>,
     /// The sound device it plays on, if one is working.
@@ -137,8 +140,10 @@ pub struct LocalReport {
 pub struct LocalMeter {
     run: Option<(u64, f64)>,
     pending: LocalReport,
-    /// The sound devices' error count when last looked at.
+    /// The sound devices' error count when last looked at, and how many of
+    /// them came with the system calling late.
     errors: Option<u64>,
+    errors_late: Option<u64>,
     next_send: f64,
     seq: u32,
 }
@@ -171,19 +176,26 @@ impl LocalMeter {
         }
     }
 
-    /// The sound devices' error count now: the new ones are dropouts.
-    pub fn errors(&mut self, now: f64, count: u64) {
+    /// The sound devices' error count now, `late` of them with the system
+    /// calling for sound late: the new ones are dropouts.
+    pub fn errors(&mut self, now: f64, count: u64, late: u64) {
         if self.run.is_none() {
             return;
         }
         let seen = *self.errors.get_or_insert(count);
+        let seen_late = *self.errors_late.get_or_insert(late);
         let t = (self.at(now) * 100.0).round() / 100.0;
+        let mut added = 0u64;
         for _ in seen..count {
             if self.pending.dropouts.len() < MAX_ROWS {
                 self.pending.dropouts.push(t);
+                added += 1;
             }
         }
+        let late_new = late.saturating_sub(seen_late).min(added);
+        self.pending.dropouts_late += late_new as u32;
         self.errors = Some(count.max(seen));
+        self.errors_late = Some(late.max(seen_late));
     }
 
     /// The report to send now, if one is due (or `last`).
@@ -258,9 +270,9 @@ mod tests {
         m.sample(10.0, &row(100, 0));
         assert!(m.report(10.0, vec![], None, 0, false).is_none());
         m.begin(7, 100.0);
-        m.errors(100.0, 4);
+        m.errors(100.0, 4, 1);
         m.sample(101.0, &row(300, 4));
-        m.errors(102.5, 6);
+        m.errors(102.5, 6, 2);
         let r = m
             .report(
                 102.5,
@@ -276,6 +288,10 @@ mod tests {
         assert_eq!(r.samples[0].rss_mb, 300);
         // Dropouts from before the test aren't its.
         assert_eq!(r.dropouts, vec![2.5, 2.5]);
+        assert_eq!(
+            r.dropouts_late, 1,
+            "one of the two with the system calling late"
+        );
         assert_eq!(r.outputs, vec![OutputRate::new("Left 1", 59.9, Some(60.0))]);
         // Not again until SEND_EVERY has passed.
         m.sample(103.0, &row(310, 6));

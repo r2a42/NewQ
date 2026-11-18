@@ -1187,9 +1187,11 @@ impl App {
         {
             self.play.local.sample(now, &row);
         }
-        self.play
-            .local
-            .errors(now, crate::media::audio::stream_errors());
+        self.play.local.errors(
+            now,
+            crate::media::audio::stream_errors(),
+            crate::media::audio::stream_errors_late(),
+        );
         let (outputs, device, ram) = self.local_facts();
         if let (Some(p), Some(r)) = (
             primary,
