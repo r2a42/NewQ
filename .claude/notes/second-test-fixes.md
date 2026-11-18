@@ -144,3 +144,7 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    removing it, so a choice nobody made survives. Proposed: remove entries older versions made,
    once, with a one-line note on that computer ("Start at login was switched off; tick it here to
    have it back"). Waiting on the owner's yes.
+21. **The Preview pane's aspect ratio is sometimes wrong** (owner, 2026-11-18). Not yet known: which
+   display it was showing, its size and shape against the pane's, whether in the classic or new
+   interface, and whether it was during a test. Owner: don't start fixing until the logs from the
+   0.24.3 run are in.
