@@ -187,3 +187,10 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    took up to 144% of the time it has" reads the gap as load: say "the system called for sound late"
    instead. Possible causes: MacBook speakers' power saving, another app; a larger buffer may help.
 25. No timeline clip came up more than 0.5 s late in this run (the 33.5 s one didn't recur).
+26. **A large LAN transfer ran during the 0.24.3 test** (owner, 2026-11-18; on purpose a useful
+   destructive test). Fits the timeline part's round trips up to 157 ms (28 ms in the cue-list
+   part). The late commands (up to 7.7 s) and the network drop-outs line up with the laptop's
+   10.9 and 13.1 s main-loop stalls on the software renderer, not the transfer alone. The GPU loss
+   itself is a display reconfiguration plus a DXGI device suspension; whether the transfer played
+   a part is unknown. Idea (not asked for): a Test Mode option that loads the network on purpose
+   (the media server pushing a large file between computers during the run) so this is repeatable.
