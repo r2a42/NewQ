@@ -12,8 +12,9 @@ computers are in; then read the logs, add what they show, and fix in order of ha
    behind the full-screen waiting card). Beacons go out, so the primary sees the laptop, but the
    primary's dial in (`hub.rs` `NetAction::Adopt` -> `pending` + redial) fails silently.
    Fix: after ~10 s without a session, say so on the row ("Can't reach Assistant at
-   192.168.x.x"), name the firewall when the computer is Windows, and log each failed dial
-   with its error. Confirm the cause from the logs first.
+   192.168.x.x") with the dial's own error, and log each failed dial. Neither log covers that
+   moment, so the firewall is a guess (the duplicate identity of item 7 is a rival cause): name
+   it only as one possibility on Windows.
 2. **Display computer: the firewall prompt is hidden behind the full-screen card.** Consider the
    card saying "Not reached by a primary yet: Windows may be blocking NewQ" when beacons go out
    but no primary has connected for a while, or checking for an inbound firewall rule at start
@@ -40,8 +41,10 @@ computers are in; then read the logs, add what they show, and fix in order of ha
    calls `set_start_at_login(true)`, which writes the value `NewQ` under
    `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (`autostart.rs`; a LaunchAgent on a Mac,
    `~/.config/autostart` on Linux), not a Startup-folder shortcut, so the owner didn't find it.
-   Make it opt-in (the Show network page's *Starts at login* and the primary's toggle), say in
-   NewQ where it is and how to turn it off, and name the entry "NewQ Display".
+   Owner's rule (2026-11-18): never without the user's input; it can be switched on **and off**
+   from the primary (the computer's row) and on the display computer itself. Say in NewQ where
+   it is and how to turn it off, and name the entry "NewQ Display". Existing entries: check
+   whether they were written with `--display` (0.24.0's may not have been).
 6. Optional: rebuild 0.24.2's Mac download signed and notarised once Apple's servers are back.
 
 ## Known before this test (still open)
@@ -77,9 +80,14 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    alone (tests already use separate `NEWQ_NODE_DIR`s); (b) the hub notices one id beaconing from
    two ports/addresses and warns on both computers instead of switching between them; (c) the
    clock keeper aims at the session's own peer address and port, not the latest beacon's.
-   **Confirmed by WNO-2's own log**: for the whole test it kept the clock with
-   `2.0.0.100:47820` (09:29:17); after a restart at 10:35, with the stray copy gone, it chose
-   `2.0.0.100:47821`, the real primary.
+   **WNO-2's own log supports it, not proves it**: it started keeping the clock with
+   `2.0.0.100:47820` (09:29:17) while the primary listened on 47821; after a restart at 10:35 it
+   chose `:47821`. `keep_clock` re-aims (`k.aim`) without logging, so how often it switched is not
+   in the log; the ~490 lock flips suggest two sources. Of the 14 corrections, some came in
+   locked spells, so not all drift is explained yet. To confirm: one NewQ on the Mac (port
+   47820), rerun Short with Cue list + Network. Log every re-aim.
+   Also: unlocked with a large backward `e` the clock slews at `max_slew_unlocked` (1 %); never
+   chase a big step that way while cues play.
 8. **The clock error figure is nonsense when unlocked** (2,605,312 ms = 43 min). Find what the
    bound adds up while unlocked (`clock.rs::now`: `left` = slew × time remaining after a huge
    backward `e`, consistent with answers from two clocks); report "not locked" rather than a
@@ -101,7 +109,7 @@ Mac zip (2026-11-18, Medium, Cue list + Timeline + Network, 1 h; primary MacBook
    treating it as real.
 12. **Timeline part: WNO-2 "worst 1650 frames apart" (10 s) for about 4 s**, around the same
    lap-3 moment. Probably the late Earthrise above; check.
-13. **Network part was good**: 1.8 ms apart at worst over 6 min, 0 late commands. Sound up to
+13. **Network part looked good** (1.8 ms apart, 0 late commands) but `apart_ms` compares when cues began, and command-started cues carry the primary's stamp, so it reads near 0 even with a wrong clock; it was unlocked for 260 of 689 rows. Measure what the screens show instead (the cue's time now on each side). Sound up to
    174 ms from the primary's (sound ahead is never held back, by design).
 14. **WNO-2 drew at its displays' rates** (162-165 fps at 165 Hz, 59-60 at 60 Hz): no stutter on
    this laptop. The 0.24.1 4-fps laptop ("Assistant", RTX 4050) was not in this test, so that
