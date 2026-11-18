@@ -239,3 +239,8 @@ unless it reproduces).
 
 **Before the next release (owner, 2026-11-18):** when every item above is done, a full review by a
 Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then the release.
+27. **Flaky test under load**: `net::media::tests::files_arrive_in_playhead_order_then_the_library_and_progress_reaches_the_primary`
+   failed once in a full run while three agents were building (arrival order assert, tests.rs:616);
+   passed 3/3 alone. Likely cause: the playhead (`p.at.playhead`) is set after `same_show`, so a
+   loaded machine lets the followers start pulling in the default order before the `MediaOrder`
+   arrives. Root-cause it and make the test wait for the order (or set it first); no retry loops.
