@@ -36,6 +36,13 @@ pub enum NetMode {
     Follower,
 }
 
+/// What had been started before a call (`Engine::net_mark`).
+pub(super) struct StartMark {
+    instance: u64,
+    pending: usize,
+    runs: Vec<(TimelineKey, super::RunState, f64, Option<f64>)>,
+}
+
 #[derive(Default)]
 pub struct NetGate {
     pub mode: NetMode,
@@ -229,6 +236,7 @@ impl Engine {
     /// ticks again from where they are.
     pub fn net_leave_shared(&mut self) {
         self.sync = None;
+        self.net_ended.clear();
         for a in &mut self.active {
             a.anchor = None;
         }
@@ -239,37 +247,65 @@ impl Engine {
     /// that long ago, so what it starts is placed as if it had been done then.
     pub fn net_apply(&mut self, show: &Show, cmd: &Command, late: f64) {
         self.enter();
-        let before = self.next_instance;
-        let pending_before = self.pending.len();
-        let runs_before = self.runs.net_runs();
+        let mark = self.net_mark();
         self.apply_one(show, cmd);
         if late > 0.0
             && let Some(now) = self.net_shared_time()
         {
-            for a in self.active.iter_mut().filter(|a| a.instance >= before) {
-                if a.run.is_none() {
-                    a.anchor = Some(now - late - a.elapsed);
-                }
-            }
-            for p in self.pending.iter_mut().skip(pending_before) {
-                if p.run.is_none() && p.reading.is_none() {
-                    p.remaining -= late;
-                }
-            }
-            // A run set going by it began its clock that long ago.
-            for (key, state, pos, _) in self.runs.net_runs() {
-                let was = runs_before.iter().find(|r| r.0 == key);
-                let went = matches!(state, super::RunState::Running | super::RunState::Cueing)
-                    && was.is_none_or(|w| {
-                        !matches!(w.1, super::RunState::Running | super::RunState::Cueing)
-                            || (w.2 - pos).abs() > 1e-9
-                    });
-                if went {
-                    self.runs.net_place(key, now - late - pos, None);
-                }
-            }
+            self.net_backdate(&mark, now - late);
         }
         self.leave();
+    }
+
+    /// What has been started so far, so that what a call starts after it can
+    /// be placed earlier (`net_backdate`).
+    pub(super) fn net_mark(&self) -> StartMark {
+        StartMark {
+            instance: self.next_instance,
+            pending: self.pending.len(),
+            runs: self.runs.net_runs(),
+        }
+    }
+
+    /// Ticking by a shared clock: what was started since `mark` (cues, the
+    /// pre-waits of cues to come, timelines set going) began at shared time
+    /// `due`, before this tick's: a late command, or the end of the cue it
+    /// follows, which every computer reaches at the same shared time whatever
+    /// frame it noticed it in. Nothing when `due` isn't before this tick.
+    pub(super) fn net_backdate(&mut self, mark: &StartMark, due: f64) {
+        let Some(now) = self.net_shared_time() else {
+            return;
+        };
+        let late = now - due;
+        if late.is_nan() || late <= 0.0 {
+            return;
+        }
+        for a in self
+            .active
+            .iter_mut()
+            .filter(|a| a.instance >= mark.instance)
+        {
+            if a.run.is_none() {
+                a.anchor = Some(due - a.elapsed);
+            }
+        }
+        for p in self.pending.iter_mut().skip(mark.pending) {
+            if p.run.is_none() && p.reading.is_none() {
+                p.remaining -= late;
+            }
+        }
+        // A run set going by it began its clock that long ago.
+        for (key, state, pos, _) in self.runs.net_runs() {
+            let was = mark.runs.iter().find(|r| r.0 == key);
+            let went = matches!(state, super::RunState::Running | super::RunState::Cueing)
+                && was.is_none_or(|w| {
+                    !matches!(w.1, super::RunState::Running | super::RunState::Cueing)
+                        || (w.2 - pos).abs() > 1e-9
+                });
+            if went {
+                self.runs.net_place(key, due - pos, None);
+            }
+        }
     }
 
     fn apply_one(&mut self, show: &Show, cmd: &Command) {

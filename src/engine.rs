@@ -69,6 +69,13 @@ fn video_start(
 const DEFAULT_OUTPUT_SIZE: (u32, u32) = (1920, 1080);
 /// A dip reveals anyway if the incoming cue hasn't started after this long.
 const REVEAL_TIMEOUT: f64 = 3.0;
+/// Ticking by a shared clock, a cue seen to end past its length is taken to
+/// have ended at its length (`ended_at`), up to this much before the tick
+/// that saw it (more is a stall, or a file that ran on past its length).
+const ENDED_LATE_MAX: f64 = 0.25;
+/// How long the shared time a cue ended at is kept for what it leads to (a
+/// group's next child, seen at the next tick).
+const ENDED_KEPT: f64 = 1.0;
 
 #[derive(Clone, Debug)]
 struct Ramp {
@@ -1162,6 +1169,9 @@ pub struct Engine {
     /// Ticking by a shared clock (`tick_shared`, the network sync trial): None
     /// unless that is called, so `tick` is as it always was.
     sync: Option<SharedTime>,
+    /// Ticking by a shared clock: the shared time each cue last came to its
+    /// end by itself, for what it leads to (`ended_at`); kept `ENDED_KEPT`.
+    net_ended: HashMap<CueId, f64>,
     /// In a show network: the gate on the engine's entry points (`engine/net.rs`).
     net: net::NetGate,
     /// A media finder of its own (tests); else the app's, if this computer
@@ -1227,6 +1237,7 @@ impl Engine {
             edits: Vec::new(),
             runs: timeline::Runs::default(),
             sync: None,
+            net_ended: HashMap::new(),
             net: net::NetGate::default(),
             media_finder: None,
             transfer_cards: true,
@@ -1276,6 +1287,7 @@ impl Engine {
             edits: Vec::new(),
             runs: timeline::Runs::default(),
             sync: None,
+            net_ended: HashMap::new(),
             net: net::NetGate::default(),
             media_finder: None,
             transfer_cards: true,
@@ -3693,6 +3705,9 @@ impl Engine {
             self.advance_groups(show)
         };
         let mut follow = Vec::new();
+        // Ticking by a shared clock: the cues that came to their end, and the
+        // shared time they got there.
+        let mut ended: Vec<(CueId, f64)> = Vec::new();
         let mut messages = Vec::new();
         let mut entries = Vec::new();
         let mut midpoints = Vec::new();
@@ -3891,7 +3906,8 @@ impl Engine {
                                     && !keep
                                     && !media.is_some_and(|m| m.hold_last_frame);
                                 a.held = true;
-                                completed_follow(a, cue, &mut follow);
+                                let end = ended_at(a, shared, on_clock);
+                                completed_follow(a, cue, end, &mut follow);
                             } else {
                                 completed = true;
                             }
@@ -4077,7 +4093,7 @@ impl Engine {
                     } else if !paused {
                         a.elapsed += dt;
                     }
-                    completed = done_groups.contains(&a.instance);
+                    completed = done_groups.iter().any(|d| d.0 == a.instance);
                 }
             }
 
@@ -4245,7 +4261,20 @@ impl Engine {
                 return false;
             }
             if completed {
-                completed_follow(a, cue, &mut follow);
+                // Where it ended by the shared clock: a group, where its last
+                // child did.
+                let end = match &a.kind {
+                    ActiveKind::Group(_) => done_groups
+                        .iter()
+                        .find(|d| d.0 == a.instance)
+                        .and_then(|d| d.1)
+                        .or(shared),
+                    _ => ended_at(a, shared, on_clock),
+                };
+                if let Some(end) = end {
+                    ended.push((a.cue_id, end));
+                }
+                completed_follow(a, cue, end, &mut follow);
                 return false;
             }
             true
@@ -4266,8 +4295,18 @@ impl Engine {
         for (id, matte, half, at) in midpoints {
             self.start_with(show, id, Some((matte, half)), at);
         }
-        for id in follow {
+        if let Some(now) = shared {
+            self.net_ended.retain(|_, t| now - *t <= ENDED_KEPT);
+        }
+        self.net_ended.extend(ended);
+        // What follows a cue starts where it ended by the shared clock, the
+        // same on every computer whatever frame each noticed the end in.
+        for (id, end) in follow {
+            let mark = self.net_mark();
             self.fire_next(show, id);
+            if let Some(end) = end {
+                self.net_backdate(&mark, end);
+            }
         }
         self.crumbs.lap("starting what follows");
         // The timelines: their groups' times, and the runs that have ended.
@@ -4362,10 +4401,14 @@ impl Engine {
 
     /// Fire the next child of every playlist whose current child has finished.
     /// Returns the groups (instances) whose children have all finished.
-    fn advance_groups(&mut self, show: &Show) -> Vec<u64> {
+    /// Ticking by a shared clock, each is placed at the shared time it was due
+    /// (`ended_at`): a child where the one before it ended (or, crossfading
+    /// in, that much before), a group where its last child ended.
+    fn advance_groups(&mut self, show: &Show) -> Vec<(u64, Option<f64>)> {
         let mut done = Vec::new();
         let mut to_fire = Vec::new();
         let mut early = Vec::new();
+        let ended = |id: &CueId| self.sync.and(self.net_ended.get(id).copied());
         for a in &self.active {
             let ActiveKind::Group(g) = &a.kind else {
                 continue;
@@ -4379,15 +4422,16 @@ impl Engine {
                 && let Some((aimed, t)) =
                     show.cue(current).and_then(|c| crossfade_into_next(show, c))
                 && aimed == next
-                && self.active.iter().any(|c| {
+                && let Some(c) = self.active.iter().find(|c| {
                     c.cue_id == current
                         && !c.stopping
                         && c.started
                         && c.duration.is_some_and(|d| d - c.elapsed <= t)
                 })
             {
+                let due = c.anchor.zip(c.duration).map(|(zero, d)| zero + d - t);
                 early.push((next, t));
-                to_fire.push((a.instance, next));
+                to_fire.push((a.instance, next, due));
                 continue;
             }
             if a.stopping || g.children.iter().any(|c| self.is_running(*c)) {
@@ -4399,8 +4443,14 @@ impl Engine {
                 continue;
             }
             match g.children.get(g.next) {
-                Some(&child) if g.mode == GroupMode::Playlist => to_fire.push((a.instance, child)),
-                _ => done.push(a.instance),
+                Some(&child) if g.mode == GroupMode::Playlist => {
+                    let before = g.next.checked_sub(1).and_then(|n| g.children.get(n));
+                    to_fire.push((a.instance, child, before.and_then(ended)));
+                }
+                _ => done.push((
+                    a.instance,
+                    g.children.iter().filter_map(ended).reduce(f64::max),
+                )),
             }
         }
         // A held cue started early is held that much longer, so it ends when it
@@ -4411,7 +4461,7 @@ impl Engine {
                 self.started_early.insert(cue, t);
             }
         }
-        for (instance, child) in to_fire {
+        for (instance, child, due) in to_fire {
             if let Some(ActiveKind::Group(g)) = self
                 .active
                 .iter_mut()
@@ -4420,7 +4470,11 @@ impl Engine {
             {
                 g.next += 1;
             }
+            let mark = self.net_mark();
             self.fire(show, child);
+            if let Some(due) = due {
+                self.net_backdate(&mark, due);
+            }
         }
         done
     }
@@ -4934,14 +4988,41 @@ fn sound_caught_up(cue: Option<&Cue>, behind: f64) {
     );
 }
 
-fn completed_follow(a: &mut ActiveCue, cue: Option<&Cue>, follow: &mut Vec<CueId>) {
+/// It came to its end (`end`: where, by the shared clock): what auto-follows
+/// it is due.
+fn completed_follow(
+    a: &mut ActiveCue,
+    cue: Option<&Cue>,
+    end: Option<f64>,
+    follow: &mut Vec<(CueId, Option<f64>)>,
+) {
     if a.followed || a.stopping {
         return;
     }
     a.followed = true;
     if cue.is_some_and(|c| c.continue_mode == ContinueMode::AutoFollow) {
-        follow.push(a.cue_id);
+        follow.push((a.cue_id, end));
     }
+}
+
+/// Ticking by a shared clock (`now`, this tick's), the shared time at which a
+/// cue that came to its end this tick got there: its time past its length
+/// (a clip kept by its timeline's clock: the clock past its end) is taken
+/// off, up to `ENDED_LATE_MAX`. The engine sees an end only at a tick, and
+/// each computer ticks at its own frame rate: what follows the cue starts
+/// from here, so it starts at the same shared time on all of them.
+fn ended_at(a: &ActiveCue, now: Option<f64>, on_clock: Option<f64>) -> Option<f64> {
+    let now = now?;
+    let over = match on_clock {
+        Some(left) if a.clocked => -left,
+        _ => a.duration.map_or(0.0, |d| a.elapsed - d),
+    };
+    let over = if over.is_finite() {
+        over.clamp(0.0, ENDED_LATE_MAX)
+    } else {
+        0.0
+    };
+    Some(now - over)
 }
 
 #[cfg(test)]

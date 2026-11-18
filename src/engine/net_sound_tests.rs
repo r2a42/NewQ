@@ -191,3 +191,146 @@ fn a_sound_that_starts_late_on_one_computer_catches_up_and_the_pictures_never_di
         }
     }
 }
+
+/// A chain of real media, each cue auto-following the last: a film with
+/// sound, a sound, a timeline group of a film and a sound, a film without
+/// sound, a sound with a pre-wait, then a long wait. The primary
+/// ticks at 60 Hz and the follower at 165 (the 0.24.3 test's Mac and Windows
+/// laptop); both do GO at one shared time, as a command makes them, and
+/// every cue after it is started by each engine itself as the one before
+/// ends. Each must begin at the same shared time on both (where the one
+/// before ended by the clock), not at the frame each noticed the end in:
+/// those differed by up to a 60 Hz frame at each link and added up (issue
+/// 23 of the 0.24.3 test: cues 26 ms off, each "put right").
+#[test]
+fn a_chain_of_films_and_sounds_starts_each_cue_together_at_any_frame_rate() {
+    use crate::show::{ContinueMode, CueKind, GroupMode};
+    let Some((ff, tone)) = crate::media::test_media("tone_5s.wav") else {
+        return;
+    };
+    let Some((_, film)) = crate::media::test_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let Some((_, smpte)) = crate::media::test_media("smpte_8s.mp4") else {
+        return;
+    };
+    let mut show = Show::default();
+    let mut ids = Vec::new();
+    // (type, file, end, pre-wait, in the timeline group)
+    let mut timeline = None;
+    for (ty, file, end, pre_wait, clip) in [
+        (CueType::Video, &film, 1.507, 0.0, false),
+        (CueType::Audio, &tone, 1.213, 0.0, false),
+        (CueType::Video, &smpte, 1.109, 0.0, true),
+        (CueType::Audio, &tone, 0.917, 0.419, true),
+        (CueType::Video, &smpte, 1.371, 0.0, false),
+        (CueType::Audio, &tone, 0.917, 0.253, false),
+    ] {
+        if clip && timeline.is_none() {
+            let mut g = show.make_cue(CueType::Group, None, show.cues.len());
+            if let CueKind::Group(gc) = &mut g.kind {
+                gc.mode = GroupMode::Timeline;
+            }
+            g.continue_mode = ContinueMode::AutoFollow;
+            ids.push(g.id);
+            timeline = Some(g.id);
+            show.cues.push(g);
+        }
+        let id = cue(&mut show, ty, file);
+        let c = show.cues.last_mut().expect("a cue");
+        c.kind.media_mut().expect("media").end = Some(end);
+        c.pre_wait = pre_wait;
+        if clip {
+            c.parent = timeline;
+        } else {
+            c.continue_mode = ContinueMode::AutoFollow;
+            ids.push(id);
+        }
+    }
+    let mut w = show.make_cue(CueType::Wait, None, show.cues.len());
+    if let CueKind::Wait(x) = &mut w.kind {
+        x.duration = 1000.0;
+    }
+    ids.push(w.id);
+    show.cues.push(w);
+    let mut p = Side::new(&ff, 512);
+    let mut f = Side::new(&ff, 480);
+    let t0 = Instant::now();
+    let shared = || t0.elapsed().as_secs_f64();
+    p.began = Some(0.0);
+    f.began = Some(0.0);
+    for s in [&mut p, &mut f] {
+        s.e.tick_shared(&show, 0.0);
+        s.e.load_ahead(&show, ids[0]);
+    }
+    while p.e.prepared.is_empty() || f.e.prepared.is_empty() {
+        assert!(shared() < 30.0, "the first cue was never got ready");
+        std::thread::sleep(Duration::from_millis(10));
+        let now = shared();
+        for s in [&mut p, &mut f] {
+            s.play_to(now);
+            s.e.tick_shared(&show, now);
+        }
+    }
+    let fire_at = shared() + 0.2;
+    // (side, its frame rate, its next tick, whether it has done the GO)
+    let mut sides = [
+        (p, 60.0, fire_at, false),
+        (f, 165.0, fire_at + 0.0013, false),
+    ];
+    // Each cue's anchor on each side, as first seen (the timeline group's
+    // clock's after the cues').
+    let mut anchors: Vec<[Option<f64>; 2]> = vec![[None, None]; ids.len() + 1];
+    while anchors.iter().any(|a| a.iter().any(Option::is_none)) {
+        std::thread::sleep(Duration::from_millis(1));
+        let now = shared();
+        assert!(now < fire_at + 60.0, "the chain never reached its end");
+        for (k, (s, hz, next, went)) in sides.iter_mut().enumerate() {
+            if now < *next {
+                continue;
+            }
+            // Its own rate, and a late wake-up as a real loop has.
+            *next = (*next + 1.0 / *hz).max(now);
+            s.play_to(now);
+            if !*went {
+                s.e.tick_shared(&show, fire_at);
+                s.e.fire(&show, ids[0]);
+                *went = true;
+            }
+            s.e.tick_shared(&show, now);
+            let state = s.e.net_state(now);
+            for (i, id) in ids.iter().enumerate() {
+                if anchors[i][k].is_none()
+                    && let Some(c) = state.cues.iter().find(|c| c.cue == *id)
+                {
+                    anchors[i][k] = Some(c.anchor);
+                }
+            }
+            let key = crate::timeline::TimelineKey::Group(timeline.expect("a timeline"));
+            if anchors[ids.len()][k].is_none()
+                && let Some(r) = state.runs.iter().find(|r| r.key == key)
+            {
+                anchors[ids.len()][k] = r.anchor;
+            }
+        }
+    }
+    let mut worst: f64 = 0.0;
+    for (i, a) in anchors.iter().enumerate() {
+        let (pa, fa) = (a[0].unwrap_or(0.0), a[1].unwrap_or(0.0));
+        eprintln!(
+            "cue {i}: primary {:.4} s, follower {:.4} s, {:+.1} ms apart",
+            pa - fire_at,
+            fa - fire_at,
+            (fa - pa) * 1000.0
+        );
+        worst = worst.max((fa - pa).abs());
+    }
+    let [(p, ..), (f, ..)] = &mut sides;
+    assert!(
+        worst < 0.002,
+        "{:.1} ms apart; {:?} {:?}",
+        worst * 1000.0,
+        p.e.take_problems(),
+        f.e.take_problems()
+    );
+}
