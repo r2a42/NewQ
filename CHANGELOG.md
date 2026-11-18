@@ -13,6 +13,10 @@ release page, and a release is refused if it has none.
   downloading or saving anything. The running window shows the rate with each computer; the
   report says whether it was on and how much went each way, so a run with it and one without
   can be compared. Off unless chosen; remembered on this computer.
+- **Advice for Windows show computers.** The README's display computer section now says how
+  to stop Windows Update installing a graphics driver in the middle of a show (it happened in
+  a test: the screens blinked): pause updates before a show, and on Windows Pro the policy *Do
+  not include drivers with Windows Updates*.
 - **After a backup takes control, it says where the sound went and can take it over.** A
   sound output given to the old primary and another computer stayed with the old primary, so
   the new primary played none of it and nothing said so. It still stays (the old primary may

@@ -1106,6 +1106,15 @@ Open it on a computer with projectors or screens and that is all you do there:
 - Keep NewQ Display in the same folder as NewQ (on a Mac, put both in
   *Applications*). It finds NewQ there and starts it as `newq --display`; if it
   can't find NewQ it says so.
+- **On Windows, stop Windows Update changing the graphics driver during a
+  show.** Windows can install or update the graphics driver by itself, in the
+  middle of a show: it happened in a test, the screens blinked and NewQ had to
+  recover its pictures. Before a show, pause updates (*Settings ▸ Windows
+  Update ▸ Pause updates*). On Windows Pro you can also keep drivers out of
+  Windows Update for good: in the Group Policy editor (`gpedit.msc`),
+  *Computer Configuration ▸ Administrative Templates ▸ Windows Components ▸
+  Windows Update ▸ Manage updates offered from Windows Update*, turn on *Do not
+  include drivers with Windows Updates*. Do this on the primary too.
 
 ### Setting it up, step by step
 
