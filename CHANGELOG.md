@@ -50,10 +50,9 @@ release page, and a release is refused if it has none.
   Tailscale), and what went wrong. The primary now tries every address the computer was heard
   on, not just one. On a Windows computer it mentions that Windows Firewall may be blocking NewQ.
 - **The clock figure is no longer nonsense.** A computer whose clock isn't settled reports *not
-  locked* instead of a number (the second test showed 2,605,312 ms). A clock that is a long
-  way ahead of the primary's is put right at once while nothing plays, and never chased slowly
-  for minutes while a cue runs (it is put right within half a minute, and what plays carries
-  on from where it is).
+  locked* instead of a number (the second test showed 2,605,312 ms). A clock that turns out to
+  be a long way off the primary's is put right at once instead of being chased slowly for
+  minutes (or days), and what plays on that computer carries on from where it is.
 
 ## 0.24.2
 
