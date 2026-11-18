@@ -1006,6 +1006,25 @@ fn a_monitor_drawing_slowly_is_said_on_the_page() {
     );
 }
 
+#[test]
+fn a_computer_drawing_in_software_is_said_on_the_page() {
+    let s = proto::StatusReport {
+        software_drawing: Some(crate::adapters::SoftwareDrawing {
+            adapter: "Microsoft Basic Render Driver".into(),
+            lost: true,
+        }),
+        ..Default::default()
+    };
+    let said = super::slow_drawing("WNO-2", &s);
+    assert_eq!(said.len(), 1);
+    assert!(
+        said[0].starts_with(
+            "⚠ WNO-2 lost its graphics card and is drawing in software (Microsoft Basic Render Driver): pictures will be very slow"
+        ),
+        "{said:?}"
+    );
+}
+
 /// Two NewQs with one identity (second test): the badge turns red and the page
 /// draws the warning in both interfaces; a follower whose clock isn't settled
 /// says "clock not locked" rather than a figure.

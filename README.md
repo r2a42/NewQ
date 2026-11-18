@@ -1041,6 +1041,14 @@ stays on the computer until you send it yourself.
   taken away mid-show, NewQ notices, says so in the status bar, and starts the
   main window and every output window again on a new device, usually in well
   under a second. Cues keep playing; a picture may blink out for that moment.
+  NewQ always draws with a graphics card when there is one. If the only thing
+  offered after a reset is the system's software renderer (on Windows
+  *Microsoft Basic Render Driver*, which draws a picture every few seconds),
+  NewQ uses it only to keep going, says so in red in the status bar (and, on a
+  display computer, on the primary's row for it and in the network test's
+  report), keeps looking for the card every few seconds, and moves back onto it
+  as soon as it is offered again. A display change in the middle of a frame no
+  longer stops an output window's drawing.
 
 ## Show network: several computers
 

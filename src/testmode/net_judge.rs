@@ -96,6 +96,8 @@ pub struct ComputerNotes {
     pub ended: bool,
     /// Its output windows' drawing, a monitor each.
     pub monitors: Vec<MonitorNotes>,
+    /// It drew in software at some time during the test (from its status).
+    pub software: Option<crate::adapters::SoftwareDrawing>,
 }
 
 /// How one of a computer's output windows drew over the test.
@@ -370,6 +372,24 @@ pub fn drawing_findings(who: &str, monitors: &[MonitorNotes]) -> (Vec<String>, V
     (lines, f)
 }
 
+/// A computer that drew in software during the test (`who` names it): a
+/// problem, whatever else its drawing says.
+pub fn software_finding(who: &str, s: Option<&crate::adapters::SoftwareDrawing>) -> Vec<Finding> {
+    s.map(|s| finding(Severity::Problem, s.report_sentence(who)))
+        .into_iter()
+        .collect()
+}
+
+/// Keep the first sight of drawing in software (`now`) in `kept`.
+pub fn note_software(
+    kept: &mut Option<crate::adapters::SoftwareDrawing>,
+    now: Option<crate::adapters::SoftwareDrawing>,
+) {
+    if kept.is_none() {
+        *kept = now;
+    }
+}
+
 /// Add what one look at a computer's drawing says to `notes`.
 pub fn note_drawing(notes: &mut Vec<MonitorNotes>, rates: &[MonitorRate]) {
     for m in rates {
@@ -464,6 +484,7 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
     // second is no show (R21). Judged whatever the times say.
     let (more, found) = drawing_findings(&c.name, &c.monitors);
     lines.extend(more);
+    f.extend(software_finding(&c.name, c.software.as_ref()));
     f.extend(found);
     if let Some(w) = c.worst_sound() {
         lines.push(format!("Sound up to {w:.0} ms from the primary's"));
@@ -898,6 +919,34 @@ mod tests {
         let mut c = good("Left");
         c.refresh_hz = Some(50.0);
         assert!(judge_computer(&c, 120.0).headline.contains("0.3 frames"));
+    }
+
+    /// WNO-2 in the 0.24.3 run: in step by the clock, a picture every 10 s
+    /// on Microsoft Basic Render Driver. The report names it as a problem.
+    #[test]
+    fn a_computer_that_drew_in_software_is_a_problem() {
+        let mut c = good("WNO-2");
+        let soft = crate::adapters::SoftwareDrawing {
+            adapter: "Microsoft Basic Render Driver".into(),
+            lost: true,
+        };
+        note_software(&mut c.software, None);
+        assert_eq!(c.software, None);
+        note_software(&mut c.software, Some(soft.clone()));
+        // The first sight is kept; a later "back on the card" doesn't clear it.
+        note_software(&mut c.software, None);
+        assert_eq!(c.software.as_ref(), Some(&soft));
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound, "{:?}", v.findings);
+        assert!(
+            v.findings.iter().any(|f| f.severity == Severity::Problem
+                && f.text.starts_with(
+                    "WNO-2 lost its graphics card and drew in software (Microsoft Basic Render Driver): its pictures were very slow"
+                )),
+            "{:?}",
+            v.findings
+        );
+        assert!(software_finding("This computer", None).is_empty());
     }
 
     #[test]

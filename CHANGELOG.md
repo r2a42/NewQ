@@ -6,6 +6,17 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **NewQ no longer stays on the computer's software renderer after the graphics card resets.** A
+  Windows laptop whose displays were rearranged mid-test had its graphics driver reset, and NewQ
+  took the only thing offered at that moment, *Microsoft Basic Render Driver*, and kept it: a
+  picture every 10 to 15 seconds for the rest of the show. NewQ now always picks a graphics card
+  over a software renderer, uses a software one only to keep going, looks for the card again
+  every few seconds and moves the displays back onto it once it is there. While it draws in
+  software it says so in red in the status bar, and a display computer tells the primary: its
+  row on the Show network page and the test report say "lost its graphics card and is drawing
+  in software: pictures will be very slow". An output window that meets a display change in the
+  middle of a frame now skips that frame instead of stopping and starting again.
+
 ## 0.24.3
 
 - **A picture on a timeline no longer flashes up a second copy on a display computer** when the

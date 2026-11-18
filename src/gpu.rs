@@ -47,8 +47,64 @@ impl DeviceLost {
     }
 }
 
-/// The graphics adapter in use, for the Test Mode report.
-pub static GPU_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// The graphics adapter the windows draw with (the latest, after a rebuild),
+/// for the Test Mode report.
+static GPU_NAME: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+
+pub fn gpu_name() -> Option<String> {
+    GPU_NAME.lock().clone()
+}
+
+/// Set while the windows draw with a software renderer (`adapters`): the
+/// status bar, the computer's status report and Test Mode say so.
+static SOFTWARE: parking_lot::Mutex<Option<crate::adapters::SoftwareDrawing>> =
+    parking_lot::Mutex::new(None);
+
+/// A graphics device has been lost in this run (the software warning then
+/// says the card was lost, not that there never was one).
+static LOST_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This computer's windows are drawn in software, and with what.
+pub fn drawing_in_software() -> Option<crate::adapters::SoftwareDrawing> {
+    SOFTWARE.lock().clone()
+}
+
+/// Note that the graphics device was lost (`app.rs::watch_gpu`).
+pub fn note_device_lost() {
+    LOST_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The instance the windows' devices come from. A new one for each rebuild
+/// after a loss: on Windows an instance's list of adapters is the one the
+/// system had when it was made, so an old one never sees the card come back.
+/// DX12 on Windows (Vulkan drivers there can stall acquiring frames for
+/// occluded windows). `WGPU_BACKEND=vulkan` etc. overrides this.
+pub fn instance_for(display: Option<winit::event_loop::OwnedDisplayHandle>) -> wgpu::Instance {
+    let mut desc = match display {
+        Some(d) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(d)),
+        None => wgpu::InstanceDescriptor::new_without_display_handle(),
+    };
+    if cfg!(windows) {
+        desc.backends = wgpu::Backends::DX12;
+    }
+    wgpu::Instance::new(desc.with_env())
+}
+
+/// The hardware graphics adapters the system offers now (their names), from
+/// a fresh instance: for the look for the card while drawing in software.
+/// Can take a while (and on a driver reset, longer): never on the main thread.
+pub fn hardware_offered() -> Vec<String> {
+    let instance = instance_for(None);
+    let offers: Vec<crate::adapters::Offer> =
+        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+            .iter()
+            .map(|a| crate::adapters::Offer::of(&a.get_info(), true))
+            .collect();
+    crate::adapters::hardware(&offers)
+        .into_iter()
+        .map(|o| o.name.clone())
+        .collect()
+}
 
 /// What NewQ has asked the graphics card for, in MB (what wgpu has allocated:
 /// textures and buffers), as the main loop last looked; `u64::MAX` until it
@@ -82,44 +138,82 @@ pub struct Gpu {
 
 impl Gpu {
     /// Create the GPU context, using `window` to pick a compatible adapter.
+    /// A hardware adapter always wins over a software renderer (`adapters`);
+    /// with `allow_software` false, finding only a software one is an error
+    /// (a rebuild after a loss gives the card a moment to come back).
     pub fn new(
         instance: wgpu::Instance,
         window: Arc<Window>,
+        allow_software: bool,
     ) -> Result<(Gpu, wgpu::Surface<'static>)> {
         let surface = instance.create_surface(window)?;
         // Every graphics card the system offers, for the log: on a laptop with
         // two, a display wired to the other one is drawn across to it.
-        for a in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+        let all = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        let mut offers = Vec::new();
+        for a in &all {
             let i = a.get_info();
+            let draws = a.is_surface_supported(&surface);
             log::info!(
                 "graphics adapter offered: {} ({:?}, {:?}){}",
                 i.name,
                 i.device_type,
                 i.backend,
-                if a.is_surface_supported(&surface) {
+                if draws {
                     ", can draw to the main window"
                 } else {
                     ""
                 }
             );
+            offers.push(crate::adapters::Offer::of(&i, draws));
         }
-        let adapter =
-            pollster::block_on(
-                instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    // WGPU_POWER_PREF=low selects the integrated GPU on hybrid laptops.
-                    power_preference: wgpu::PowerPreference::from_env()
-                        .unwrap_or(wgpu::PowerPreference::HighPerformance),
-                    force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
-                    apply_limit_buckets: false,
-                }),
-            )
-            .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
-        log::info!("GPU (the one used): {:?}", adapter.get_info());
-        {
-            let i = adapter.get_info();
-            let _ = GPU_NAME.set(format!("{} ({:?}, {:?})", i.name, i.backend, i.device_type));
+        // WGPU_POWER_PREF=low selects the integrated GPU on hybrid laptops.
+        let power =
+            wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance);
+        let first = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: power,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
+        }))
+        .ok();
+        let first_offer = first
+            .as_ref()
+            .map(|a| crate::adapters::Offer::of(&a.get_info(), true));
+        let adapter = match crate::adapters::better(
+            first_offer.as_ref(),
+            &offers,
+            power == wgpu::PowerPreference::LowPower,
+        ) {
+            Some(i) => {
+                log::warn!(
+                    "wgpu offered {}; taking {} instead (a graphics card before a software renderer)",
+                    first_offer
+                        .as_ref()
+                        .map_or("no adapter", |o| o.name.as_str()),
+                    offers[i].name
+                );
+                all[i].clone()
+            }
+            None => first.ok_or_else(|| anyhow!("no suitable GPU adapter"))?,
+        };
+        let info = adapter.get_info();
+        let software = crate::adapters::Kind::of(info.device_type, &info.name).is_software();
+        if software && !allow_software {
+            return Err(anyhow!(
+                "only a software renderer is offered ({})",
+                info.name
+            ));
         }
+        log::info!("GPU (the one used): {info:?}");
+        *GPU_NAME.lock() = Some(format!(
+            "{} ({:?}, {:?})",
+            info.name, info.backend, info.device_type
+        ));
+        *SOFTWARE.lock() = software.then(|| crate::adapters::SoftwareDrawing {
+            adapter: info.name.clone(),
+            lost: LOST_ONCE.load(std::sync::atomic::Ordering::Relaxed),
+        });
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("newq"),
@@ -181,6 +275,28 @@ impl Gpu {
     pub fn configure(&self, surface: &wgpu::Surface, config: &wgpu::SurfaceConfiguration) {
         let _alone = self.gate.write();
         surface.configure(&self.device, config);
+    }
+
+    /// Configure once and say whether it took: a configure that fails leaves
+    /// the surface unusable (wgpu panics on the next `get_current_texture` of
+    /// a surface never configured), and one on a lost device fails silently.
+    pub fn try_configure(
+        &self,
+        surface: &wgpu::Surface,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> bool {
+        if self.lost.why().is_some() {
+            return false;
+        }
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.configure(surface, config);
+        pollster::block_on(scope.pop()).is_none() && self.lost.why().is_none()
+    }
+
+    /// It draws with a software renderer (`adapters::Kind::Software`).
+    pub fn is_software(&self) -> bool {
+        let i = self.adapter.get_info();
+        crate::adapters::Kind::of(i.device_type, &i.name).is_software()
     }
 
     /// A GPU with no window (for the benchmark and the tests), if this machine has

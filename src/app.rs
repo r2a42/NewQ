@@ -175,13 +175,43 @@ fn start_output_thread(
 
 /// The graphics device was lost and its windows are being given a new one.
 struct GpuRecovery {
-    instance: wgpu::Instance,
     /// The old render threads, which must be gone (and their surfaces with
     /// them) before the windows can have new surfaces.
     stopping: Vec<JoinHandle<()>>,
     since: Instant,
     last_try: Option<Instant>,
     warned: bool,
+    /// Moving off a software renderer onto a card that was offered again,
+    /// not a loss.
+    to_hardware: bool,
+}
+
+/// While the windows draw in software (`adapters`): the look for a graphics
+/// card, every few seconds on a thread of its own (listing the adapters can
+/// take a while, longer during a driver reset), and the rebuilds onto one.
+struct SoftwareWatch {
+    since: Instant,
+    look: Option<(JoinHandle<Vec<String>>, Instant)>,
+    looked: Option<Instant>,
+    slow_look_said: bool,
+    /// Rebuilds onto a card that still ended in software, and the last one.
+    failed: u32,
+    last_switch: Option<Instant>,
+    gave_up_said: bool,
+}
+
+impl SoftwareWatch {
+    fn new() -> SoftwareWatch {
+        SoftwareWatch {
+            since: Instant::now(),
+            look: None,
+            looked: None,
+            slow_look_said: false,
+            failed: 0,
+            last_switch: None,
+            gave_up_said: false,
+        }
+    }
 }
 
 /// A test-pattern texture, with the output number and size it shows.
@@ -236,6 +266,12 @@ pub struct App {
     gpu: Option<Gpu>,
     recovery: Option<GpuRecovery>,
     gpu_restarts: u32,
+    /// For a new graphics instance at each rebuild (`gpu::instance_for`).
+    display_handle: Option<winit::event_loop::OwnedDisplayHandle>,
+    /// Drawing in software: looking for a card to go back to.
+    software: Option<SoftwareWatch>,
+    /// A card was offered again while drawing in software: rebuild onto it.
+    to_hardware: bool,
     /// For testing the recovery: when to destroy the graphics device
     /// (`NEWQ_LOSE_GPU_AFTER`, in seconds).
     lose_gpu_at: Option<Instant>,
@@ -472,6 +508,9 @@ impl App {
             gpu: None,
             recovery: None,
             gpu_restarts: 0,
+            display_handle: None,
+            software: None,
+            to_hardware: false,
             lose_gpu_at: std::env::var("NEWQ_LOSE_GPU_AFTER")
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
@@ -686,6 +725,7 @@ impl App {
                 })
                 .collect(),
             audio_devices: self.ui.audio_devices.clone(),
+            software: crate::gpu::drawing_in_software(),
         };
         if facts != self.net_told {
             self.net.set_local(facts.clone());
@@ -1137,13 +1177,22 @@ impl App {
             // The loss is reported when the device is polled.
             let _ = gpu.device.poll(wgpu::PollType::Poll);
         }
-        if self.recovery.is_none()
-            && let Some(gpu) = &self.gpu
-            && let Some(why) = gpu.lost.why()
-        {
-            self.engine.problem(format!(
-                "The graphics device was lost ({why}); restarting the displays"
-            ));
+        if self.recovery.is_none() {
+            self.watch_software();
+        }
+        let lost = self.gpu.as_ref().and_then(|g| g.lost.why());
+        if self.recovery.is_none() && self.gpu.is_some() && (lost.is_some() || self.to_hardware) {
+            let to_hardware = lost.is_none();
+            self.to_hardware = false;
+            if let Some(why) = lost {
+                crate::gpu::note_device_lost();
+                self.engine.problem(format!(
+                    "The graphics device was lost ({why}): the graphics driver probably restarted or was updated. Restarting the displays"
+                ));
+            } else {
+                self.engine
+                    .log("A graphics card is offered again: moving the displays back onto it");
+            }
             let mut stopping = Vec::new();
             if let Some(ctl) = &mut self.control {
                 stopping.extend(ctl.thread.take().map(ControlThread::quit));
@@ -1158,11 +1207,11 @@ impl App {
                 screen.needs_redraw = true;
             }
             self.recovery = Some(GpuRecovery {
-                instance: gpu.instance.clone(),
                 stopping,
                 since: Instant::now(),
                 last_try: None,
                 warned: false,
+                to_hardware,
             });
             self.gpu = None;
             // Everything on the old device is gone with it, streams included
@@ -1191,7 +1240,12 @@ impl App {
         let Some(ctl) = &mut self.control else {
             return;
         };
-        let (gpu, surface) = match Gpu::new(rec.instance.clone(), ctl.window.clone()) {
+        // A new instance each time: an old one's list of adapters is the
+        // system's when it was made (Windows), so it never sees the card back.
+        // A software renderer only once the card has had a moment to return.
+        let allow_software = crate::adapters::settles_for_software(rec.since.elapsed());
+        let instance = crate::gpu::instance_for(self.display_handle.clone());
+        let (gpu, surface) = match Gpu::new(instance, ctl.window.clone(), allow_software) {
             Ok(made) => made,
             Err(e) => {
                 // The driver may need a moment; keep trying.
@@ -1199,6 +1253,7 @@ impl App {
                 return;
             }
         };
+        let to_hardware = rec.to_hardware;
         let size = ctl.window.inner_size();
         let Some(config) = gpu.surface_config(&surface, (size.width, size.height)) else {
             log::warn!("the new graphics device can't draw to the main window");
@@ -1235,9 +1290,93 @@ impl App {
                     .log(e.replace("{display}", &(monitor + 1).to_string())),
             }
         }
-        self.gpu = Some(gpu);
         self.recovery = None;
         self.engine.log("The graphics device was restarted");
+        self.note_gpu_kind(&gpu, to_hardware);
+        self.gpu = Some(gpu);
+    }
+
+    /// After a device was made: drawing in software is said loudly and the
+    /// look for a card begins (or goes on); back on a card, that is said too.
+    fn note_gpu_kind(&mut self, gpu: &Gpu, to_hardware: bool) {
+        let name = gpu.adapter.get_info().name;
+        if gpu.is_software() {
+            let watch = self.software.get_or_insert_with(SoftwareWatch::new);
+            if to_hardware {
+                watch.failed += 1;
+                watch.last_switch = Some(Instant::now());
+            }
+            let said = crate::gpu::drawing_in_software()
+                .map(|s| s.sentence("This computer"))
+                .unwrap_or_else(|| format!("This computer is drawing in software ({name})"));
+            self.engine.problem(said);
+        } else if self.software.take().is_some() {
+            self.engine.log(format!(
+                "Back on the graphics card ({name}): pictures are drawn at full speed again"
+            ));
+        }
+    }
+
+    /// While drawing in software, look for a graphics card every few seconds
+    /// (on a thread) and, when one is offered, rebuild onto it (`to_hardware`,
+    /// the same way as after a loss). Never waits.
+    fn watch_software(&mut self) {
+        let Some(w) = &mut self.software else {
+            return;
+        };
+        if let Some((look, began)) = &w.look {
+            if !look.is_finished() {
+                if !w.slow_look_said && began.elapsed() > Duration::from_secs(30) {
+                    w.slow_look_said = true;
+                    log::warn!("looking for a graphics card has taken over 30 s");
+                }
+                return;
+            }
+            let found = w
+                .look
+                .take()
+                .and_then(|(h, _)| h.join().ok())
+                .unwrap_or_default();
+            w.looked = Some(Instant::now());
+            let since = w.last_switch.map(|t| t.elapsed());
+            if crate::adapters::switch_back(true, !found.is_empty(), w.failed, since) {
+                log::warn!(
+                    "a graphics card is offered again ({}); rebuilding the displays onto it",
+                    found.join(", ")
+                );
+                self.to_hardware = true;
+            } else if !found.is_empty()
+                && crate::adapters::after_failed_switches(w.failed).is_none()
+                && !w.gave_up_said
+            {
+                w.gave_up_said = true;
+                log::warn!(
+                    "a graphics card is offered ({}) but the displays could not be drawn with it {} times: staying in software; restart NewQ to try again",
+                    found.join(", "),
+                    w.failed
+                );
+            } else {
+                log::debug!("looked for a graphics card: {found:?}");
+            }
+            return;
+        }
+        let due = w
+            .looked
+            .is_none_or(|t| t.elapsed() >= crate::adapters::look_every(w.since.elapsed()));
+        if !due || crate::adapters::after_failed_switches(w.failed).is_none() {
+            return;
+        }
+        match std::thread::Builder::new()
+            .name("gpu-look".into())
+            .spawn(|| {
+                crate::crash::catch_expected(crate::gpu::hardware_offered).unwrap_or_default()
+            }) {
+            Ok(h) => w.look = Some((h, Instant::now())),
+            Err(e) => {
+                log::warn!("could not start looking for a graphics card: {e}");
+                w.looked = Some(Instant::now());
+            }
+        }
     }
 
     /// Put each output window back over its display if the system has
@@ -2829,17 +2968,11 @@ impl App {
                 )
                 .map_err(|e| format!("The main window could not be opened: {e}"))?,
         );
-        // DX12 on Windows (Vulkan drivers there can stall acquiring frames for
-        // occluded windows). `WGPU_BACKEND=vulkan` etc. overrides this.
-        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
-            event_loop.owned_display_handle(),
-        ));
-        if cfg!(windows) {
-            desc.backends = wgpu::Backends::DX12;
-        }
-        let instance = wgpu::Instance::new(desc.with_env());
-        let (gpu, surface) = Gpu::new(instance, window.clone())
+        self.display_handle = Some(event_loop.owned_display_handle());
+        let instance = crate::gpu::instance_for(self.display_handle.clone());
+        let (gpu, surface) = Gpu::new(instance, window.clone(), true)
             .map_err(|e| format!("The graphics card could not be set up: {e:#}"))?;
+        self.note_gpu_kind(&gpu, false);
         let size = window.inner_size();
         let config = gpu
             .surface_config(&surface, (size.width, size.height))
