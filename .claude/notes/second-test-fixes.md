@@ -210,3 +210,6 @@ unless it reproduces).
    Owner on the Mac's sound dropouts (item 24): don't try to fix them unless it's easy; nobody was
    listening, so it's unknown whether they were audible. The running agent only corrects the report's
    wording (system called late vs NewQ's mixing).
+
+**Before the next release (owner, 2026-11-18):** when every item above is done, a full review by a
+Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then the release.
