@@ -969,6 +969,7 @@ fn the_network_tests_measurements_reach_the_primary_from_two_computers() {
     p.broadcast(Msg::NetTest(Box::new(NetTest::Begin {
         run: 9,
         start: 1.0,
+        load: None,
     })));
     for h in [&d, &e] {
         let began = Instant::now();
@@ -976,7 +977,7 @@ fn the_network_tests_measurements_reach_the_primary_from_two_computers() {
         while !got && began.elapsed() < Duration::from_secs(60) {
             got = h.take_events().into_iter().any(|ev| {
                 matches!(ev, NetEvent::Message { from, msg: Msg::NetTest(t) }
-                    if from == pid && *t == NetTest::Begin { run: 9, start: 1.0 })
+                    if from == pid && *t == NetTest::Begin { run: 9, start: 1.0, load: None })
             });
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1016,6 +1017,80 @@ fn the_network_tests_measurements_reach_the_primary_from_two_computers() {
     let mut want = vec![did, eid];
     want.sort();
     assert_eq!(from, want);
+}
+
+#[test]
+fn the_tests_network_load_goes_both_ways_on_its_own_connection_and_stops() {
+    use crate::net::load::{LoadClient, LoadLevel, LoadServer};
+    use crate::net::measure::NetTest;
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let (pid, did) = (id_of(&p), id_of(&d));
+    let _ = (d.take_events(), p.take_events());
+    // The primary starts the load as playing begins and says where in Begin.
+    let server = LoadServer::start("127.0.0.1:0".parse().unwrap(), LoadLevel::Light).unwrap();
+    p.broadcast(Msg::NetTest(Box::new(NetTest::Begin {
+        run: 4,
+        start: 1.0,
+        load: Some(server.ask()),
+    })));
+    // The computer dials the primary's address, as the app does.
+    let began = Instant::now();
+    let mut client = None;
+    while client.is_none() && began.elapsed() < Duration::from_secs(60) {
+        for ev in d.take_events() {
+            if let NetEvent::Message {
+                from,
+                msg: Msg::NetTest(t),
+            } = ev
+                && let NetTest::Begin {
+                    run,
+                    load: Some(ask),
+                    ..
+                } = *t
+                && from == pid
+            {
+                let addr = d
+                    .view()
+                    .peer(pid)
+                    .and_then(|x| x.addr)
+                    .expect("its address");
+                client = Some(LoadClient::start(
+                    std::net::SocketAddr::new(addr, ask.port),
+                    did,
+                    run,
+                    &ask,
+                ));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let client = client.expect("Begin with the load reached the computer");
+    let going = |what: &str, f: &dyn Fn(&crate::net::load::Totals) -> bool| {
+        let t = Instant::now();
+        while !server.totals().get(&did).is_some_and(f) {
+            assert!(t.elapsed() < Duration::from_secs(30), "{what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    going("bytes both ways", &|t| {
+        t.connected && t.sent > 2_000_000 && t.received > 2_000_000
+    });
+    // The hubs' own sessions carry on meanwhile.
+    until(&p, "the computer still connected", |v| {
+        peer(v, did).is_some_and(|x| x.connected && x.status.is_some())
+    });
+    // The test ends: the primary stops, the computer lets go by itself.
+    server.stop();
+    let t = Instant::now();
+    while !client.ended() {
+        assert!(t.elapsed() < Duration::from_secs(30), "the computer let go");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    going("closed", &|t| !t.connected);
+    let t = server.totals()[&did].clone();
+    let line = crate::net::load::report_lines(LoadLevel::Light, &[("Left".into(), Some(t))]);
+    assert!(line[1].starts_with("  Left: to it "), "{line:?}");
 }
 
 // ---- NewQ Display (`--display`) ----

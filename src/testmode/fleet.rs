@@ -11,8 +11,11 @@
 //! at the end judges each computer with Test Mode's own findings
 //! (`analysis`) and the network test's (`net_judge`), a part per computer.
 //!
-//! Nothing here touches a socket or the show: `out` holds what is to be sent
-//! (`TestMode::net_out`), and the test that owns it plays and restores.
+//! Nothing here touches the show: `out` holds what is to be sent
+//! (`TestMode::net_out`), and the test that owns it plays and restores. The
+//! one thing on the network of its own is the load (`net::load`, chosen under
+//! More and kept in `Prefs::test_load`), started on its own threads when
+//! playing begins, stopped at the end, its figures in the report.
 
 use super::analysis::{self, Finding, Severity, Verdict};
 use super::net_judge::{self, ComputerNotes, ComputerVerdict, Transfer};
@@ -367,6 +370,13 @@ pub struct Fleet {
     pub said: Vec<(f64, String)>,
     began: Instant,
     last_judged: Option<f64>,
+    // ---- The network load (`net::load`) ----
+    /// How hard the test loads the network (Off: not at all).
+    pub load_level: crate::net::load::LoadLevel,
+    /// The primary's side of it, from the start of playing to the end.
+    load: Option<crate::net::load::LoadServer>,
+    /// Its figures, kept when it stops.
+    load_final: Option<BTreeMap<NodeId, crate::net::load::Totals>>,
 }
 
 impl Fleet {
@@ -409,6 +419,9 @@ impl Fleet {
             said: Vec::new(),
             began: Instant::now(),
             last_judged: None,
+            load_level: crate::net::load::LoadLevel::from_env().unwrap_or(st.prefs.test_load),
+            load: None,
+            load_final: None,
         }
     }
 
@@ -604,6 +617,7 @@ impl Fleet {
         self.start = Some(now);
         let line = self.transfers_line();
         self.say(format!("All here. {line}"));
+        self.start_load();
         self.tell_all(now);
         for id in self.computers.keys() {
             self.told.insert(*id, now);
@@ -618,6 +632,7 @@ impl Fleet {
             NetTest::Begin {
                 run,
                 start: self.start.unwrap_or(now),
+                load: self.load.as_ref().map(|l| l.ask()),
             },
         ));
         if self.test != 0 {
@@ -639,7 +654,19 @@ impl Fleet {
         let begin = NetTest::Begin {
             run,
             start: self.start.unwrap_or(now),
+            load: self.load.as_ref().map(|l| l.ask()),
         };
+        // A computer gone from the network: its load is cut.
+        if let Some(l) = &self.load {
+            let here: Vec<NodeId> = st
+                .net
+                .peers
+                .iter()
+                .filter(|p| p.ours && p.connected)
+                .map(|p| p.id)
+                .collect();
+            l.keep_only(&here);
+        }
         for p in st.net.peers.iter().filter(|p| p.ours && p.connected) {
             // A computer that lost its graphics card says so in its status.
             if let Some(c) = self.computers.get_mut(&p.id) {
@@ -753,6 +780,7 @@ impl Fleet {
             return;
         }
         self.ended = Some(now);
+        self.stop_load();
         let run = self.run;
         self.out.push((None, NetTest::End { run }));
         if self.muted {
@@ -789,6 +817,12 @@ impl Fleet {
     /// The window's line per computer while it plays: in step or not, each
     /// output's frame rate, and anything wrong (warn: something is).
     pub fn live_lines(&self, st: &UiState, now: f64) -> Vec<(String, bool)> {
+        let mut v = self.computer_lines(st, now);
+        v.extend(self.load_now().map(|l| (l, false)));
+        v
+    }
+
+    fn computer_lines(&self, st: &UiState, now: f64) -> Vec<(String, bool)> {
         self.computers
             .values()
             .map(|c| {
@@ -853,6 +887,94 @@ impl Fleet {
             .collect()
     }
 
+    // ---- The network load (`net::load`) ----
+
+    /// Playing begins: the load starts (if chosen), on threads of its own.
+    fn start_load(&mut self) {
+        if self.load_level.is_off() || self.load.is_some() {
+            return;
+        }
+        // Every adapter; the tests keep to this computer.
+        let bind = if cfg!(test) {
+            "127.0.0.1:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        match crate::net::load::LoadServer::start(
+            bind.parse().expect("an address"),
+            self.load_level,
+        ) {
+            Ok(l) => {
+                self.say(format!(
+                    "Network load on: {} (port {})",
+                    self.load_level.describe(),
+                    l.ask().port
+                ));
+                self.load = Some(l);
+            }
+            Err(e) => self.say(format!(
+                "Network load: couldn't start ({e}); the test plays without it"
+            )),
+        }
+    }
+
+    /// The test is over: the load stops, its figures kept and said.
+    fn stop_load(&mut self) {
+        let Some(l) = self.load.take() else {
+            return;
+        };
+        l.stop();
+        self.load_final = Some(l.totals());
+        let lines = self.load_lines();
+        for line in lines.into_iter().skip(1) {
+            self.say(line.trim().to_string());
+        }
+    }
+
+    /// Its figures so far (or at the end).
+    fn load_totals(&self) -> Option<BTreeMap<NodeId, crate::net::load::Totals>> {
+        self.load_final
+            .clone()
+            .or_else(|| self.load.as_ref().map(|l| l.totals()))
+    }
+
+    /// The report's lines for the load: off, or what went with each computer.
+    pub fn load_lines(&self) -> Vec<String> {
+        let totals = self.load_totals().unwrap_or_default();
+        let each: Vec<(String, Option<crate::net::load::Totals>)> = self
+            .computers
+            .values()
+            .map(|c| (c.notes.name.clone(), totals.get(&c.id).cloned()))
+            .collect();
+        crate::net::load::report_lines(self.load_level, &each)
+    }
+
+    /// The window's line while it runs: the rate each way now.
+    pub fn load_now(&self) -> Option<String> {
+        let l = self.load.as_ref()?;
+        let rates = l.rates();
+        let totals = l.totals();
+        let each: Vec<String> = self
+            .computers
+            .values()
+            .map(|c| {
+                let up = totals.get(&c.id).is_some_and(|t| t.connected);
+                match rates.get(&c.id) {
+                    Some((o, i)) if up => {
+                        format!("{} out {o:.0}, in {i:.0} Mbit/s", c.notes.name)
+                    }
+                    _ if up => format!("{} starting", c.notes.name),
+                    _ => format!("{} not connected", c.notes.name),
+                }
+            })
+            .collect();
+        Some(format!(
+            "Network load ({}): {}",
+            self.load_level.short(),
+            each.join(", ")
+        ))
+    }
+
     /// Each computer's verdict over a test `secs` long.
     pub fn verdicts(&self, secs: f64) -> Vec<ComputerVerdict> {
         self.computers.values().map(|c| c.verdict(secs)).collect()
@@ -882,6 +1004,9 @@ impl Fleet {
             "  What the test adds on each computer: the screens ticked for it (each its own window, all showing the same picture), a look at memory and processor every {} s on a thread of its own, and a short report over the network every second. Nothing is drawn on the outputs for the test, so what they show is what a show would.",
             crate::net::measure_local::ROW_EVERY
         );
+        for l in self.load_lines() {
+            let _ = writeln!(s, "  {l}");
+        }
         for v in verdicts {
             let _ = writeln!(s);
             let _ = writeln!(s, "  {} — {}", v.name, v.verdict.label());
@@ -1240,6 +1365,63 @@ mod tests {
         // Once connected again (seen by `media_ready`) it waits on.
         assert!(!f.media_ready(&st));
         assert!(!f.away_since.contains_key(&NodeId(2)));
+    }
+
+    #[test]
+    fn the_chosen_network_load_starts_with_playing_stops_at_the_end_and_is_reported() {
+        let mut st = UiState::default();
+        let mut v = NetView::default();
+        v.peers.push(crate::net::hub::PeerView {
+            id: NodeId(2),
+            name: "Left".into(),
+            ours: true,
+            connected: true,
+            ..Default::default()
+        });
+        st.net = std::sync::Arc::new(v);
+        // Off (the default): Begin says nothing of it, the report says off.
+        let mut f = Fleet::new(&st, Vec::new(), false);
+        f.begin(1.0);
+        assert!(
+            f.out
+                .iter()
+                .any(|(_, m)| matches!(m, NetTest::Begin { load: None, .. }))
+        );
+        assert!(f.load_now().is_none());
+        assert!(f.report(&[]).contains("Network load: off"));
+        // Chosen: on from the start of playing, told in Begin (and again to a
+        // computer told again), off at the end with what went.
+        st.prefs.test_load = crate::net::load::LoadLevel::Heavy;
+        let mut f = Fleet::new(&st, Vec::new(), false);
+        assert_eq!(f.load_level, crate::net::load::LoadLevel::Heavy);
+        assert!(f.load.is_none(), "nothing before playing");
+        f.begin(1.0);
+        let ask = f.out.iter().find_map(|(_, m)| match m {
+            NetTest::Begin { load, .. } => load.clone(),
+            _ => None,
+        });
+        let ask = ask.expect("Begin carries the load");
+        assert_eq!(ask.bytes_per_sec, Some(50_000_000));
+        assert!(
+            f.said
+                .iter()
+                .any(|(_, l)| l.starts_with("Network load on: Heavy"))
+        );
+        assert_eq!(
+            f.load_now().as_deref(),
+            Some("Network load (Heavy): Left not connected")
+        );
+        f.end(30.0);
+        assert!(f.load.is_none(), "stopped at the end");
+        let report = f.report(&[]);
+        assert!(
+            report.contains("Network load: on, Heavy, about 400 Mbit/s each way per computer"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Left: never connected for the load"),
+            "{report}"
+        );
     }
 
     #[test]

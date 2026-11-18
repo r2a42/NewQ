@@ -47,6 +47,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
     let mut sound = (st.prefs.test_sound.clone(), st.prefs.test_muted);
     test.heavy = st.prefs.test_heavy;
+    test.load = st.prefs.test_load;
     let devices = st.audio_devices.clone();
     egui::Window::new("Test mode")
         .open(&mut open)
@@ -85,14 +86,17 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
     test.open = open;
     let heavy = test.heavy;
+    let load = test.load;
     let pick = test.pick();
     st.test = test;
     if selected != st.prefs.test_displays
         || sound != (st.prefs.test_sound.clone(), st.prefs.test_muted)
         || heavy != st.prefs.test_heavy
+        || load != st.prefs.test_load
         || pick != st.prefs.test_pick
     {
         st.prefs.test_heavy = heavy;
+        st.prefs.test_load = load;
         st.prefs.test_pick = pick;
         st.prefs.test_displays = selected;
         (st.prefs.test_sound, st.prefs.test_muted) = sound;
@@ -914,6 +918,7 @@ fn more(
     });
     ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
         .on_hover_text("The cue list part blends three more whole-screen films with effects over the others: late frames then show where this computer's limit is.");
+    load_choice(ui, test, &facts.net);
     ui.separator();
     let can = facts.refusal.is_none() && engine.ff.is_some();
     ui.horizontal(|ui| {
@@ -969,6 +974,65 @@ fn more(
         .weak()
         .small(),
     );
+}
+
+/// Why the network can't be loaded; None: it can.
+pub fn load_reason(net: &super::choice::NetFacts) -> Option<&'static str> {
+    (!net.primary || net.computers.is_empty())
+        .then_some("Needs another computer in the show network.")
+}
+
+/// Under More: how hard to load the show network while a test runs across
+/// it (`net::load`), greyed with the reason when there is no other computer.
+fn load_choice(ui: &mut egui::Ui, test: &mut super::TestMode, net: &super::choice::NetFacts) {
+    use crate::net::load::LoadLevel;
+    let why = load_reason(net);
+    ui.horizontal(|ui| {
+        ui.label("Load the network while testing");
+        let r = ui
+            .add_enabled_ui(why.is_none(), |ui| {
+                egui::ComboBox::from_id_salt("test-load")
+                    .selected_text(test.load.label())
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for level in LoadLevel::ALL {
+                            let r = ui.selectable_label(test.load == level, level.label());
+                            #[cfg(test)]
+                            note_choice(ui, format!("load:{}", level.short()), &r);
+                            if r.clicked() {
+                                test.load = level;
+                            }
+                        }
+                    })
+                    .response
+            })
+            .inner;
+        let r = match why {
+            Some(why) => r.on_disabled_hover_text(why),
+            None => r.on_hover_text(
+                "Made-up bytes go both ways between this computer and each other one, on a connection of their own, for as long as the test plays: compare a run with it and one without. Nothing is downloaded or saved.",
+            ),
+        };
+        #[cfg(test)]
+        note_choice(ui, "Load the network".into(), &r);
+        let _ = r;
+    });
+    if let Some(why) = why {
+        net_label(
+            ui,
+            RichText::new(format!("Network load: {why}")).weak().small(),
+        );
+    } else if !test.load.is_off() {
+        net_label(
+            ui,
+            RichText::new(format!(
+                "Each computer: {}. The report says how much went each way.",
+                test.load.describe()
+            ))
+            .weak()
+            .small(),
+        );
+    }
 }
 
 /// For the tests: the network test's words and buttons as drawn.

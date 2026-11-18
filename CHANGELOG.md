@@ -6,6 +6,13 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Test Mode can load the show network on purpose.** *More ▸ Load the network while testing*
+  (*Light* about 50 Mbit/s, *Heavy* about 400 Mbit/s, or *As fast as it goes*) sends made-up
+  data both ways between the primary and each other computer for as long as a test plays
+  across the show network, like a large file copy over the network during a show, without
+  downloading or saving anything. The running window shows the rate with each computer; the
+  report says whether it was on and how much went each way, so a run with it and one without
+  can be compared. Off unless chosen; remembered on this computer.
 - **NewQ no longer stays on the computer's software renderer after the graphics card resets.** A
   Windows laptop whose displays were rearranged mid-test had its graphics driver reset, and NewQ
   took the only thing offered at that moment, *Microsoft Basic Render Driver*, and kept it: a

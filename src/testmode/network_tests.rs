@@ -312,7 +312,7 @@ impl Rig {
                     continue;
                 }
                 match m {
-                    NetTest::Begin { run, start } => {
+                    NetTest::Begin { run, start, .. } => {
                         c.measure.begin(*run, *start);
                         c.local.begin(*run, *start);
                         c.mark.begin(*run, c.log.len() as u64);

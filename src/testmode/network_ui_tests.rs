@@ -347,6 +347,69 @@ fn more_holds_the_feature_check_and_the_decoding_comparison() {
 }
 
 #[test]
+fn the_network_load_is_chosen_under_more_and_greyed_alone() {
+    use crate::net::load::LoadLevel;
+    for modern in [false, true] {
+        for net in [false, true] {
+            let (mut show, mut e, mut st) =
+                (Show::default(), Engine::for_tests(), UiState::default());
+            if net {
+                st.net = Arc::new(primary_view(true));
+            }
+            let ctx = egui::Context::default();
+            let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
+            let at = rect_of(&notes, "More").center();
+            let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, click_at(at));
+            let combo = rect_of(&notes, "Load the network");
+            assert!(
+                on_screen(combo),
+                "modern {modern}, network {net}: {combo:?}"
+            );
+            let notes = choices(
+                &ctx,
+                modern,
+                &mut show,
+                &mut e,
+                &mut st,
+                click_at(combo.center()),
+            );
+            if !net {
+                // Greyed, with the reason said.
+                assert!(
+                    has(
+                        &notes,
+                        "Network load: Needs another computer in the show network."
+                    ),
+                    "{notes:?}"
+                );
+                assert!(!has(&notes, "load:Light"), "no list opens: {notes:?}");
+                assert_eq!(st.prefs.test_load, LoadLevel::Off);
+                continue;
+            }
+            let light = rect_of(&notes, "load:Light");
+            assert!(on_screen(light), "modern {modern}: {light:?}");
+            let notes = choices(
+                &ctx,
+                modern,
+                &mut show,
+                &mut e,
+                &mut st,
+                click_at(light.center()),
+            );
+            // Remembered for this computer, and said what it does.
+            assert_eq!(st.prefs.test_load, LoadLevel::Light, "modern {modern}");
+            assert!(
+                has(
+                    &notes,
+                    "Each computer: Light, about 50 Mbit/s each way per computer."
+                ),
+                "{notes:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_run_of_several_parts_reads_overall_first_then_a_section_per_part() {
     use super::net_judge::{ComputerNotes, judge};
     use crate::testmode::analysis::Verdict;
