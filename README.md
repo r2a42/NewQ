@@ -421,20 +421,23 @@ stays on the computer until you send it yourself.
   press it again to go back to the one chosen. It is kept per computer, and
   while a display's corners are being edited only that display is shown.
   *Test pattern* shows a picture for lining a display up, with a dropdown of
-  thirteen beside it and a *Number* checkbox that turns the display's number
-  on the patterns off (choosing one turns the pattern on; it works the same on
-  sub displays, and the choice is saved with the show). The first, and the one a
-  display starts with, is *SMPTE colour bars*: the 75% bars, the reversed blue
-  row, and the -I, white, +Q and black-level (PLUGE) strips, with the display's
-  number over them. The bars are 4:3 in the middle of any display, as the
-  broadcast standard lays them out for wide pictures, with 40% grey filling the
-  width either side (wider on 16:9 than on 16:10, wider still on an ultrawide or
-  an edge-blended pair); a 4:3 display, or a narrower one, is all bars. The
-  *Number* checkbox is greyed for the patterns with no room for a number. They are drawn for a computer's full-range picture:
-  black is 0 throughout, and of the PLUGE strips only the one just above black
-  (4%) differs from it, so turn the display's brightness down until that strip
-  only just shows (the strip below black can't exist in full range, so it is
-  black). *Colour bars and
+  fourteen beside it and a *Number* checkbox that turns the display's number
+  on the patterns off (greyed for the patterns with no room for one; choosing a
+  pattern turns it on; it works the same on sub displays, and the choice is saved
+  with the show). The first, and the one a display starts with, is *SMPTE colour
+  bars (HD)*, the HD bars of SMPTE RP 219 (ARIB STD-B28) that broadcast monitors
+  and cameras show: from the top, the 75% bars; 75% white with 100% cyan and blue at
+  its ends (do full colours clip?); a grey ramp from black to white with 100%
+  yellow and red at its ends (banding, and crushed blacks or whites); and 100%
+  white beside the black-level (PLUGE) strips, with the display's number over
+  them. *SMPTE colour bars, classic* is the 1978 pattern (the reversed blue row and
+  the -I, white and +Q blocks). Both are 4:3 in the middle of any display, with
+  grey filling the width either side (wider on 16:9 than on 16:10, wider still on
+  an ultrawide or an edge-blended pair, where the HD bars' coloured ends stay
+  16:9's width); a 4:3 display, or a narrower one, is all bars. They are drawn for
+  a computer's full-range picture, where black is 0 and nothing can be below it:
+  turn the display's brightness down until the +2% strip (HD) or the +4% strip
+  (classic) only just shows against the black beside it. *Colour bars and
   number* is the one NewQ had before, for telling which projector is which.
   The others: *Grid* (squareness and where the picture lands), *Crosshatch*
   (a fine grid of one pixel lines, for straightness when setting a mesh or
