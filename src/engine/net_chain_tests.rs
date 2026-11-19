@@ -130,10 +130,13 @@ fn a_crossfade_longer_than_the_picture_before_never_starts_before_it() {
     let second = loop {
         assert!(t0.elapsed() < Duration::from_secs(10), "it never came in");
         std::thread::sleep(Duration::from_millis(2));
-        e.tick_shared(&show, shared());
-        let s = e.net_state(0.0);
-        if let Some(c) = s.cues.iter().find(|c| c.cue == ids[1]) {
-            break c.anchor;
+        let now = shared();
+        e.tick_shared(&show, now);
+        let s = e.net_state(now);
+        if s.cues.iter().any(|c| c.cue == ids[1]) {
+            // Its anchor is set by the next tick: read it from there.
+            e.tick_shared(&show, shared());
+            break anchor(&e, ids[1]);
         }
     };
     let first = anchor(&e, ids[0]);
