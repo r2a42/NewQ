@@ -6,6 +6,42 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A test across the show network that can't start no longer keeps your show away.** When a
+  test had sent its show to every computer and then couldn't make its folder or its log (a full
+  disk, a folder it may not write), your show stayed put aside: the test's show stayed open and
+  locked, and the other computers measured on. Now your show comes back on every computer, the
+  computers are told the test is over, and the window says why.
+- **A computer that missed the end of a test stops measuring by itself.** One that didn't hear
+  the end (its connection blipped then, or the primary was closed) stayed muted, under the
+  network load and measuring for up to three hours. Now the primary tells it again while it
+  still reports, it stops when the primary's own show comes back or the primary has been out of
+  reach for 20 seconds, and a primary closed during a test tells the computers before it goes.
+  A test part longer than three hours (a Long test) no longer reads as the computers dropping
+  out at three hours: the primary tells them to keep measuring every minute.
+- **The network test no longer reads a slow message as the screens apart.** One slow round
+  trip to the primary moved "apart on the screens" by half of it for the next 20 seconds, and
+  under the network load every heartbeat that waited behind other messages counted as the
+  screens that far apart, so a computer in step could read "Out of step". Now the shortest
+  recent round trip and the least of the last five seconds' heartbeats are used: a clock that
+  is really wrong still shows.
+- **A computer that could compare nothing is a problem in the report.** After a lost command a
+  computer compared nothing with the primary for the rest of the test, so nothing read apart,
+  and it passed. Now not being in step (or comparing nothing while the primary played) for more
+  than three seconds at a stretch is a problem, and network.csv no longer counts a clock that
+  had lost track (a bound of exactly one second) as one second of error.
+- **Each computer's log comes back whole and in its own folder.** A computer's log goes to the
+  primary in pieces, so a large one on a slow link no longer gets the computer dropped and its
+  log lost; it is read correctly after the log file was put aside during the test; two
+  computers of the same name get folders of their own in the zip (names in any script are
+  kept); and the window says which computers' logs did not come back instead of saying all are
+  inside. A test of several parts with a computer on NewQ 0.24.2 no longer drops its connection
+  over and over.
+- **A computer joining the show network fetches the media in the right order from the start.**
+  It could hear where to fetch from before the order to fetch in, and begin in the media
+  list's order.
+- **The release workflow no longer publishes a Mac download as "signed and notarised" when it
+  isn't.** A tagged release without the Developer ID or the notarisation key now fails instead
+  of falling back to an ad-hoc signed app (a dry run still builds one ad-hoc as before).
 - **Films no longer hold up the rest of NewQ while their frames go to the graphics card.**
   Each new frame (and each still, clock or test pattern) is now handed to a thread of its own
   that writes it to the graphics card, so a moment's wait there (seen on a Mac as the main loop
