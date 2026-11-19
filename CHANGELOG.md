@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.4
+
 - **A test across the show network that can't start no longer keeps your show away.** When a
   test had sent its show to every computer and then couldn't make its folder or its log (a full
   disk, a folder it may not write), your show stayed put aside: the test's show stayed open and
