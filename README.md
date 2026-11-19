@@ -415,7 +415,11 @@ stays on the computer until you send it yourself.
   any display or sub display; with more than one, a menu above it picks which.
   The preview keeps the display's own shape at any size of its pane (a sub display
   that shows part of another's picture: that part's shape), as large as fits, with
-  black bars beside it or above and below.
+  black bars beside it or above and below. *Multiview* (the button beside the
+  menu) shows every one at once in a grid, each under its name and in its own
+  shape, as many columns as the pane's width allows (up to sixteen displays);
+  press it again to go back to the one chosen. It is kept per computer, and
+  while a display's corners are being edited only that display is shown.
   *Test pattern* shows a picture for lining a display up, with a dropdown of
   twelve beside it (choosing one turns the pattern on; it works the same on
   sub displays, and the choice is saved with the show). *Colour bars and

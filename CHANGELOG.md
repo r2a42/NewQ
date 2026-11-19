@@ -6,6 +6,10 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Multiview in the Preview pane.** With more than one display, the *Multiview* button above the
+  preview shows all of them at once, each under its name and in its own shape; press it again for
+  the single preview and its menu. Kept per computer.
+
 ## 0.24.5
 
 - **A sound cue that plays on another computer of the show network no longer restarts over and
