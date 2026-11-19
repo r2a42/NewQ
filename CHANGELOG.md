@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.7
+
 - **The HD colour bars are the default test pattern.** A display's *Test pattern* now starts with
   the HD bars that broadcast monitors and cameras use (SMPTE RP 219): the 75% bars, then full
   cyan, blue, yellow and red at the ends of a white strip and a grey ramp (for colours that clip,
