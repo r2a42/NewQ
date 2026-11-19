@@ -570,6 +570,21 @@ impl PatternKind {
         PatternKind::Focus,
     ];
 
+    /// Whether the pattern draws the display's number over itself (see
+    /// `pattern::colour`); the others have no room for it.
+    pub fn draws_number(self) -> bool {
+        matches!(
+            self,
+            PatternKind::Smpte
+                | PatternKind::Smpte169
+                | PatternKind::Smpte1610
+                | PatternKind::Bars
+                | PatternKind::Grid
+                | PatternKind::Circles
+                | PatternKind::Frame
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PatternKind::Smpte => "SMPTE colour bars (16:9 or 16:10 to suit)",

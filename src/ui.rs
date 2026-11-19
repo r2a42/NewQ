@@ -4584,6 +4584,17 @@ fn multiview_columns(n: usize, width: f32, gap: f32) -> usize {
     square.clamp(1, fit)
 }
 
+/// The multiview's header: how many outputs, and which are shown when there are more
+/// than it has tiles for.
+fn multiview_count(n: usize) -> String {
+    let most = crate::gpu::MULTI_SLOTS;
+    if n > most {
+        format!("the first {most} of {n} outputs")
+    } else {
+        format!("{n} outputs")
+    }
+}
+
 /// Every output's live picture in a grid, each under its name, in the display's own shape
 /// (black bars in the rest of its cell, as the single preview has). Each tile draws in a slot
 /// of its own, since the tiles are drawn in the same frame at different sizes; past
@@ -4722,7 +4733,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
             }
         }
         if multi {
-            ui.label(RichText::new(format!("{} outputs", st.previews.len())).strong());
+            ui.label(RichText::new(multiview_count(st.previews.len())).strong());
         } else if st.previews.len() > 1 {
             ui.add_enabled_ui(!editing, |ui| {
                 egui::ComboBox::from_id_salt("preview_output")
@@ -6736,9 +6747,9 @@ fn pattern_picker(
         })
         .response
         .on_hover_text(kind.description());
-    ui.checkbox(number, "Number").on_hover_text(
-        "Draw the display's number over the test pattern (on the patterns that have room for it)",
-    );
+    ui.add_enabled(kind.draws_number(), egui::Checkbox::new(number, "Number"))
+        .on_hover_text("Draw the display's number over the test pattern")
+        .on_disabled_hover_text("This pattern has no room for the display's number");
 }
 
 fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
@@ -14934,6 +14945,23 @@ mod tests {
                 };
                 assert_eq!(lefts.len(), want_cols, "{what}");
             }
+        }
+    }
+
+    #[test]
+    fn the_multiview_says_which_outputs_it_shows_past_its_tiles() {
+        assert_eq!(multiview_count(3), "3 outputs");
+        assert_eq!(multiview_count(16), "16 outputs");
+        assert_eq!(multiview_count(20), "the first 16 of 20 outputs");
+    }
+
+    #[test]
+    fn the_number_tick_is_offered_only_for_patterns_that_draw_a_number() {
+        // Each pattern that claims a number really draws one, and the others don't.
+        for k in PatternKind::ALL {
+            let with = crate::pattern::render(k, 192, 108, 1);
+            let without = crate::pattern::render(k, 192, 108, 0);
+            assert_eq!(with != without, k.draws_number(), "{k:?}");
         }
     }
 
