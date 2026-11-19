@@ -74,6 +74,11 @@ pub fn note_device_lost() {
     LOST_ONCE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// A graphics device has been lost this run (`note_device_lost`).
+pub fn lost_this_run() -> bool {
+    LOST_ONCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The instance the windows' devices come from. A new one for each rebuild
 /// after a loss: on Windows an instance's list of adapters is the one the
 /// system had when it was made, so an old one never sees the card come back.
@@ -206,14 +211,6 @@ impl Gpu {
             ));
         }
         log::info!("GPU (the one used): {info:?}");
-        *GPU_NAME.lock() = Some(format!(
-            "{} ({:?}, {:?})",
-            info.name, info.backend, info.device_type
-        ));
-        *SOFTWARE.lock() = software.then(|| crate::adapters::SoftwareDrawing {
-            adapter: info.name.clone(),
-            lost: LOST_ONCE.load(std::sync::atomic::Ordering::Relaxed),
-        });
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("newq"),
@@ -224,6 +221,16 @@ impl Gpu {
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 ..Default::default()
             }))?;
+        // Only now that it is the one used (a failed request leaves the
+        // status as it was).
+        *GPU_NAME.lock() = Some(format!(
+            "{} ({:?}, {:?})",
+            info.name, info.backend, info.device_type
+        ));
+        *SOFTWARE.lock() = software.then(|| crate::adapters::SoftwareDrawing {
+            adapter: info.name.clone(),
+            lost: LOST_ONCE.load(std::sync::atomic::Ordering::Relaxed),
+        });
         crate::media::video::set_bc_supported(
             device
                 .features()

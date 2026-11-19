@@ -131,14 +131,24 @@ pub fn settles_for_software(waited: Duration) -> bool {
 
 /// How often to look for a hardware adapter while drawing in software: every
 /// few seconds at first (a driver reset is over in seconds), then twice a
-/// minute.
-pub fn look_every(on_software_for: Duration) -> Duration {
+/// minute. With no device lost this run (NewQ started in software: a machine
+/// with no card, or a driver that was still starting), once a minute after
+/// the first two minutes, and not at all after `LOOK_FOR_UNLOST` (each look
+/// makes a graphics instance and lists the adapters): None.
+pub fn look_every(on_software_for: Duration, lost_this_run: bool) -> Option<Duration> {
     if on_software_for < Duration::from_secs(120) {
-        Duration::from_secs(5)
+        Some(Duration::from_secs(5))
+    } else if lost_this_run {
+        Some(Duration::from_secs(30))
+    } else if on_software_for < LOOK_FOR_UNLOST {
+        Some(Duration::from_secs(60))
     } else {
-        Duration::from_secs(30)
+        None
     }
 }
+
+/// How long a NewQ that started in software looks for a card.
+pub const LOOK_FOR_UNLOST: Duration = Duration::from_secs(15 * 60);
 
 /// After `failed` rebuilds that hoped for hardware and still ended in
 /// software (it went again, or can't draw to the window), wait this long
@@ -361,11 +371,17 @@ mod tests {
 
     #[test]
     fn the_card_is_looked_for_often_at_first_then_less() {
-        assert_eq!(look_every(Duration::from_secs(10)), Duration::from_secs(5));
-        assert_eq!(
-            look_every(Duration::from_secs(600)),
-            Duration::from_secs(30)
-        );
+        let secs = |s: u64| Some(Duration::from_secs(s));
+        for lost in [true, false] {
+            assert_eq!(look_every(Duration::from_secs(10), lost), secs(5));
+        }
+        // After a loss, for as long as it takes.
+        assert_eq!(look_every(Duration::from_secs(600), true), secs(30));
+        assert_eq!(look_every(Duration::from_secs(86_400), true), secs(30));
+        // Started in software (perhaps no card at all): less, then not at all.
+        assert_eq!(look_every(Duration::from_secs(600), false), secs(60));
+        assert_eq!(look_every(LOOK_FOR_UNLOST, false), None);
+        assert_eq!(look_every(Duration::from_secs(86_400), false), None);
     }
 
     #[test]

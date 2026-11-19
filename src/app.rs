@@ -199,6 +199,8 @@ struct SoftwareWatch {
     failed: u32,
     last_switch: Option<Instant>,
     gave_up_said: bool,
+    /// The look has stopped (`adapters::look_every`) and the log said so.
+    stopped_said: bool,
 }
 
 impl SoftwareWatch {
@@ -211,6 +213,7 @@ impl SoftwareWatch {
             failed: 0,
             last_switch: None,
             gave_up_said: false,
+            stopped_said: false,
         }
     }
 }
@@ -488,8 +491,22 @@ impl App {
         // display computer written again with `--display` if it lacks it).
         // An entry that started NewQ plain on a display computer: this start
         // may be that login's, so it is display mode too.
+        // The clean-up is done only where its having been done can be kept:
+        // with settings that can't be saved, every start would remove again
+        // an entry ticked since.
+        let can_keep = ui.prefs.start_at_login_cleaned
+            || ui.layout_dir.as_ref().is_some_and(|dir| {
+                ui.prefs
+                    .save(dir)
+                    .map_err(|e| {
+                        log::warn!(
+                            "start at login: the settings of this computer can't be saved ({e}): an older NewQ's entry, if any, is left as it is"
+                        )
+                    })
+                    .is_ok()
+            });
         let looked = crate::autostart::look_at_start(
-            ui.prefs.start_at_login_cleaned,
+            crate::autostart::skip_clean_up(ui.prefs.start_at_login_cleaned, can_keep),
             ui.net.me.on
                 && ui.net.me.adopted()
                 && ui.net.me.role == crate::net::node::Role::Display,
@@ -1432,9 +1449,18 @@ impl App {
             }
             return;
         }
-        let due = w
-            .looked
-            .is_none_or(|t| t.elapsed() >= crate::adapters::look_every(w.since.elapsed()));
+        let Some(every) =
+            crate::adapters::look_every(w.since.elapsed(), crate::gpu::lost_this_run())
+        else {
+            if !w.stopped_said {
+                w.stopped_said = true;
+                log::info!(
+                    "no graphics card has been offered since NewQ started in software: no longer looking (restart NewQ to look again)"
+                );
+            }
+            return;
+        };
+        let due = w.looked.is_none_or(|t| t.elapsed() >= every);
         if !due || crate::adapters::after_failed_switches(w.failed).is_none() {
             return;
         }
