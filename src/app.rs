@@ -398,6 +398,8 @@ pub struct App {
     /// Upload on the main thread as before (`NEWQ_UPLOADS_ON_MAIN=1`, or the
     /// thread could not be started).
     uploads_on_main: bool,
+    /// When the uploads thread was last found stopped (`upload_restart_due`).
+    uploads_restarted: Option<Instant>,
     /// `NEWQ_AUTOSTART`: press GO this long after starting, once.
     autostart: Option<Instant>,
     /// A recovery file from a session that didn't end properly, to offer once.
@@ -592,6 +594,7 @@ impl App {
             uploader: None,
             uploads_waiting: false,
             uploads_on_main: std::env::var_os("NEWQ_UPLOADS_ON_MAIN").is_some(),
+            uploads_restarted: None,
             autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
                 let secs = if v == "1" {
                     5.0
@@ -1191,6 +1194,20 @@ impl App {
         );
     }
 
+    /// Let go of every texture made for the outputs (the layers', the test
+    /// patterns, the frame-rate labels and the display computers' cards), so
+    /// each is made and written again: the device they were on is gone, or the
+    /// uploads thread that was to write them died.
+    fn forget_pictures(&mut self) {
+        self.textures.clear();
+        self.patterns.clear();
+        self.fps_labels.clear();
+        self.play.cards.clear();
+        for screen in self.screens.values_mut() {
+            screen.needs_redraw = true;
+        }
+    }
+
     /// Notice a lost graphics device and give every window a new one: stop the
     /// render threads, then start a device, surfaces and threads afresh.
     fn watch_gpu(&mut self) {
@@ -1202,9 +1219,13 @@ impl App {
             gpu.device.destroy();
         }
         // The loss is reported when the device is polled: the upload thread
-        // does it (a poll waits for the locks the render threads hold).
+        // does it (a poll waits for the locks the render threads hold), unless
+        // it hasn't for a while (stuck in a write to a dying driver).
         if let Some(gpu) = &self.gpu
-            && self.uploader.is_none()
+            && self
+                .uploader
+                .as_ref()
+                .is_none_or(|u| !u.polled_within(UPLOADER_POLL_PATIENCE))
         {
             let _ = gpu.device.poll(wgpu::PollType::Poll);
         }
@@ -1251,8 +1272,7 @@ impl App {
             // Everything on the old device is gone with it, streams included
             // (they start again once there is a new device).
             self.stop_streams();
-            self.textures.clear();
-            self.patterns.clear();
+            self.forget_pictures();
             self.uploader = None;
         }
         let Some(rec) = &mut self.recovery else {
@@ -2130,8 +2150,7 @@ impl App {
             cue.valign = crate::show::TextVAlign::Top;
             cue.bold = true;
             let img = crate::text::render(&cue, (w, h));
-            let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
-            upload::rgba(up, gpu, &tex, img.data);
+            let tex = renew_rgba(gpu, up, labels.get(&id).map(|(_, t)| t), img);
             labels.insert(id, (text.to_string(), tex));
         }
         OutputLayer {
@@ -2203,10 +2222,19 @@ impl App {
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = self.gpu.clone() else { return };
         let gpu = &gpu;
-        if !self.uploads_on_main && self.uploader.as_ref().is_none_or(|u| u.ended()) {
-            if self.uploader.is_some() {
-                log::warn!("the thread that uploads pictures stopped; starting another");
-            }
+        if self.uploader.as_ref().is_some_and(|u| u.ended()) {
+            // What it was given and hadn't written died with it, though it
+            // was recorded as sent: everything is made and written again
+            // (here, until another thread is started).
+            log::warn!("the thread that uploads pictures stopped; starting another");
+            self.uploader = None;
+            self.forget_pictures();
+            self.uploads_restarted = Some(Instant::now());
+        }
+        if !self.uploads_on_main
+            && self.uploader.is_none()
+            && upload_restart_due(self.uploads_restarted, Instant::now())
+        {
             self.uploader = match crate::upload::Uploader::start(gpu.clone()) {
                 Ok(u) => Some(u),
                 Err(e) => {
@@ -2306,96 +2334,16 @@ impl App {
                 None => pin,
             };
 
-            let mut layers = Vec::new();
             let engine_layers = self.engine.layers(source);
             let has_picture = !engine_layers.is_empty();
-            for l in engine_layers {
-                let began = Instant::now();
-                let before = self.textures.get(&l.instance).map(|e| Arc::as_ptr(&e.0));
-                let entry = match &l.source {
-                    LayerSource::Video(p) => {
-                        let Some(frame) = p.current() else { continue };
-                        let new_texture = || {
-                            let tex = match frame.hap {
-                                Some(f) => LayerTexture::new_bc(gpu, p.width, p.height, f),
-                                None if p.rgba => LayerTexture::new_rgba(gpu, p.width, p.height),
-                                None => LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix),
-                            };
-                            (Arc::new(tex), 0)
-                        };
-                        let up = self.uploader.as_ref();
-                        let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
-                        // A seek can bring a player of another size (the output
-                        // was resized since the cue started), or of another kind of
-                        // frame: they need a texture of their own, or would not be shown.
-                        let right_kind = match frame.hap {
-                            Some(f) => entry.0.is_bc(f),
-                            None => !entry.0.is_bc_any() && (p.rgba == entry.0.is_rgba()),
-                        };
-                        if (entry.0.width, entry.0.height) != (p.width, p.height) || !right_kind {
-                            *entry = new_texture();
-                        }
-                        if entry.1 != p.serial {
-                            let kind = match frame.hap {
-                                Some(_) => upload::Kind::Bc,
-                                None if p.rgba => upload::Kind::Rgba,
-                                None => upload::Kind::Yuv,
-                            };
-                            upload::copy(up, gpu, &entry.0, kind, &frame.data);
-                            entry.1 = p.serial;
-                        }
-                        entry
-                    }
-                    LayerSource::Image(img, version) => {
-                        let version = *version;
-                        let up = self.uploader.as_ref();
-                        let new_texture = || {
-                            let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
-                            upload::image(up, gpu, &tex, img);
-                            (tex, version)
-                        };
-                        let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
-                        // A clock or timer is drawn again as the time changes.
-                        if entry.1 != version {
-                            if (entry.0.width, entry.0.height) == (img.width, img.height) {
-                                upload::image(up, gpu, &entry.0, img);
-                                entry.1 = version;
-                            } else {
-                                *entry = new_texture();
-                            }
-                        }
-                        entry
-                    }
-                    LayerSource::Solid(color) => {
-                        let up = self.uploader.as_ref();
-                        self.textures.entry(l.instance).or_insert_with(|| {
-                            let tex = Arc::new(LayerTexture::new_rgba(gpu, 2, 2));
-                            upload::rgba(up, gpu, &tex, color.repeat(4));
-                            (tex, 1)
-                        })
-                    }
-                };
-                let took = began.elapsed();
-                if self.slowest_upload.is_none_or(|(.., d, _)| took > d) {
-                    let made = before != Some(Arc::as_ptr(&entry.0));
-                    self.slowest_upload =
-                        Some((l.instance, entry.0.width, entry.0.height, took, made));
-                }
-                // Not shown until its first picture is in (the upload thread
-                // may be held up): a new texture holds nothing worth showing.
-                if !entry.0.is_filled() {
-                    self.uploads_waiting = true;
-                    continue;
-                }
-                layers.push(OutputLayer {
-                    texture: entry.0.clone(),
-                    opacity: l.opacity,
-                    fit: l.fit,
-                    transform: l.transform,
-                    color: l.color,
-                    fx: l.fx,
-                });
-            }
+            let mut layers = picture_layers(
+                &mut self.textures,
+                gpu,
+                self.uploader.as_ref(),
+                engine_layers,
+                &mut self.uploads_waiting,
+                &mut self.slowest_upload,
+            );
 
             // The frame rate, in the corner, if asked for and only over a
             // picture: an idle output stays black.
@@ -2465,7 +2413,7 @@ impl App {
                 {
                     let tex = Arc::new(LayerTexture::new_rgba(gpu, size.0, size.1));
                     let px = pattern::render(kind, size.0, size.1, number);
-                    upload::rgba(self.uploader.as_ref(), gpu, &tex, px);
+                    upload::first(self.uploader.as_ref(), gpu, &tex, upload::Kind::Rgba, &px);
                     self.patterns.insert(id, (tex, number, size, kind));
                     pattern_changed = true;
                 }
@@ -2600,7 +2548,9 @@ impl App {
                 Some(card) => {
                     let fresh = self.play.cards.get(m).is_none_or(|(c, _)| *c != card);
                     if fresh {
-                        let tex = card_texture(gpu, self.uploader.as_ref(), &card, screen.size);
+                        let old = self.play.cards.get(m).map(|(_, t)| t);
+                        let tex =
+                            card_texture(gpu, self.uploader.as_ref(), old, &card, screen.size);
                         self.play.cards.insert(*m, (card, tex));
                         screen.needs_redraw = true;
                     }
@@ -2655,6 +2605,9 @@ impl App {
         if was_waiting && let Some(ctl) = &self.control {
             ctl.window.request_redraw();
         }
+        // A picture written again in place (a card's new words) is drawn once
+        // it is in, though nothing plays.
+        self.uploads_waiting |= self.uploader.as_ref().is_some_and(|u| u.busy());
     }
 
     /// Give every popped-out pane in the layout a window, and close the
@@ -4017,11 +3970,128 @@ fn route_outputs(
         .collect()
 }
 
+/// The uploads thread polls the device; when it hasn't for this long, the
+/// main thread does (a lost device would otherwise go unnoticed).
+const UPLOADER_POLL_PATIENCE: Duration = Duration::from_secs(1);
+
+/// A stopped uploads thread is started again at most this often (one that
+/// panics at once would otherwise be started every pass); meanwhile pictures
+/// are written on the main thread.
+const UPLOADS_RESTART_EVERY: Duration = Duration::from_millis(1500);
+
+/// Whether to start the uploads thread, last found stopped at `stopped`.
+fn upload_restart_due(stopped: Option<Instant>, now: Instant) -> bool {
+    stopped.is_none_or(|t| now.saturating_duration_since(t) >= UPLOADS_RESTART_EVERY)
+}
+
+/// The textures of an output's layers, made or brought up to date, as the
+/// layers to draw. A texture is made with its first picture in (written here,
+/// `upload::first`), so a hard cut has the new picture on the pass the old one
+/// went; later pictures go through the uploads thread. A layer whose texture
+/// still holds nothing (a frame too short to write) is left out and
+/// `waiting` set.
+fn picture_layers(
+    textures: &mut HashMap<u64, (Arc<LayerTexture>, u64)>,
+    gpu: &Gpu,
+    up: Option<&upload::Uploader>,
+    engine_layers: Vec<crate::engine::LayerRef<'_>>,
+    waiting: &mut bool,
+    slowest: &mut Option<(u64, u32, u32, Duration, bool)>,
+) -> Vec<OutputLayer> {
+    let mut layers = Vec::new();
+    for l in engine_layers {
+        let began = Instant::now();
+        let before = textures.get(&l.instance).map(|e| Arc::as_ptr(&e.0));
+        let entry = match &l.source {
+            LayerSource::Video(p) => {
+                let Some(frame) = p.current() else { continue };
+                let kind = match frame.hap {
+                    Some(_) => upload::Kind::Bc,
+                    None if p.rgba => upload::Kind::Rgba,
+                    None => upload::Kind::Yuv,
+                };
+                // A seek can bring a player of another size (the output was
+                // resized since the cue started), or of another kind of frame:
+                // they need a texture of their own, or would not be shown.
+                let fits = |t: &LayerTexture| {
+                    let right_kind = match frame.hap {
+                        Some(f) => t.is_bc(f),
+                        None => !t.is_bc_any() && (p.rgba == t.is_rgba()),
+                    };
+                    (t.width, t.height) == (p.width, p.height) && right_kind
+                };
+                match textures.get_mut(&l.instance) {
+                    Some(entry) if fits(&entry.0) => {
+                        if entry.1 != p.serial {
+                            upload::copy(up, gpu, &entry.0, kind, &frame.data);
+                            entry.1 = p.serial;
+                        }
+                    }
+                    _ => {
+                        let tex = Arc::new(match frame.hap {
+                            Some(f) => LayerTexture::new_bc(gpu, p.width, p.height, f),
+                            None if p.rgba => LayerTexture::new_rgba(gpu, p.width, p.height),
+                            None => LayerTexture::new_yuv(gpu, p.width, p.height, p.matrix),
+                        });
+                        upload::first(up, gpu, &tex, kind, &frame.data);
+                        textures.insert(l.instance, (tex, p.serial));
+                    }
+                }
+                &textures[&l.instance]
+            }
+            LayerSource::Image(img, version) => {
+                let version = *version;
+                match textures.get_mut(&l.instance) {
+                    // A clock or timer is drawn again as the time changes.
+                    Some(entry) if (entry.0.width, entry.0.height) == (img.width, img.height) => {
+                        if entry.1 != version {
+                            upload::image(up, gpu, &entry.0, img);
+                            entry.1 = version;
+                        }
+                    }
+                    _ => {
+                        let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
+                        upload::first(up, gpu, &tex, upload::Kind::Rgba, &img.data);
+                        textures.insert(l.instance, (tex, version));
+                    }
+                }
+                &textures[&l.instance]
+            }
+            LayerSource::Solid(color) => textures.entry(l.instance).or_insert_with(|| {
+                let tex = Arc::new(LayerTexture::new_rgba(gpu, 2, 2));
+                upload::first(up, gpu, &tex, upload::Kind::Rgba, &color.repeat(4));
+                (tex, 1)
+            }),
+        };
+        let took = began.elapsed();
+        if slowest.is_none_or(|(.., d, _)| took > d) {
+            let made = before != Some(Arc::as_ptr(&entry.0));
+            *slowest = Some((l.instance, entry.0.width, entry.0.height, took, made));
+        }
+        // A texture that holds nothing yet is not worth showing (a YUV one of
+        // zeros is green).
+        if !entry.0.is_filled() {
+            *waiting = true;
+            continue;
+        }
+        layers.push(OutputLayer {
+            texture: entry.0.clone(),
+            opacity: l.opacity,
+            fit: l.fit,
+            transform: l.transform,
+            color: l.color,
+            fx: l.fx,
+        });
+    }
+    layers
+}
+
 /// A display computer's card (or Identify's name) as a picture the shape of
 /// its monitor: grey words in the middle of black.
 fn card_texture(
     gpu: &Gpu,
     up: Option<&upload::Uploader>,
+    old: Option<&Arc<LayerTexture>>,
     card: &play::Card,
     size: (u32, u32),
 ) -> Arc<LayerTexture> {
@@ -4059,9 +4129,30 @@ fn card_texture(
             }
         }
     }
-    let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
-    upload::rgba(up, gpu, &tex, img.data);
-    tex
+    renew_rgba(gpu, up, old, img)
+}
+
+/// A texture showing `img` in place of `old`: `old` itself when it is the
+/// same size, written again through the uploads thread (it shows the earlier
+/// picture until then, never nothing), else a new one with the picture
+/// written here and now (`upload::first`).
+fn renew_rgba(
+    gpu: &Gpu,
+    up: Option<&upload::Uploader>,
+    old: Option<&Arc<LayerTexture>>,
+    img: crate::media::video::RgbaImage,
+) -> Arc<LayerTexture> {
+    match old {
+        Some(t) if (t.width, t.height) == (img.width, img.height) && t.is_filled() => {
+            upload::rgba(up, gpu, t, img.data);
+            t.clone()
+        }
+        _ => {
+            let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
+            upload::first(up, gpu, &tex, upload::Kind::Rgba, &img.data);
+            tex
+        }
+    }
 }
 
 /// The card over the whole of a monitor.
@@ -4546,5 +4637,237 @@ mod tests {
         d.computer = Some(me);
         let r = route_outputs(&[d], &monitors, Some(0), me);
         assert_eq!(r[&OutputId(1)].map(|t| t.monitor), Some(1));
+    }
+
+    mod pictures {
+        use super::*;
+        use crate::engine::LayerRef;
+        use crate::media::video::{RgbaImage, VideoPlayer};
+
+        fn gpu() -> Option<Gpu> {
+            let gpu = Gpu::headless();
+            assert!(
+                gpu.is_some() || std::env::var_os("NEWQ_REQUIRE_GPU").is_none(),
+                "no GPU"
+            );
+            gpu
+        }
+
+        fn layer(instance: u64, source: LayerSource<'_>) -> LayerRef<'_> {
+            LayerRef {
+                instance,
+                opacity: 1.0,
+                fit: Fit::Stretch,
+                transform: LayerTransform::default(),
+                color: ColorAdjust::default(),
+                fx: Default::default(),
+                source,
+            }
+        }
+
+        fn raw(w: u32, h: u32, v: u8) -> RgbaImage {
+            RgbaImage {
+                width: w,
+                height: h,
+                data: vec![v; (w * h * 4) as usize],
+            }
+        }
+
+        fn image(w: u32, h: u32, v: u8) -> Arc<RgbaImage> {
+            Arc::new(raw(w, h, v))
+        }
+
+        type Textures = HashMap<u64, (Arc<LayerTexture>, u64)>;
+
+        fn pass(
+            textures: &mut Textures,
+            gpu: &Gpu,
+            up: &upload::Uploader,
+            layers: Vec<LayerRef<'_>>,
+        ) -> (Vec<OutputLayer>, bool) {
+            // As the main loop does: the textures of cues gone are let go.
+            let live: HashSet<u64> = layers.iter().map(|l| l.instance).collect();
+            textures.retain(|k, _| live.contains(k));
+            let mut waiting = false;
+            let mut slowest = None;
+            let out = picture_layers(textures, gpu, Some(up), layers, &mut waiting, &mut slowest);
+            (out, waiting)
+        }
+
+        fn shows(out: &[OutputLayer], textures: &Textures, instance: u64) -> bool {
+            out.len() == 1 && Arc::ptr_eq(&out[0].texture, &textures[&instance].0)
+        }
+
+        /// B1: with the uploads thread held up (as a Mac's driver held it 100
+        /// to 180 ms), the pass of a hard cut has the new picture, never
+        /// neither: a still, a film, a film seeked to another size, a colour.
+        #[test]
+        fn a_hard_cut_has_the_new_picture_on_the_pass_the_old_one_goes() {
+            let Some(gpu) = gpu() else { return };
+            let up = upload::Uploader::start(gpu.clone()).expect("thread");
+            up.hold(true);
+            let mut textures = Textures::new();
+            let (a, b) = (image(8, 8, 10), image(16, 8, 20));
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(1, LayerSource::Image(&a, 1))],
+            );
+            assert!(shows(&out, &textures, 1), "the first still");
+            // The cut: the still goes, another comes in its place.
+            let (out, waiting) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(2, LayerSource::Image(&b, 1))],
+            );
+            assert!(shows(&out, &textures, 2), "the still cut to");
+            assert!(!waiting);
+            // To a film.
+            let film = VideoPlayer::showing(64, 32, vec![128; 64 * 32 * 3 / 2]);
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(3, LayerSource::Video(&film))],
+            );
+            assert!(shows(&out, &textures, 3), "the film cut to");
+            let first = textures[&3].0.clone();
+            // The film seeked with the display resized: a texture of the new size.
+            let resized = VideoPlayer::showing(32, 16, vec![128; 32 * 16 * 3 / 2]);
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(3, LayerSource::Video(&resized))],
+            );
+            assert!(shows(&out, &textures, 3), "the film at its new size");
+            assert!(
+                !Arc::ptr_eq(&first, &textures[&3].0),
+                "a texture of its own"
+            );
+            // A colour.
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(4, LayerSource::Solid([1, 2, 3, 255]))],
+            );
+            assert!(shows(&out, &textures, 4), "the colour cut to");
+            // A new picture in a texture there already waits for the thread,
+            // and the one before is shown meanwhile.
+            let c = image(8, 8, 30);
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(2, LayerSource::Image(&a, 2))],
+            );
+            let kept = out[0].texture.clone();
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(2, LayerSource::Image(&c, 3))],
+            );
+            assert!(
+                Arc::ptr_eq(&out[0].texture, &kept),
+                "written in place, later"
+            );
+            assert!(up.busy(), "and the windows are to draw again once it is in");
+            // The same cue's still at another size (a clock's words got longer):
+            // a texture of its own, shown at once.
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(2, LayerSource::Image(&b, 4))],
+            );
+            assert!(shows(&out, &textures, 2));
+            assert!(!Arc::ptr_eq(&out[0].texture, &kept));
+            up.hold(false);
+            let began = Instant::now();
+            while up.busy() {
+                assert!(began.elapsed() < Duration::from_secs(20), "written");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// B1 for the frame-rate label and a display computer's card: the one
+        /// shown is never one with nothing in it yet.
+        #[test]
+        fn a_card_or_label_whose_words_change_never_blinks() {
+            let Some(gpu) = gpu() else { return };
+            let up = upload::Uploader::start(gpu.clone()).expect("thread");
+            up.hold(true);
+            let first = renew_rgba(&gpu, Some(&up), None, raw(8, 8, 1));
+            assert!(first.is_filled(), "a new one is made with its picture in");
+            // Other words at the same size: the same texture, written again.
+            let same = renew_rgba(&gpu, Some(&up), Some(&first), raw(8, 8, 2));
+            assert!(Arc::ptr_eq(&same, &first) && same.is_filled());
+            assert!(up.busy(), "drawn again once the new words are in");
+            // Another size (the monitor changed): a new one, filled.
+            let other = renew_rgba(&gpu, Some(&up), Some(&first), raw(16, 8, 3));
+            assert!(!Arc::ptr_eq(&other, &first) && other.is_filled());
+            up.hold(false);
+        }
+
+        /// B2: a stopped uploads thread is started again, but not at once
+        /// after the last stop.
+        #[test]
+        fn a_stopped_uploads_thread_is_started_again_at_most_every_second_and_a_half() {
+            let now = Instant::now();
+            assert!(upload_restart_due(None, now), "the first start");
+            assert!(!upload_restart_due(Some(now), now));
+            assert!(!upload_restart_due(
+                Some(now),
+                now + UPLOADS_RESTART_EVERY / 2
+            ));
+            assert!(upload_restart_due(Some(now), now + UPLOADS_RESTART_EVERY));
+            // A stop noted "later" than now (clocks are what they are) waits.
+            assert!(!upload_restart_due(Some(now + Duration::from_secs(1)), now));
+        }
+
+        /// B2: what a thread that died was given is written again: once the
+        /// textures are forgotten (`App::forget_pictures`), the next pass
+        /// makes them anew, with their pictures in, though no thread runs.
+        #[test]
+        fn after_the_uploads_thread_dies_the_pictures_are_made_again_and_shown() {
+            let Some(gpu) = gpu() else { return };
+            let up = upload::Uploader::start(gpu.clone()).expect("thread");
+            let mut textures = Textures::new();
+            let a = image(8, 8, 10);
+            let (out, _) = pass(
+                &mut textures,
+                &gpu,
+                &up,
+                vec![layer(1, LayerSource::Image(&a, 1))],
+            );
+            assert_eq!(out.len(), 1);
+            up.fail();
+            // (It panics at its next batch.)
+            up.image(&textures[&1].0, &a);
+            let began = Instant::now();
+            while !up.ended() {
+                assert!(
+                    began.elapsed() < Duration::from_secs(20),
+                    "the thread ended"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            textures.clear();
+            let mut waiting = false;
+            let out = picture_layers(
+                &mut textures,
+                &gpu,
+                None,
+                vec![layer(1, LayerSource::Image(&a, 1))],
+                &mut waiting,
+                &mut None,
+            );
+            assert_eq!(out.len(), 1);
+            assert!(!waiting);
+        }
     }
 }
