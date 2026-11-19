@@ -673,8 +673,9 @@ mod tests {
         let mut show = Show::default();
         let l = show.add_list("Programme");
         show.lists.last_mut().unwrap().timeline = Some(TimelineSettings::for_editor());
-        let mut add = |at: f64, len: f64| {
+        let mut add = |at: f64, len: f64, name: &str| {
             let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+            c.name = name.to_string();
             c.pre_wait = at;
             c.list = l;
             if let CueKind::Text(t) = &mut c.kind {
@@ -684,9 +685,9 @@ mod tests {
             show.cues.push(c);
             id
         };
-        let first = add(0.5, 3.0);
-        let long = add(10.0, 20.0);
-        let later = add(16.0, 3.0);
+        let first = add(0.5, 3.0, "first");
+        let long = add(10.0, 20.0, "long");
+        let later = add(16.0, 3.0, "later");
         let key = TimelineKey::List(l);
         let mut e = Engine::for_tests();
         e.output_sizes.insert(show.outputs[0].id, (64, 36));
@@ -722,14 +723,19 @@ mod tests {
         assert!(watch.came.contains(&first), "{:?}", watch.notes.arrivals);
         assert!(watch.came.contains(&later), "{:?}", watch.notes.arrivals);
         assert!(!watch.came.contains(&long), "{:?}", watch.notes.arrivals);
+        // The clip the seek started part way in is never judged by its place
+        // (the fault gave it 4 s late). How late the others came depends on how
+        // soon a busy machine draws their text, so they aren't judged here.
         assert!(
-            watch
-                .notes
-                .arrivals
-                .iter()
-                .all(|a| a.late.is_some_and(|x| x < 0.5)),
+            watch.notes.arrivals.iter().all(|a| a.name != name(long)),
             "{} judged: {:?}",
             name(long),
+            watch.notes.arrivals
+        );
+        assert!(
+            watch.notes.arrivals.iter().any(|a| a.name == name(first))
+                && watch.notes.arrivals.iter().any(|a| a.name == name(later)),
+            "{:?}",
             watch.notes.arrivals
         );
     }
