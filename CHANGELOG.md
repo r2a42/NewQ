@@ -6,6 +6,8 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.24.5
+
 - **A sound cue that plays on another computer of the show network no longer restarts over and
   over on this one.** A display computer whose show's sound output plays on the primary only
   refused the sound cue, then started it again part way at every heartbeat for as long as it
@@ -19,7 +21,6 @@ release page, and a release is refused if it has none.
   (B173HAN04.9) is run by Windows' basic display driver: install the graphics driver for this
   computer*: in the status bar and the Displays settings, on the primary's row for a display
   computer, and as a problem in Test Mode's report.
-
 - **A display computer starts cleanly.** Opening NewQ Display on Windows showed a white box over
   part of each screen before anything else. Now a screen shows nothing until NewQ has drawn on it
   full screen: from start-up, only the computer's card (its name, screen and address), so you can
