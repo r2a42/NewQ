@@ -347,7 +347,7 @@ impl Watch {
             );
             self.drift(key, prev, state, pos, now, t);
             self.cueing(key, state, now, t, lap);
-            self.arrivals(show, engine, key, prev, state, pos, t);
+            self.arrivals(show, engine, key, prev, state, pos, now, t);
         }
     }
 
@@ -425,6 +425,7 @@ impl Watch {
         prev: Option<Look>,
         state: RunState,
         pos: f64,
+        now: Instant,
         t: f64,
     ) {
         let clips = engine.timeline_clips_up(key);
@@ -439,7 +440,24 @@ impl Watch {
             (None | Some(RunState::Stopped), _) => {
                 self.from.insert(key, 0.0);
             }
-            _ => {}
+            _ => {
+                // Put somewhere else between two looks without a look at it
+                // cueing (a seek whose clips were all ready is released at
+                // once; a loop going round): from about where it was put. A
+                // clip it started part way in is not one the clock reached (it
+                // was once judged by its place, "33.5 s late").
+                if let Some(p) = prev {
+                    let wall = now.saturating_duration_since(p.at).as_secs_f64();
+                    let ran = if p.state == RunState::Running {
+                        wall
+                    } else {
+                        0.0
+                    };
+                    if pos < p.pos - 1e-6 || pos - (p.pos + ran) > JUMPED {
+                        self.from.insert(key, (pos - wall).max(0.0));
+                    }
+                }
+            }
         }
         let from = self.from.get(&key).copied().unwrap_or(f64::INFINITY);
         for c in &clips {
@@ -642,6 +660,77 @@ mod tests {
             (took - built.lap_secs).abs() < 6.0,
             "the lap took {took:.1} s of show time; the plan says {:.1}",
             built.lap_secs
+        );
+    }
+
+    /// A seek the watch never saw cueing (it cued and ran on between two
+    /// looks, as a seek whose clips were all ready does at once): what it
+    /// started part way in is not judged as late by its place, while what the
+    /// clock then reaches is. Texts, no media.
+    #[test]
+    fn a_seek_not_seen_cueing_is_not_a_late_clip() {
+        use crate::show::{CueType, TimelineSettings};
+        let mut show = Show::default();
+        let l = show.add_list("Programme");
+        show.lists.last_mut().unwrap().timeline = Some(TimelineSettings::for_editor());
+        let mut add = |at: f64, len: f64| {
+            let mut c = show.make_cue(CueType::Text, None, show.cues.len());
+            c.pre_wait = at;
+            c.list = l;
+            if let CueKind::Text(t) = &mut c.kind {
+                t.media.end = Some(len);
+            }
+            let id = c.id;
+            show.cues.push(c);
+            id
+        };
+        let first = add(0.5, 3.0);
+        let long = add(10.0, 20.0);
+        let later = add(16.0, 3.0);
+        let key = TimelineKey::List(l);
+        let mut e = Engine::for_tests();
+        e.output_sizes.insert(show.outputs[0].id, (64, 36));
+        let mut watch = Watch::default();
+        let base = Instant::now();
+        let mut t = 0.0;
+        let mut step = |e: &mut Engine, watch: &mut Watch, look: bool| {
+            std::thread::sleep(Duration::from_millis(2));
+            e.tick(&show, 0.02);
+            t += 0.02;
+            if look {
+                watch.tick(&show, e, &[key], base + Duration::from_secs_f64(t), t, 1);
+            }
+        };
+        e.timeline_run(&show, key);
+        while e.timeline_clock(key).is_none_or(|(_, pos)| pos < 4.0) {
+            step(&mut e, &mut watch, true);
+        }
+        // To 14: the long clip starts 4 s in. Not looked at until it runs on.
+        e.timeline_seek(&show, key, 14.0, true);
+        let began = Instant::now();
+        while e
+            .timeline_clock(key)
+            .is_none_or(|(s, _)| s != RunState::Running)
+        {
+            assert!(began.elapsed() < Duration::from_secs(10), "it never ran on");
+            step(&mut e, &mut watch, false);
+        }
+        while e.timeline_clock(key).is_none_or(|(_, pos)| pos < 18.0) {
+            step(&mut e, &mut watch, true);
+        }
+        let name = |id: CueId| show.cue(id).unwrap().name.clone();
+        assert!(watch.came.contains(&first), "{:?}", watch.notes.arrivals);
+        assert!(watch.came.contains(&later), "{:?}", watch.notes.arrivals);
+        assert!(!watch.came.contains(&long), "{:?}", watch.notes.arrivals);
+        assert!(
+            watch
+                .notes
+                .arrivals
+                .iter()
+                .all(|a| a.late.is_some_and(|x| x < 0.5)),
+            "{} judged: {:?}",
+            name(long),
+            watch.notes.arrivals
         );
     }
 
