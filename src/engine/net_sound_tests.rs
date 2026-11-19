@@ -334,3 +334,124 @@ fn a_chain_of_films_and_sounds_starts_each_cue_together_at_any_frame_rate() {
         f.e.take_problems()
     );
 }
+
+/// A cue that a sound and a film with sound follow is seen to end 100 ms
+/// past its length (a stall, or a file that ran on) on both computers, one
+/// at 60 Hz and one at 165: what follows starts at the tick on each, from its
+/// beginning, as 0.24.2 did. Placed back where the cue ended, the sounds
+/// would skip all but `SOUND_SLACK` of those 100 ms and the film's first
+/// frames would never be shown.
+#[test]
+fn what_follows_a_cue_seen_100_ms_past_its_end_starts_from_its_beginning() {
+    use crate::show::{ContinueMode, CueKind};
+    let Some((ff, tone)) = crate::media::test_media("tone_5s.wav") else {
+        return;
+    };
+    let Some((_, film)) = crate::media::test_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let mut show = Show::default();
+    let mut w = show.make_cue(CueType::Wait, None, show.cues.len());
+    if let CueKind::Wait(x) = &mut w.kind {
+        x.duration = 0.6;
+    }
+    w.continue_mode = ContinueMode::AutoFollow;
+    let first = w.id;
+    show.cues.push(w);
+    let video = cue(&mut show, CueType::Video, &film);
+    show.cues.last_mut().expect("a cue").continue_mode = ContinueMode::AutoContinue;
+    let sound = cue(&mut show, CueType::Audio, &tone);
+    let mut p = Side::new(&ff, 512);
+    let mut f = Side::new(&ff, 480);
+    let t0 = Instant::now();
+    let shared = || t0.elapsed().as_secs_f64();
+    p.began = Some(0.0);
+    f.began = Some(0.0);
+    for s in [&mut p, &mut f] {
+        s.e.tick_shared(&show, 0.0);
+        s.e.load_ahead(&show, video);
+        s.e.load_ahead(&show, sound);
+    }
+    while !(p.e.prepared.len() >= 2 && f.e.prepared.len() >= 2) {
+        assert!(shared() < 30.0, "the cues were never got ready");
+        std::thread::sleep(Duration::from_millis(10));
+        let now = shared();
+        for s in [&mut p, &mut f] {
+            s.play_to(now);
+            s.e.tick_shared(&show, now);
+        }
+    }
+    let fire_at = shared() + 0.2;
+    let end = fire_at + 0.6;
+    let seen = end + 0.1;
+    let mut sides = [(p, 60.0, fire_at, false), (f, 165.0, fire_at, false)];
+    // The tick at which each side saw the end.
+    let mut saw: [Option<f64>; 2] = [None, None];
+    loop {
+        std::thread::sleep(Duration::from_millis(1));
+        let now = shared();
+        assert!(now < fire_at + 30.0, "what follows never started");
+        if now >= seen + 0.8 {
+            break;
+        }
+        for (k, (s, hz, next, went)) in sides.iter_mut().enumerate() {
+            if now < *next {
+                continue;
+            }
+            *next = (*next + 1.0 / *hz).max(now);
+            // Nothing between a frame before its end and 100 ms past it.
+            if now > end - 0.005 && now < seen {
+                *next = seen;
+                continue;
+            }
+            s.play_to(now);
+            if !*went {
+                s.e.tick_shared(&show, fire_at);
+                s.e.fire(&show, first);
+                *went = true;
+            }
+            s.e.tick_shared(&show, now);
+            if saw[k].is_none() && s.e.active.iter().any(|a| a.cue_id == video) {
+                saw[k] = Some(now);
+            }
+        }
+    }
+    let now = shared();
+    for (k, (s, ..)) in sides.iter_mut().enumerate() {
+        let saw = saw[k].expect("what follows began");
+        assert!(saw >= seen, "{}", saw - seen);
+        let state = s.e.net_state(now);
+        for id in [video, sound] {
+            let at = state
+                .cues
+                .iter()
+                .find(|c| c.cue == id)
+                .map(|c| c.anchor)
+                .expect("it plays");
+            assert!(
+                at >= saw - 0.02,
+                "side {k}: placed {:.0} ms before the tick that saw the end",
+                (saw - at) * 1000.0
+            );
+            // Its sound has played from its beginning: no more than the card
+            // has had time to play since it began.
+            let reached = match &s.cue(id).kind {
+                ActiveKind::Audio(vo) => vo.reached(),
+                ActiveKind::Video(v) => v.voice.as_ref().expect("its sound").reached(),
+                _ => panic!("a sound"),
+            };
+            let skipped = reached - (s.card.frames as f64 / RATE - at);
+            assert!(
+                skipped.abs() < 0.02,
+                "side {k}: the sound skipped {:.0} ms; {:?}",
+                skipped * 1000.0,
+                s.e.take_problems()
+            );
+        }
+        let pic = match &s.cue(video).kind {
+            ActiveKind::Video(v) => v.picture_at,
+            _ => panic!("a film"),
+        };
+        assert!(pic < now - saw + 0.02, "the film is at {pic:.3} s");
+    }
+}

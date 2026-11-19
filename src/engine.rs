@@ -72,10 +72,13 @@ const DEFAULT_OUTPUT_SIZE: (u32, u32) = (1920, 1080);
 const REVEAL_TIMEOUT: f64 = 3.0;
 /// Ticking by a shared clock, a cue seen to end past its length is taken to
 /// have ended at its length (`ended_at`), and what follows it is placed there,
-/// if that is no more than this before the tick that saw it; more is a stall,
-/// or a file that ran on past its length, or a group's child that ended long
-/// before the last one was stopped, and what follows starts at the tick.
-const ENDED_LATE_MAX: f64 = 0.25;
+/// if that is no more than this (a couple of frames) before the tick that saw
+/// it; for what has a sound, no more than `audio::SOUND_SLACK`
+/// (`chain_backdate`). More is a stall, or a file that ran on past its
+/// length, or a group's child that ended long before the last one was
+/// stopped, and what follows starts at the tick: placed further back, a sound
+/// would skip its beginning and a picture never show its first frames.
+const ENDED_LATE_MAX: f64 = 0.05;
 /// How long the shared time a cue ended at is kept for what it leads to (a
 /// group's next child, seen at the next tick).
 const ENDED_KEPT: f64 = 1.0;
@@ -556,6 +559,12 @@ pub struct ActiveCue {
     faded: bool,
     auto_faded: bool,
     followed: bool,
+    /// Ticking by a shared clock, a sound (or a film) that the clock has
+    /// taken past its length, its device still playing out its last buffers
+    /// (up to `audio::SOUND_SLACK` and a buffer behind): it ended there, so
+    /// what follows has been started and a group no longer waits for it
+    /// (`is_running`). It is dropped once played out.
+    over_by_clock: bool,
     panic: bool,
     entry: Option<EntryAction>,
     /// The instance of the group (all together) whose child this is: its brothers
@@ -2854,6 +2863,7 @@ impl Engine {
             faded: false,
             auto_faded: false,
             followed: true,
+            over_by_clock: false,
             panic: false,
             entry: None,
             together: None,
@@ -2947,6 +2957,7 @@ impl Engine {
             faded: false,
             auto_faded: false,
             followed: false,
+            over_by_clock: false,
             panic: false,
             entry: None,
             together: None,
@@ -4099,6 +4110,28 @@ impl Engine {
                     completed = done_groups.iter().any(|d| d.0 == a.instance);
                 }
             }
+            // Ticking by a shared clock, a sound or a film the clock has taken
+            // to its length has ended there, the same on every computer: its
+            // device may play its last buffers out a few frames later.
+            if !completed
+                && pinned.is_some()
+                && shared.is_some()
+                && a.started
+                && !a.stopping
+                && !a.held
+                && !a.over_by_clock
+                && a.run.is_none()
+                && !levels_wait
+                && matches!(a.kind, ActiveKind::Audio(_) | ActiveKind::Video(_))
+                && a.duration.is_some_and(|d| a.elapsed >= d)
+            {
+                a.over_by_clock = true;
+                let end = ended_at(a, shared, on_clock);
+                if let Some(end) = end {
+                    ended.push((a.cue_id, end));
+                }
+                completed_follow(a, cue, end, &mut follow);
+            }
 
             if a.started && !paused {
                 a.opacity.step(dt, &steps);
@@ -4274,7 +4307,8 @@ impl Engine {
                         .or(shared),
                     _ => ended_at(a, shared, on_clock),
                 };
-                if let Some(end) = end {
+                // (One the clock took past its length ended then.)
+                if let Some(end) = end.filter(|_| !a.over_by_clock) {
                     ended.push((a.cue_id, end));
                 }
                 completed_follow(a, cue, end, &mut follow);
@@ -4301,14 +4335,34 @@ impl Engine {
         if let Some(now) = shared {
             self.net_ended.retain(|_, t| now - *t <= ENDED_KEPT);
         }
+        let any_ended = !ended.is_empty();
         self.net_ended.extend(ended);
+        // Ticking by a shared clock, a group whose last child ended this tick
+        // ends now, and a playlist's next child starts now: a tick later, at
+        // 60 Hz, what follows was often further back than it may be placed
+        // (`chain_backdate`), and started at a tick of its own on each
+        // computer.
+        if shared.is_some() && any_ended && !paused {
+            for (instance, end) in self.advance_groups(show) {
+                let Some(i) = self.active.iter().position(|a| a.instance == instance) else {
+                    continue;
+                };
+                let mut a = self.active.remove(i);
+                let end = end.or(shared);
+                if let Some(end) = end {
+                    self.net_ended.insert(a.cue_id, end);
+                }
+                let cue = show.cue(a.cue_id);
+                completed_follow(&mut a, cue, end, &mut follow);
+            }
+        }
         // What follows a cue starts where it ended by the shared clock, the
         // same on every computer whatever frame each noticed the end in.
         for (id, end) in follow {
             let mark = self.net_mark();
             self.fire_next(show, id);
             if let Some(end) = end {
-                self.chain_backdate(&mark, end);
+                self.chain_backdate(show, &mark, end);
             }
         }
         self.crumbs.lap("starting what follows");
@@ -4396,10 +4450,14 @@ impl Engine {
     }
 
     /// A cue that is waiting out a pre-wait or still playing. A video that is
-    /// holding its last frame has finished.
+    /// holding its last frame has finished, and so has a sound the shared
+    /// clock has taken past its length (`over_by_clock`).
     fn is_running(&self, id: CueId) -> bool {
         self.pending.iter().any(|p| p.cue_id == id)
-            || self.active.iter().any(|a| a.cue_id == id && !a.held)
+            || self
+                .active
+                .iter()
+                .any(|a| a.cue_id == id && !a.held && !a.over_by_clock)
     }
 
     /// Fire the next child of every playlist whose current child has finished.
@@ -4481,7 +4539,7 @@ impl Engine {
             let mark = self.net_mark();
             self.fire(show, child);
             if let Some(due) = due {
-                self.chain_backdate(&mark, due);
+                self.chain_backdate(show, &mark, due);
             }
         }
         done
@@ -4489,12 +4547,21 @@ impl Engine {
 
     /// What a cue that ended (or a group's child that is due) started since
     /// `mark` is placed at `due`, where it ended by the shared clock, when that
-    /// is no more than `ENDED_LATE_MAX` before this tick.
-    fn chain_backdate(&mut self, mark: &net::StartMark, due: f64) {
-        if self
-            .net_shared_time()
-            .is_some_and(|now| now - due <= ENDED_LATE_MAX)
-        {
+    /// is no more than `ENDED_LATE_MAX` before this tick, or `SOUND_SLACK`
+    /// when any of it has a sound (a sound further behind skips ahead:
+    /// `Voice::keep_to`).
+    fn chain_backdate(&mut self, show: &Show, mark: &net::StartMark, due: f64) {
+        let Some(now) = self.net_shared_time() else {
+            return;
+        };
+        let late = now - due;
+        let sounds = self.net_started_sound(show, mark, late);
+        let most = if sounds {
+            crate::media::audio::SOUND_SLACK.min(ENDED_LATE_MAX)
+        } else {
+            ENDED_LATE_MAX
+        };
+        if late <= most {
             self.net_backdate(mark, due);
         }
     }

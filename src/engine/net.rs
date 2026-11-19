@@ -267,6 +267,22 @@ impl Engine {
         }
     }
 
+    /// Whether what was started since `mark` has a sound that would begin
+    /// now, were it placed `late` back: a cue playing with a voice, or one
+    /// still to start whose pre-wait that would use up.
+    pub(super) fn net_started_sound(&self, show: &Show, mark: &StartMark, late: f64) -> bool {
+        self.active
+            .iter()
+            .filter(|a| a.instance >= mark.instance)
+            .any(|a| a.voice().is_some())
+            || self.pending.iter().skip(mark.pending).any(|p| {
+                p.remaining <= late
+                    && show
+                        .cue(p.cue_id)
+                        .is_some_and(|c| matches!(c.kind, CueKind::Audio(_) | CueKind::Video(_)))
+            })
+    }
+
     /// Ticking by a shared clock: what was started since `mark` (cues, the
     /// pre-waits of cues to come, timelines set going) began at shared time
     /// `due`, before this tick's: a late command, or the end of the cue it
