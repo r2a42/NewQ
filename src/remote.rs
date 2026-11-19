@@ -931,6 +931,13 @@ pub mod fixtures {
         show.cues.push(g);
         let mut c = text(&mut show, 4.0);
         c.parent = Some(gid);
+        // On a layer above the list's: the two timelines play together on the
+        // one display. On the same layer the group's text, once drawn (on a
+        // thread, so whenever a busy machine gets to it), would replace the
+        // list's and leave it nothing to fade at a Stop.
+        if let CueKind::Text(t) = &mut c.kind {
+            t.media.layer = 1;
+        }
         show.cues.push(c);
         let mut p = control(
             &mut show,
