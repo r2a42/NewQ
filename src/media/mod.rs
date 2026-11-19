@@ -345,6 +345,40 @@ pub fn test_media(file: &str) -> Option<(Ffmpeg, PathBuf)> {
     found
 }
 
+/// A film whose sound runs `extra` seconds past its picture (as a trailer's
+/// often does), made in a folder of its own.
+#[cfg(test)]
+pub fn film_with_longer_sound(ff: &crate::media::ffmpeg::Ffmpeg, extra: f64) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("newq_test_longer_sound_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    // (One each: tests run side by side.)
+    let n = std::thread::current().id();
+    let clip = dir.join(format!("longer_sound_{n:?}.mp4").replace(['(', ')'], ""));
+    let made = ff
+        .command()
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x90:rate=30:duration=1",
+        ])
+        .args(["-f", "lavfi", "-i"])
+        .arg(format!(
+            "sine=frequency=440:sample_rate=48000:duration={}",
+            1.0 + extra
+        ))
+        .args(["-pix_fmt", "yuv420p"])
+        .arg(&clip)
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(
+        made || std::env::var_os("NEWQ_REQUIRE_MEDIA").is_none(),
+        "ffmpeg could not make the film"
+    );
+    made.then_some(clip)
+}
+
 /// Like `test_media`, for tests that make a Hap file with FFmpeg: None (the
 /// test skips) when this FFmpeg has no `hap` encoder, as on Homebrew's build.
 #[cfg(test)]

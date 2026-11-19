@@ -82,6 +82,15 @@ const ENDED_LATE_MAX: f64 = 0.05;
 /// How long the shared time a cue ended at is kept for what it leads to (a
 /// group's next child, seen at the next tick).
 const ENDED_KEPT: f64 = 1.0;
+/// Ticking by a shared clock, a film or sound whose file ran out here less
+/// than this (seconds) before the clock takes it to its length is over only
+/// there (`short_of_clock`): on its last frame, or silent, meanwhile. What a
+/// computer has of a file runs out at its own moment: a picture is done a
+/// frame before its length, a sound once its card has been sent the last of
+/// it, a computer without the sound's output when the picture is, and a
+/// film's sound may run on past its picture. Further short than this, the
+/// length is wrong, and it ends when it runs out, as it always did.
+const SHORT_OF_CLOCK_MAX: f64 = 1.0;
 
 #[derive(Clone, Debug)]
 struct Ramp {
@@ -3882,6 +3891,9 @@ impl Engine {
             }
             // Ticking by a shared clock: its time is the clock's (`tick_shared`).
             let pinned = a.pinned(shared, paused, dt, &anchored);
+            // ...and a file that ran out here a little before the clock takes
+            // it to its length is over there, the same on every computer.
+            let short_of_clock = short_of_clock(pinned, shared, a.duration);
 
             match &mut a.kind {
                 ActiveKind::Video(v) => {
@@ -3962,7 +3974,11 @@ impl Engine {
                         // A camera never ends by itself; "run for" ends it.
                         if v.player.is_live() && a.duration.is_some_and(|d| a.elapsed >= d) {
                             completed = !clock_ends;
-                        } else if v.player.finished() && audio_done && !a.held {
+                        } else if v.player.finished()
+                            && audio_done
+                            && !a.held
+                            && !(short_of_clock && !goes_round && !levels_wait)
+                        {
                             if v.player.is_live() {
                                 let err = v.player.error().unwrap_or_else(|| "it stopped".into());
                                 messages.push(format!(
@@ -4116,7 +4132,7 @@ impl Engine {
                         {
                             a.duration = Some(a.seek_base + at + vo.tail_len());
                         }
-                        if vo.finished() {
+                        if vo.finished() && !(short_of_clock && !goes_round && !levels_wait) {
                             // Out of sound before its timeline moves on: silence
                             // (or round again).
                             if goes_round && !levels_wait && !a.held {
@@ -4175,7 +4191,10 @@ impl Engine {
             }
             // Ticking by a shared clock, a sound or a film the clock has taken
             // to its length has ended there, the same on every computer: its
-            // device may play its last buffers out a few frames later.
+            // device may play its last buffers out a few frames later. So has
+            // a timeline's clip on its clock (one whose end the clock keeps
+            // ends by `ends_at`), or its group would end when each computer's
+            // card had played it out.
             if !completed
                 && pinned.is_some()
                 && shared.is_some()
@@ -4183,7 +4202,7 @@ impl Engine {
                 && !a.stopping
                 && !a.held
                 && !a.over_by_clock
-                && a.run.is_none()
+                && !a.clocked
                 && !levels_wait
                 && matches!(a.kind, ActiveKind::Audio(_) | ActiveKind::Video(_))
                 && a.duration.is_some_and(|d| a.elapsed >= d)
@@ -5150,6 +5169,15 @@ fn sound_caught_up(cue: Option<&Cue>, behind: f64) {
         cue.map(|c| c.number.as_str()).unwrap_or("?"),
         behind * 1000.0
     );
+}
+
+/// Whether a file playing by a shared clock (`pinned`: its time by it) has
+/// a little of its length still to go by the clock (`SHORT_OF_CLOCK_MAX`).
+fn short_of_clock(pinned: Option<f64>, shared: Option<f64>, duration: Option<f64>) -> bool {
+    shared.is_some()
+        && pinned
+            .zip(duration)
+            .is_some_and(|(t, d)| t < d && d - t <= SHORT_OF_CLOCK_MAX)
 }
 
 /// It came to its end (`end`: where, by the shared clock): what auto-follows

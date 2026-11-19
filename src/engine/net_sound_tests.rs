@@ -718,3 +718,156 @@ fn a_cue_started_to_match_the_primary_that_goes_again_is_not_started_over_and_ov
     }
     assert_eq!(tries, 2, "one try for each of the primary's instances");
 }
+
+/// Issue 33 of the 0.24.4 test (the cue-list part: a Mac primary that played
+/// the sound and a Windows display computer that had none): a timeline
+/// group's film ended on each computer when what it had of it ran out, the
+/// picture on the display computer and the sound, played out by its card, on
+/// the primary. Its sound ran on past its picture, so the group after it
+/// started a few hundred ms apart on the two (and a frame apart where they ran
+/// out together: a picture is done a frame before its end, a sound a buffer
+/// after), and was "put right" every lap. Ticking by a shared clock, a film
+/// is over where the clock takes it to its length, on every computer.
+#[test]
+fn the_timeline_group_after_a_film_starts_together_with_and_without_its_sound() {
+    use crate::show::{ContinueMode, CueKind, GroupMode, Transition};
+    use crate::timeline::TimelineKey;
+    let Some((ff, film)) = crate::media::test_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let Some(longer) = crate::media::film_with_longer_sound(&ff, 0.4) else {
+        return;
+    };
+    // Its length, as this FFmpeg reads it (its sound's: about 1.4 s).
+    let len = ff
+        .probe(&longer)
+        .ok()
+        .and_then(|i| i.duration)
+        .expect("the film's length");
+    assert!((len - 1.4).abs() < 0.1, "{len}");
+    let mut show = Show::default();
+    let group = |show: &mut Show| {
+        let mut g = show.make_cue(CueType::Group, None, show.cues.len());
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        g.continue_mode = ContinueMode::AutoFollow;
+        let id = g.id;
+        show.cues.push(g);
+        id
+    };
+    // As Test Mode's trailers: a group each, a crossfade, faded in and out.
+    let first = group(&mut show);
+    let clip_a = cue(&mut show, CueType::Video, &longer);
+    let second = group(&mut show);
+    let clip_b = cue(&mut show, CueType::Video, &film);
+    for (clip, parent, end) in [(clip_a, first, None), (clip_b, second, Some(0.8))] {
+        let c = show.cues.iter_mut().find(|c| c.id == clip).expect("a cue");
+        c.parent = Some(parent);
+        let m = c.kind.media_mut().expect("media");
+        m.end = end;
+        m.transition = Transition::Crossfade;
+        m.fade_in = 0.2;
+        m.fade_out = 0.2;
+    }
+    let mut w = show.make_cue(CueType::Wait, None, show.cues.len());
+    if let CueKind::Wait(x) = &mut w.kind {
+        x.duration = 1000.0;
+    }
+    let wait = w.id;
+    show.cues.push(w);
+    // The primary plays the sound on its card; the display computer has no
+    // sound output (`AudioOutputConfig::device_here`).
+    let mut p = Side::new(&ff, 512);
+    let mut f = Side::new(&ff, 480);
+    f.e.audio = AudioOut::disabled();
+    let t0 = Instant::now();
+    let shared = || t0.elapsed().as_secs_f64();
+    p.began = Some(0.0);
+    for s in [&mut p, &mut f] {
+        s.e.tick_shared(&show, 0.0);
+        s.e.load_ahead(&show, clip_a);
+    }
+    while p.e.prepared.is_empty() || f.e.prepared.is_empty() {
+        assert!(shared() < 30.0, "the first film was never got ready");
+        std::thread::sleep(Duration::from_millis(10));
+        let now = shared();
+        for s in [&mut p, &mut f] {
+            s.play_to(now);
+            s.e.tick_shared(&show, now);
+        }
+    }
+    let fire_at = shared() + 0.2;
+    let mut sides = [(p, fire_at, false), (f, fire_at + 0.0071, false)];
+    // What follows the first group, on each side: the second group's cue
+    // and clock, and the wait after it.
+    let key = TimelineKey::Group(second);
+    let mut anchors = [[None::<f64>; 2]; 3];
+    while anchors.iter().any(|a| a.iter().any(Option::is_none)) {
+        std::thread::sleep(Duration::from_millis(1));
+        let now = shared();
+        assert!(
+            now < fire_at + 30.0,
+            "the chain never reached its end: {anchors:?}"
+        );
+        for (k, (s, next, went)) in sides.iter_mut().enumerate() {
+            if now < *next {
+                continue;
+            }
+            *next = (*next + 1.0 / 60.0).max(now);
+            s.play_to(now);
+            if !*went {
+                s.e.tick_shared(&show, fire_at);
+                s.e.fire(&show, first);
+                *went = true;
+            }
+            s.e.tick_shared(&show, now);
+            let state = s.e.net_state(now);
+            for (i, id) in [second, wait].into_iter().enumerate() {
+                if anchors[i][k].is_none()
+                    && let Some(c) = state.cues.iter().find(|c| c.cue == id)
+                {
+                    anchors[i][k] = Some(c.anchor);
+                }
+            }
+            if anchors[2][k].is_none()
+                && let Some(r) = state.runs.iter().find(|r| r.key == key)
+            {
+                anchors[2][k] = r.anchor;
+            }
+        }
+    }
+    let mut worst: f64 = 0.0;
+    // (Where each is due: the first film's length, which is its sound's,
+    // and the second's after it.)
+    for ((what, due), a) in [
+        ("second group", len),
+        ("wait", len + 0.8),
+        ("second group's clock", len),
+    ]
+    .iter()
+    .zip(anchors)
+    {
+        let (pa, fa) = (a[0].unwrap_or(0.0), a[1].unwrap_or(0.0));
+        eprintln!(
+            "{what}: primary {:.4} s, display computer {:.4} s, {:+.1} ms apart",
+            pa - fire_at,
+            fa - fire_at,
+            (fa - pa) * 1000.0
+        );
+        worst = worst.max((fa - pa).abs());
+        assert!(
+            (pa - fire_at - due).abs() < 0.02,
+            "{what} began {:.3} s after the first",
+            pa - fire_at
+        );
+    }
+    let [(p, ..), (f, ..)] = &mut sides;
+    assert!(
+        worst < 0.002,
+        "{:.1} ms apart; {:?} {:?}",
+        worst * 1000.0,
+        p.e.take_problems(),
+        f.e.take_problems()
+    );
+}
