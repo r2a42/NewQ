@@ -21,8 +21,10 @@ pub enum AdapterKind {
     WiFi,
     /// A VPN or another tunnel.
     Vpn,
-    /// An adapter whose name doesn't say (a Mac's "en0" is wired or Wi-Fi).
+    /// An adapter whose name doesn't say (a Mac's "en0" is wired or Wi-Fi),
+    /// or a kind a later NewQ names that this one doesn't know.
     #[default]
+    #[serde(other)]
     Other,
 }
 

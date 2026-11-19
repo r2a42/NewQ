@@ -81,6 +81,8 @@ pub enum Command {
     },
     /// A control action on a cue from outside the show (a remote, the menu).
     Control {
+        /// (An action a later NewQ adds reads as `Memo`: nothing done.)
+        #[serde(deserialize_with = "lenient_action")]
         action: ControlAction,
         target: CueId,
         from: String,
@@ -121,6 +123,16 @@ pub enum Command {
     /// and not done (a frame that can't be read would close the session).
     #[serde(other)]
     Unknown,
+}
+
+/// A control action, or `Memo` (which does nothing) for one a later NewQ adds:
+/// the command is still acknowledged and the session stays up.
+fn lenient_action<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ControlAction, D::Error> {
+    use serde::de::IntoDeserializer;
+    let word = String::deserialize(d)?;
+    let known: Result<ControlAction, serde::de::value::Error> =
+        ControlAction::deserialize(word.as_str().into_deserializer());
+    Ok(known.unwrap_or(ControlAction::Memo))
 }
 
 impl Command {

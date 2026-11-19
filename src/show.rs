@@ -8168,6 +8168,46 @@ mod tests {
         assert_eq!(c.at, Some(TimelinePoint::Marker(2)));
     }
 
+    /// A later NewQ's kind of timeline or of pause freeze, in a show (or one
+    /// sent over a show network), never stops it opening: the timeline is one
+    /// no show has, the freeze none.
+    #[test]
+    fn a_later_kind_of_timeline_or_freeze_still_opens() {
+        let mut show = Show::default();
+        let mut c = show.make_cue(CueType::Control, None, 0);
+        c.kind = CueKind::Control(ControlCue {
+            action: ControlAction::TimelinePause,
+            timeline: Some(TimelineKey::List(3)),
+            freeze: PauseFreeze::Clips,
+            ..Default::default()
+        });
+        show.cues.push(c);
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(json.contains(r#""timeline":{"List":3}"#), "{json}");
+        assert!(json.contains(r#""freeze":"Clips""#), "{json}");
+        for timeline in [
+            r#""timeline":{"Reel":{"n":3,"side":"A"}}"#,
+            r#""timeline":"Everything""#,
+        ] {
+            let later = json
+                .replace(r#""timeline":{"List":3}"#, timeline)
+                .replace(r#""freeze":"Clips""#, r#""freeze":"Melt""#);
+            let back: Show = serde_json::from_str(&later).expect(&later);
+            let c = control_of(&back, back.cues[0].id);
+            assert_eq!(
+                (c.timeline, c.freeze),
+                (Some(TimelineKey::UNKNOWN), PauseFreeze::Nothing),
+                "{later}"
+            );
+        }
+        // Both known kinds still read as themselves.
+        for key in [TimelineKey::Group(CueId(4)), TimelineKey::List(0)] {
+            let j = serde_json::to_string(&key).unwrap();
+            assert_eq!(serde_json::from_str::<TimelineKey>(&j).unwrap(), key);
+        }
+        assert!(serde_json::from_str::<TimelineKey>(r#"{"List":"x"}"#).is_err());
+    }
+
     #[test]
     fn a_timeline_made_in_the_editor_is_written_with_both_rules() {
         use crate::timeline::edit;

@@ -546,6 +546,101 @@ mod tests {
         ));
     }
 
+    /// Values a later NewQ may add inside a known message (a kind of network
+    /// path, of refusal, of timeline, of pause freeze, a control action) read
+    /// as this NewQ's catch-all, never as a frame that can't be read (which
+    /// closes the session).
+    #[test]
+    fn a_later_kind_inside_a_known_message_is_let_pass() {
+        use crate::net::paths::AdapterKind;
+        use crate::net::play::{Command, Timed};
+        use crate::show::{ControlAction, CueId};
+        use crate::timeline::{PauseFreeze, TimelineKey};
+        let later = |msg: &Msg, from: &str, to: &str| {
+            let json = serde_json::to_string(msg).unwrap();
+            assert!(json.contains(from), "{json}");
+            decode(json.replace(from, to).as_bytes()).expect(to)
+        };
+        let status = Msg::Status(Box::new(StatusReport {
+            path: Some(AdapterKind::Vpn),
+            ..StatusReport::default()
+        }));
+        let Msg::Status(r) = later(&status, r#""path":"Vpn""#, r#""path":"Satellite""#) else {
+            panic!("a status");
+        };
+        assert_eq!(r.path, Some(AdapterKind::Other));
+        let refused = Msg::Refused {
+            why: Refusal::Passcode,
+            text: "No".into(),
+        };
+        assert_eq!(
+            later(&refused, r#""why":"Passcode""#, r#""why":"Busy""#),
+            Msg::Refused {
+                why: Refusal::Unknown,
+                text: "No".into()
+            }
+        );
+        let timed = |cmd| {
+            Msg::Play(Box::new(Timed {
+                epoch: 1,
+                seq: 2,
+                at: 3.0,
+                cmd,
+            }))
+        };
+        let pause = timed(Command::TimelinePause {
+            key: TimelineKey::List(2),
+            freeze: PauseFreeze::Clips,
+            clips: vec![],
+            live: false,
+            waits_for_go: false,
+        });
+        let json = serde_json::to_string(&pause)
+            .unwrap()
+            .replace(r#"{"List":2}"#, r#"{"Reel":[2,"A"]}"#)
+            .replace(r#""Clips""#, r#""Melt""#);
+        let Msg::Play(t) = decode(json.as_bytes()).expect(&json) else {
+            panic!("a command");
+        };
+        assert_eq!(
+            t.cmd,
+            Command::TimelinePause {
+                key: TimelineKey::UNKNOWN,
+                freeze: PauseFreeze::Nothing,
+                clips: vec![],
+                live: false,
+                waits_for_go: false,
+            }
+        );
+        let control = timed(Command::Control {
+            action: ControlAction::Devamp,
+            target: CueId(4),
+            from: "OSC".into(),
+        });
+        let Msg::Play(t) = later(&control, r#""Devamp""#, r#""Rewind""#) else {
+            panic!("a command");
+        };
+        assert_eq!(
+            t.cmd,
+            Command::Control {
+                action: ControlAction::Memo,
+                target: CueId(4),
+                from: "OSC".into(),
+            }
+        );
+        // The known ones are still themselves.
+        let Msg::Play(t) = decode(&serde_json::to_vec(&control).unwrap()).unwrap() else {
+            panic!("a command");
+        };
+        assert!(matches!(
+            t.cmd,
+            Command::Control {
+                action: ControlAction::Devamp,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn a_message_a_later_newq_adds_is_let_pass() {
         assert_eq!(

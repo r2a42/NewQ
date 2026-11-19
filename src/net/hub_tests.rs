@@ -1446,20 +1446,43 @@ fn kinds_a_later_newq_adds_are_passed_by_and_the_session_stays_up() {
         .replace(r#""do":"panic""#, r#""do":"a_later_command","n":4"#);
     assert!(play.contains("a_later_command"), "{play}");
     p.broadcast_json(&play);
-    let state = Msg::PlayState(Box::new(PlayState {
-        runs: vec![RunNow {
-            key: crate::timeline::TimelineKey::List(1),
-            state: RunWord::Running,
-            pos: 1.0,
-            anchor: None,
-        }],
-        ..PlayState::default()
-    }));
-    let state = serde_json::to_string(&state)
+    let state_msg = |state: RunWord| {
+        Msg::PlayState(Box::new(PlayState {
+            runs: vec![RunNow {
+                key: crate::timeline::TimelineKey::List(1),
+                state,
+                pos: 1.0,
+                anchor: None,
+            }],
+            ..PlayState::default()
+        }))
+    };
+    let state = serde_json::to_string(&state_msg(RunWord::Running))
         .unwrap()
         .replace(r#""state":"running""#, r#""state":"a_later_state""#);
     assert!(state.contains("a_later_state"), "{state}");
     p.broadcast_json(&state);
+    // A known command and heartbeat carrying a later kind of timeline and of
+    // freeze (`TimelineKey::UNKNOWN`, `PauseFreeze::Nothing`).
+    let pause = Msg::Play(Box::new(Timed {
+        epoch: 1,
+        seq: 6,
+        at: 2.5,
+        cmd: Command::TimelinePause {
+            key: crate::timeline::TimelineKey::List(1),
+            freeze: crate::timeline::PauseFreeze::Clips,
+            clips: vec![],
+            live: false,
+            waits_for_go: false,
+        },
+    }));
+    let later_key = |json: String| json.replace(r#"{"List":1}"#, r#"{"Reel":{"n":1}}"#);
+    let pause = later_key(serde_json::to_string(&pause).unwrap()).replace("Clips", "Melt");
+    assert!(pause.contains("Reel") && pause.contains("Melt"), "{pause}");
+    p.broadcast_json(&pause);
+    let state2 = later_key(serde_json::to_string(&state_msg(RunWord::Paused)).unwrap());
+    assert!(state2.contains("Reel"), "{state2}");
+    p.broadcast_json(&state2);
     // Then a message it knows, on the same session: a frame that couldn't be
     // read would have closed it, and this one would be lost with it.
     p.broadcast(Msg::NetTest(Box::new(NetTest::End { run: 3 })));
@@ -1495,8 +1518,23 @@ fn kinds_a_later_newq_adds_are_passed_by_and_the_session_stays_up() {
         panic!("the heartbeat after it: {got:?}");
     };
     assert_eq!(s.runs[0].state, RunWord::Unknown);
+    let Some(Msg::Play(t)) = got.get(i + 3) else {
+        panic!("the pause after it: {got:?}");
+    };
+    assert!(matches!(
+        t.cmd,
+        Command::TimelinePause {
+            key: crate::timeline::TimelineKey::UNKNOWN,
+            freeze: crate::timeline::PauseFreeze::Nothing,
+            ..
+        }
+    ));
+    let Some(Msg::PlayState(s)) = got.get(i + 4) else {
+        panic!("the heartbeat after it: {got:?}");
+    };
+    assert_eq!(s.runs[0].key, crate::timeline::TimelineKey::UNKNOWN);
     assert_eq!(
-        got.get(i + 3),
+        got.get(i + 5),
         Some(&Msg::NetTest(Box::new(NetTest::End { run: 3 })))
     );
     // Done by a follower's engine, the unknown command changes nothing.
