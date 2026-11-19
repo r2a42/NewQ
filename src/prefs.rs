@@ -60,6 +60,9 @@ pub struct Prefs {
     /// The new interface (editor, operator and patch views) in place of the panes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub new_layout: bool,
+    /// The Preview pane shows every output at once (a multiview), not the one chosen.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multiview: bool,
     /// How much the log says (see `logging`).
     #[serde(default, skip_serializing_if = "is_default_level")]
     pub log_level: crate::logging::LogLevel,
@@ -232,6 +235,7 @@ mod tests {
             clicker_go: Some(0x51),
             clicker_back: Some(0x49),
             new_layout: true,
+            multiview: true,
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,
             timeline_follow: TimelineFollow::Centre,
@@ -270,6 +274,7 @@ mod tests {
         let json = serde_json::to_string(&Prefs::default()).unwrap();
         assert!(!json.contains("test_"), "{json}");
         assert!(!json.contains("new_layout"), "{json}");
+        assert!(!json.contains("multiview"), "{json}");
         assert!(
             !json.contains("let_computer_sleep") && !json.contains("fps_on_output"),
             "{json}"
