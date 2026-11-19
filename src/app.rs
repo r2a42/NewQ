@@ -2370,7 +2370,8 @@ impl App {
                     name: o.name.clone(),
                     test_pattern: o.test_pattern,
                     pattern: o.pattern,
-                    number: i + 1,
+                    // 0 draws no number.
+                    number: if o.pattern_number { i + 1 } else { 0 },
                     corners,
                     mesh,
                     part: self.show.part_of(o.id),

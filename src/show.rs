@@ -660,6 +660,9 @@ pub struct OutputConfig {
     /// Which test pattern it shows when `test_pattern` is on.
     #[serde(default, skip_serializing_if = "is_default_pattern")]
     pub pattern: PatternKind,
+    /// Whether the patterns that have room for it draw the display's number.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub pattern_number: bool,
     /// Keystone / corner pin applied to everything on a display. (A sub
     /// display's area is its keystone.)
     #[serde(default)]
@@ -729,6 +732,7 @@ impl OutputConfig {
             enabled: true,
             test_pattern: false,
             pattern: PatternKind::default(),
+            pattern_number: true,
             corners: Corners::default(),
             mesh: None,
             part_of: None,
@@ -5298,6 +5302,15 @@ mod tests {
         assert_ne!(old, plain, "the test edits the file");
         let kept: Show = serde_json::from_str(&old).unwrap();
         assert_eq!(kept.outputs[0].pattern, PatternKind::Bars);
+        // The number is on unless turned off, and only "off" is written.
+        assert!(back.outputs[0].pattern_number);
+        assert!(!plain.contains("pattern_number"), "{plain}");
+        show.outputs[0].pattern_number = false;
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(json.contains("\"pattern_number\":false"), "{json}");
+        let off: Show = serde_json::from_str(&json).unwrap();
+        assert!(!off.outputs[0].pattern_number);
+        show.outputs[0].pattern_number = true;
         // Every pattern survives a save and load, and is written under its name.
         for kind in PatternKind::ALL {
             show.outputs[0].pattern = kind;

@@ -8,7 +8,7 @@ const WHITE: [u8; 3] = [255, 255, 255];
 const BLACK: [u8; 3] = [0, 0, 0];
 
 /// Draw `kind` at `w` by `h` pixels. `number` is the display's number, drawn
-/// large on the patterns that have room for it.
+/// large on the patterns that have room for it (0 = draw none).
 pub fn render(kind: PatternKind, w: u32, h: u32, number: usize) -> Vec<u8> {
     let (w, h) = (w.max(2), h.max(2));
     let kind = resolve(kind, w, h);
@@ -307,11 +307,15 @@ struct Digits {
 
 impl Digits {
     fn new(w: u32, h: u32, number: usize) -> Digits {
-        let list: Vec<u32> = number
-            .to_string()
-            .chars()
-            .filter_map(|c| c.to_digit(10))
-            .collect();
+        let list: Vec<u32> = if number == 0 {
+            Vec::new()
+        } else {
+            number
+                .to_string()
+                .chars()
+                .filter_map(|c| c.to_digit(10))
+                .collect()
+        };
         // As tall as fits, also on narrow sub displays.
         let n = list.len() as f32;
         let dh = (h as f32 * 0.4).min(w as f32 * 0.7 / (n * 0.55 + (n - 1.0).max(0.0) * 0.165));
@@ -540,6 +544,24 @@ mod tests {
             render(PatternKind::Smpte169, 192, 108, 1),
             render(PatternKind::Smpte169, 192, 108, 8)
         );
+    }
+
+    #[test]
+    fn number_0_draws_no_number_and_leaves_the_pattern_whole() {
+        for k in [
+            PatternKind::Smpte169,
+            PatternKind::Bars,
+            PatternKind::Grid,
+            PatternKind::Circles,
+            PatternKind::Frame,
+        ] {
+            assert_ne!(pic(k, 0), pic(k, 1), "{k:?} shows a number when asked");
+        }
+        // Where the number goes, the SMPTE bars show their own green bar.
+        assert_eq!(at(&pic(PatternKind::Smpte169, 0), 96, 40), [0, 191, 0]);
+        assert_ne!(at(&pic(PatternKind::Smpte169, 1), 96, 40), [0, 191, 0]);
+        // Tiny pictures with no number don't panic either.
+        assert_eq!(render(PatternKind::Smpte, 2, 2, 0).len(), 16);
     }
 
     #[test]

@@ -824,7 +824,9 @@ The README describes the features; this file is about working on the code.
   output's canvas, not the rounded size it draws at), drawn on the CPU; `app.rs` caches one per
   display by kind, number and size. The SMPTE bars are full-range RGB: black is 0 everywhere,
   PLUGE above black `ABOVE_BLACK` (10), below black can't exist so it is 0. `PatternKind`
-  deserialises leniently (an unknown name is the default), shows too.
+  deserialises leniently (an unknown name is the default), shows too. `OutputConfig::pattern_number`
+  (the Number checkbox, on unless written `false`): `app.rs` passes number 0, which `pattern::render`
+  draws as no number.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
   picture as the shown time changes; the renderer re-uploads on `version`).
   `src/relink.rs`: finding moved media and copying it into one folder.

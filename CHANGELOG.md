@@ -6,6 +6,9 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **The number on a test pattern is a setting.** A *Number* checkbox beside a display's (and sub
+  display's) *Test pattern* choice turns the display's number on or off. It is on as before, and a
+  show only records it when it is off.
 - **SMPTE colour bars are the default test pattern**, in 16:9 and 16:10. A display's *Test pattern*
   now starts with SMPTE bars (75% bars, reversed blue row, -I/white/+Q and PLUGE strips, the
   display's number over them) in whichever of the two shapes is nearer the display it is shown on;
