@@ -974,20 +974,35 @@ mod lock_tests {
             random_u64()
         ));
         let first = lock_node_dir(&d, Duration::ZERO).expect("the first holds it");
+        let said = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let waiter = {
             let d = d.clone();
+            let said = said.clone();
             std::thread::spawn(move || {
-                let mut said = 0;
-                let lock = wait_for_node_dir(&d, Duration::from_millis(50), |_| said += 1);
-                (lock.is_ok(), said)
+                wait_for_node_dir(&d, Duration::from_millis(50), |_| {
+                    said.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .is_ok()
             })
         };
-        // Longer than any fixed wait would be, in steps.
-        std::thread::sleep(Duration::from_millis(400));
+        // It keeps waiting, saying so, for as long as the folder is held:
+        // let go only once it has said so a few times (however slow the
+        // machine is to run it), never after a fixed wait.
+        let began = std::time::Instant::now();
+        while said.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+            assert!(
+                began.elapsed() < Duration::from_secs(30),
+                "it said it was waiting {} times",
+                said.load(std::sync::atomic::Ordering::SeqCst)
+            );
+            assert!(!waiter.is_finished(), "it stopped waiting while held");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         drop(first);
-        let (got, said) = waiter.join().unwrap();
-        assert!(got, "it got the folder once the other let go");
-        assert!(said >= 3, "it said it was waiting: {said}");
+        assert!(
+            waiter.join().unwrap(),
+            "it got the folder once the other let go"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
