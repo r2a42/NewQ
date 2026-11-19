@@ -290,3 +290,6 @@ Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then
    auto-follow). Unknown why the heartbeats stopped matching (a group-as-timeline `Run` the follower
    and primary disagree on? the "Round again" GoTo?). Reproduce with `play_tests.rs::World` on the
    Medium cue-list show before guessing.
+
+**0.24.5 (owner, 2026-11-19):** items 30, 31 (agreed), 32 and 33; no Fable review this time. Built by
+three agents in parallel (32; 33; 30+31), then the full check and the release.
