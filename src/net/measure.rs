@@ -54,6 +54,10 @@ pub enum NetTest {
     /// test `test`, so the log sent at its end goes back to the start of that
     /// test's first part, not of this part alone (`LogMark`).
     Whole { run: u64, test: u64 },
+    /// A kind a later NewQ sends that this one doesn't know: let pass (with a
+    /// debug line), never a frame that can't be read (which closes the session).
+    #[serde(other)]
+    Unknown,
 }
 
 /// What one computer measured over about a second.
@@ -760,9 +764,13 @@ mod tests {
             load: None,
         };
         assert!(!serde_json::to_string(&off).unwrap().contains("load"));
-        // (A message of its own would have closed an older NewQ's session:
-        // a `net_test` word it doesn't know is a message it can't read.)
-        assert!(crate::net::proto::decode(br#"{"t":"net_test","nt":"load","run":1}"#).is_err());
+        // (A message of its own would have closed a 0.24.3 session: a
+        // `net_test` word it doesn't know was a message it couldn't read. Now
+        // such a word reads as `Unknown` and is passed by.)
+        assert_eq!(
+            crate::net::proto::decode(br#"{"t":"net_test","nt":"load","run":1}"#).unwrap(),
+            Msg::NetTest(Box::new(NetTest::Unknown))
+        );
     }
 
     #[test]

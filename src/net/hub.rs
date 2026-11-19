@@ -274,6 +274,10 @@ pub enum Event {
     Media(Option<Box<crate::net::media::MediaReport>>),
     Send(NodeId, Msg),
     Broadcast(Msg),
+    /// A frame's JSON as it is, to every computer (tests: what a later NewQ
+    /// would send).
+    #[cfg(test)]
+    BroadcastJson(Vec<u8>),
     /// To the computers of this network (or one), ahead of other frames when
     /// `urgent` (stage 4a).
     Tell {
@@ -366,6 +370,12 @@ impl Hub {
     #[allow(dead_code)] // for later stages
     pub fn broadcast(&self, msg: Msg) {
         let _ = self.tx.send(Event::Broadcast(msg));
+    }
+
+    /// Send this JSON as a frame to every computer, as a later NewQ might.
+    #[cfg(test)]
+    pub fn broadcast_json(&self, json: &str) {
+        let _ = self.tx.send(Event::BroadcastJson(json.as_bytes().to_vec()));
     }
 
     // ---- Playing together (stage 4a) ----
@@ -754,21 +764,29 @@ impl State {
             }
             Event::Tell { to, msg, urgent } => self.tell(to, &msg, urgent),
             Event::Sync(f) => self.sync = f,
-            Event::Broadcast(msg) => {
-                let frame = Arc::new(proto::encode(&msg));
-                let to: Vec<ConnId> = self
-                    .conns
-                    .iter()
-                    .filter(|(_, c)| (c.welcomed || c.obeying) && !c.closing)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for c in to {
-                    if let Some(conn) = self.conns.get(&c)
-                        && !conn.session.send_bytes(frame.clone())
-                    {
-                        self.drop_slow(c);
-                    }
-                }
+            #[cfg(test)]
+            Event::BroadcastJson(body) => {
+                let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                frame.extend_from_slice(&body);
+                self.broadcast_frame(Arc::new(frame));
+            }
+            Event::Broadcast(msg) => self.broadcast_frame(Arc::new(proto::encode(&msg))),
+        }
+    }
+
+    /// One frame to every computer welcomed or obeyed.
+    fn broadcast_frame(&mut self, frame: Arc<Vec<u8>>) {
+        let to: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| (c.welcomed || c.obeying) && !c.closing)
+            .map(|(id, _)| *id)
+            .collect();
+        for c in to {
+            if let Some(conn) = self.conns.get(&c)
+                && !conn.session.send_bytes(frame.clone())
+            {
+                self.drop_slow(c);
             }
         }
     }

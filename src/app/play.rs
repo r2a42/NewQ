@@ -961,6 +961,10 @@ impl App {
     /// or from a computer to this primary's Test Mode.
     fn net_test_message(&mut self, from: NodeId, t: crate::net::measure::NetTest, primary: bool) {
         use crate::net::measure::NetTest;
+        if t == NetTest::Unknown {
+            log::debug!("network test: a message from a later NewQ, not known here");
+            return;
+        }
         if !primary {
             if self.play.mode == NetMode::Primary {
                 self.ui.test.net_in.push((from, t));

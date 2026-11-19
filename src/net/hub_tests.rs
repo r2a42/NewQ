@@ -1423,3 +1423,85 @@ fn this_computers_identity_from_another_port_is_noticed_whatever_address_it_come
         v.twin.is_none()
     });
 }
+
+#[test]
+fn kinds_a_later_newq_adds_are_passed_by_and_the_session_stays_up() {
+    use crate::net::measure::NetTest;
+    use crate::net::play::{Command, PlayState, RunNow, RunWord, Timed};
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let (pid, did) = (id_of(&p), id_of(&d));
+    let _ = (d.take_events(), p.take_events());
+    // A network test message, a command and a heartbeat's run of kinds this
+    // NewQ doesn't know (written as a later one would).
+    p.broadcast_json(r#"{"t":"net_test","nt":"something_later","run":3,"extra":[1,2]}"#);
+    let play = Msg::Play(Box::new(Timed {
+        epoch: 1,
+        seq: 5,
+        at: 2.0,
+        cmd: Command::Panic,
+    }));
+    let play = serde_json::to_string(&play)
+        .unwrap()
+        .replace(r#""do":"panic""#, r#""do":"a_later_command","n":4"#);
+    assert!(play.contains("a_later_command"), "{play}");
+    p.broadcast_json(&play);
+    let state = Msg::PlayState(Box::new(PlayState {
+        runs: vec![RunNow {
+            key: crate::timeline::TimelineKey::List(1),
+            state: RunWord::Running,
+            pos: 1.0,
+            anchor: None,
+        }],
+        ..PlayState::default()
+    }));
+    let state = serde_json::to_string(&state)
+        .unwrap()
+        .replace(r#""state":"running""#, r#""state":"a_later_state""#);
+    assert!(state.contains("a_later_state"), "{state}");
+    p.broadcast_json(&state);
+    // Then a message it knows, on the same session: a frame that couldn't be
+    // read would have closed it, and this one would be lost with it.
+    p.broadcast(Msg::NetTest(Box::new(NetTest::End { run: 3 })));
+    let began = Instant::now();
+    let mut got = Vec::new();
+    while began.elapsed() < Duration::from_secs(60)
+        && !got
+            .iter()
+            .any(|m| matches!(m, Msg::NetTest(t) if **t == NetTest::End { run: 3 }))
+    {
+        for ev in d.take_events() {
+            if let NetEvent::Message { from, msg } = ev {
+                assert_eq!(from, pid);
+                got.push(msg);
+            }
+        }
+        assert!(
+            peer(&p.view(), did).is_some_and(|x| x.connected),
+            "the session stayed up"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let unknown = Msg::NetTest(Box::new(NetTest::Unknown));
+    let i = got
+        .iter()
+        .position(|m| *m == unknown)
+        .expect("passed on, unknown");
+    let Some(Msg::Play(t)) = got.get(i + 1) else {
+        panic!("the command after it: {got:?}");
+    };
+    assert_eq!((t.seq, &t.cmd), (5, &Command::Unknown));
+    let Some(Msg::PlayState(s)) = got.get(i + 2) else {
+        panic!("the heartbeat after it: {got:?}");
+    };
+    assert_eq!(s.runs[0].state, RunWord::Unknown);
+    assert_eq!(
+        got.get(i + 3),
+        Some(&Msg::NetTest(Box::new(NetTest::End { run: 3 })))
+    );
+    // Done by a follower's engine, the unknown command changes nothing.
+    let show = crate::show::Show::default();
+    let mut e = crate::engine::Engine::for_tests();
+    e.net_apply(&show, &t.cmd, 0.0);
+    assert!(!e.is_active());
+}

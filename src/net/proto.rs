@@ -154,7 +154,9 @@ pub fn slow_below(refresh_hz: Option<f32>) -> f32 {
 pub enum Link {
     Wired,
     WiFi,
+    /// (Also a kind of link a later NewQ names that this one doesn't know.)
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -663,5 +665,31 @@ mod tests {
         assert_eq!(Link::from_adapter_name("Ethernet 2"), Link::Wired);
         assert_eq!(Link::from_adapter_name("enp3s0"), Link::Wired);
         assert_eq!(Link::from_adapter_name("en0"), Link::Unknown);
+    }
+
+    #[test]
+    fn a_link_a_later_newq_names_reads_as_unknown_and_the_status_still_reads() {
+        assert_eq!(
+            serde_json::from_str::<Link>(r#""Wired""#).unwrap(),
+            Link::Wired
+        );
+        assert_eq!(
+            serde_json::from_str::<Link>(r#""Fibre""#).unwrap(),
+            Link::Unknown
+        );
+        let s = StatusReport {
+            name: "Left".into(),
+            link: Link::WiFi,
+            ..StatusReport::default()
+        };
+        let json = encode(&Msg::Status(Box::new(s))).split_off(4);
+        let later = String::from_utf8(json)
+            .unwrap()
+            .replace(r#""WiFi""#, r#""Fibre""#);
+        assert!(later.contains("Fibre"), "{later}");
+        let Ok(Msg::Status(r)) = decode(later.as_bytes()) else {
+            panic!("unread: {later}");
+        };
+        assert_eq!((r.name.as_str(), r.link), ("Left", Link::Unknown));
     }
 }
