@@ -11,6 +11,8 @@
 # Every package also bundles the MediaMTX streaming server (scripts/mediamtx_pins.txt),
 # downloaded from this repository's mirror of it (the Mirror MediaMTX workflow) and
 # checked against its SHA-256. MEDIAMTX_BASE_URL overrides where it is fetched from.
+# NEWQ_REQUIRE_NOTARISED=1 (a tagged release whose page will say "signed and notarised")
+# fails the Mac package unless it is signed with MACOS_SIGN_IDENTITY and notarised.
 set -euo pipefail
 # A failure inside $(...) must stop the script too.
 shopt -s inherit_errexit 2>/dev/null || true
@@ -314,9 +316,17 @@ EOF
           spctl --assess --type execute --verbose=2 "$a"
         done
       else
+        if [ -n "${NEWQ_REQUIRE_NOTARISED:-}" ]; then
+          echo "this release says signed and notarised, but no App Store Connect API key was given (APPLE_API_KEY_PATH)" >&2
+          exit 1
+        fi
         echo "signed, not notarised (no App Store Connect API key given)"
       fi
     else
+      if [ -n "${NEWQ_REQUIRE_NOTARISED:-}" ]; then
+        echo "this release says signed and notarised, but there is no signing identity (MACOS_SIGN_IDENTITY)" >&2
+        exit 1
+      fi
       # Apple Silicon only runs signed code: ad-hoc sign the helpers and the app.
       codesign --force --sign - "$app/Contents/MacOS/ffmpeg" "$app/Contents/MacOS/ffprobe" "$app/Contents/MacOS/mediamtx"
       codesign --force --sign - "$app"
