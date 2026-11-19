@@ -246,6 +246,78 @@ impl SoftwareDrawing {
     }
 }
 
+/// Whether Windows drives a display through its basic display driver, from
+/// the name it gives the display's adapter ("Microsoft Basic Display
+/// Adapter") or, better, the driver service its video key names
+/// ("BasicDisplay", which isn't translated): either says so (a failed card's
+/// video key may still name its own driver while Windows has put the basic
+/// one in its place, so neither alone is trusted to say no). That happens
+/// when the graphics
+/// card's own driver is missing or failed (Device Manager's Code 31, Code 43):
+/// every frame is drawn by the processor and copied to the panel, a few a
+/// second. Pure, for the tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_basic_display_driver(adapter: &str, service: Option<&str>) -> bool {
+    let by_service = service.is_some_and(|s| s.trim().eq_ignore_ascii_case("BasicDisplay"));
+    let lower = adapter.to_ascii_lowercase();
+    by_service || lower.contains("basic display") || lower.contains("basic render")
+}
+
+/// The warning for a screen Windows drives through its basic display driver.
+/// `who`: the computer ("WNO-2"), or None for this one; `screen`: its place
+/// among the computer's monitors (0 = Screen 1); `name`: the monitor's
+/// ("B173HAN04.9"). Pure, for the tests.
+pub fn basic_driver_sentence(who: Option<&str>, screen: usize, name: &str) -> String {
+    let what = match who {
+        Some(w) => format!("{w}'s screen {} ({name})", screen + 1),
+        None => format!("Screen {} ({name})", screen + 1),
+    };
+    let fix = if who.is_some() {
+        "install the graphics driver for that computer"
+    } else {
+        "install the graphics driver for this computer"
+    };
+    format!(
+        "{what} is run by Windows' basic display driver: {fix}. Until then its pictures are \
+         very slow (a few frames a second)"
+    )
+}
+
+/// The same for a test's report.
+pub fn basic_driver_report(who: &str, screen: usize, name: &str) -> String {
+    let that = if who.starts_with("This computer") {
+        "this"
+    } else {
+        "that"
+    };
+    format!(
+        "{who}'s screen {} ({name}) was run by Windows' basic display driver: install the \
+         graphics driver for {that} computer. Its pictures were very slow, whatever the timing \
+         says",
+        screen + 1
+    )
+}
+
+/// The status bar's warning for this computer's screens on Windows' basic
+/// display driver (`monitors`: name and whether it is), with the whole
+/// sentence on hover.
+pub fn basic_driver_status(ui: &mut egui::Ui, monitors: &[(String, bool)]) {
+    let said: Vec<String> = monitors
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, basic))| *basic)
+        .map(|(i, (name, _))| basic_driver_sentence(None, i, name))
+        .collect();
+    if said.is_empty() {
+        return;
+    }
+    ui.label(
+        egui::RichText::new("⚠ a screen has no graphics driver: pictures very slow")
+            .color(egui::Color32::from_rgb(230, 70, 60)),
+    )
+    .on_hover_text(said.join("\n"));
+}
+
 /// The status bar's warning while this computer draws in software.
 pub fn status(ui: &mut egui::Ui) {
     let Some(s) = crate::gpu::drawing_in_software() else {
@@ -265,6 +337,61 @@ mod tests {
             kind,
             draws,
         }
+    }
+
+    #[test]
+    fn a_screen_on_windows_basic_display_driver_is_known_and_said_plainly() {
+        // By the driver service, which Windows doesn't translate...
+        assert!(is_basic_display_driver(
+            "Microsoft Basisanzeigeadapter",
+            Some("BasicDisplay")
+        ));
+        assert!(is_basic_display_driver("", Some("basicdisplay")));
+        assert!(!is_basic_display_driver(
+            "AMD Radeon(TM) Graphics",
+            Some("amdkmdag")
+        ));
+        // ...or by the name it gives the adapter, whatever service the video
+        // key still names (a failed card's may name its own driver).
+        assert!(is_basic_display_driver(
+            "Microsoft Basic Display Adapter",
+            Some("amdkmdag")
+        ));
+        assert!(is_basic_display_driver(
+            "Microsoft Basic Display Adapter",
+            None
+        ));
+        assert!(is_basic_display_driver(
+            "Microsoft Basic Render Driver",
+            Some("")
+        ));
+        assert!(!is_basic_display_driver(
+            "NVIDIA GeForce RTX 4050 Laptop GPU",
+            None
+        ));
+        assert!(!is_basic_display_driver("Intel(R) UHD Graphics", None));
+        assert!(!is_basic_display_driver("", None));
+
+        assert_eq!(
+            basic_driver_sentence(None, 0, "B173HAN04.9"),
+            "Screen 1 (B173HAN04.9) is run by Windows' basic display driver: install the \
+             graphics driver for this computer. Until then its pictures are very slow (a few \
+             frames a second)"
+        );
+        assert!(
+            basic_driver_sentence(Some("WNO-2"), 1, "B173HAN04.9").starts_with(
+                "WNO-2's screen 2 (B173HAN04.9) is run by Windows' basic display driver: \
+                 install the graphics driver for that computer."
+            )
+        );
+        assert!(basic_driver_report("WNO-2", 0, "B173HAN04.9").starts_with(
+            "WNO-2's screen 1 (B173HAN04.9) was run by Windows' basic display driver: install \
+             the graphics driver for that computer."
+        ));
+        assert!(
+            basic_driver_report("This computer (the primary)", 0, "B173HAN04.9")
+                .contains("install the graphics driver for this computer.")
+        );
     }
 
     #[test]

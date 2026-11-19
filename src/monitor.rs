@@ -12,6 +12,10 @@ pub struct Identity {
     /// whatever else is plugged in: its make and model, and its serial number
     /// where it has one.
     pub hardware: Option<String>,
+    /// Windows drives it through its basic display driver (no graphics
+    /// driver for the card it is on): pictures are very slow there
+    /// (`adapters::is_basic_display_driver`). Never set on a Mac or Linux.
+    pub basic_driver: bool,
 }
 
 /// Ask the system what a display is. winit's own name for it follows the
@@ -26,12 +30,23 @@ pub fn identify(m: &MonitorHandle) -> Identity {
     #[cfg(windows)]
     {
         let name = m.name().unwrap_or_default();
-        windows_edid(&name)
+        let mut id = windows_edid(&name)
             .and_then(|b| crate::edid::parse(&b))
             .map_or_else(Identity::default, |e| Identity {
                 title: Some(e.title()),
                 hardware: Some(e.hardware_id()),
-            })
+                basic_driver: false,
+            });
+        if let Some((driver, service)) = windows_adapter(&name) {
+            id.basic_driver = crate::adapters::is_basic_display_driver(&driver, service.as_deref());
+            if id.basic_driver {
+                log::warn!(
+                    "display {name} is run by Windows' basic display driver ({driver}, service {})",
+                    service.as_deref().unwrap_or("unknown")
+                );
+            }
+        }
+        id
     }
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
@@ -41,6 +56,7 @@ pub fn identify(m: &MonitorHandle) -> Identity {
             .map_or_else(Identity::default, |e| Identity {
                 title: Some(e.title()),
                 hardware: Some(e.hardware_id()),
+                basic_driver: false,
             })
     }
 }
@@ -76,6 +92,7 @@ fn mac_identity(m: &MonitorHandle) -> Identity {
     Identity {
         title,
         hardware: mac_hardware_id(vendor, model, serial),
+        basic_driver: false,
     }
 }
 
@@ -152,6 +169,84 @@ fn windows_edid(device: &str) -> Option<Vec<u8>> {
         buf.truncate(size as usize);
         buf
     })
+}
+
+/// The graphics adapter that drives the display output named `device`
+/// (`\\.\DISPLAY2`): its name as Windows gives it ("Microsoft Basic Display
+/// Adapter", "AMD Radeon(TM) Graphics") and the driver service its video key
+/// names ("BasicDisplay", "amdkmdag"), which isn't translated. One call per
+/// adapter output, made when the monitors change.
+#[cfg(windows)]
+fn windows_adapter(device: &str) -> Option<(String, Option<String>)> {
+    use std::iter::once;
+    use windows_sys::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW};
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    let text = |w: &[u16]| {
+        let len = w.iter().position(|c| *c == 0).unwrap_or(w.len());
+        String::from_utf16_lossy(&w[..len])
+    };
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(once(0)).collect() };
+    for i in 0..64u32 {
+        // SAFETY: a zeroed DISPLAY_DEVICEW with its size filled in is what the
+        // call wants; a null device lists the adapters' outputs.
+        let mut dd: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+        dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if unsafe { EnumDisplayDevicesW(std::ptr::null(), i, &mut dd, 0) } == 0 {
+            return None;
+        }
+        if !text(&dd.DeviceName).eq_ignore_ascii_case(device) {
+            continue;
+        }
+        let driver = text(&dd.DeviceString);
+        let service = video_service_key(&text(&dd.DeviceKey)).and_then(|key| {
+            let key = wide(&key);
+            let mut hkey: HKEY = std::ptr::null_mut();
+            // SAFETY: `key` is nul-terminated; `hkey` is closed below.
+            if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.as_ptr(), 0, KEY_READ, &mut hkey) }
+                != 0
+            {
+                return None;
+            }
+            let value = wide("Service");
+            let mut buf = [0u16; 128];
+            let mut size = std::mem::size_of_val(&buf) as u32;
+            // SAFETY: `buf` and `size` describe the same memory.
+            let status = unsafe {
+                RegQueryValueExW(
+                    hkey,
+                    value.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr().cast(),
+                    &mut size,
+                )
+            };
+            // SAFETY: opened above.
+            unsafe { RegCloseKey(hkey) };
+            (status == 0).then(|| text(&buf[..(size as usize / 2).min(buf.len())]))
+        });
+        return Some((driver, service));
+    }
+    None
+}
+
+/// The registry key (under HKEY_LOCAL_MACHINE) that names the driver service
+/// of a display adapter, from the `DeviceKey` Windows gives its output:
+/// `\Registry\Machine\System\CurrentControlSet\Control\Video\{guid}\0000` ->
+/// `System\CurrentControlSet\Control\Video\{guid}\Video`. Pure, for the
+/// tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn video_service_key(device_key: &str) -> Option<String> {
+    let lower = device_key.to_ascii_lowercase();
+    let start = lower.find(r"\registry\machine\")? + r"\registry\machine\".len();
+    let rest = &device_key[start..];
+    let (adapter, _instance) = rest.rsplit_once('\\')?;
+    if !adapter.to_ascii_lowercase().contains(r"\control\video\{") {
+        return None;
+    }
+    Some(format!(r"{adapter}\Video"))
 }
 
 /// The registry key holding a monitor's EDID, from its device interface
@@ -255,6 +350,24 @@ pub fn pin_allowed(since_last: Option<std::time::Duration>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_driver_service_of_a_display_adapter_is_read_from_its_video_key() {
+        assert_eq!(
+            super::video_service_key(
+                r"\Registry\Machine\System\CurrentControlSet\Control\Video\{3D2B2A4C-1111-2222-3333-444455556666}\0000"
+            )
+            .as_deref(),
+            Some(
+                r"System\CurrentControlSet\Control\Video\{3D2B2A4C-1111-2222-3333-444455556666}\Video"
+            )
+        );
+        assert_eq!(super::video_service_key(""), None);
+        assert_eq!(
+            super::video_service_key(r"\Registry\Machine\System\Somewhere\Else\0000"),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]

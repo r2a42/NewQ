@@ -931,6 +931,18 @@ pub fn slow_drawing(name: &str, s: &proto::StatusReport) -> Vec<String> {
         .map(|d| format!("⚠ {}", d.sentence(name)));
     software
         .into_iter()
+        .chain(
+            s.monitors
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.basic_driver)
+                .map(|(i, m)| {
+                    format!(
+                        "⚠ {}",
+                        crate::adapters::basic_driver_sentence(Some(name), i, &m.identity)
+                    )
+                }),
+        )
         .chain(s.monitors.iter()
         .enumerate()
         .filter(|(_, m)| m.drawing_slowly())
