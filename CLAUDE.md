@@ -249,7 +249,7 @@ The README describes the features; this file is about working on the code.
   one another: `engine.rs::ended_at` records, ticking by a shared clock, the shared time a cue ended in
   `Engine::net_ended` (`ENDED_KEPT`); auto-follow, a group's next child (a crossfade `fade_in` earlier,
   never before that child began) and a group's end are placed there through `chain_backdate` (at most
-  `ENDED_LATE_MAX`, 0.25 s, back); `net_mark`/`net_backdate` shared with `net_apply`'s late commands
+  `ENDED_LATE_MAX`, 0.05 s, back, or `SOUND_SLACK` when what it starts has a sound: `net_started_sound`; later, it starts at the tick from its beginning; by a shared clock a sound or film the clock takes past its length is over there, `ActiveCue::over_by_clock`, while its device plays the tail out, and a group whose last child ended this tick ends in that tick, a second `advance_groups` pass in `tick`); `net_mark`/`net_backdate` shared with `net_apply`'s late commands
   (each computer had anchored at the tick that saw the end: 0.24.3's -26 ms corrections). Tests:
   `play_tests.rs::cues_that_follow_one_another_start_together_at_any_frame_rate` (`Node::hz`),
   `net_sound_tests.rs::a_chain_of_films_and_sounds_…`, `engine/net_chain_tests.rs`. Network load in Test
@@ -270,6 +270,33 @@ The README describes the features; this file is about working on the code.
   here instead* = `Action::PlaySoundHere` -> `AudioOutputConfig::move_to` (allowed in show mode); the id is
   lost if the new primary restarts. Test Mode's timeline `Watch`: a clock put elsewhere between two looks
   resets `from` to `pos - wall` (a seek released at once was never seen `Cueing`).
+  After the 0.24.4 review (`.claude/notes/review-0.24.4.md`). Pictures: `upload::first` writes a new
+  texture's first picture on the main thread where `app.rs::picture_layers` (or `renew_rgba`, in place at
+  the same size, for the fps label and cards) makes it, so a cut never has a pass with neither picture;
+  `Uploader::busy` keeps windows drawing until in-place writes land; a stopped uploads thread:
+  `App::forget_pictures` (also on a device rebuild), main-thread writes, restart at most every
+  `UPLOADS_RESTART_EVERY`; `polled_within`/`UPLOADER_POLL_PATIENCE`; hooks `Uploader::hold`/`fail`;
+  `adapters::look_every(on_for, lost_this_run)` stops after `LOOK_FOR_UNLOST`; `autostart::skip_clean_up`
+  when prefs can't be saved. Network: `NetTest`, `play::Command`, `RunWord`, `Link`, `AdapterKind`,
+  `Refusal` take an unknown kind as `Unknown`/`Other`; `PauseFreeze` (to `Nothing`) and `TimelineKey` (to
+  `TimelineKey::UNKNOWN`, `List(u32::MAX)`) deserialise leniently, shows too; `Command::Control.action`
+  unknown reads as `Memo`; `ControlAction`/`TimelinePoint` in show files stay strict. `net_shift_shared`
+  moves `net_ended`; `LoadServer` removes ended connections; a beacon with our id and port from an address
+  not ours (`hub::from_here`) is `twin_self` (a cloned `node.json`). `node::when_held`
+  (`Ask`/`HandOverOrWait`/`Wait`), `wait_for_node_dir`: a restart or a `--display` start waits for the lock
+  however long, no dialog. Test Mode: `session::NotLaunched` carries the user's show back from `launch` and
+  `full::launch` (`TestMode::not_launched` puts it back and ends the fleet); a follower stops measuring
+  without `End` (`App::stop_measuring`: a non-test show arrives, `network::is_any_test_show`;
+  `PRIMARY_AWAY_AT_MOST` 20 s unreached; `MEASURE_AT_MOST` since the last `Begin`, which the fleet resends
+  every `BEGIN_AGAIN`); `End` only for the run measured; `TestMode::end_again`; `App::net_test_flush` on
+  quit; `Whole` only to 0.24.3+ (`fleet::takes_whole`); `seen_offset` uses `ClockHandle::best_rtt` and
+  `Measurer::least_seen` (`SEEN_WINDOW` 5 s); `Row::uncompared` and the not-in-step Problem
+  (`NOT_IN_STEP_PROBLEM_SECS`); `CLOCK_LOST_MS` exclusive; `LogTail` in `log_pieces` (`LOG_PIECE` 256 KB,
+  `more`), `LogAt` (length + head hash) survives a rotation; `Fleet::log_path(id)` unique folders;
+  `ComputerVerdict::log` -> `gui::logs_inside`; `Fleet::all_in` waits `LOG_LIMIT` for a log arriving.
+  Media: `manager::sends` (pure), `served`: the port never goes before the order. Release: a tagged build
+  without `mac_unsigned` needs all five Mac secrets (`signing` step fails) and sets
+  `NEWQ_REQUIRE_NOTARISED` (package_release.sh refuses ad-hoc or un-notarised).
   Test Mode's window and several parts in one test (0.24.2). `testmode/choice.rs` (pure): `Parts` (the Cue
   list / Timeline / Network ticks, kept in `Prefs::test_pick`; `PickFile` reads 0.24's flavour/debug), `Part`,
   `PartPlan`, `plan(level, parts, network_ok)` (Medium and Long are the whole run's time: network laps 1/3/10
@@ -508,7 +535,7 @@ The README describes the features; this file is about working on the code.
   that ended (at most one restart every 2 s); `mix_each` drops a voice that panics in the audio callback
   (a panic leaving a CoreAudio callback aborts; the MIDI input callback catches its own for the same reason);
   `output.rs::lived_through` keeps the send-cues threads alive; `update_hosting` replaces a dead MediaMTX runner.
-  `NEWQ_TEST_PANIC=<engine|ui|outputs|render|audio>@<seconds>` makes one happen. Never take time from an
+  `NEWQ_TEST_PANIC=<engine|ui|outputs|render|audio|uploads>@<seconds>` makes one happen. Never take time from an
   `Instant` (`Instant::now() - d` panics soon after boot): use `Option<Instant>` or `checked_sub`.
   A `clamp` whose bounds come from a show or a file panics when they are inverted or NaN (`ui.rs::within`).
 - `src/reaper.rs`: no program NewQ starts outlives it. `reaper::start` (main.rs) runs a copy of NewQ as a
