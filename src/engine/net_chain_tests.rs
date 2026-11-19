@@ -157,3 +157,80 @@ fn putting_the_shared_clock_back_moves_where_cues_ended() {
     assert!((ended(&e) - (T0 - 1.0)).abs() < 1e-9, "{}", ended(&e) - T0);
     assert!((e.net_shared_time().unwrap() - (T0 - 0.995)).abs() < 1e-9);
 }
+
+/// A later NewQ's kind of timeline (`TimelineKey::UNKNOWN`) in a command, a
+/// heartbeat or a control cue does nothing: nothing plays, no run is made,
+/// nothing is put right.
+#[test]
+fn a_timeline_this_newq_doesnt_know_is_left_alone() {
+    use crate::net::play::{Command, PlayState, RunNow, RunWord};
+    use crate::show::{ControlAction, ControlCue, PauseFreeze};
+    use crate::timeline::TimelineKey;
+    let (mut show, list, _) = crate::remote::fixtures::show();
+    let key = TimelineKey::UNKNOWN;
+    let mut e = Engine::for_tests();
+    e.tick_shared(&show, T0);
+    for cmd in [
+        Command::TimelineRun { key },
+        Command::TimelineSeek {
+            key,
+            pos: 2.0,
+            picture: true,
+        },
+        Command::TimelineRunFrom { key, pos: 1.0 },
+        Command::TimelinePause {
+            key,
+            freeze: PauseFreeze::Everything,
+            clips: vec![],
+            live: false,
+            waits_for_go: false,
+        },
+        Command::TimelineGoOne { key },
+        Command::TimelineContinue { key },
+        Command::TimelineLeave { key },
+        Command::TimelineStop { key, fade: 0.0 },
+    ] {
+        e.net_apply(&show, &cmd, 0.0);
+    }
+    let mut c = crate::remote::fixtures::control(
+        &mut show,
+        ControlCue {
+            action: ControlAction::TimelineRun,
+            timeline: Some(key),
+            ..Default::default()
+        },
+    );
+    c.list = 0;
+    let cid = c.id;
+    show.cues.push(c);
+    e.fire(&show, cid);
+    ticks(&mut e, &show, T0, T0 + 0.5);
+    assert!(!e.is_active(), "nothing plays");
+    assert!(e.timelines().is_empty(), "{:?}", e.timelines());
+    // (A run-from or a seek of a timeline that isn't there notes where it
+    // was asked to be, stopped, as for any timeline no longer in the show.)
+    assert!(
+        e.timeline_clock(key)
+            .is_none_or(|(state, _)| state == RunState::Stopped),
+        "{:?}",
+        e.timeline_clock(key)
+    );
+    // A heartbeat with that timeline running: nothing to put right, twice.
+    let s = PlayState {
+        time: T0 + 0.5,
+        list,
+        runs: vec![RunNow {
+            key,
+            state: RunWord::Running,
+            pos: 3.0,
+            anchor: Some(T0 - 2.5),
+        }],
+        ..PlayState::default()
+    };
+    let mut doubts = NetCorrection::default();
+    for _ in 0..6 {
+        let fixed = e.net_correct(&show, &s, T0 + 0.5, &mut doubts);
+        assert!(fixed.is_empty(), "{fixed:?}");
+    }
+    assert!(!e.is_active() && e.timelines().is_empty());
+}

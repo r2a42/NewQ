@@ -455,3 +455,66 @@ fn what_follows_a_cue_seen_100_ms_past_its_end_starts_from_its_beginning() {
         assert!(pic < now - saw + 0.02, "the film is at {pic:.3} s");
     }
 }
+
+/// A sound set to play twice, ticking by a shared clock: what follows it
+/// starts after the second pass, where the clock takes it past its whole
+/// length (`over_by_clock`), not after the first.
+#[test]
+fn what_follows_a_sound_played_twice_starts_after_both_passes() {
+    use crate::show::{ContinueMode, CueKind};
+    let Some((ff, tone)) = crate::media::test_media("tone_5s.wav") else {
+        return;
+    };
+    let mut show = Show::default();
+    let sound = cue(&mut show, CueType::Audio, &tone);
+    {
+        let c = show.cues.last_mut().expect("a cue");
+        let m = c.kind.media_mut().expect("media");
+        m.end = Some(0.4);
+        m.loop_media = true;
+        m.loop_count = 2;
+        c.continue_mode = ContinueMode::AutoFollow;
+    }
+    let mut w = show.make_cue(CueType::Wait, None, show.cues.len());
+    if let CueKind::Wait(x) = &mut w.kind {
+        x.duration = 1000.0;
+    }
+    let after = w.id;
+    show.cues.push(w);
+    let mut s = Side::new(&ff, 512);
+    let t0 = Instant::now();
+    let shared = || t0.elapsed().as_secs_f64();
+    s.began = Some(0.0);
+    s.e.tick_shared(&show, 0.0);
+    s.e.load_ahead(&show, sound);
+    while s.e.prepared.is_empty() {
+        assert!(shared() < 30.0, "never got ready");
+        std::thread::sleep(Duration::from_millis(10));
+        let now = shared();
+        s.play_to(now);
+        s.e.tick_shared(&show, now);
+    }
+    let fire_at = shared() + 0.1;
+    let mut fired = false;
+    let at = loop {
+        std::thread::sleep(Duration::from_millis(4));
+        let now = shared();
+        assert!(now < fire_at + 20.0, "what follows never started");
+        s.play_to(now);
+        if !fired && now >= fire_at {
+            s.e.tick_shared(&show, fire_at);
+            s.e.fire(&show, sound);
+            fired = true;
+        }
+        s.e.tick_shared(&show, now);
+        let state = s.e.net_state(now);
+        if let Some(c) = state.cues.iter().find(|c| c.cue == after) {
+            break c.anchor;
+        }
+    };
+    assert!(
+        (at - fire_at - 0.8).abs() < 0.03,
+        "what follows began {:.3} s after the sound",
+        at - fire_at
+    );
+}
