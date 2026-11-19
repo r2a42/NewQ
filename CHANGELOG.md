@@ -6,6 +6,14 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A sound cue that plays on another computer of the show network no longer restarts over and
+  over on this one.** A display computer whose show's sound output plays on the primary only
+  refused the sound cue, then started it again part way at every heartbeat for as long as it
+  lasted (hundreds of times a lap), and Test Mode said it played less than the primary. Now it
+  keeps the cue's time in silence, as playing; a film whose sound plays elsewhere shows its
+  pictures without a warning. And whatever the reason, a cue started on a computer to match the
+  primary that stops again at once is not started again until the primary starts it anew.
+
 ## 0.24.4
 
 - **A test across the show network that can't start no longer keeps your show away.** When a
