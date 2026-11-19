@@ -155,8 +155,9 @@ impl<F: FnMut()> Drop for OnPanic<F> {
 
 /// For trying the above on a running program: `NEWQ_TEST_PANIC=<part>@<seconds>`
 /// panics once in that part of the program, that long after it started. The
-/// parts are `engine`, `ui`, `outputs`, `render` (an output window's thread)
-/// and `audio` (the mixer). Costs one atomic read where it is called.
+/// parts are `engine`, `ui`, `outputs`, `render` (an output window's thread),
+/// `audio` (the mixer) and `uploads` (the thread that writes pictures to the
+/// graphics card, `upload.rs`). Costs one atomic read where it is called.
 pub fn test_panic(part: &str) {
     use std::sync::OnceLock;
     static FIRED: AtomicBool = AtomicBool::new(true);

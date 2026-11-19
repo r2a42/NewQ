@@ -2272,7 +2272,7 @@ release build.
 | `WGPU_BACKEND`    | Force a graphics API: `dx12`, `vulkan`, `metal`, `gl`               |
 | `WGPU_POWER_PREF` | `low` prefers the integrated GPU, `high` the discrete GPU           |
 | `NEWQ_TRACE_OUTPUT` | Log the layer opacities of every frame each output composites     |
-| `NEWQ_TEST_PANIC` | For trying the above: `engine@10` makes that part fail once, 10 s after starting (`engine`, `ui`, `outputs`, `render`, `audio`) |
+| `NEWQ_TEST_PANIC` | For trying the above: `engine@10` makes that part fail once, 10 s after starting (`engine`, `ui`, `outputs`, `render`, `audio`, `uploads`: the thread that writes pictures to the graphics card) |
 | `NEWQ_LOG`        | How much the log says for this run, whatever the setting: `error`, `warn`, `info`, `debug` or `trace`, and parts by name (`NEWQ_LOG=debug,wgpu=info`). `RUST_LOG` is read if this isn't set |
 | `NEWQ_STATS`      | Write a CSV of memory, CPU, FFmpeg processes, late frames, audio load and main-loop stalls (a file, or `1` for `newq-stats.csv` in the log folder) |
 | `NEWQ_STATS_SECS` | Seconds between rows of that file (default 10)                      |

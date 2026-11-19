@@ -753,6 +753,35 @@ impl VideoPlayer {
         self.current.as_ref()
     }
 
+    /// Tests: a player of `width` x `height` yuv420p frames showing a frame of
+    /// `data` (serial 1), with no reader behind it.
+    #[cfg(test)]
+    pub fn showing(width: u32, height: u32, data: Vec<u8>) -> VideoPlayer {
+        let (_tx, rx) = bounded(1);
+        let (recycle, _) = unbounded();
+        VideoPlayer {
+            width,
+            height,
+            rgba: false,
+            matrix: ColorMatrix::Bt709,
+            rx,
+            recycle,
+            children: Children::new(),
+            eof: Arc::new(AtomicBool::new(true)),
+            error: Arc::new(Mutex::new(None)),
+            current: Some(VideoFrame {
+                pts: 0.0,
+                hap: None,
+                data,
+            }),
+            pending: None,
+            serial: 1,
+            live: false,
+            frozen: false,
+            reader_done: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     /// All frames have been decoded and presented.
     pub fn finished(&mut self) -> bool {
         self.fill_pending();

@@ -11,6 +11,11 @@
 //! did) and goes on; this thread writes it and submits, latest frame wins per
 //! texture, and a texture is shown once its first picture is in
 //! (`LayerTexture::is_filled`).
+//!
+//! A new texture's first picture is written on the main thread where the
+//! texture is made (`first`): one write per cue start or change of size. Left
+//! to this thread, a hard cut showed neither picture until it came round (the
+//! old cue was gone on that pass and the new one not yet filled).
 
 use crate::gpu::{Gpu, LayerTexture};
 use crate::media::video::RgbaImage;
@@ -111,6 +116,14 @@ struct State {
     pending: Pending,
     spare: Vec<Vec<u8>>,
     quit: bool,
+    /// Tests: the thread leaves the pictures waiting, as if stuck in the
+    /// driver (`Uploader::hold`).
+    held: bool,
+    /// Tests: the thread panics at its next batch (`Uploader::fail`).
+    fail: bool,
+    /// Something was written on the main thread (`first`): submit, so its
+    /// staging copy is let go (`Uploader::flush_soon`).
+    flush: bool,
 }
 
 #[derive(Default)]
@@ -121,6 +134,20 @@ struct Shared {
     ended: AtomicBool,
     /// Pictures written, for tests.
     written: AtomicU64,
+    /// When the thread last polled the device, in ms after `began`: the main
+    /// thread polls itself when this is old (the thread is stuck in a write
+    /// to a dying driver, and the loss would go unnoticed).
+    polled_ms: AtomicU64,
+    began: Option<Instant>,
+    /// A batch is being written and submitted (`Uploader::busy`).
+    in_flight: AtomicBool,
+}
+
+impl Shared {
+    fn stamp_poll(&self) {
+        let ms = self.began.map_or(0, |b| b.elapsed().as_millis() as u64);
+        self.polled_ms.store(ms, Ordering::Release);
+    }
 }
 
 /// The upload thread. Dropping it lets the thread go (without waiting for it:
@@ -131,7 +158,10 @@ pub struct Uploader {
 
 impl Uploader {
     pub fn start(gpu: Gpu) -> std::io::Result<Uploader> {
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            began: Some(Instant::now()),
+            ..Shared::default()
+        });
         let s = shared.clone();
         std::thread::Builder::new()
             .name("uploads".into())
@@ -150,6 +180,47 @@ impl Uploader {
     /// The thread has stopped (it panicked): start another.
     pub fn ended(&self) -> bool {
         self.shared.ended.load(Ordering::Acquire)
+    }
+
+    /// The thread has polled the device within `within` (it hasn't, while it
+    /// is held up in a write or has ended).
+    pub fn polled_within(&self, within: Duration) -> bool {
+        let Some(began) = self.shared.began else {
+            return false;
+        };
+        let now = began.elapsed().as_millis() as u64;
+        !self.ended()
+            && now.saturating_sub(self.shared.polled_ms.load(Ordering::Acquire))
+                <= within.as_millis() as u64
+    }
+
+    /// Pictures are waiting to be written, or being written: the windows are
+    /// to draw again once they are in (a card written again in place on an
+    /// idle display computer would otherwise keep its old words).
+    pub fn busy(&self) -> bool {
+        self.shared.in_flight.load(Ordering::Acquire)
+            || !self.shared.state.lock().pending.is_empty()
+    }
+
+    /// Have the thread submit soon (a picture was written on the main thread).
+    pub fn flush_soon(&self) {
+        self.shared.state.lock().flush = true;
+        self.shared.cv.notify_one();
+    }
+
+    /// Tests: leave the pictures waiting (as if stuck in the driver) while
+    /// `on`.
+    #[cfg(test)]
+    pub fn hold(&self, on: bool) {
+        self.shared.state.lock().held = on;
+        self.shared.cv.notify_all();
+    }
+
+    /// Tests: make the thread panic at its next batch.
+    #[cfg(test)]
+    pub fn fail(&self) {
+        self.shared.state.lock().fail = true;
+        self.shared.cv.notify_all();
     }
 
     /// Upload a copy of `data` into `texture` (a video frame: its buffer goes
@@ -237,6 +308,22 @@ pub fn rgba(up: Option<&Uploader>, gpu: &Gpu, texture: &Arc<LayerTexture>, data:
     }
 }
 
+/// Write a new texture's first picture here and now, on the calling (main)
+/// thread, so it can be shown on this very pass: a texture left for the
+/// thread would make a hard cut show neither picture until the thread came
+/// round. One write per cue start or change of size; later pictures go
+/// through the thread (`copy`, `image`, `rgba`).
+pub fn first(up: Option<&Uploader>, gpu: &Gpu, texture: &LayerTexture, kind: Kind, data: &[u8]) {
+    write_now(gpu, texture, kind, data);
+    // Its staging copy is let go at the next submit, and nothing may be
+    // drawing (a Mac's background window): the thread submits (a submit here
+    // would wait for the locks the render threads hold); without it the main
+    // loop does after the pass.
+    if let Some(up) = up {
+        up.flush_soon();
+    }
+}
+
 fn write_now(gpu: &Gpu, texture: &LayerTexture, kind: Kind, data: &[u8]) {
     match kind {
         Kind::Yuv => texture.upload_yuv(&gpu.queue, data),
@@ -256,23 +343,38 @@ fn keep_spare(spare: &mut Vec<Vec<u8>>, data: Bytes) {
 fn work(gpu: &Gpu, s: &Shared) {
     let mut last_said: Option<Instant> = None;
     let mut last_poll = Instant::now();
+    s.stamp_poll();
     loop {
         let jobs = {
             let mut st = s.state.lock();
-            while st.pending.is_empty() && !st.quit {
-                if s.cv.wait_for(&mut st, POLL_EVERY).timed_out() && st.pending.is_empty() {
+            while (st.pending.is_empty() || st.held) && !st.flush && !st.quit {
+                if s.cv.wait_for(&mut st, POLL_EVERY).timed_out()
+                    && st.pending.is_empty()
+                    && !st.held
+                    && !st.flush
+                {
                     // Off the main thread, as is everything here.
                     drop(st);
                     last_poll = Instant::now();
                     let _ = gpu.device.poll(wgpu::PollType::Poll);
+                    s.stamp_poll();
                     st = s.state.lock();
                 }
             }
             if st.quit {
                 return;
             }
-            st.pending.take()
+            assert!(!st.fail, "the uploads thread was asked to fail (a test)");
+            st.flush = false;
+            s.in_flight.store(true, Ordering::Release);
+            // (Held, it only submits what the main thread wrote.)
+            if st.held {
+                Vec::new()
+            } else {
+                st.pending.take()
+            }
         };
+        crate::crash::test_panic("uploads");
         let began = Instant::now();
         let n = jobs.len();
         let mut spent = Vec::with_capacity(n);
@@ -290,6 +392,7 @@ fn work(gpu: &Gpu, s: &Shared) {
         if last_poll.elapsed() >= POLL_EVERY {
             last_poll = Instant::now();
             let _ = gpu.device.poll(wgpu::PollType::Poll);
+            s.stamp_poll();
         }
         let took = began.elapsed();
         if took >= SLOW_BATCH && last_said.is_none_or(|t| t.elapsed() >= SLOW_LOG_EVERY) {
@@ -303,6 +406,7 @@ fn work(gpu: &Gpu, s: &Shared) {
             );
         }
         let mut st = s.state.lock();
+        s.in_flight.store(false, Ordering::Release);
         for data in spent {
             keep_spare(&mut st.spare, data);
         }
@@ -409,5 +513,43 @@ mod tests {
         drop(held);
         wait_for("the newest was written", || up.written() == 3);
         assert!(up.shared.state.lock().spare.len() <= SPARE);
+    }
+
+    /// B4: the thread says when it last polled the device, so the main
+    /// thread can poll while it is stuck (here: held) in a write.
+    #[test]
+    fn a_thread_held_up_in_a_write_is_seen_to_have_stopped_polling() {
+        let Some(gpu) = Gpu::headless() else {
+            assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+            return;
+        };
+        let within = Duration::from_millis(300);
+        let up = Uploader::start(gpu.clone()).expect("thread");
+        wait_for("it polls while idle", || up.polled_within(within));
+        let tex = Arc::new(LayerTexture::new_rgba(&gpu, 2, 2));
+        up.hold(true);
+        up.rgba(&tex, vec![1u8; 16]);
+        wait_for("held up, it stops polling", || !up.polled_within(within));
+        up.hold(false);
+        wait_for("let go, the picture is written", || tex.is_filled());
+        wait_for("and it polls again", || up.polled_within(within));
+    }
+
+    /// B2: a thread that panics says it has ended (the main thread then
+    /// starts another and has everything written again).
+    #[test]
+    fn a_thread_that_panics_says_it_has_ended() {
+        let Some(gpu) = Gpu::headless() else {
+            assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+            return;
+        };
+        let up = Uploader::start(gpu.clone()).expect("thread");
+        assert!(!up.ended());
+        up.fail();
+        let tex = Arc::new(LayerTexture::new_rgba(&gpu, 2, 2));
+        up.rgba(&tex, vec![1u8; 16]);
+        wait_for("it ended", || up.ended());
+        assert!(!tex.is_filled(), "what it was given died with it");
+        assert!(!up.polled_within(Duration::from_secs(60)));
     }
 }
