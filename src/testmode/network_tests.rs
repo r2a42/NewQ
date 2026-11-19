@@ -143,6 +143,8 @@ struct Comp {
     mark: crate::net::measure::LogMark,
     /// It ran the end of the test (its last report and log were sent).
     ended: bool,
+    /// The next this many `End`s are lost on the way to it.
+    lose_ends: u32,
     // ---- Every test across the network: what it measures of itself ----
     local: crate::net::measure_local::LocalMeter,
     /// The frame rate its output reports.
@@ -201,6 +203,7 @@ impl Rig {
                     log: String::new(),
                     mark: Default::default(),
                     ended: false,
+                    lose_ends: 0,
                     local: Default::default(),
                     fps: 60.0,
                     played: 0,
@@ -315,12 +318,18 @@ impl Rig {
                     NetTest::Begin { run, start, .. } => {
                         c.measure.begin(*run, *start);
                         c.local.begin(*run, *start);
-                        c.mark.begin(*run, c.log.len() as u64);
+                        c.mark
+                            .begin(*run, crate::net::measure::LogAt::at(c.log.len() as u64));
                         c.log
                             .push_str(&format!("{}: measuring run {run}\n", c.name));
                     }
                     NetTest::Whole { run, test } => c.mark.whole(*run, *test),
-                    NetTest::End { run } => {
+                    // Lost on the way.
+                    NetTest::End { .. } if c.lose_ends > 0 => c.lose_ends -= 1,
+                    // As the app: only the run measured.
+                    NetTest::End { run }
+                        if c.measure.running() == Some(*run) || c.local.running() == Some(*run) =>
+                    {
                         if let Some(r) = c.measure.end(*run, now, Link::Wired, Some(60.0)) {
                             self.test.net_in.push((c.id, NetTest::Report(Box::new(r))));
                         }
@@ -328,14 +337,11 @@ impl Rig {
                             self.test.net_in.push((c.id, NetTest::Local(Box::new(r))));
                         }
                         c.log.push_str(&format!("{}: run {run} ended\n", c.name));
-                        let from = c.mark.from(*run) as usize;
-                        self.test.net_in.push((
-                            c.id,
-                            NetTest::LogTail {
-                                run: *run,
-                                text: c.log[from.min(c.log.len())..].to_string(),
-                            },
-                        ));
+                        let from = c.mark.from(*run).len as usize;
+                        let text = c.log[from.min(c.log.len())..].to_string();
+                        for piece in crate::net::measure::log_pieces(*run, text) {
+                            self.test.net_in.push((c.id, piece));
+                        }
                         c.ended = true;
                     }
                     _ => {}
@@ -348,6 +354,8 @@ impl Rig {
                     // it (it arrives at once here).
                     let seen = crate::net::measure::seen_offset(now + c.clock_off, s.time, None);
                     c.measure.heartbeat(s, &ours, Some(seen));
+                } else {
+                    c.measure.unmatched(s);
                 }
                 c.follower.heard(s.clone());
             }
@@ -981,6 +989,55 @@ fn a_short_test_plays_on_every_computer_and_each_ones_own_measurements_come_back
     assert!(
         report.contains("Right's own log is in this zip: computers/Right/newq.log"),
         "{report}"
+    );
+    r.assert_restored();
+}
+
+#[test]
+fn a_test_that_cannot_make_its_folder_after_spreading_puts_the_show_back_everywhere() {
+    // 0.24.4's review (C1): the stash went with the error; the test show
+    // stayed, the show locked, and the computers measured on.
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "nofolder");
+    r.start_short(&ff);
+    // Where the run's folder goes is a file: it can't be made.
+    std::fs::create_dir_all(r.dir.join("test-mode")).unwrap();
+    std::fs::write(r.dir.join("test-mode").join("runs"), "in the way").unwrap();
+    r.run_until("it gives up", 30.0, |r| {
+        !r.spreading() && r.test.notice.is_some()
+    });
+    let notice = r.test.notice.clone().unwrap();
+    assert!(
+        notice.contains("Can't make the folder") && notice.contains("Your show is back"),
+        "{notice}"
+    );
+    assert!(!matches!(r.test.view(), View::Running(_)));
+    r.assert_restored();
+    // Told to measure, and then that it is over.
+    for c in &r.comps {
+        assert!(c.ended, "{} was never told the test is over", c.name);
+        assert!(c.measure.running().is_none(), "{}", c.name);
+    }
+}
+
+#[test]
+fn a_computer_that_missed_the_end_is_told_again_and_sends_its_last() {
+    // 0.24.4's review (C2): a follower that missed `End` measured on, muted,
+    // for up to 3 h; its log never came.
+    let _heavy = crate::testmode::heavy();
+    let Some(ff) = ffmpeg() else { return };
+    let mut r = Rig::new(&ff, "lostend");
+    r.comps[1].lose_ends = 1;
+    r.start_short(&ff);
+    r.run_until("the test ends", 120.0, |r| r.done().is_some());
+    assert!(r.comps[1].ended, "Right was not told again");
+    assert!(r.comps[1].measure.running().is_none());
+    let d = r.done().unwrap();
+    assert!(
+        d.folder.join("computers/Right/newq.log").is_file(),
+        "{}",
+        d.report
     );
     r.assert_restored();
 }

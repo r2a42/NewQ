@@ -85,8 +85,11 @@ pub(super) struct Playing {
     tail: Option<(u64, std::sync::mpsc::Receiver<String>)>,
     /// Where in the log the test began (`LogMark`).
     log_mark: crate::net::measure::LogMark,
-    /// When the measuring began (it ends by itself if never told to).
+    /// When the measuring began, or was last asked for again (it ends by
+    /// itself if never told to).
     measuring_since: Option<Instant>,
+    /// Since when the primary has been out of reach while measuring.
+    primary_away: Option<Instant>,
     /// `NEWQ_NET_TEST_AUTOSTART` was looked at (and acted on).
     autostarted: bool,
     auto_ready: Option<Instant>,
@@ -324,9 +327,11 @@ impl App {
                     // heartbeat shows it: what the screens show is compared.
                     let clock = self.net.clock();
                     let seen = clock.now().map(|n| {
-                        crate::net::measure::seen_offset(n.time, s.time, clock.worst_rtt())
+                        crate::net::measure::seen_offset(n.time, s.time, clock.best_rtt())
                     });
                     self.play.measure.heartbeat(&s, &ours, seen);
+                } else {
+                    self.play.measure.unmatched(&s);
                 }
                 self.play.follower.heard(*s)
             }
@@ -368,6 +373,13 @@ impl App {
         self.ui.took_synced_show(&self.show, &mut self.engine);
         self.ui.check_media(&self.show);
         self.play.have = Some(hash);
+        // A show that isn't a test's while measuring: the test is over on
+        // the primary (its `End` was lost on the way).
+        if self.play.measure.running().is_some()
+            && !crate::testmode::network::is_any_test_show(&self.show)
+        {
+            self.stop_measuring("the primary's own show came back");
+        }
         log::info!(
             "show network: took the primary's show ({} bytes)",
             json.len()
@@ -953,10 +965,41 @@ impl App {
 
 // ---- The network test (stage 6, `net::measure`, `testmode::network`) ----
 
-/// A follower measures for at most this long without being told it is over.
+/// A follower measures for at most this long without being told it is over,
+/// or again to measure (the primary says `Begin` again every
+/// `fleet::BEGIN_AGAIN`; one before 0.24.4 never did, hence the hours).
 const MEASURE_AT_MOST: Duration = Duration::from_secs(3 * 3600);
+/// A follower whose primary has been out of reach this long stops measuring
+/// (unmuted, the network load let go). A blip is shorter.
+const PRIMARY_AWAY_AT_MOST: Duration = Duration::from_secs(20);
 
 impl App {
+    /// The test is over here without an `End` (`why`): nothing is measured
+    /// or sent, the sound is back and the network load let go.
+    fn stop_measuring(&mut self, why: &str) {
+        log::info!("network test: measuring stopped: {why}");
+        self.play.measure = Default::default();
+        self.play.measuring_since = None;
+        self.play.primary_away = None;
+        self.play.local = Default::default();
+        self.play.local_stats = None;
+        self.play.load = None;
+        self.unmute_test();
+    }
+
+    /// The primary's Test Mode said what it has for the computers as NewQ
+    /// closes (`TestMode::shutdown`: the test is over): sent now, with a
+    /// moment for the frames to leave before the sessions close.
+    pub(super) fn net_test_flush(&mut self) {
+        if self.play.mode != NetMode::Primary || self.ui.test.net_out.is_empty() {
+            return;
+        }
+        for (to, m) in std::mem::take(&mut self.ui.test.net_out) {
+            self.net.tell(to, Msg::NetTest(Box::new(m)), true);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
     /// A network test message: from the primary to this follower (`primary`),
     /// or from a computer to this primary's Test Mode.
     fn net_test_message(&mut self, from: NodeId, t: crate::net::measure::NetTest, primary: bool) {
@@ -975,16 +1018,19 @@ impl App {
             NetTest::Begin { run, start, load } => {
                 self.net_load(from, run, load);
                 if self.play.measure.running() != Some(run) {
-                    self.play.measuring_since = Some(Instant::now());
                     // Stalls from before the test aren't its.
                     let _ = crate::crumbs::take_stalls();
                 }
+                // The primary says it again now and then while the test
+                // plays (`Fleet::keep_up`): the measuring goes on as long.
+                self.play.measuring_since = Some(Instant::now());
                 self.play.measure.begin(run, start);
                 // Where its log for the test begins.
                 crate::logging::flush();
                 let log = crate::crash::log_dir().join("newq.log");
-                let len = std::fs::metadata(&log).map_or(0, |m| m.len());
-                self.play.log_mark.begin(run, len);
+                self.play
+                    .log_mark
+                    .begin(run, crate::net::measure::LogAt::of(&log));
                 // ---- and how it copes itself ----
                 if self.play.local.running() != Some(run) {
                     self.play.local_stats = Some(crate::stats::StatsLog::in_memory(
@@ -1000,6 +1046,13 @@ impl App {
             }
             NetTest::Whole { run, test } => self.play.log_mark.whole(run, test),
             NetTest::End { run } => {
+                // Only the run measured here (an `End` said again for an
+                // earlier part must not end the next one).
+                if self.play.measure.running() != Some(run)
+                    && self.play.local.running() != Some(run)
+                {
+                    return;
+                }
                 let now = self.net.clock().now().map_or(local_now(), |n| n.time);
                 let (link, refresh) = self.net_test_facts();
                 if let Some(r) = self.play.measure.end(run, now, link, refresh) {
@@ -1125,29 +1178,48 @@ impl App {
             let run = *run;
             self.play.tail = None;
             if let Some(p) = primary {
-                self.net.tell(
-                    Some(p),
-                    Msg::NetTest(Box::new(NetTest::LogTail { run, text })),
-                    false,
-                );
+                // In pieces: one frame of megabytes holds the session for
+                // longer than the primary waits to hear (`hub::SILENT_FOR`)
+                // on a slow link, and the computer is dropped with its log.
+                for piece in crate::net::measure::log_pieces(run, text) {
+                    self.net.tell(Some(p), Msg::NetTest(Box::new(piece)), false);
+                }
             }
         }
         if self.play.measure.running().is_none() {
             self.play.load = None;
+            self.play.primary_away = None;
             return;
         }
-        if self.play.mode != NetMode::Follower
-            || self
-                .play
-                .measuring_since
-                .is_some_and(|t| t.elapsed() > MEASURE_AT_MOST)
+        // The primary out of reach for a while (its session closed: it quit,
+        // or its `End` was lost with it) ends the measuring here; a blip
+        // doesn't (it says `Begin` again when the computer is heard again).
+        let reached =
+            primary.is_some_and(|p| self.ui.net.peers.iter().any(|v| v.id == p && v.connected));
+        if reached {
+            self.play.primary_away = None;
+        } else if self.play.primary_away.is_none() {
+            self.play.primary_away = Some(Instant::now());
+        }
+        let why = if self.play.mode != NetMode::Follower {
+            Some("this computer no longer follows")
+        } else if self
+            .play
+            .primary_away
+            .is_some_and(|t| t.elapsed() > PRIMARY_AWAY_AT_MOST)
         {
-            self.play.measure = Default::default();
-            self.play.measuring_since = None;
-            self.play.local = Default::default();
-            self.play.local_stats = None;
-            self.play.load = None;
-            self.unmute_test();
+            Some("the primary has been out of reach")
+        } else if self
+            .play
+            .measuring_since
+            .is_some_and(|t| t.elapsed() > MEASURE_AT_MOST)
+        {
+            Some("it was never told the test is over")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.stop_measuring(why);
             return;
         }
         let clock = self.net.clock();

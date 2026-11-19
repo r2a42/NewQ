@@ -232,6 +232,62 @@ fn the_results_give_each_computer_its_verdict_in_words() {
     }
 }
 
+#[test]
+fn the_zip_note_says_which_computers_logs_are_in_it_and_which_did_not_come() {
+    // 0.24.4's review (C9): it said every log was inside when one was missing.
+    use super::net_judge::{ComputerNotes, judge};
+    let j = judge(
+        &[ComputerNotes::new("Left"), ComputerNotes::new("Right")],
+        120.0,
+        Vec::new(),
+    );
+    let done = |logs: [Option<&str>; 2]| {
+        let mut computers = j.computers.clone();
+        for (c, l) in computers.iter_mut().zip(logs) {
+            c.log = l.map(str::to_string);
+        }
+        Done {
+            parts: Vec::new(),
+            compare: None,
+            full: None,
+            computers,
+            network: None,
+            flavour: super::super::Flavour::Cues,
+            bundle: Default::default(),
+            level: Level::Short,
+            verdict: j.verdict,
+            headline: j.headline.clone(),
+            steady: None,
+            findings: Vec::new(),
+            folder: PathBuf::from("/nowhere"),
+            report: String::new(),
+            laps: 0,
+            elapsed: Duration::from_secs(130),
+            ended: End::Finished,
+        }
+    };
+    let left = Some("computers/Left/newq.log");
+    let right = Some("computers/Right/newq.log");
+    let both = crate::testmode::gui::logs_inside(&done([left, right]));
+    assert!(
+        both.starts_with(
+            "Every computer's own log is inside the zip too (computers/Left/newq.log, computers/Right/newq.log)"
+        ),
+        "{both}"
+    );
+    let one = crate::testmode::gui::logs_inside(&done([left, None]));
+    assert!(one.contains("(computers/Left/newq.log)"), "{one}");
+    assert!(
+        one.contains("Right's own log did not come back") && !one.starts_with("Every"),
+        "{one}"
+    );
+    let none = crate::testmode::gui::logs_inside(&done([None, None]));
+    assert!(
+        none.starts_with("The own logs of Left, Right did not come back"),
+        "{none}"
+    );
+}
+
 // ---- The choices, drawn and clicked in the whole window ----
 
 fn click_at(at: Pos2) -> Vec<Vec<egui::Event>> {

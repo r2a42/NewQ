@@ -78,6 +78,13 @@ impl ClockHandle {
         self.0.lock().rtts.iter().copied().reduce(f64::max)
     }
 
+    /// The shortest of the recent round trips (seconds): the way a message
+    /// takes with no wait on it, for a heartbeat's (`measure::seen_offset`).
+    /// One slow exchange moves the worst for 20 s, never this.
+    pub fn best_rtt(&self) -> Option<f64> {
+        self.0.lock().rtts.iter().copied().reduce(f64::min)
+    }
+
     /// Start again (another primary).
     pub fn reset(&self) {
         *self.0.lock() = Kept::default();
@@ -333,6 +340,35 @@ mod tests {
         drop(keeper);
         stop.store(true, Ordering::Relaxed);
         answering.join().unwrap();
+    }
+
+    #[test]
+    fn one_slow_round_trip_doesnt_make_a_heartbeat_read_apart() {
+        // 0.24.4's review (C3): `seen_offset` took half the worst round trip
+        // of the last 20 s, so one 70 ms exchange moved every heartbeat by
+        // 35 ms (a false "out of step"). The shortest is the heartbeat's way.
+        let clock = ClockHandle::default();
+        let mut t = 1000.0;
+        for n in 0..30 {
+            let way = if n == 12 { 0.035 } else { 0.001 };
+            clock.take(
+                Exchange {
+                    t1: t,
+                    t2: t + way,
+                    t3: t + way,
+                    t4: t + 2.0 * way,
+                },
+                t + 2.0 * way,
+            );
+            t += 0.5;
+        }
+        assert!((clock.worst_rtt().unwrap() - 0.070).abs() < 1e-9);
+        assert!((clock.best_rtt().unwrap() - 0.002).abs() < 1e-9);
+        // A heartbeat made at 2000.000 and read here 1 ms later, clocks the same.
+        let seen = crate::net::measure::seen_offset(2000.001, 2000.0, clock.best_rtt());
+        assert!(seen.abs() < 0.0005, "{seen}");
+        let was = crate::net::measure::seen_offset(2000.001, 2000.0, clock.worst_rtt());
+        assert!(was < -0.03, "{was}");
     }
 
     #[test]

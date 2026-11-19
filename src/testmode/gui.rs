@@ -1205,21 +1205,47 @@ fn part_section(ui: &mut egui::Ui, i: usize, p: &super::sequence::PartDone) {
 /// The finished window's line on the other computers' logs: each is in the
 /// zip (`fleet::log_path`), since a display computer makes no zip of its own.
 pub fn logs_inside(d: &super::session::Done) -> String {
-    let mut names: Vec<&str> = Vec::new();
+    // Each computer once, by name: its log's place if it came in any part.
+    let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
     let all = std::iter::once(d).chain(d.parts.iter().filter_map(|p| p.done.as_deref()));
     for done in all {
         let net = done.network.iter().flat_map(|n| n.computers.iter());
         for c in net.chain(done.computers.iter()) {
-            if !names.contains(&c.name.as_str()) {
-                names.push(&c.name);
+            match seen.iter_mut().find(|(n, _)| *n == c.name) {
+                Some((_, log)) => *log = log.or(c.log.as_deref()),
+                None => seen.push((&c.name, c.log.as_deref())),
             }
         }
     }
-    let paths: Vec<String> = names.iter().map(|n| super::fleet::log_path(n)).collect();
-    format!(
-        "Every computer's own log is inside the zip too ({}): the other computers make no zip of their own, so this one file is all there is to send.",
-        paths.join(", ")
-    )
+    let inside: Vec<&str> = seen.iter().filter_map(|(_, l)| *l).collect();
+    let missing: Vec<&str> = seen
+        .iter()
+        .filter(|(_, l)| l.is_none())
+        .map(|(n, _)| *n)
+        .collect();
+    let send =
+        "the other computers make no zip of their own, so this one file is all there is to send.";
+    let away = |names: &[&str]| match names {
+        [one] => format!(
+            "{one}'s own log did not come back: it is newq.log in NewQ's log folder on {one}."
+        ),
+        _ => format!(
+            "The own logs of {} did not come back: each is newq.log in NewQ's log folder on that computer.",
+            names.join(", ")
+        ),
+    };
+    match (inside.is_empty(), missing.is_empty()) {
+        (false, true) => format!(
+            "Every computer's own log is inside the zip too ({}): {send}",
+            inside.join(", ")
+        ),
+        (false, false) => format!(
+            "The other computers' own logs are inside the zip too ({}): {send} {}",
+            inside.join(", "),
+            away(&missing)
+        ),
+        (true, _) => away(&missing),
+    }
 }
 
 /// A line per computer: its verdict and headline, its numbers folded under it.
