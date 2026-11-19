@@ -6,6 +6,14 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **SMPTE colour bars are the default test pattern**, in 16:9 and 16:10. A display's *Test pattern*
+  now starts with SMPTE bars (75% bars, reversed blue row, -I/white/+Q and PLUGE strips, the
+  display's number over them) in whichever of the two shapes is nearer the display it is shown on;
+  two more choices force 16:9 or 16:10. They are made for a computer's full-range picture: black
+  is one black throughout, and the PLUGE strip just above black is 4%. The older *Colour bars and
+  number* is still in the list, and a show that chose it keeps it; a show that never chose now
+  shows the SMPTE bars. A test pattern this version doesn't know (from a later NewQ) shows the
+  SMPTE bars instead of stopping the show from opening.
 - **Multiview in the Preview pane.** With more than one display, the *Multiview* button above the
   preview shows all of them at once, each under its name and in its own shape; press it again for
   the single preview and its menu. Kept per computer.

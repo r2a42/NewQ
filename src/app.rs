@@ -2494,6 +2494,9 @@ impl App {
             // and grid stay true on a sub display of any size.
             let mut pattern_changed = false;
             if want_pattern {
+                // The automatic SMPTE bars take their shape from the canvas itself,
+                // not from the rounded size they are drawn at below.
+                let kind = pattern::resolve(kind, own_canvas.0, own_canvas.1);
                 // Drawn small and stretched, except the patterns made of single
                 // pixels, which need the display's own size (up to 4K).
                 let size = if kind.pixel_exact() {

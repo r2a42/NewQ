@@ -6705,16 +6705,16 @@ fn edge_blend_editor(ui: &mut Ui, d: &mut OutputConfig, size: (u32, u32)) {
         });
 }
 
-/// The "Test pattern" checkbox and the choice of which of the twelve patterns
-/// it shows. Choosing one turns the pattern on.
+/// The "Test pattern" checkbox and the choice of which of the patterns it
+/// shows. Choosing one turns the pattern on.
 fn pattern_picker(ui: &mut Ui, id: (&str, u64), on: &mut bool, kind: &mut PatternKind) {
     ui.checkbox(on, "Test pattern")
         .on_hover_text("Show a picture for lining the display up: choose which on the right");
     egui::ComboBox::from_id_salt(id)
         .selected_text(kind.label())
         .width(150.0)
-        // All twelve at once, without scrolling.
-        .height(400.0)
+        // All of them at once, without scrolling.
+        .height(480.0)
         .show_ui(ui, |ui| {
             for k in PatternKind::ALL {
                 if ui
@@ -15227,7 +15227,7 @@ mod tests {
             time: Some(1.0),
             ..Default::default()
         };
-        // A pattern other than the bars, on, on a display and a sub display.
+        // A pattern other than the default, on, on a display and a sub display.
         show.outputs[0].pattern = PatternKind::Circles;
         show.outputs[0].test_pattern = true;
         let sub_idx = show
