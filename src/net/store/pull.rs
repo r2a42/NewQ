@@ -316,6 +316,20 @@ pub struct Puller {
 
 impl Puller {
     pub fn start(store: Store, sources: Vec<String>, follow: Follow, opts: PullOptions) -> Puller {
+        Puller::start_ordered(store, sources, follow, None, opts)
+    }
+
+    /// `start` with the order to fetch in from the first look (see
+    /// `set_order`). Set after `start`, an order could come too late: the
+    /// thread may already have taken up the version and begun its first file
+    /// in the version's own order, and a new order waits for a transfer to end.
+    pub fn start_ordered(
+        store: Store,
+        sources: Vec<String>,
+        follow: Follow,
+        order: Option<Vec<String>>,
+        opts: PullOptions,
+    ) -> Puller {
         let shared = Arc::new(Shared {
             store,
             cap: opts.rate_cap.map(RateCap::new),
@@ -324,7 +338,7 @@ impl Puller {
             control: Mutex::new(Control {
                 sources,
                 follow,
-                order: None,
+                order,
                 ask_now: true,
             }),
             wake: Condvar::new(),

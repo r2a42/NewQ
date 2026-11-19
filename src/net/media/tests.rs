@@ -535,15 +535,23 @@ fn cue_of(show: &Show, file: &Path) -> CueId {
         .id
 }
 
-/// The paths a follower has, in the order they arrived (looked at each pass).
+/// The paths a follower has, in the order they arrived: by when each object
+/// was written whole (its file's time), not by when a pass saw it, as a pass
+/// that comes late (a busy machine) sees several at once.
 #[derive(Default)]
-struct Arrivals(Vec<PathBuf>);
+struct Arrivals(Vec<PathBuf>, Vec<std::time::SystemTime>);
 
 impl Arrivals {
     fn note(&mut self, n: &Node, files: &[PathBuf]) {
         for f in files {
-            if !self.0.contains(f) && n.local(f).is_here() {
-                self.0.push(f.clone());
+            if self.0.contains(f) {
+                continue;
+            }
+            if let Local::Here(at) = n.local(f) {
+                let made = std::fs::metadata(&at).and_then(|m| m.modified()).unwrap();
+                let i = self.1.partition_point(|t| *t <= made);
+                self.0.insert(i, f.clone());
+                self.1.insert(i, made);
             }
         }
     }
@@ -685,16 +693,30 @@ fn a_jump_reorders_without_fetching_again_and_marks_follow_the_reports() {
         !seen.0.is_empty()
     });
     assert_eq!(seen.0[0], files[0]);
-    // A jump to the last file: it comes next (the one in flight finishes).
+    // A jump to the last file: it comes next once the follower takes the new
+    // order up (when the transfer in flight then ends; on a busy machine the
+    // order may reach it after another has begun). The snapshot that first
+    // counts the order taken up also counts the transfer it started.
+    let puller = a.mgr.puller().unwrap();
+    let orders = puller.snapshot().reorders;
     p.at.playhead = Some(cue_of(&p.show, &files[5]));
+    let mut started_by = None;
     until(&mut [&mut p, &mut a], "every file", |n| {
         seen.note(n[1], &files);
+        let s = puller.snapshot();
+        if started_by.is_none() && s.reorders > orders {
+            started_by = Some(s.started);
+        }
         seen.0.len() == files.len()
     });
+    let started_by = started_by.expect("the new order taken up");
     let at5 = seen.0.iter().position(|f| *f == files[5]).unwrap();
-    assert!(at5 <= 2, "the jumped-to file came next: {:?}", seen.0);
+    assert!(
+        at5 < started_by,
+        "the jumped-to file came next ({started_by} started by then): {:?}",
+        seen.0
+    );
     // Nothing was fetched twice.
-    let puller = a.mgr.puller().unwrap();
     let total: u64 = 6 * 50_000;
     until(&mut [&mut p, &mut a], "the puller's count", |_| {
         puller.snapshot().received >= total

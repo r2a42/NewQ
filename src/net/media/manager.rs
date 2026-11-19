@@ -1027,6 +1027,15 @@ impl PrimarySide {
         });
         for p in &ours {
             let new = !self.told.contains(&p.id);
+            // The order ahead of the port: a follower starts fetching when it
+            // hears of the port, and may read the two in separate passes.
+            if let Some(o) = &self.order
+                && ((new && soon) || order_again)
+            {
+                out.push(Outgoing::To(p.id, Msg::MediaOrder { paths: o.clone() }));
+                self.told.insert(p.id);
+                self.order_sent = Some(now);
+            }
             if again || new {
                 let sources: Vec<String> = full
                     .iter()
@@ -1036,13 +1045,6 @@ impl PrimarySide {
                 if again || soon {
                     out.push(Outgoing::To(p.id, Msg::MediaServer { port, sources }));
                 }
-            }
-            if let Some(o) = &self.order
-                && ((new && soon) || order_again)
-            {
-                out.push(Outgoing::To(p.id, Msg::MediaOrder { paths: o.clone() }));
-                self.told.insert(p.id);
-                self.order_sent = Some(now);
             }
         }
         if order_again {
@@ -1226,15 +1228,16 @@ impl FollowerSide {
             match &self.puller {
                 Some(p) => p.set_sources(src.clone()),
                 None => {
-                    let p = Arc::new(Puller::start(
+                    // The order known so far goes in with it: set after the
+                    // thread starts, the first file could be the version's
+                    // first rather than the playhead's (a busy machine).
+                    let p = Arc::new(Puller::start_ordered(
                         store.clone(),
                         src.clone(),
                         Follow::Current,
+                        self.order.clone(),
                         cfg.pull.clone(),
                     ));
-                    if let Some(o) = &self.order {
-                        p.set_order(Some(o.clone()));
-                    }
                     self.finder.set_puller(Some(p.clone()));
                     self.puller = Some(p);
                 }
