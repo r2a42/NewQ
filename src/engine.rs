@@ -26,6 +26,7 @@ use crate::timecode::{Follower, Rate, Timecode};
 use crossbeam_channel::Receiver;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Cues from the playhead onward (along a continue chain) that get preloaded.
@@ -264,7 +265,7 @@ pub struct VideoState {
 }
 
 pub struct ImageState {
-    pub image: Option<RgbaImage>,
+    pub image: Option<Arc<RgbaImage>>,
     /// Counts the pictures: the renderer uploads a new one when it changes.
     pub version: u64,
     loader: Option<Receiver<Result<RgbaImage, String>>>,
@@ -1092,7 +1093,7 @@ pub struct LayerRef<'a> {
 pub enum LayerSource<'a> {
     Video(&'a VideoPlayer),
     /// The picture and its version (see `ImageState::version`).
-    Image(&'a RgbaImage, u64),
+    Image(&'a Arc<RgbaImage>, u64),
     Solid([u8; 4]),
 }
 
@@ -3923,7 +3924,7 @@ impl Engine {
                         img.loader = None;
                         match result {
                             Ok(i) => {
-                                img.image = Some(i);
+                                img.image = Some(Arc::new(i));
                                 img.version += 1;
                             }
                             Err(e) => {
@@ -3947,7 +3948,7 @@ impl Engine {
                         {
                             rd.pending = None;
                             if let Ok(i) = result {
-                                img.image = Some(i);
+                                img.image = Some(Arc::new(i));
                                 img.version += 1;
                             }
                         }
@@ -3972,7 +3973,7 @@ impl Engine {
                         {
                             live.pending = None;
                             if let Ok(i) = result {
-                                img.image = Some(i);
+                                img.image = Some(Arc::new(i));
                                 img.version += 1;
                             }
                         }

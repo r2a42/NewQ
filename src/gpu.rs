@@ -1167,6 +1167,9 @@ pub struct LayerTexture {
     slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     /// How many cells per side each slot was last set to draw.
     cells: Vec<AtomicU32>,
+    /// A picture has been written into it (see `upload::Uploader`): until
+    /// then it holds nothing worth showing (a YUV texture of zeros is green).
+    filled: std::sync::atomic::AtomicBool,
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -1300,6 +1303,7 @@ impl LayerTexture {
             },
             t.size(),
         );
+        self.mark_filled();
     }
 
     fn finish(
@@ -1353,7 +1357,17 @@ impl LayerTexture {
             matrix,
             slots: (0..SLOTS).map(|_| slot()).collect(),
             cells: (0..SLOTS).map(|_| AtomicU32::new(1)).collect(),
+            filled: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether a picture has been written into it.
+    pub fn is_filled(&self) -> bool {
+        self.filled.load(Ordering::Acquire)
+    }
+
+    fn mark_filled(&self) {
+        self.filled.store(true, Ordering::Release);
     }
 
     /// Upload a yuv420p frame (Y plane followed by U and V).
@@ -1367,6 +1381,7 @@ impl LayerTexture {
         write_plane(queue, &p[0], &data[..ylen], 1);
         write_plane(queue, &p[1], &data[ylen..ylen + clen], 1);
         write_plane(queue, &p[2], &data[ylen + clen..ylen + 2 * clen], 1);
+        self.mark_filled();
     }
 
     /// Set where (on an output placed by `geometry`) and how opaquely this
@@ -1446,6 +1461,7 @@ impl LayerTexture {
         };
         if data.len() >= (self.width * self.height * 4) as usize {
             write_plane(queue, t, data, 4);
+            self.mark_filled();
         }
     }
 }

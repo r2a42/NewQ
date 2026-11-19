@@ -6,6 +6,12 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Films no longer hold up the rest of NewQ while their frames go to the graphics card.**
+  Each new frame (and each still, clock or test pattern) is now handed to a thread of its own
+  that writes it to the graphics card, so a moment's wait there (seen on a Mac as the main loop
+  held up for 100-180 ms "making the pictures", now and then at a whole minute) no longer stops
+  cues, the controls and the show network meanwhile. A picture appears once it is on the card;
+  the log says when the card was slow to take one. `NEWQ_UPLOADS_ON_MAIN=1` goes back to the old way.
 - **Test Mode can load the show network on purpose.** *More ▸ Load the network while testing*
   (*Light* about 50 Mbit/s, *Heavy* about 400 Mbit/s, or *As fast as it goes*) sends made-up
   data both ways between the primary and each other computer for as long as a test plays
