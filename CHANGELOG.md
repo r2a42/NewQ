@@ -13,6 +13,13 @@ release page, and a release is refused if it has none.
   keeps the cue's time in silence, as playing; a film whose sound plays elsewhere shows its
   pictures without a warning. And whatever the reason, a cue started on a computer to match the
   primary that stops again at once is not started again until the primary starts it anew.
+- **A display computer starts cleanly.** Opening NewQ Display on Windows showed a white box over
+  part of each screen before anything else. Now a screen shows nothing until NewQ has drawn on it
+  full screen: from start-up, only the computer's card (its name, screen and address), so you can
+  see every projector and screen is on. The card goes when the primary plays its first cue and
+  never comes back in that run: between cues the screens are black, even if a computer drops out
+  of step for a moment or restarts. *Identify* now shows the computer's name, the screen's number
+  and its address on black for a few seconds, then what was there comes back.
 
 ## 0.24.4
 

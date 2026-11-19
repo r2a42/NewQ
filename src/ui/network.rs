@@ -324,7 +324,7 @@ pub fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Ac
 fn display_cards(ui: &mut Ui, show: &mut Show) {
     section(ui, "Cards on display computers' screens", |ui| {
         ui.horizontal(|ui| {
-            ui.label("Show a card while they wait");
+            ui.label("Show the start-up card");
             let r = egui::ComboBox::from_id_salt("wait_cards")
                 .selected_text(show.wait_cards.label())
                 .width(300.0)
@@ -342,11 +342,12 @@ fn display_cards(ui: &mut Ui, show: &mut Show) {
         });
         hint(
             ui,
-            "The waiting card shows a display computer's name, address and how it stands, so it \
-             can be found and set up. Once the show is ready on it, a screen with nothing \
-             playing is black between cues, whatever is chosen here. \"Never\": black from \
-             the start (a computer no show has added yet still shows it). Identify always \
-             shows the name.",
+            "The start-up card shows a display computer's name, address and how it stands, so \
+             you can see its screens are on and find it. Once the first cue has played, a \
+             screen with nothing playing is black for the rest of the run, whatever is chosen \
+             here: the card never comes back between cues. \"Never\": black from the start (a \
+             computer no show has added yet still shows it). Identify always shows the name, \
+             screen and address for a few seconds.",
         );
         let mut cards = !show.no_transfer_cards;
         let r = ui.checkbox(&mut cards, "Show transfer cards on the displays");

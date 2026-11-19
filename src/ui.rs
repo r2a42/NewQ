@@ -565,6 +565,8 @@ impl UiState {
     /// (`TestCarry::keep`), keep it put aside and the test show in place.
     pub fn end_test(&mut self, show: &mut Show, engine: &mut Engine, stash: TestStash) {
         engine.stop_all(0.0);
+        // The test's cues are not the show's start (`PlayState::started`).
+        engine.show_opened();
         if self.test_carry.keep {
             self.test_carry.held = Some(stash);
             return;
@@ -10508,6 +10510,7 @@ fn load_into(
 ) {
     engine.stop_all(0.0);
     *show = new;
+    engine.show_opened();
     engine.forget_lists();
     engine.playhead = show.cues.first().map(|c| c.id);
     st.selected = engine.playhead;
