@@ -206,9 +206,17 @@ The README describes the features; this file is about working on the code.
   clock and media; no beacons on VPN adapters; a session on a worse path is logged (`say_worse_paths`),
   not cut. `StatusReport.path`/`vpn_on`, `NetView.reached`/`adapters`; `ui/network::{address_text,
   peer_address, own_addresses, vpn_words}`. Never tried with a real VPN. `Show::wait_cards` (`WaitCards`
-  UntilReady/AlsoUnused/Never; `play::{still_ready, card_shows}`): `Playing::ready` latches once in step
-  with the media here, so a screen with nothing playing stays black between cues (the card used to flash
-  whenever `in_step` flickered); set on the Show network page beside `no_transfer_cards`.
+  UntilReady/AlsoUnused/Never, the names kept; `play::{show_started, card_shows}`): the card is for
+  start-up only. `Playing::started` latches for the run once the show has started: `Follower::saw_start`
+  (a command that `starts()`, or a heartbeat that `shows_start()`: `PlayState::started`, the primary's
+  `started_total() > 0`, serde default, or cues/runs in it) or the engine started a cue here; after that a
+  screen with nothing playing is black (AlsoUnused keeps it on unused screens; not adopted always shows
+  it). Identify (`identify_text`: name, "Screen N", `card_address_of` the best adapter) replaces the
+  screen's layers, on black. Output windows start hidden on Windows (`OUTPUTS_START_HIDDEN`: winit shows a
+  window before making it full screen, with no background brush, so it was a white box) and are shown by
+  `show_drawn_outputs` once `OutputThread::presented_size` is the display's (`output_ready_to_show`, or
+  after `FIRST_FRAME_WAIT`); Mac and X11 as before. Set on the Show network page beside
+  `no_transfer_cards`.
   After the second real test (0.24.3; list in `.claude/notes/second-test-fixes.md`). **One NewQ per
   node folder**, every app mode: `node::lock_node_dir` holds `<node dir>/node.lock` (std
   `File::try_lock`, released by the OS however NewQ ends), taken in `main.rs::hold_node_folder`

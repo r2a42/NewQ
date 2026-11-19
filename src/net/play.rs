@@ -136,6 +136,23 @@ fn lenient_action<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ControlActio
 }
 
 impl Command {
+    /// Whether it starts something: a GO, a cue fired, a timeline run, put
+    /// at a time or gone on (the show has started: `Follower::saw_start`).
+    pub fn starts(&self) -> bool {
+        matches!(
+            self,
+            Command::Go { .. }
+                | Command::GoPlayhead { .. }
+                | Command::GoList { .. }
+                | Command::Fire { .. }
+                | Command::TimelineRun { .. }
+                | Command::TimelineSeek { .. }
+                | Command::TimelineRunFrom { .. }
+                | Command::TimelineGoOne { .. }
+                | Command::TimelineContinue { .. }
+        )
+    }
+
     /// The cue it will start, to be got ready on arrival (a cold FFmpeg start
     /// is the real floor of the lead, as the trial found).
     pub fn will_start(&self, show: &Show) -> Option<CueId> {
@@ -221,6 +238,23 @@ pub struct PlayState {
     pub playheads: Vec<(u32, Option<CueId>)>,
     pub cues: Vec<CueNow>,
     pub runs: Vec<RunNow>,
+    /// The primary has started a cue (or put a timeline's picture up) since
+    /// its show was opened (`Engine::started_since_show`: not a test's, not
+    /// an earlier show's): the show has started, so a display computer's start-up card
+    /// is gone for good (`Follower::saw_start`). A NewQ before 0.24.5 neither
+    /// sends nor reads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub started: bool,
+}
+
+impl PlayState {
+    /// Whether this heartbeat shows the show has started: said so, or
+    /// something plays (an older primary doesn't say).
+    pub fn shows_start(&self) -> bool {
+        self.started
+            || !self.cues.is_empty()
+            || self.runs.iter().any(|r| r.state != RunWord::Stopped)
+    }
 }
 
 /// A piece of the show (its JSON, cut so that a large show never makes one
@@ -535,6 +569,10 @@ pub struct Follower {
     pub corrections: u64,
     /// The show the primary said it plays at its last heartbeat (its hash).
     pub primary_show: Option<u64>,
+    /// The primary has started the show: a command that starts something
+    /// came, or a heartbeat said so (`PlayState::shows_start`). Never set
+    /// back; a display computer's start-up card goes for good.
+    pub saw_start: bool,
 }
 
 impl Follower {
@@ -556,6 +594,7 @@ impl Follower {
             || self.done.contains(&t.seq)
             || self.queue.iter().any(|q| q.seq == t.seq);
         if !known {
+            self.saw_start |= t.cmd.starts();
             if let Some(id) = t.cmd.will_start(show) {
                 engine.load_ahead(show, id);
             }
@@ -576,6 +615,7 @@ impl Follower {
     /// The primary's heartbeat.
     pub fn heard(&mut self, s: PlayState) {
         self.new_epoch(s.epoch);
+        self.saw_start |= s.shows_start();
         self.primary_show = Some(s.show);
         self.state = Some(s);
     }

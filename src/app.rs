@@ -90,6 +90,28 @@ struct PopoutWindow {
 /// How long a window may stay hidden waiting for its first frame.
 const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
 
+/// Output windows start hidden and are shown once they have drawn at their
+/// display's size (`output_ready_to_show`). On Windows a new window is shown
+/// at once, at its first size, before winit makes it full screen, and stays
+/// white (its class has no background brush) until the first frame: a white
+/// box on part of the display. A Mac's output window is backed with black
+/// and placed over its display by `macwin` (which needs it on screen), and
+/// X11 takes full screen only from a window that is mapped, so those are
+/// shown from the start as before.
+const OUTPUTS_START_HIDDEN: bool = cfg!(windows);
+
+/// Whether a hidden output window is to be shown now: it has presented a
+/// frame at its display's size, or it has waited `FIRST_FRAME_WAIT` (a
+/// surface that won't draw must not leave the display without its window).
+/// Pure, for the tests.
+fn output_ready_to_show(
+    presented: Option<(u32, u32)>,
+    display: (u32, u32),
+    waited: Duration,
+) -> bool {
+    presented == Some(display) || waited > FIRST_FRAME_WAIT
+}
+
 /// Where an output is drawn: an area of a physical display (the whole of it
 /// unless the output is on a sub display).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +150,11 @@ struct ScreenWindow {
     /// The title last given to the window (asking a window for its title is a
     /// round trip to the display server on some systems).
     title: String,
+    /// Whether the window has been shown (`OUTPUTS_START_HIDDEN`): only once
+    /// it has drawn at its display's size, so nobody sees an empty (white)
+    /// window, or one smaller than the display, before the first picture.
+    shown: bool,
+    created: Instant,
 }
 
 impl ScreenWindow {
@@ -1103,6 +1130,7 @@ impl App {
         };
         let mut attrs = Window::default_attributes()
             .with_title("NewQ output")
+            .with_visible(!OUTPUTS_START_HIDDEN)
             .with_inner_size(LogicalSize::new(960.0, 540.0));
         if cfg!(target_os = "macos") {
             // Native fullscreen gets a Space of its own on that display, which
@@ -1176,17 +1204,8 @@ impl App {
             size.1,
             window.scale_factor()
         );
-        // A new fullscreen window takes the focus (and on a Mac, its own
-        // Space); bring the controls back in front (not a display computer's
-        // hidden window).
-        if let Some(ctl) = &self.control
-            && !self.is_display_computer()
-        {
-            ctl.window.focus_window();
-        }
-        // A display computer's keys (the quit key) go to its outputs.
-        if self.is_display_computer() {
-            window.focus_window();
+        if !OUTPUTS_START_HIDDEN {
+            self.focus_after_output(&window);
         }
         self.screens.insert(
             monitor,
@@ -1207,8 +1226,49 @@ impl App {
                 sent: Vec::new(),
                 blend: EdgeBlend::default(),
                 title: String::new(),
+                shown: !OUTPUTS_START_HIDDEN,
+                created: Instant::now(),
             },
         );
+    }
+
+    /// A new fullscreen window takes the focus (and on a Mac, its own Space):
+    /// bring the controls back in front (not a display computer's hidden
+    /// window); a display computer's keys (the quit key) go to its outputs.
+    fn focus_after_output(&self, window: &Window) {
+        if self.is_display_computer() {
+            window.focus_window();
+        } else if let Some(ctl) = &self.control {
+            ctl.window.focus_window();
+        }
+    }
+
+    /// Show the output windows that started hidden once each has drawn at
+    /// its display's size (`output_ready_to_show`).
+    fn show_drawn_outputs(&mut self) {
+        let mut shown = Vec::new();
+        for (m, s) in &mut self.screens {
+            if s.shown {
+                continue;
+            }
+            let presented = s.thread.as_ref().and_then(|t| t.presented_size());
+            let display = (s.monitor.size().width, s.monitor.size().height);
+            if output_ready_to_show(presented, display, s.created.elapsed()) {
+                s.shown = true;
+                s.window.set_visible(true);
+                log::info!(
+                    "output window on display {m} shown ({})",
+                    match presented {
+                        Some((w, h)) => format!("drew {w}x{h}"),
+                        None => "nothing drawn yet".into(),
+                    }
+                );
+                shown.push(s.window.clone());
+            }
+        }
+        for w in shown {
+            self.focus_after_output(&w);
+        }
     }
 
     /// Let go of every texture made for the outputs (the layers', the test
@@ -2580,8 +2640,13 @@ impl App {
                         self.play.cards.insert(*m, (card, tex));
                         screen.needs_redraw = true;
                     }
-                    if let Some((_, tex)) = self.play.cards.get(m) {
+                    if let Some((card, tex)) = self.play.cards.get(m) {
                         if tex.is_filled() {
+                            // Identify is on black: what plays is hidden for
+                            // its few seconds, then comes back.
+                            if card.big {
+                                list.clear();
+                            }
                             list.push(card_group(tex.clone(), screen.size));
                         } else {
                             self.uploads_waiting = true;
@@ -2753,6 +2818,7 @@ impl App {
             ctl.window.focus_window();
             ctl.next_repaint = Some(Instant::now());
         }
+        self.show_drawn_outputs();
         let hidden: Vec<WindowId> = self
             .popouts
             .iter()
@@ -3728,6 +3794,10 @@ impl App {
         if playing || self.uploads_waiting {
             next = next.min(now + TICK_WHILE_PLAYING);
         }
+        // An output window waiting to be shown is looked at again soon.
+        if self.screens.values().any(|s| !s.shown) {
+            next = next.min(now + TICK_WHILE_PLAYING);
+        }
         if let Some(t) = self.play_wake(now) {
             next = next.min(t);
         }
@@ -4130,7 +4200,7 @@ fn card_texture(
     let h = ((w as f32 * size.1 as f32 / size.0.max(1) as f32) as u32).clamp(2, 4096);
     let mut cue = crate::show::TextCue::new(None);
     cue.text = card.text.clone();
-    cue.size = if card.big { 0.16 } else { 0.035 };
+    cue.size = if card.big { 0.12 } else { 0.035 };
     cue.width = 0.9;
     cue.align = crate::show::TextAlign::Center;
     cue.valign = crate::show::TextVAlign::Middle;
@@ -4256,6 +4326,26 @@ fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, u
 mod tests {
     use super::*;
     use crate::show::{DisplayRef, NodeId};
+
+    #[test]
+    fn an_output_window_is_shown_once_it_has_drawn_at_its_displays_size() {
+        let full = (1920, 1080);
+        let soon = Duration::from_millis(40);
+        // Nothing drawn yet, or drawn at its first size before it went full
+        // screen: still hidden (that is the white box on Windows).
+        assert!(!output_ready_to_show(None, full, soon));
+        assert!(!output_ready_to_show(Some((1440, 810)), full, soon));
+        // Drawn at the display's size: shown.
+        assert!(output_ready_to_show(Some(full), full, soon));
+        // A window that can't draw is shown all the same after a while.
+        let late = FIRST_FRAME_WAIT + Duration::from_millis(1);
+        assert!(output_ready_to_show(None, full, late));
+        assert!(output_ready_to_show(Some((1440, 810)), full, late));
+        // Only Windows starts them hidden (a Mac's are backed black and must
+        // be on screen to cover their display; X11 makes a window full
+        // screen only once it is mapped).
+        assert_eq!(OUTPUTS_START_HIDDEN, cfg!(windows));
+    }
 
     fn keys(names: &[&str]) -> Vec<MonitorKey> {
         names

@@ -350,6 +350,10 @@ enum OutputJob {
 pub struct OutputThread {
     mailbox: Arc<Mailbox<OutputJob>>,
     handle: JoinHandle<()>,
+    /// The size of the last frame presented (`width << 32 | height`), 0
+    /// before the first: a window is shown only once it has drawn at the
+    /// size it is to be (`presented_size`).
+    presented: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl OutputThread {
@@ -363,10 +367,22 @@ impl OutputThread {
     ) -> std::io::Result<OutputThread> {
         let mailbox = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
+        let presented = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let flag = presented.clone();
         let handle = std::thread::Builder::new()
             .name("output-render".into())
-            .spawn(move || output_loop(gpu, window, surface, config, slot, mb))?;
-        Ok(OutputThread { mailbox, handle })
+            .spawn(move || output_loop(gpu, window, surface, config, slot, mb, flag))?;
+        Ok(OutputThread {
+            mailbox,
+            handle,
+            presented,
+        })
+    }
+
+    /// The size of the last frame it presented, None before the first.
+    pub fn presented_size(&self) -> Option<(u32, u32)> {
+        let v = self.presented.load(Ordering::Acquire);
+        (v != 0).then_some(((v >> 32) as u32, v as u32))
     }
 
     /// Whether the thread has ended by itself (it only should when asked to).
@@ -405,6 +421,7 @@ fn output_loop(
     mut config: wgpu::SurfaceConfiguration,
     slot: Slot,
     mailbox: Arc<Mailbox<OutputJob>>,
+    presented: Arc<std::sync::atomic::AtomicU64>,
 ) {
     let pipeline = gpu.compositor.pipeline(&gpu.device, config.format);
     let fade = BlendPass::new(&gpu.device, config.format);
@@ -514,6 +531,10 @@ fn output_loop(
         gpu.submit([cmd]);
         window.pre_present_notify();
         gpu.queue.present(frame);
+        presented.store(
+            (u64::from(config.width) << 32) | u64::from(config.height.max(1)),
+            Ordering::Release,
+        );
         if let Some(rate) = fps.tick(Instant::now()) {
             let i = slot_index(slot);
             FPS[i].store((rate * 10.0).round() as u32, Ordering::Relaxed);

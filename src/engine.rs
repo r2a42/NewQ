@@ -1155,6 +1155,8 @@ pub struct Engine {
     /// settings for a few seconds, so a bad file isn't retried every tick.
     failed_preps: HashMap<CueId, (PrepSig, Instant)>,
     next_instance: u64,
+    /// `started_total` when the show was last opened (`show_opened`).
+    started_before_show: u64,
     /// Cues started early to crossfade over the child ahead of them in a "play
     /// in order" group, and by how much (see `ActiveCue::extra_hold`).
     started_early: HashMap<CueId, f64>,
@@ -1243,6 +1245,7 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
+            started_before_show: 0,
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -1293,6 +1296,7 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
+            started_before_show: 0,
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
             camera_scan: None,
@@ -4916,6 +4920,20 @@ impl Engine {
     /// How many cues have been started since the program began.
     pub fn started_total(&self) -> u64 {
         self.next_instance - 1
+    }
+
+    /// A show was opened (or Test Mode gave the operator's show back): the
+    /// cues started before it don't count as this show having started
+    /// (`started_since_show`).
+    pub fn show_opened(&mut self) {
+        self.started_before_show = self.started_total();
+    }
+
+    /// Whether a cue has been started (or a timeline's picture put up) since
+    /// the show was opened: a primary's heartbeat says so
+    /// (`PlayState::started`), and its display computers' start-up cards go.
+    pub fn started_since_show(&self) -> bool {
+        self.started_total() > self.started_before_show
     }
 
     pub fn picture_layers(&self) -> u32 {

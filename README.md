@@ -1084,7 +1084,13 @@ Open it on a computer with projectors or screens and that is all you do there:
   *Screen 2*…, numbered as the primary's Displays menu and Test Mode number that
   computer's monitors, even when there is only one), its address and *Waiting
   for a NewQ primary on this network*. A monitor plugged in later gets a card
-  too.
+  too. The card is for start-up, so you can see every projector and screen is
+  on and working: it stays until the primary plays its first cue, and from then
+  on, for as long as NewQ runs, a screen is black whenever nothing plays on it.
+  The card never comes back between cues (not when a cue ends, not if the
+  computer drops out of step for a moment). No window is shown before it has
+  drawn its first picture full screen, so nothing white or half-sized flashes up
+  while NewQ starts.
 - If no primary has reached it after about 20 seconds, the card says so: *Not
   reached by a primary yet*. If the primary lists the computer but can't add it,
   the firewall on the display computer may be blocking NewQ (on Windows its
@@ -1134,8 +1140,9 @@ Open it on a computer with projectors or screens and that is all you do there:
    Show network ▸ Run the show network from this computer*.
 4. **Add the computers:** they appear under *Waiting to join*; *Add to the show*
    on each. Give each its role from its row's menu: *Display*, or *Backup* for a
-   second control computer. *Identify* flashes a computer's name on its screens
-   if you aren't sure which is which.
+   second control computer. *Identify* shows a computer's name, which of its
+   screens each one is (*Screen 1*, *Screen 2*…) and its address, big on black,
+   on each of its screens for a few seconds, if you aren't sure which is which.
 5. **Displays:** in *Displays*, give each display of the show a monitor: the menu
    offers every computer's monitors beside this one's.
 6. **Sound:** in *Settings ▸ Audio*, tick *Plays on* for the computer (or
@@ -1188,7 +1195,9 @@ Open it on a computer with projectors or screens and that is all you do there:
   *Backup*, chosen from the menu and written on that computer at once), its
   name (*Rename*), NewQ version (a different one is said plainly), wired or
   Wi-Fi where it can tell, free disk, its monitors and sound devices.
-  *Identify* shows the computer's name big on its screen for a few seconds;
+  *Identify* shows the computer's name, the screen's number and its address big
+  on black on each of its screens for a few seconds, then what was there comes
+  back;
   *Release* sends it back to waiting. On the other computer the page and the
   status bar say which primary it follows.
 - **Addresses.** Each computer's row shows the address it is connected on and
@@ -1248,16 +1257,17 @@ never copy media by hand, and nothing waits for it.
 - **Cards on display computers' screens.** *Settings ▸ Show network ▸ Cards on
   display computers' screens* has the two cards side by side, both kept in the
   show so every computer follows them:
-  - *Show a card while they wait*: the waiting card is a display computer's
-    name, address and how it stands, so it can be found and set up. *Until the
-    show is ready* (the default) shows it until the computer is first in step
-    with its media; *Until ready, and on screens the show doesn't use* keeps it
-    on unused screens; *Never (black)* never shows it once the computer has been
-    added to a show, so one that restarts mid-show comes up black (a computer no
-    show has added yet still shows it, or nobody could find it). Once a computer
-    is ready, a screen with nothing playing is black between cues whatever is
-    chosen: the card never comes back when a cue ends. *Identify* always shows
-    the name.
+  - *Show the start-up card*: the card is a display computer's name, address
+    and how it stands, so you can see its screens are on and find it. *From
+    start-up until the first cue* (the default) shows it until the primary
+    plays its first cue; *Until the first cue, and on screens the show doesn't
+    use* also keeps it on screens nothing is ever played on; *Never (black)*
+    never shows it once the computer has been added to a show (a computer no
+    show has added yet still shows it, or nobody could find it). Once the first
+    cue has played, a screen with nothing playing is black for the rest of the
+    run whatever is chosen: the card never comes back between cues, and a
+    display computer that restarts mid-show comes up black as soon as it hears
+    the primary. *Identify* always shows the name, screen and address.
   - *Show transfer cards on the displays*: off, a display shows black where
     *Media transferring* would be, for a show in front of an audience.
 - **The library.** *Settings ▸ Media ▸ Folders to keep on every computer*: add a
@@ -1329,10 +1339,11 @@ never copy media by hand, and nothing waits for it.
 - **Cameras.** A computer plays a camera cue only if it has that camera (a
   capture card in each display computer); otherwise it shows nothing for it.
 - **Display computers** have no control window. Every monitor they have becomes
-  an output at start-up. Ctrl+Q (Command-Q on a Mac) on one quits NewQ there. Until the computer is in step, and on any monitor the
-  show doesn't use, a quiet grey card says its name, its address, who runs the
-  show and how it is getting on; once in step a monitor with nothing playing is
-  black. *Identify* from the primary flashes the name on every output. A change
+  an output at start-up. Ctrl+Q (Command-Q on a Mac) on one quits NewQ there. From start-up until the
+  primary plays its first cue, a quiet grey card says its name, its address, who
+  runs the show and how it is getting on; after that a monitor with nothing
+  playing is black. *Identify* from the primary shows the name, screen number
+  and address on black on every output for a few seconds. A change
   of role takes effect at once (the control window closes or opens again);
   *Restart* on the primary's row starts NewQ again on that computer.
 - **Backup computers** follow like any other computer and show the show, the

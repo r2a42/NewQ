@@ -451,6 +451,7 @@ impl Engine {
             playheads,
             cues,
             runs,
+            started: self.started_since_show(),
             ..Default::default()
         }
     }

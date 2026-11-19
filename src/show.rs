@@ -95,13 +95,14 @@ pub struct Show {
     pub wait_cards: WaitCards,
 }
 
-/// When a display computer shows its card (its name, address, who runs the
-/// show and how it stands) on its screens. Once the show is ready, a screen
-/// with nothing playing is black whatever this says; Identify shows the name
-/// whatever it says.
+/// When a display computer shows its start-up card (its name, address, who
+/// runs the show and how it stands) on its screens. Once the show has started
+/// (the primary played its first cue), a screen with nothing playing is black
+/// for the rest of the run whatever this says; Identify shows the name
+/// whatever it says. (The variants keep their names, which are in show files.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WaitCards {
-    /// Until the computer is first in step with the show and has its media.
+    /// From start-up until the show starts (`app/play.rs::card_shows`).
     #[default]
     UntilReady,
     /// As `UntilReady`, and always on screens the show doesn't use.
@@ -124,8 +125,8 @@ impl WaitCards {
     /// What the setting's menu says.
     pub fn label(self) -> &'static str {
         match self {
-            WaitCards::UntilReady => "Until the show is ready",
-            WaitCards::AlsoUnused => "Until ready, and on screens the show doesn't use",
+            WaitCards::UntilReady => "From start-up until the first cue",
+            WaitCards::AlsoUnused => "Until the first cue, and on screens the show doesn't use",
             WaitCards::Never => "Never (black)",
         }
     }

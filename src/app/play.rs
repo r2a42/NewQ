@@ -76,9 +76,9 @@ pub(super) struct Playing {
     /// Since when no computer has had a session with this one (a display
     /// computer's card: `not_reached_words`).
     unreached_since: Option<Instant>,
-    /// This display computer has been in step with its show, its media here:
-    /// its screens are black between cues from then on (`card_shows`).
-    ready: bool,
+    /// The show has started (`show_started`): this display computer's
+    /// start-up card is gone for the rest of the run (`card_shows`).
+    started: bool,
     // ---- The network test (stage 6) ----
     measure: crate::net::measure::Measurer,
     /// This computer's log since the test began, being read for the primary.
@@ -697,25 +697,27 @@ pub(super) fn display_windows(
     }
 }
 
-/// Whether a display computer is ready (`Playing::ready`) after this look:
-/// it stays ready through anything but being released. Pure, for the tests.
-pub(super) fn still_ready(
-    was: bool,
-    adopted: bool,
-    standing: Option<Standing>,
-    media_here: bool,
-) -> bool {
-    adopted && (was || (standing == Some(Standing::InStep) && media_here))
+/// Whether the show has started, as a display computer sees it, after this
+/// look (`Playing::started`): once it has, it has for the rest of the run,
+/// whatever comes and goes (out of step, the clock lost, a new show sent, a
+/// takeover). `heard`: the primary said so or was seen starting something
+/// (`Follower::saw_start`); `started_here`: this computer's engine has started
+/// a cue. Pure, for the tests.
+pub(super) fn show_started(was: bool, heard: bool, started_here: bool) -> bool {
+    was || heard || started_here
 }
 
-/// Whether a display computer's screen shows its card: always while it waits
-/// for a primary to add it (else nobody could find it); once added, as the
-/// show's setting says, and never on a screen in use once it is ready. Pure,
-/// for the tests.
+/// Whether a display computer's screen shows its start-up card: always while
+/// it waits for a primary to add it (else nobody could find it); once added,
+/// until the show starts (the first cue the primary plays), as the show's
+/// setting says, and never again after that, so nothing but the show (or
+/// Identify) is ever seen between cues. `AlsoUnused` keeps it on the screens
+/// the show gives no display, which nothing is ever played on. Pure, for the
+/// tests.
 pub(super) fn card_shows(
     setting: crate::show::WaitCards,
     adopted: bool,
-    ready: bool,
+    started: bool,
     has_display: bool,
 ) -> bool {
     use crate::show::WaitCards;
@@ -724,8 +726,8 @@ pub(super) fn card_shows(
     }
     match setting {
         WaitCards::Never => false,
-        WaitCards::UntilReady => !ready,
-        WaitCards::AlsoUnused => !ready || !has_display,
+        WaitCards::UntilReady => !started,
+        WaitCards::AlsoUnused => !started || !has_display,
     }
 }
 
@@ -735,6 +737,28 @@ pub(super) fn card_shows(
 /// the tests.
 pub(super) fn screen_name(name: &str, monitor: usize) -> String {
     format!("{name} · Screen {}", monitor + 1)
+}
+
+/// What Identify shows on each screen of the computer, big, on black: its
+/// name, which of its screens this is ("Screen 2", as `screen_name` numbers
+/// them) and its address on the network. Pure, for the tests.
+pub(super) fn identify_text(name: &str, monitor: usize, address: Option<&str>) -> String {
+    let mut lines = vec![name.to_string(), format!("Screen {}", monitor + 1)];
+    if let Some(a) = address {
+        lines.push(a.to_string());
+    }
+    lines.join("\n")
+}
+
+/// The address a card shows: the best of this computer's adapters, as the
+/// show network ranks them (`paths::rank`: a wired one on our subnet before
+/// Wi-Fi, a VPN last; never link-local), else None. Pure, for the tests.
+pub(super) fn card_address_of(adapters: &[crate::net::paths::Adapter]) -> Option<String> {
+    adapters
+        .iter()
+        .filter(|a| !a.ip.is_link_local() && !a.ip.is_loopback())
+        .min_by_key(|a| crate::net::paths::rank(a.ip.into(), adapters))
+        .map(|a| a.ip.to_string())
 }
 
 /// The card's words: the computer's name and which of its screens this is,
@@ -856,6 +880,12 @@ impl App {
         self.play.address.as_ref().and_then(|(_, a)| a.clone())
     }
 
+    /// The address the cards and Identify show: the one the show network
+    /// would use (`card_address_of`), else the first the system lists.
+    pub(super) fn card_address(&mut self) -> Option<String> {
+        card_address_of(&self.ui.net.adapters).or_else(|| self.own_address())
+    }
+
     /// The card on one monitor of this computer, if any: the name big while
     /// the primary asks it to Identify (on every output, whatever the role);
     /// on a display computer, the quiet card until it is in step, and always on
@@ -868,7 +898,8 @@ impl App {
         {
             // Flashing: on half a second, dimmer the next.
             let on = (local_now() * 2.0) as i64 % 2 == 0;
-            let text = format!("{}\nScreen {}", v.name, monitor + 1);
+            let address = self.card_address();
+            let text = identify_text(&v.name, monitor, address.as_deref());
             return Some(Card {
                 text: if on { text } else { format!("{text} ") },
                 big: true,
@@ -880,20 +911,25 @@ impl App {
         }
         let clock = self.net.clock().now();
         let standing = self.play.standing(clock.is_some_and(|n| n.locked));
-        // Ready once in step with its media here; from then on a screen with
-        // nothing playing is black, whatever comes and goes (a cue ending
-        // can put it out of step for a heartbeat: the card must not flash
-        // up in front of an audience).
+        // The card is for start-up: from the first cue the primary plays, a
+        // screen with nothing playing is black for the rest of the run (out
+        // of step for a heartbeat, a clock lost, a new show: nothing brings
+        // the card back in front of an audience).
         let adopted = v.me.adopted();
-        let media_here = self.ui.media.own.as_ref().is_none_or(|own| {
-            let used = &own.progress.used;
-            used.bytes_here >= used.bytes_wanted
-        });
-        self.play.ready = still_ready(self.play.ready, adopted, standing, media_here);
-        if !card_shows(self.show.wait_cards, adopted, self.play.ready, has_display) {
+        self.play.started = show_started(
+            self.play.started,
+            self.play.follower.saw_start,
+            self.engine.started_total() > 0,
+        );
+        if !card_shows(
+            self.show.wait_cards,
+            adopted,
+            self.play.started,
+            has_display,
+        ) {
             return None;
         }
-        let address = self.own_address();
+        let address = self.card_address();
         let primary = v.following.as_ref().map(|f| (f.name.as_str(), f.online));
         let mut text = card_text(
             &v.name,
@@ -1360,48 +1396,177 @@ mod tests {
     use super::*;
 
     #[test]
-    fn once_ready_a_display_computers_screens_stay_black_between_cues() {
+    fn the_start_up_card_shows_until_the_show_starts_and_never_again() {
         use crate::show::WaitCards;
-        // Getting the show: the card, on every screen.
-        let mut ready = false;
-        for st in [
-            Standing::WaitingForClock,
-            Standing::WaitingForShow,
-            Standing::GettingReady,
-        ] {
-            ready = still_ready(ready, true, Some(st), true);
-            assert!(!ready);
-            assert!(card_shows(WaitCards::UntilReady, true, ready, true));
+        // Switched on, added, getting the show, in step: nothing has been
+        // played yet, so the card shows on every screen (the projectors and
+        // screens can be seen to be on and working).
+        let mut started = false;
+        for _ in 0..3 {
+            started = show_started(started, false, false);
+            assert!(!started);
+            assert!(card_shows(WaitCards::UntilReady, true, started, true));
+            assert!(card_shows(WaitCards::UntilReady, true, started, false));
         }
-        // In step but its media still coming: still the card.
-        assert!(!still_ready(ready, true, Some(Standing::InStep), false));
-        ready = still_ready(ready, true, Some(Standing::InStep), true);
-        assert!(ready);
-        // A cue ends: out of step for a heartbeat, then back. Black throughout.
-        for st in [
-            Standing::GettingReady,
-            Standing::InStep,
-            Standing::GettingReady,
-        ] {
-            ready = still_ready(ready, true, Some(st), true);
-            assert!(
-                !card_shows(WaitCards::UntilReady, true, ready, true),
-                "{st:?}"
-            );
-            assert!(!card_shows(WaitCards::UntilReady, true, ready, false));
+        // The primary plays its first cue: black from then on, whatever
+        // happens (out of step, the clock lost, a new show, a takeover: the
+        // follower is made afresh and has seen nothing).
+        started = show_started(started, true, false);
+        assert!(started);
+        for _ in 0..5 {
+            started = show_started(started, false, false);
+            assert!(started);
+            assert!(!card_shows(WaitCards::UntilReady, true, started, true));
+            assert!(!card_shows(WaitCards::UntilReady, true, started, false));
         }
+        // A cue this computer started itself counts as much.
+        assert!(show_started(false, false, true));
         // "On screens the show doesn't use too": those keep it.
-        assert!(card_shows(WaitCards::AlsoUnused, true, ready, false));
-        assert!(!card_shows(WaitCards::AlsoUnused, true, ready, true));
+        assert!(card_shows(WaitCards::AlsoUnused, true, started, false));
+        assert!(!card_shows(WaitCards::AlsoUnused, true, started, true));
+        assert!(card_shows(WaitCards::AlsoUnused, true, false, true));
         // Never: black from the first moment once it is a show's computer...
         assert!(!card_shows(WaitCards::Never, true, false, true));
         assert!(!card_shows(WaitCards::Never, true, false, false));
         // ...but a computer no primary has added shows it, so it can be found.
         for w in WaitCards::ALL {
             assert!(card_shows(w, false, false, true));
+            assert!(card_shows(w, false, true, true));
         }
-        // Released: ready no more.
-        assert!(!still_ready(true, false, None, true));
+    }
+
+    #[test]
+    fn the_follower_sees_the_show_start_from_a_command_or_a_heartbeat() {
+        use crate::net::play::{Command, CueNow, PlayState, RunNow, RunWord, Timed};
+        use crate::show::{CueId, TimelineKey};
+        let show = crate::show::Show::default();
+        let mut engine = crate::engine::Engine::for_tests();
+        // Heartbeats of a primary that has played nothing: not started.
+        let mut f = Follower::default();
+        f.heard(PlayState::default());
+        let stopped = RunNow {
+            key: TimelineKey::List(1),
+            state: RunWord::Stopped,
+            pos: 0.0,
+            anchor: None,
+        };
+        f.heard(PlayState {
+            runs: vec![stopped.clone()],
+            ..Default::default()
+        });
+        assert!(!f.saw_start);
+        // A command that changes nothing playing: not started either.
+        let timed = |seq, cmd| Timed {
+            epoch: 1,
+            seq,
+            at: 0.0,
+            cmd,
+        };
+        f.receive(
+            timed(1, Command::SetPaused { paused: true }),
+            &mut engine,
+            &show,
+        );
+        f.receive(timed(2, Command::StopAll { fade: 0.0 }), &mut engine, &show);
+        assert!(!f.saw_start);
+        // A GO: started.
+        f.receive(
+            timed(
+                3,
+                Command::Go {
+                    list: 0,
+                    playhead: None,
+                },
+            ),
+            &mut engine,
+            &show,
+        );
+        assert!(f.saw_start);
+        // A heartbeat that says so (0.24.5 on), or shows a cue or a run
+        // going (an older primary): started.
+        for s in [
+            PlayState {
+                started: true,
+                ..Default::default()
+            },
+            PlayState {
+                cues: vec![CueNow {
+                    cue: CueId(4),
+                    anchor: 0.0,
+                    stopping: false,
+                    sound: None,
+                }],
+                ..Default::default()
+            },
+            PlayState {
+                runs: vec![RunNow {
+                    state: RunWord::Paused,
+                    ..stopped.clone()
+                }],
+                ..Default::default()
+            },
+        ] {
+            let mut f = Follower::default();
+            f.heard(s.clone());
+            assert!(f.saw_start, "{s:?}");
+        }
+        // Said by a primary only once it has started a cue, and left out
+        // of the message until then (an older NewQ reads it as before).
+        let mut e = crate::engine::Engine::for_tests();
+        let s = e.net_state(0.0);
+        assert!(!s.started);
+        assert!(!serde_json::to_string(&s).unwrap().contains("started"));
+        let old: PlayState = serde_json::from_str(
+            r#"{"epoch":1,"seq":0,"time":0.0,"show":0,"paused":false,"list":0,"playhead":null,"cues":[],"runs":[]}"#,
+        )
+        .unwrap();
+        assert!(!old.started);
+        let mut show = crate::show::Show::default();
+        let c = show.make_cue(crate::show::CueType::Wait, None, 0);
+        let id = c.id;
+        show.cues.push(c);
+        e.fire(&show, id);
+        e.tick(&show, 0.01);
+        let s = e.net_state(0.0);
+        assert!(s.started);
+        assert!(
+            serde_json::to_string(&s)
+                .unwrap()
+                .contains("\"started\":true")
+        );
+        // Another show opened (or a test's show put back): not started until
+        // a cue of it is.
+        e.stop_all(0.0);
+        e.show_opened();
+        assert!(!e.net_state(0.0).started);
+        e.fire(&show, id);
+        e.tick(&show, 0.01);
+        assert!(e.net_state(0.0).started);
+    }
+
+    #[test]
+    fn identify_says_the_name_the_screen_and_the_address() {
+        assert_eq!(
+            identify_text("WNO-2", 1, Some("192.168.1.20")),
+            "WNO-2\nScreen 2\n192.168.1.20"
+        );
+        assert_eq!(identify_text("Left", 0, None), "Left\nScreen 1");
+        // The address the network would use: wired before Wi-Fi, a VPN last,
+        // never link-local.
+        use crate::net::paths::Adapter;
+        let mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
+        let adapters = [
+            Adapter::new("Tailscale", [100, 64, 0, 3].into(), mask),
+            Adapter::new("Wi-Fi", [192, 168, 4, 7].into(), mask),
+            Adapter::new("Ethernet 2", [169, 254, 3, 3].into(), mask),
+            Adapter::new("Ethernet", [10, 0, 0, 5].into(), mask),
+        ];
+        assert_eq!(card_address_of(&adapters).as_deref(), Some("10.0.0.5"));
+        assert_eq!(
+            card_address_of(&adapters[..3]).as_deref(),
+            Some("192.168.4.7")
+        );
+        assert_eq!(card_address_of(&[]), None);
     }
 
     #[test]
