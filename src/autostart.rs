@@ -232,6 +232,14 @@ pub fn at_start(entry: Option<(&str, &str)>, cleaned: bool, display_computer: bo
     }
 }
 
+/// The `cleaned` to give `look_at_start`: the clean-up is skipped (as if
+/// done) where its being done can't be kept (`can_keep`: the settings can be
+/// saved), or every start would remove an entry someone ticked since. Pure,
+/// for the tests.
+pub fn skip_clean_up(cleaned: bool, can_keep: bool) -> bool {
+    cleaned || !can_keep
+}
+
 /// The one-line note on a computer whose entry the clean-up removed.
 pub const SWITCHED_OFF: &str = "Start at login was switched off (an older NewQ had switched it \
                                 on by itself); tick it to have it back";
@@ -411,6 +419,20 @@ mod tests {
         assert!(p.contains("<key>RunAtLoad</key>\n\t<true/>"));
         assert!(p.contains(&format!("<string>{LABEL}</string>")));
         assert!(p.starts_with("<?xml"));
+    }
+
+    #[test]
+    fn the_clean_up_is_skipped_where_its_being_done_could_not_be_kept() {
+        let entry = Some((RUN_VALUE, "\"newq\""));
+        // Settings that can be saved: removed once.
+        let cleaned = skip_clean_up(false, true);
+        assert_eq!(at_start(entry, cleaned, false), AtStart::Remove);
+        // Settings that can't: never removed (it would be at every start,
+        // ticked since or not).
+        let cleaned = skip_clean_up(false, false);
+        assert_eq!(at_start(entry, cleaned, false), AtStart::Leave);
+        // Done before: left, whatever the settings.
+        assert!(skip_clean_up(true, false) && skip_clean_up(true, true));
     }
 
     #[test]

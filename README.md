@@ -1051,7 +1051,9 @@ stays on the computer until you send it yourself.
   NewQ uses it only to keep going, says so in red in the status bar (and, on a
   display computer, on the primary's row for it and in the network test's
   report), keeps looking for the card every few seconds, and moves back onto it
-  as soon as it is offered again. A display change in the middle of a frame no
+  as soon as it is offered again. A NewQ that started in software (with no card
+  lost since) looks for a card for its first quarter of an hour, then stops
+  (restart NewQ to look again). A display change in the middle of a frame no
   longer stops an output window's drawing.
 
 ## Show network: several computers
