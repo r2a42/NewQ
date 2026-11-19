@@ -245,6 +245,31 @@ The README describes the features; this file is about working on the code.
   `Run::outgoing`, `run` None); `plays_by_itself()` (no run, not outgoing) is what `net_state` lists
   and what `net_correct` counts as its own; `net_correct` never starts a cue `model::key_of` places on
   a timeline. Tests: `engine/timeline/tests.rs` (`NEVER_CUED`, cfg(test) in `run_cued`).
+  After the third real test (0.24.4; `.claude/notes/second-test-fixes.md` items 20-29). Cues that follow
+  one another: `engine.rs::ended_at` records, ticking by a shared clock, the shared time a cue ended in
+  `Engine::net_ended` (`ENDED_KEPT`); auto-follow, a group's next child (a crossfade `fade_in` earlier,
+  never before that child began) and a group's end are placed there through `chain_backdate` (at most
+  `ENDED_LATE_MAX`, 0.25 s, back); `net_mark`/`net_backdate` shared with `net_apply`'s late commands
+  (each computer had anchored at the tick that saw the end: 0.24.3's -26 ms corrections). Tests:
+  `play_tests.rs::cues_that_follow_one_another_start_together_at_any_frame_rate` (`Node::hz`),
+  `net_sound_tests.rs::a_chain_of_films_and_sounds_…`, `engine/net_chain_tests.rs`. Network load in Test
+  Mode: `src/net/load.rs` streams a repeated 64 KB made-up buffer both ways between the primary and each
+  computer while a test across the network plays (`LoadLevel` Off/Light 50/Heavy 400 Mbit/s/Full;
+  `Prefs::test_load`, Test Mode ▸ More; `NEWQ_TEST_LOAD`); `LoadServer` (token + node id first, counts
+  both ways, `keep_only`), `LoadClient`, paced writer (`Pacer`) and draining reader threads; carried as
+  `NetTest::Begin { load }` (serde default); `Fleet::start_load`/`stop_load`, `load_lines` in the reports,
+  `app/play.rs::net_load`. `NetTest`, `play::Command`, `RunWord` and `Link` read an unknown kind as
+  `Unknown` (`#[serde(other)]`), so a later NewQ's new kinds never close a session (`Hub::broadcast_json`,
+  cfg(test)). Media: `Puller::start_ordered` takes the order at start and the primary sends `MediaOrder`
+  ahead of `MediaServer` (the puller could start the version's first file in its own order). Start at
+  login: `autostart::at_start` (pure: `Leave`/`Remove`/`Rewrite`), `look_at_start` in `App::new`; the first
+  start of 0.24.4+ removes any entry once (`Prefs::start_at_login_cleaned`, set only when the removal
+  worked), note `autostart::SWITCHED_OFF` via `network::login_note` (`LOGIN_NOTE_FOR`). Sound after a
+  takeover: an output named for the old primary stays with it; `NetView::took_control_from_id`,
+  `UiState::took_control_from()`, `network::sound_after_takeover` (`SoundLeft::OnOld`/`NoDevice`), *Play it
+  here instead* = `Action::PlaySoundHere` -> `AudioOutputConfig::move_to` (allowed in show mode); the id is
+  lost if the new primary restarts. Test Mode's timeline `Watch`: a clock put elsewhere between two looks
+  resets `from` to `pos - wall` (a seek released at once was never seen `Cueing`).
   Test Mode's window and several parts in one test (0.24.2). `testmode/choice.rs` (pure): `Parts` (the Cue
   list / Timeline / Network ticks, kept in `Prefs::test_pick`; `PickFile` reads 0.24's flavour/debug), `Part`,
   `PartPlan`, `plan(level, parts, network_ok)` (Medium and Long are the whole run's time: network laps 1/3/10
@@ -399,10 +424,32 @@ The README describes the features; this file is about working on the code.
   Every `queue.submit` goes through `Gpu::submit` and every `surface.configure` through `Gpu::configure`
   (`Gpu::gate`, a RwLock): configuring waits for the device to go idle and fails if another thread submits
   meanwhile; a Mac whose external display went off left the control window undrawn for 34 s.
-  Texture uploads happen on the main thread (`app.rs::update_outputs`) and wgpu holds each
-  one's staging copy until the next `queue.submit`; a Mac stops presenting a background
-  window, so nothing else submits: `Gpu::flush_uploads` after each frame's uploads (this
-  was 81 GB in a Medium test run in the background).
+  `src/upload.rs`: texture uploads are off the main thread. `Uploader` (an "uploads" thread) takes each
+  frame from `update_outputs` (a copy into a recycled buffer, or the engine's `Arc<RgbaImage>` for
+  stills, clocks and cards), latest wins per texture (`Pending`), writes it, submits (`Gpu::flush_uploads`:
+  wgpu holds each staging copy until a submit, and a Mac stops presenting a background window, so nothing
+  else submits; this was 81 GB in a Medium test run in the background) and polls the device for a loss
+  every `POLL_EVERY`. A layer is drawn only once `LayerTexture::is_filled`; `App::uploads_waiting` redraws
+  when it arrives. Two Mac tests had the main loop wait 100-180 ms in `write_texture` with 1-5 ms of CPU;
+  headless, another thread's submit made a 1080p upload wait up to 2 s. `NEWQ_UPLOADS_ON_MAIN=1` keeps the
+  old path. Textures are still made on the main thread. Tried headless only.
+  `src/adapters.rs` (pure): which adapter (`better`: wgpu's pick stands unless software; else discrete,
+  integrated, virtual, other; software (`Kind::of`: Cpu or Basic Render Driver, llvmpipe…) only alone),
+  `SOFTWARE_GRACE` (3 s after a loss), `look_every`, `switch_back`/`failed_switch`/`after_failed_switches`
+  (30 s, 2 min, 8 min, give up), `SoftwareDrawing` (`StatusReport.software_drawing`, serde default),
+  `status`. `Gpu::new(instance, window, allow_software)`; every rebuild uses a fresh `gpu::instance_for`
+  (an old DXGI factory never sees the card back). `app.rs`: `SoftwareWatch` looks on a `gpu-look` thread
+  (`gpu::hardware_offered`) and sets `to_hardware`, which `watch_gpu` rebuilds by the loss path.
+  `gpu::drawing_in_software()` feeds `LocalFacts.software`, `slow_drawing` and Test Mode. `render.rs::Ready`:
+  a surface that won't configure skips frames (`Gpu::try_configure`, retried every 250 ms;
+  `get_current_texture` in `catch_expected`). A 0.24.3 laptop lost its NVIDIA driver to a Windows driver
+  update mid-test and stayed on Basic Render Driver. Tried under Xvfb with a fake look answer only.
+  `src/ui/preview.rs`: every preview keeps the display's shape (`fit_picture`, `space`, `space_size`,
+  `part_shape`, `outline`, `WholeViewport`: egui clamps a paint callback's viewport to the window, which
+  squeezed the picture); `PreviewOutput::canvas` is the preview's shape, `picture` the canvas its layers are
+  laid out on (the source picture for a `part_of`). `audio::LoadMeter` averages NewQ's mixing over
+  `STEADY_BUFFERS` buffers, each capped at 1; `audio::cause`/`stream_errors_late()` tell the system calling
+  late from slow mixing (`analysis::dropout_cause`).
 - `src/awake.rs`: `KeepAwake` holds the computer awake (caffeinate, `SetThreadExecutionState`,
   systemd-inhibit) while a test runs; `SleepWatch` notices a sleep by the wall clock running ahead of
   `Instant`, which stops in sleep on a Mac and Linux (Test Mode reports it and leaves the laps it

@@ -237,6 +237,8 @@ unless it reproduces).
    listening, so it's unknown whether they were audible. The running agent only corrects the report's
    wording (system called late vs NewQ's mixing).
 
+**Status 2026-11-19: every item above is done** (20-29 merged; 19 fixed as a measuring fault in `Watch`).
+
 **Before the next release (owner, 2026-11-18):** when every item above is done, a full review by a
 Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then the release.
 27. **Flaky test under load**: `net::media::tests::files_arrive_in_playhead_order_then_the_library_and_progress_reaches_the_primary`
