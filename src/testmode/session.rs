@@ -1274,9 +1274,10 @@ impl TestMode {
                 }
             }
             Phase::Closing(c) => {
-                let done = self.fleet.as_ref().is_none_or(|f| {
-                    f.all_in(st, now) || now - c.since > super::fleet::ENDING_LIMIT
-                });
+                let done = self
+                    .fleet
+                    .as_ref()
+                    .is_none_or(|f| f.all_in(st, now) || now - c.since > super::fleet::LOG_LIMIT);
                 if !done {
                     return;
                 }

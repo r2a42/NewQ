@@ -1020,17 +1020,18 @@ impl App {
                 if self.play.measure.running() != Some(run) {
                     // Stalls from before the test aren't its.
                     let _ = crate::crumbs::take_stalls();
+                    // Where its log for the test begins (once a run: the
+                    // primary says `Begin` again every minute).
+                    crate::logging::flush();
+                    let log = crate::crash::log_dir().join("newq.log");
+                    self.play
+                        .log_mark
+                        .begin(run, crate::net::measure::LogAt::of(&log));
                 }
                 // The primary says it again now and then while the test
                 // plays (`Fleet::keep_up`): the measuring goes on as long.
                 self.play.measuring_since = Some(Instant::now());
                 self.play.measure.begin(run, start);
-                // Where its log for the test begins.
-                crate::logging::flush();
-                let log = crate::crash::log_dir().join("newq.log");
-                self.play
-                    .log_mark
-                    .begin(run, crate::net::measure::LogAt::of(&log));
                 // ---- and how it copes itself ----
                 if self.play.local.running() != Some(run) {
                     self.play.local_stats = Some(crate::stats::StatsLog::in_memory(

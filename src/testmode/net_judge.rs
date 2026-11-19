@@ -673,7 +673,7 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
         f.push(finding(
             Severity::Problem,
             format!(
-                "{} was not in step with the primary for about {} at a stretch, so what it played could not be compared (a command lost, or the show not the primary's)",
+                "{} was not in step with the primary for about {} at a stretch, so what it played could not be compared with what the primary played",
                 c.name,
                 span(stuck)
             ),
@@ -790,7 +790,7 @@ pub fn judge(computers: &[ComputerNotes], secs: f64, own: Vec<Finding>) -> Judge
 /// `network.csv`: a row per look of each computer.
 pub fn csv(computers: &[ComputerNotes]) -> String {
     let mut s = String::from(
-        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,shown_apart_ms,shown_apart_frames,began_apart_ms,began_apart_frames,compared,missing,sound_apart_ms\n",
+        "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,shown_apart_ms,shown_apart_frames,began_apart_ms,began_apart_frames,compared,missing,sound_apart_ms,uncompared\n",
     );
     let num = |v: Option<f64>| v.map_or(String::new(), |x| format!("{x:.2}"));
     for c in computers {
@@ -801,7 +801,7 @@ pub fn csv(computers: &[ComputerNotes]) -> String {
             let kept = ComputerNotes::clock_kept(r);
             let _ = writeln!(
                 s,
-                "{},{:.2},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{}",
                 csv_field(&c.name),
                 r.t,
                 num(r.clock_error_ms.filter(|e| *e < CLOCK_LOST_MS)),
@@ -814,7 +814,8 @@ pub fn csv(computers: &[ComputerNotes]) -> String {
                 num(r.apart_ms.map(|a| a / frame)),
                 r.compared,
                 r.missing,
-                num(r.sound_apart_ms)
+                num(r.sound_apart_ms),
+                r.uncompared
             );
         }
     }
@@ -1412,13 +1413,13 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(
             lines[0],
-            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,shown_apart_ms,shown_apart_frames,began_apart_ms,began_apart_frames,compared,missing,sound_apart_ms"
+            "computer,t_s,clock_error_ms,rtt_ms,locked,in_step,shown_apart_ms,shown_apart_frames,began_apart_ms,began_apart_frames,compared,missing,sound_apart_ms,uncompared"
         );
         assert_eq!(
             lines[1],
-            "\"Left, stage\",0.00,0.30,1.20,1,1,,,6.70,0.40,2,0,"
+            "\"Left, stage\",0.00,0.30,1.20,1,1,,,6.70,0.40,2,0,,0"
         );
-        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,,,2,0,");
+        assert_eq!(lines[3], "Right,0.00,0.30,1.20,1,1,,,,,2,0,,0");
         b.commands = commands(40, 1);
         let cs = [a, b];
         let j = judge(&cs, 120.0, vec![]);

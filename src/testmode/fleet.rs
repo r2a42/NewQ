@@ -39,6 +39,8 @@ pub const AWAY_SECS: f64 = 3.0;
 pub const BEGIN_AGAIN: f64 = 60.0;
 /// After the end, the computers' last reports are waited for this long (s).
 pub const ENDING_LIMIT: f64 = 8.0;
+/// ... and for this long while a computer's log is still arriving in pieces (s).
+pub const LOG_LIMIT: f64 = 60.0;
 /// How long the media may take to reach every computer before the test gives up.
 pub const MEDIA_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// A computer with all the media that isn't in step after this long ends the
@@ -819,7 +821,12 @@ impl Fleet {
             (c.notes.ended && c.log_tail.is_some())
                 || !st.net.peers.iter().any(|p| p.id == *id && p.connected)
         });
-        all || self.ended.is_some_and(|e| now - e > ENDING_LIMIT)
+        // A log on its way in pieces (a slow link) is waited for longer.
+        let coming = self.computers.iter().any(|(id, c)| {
+            !c.log_coming.is_empty() && st.net.peers.iter().any(|p| p.id == *id && p.connected)
+        });
+        let limit = if coming { LOG_LIMIT } else { ENDING_LIMIT };
+        all || self.ended.is_some_and(|e| now - e > limit)
     }
 
     /// A computer silent at the end dropped out then.
