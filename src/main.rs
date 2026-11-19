@@ -86,18 +86,47 @@ fn startup_options(
 }
 
 /// Hold the node folder's lock (`net::node::lock_node_dir`). Another NewQ
-/// holding it: say so and end (the exit code). A lock that can't be tried is
-/// no reason not to start.
+/// holding it: say so and end (the exit code), or, started with nobody to
+/// read a dialog (`net::node::when_held`), wait for it to close. A lock that
+/// can't be tried is no reason not to start.
 fn hold_node_folder() -> Result<Option<net::node::NodeLock>, i32> {
+    use net::node::WhenHeld;
     let dir = net::node::node_dir();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let when = net::node::when_held(
+        std::env::var_os(net::node::RESTARTING_ENV).is_some(),
+        net::node::startup_flag(&args) == Some(net::node::Startup::Display),
+    );
+    // Waits for as long as the other takes to close, saying so on the way
+    // (the log isn't begun until the folder is held).
+    let wait_it_out = || {
+        let said = |so_far: std::time::Duration| {
+            eprintln!(
+                "NewQ: waiting for the NewQ that holds {} to close ({} s so far)",
+                dir.display(),
+                so_far.as_secs()
+            )
+        };
+        match net::node::wait_for_node_dir(&dir, std::time::Duration::from_secs(30), said) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(e) => {
+                eprintln!(
+                    "NewQ couldn't lock {} ({e}); starting anyway",
+                    dir.display()
+                );
+                Ok(None)
+            }
+        }
+    };
     // Started again by its primary: the old copy is still closing.
-    let wait = if std::env::var_os(net::node::RESTARTING_ENV).is_some() {
+    let wait = if when == WhenHeld::Wait {
         std::time::Duration::from_secs(20)
     } else {
         std::time::Duration::ZERO
     };
     match net::node::lock_node_dir(&dir, wait) {
         Ok(lock) => Ok(Some(lock)),
+        Err(net::node::LockRefused::Held) if when == WhenHeld::Wait => wait_it_out(),
         Err(net::node::LockRefused::Held) => {
             // Hand the show (if one was given) to the open NewQ, which looks
             // for requests about twice a second and comes to the front.
@@ -128,8 +157,16 @@ fn hold_node_folder() -> Result<Option<net::node::NodeLock>, i32> {
                 eprintln!("the NewQ that was open has closed: this one starts");
                 return Ok(Some(lock));
             }
+            // A display computer's start: the open NewQ came forward, or it
+            // is closing and this one starts once it has.
+            if when == WhenHeld::HandOverOrWait && !taken {
+                return wait_it_out();
+            }
             let words = net::node::already_open_words(show.as_deref(), taken);
             eprintln!("{} ({})", words.replace("\n\n", " "), dir.display());
+            if when == WhenHeld::HandOverOrWait {
+                return Err(3);
+            }
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Info)
                 .set_title("NewQ is already open")

@@ -57,6 +57,10 @@ release page, and a release is refused if it has none.
   downloading or saving anything. The running window shows the rate with each computer; the
   report says whether it was on and how much went each way, so a run with it and one without
   can be compared. Off unless chosen; remembered on this computer.
+- **A display computer restarted by its primary always comes back.** NewQ started again by the
+  primary (*Restart*, a role change), by NewQ Display or at login now waits for the NewQ before
+  it to close, however long that takes, instead of giving up after about half a minute with an
+  *NewQ is already open* message nobody was there to read, which left the computer without NewQ.
 - **Two computers with one identity are noticed.** A computer whose NewQ settings folder was
   copied from another (a cloned disk) has that computer's identity, and the others can't tell
   the two apart. Both now show the warning a second copy of NewQ on one computer already gave,
