@@ -518,3 +518,203 @@ fn what_follows_a_sound_played_twice_starts_after_both_passes() {
         at - fire_at
     );
 }
+
+/// A follower whose show's sound output plays on the primary only (0.24.4's
+/// display computer, item 32): its sound cue was refused ("its sound output
+/// plays on other computers"), so each heartbeat found the primary's cue
+/// missing and started it part way, it ended again at once, and so on for as
+/// long as the cue lasted (317 times), and Test Mode said it played less than
+/// the primary. Here the sound keeps its time in silence: it is playing on
+/// both, nothing is put right, and a film whose sound plays elsewhere shows
+/// its pictures.
+#[test]
+fn a_sound_that_plays_on_other_computers_is_playing_here_and_never_restarted() {
+    use crate::show::AudioOutputId;
+    let Some((ff, tone)) = crate::media::test_media("tone_5s.wav") else {
+        return;
+    };
+    let Some((_, film)) = crate::media::test_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let mut show = Show::default();
+    let sound = cue(&mut show, CueType::Audio, &tone);
+    let video = cue(&mut show, CueType::Video, &film);
+    let mut p = Side::new(&ff, 512);
+    let mut f = Side::new(&ff, 480);
+    // The follower: the show's (first and only) output is the primary's.
+    f.e.audio = AudioOut::new();
+    f.e.audio.sync_placed(&[(AudioOutputId(1), None)]);
+    assert!(f.e.audio.is_elsewhere(None));
+    f.e.set_log_tap(true);
+    p.began = Some(0.0);
+    let t0 = Instant::now();
+    let shared = || t0.elapsed().as_secs_f64();
+    for s in [&mut p, &mut f] {
+        s.e.tick_shared(&show, 0.0);
+        s.e.load_ahead(&show, sound);
+        s.e.load_ahead(&show, video);
+    }
+    // (The follower's film; its sound, refused before item 32's fix, wasn't
+    // got ready at all.)
+    while !(p.e.prepared.len() >= 2 && !f.e.prepared.is_empty()) {
+        assert!(shared() < 30.0, "the cues were never got ready");
+        std::thread::sleep(Duration::from_millis(10));
+        let now = shared();
+        for s in [&mut p, &mut f] {
+            s.play_to(now);
+            s.e.tick_shared(&show, now);
+        }
+    }
+    let fire_at = shared() + 0.2;
+    let mut fired = false;
+    let mut doubts = net::NetCorrection::default();
+    let mut fixed: Vec<String> = Vec::new();
+    let mut beat = fire_at + 0.25;
+    let mut beats_with_sound = 0;
+    let mut missing_at: Vec<f64> = Vec::new();
+    let mut sought = false;
+    // Heartbeats every quarter second, past the sound's end (4 s, with the
+    // seek).
+    let until = fire_at + 6.0;
+    loop {
+        std::thread::sleep(Duration::from_millis(4));
+        let now = shared();
+        if !fired && now >= fire_at {
+            for s in [&mut p, &mut f] {
+                s.e.tick_shared(&show, fire_at);
+                s.e.fire(&show, sound);
+                s.e.fire(&show, video);
+            }
+            fired = true;
+        }
+        for s in [&mut p, &mut f] {
+            s.play_to(now);
+            s.e.tick_shared(&show, now);
+        }
+        if !fired || now < beat {
+            continue;
+        }
+        beat += 0.25;
+        // Two seconds in, the sound is sought to 3 s on both, as a command
+        // does it: the silent one's time moves as the primary's does.
+        if !sought && now - fire_at >= 2.0 {
+            for s in [&mut p, &mut f] {
+                let i = s.cue(sound).instance;
+                s.e.seek(&show, i, 3.0).expect("it can be sought");
+            }
+            sought = true;
+        }
+        let (ps, fs) = (p.e.net_state(now), f.e.net_state(now));
+        // (Its end is by the shared clock on both, at the same tick.)
+        let (_, _, missing) = apart_between(&ps, &fs);
+        if missing > 0 {
+            missing_at.push(now - fire_at);
+        }
+        if ps.cues.iter().any(|c| c.cue == sound) {
+            beats_with_sound += 1;
+        }
+        fixed.extend(f.e.net_correct(&show, &ps, now, &mut doubts));
+        if now - fire_at < 3.0 {
+            // The film's pictures play here, without its sound.
+            let ActiveKind::Video(v) = &f.cue(video).kind else {
+                panic!("a film");
+            };
+            assert!(v.voice.is_none());
+            if now - fire_at > 1.0 {
+                assert!(
+                    (v.picture_at - (now - fire_at)).abs() < 0.05,
+                    "the film is at {:.3} s, {:.3} s after GO",
+                    v.picture_at,
+                    now - fire_at
+                );
+            }
+        }
+        if now >= until {
+            break;
+        }
+    }
+    assert!((14..=17).contains(&beats_with_sound), "{beats_with_sound}");
+    assert!(
+        fixed.is_empty() && missing_at.is_empty(),
+        "put right: {fixed:?}; missing here at {missing_at:.2?} s"
+    );
+    // It plays here in silence: no sound of its own to compare.
+    let fs = f.e.net_state(shared());
+    assert!(fs.cues.iter().all(|c| c.cue != sound || c.sound.is_none()));
+    let problems = f.e.take_problems();
+    assert!(
+        !problems.iter().any(|p| p.contains("other computers")),
+        "{problems:?}"
+    );
+}
+
+/// Whatever the reason a cue won't play here (here, a sound with no sound
+/// device at all), the follower starts it for the primary's instance once,
+/// not at every heartbeat; a new instance on the primary is tried once more.
+#[test]
+fn a_cue_started_to_match_the_primary_that_goes_again_is_not_started_over_and_over() {
+    use crate::net::play::{CueNow, PlayState};
+    let Some((ff, tone)) = crate::media::test_media("tone_5s.wav") else {
+        return;
+    };
+    let mut show = Show::default();
+    let sound = cue(&mut show, CueType::Audio, &tone);
+    let mut e = Engine::for_tests();
+    e.ff = Some(ff.clone());
+    e.audio = AudioOut::disabled();
+    e.net_set_mode(net::NetMode::Follower);
+    e.set_log_tap(true);
+    // The file has been read (so each start is tried at once).
+    let t0 = Instant::now();
+    while !matches!(e.probe.get(Some(&ff), &tone), ProbeState::Ready(_)) {
+        assert!(t0.elapsed().as_secs() < 30, "the file was never read");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let state = |time: f64, anchor: f64, paused: bool| PlayState {
+        time,
+        paused,
+        cues: vec![CueNow {
+            cue: sound,
+            anchor,
+            stopping: false,
+            sound: Some(anchor),
+        }],
+        ..Default::default()
+    };
+    let mut doubts = net::NetCorrection::default();
+    let mut tries = 0;
+    // A heartbeat at `t`: how many starts were tried.
+    let mut beat = |e: &mut Engine, t: f64, anchor: f64, paused: bool| -> usize {
+        e.tick_shared(&show, t);
+        let fixed = e.net_correct(&show, &state(t, anchor, paused), t, &mut doubts);
+        assert!(
+            fixed.iter().all(|w| w == "paused" || w == "resumed"),
+            "nothing began, so nothing is said: {fixed:?}"
+        );
+        e.tick_shared(&show, t + 0.01);
+        assert!(e.active.iter().all(|a| a.cue_id != sound));
+        e.take_problems()
+            .iter()
+            .filter(|p| p.contains("no audio output device"))
+            .count()
+    };
+    // The primary's instance from 10 s: twenty heartbeats...
+    for k in 0..20 {
+        tries += beat(&mut e, 10.5 + k as f64 * 0.25, 10.0, false);
+    }
+    // ...then paused there from 15.1 s to 17.6 s, its anchor sliding on
+    // while it stands, and going on, 2.5 s later.
+    for k in 0..10 {
+        let t = 15.5 + k as f64 * 0.25;
+        tries += beat(&mut e, t, 10.0 + (t - 15.1), true);
+    }
+    for k in 0..10 {
+        tries += beat(&mut e, 18.0 + k as f64 * 0.25, 12.5, false);
+    }
+    assert_eq!(tries, 1, "one try for the primary's instance");
+    // Another instance there, from 21 s.
+    for k in 0..20 {
+        tries += beat(&mut e, 21.5 + k as f64 * 0.25, 21.0, false);
+    }
+    assert_eq!(tries, 2, "one try for each of the primary's instances");
+}

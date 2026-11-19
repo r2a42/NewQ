@@ -718,6 +718,11 @@ impl ActiveCue {
                 }
             }
             ActiveKind::Image(_) => self.duration.filter(|d| *d > 0.0),
+            // A sound kept in silence (its output plays on other computers,
+            // or its file isn't here yet): its time moves.
+            ActiveKind::Wait if !media.loop_media && !live_sound => {
+                self.duration.filter(|d| *d > 0.0)
+            }
             _ => None,
         }
     }
@@ -1032,6 +1037,10 @@ enum PreparedKind {
     Card(Receiver<Result<RgbaImage, String>>),
     /// The same for a sound: silence that keeps its time.
     Silent,
+    /// In a show network, a sound whose output plays on other computers only:
+    /// it keeps its time here in silence, so it is playing here as on the
+    /// primary (not missing, nor started again and again by `net_correct`).
+    Elsewhere,
 }
 
 struct Prepared {
@@ -2211,7 +2220,8 @@ impl Engine {
             _ => to.max(lead),
         };
         let cue = show.cue(a.cue_id).ok_or("that cue was deleted")?.clone();
-        let is_image = matches!(a.kind, ActiveKind::Image(_));
+        // (A picture, or a sound kept in silence: only its time moves.)
+        let is_image = matches!(a.kind, ActiveKind::Image(_) | ActiveKind::Wait);
         let mut file_from = 0.0;
         let (player, voice) = if is_image {
             (None, None)
@@ -2440,6 +2450,27 @@ impl Engine {
         } else {
             db_to_gain(m.volume_db)
         };
+        // Its sound plays on other computers of the show network: it keeps
+        // its time here in silence.
+        if self.audio.is_elsewhere(m.audio_output) {
+            return Ok(Prepared {
+                cue_id: cue.id,
+                pass_len: None,
+                speed: None,
+                sig: PrepSig {
+                    media: m.clone(),
+                    size: (1, 1),
+                    camera: None,
+                },
+                kind: PreparedKind::Elsewhere,
+                duration: m.end.filter(|d| *d > 0.0),
+                warning: None,
+                t0: 0.0,
+                file_from: 0.0,
+                shift: 0.0,
+                lead: 0.0,
+            });
+        }
         let voice = self
             .audio
             .spawn_input_voice(
@@ -2587,6 +2618,24 @@ impl Engine {
             }),
             _ => None,
         };
+        // In a show network, a sound whose output plays on other computers
+        // only keeps its time here in silence (nothing is decoded, whether
+        // or not the file is here).
+        if matches!(cue.kind, CueKind::Audio(_)) && self.audio.is_elsewhere(m.audio_output) {
+            return Ok(Prepared {
+                cue_id: cue.id,
+                pass_len,
+                speed: speed.as_ref().map(|p| p.map.clone()),
+                sig,
+                kind: PreparedKind::Elsewhere,
+                duration,
+                warning: None,
+                t0: shift,
+                file_from: shift_file,
+                shift,
+                lead,
+            });
+        }
         // In a show network, a file not on this computer yet: a card (or
         // silence) in its place, with the cue's length (R13).
         let file = match self.local_file(&m.file) {
@@ -2640,7 +2689,12 @@ impl Engine {
                     )
                 }
                 .map_err(|e| format!("{e:#}"))?;
-                let voice = if info.has_audio && self.audio.available() {
+                // (A film whose sound plays on other computers is shown here
+                // without it, as it should be: nothing to warn about.)
+                let voice = if info.has_audio
+                    && self.audio.available()
+                    && !self.audio.is_elsewhere(m.audio_output)
+                {
                     match self.audio.spawn_voice_routed(
                         ff,
                         &file,
@@ -3110,7 +3164,7 @@ impl Engine {
                                 redraw: None,
                                 live: None,
                             }),
-                            PreparedKind::Silent => ActiveKind::Wait,
+                            PreparedKind::Silent | PreparedKind::Elsewhere => ActiveKind::Wait,
                             PreparedKind::Video { player, voice } => {
                                 ActiveKind::Video(Box::new(VideoState {
                                     player,
@@ -3171,6 +3225,11 @@ impl Engine {
                                 },
                             }),
                         };
+                        if matches!(active.kind, ActiveKind::Wait) && !carded {
+                            // A sound that plays on other computers keeps its
+                            // time from now.
+                            active.started = true;
+                        }
                         if carded {
                             active.card =
                                 Some(Box::new(cards::CardState::new(m.file.clone(), m.fit)));

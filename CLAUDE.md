@@ -192,7 +192,7 @@ The README describes the features; this file is about working on the code.
   picture times: the real test's 118 ms was the sound cue, not the pictures). **R21 (owner's ruling): the
   network is a reference; a picture never waits for or jumps at the primary.** `net_correct` leaves a cue
   under `LEAVE_UNDER` (1.5 frames) alone, acts only after `STEADY_BEATS` (4) heartbeats within
-  `STEADY_SPREAD`, at most once per instance (`NetCorrection::fixed`/`said`); `Follower::step` with no
+  `STEADY_SPREAD`, at most once per instance (`NetCorrection::fixed`/`said`), and a missing cue is started once per primary instance (`NetCorrection::started`, by (cue, nth) and the primary's anchor, followed while paused: one gone again isn't restarted until a new one there). A sound (or live sound) whose output `is_elsewhere` is `PreparedKind::Elsewhere` (`ActiveKind::Wait`, its length, no card; a seek moves its time), so it is playing here, not missing; a film's sound elsewhere is left out quietly (item 32: 0.24.4 restarted it each heartbeat); heartbeats leave out `over_by_clock` cues (`ActiveCue::listed`); `Follower::step` with no
   shared clock ticks on by its own. Tests: `play_tests.rs` R21 block (`World::state_offset/state_jitter/
   state_delay/silence`, `jumps`). Drawing rates: `render::FrameTimer` counts idle time between frames
   (4 fps had read as no late frames); `WaitLog` (one line per 5 s per window; `stuck` -> Mailbox where

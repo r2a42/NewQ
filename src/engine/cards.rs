@@ -292,7 +292,10 @@ impl Engine {
                 a.speed = p.speed;
             }
             // Gone again meanwhile (a new version): the card stays.
-            PreparedKind::Card(_) | PreparedKind::Silent | PreparedKind::Text(_) => {}
+            PreparedKind::Card(_)
+            | PreparedKind::Silent
+            | PreparedKind::Elsewhere
+            | PreparedKind::Text(_) => {}
         }
         true
     }

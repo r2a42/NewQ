@@ -93,7 +93,22 @@ pub struct NetCorrection {
     fixed: HashSet<u64>,
     /// Instances said to still differ after their one correction.
     said: HashSet<u64>,
+    /// Cues started here part way because the primary played them and this
+    /// computer didn't: the primary's instance (cue, nth live) and its anchor
+    /// then. One that is gone again (it failed to start, or ended at once) is
+    /// never started again for the same instance there: only for a new one
+    /// (another anchor, or the cue let go there in between).
+    started: HashMap<(CueId, usize), f64>,
+    /// Those said to have gone again.
+    gave_up: HashSet<(CueId, usize)>,
+    /// The primary was paused at the last heartbeat: its anchors slide while
+    /// it is (by the time it stands), so they are followed, not compared.
+    was_paused: bool,
 }
+
+/// The primary's anchor of one instance of a cue, as heartbeats carry it: the
+/// same instance within this (seconds; a seek there moves it by more).
+const SAME_ANCHOR: f64 = LEAVE_UNDER;
 
 impl NetCorrection {
     pub fn is_empty(&self) -> bool {
@@ -402,7 +417,7 @@ impl Engine {
         let mut cues: Vec<CueNow> = self
             .active
             .iter()
-            .filter(|a| a.plays_by_itself())
+            .filter(|a| a.listed())
             .map(|a| CueNow {
                 cue: a.cue_id,
                 anchor: a.anchor.unwrap_or(now - a.elapsed),
@@ -478,7 +493,7 @@ impl Engine {
             theirs.entry(c.cue).or_default().push(c);
         }
         let mut ours: HashMap<CueId, Vec<(u64, f64, bool)>> = HashMap::new();
-        for a in self.active.iter().filter(|a| a.plays_by_itself()) {
+        for a in self.active.iter().filter(|a| a.listed()) {
             ours.entry(a.cue_id).or_default().push((
                 a.instance,
                 a.anchor.unwrap_or(now - a.elapsed),
@@ -496,7 +511,7 @@ impl Engine {
                 _ => None,
             })
             .collect();
-        let mut start: Vec<(CueId, f64)> = Vec::new();
+        let mut start: Vec<(CueId, usize, f64)> = Vec::new();
         let mut stop: Vec<u64> = Vec::new();
         let mut shift: Vec<(u64, f64)> = Vec::new();
         for (cue, list) in &theirs {
@@ -516,9 +531,27 @@ impl Engine {
                         {
                             continue;
                         }
+                        // Started here for this instance already and gone
+                        // again: never started over and over (a sound whose
+                        // output isn't here, a file that won't open).
+                        let sliding = s.paused || doubts.was_paused;
+                        if doubts
+                            .started
+                            .get(&(*cue, n))
+                            .is_some_and(|a| sliding || (a - c.anchor).abs() <= SAME_ANCHOR)
+                        {
+                            let waiting = self.pending.iter().any(|p| p.cue_id == *cue);
+                            if !waiting && doubts.gave_up.insert((*cue, n)) {
+                                log::info!(
+                                    "show network: {} was started here to match the primary and is gone again; it isn't started again until the primary starts it anew",
+                                    name(show, *cue)
+                                );
+                            }
+                            continue;
+                        }
                         let d = Doubt::Missing(*cue, n);
                         if doubts.seen.contains(&d) {
-                            start.push((*cue, c.anchor));
+                            start.push((*cue, n, c.anchor));
                         } else {
                             seen.insert(d);
                         }
@@ -575,7 +608,7 @@ impl Engine {
                 }
             }
         }
-        for (cue, anchor) in start {
+        for (cue, n, anchor) in start {
             let from = (now - anchor).max(0.0);
             let before = self.next_instance;
             self.start_with(
@@ -587,10 +620,22 @@ impl Engine {
                     ..StartAt::default()
                 },
             );
+            let mut began = false;
             for a in self.active.iter_mut().filter(|a| a.instance >= before) {
                 a.anchor = Some(anchor);
+                began = true;
             }
-            done.push(format!("{} started {from:.2} s in", name(show, cue)));
+            // (Or waiting for its file to be read.)
+            began |= self.pending.iter().any(|p| p.cue_id == cue);
+            doubts.started.insert((cue, n), anchor);
+            if began {
+                done.push(format!("{} started {from:.2} s in", name(show, cue)));
+            } else {
+                log::info!(
+                    "show network: {} couldn't be started here to match the primary",
+                    name(show, cue)
+                );
+            }
         }
         for instance in stop {
             let id = self
@@ -698,6 +743,24 @@ impl Engine {
         let playing: HashSet<u64> = self.active.iter().map(|a| a.instance).collect();
         doubts.fixed.retain(|i| playing.contains(i));
         doubts.said.retain(|i| playing.contains(i));
+        // A start is remembered while the primary still plays that instance
+        // (followed while its anchors slide in a pause).
+        let sliding = s.paused || doubts.was_paused;
+        doubts.started.retain(|(cue, n), a| {
+            let Some(c) = theirs
+                .get(cue)
+                .and_then(|l| l.iter().filter(|c| !c.stopping).nth(*n))
+            else {
+                return false;
+            };
+            if sliding {
+                *a = c.anchor;
+            }
+            (*a - c.anchor).abs() <= SAME_ANCHOR
+        });
+        let started = &doubts.started;
+        doubts.gave_up.retain(|k| started.contains_key(k));
+        doubts.was_paused = s.paused;
         doubts.seen = seen;
         self.leave();
         done
@@ -790,6 +853,17 @@ fn restartable(show: &Show, id: CueId) -> bool {
                 | CueKind::Wait(_)
         )
     })
+}
+
+impl super::ActiveCue {
+    /// What a heartbeat lists and corrections compare: a cue playing by
+    /// itself, not one the shared clock has taken past its length
+    /// (`over_by_clock`), which has ended there on every computer while a
+    /// sound device plays its last buffers out (a sound kept in silence
+    /// here, its output elsewhere, has none to play).
+    fn listed(&self) -> bool {
+        self.plays_by_itself() && !self.over_by_clock
+    }
 }
 
 fn name(show: &Show, id: CueId) -> String {
