@@ -52,6 +52,7 @@ fn colour(
         None => c,
     };
     match kind {
+        PatternKind::SmpteHd => number(smpte_hd(x, y, w, h, shape)),
         PatternKind::Smpte => number(smpte(x, y, w, h, shape)),
         PatternKind::Bars => number(bars(x, y, w, h)),
         PatternKind::Grid => number(grid(x, y, w, h)),
@@ -140,6 +141,101 @@ fn smpte(x: u32, y: u32, w: u32, h: u32, shape: f32) -> [u8; 3] {
 const ABOVE_BLACK: [u8; 3] = [10, 10, 10];
 /// And the one below black, which full-range RGB can't show: black.
 const BELOW_BLACK: [u8; 3] = BLACK;
+
+/// The HD colour bars (ARIB STD-B28, adopted as SMPTE RP 219), from the
+/// standard's own figure for 1920 by 1080: four rows of 7/12, 1/12, 1/12 and 3/12
+/// of the height, a 4:3 area in the middle seven bars wide, and side areas `d`
+/// (240 of 1920 at 16:9).
+///
+/// 1. The 75% bars, 40% grey beside them.
+/// 2. 75% white under the bars (the standard lets its first cell be 75% white, 100%
+///    white or +I; NewQ uses 75% white), 100% cyan left and 100% blue right.
+/// 3. A ramp of brightness from black to white, one 10-bit level a sample at 1920
+///    (876 of the 1440 samples of the 4:3 area), centred on the screen, black before
+///    it and white after; 100% yellow left and 100% red right.
+/// 4. Black for 3/2 of a bar, 100% white for 2 bars, black for 5/6 of a bar, the
+///    black-level strips -2%, 0, +2%, 0, +4% a third of a bar each, black for a
+///    bar; 15% grey beside them.
+///
+/// On a display wider than 16:9 the cyan, blue, yellow and red ends stay 16:9's
+/// width beside the bars and the rest is 40% grey (15% in the bottom row); on a
+/// narrower one the side areas are what the shape leaves, none at 4:3. Full-range
+/// RGB, as `smpte`: -2% would be under black, so it is black (`BELOW_BLACK`); +2%
+/// is 5 and +4% `ABOVE_BLACK`.
+fn smpte_hd(x: u32, y: u32, w: u32, h: u32, shape: f32) -> [u8; 3] {
+    const GREY40: [u8; 3] = [102, 102, 102];
+    const GREY15: [u8; 3] = [38, 38, 38];
+    const WHITE75: [u8; 3] = [191, 191, 191];
+    const PLUS2: [u8; 3] = [5, 5, 5];
+    const BARS: [[u8; 3]; 7] = [
+        WHITE75,
+        [191, 191, 0],
+        [0, 191, 191],
+        [0, 191, 0],
+        [191, 0, 191],
+        [191, 0, 0],
+        [0, 0, 191],
+    ];
+    // Across, in the display's own shape: the 4:3 area's left edge and width, and
+    // how far the coloured ends reach out from it (16:9's side area at most).
+    let shape = shape.max(0.01);
+    let side = ((1.0 - (4.0 / 3.0) / shape) / 2.0).clamp(0.0, 0.49);
+    let ends = (((16.0 / 9.0 - 4.0 / 3.0) / 2.0) / shape).min(side);
+    let fx = (x as f32 + 0.5) / w as f32;
+    let fy = (y as f32 + 0.5) / h as f32;
+    // In bar widths across the 4:3 area (0..7), and where in the side areas.
+    let t = (fx - side) / (1.0 - 2.0 * side) * 7.0;
+    let inside = (0.0..7.0).contains(&t);
+    let left = fx < side;
+    let at_end =
+        !inside && (fx >= side - ends - 1e-6 && left || fx < 1.0 - side + ends + 1e-6 && !left);
+    if fy < 7.0 / 12.0 {
+        return if inside {
+            BARS[(t as usize).min(6)]
+        } else {
+            GREY40
+        };
+    }
+    if fy < 8.0 / 12.0 {
+        return match (inside, at_end, left) {
+            (true, ..) => WHITE75,
+            (_, true, true) => [0, 255, 255],
+            (_, true, false) => [0, 0, 255],
+            _ => GREY40,
+        };
+    }
+    if fy < 9.0 / 12.0 {
+        if inside {
+            // 876 of the 4:3 area's 1440 samples, centred: in bar widths.
+            let span = 7.0 * 876.0 / 1440.0;
+            let from = (7.0 - span) / 2.0;
+            let v = ((t - from) / span).clamp(0.0, 1.0);
+            let v = (v * 255.0).round() as u8;
+            return [v, v, v];
+        }
+        return match (at_end, left) {
+            (true, true) => [255, 255, 0],
+            (true, false) => [255, 0, 0],
+            _ => GREY40,
+        };
+    }
+    if !inside {
+        return GREY15;
+    }
+    let third = 1.0 / 3.0;
+    let pluge = 1.5 + 2.0 + 5.0 / 6.0;
+    match t {
+        t if t < 1.5 => BLACK,
+        t if t < 3.5 => WHITE,
+        t if t < pluge => BLACK,
+        t if t < pluge + third => BELOW_BLACK,
+        t if t < pluge + 2.0 * third => BLACK,
+        t if t < pluge + 3.0 * third => PLUS2,
+        t if t < pluge + 4.0 * third => BLACK,
+        t if t < pluge + 5.0 * third => ABOVE_BLACK,
+        _ => BLACK,
+    }
+}
 
 /// How thick a line is: one pixel on small pictures, more on big ones so it
 /// can still be seen.
@@ -403,12 +499,12 @@ mod tests {
     }
 
     #[test]
-    fn there_are_thirteen_with_names_and_every_one_draws_a_whole_opaque_picture() {
-        assert_eq!(PatternKind::ALL.len(), 13);
+    fn there_are_fourteen_with_names_and_every_one_draws_a_whole_opaque_picture() {
+        assert_eq!(PatternKind::ALL.len(), 14);
         let mut labels: Vec<&str> = PatternKind::ALL.iter().map(|k| k.label()).collect();
         labels.sort();
         labels.dedup();
-        assert_eq!(labels.len(), 13, "labels are different");
+        assert_eq!(labels.len(), 14, "labels are different");
         for k in PatternKind::ALL {
             assert!(!k.description().is_empty());
             let p = pic(k, 1);
@@ -433,9 +529,119 @@ mod tests {
         }
     }
 
+    /// The HD bars at 1920 by 1080, pixel by pixel against ARIB STD-B28's figure
+    /// and its table of stripe widths (Table A-5, the ideal widths).
     #[test]
-    fn the_smpte_bars_are_the_default_and_have_the_standard_layout() {
-        assert_eq!(PatternKind::default(), PatternKind::Smpte);
+    fn the_hd_bars_are_the_default_and_follow_arib_std_b28_at_1920_by_1080() {
+        assert_eq!(PatternKind::default(), PatternKind::SmpteHd);
+        let (w, h) = (1920, 1080);
+        let p = render(PatternKind::SmpteHd, w, h, 0);
+        let px = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [p[i], p[i + 1], p[i + 2]]
+        };
+        // Rows of 630, 90, 90 and 270 lines.
+        let (r1, r2, r3, r4) = (300, 675, 765, 1000);
+        assert_eq!(px(629, 629), [191, 191, 0], "row 1 ends at 630");
+        assert_eq!(px(629, 631), [191, 191, 191], "row 2 starts at 630");
+        assert_eq!(px(629, 719), [191, 191, 191]);
+        assert_ne!(px(629, 721), [191, 191, 191], "row 3 starts at 720");
+        // Row 1: 40% grey sides of 240, the bars about 206 wide from 240.
+        assert_eq!(px(100, r1), [102, 102, 102]);
+        assert_eq!(px(1820, r1), [102, 102, 102]);
+        let bars = [
+            [191, 191, 191],
+            [191, 191, 0],
+            [0, 191, 191],
+            [0, 191, 0],
+            [191, 0, 191],
+            [191, 0, 0],
+            [0, 0, 191],
+        ];
+        for (i, c) in bars.iter().enumerate() {
+            assert_eq!(px(240 + 206 * i as u32 + 100, r1), *c, "bar {i}");
+        }
+        // Row 2: 100% cyan, 75% white, 100% blue.
+        assert_eq!(px(100, r2), [0, 255, 255]);
+        assert_eq!(px(960, r2), [191, 191, 191]);
+        assert_eq!(px(1820, r2), [0, 0, 255]);
+        // Row 3: 100% yellow, the ramp (black up to 522, white from 1398, rising
+        // one level of 255 about every 3.4 pixels between), 100% red.
+        assert_eq!(px(100, r3), [255, 255, 0]);
+        assert_eq!(px(1820, r3), [255, 0, 0]);
+        assert_eq!(px(400, r3), [0, 0, 0]);
+        assert_eq!(px(1500, r3), [255, 255, 255]);
+        let mid = px(960, r3)[0];
+        assert!((126..=129).contains(&mid), "{mid}");
+        let mut last = 0;
+        for x in 522..1398 {
+            let v = px(x, r3)[0];
+            assert!(v >= last, "the ramp only rises ({x})");
+            last = v;
+        }
+        // Row 4: 15% grey sides, black 309, 100% white 411, black 171, then the
+        // black-level strips of 69/68 (-2 0 +2 0 +4) and black 206.
+        assert_eq!(px(100, r4), [38, 38, 38]);
+        assert_eq!(px(1820, r4), [38, 38, 38]);
+        assert_eq!(px(240 + 150, r4), [0, 0, 0]);
+        assert_eq!(px(549 + 200, r4), [255, 255, 255]);
+        assert_eq!(px(960 + 80, r4), [0, 0, 0]);
+        let strips = 1131;
+        assert_eq!(px(strips + 34, r4), BELOW_BLACK, "-2% shows as black");
+        assert_eq!(px(strips + 103, r4), [0, 0, 0]);
+        assert_eq!(px(strips + 171, r4), [5, 5, 5], "+2%");
+        assert_eq!(px(strips + 240, r4), [0, 0, 0]);
+        assert_eq!(px(strips + 308, r4), ABOVE_BLACK, "+4%");
+        assert_eq!(px(1600, r4), [0, 0, 0]);
+    }
+
+    #[test]
+    fn the_hd_bars_keep_4_3_and_their_coloured_ends_on_any_display() {
+        // Where the bars start and end in row 1, and what is at the far left of
+        // rows 1 to 3, for displays of every shape.
+        for (w, h) in [
+            (1920, 1200),
+            (2560, 1080),
+            (3840, 1080),
+            (1024, 768),
+            (540, 960),
+        ] {
+            let p = render(PatternKind::SmpteHd, w, h, 0);
+            let px = |x: u32, y: u32| {
+                let i = ((y * w + x) * 4) as usize;
+                [p[i], p[i + 1], p[i + 2]]
+            };
+            let row = |y: u32| (0..w).map(|x| px(x, y)).collect::<Vec<_>>();
+            let top = row(h / 4);
+            let a = top.iter().position(|c| *c == [191, 191, 191]).unwrap() as u32;
+            let b = top.iter().rposition(|c| *c == [0, 0, 191]).unwrap() as u32 + 1;
+            let bars = (b - a) as f32 / h as f32;
+            if w * 3 >= h * 4 {
+                assert!((bars - 4.0 / 3.0).abs() < 0.01, "{w}x{h}: {bars}");
+            } else {
+                assert_eq!((a, b), (0, w), "{w}x{h}: narrower than 4:3 is all bars");
+            }
+            let cyan = row(h * 15 / 24)
+                .iter()
+                .filter(|c| **c == [0, 255, 255])
+                .count() as f32;
+            let reach = (16.0 / 9.0 - 4.0 / 3.0) / 2.0 * h as f32;
+            let side = a as f32;
+            // The cyan end is as wide as 16:9's side area, or what there is.
+            assert!(
+                (cyan - reach.min(side)).abs() <= 2.0,
+                "{w}x{h}: cyan {cyan}"
+            );
+            if side > reach + 2.0 {
+                assert_eq!(px(0, h * 15 / 24), [102, 102, 102], "{w}x{h}: grey beyond");
+                assert_eq!(px(0, h * 17 / 24), [102, 102, 102], "{w}x{h}");
+                assert_eq!(px(0, h - 2), [38, 38, 38], "{w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_classic_smpte_bars_have_the_standard_layout() {
         let p = pic(PatternKind::Smpte, 1);
         // 16:9: side panels of 12.5% (24 of 192 pixels) in 40% grey, then the
         // seven bars at 75%, white to blue (each 24 pixels wide, from 24).
@@ -744,6 +950,7 @@ mod tests {
     #[test]
     fn the_number_is_drawn_where_there_is_room_and_nowhere_else() {
         for k in [
+            PatternKind::SmpteHd,
             PatternKind::Smpte,
             PatternKind::Bars,
             PatternKind::Grid,

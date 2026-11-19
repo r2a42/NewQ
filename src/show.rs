@@ -516,13 +516,16 @@ fn is_default_pattern(p: &PatternKind) -> bool {
 }
 
 /// The pictures a display can show to line it up (see `pattern`). The first
-/// is the one a display starts with: SMPTE colour bars, 4:3 in the middle of
-/// whatever shape the display is. A pattern a later NewQ
+/// is the one a display starts with: the HD colour bars (SMPTE RP 219 / ARIB
+/// STD-B28), 4:3 in the middle of whatever shape the display is. A pattern a later NewQ
 /// writes (in a show file, or in one a show network sends) reads as the
 /// default, so the rest of the show still loads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
 pub enum PatternKind {
+    /// The HD colour bars (SMPTE RP 219, ARIB STD-B28), the default since 0.24.7.
     #[default]
+    SmpteHd,
+    /// The classic SMPTE bars (ECR 1-1978), the default in 0.24.6.
     Smpte,
     Bars,
     Grid,
@@ -550,7 +553,8 @@ impl<'de> Deserialize<'de> for PatternKind {
 }
 
 impl PatternKind {
-    pub const ALL: [PatternKind; 13] = [
+    pub const ALL: [PatternKind; 14] = [
+        PatternKind::SmpteHd,
         PatternKind::Smpte,
         PatternKind::Bars,
         PatternKind::Grid,
@@ -571,7 +575,8 @@ impl PatternKind {
     pub fn draws_number(self) -> bool {
         matches!(
             self,
-            PatternKind::Smpte
+            PatternKind::SmpteHd
+                | PatternKind::Smpte
                 | PatternKind::Bars
                 | PatternKind::Grid
                 | PatternKind::Circles
@@ -581,7 +586,8 @@ impl PatternKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            PatternKind::Smpte => "SMPTE colour bars",
+            PatternKind::SmpteHd => "SMPTE colour bars (HD)",
+            PatternKind::Smpte => "SMPTE colour bars, classic",
             PatternKind::Bars => "Colour bars and number",
             PatternKind::Grid => "Grid",
             PatternKind::Crosshatch => "Crosshatch",
@@ -599,6 +605,9 @@ impl PatternKind {
 
     pub fn description(self) -> &'static str {
         match self {
+            PatternKind::SmpteHd => {
+                "The HD colour bars (SMPTE RP 219) and the display's number: 75% bars, full colours, a grey ramp and black-level strips, 4:3 in the middle with grey beside them: colour, brightness, banding and black level"
+            }
             PatternKind::Smpte => {
                 "SMPTE colour bars and the display's number, the bars 4:3 in the middle and grey beside them on a wider display: colour, brightness and black level"
             }
@@ -5293,7 +5302,7 @@ mod tests {
         assert!(!plain.contains("\"pattern\""), "{plain}");
         // A show from before there was a choice loads with the SMPTE bars.
         let back: Show = serde_json::from_str(&plain).unwrap();
-        assert_eq!(back.outputs[0].pattern, PatternKind::Smpte);
+        assert_eq!(back.outputs[0].pattern, PatternKind::SmpteHd);
         // A show that chose the older colour bars keeps them.
         let old = plain.replacen(
             "\"test_pattern\":false",
@@ -5320,7 +5329,7 @@ mod tests {
             let back: Show = serde_json::from_str(&json).unwrap();
             assert_eq!(back.outputs[0].pattern, kind);
             assert!(back.outputs[0].test_pattern);
-            assert_eq!(json.contains("\"pattern\""), kind != PatternKind::Smpte);
+            assert_eq!(json.contains("\"pattern\""), kind != PatternKind::SmpteHd);
         }
     }
 

@@ -819,9 +819,11 @@ The README describes the features; this file is about working on the code.
   server and a real publish/play-back run when `NEWQ_MEDIAMTX_DIR` (or PATH) has `mediamtx`, else skip.
   `scripts/mediamtx_pins.txt` pins the bundled version, its mirror release and SHA-256s; `package_release.sh::bundle_mediamtx`
   fetches it from this repository's mirror (a universal `lipo` binary on the Mac, signed with the others).
-  `src/pattern.rs`: the thirteen test patterns (`show::PatternKind`), drawn on the CPU by
+  `src/pattern.rs`: the fourteen test patterns (`show::PatternKind`), drawn on the CPU by
   `render_shaped` (`render` is the tests'), given the shape of the output's canvas: the default
-  `Smpte` keeps its bars 4:3 and fills the rest with grey side panels (none at 4:3 or narrower;
+  `SmpteHd` (`smpte_hd`, ARIB STD-B28 / SMPTE RP 219 from the standard's figure and Table A-5:
+  rows 7/12, 1/12, 1/12, 3/12; the coloured ends stay 16:9's width on wider displays; tested pixel
+  by pixel at 1920x1080) and the classic `Smpte` (0.24.6's default) keep their bars 4:3 and fills the rest with grey side panels (none at 4:3 or narrower;
   0.24.6's port had 16:9/16:10 variants, dropped before release); `app.rs` caches one per display by
   kind, number, drawn size and canvas. `PatternKind::draws_number` greys the Number checkbox. The SMPTE bars are full-range RGB: black is 0 everywhere,
   PLUGE above black `ABOVE_BLACK` (10), below black can't exist so it is 0. `PatternKind`
