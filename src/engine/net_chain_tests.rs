@@ -139,3 +139,21 @@ fn a_crossfade_longer_than_the_picture_before_never_starts_before_it() {
     let first = anchor(&e, ids[0]);
     assert!(second >= first - 1e-9, "{} before", first - second);
 }
+
+/// The shared clock put back moves where the cues just ended with
+/// everything else (`net_shift_shared`), so what follows them is placed by
+/// the clock as it is now.
+#[test]
+fn putting_the_shared_clock_back_moves_where_cues_ended() {
+    let mut show = Show::default();
+    let a = wait(&mut show, 1.0, None);
+    let mut e = Engine::for_tests();
+    e.tick_shared(&show, T0);
+    e.fire(&show, a);
+    ticks(&mut e, &show, T0, T0 + 1.005);
+    let ended = |e: &Engine| e.net_ended.get(&a).copied().expect("its end is kept");
+    assert!((ended(&e) - (T0 + 1.0)).abs() < 1e-9, "{}", ended(&e) - T0);
+    e.net_shift_shared(-2.0);
+    assert!((ended(&e) - (T0 - 1.0)).abs() < 1e-9, "{}", ended(&e) - T0);
+    assert!((e.net_shared_time().unwrap() - (T0 - 0.995)).abs() < 1e-9);
+}

@@ -431,12 +431,17 @@ pub struct LoadServer {
     ask: LoadAsk,
     stop: Arc<AtomicBool>,
     flows: Arc<Mutex<BTreeMap<NodeId, Arc<Flow>>>>,
-    /// Each connection (to cut it at once on `stop` or when a computer goes).
-    streams: Arc<Mutex<Vec<(NodeId, TcpStream)>>>,
+    /// Each connection (to cut it at once on `stop` or when a computer goes),
+    /// by a number of its own; one that ends is taken out, so a computer
+    /// that dials again and again holds no sockets here.
+    streams: Arc<Mutex<Streams>>,
     base: Instant,
     /// The last look at the counters, for the rate now.
     looked: Mutex<Option<Looked>>,
 }
+
+/// The connections open, each with its computer and its own number.
+type Streams = Vec<(NodeId, u64, TcpStream)>;
 
 /// When the counters were last looked at, what they were, and the rates
 /// worked out then (Mbit/s out and in).
@@ -492,7 +497,7 @@ impl LoadServer {
         if self.stop.swap(true, Ordering::Relaxed) {
             return;
         }
-        for (_, s) in self.streams.lock().drain(..) {
+        for (_, _, s) in self.streams.lock().drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -500,7 +505,7 @@ impl LoadServer {
     /// Cut the connections of computers not among `ids` (released from the
     /// network; one whose session only blips keeps its load).
     pub fn keep_only(&self, ids: &[NodeId]) {
-        self.streams.lock().retain(|(id, s)| {
+        self.streams.lock().retain(|(id, _, s)| {
             let keep = ids.contains(id);
             if !keep {
                 let _ = s.shutdown(Shutdown::Both);
@@ -596,17 +601,20 @@ fn accept_loop(
     ask: LoadAsk,
     stop: Arc<AtomicBool>,
     flows: Arc<Mutex<BTreeMap<NodeId, Arc<Flow>>>>,
-    streams: Arc<Mutex<Vec<(NodeId, TcpStream)>>>,
+    streams: Arc<Mutex<Streams>>,
     base: Instant,
 ) {
+    let mut serial = 0u64;
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((s, from)) => {
+                serial += 1;
                 let (ask, stop, flows, streams) =
                     (ask.clone(), stop.clone(), flows.clone(), streams.clone());
+                let n = serial;
                 let _ = std::thread::Builder::new()
                     .name("net-load-in".into())
-                    .spawn(move || serve(s, from, ask, stop, flows, streams, base));
+                    .spawn(move || serve(s, from, n, ask, stop, flows, streams, base));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -619,13 +627,15 @@ fn accept_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve(
     mut s: TcpStream,
     from: SocketAddr,
+    n: u64,
     ask: LoadAsk,
     stop: Arc<AtomicBool>,
     flows: Arc<Mutex<BTreeMap<NodeId, Arc<Flow>>>>,
-    streams: Arc<Mutex<Vec<(NodeId, TcpStream)>>>,
+    streams: Arc<Mutex<Streams>>,
     base: Instant,
 ) {
     let _ = s.set_nonblocking(false);
@@ -644,7 +654,7 @@ fn serve(
         return;
     }
     match s.try_clone() {
-        Ok(c) => streams.lock().push((id, c)),
+        Ok(c) => streams.lock().push((id, n, c)),
         Err(_) => return,
     }
     let flow = flows.lock().entry(id).or_default().clone();
@@ -656,6 +666,7 @@ fn serve(
         Counts { flow, base },
         format!("{} ({from})", id.short()),
     );
+    streams.lock().retain(|(_, m, _)| *m != n);
 }
 
 // ----- A computer ------------------------------------------------------------------
@@ -924,6 +935,14 @@ mod tests {
         });
         server.keep_only(&[NodeId(3)]);
         until("cut", || client.ended());
+        // A connection that ended is let go here too: a computer dialling
+        // again and again leaves no sockets behind.
+        for _ in 0..3 {
+            let again = LoadClient::start(addr, NodeId(3), 1, &ask);
+            until("going again", || server.streams.lock().len() == 1);
+            drop(again);
+            until("let go", || server.streams.lock().is_empty());
+        }
         // Nothing listening: it ends by itself.
         drop(server);
         let gone = LoadClient::start("127.0.0.1:1".parse().unwrap(), NodeId(5), 1, &ask);

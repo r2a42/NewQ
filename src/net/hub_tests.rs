@@ -1543,3 +1543,61 @@ fn kinds_a_later_newq_adds_are_passed_by_and_the_session_stays_up() {
     e.net_apply(&show, &t.cmd, 0.0);
     assert!(!e.is_active());
 }
+
+/// This computer's `node.json` copied to another computer: the copy beacons
+/// with this id and the same port, but from an address that isn't this
+/// computer's, and is told apart from this computer's own beacons coming back
+/// (from loopback or one of its addresses).
+#[test]
+fn this_computers_identity_from_another_computer_on_the_same_port_is_a_twin() {
+    let mut rig = Rig::new();
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let (out, _events) = crossbeam_channel::unbounded();
+    let me = Identity {
+        on: true,
+        ..Identity::default()
+    };
+    let mut st = State::new(rig.cfg("clone"), me, tx, out);
+    st.open(Instant::now());
+    let port = st.net.as_ref().expect("listening").port;
+    let ours = Ipv4Addr::new(10, 1, 2, 3);
+    st.adapters = vec![super::super::paths::Adapter::new(
+        "eth0",
+        ours,
+        Ipv4Addr::new(255, 255, 255, 0),
+    )];
+    let beacon = Beacon {
+        proto: proto::PROTOCOL,
+        version: proto::VERSION.into(),
+        id: st.me.id,
+        name: "Booth".into(),
+        role: Role::Alone,
+        network: None,
+        tcp_port: port,
+        show_version: None,
+        term: 0,
+        on: true,
+        system: String::new(),
+    };
+    let hear = |st: &mut State, ip: Ipv4Addr| {
+        for _ in 0..5 {
+            st.heard(
+                discover::Heard {
+                    beacon: beacon.clone(),
+                    from: SocketAddr::new(IpAddr::V4(ip), port),
+                },
+                Instant::now(),
+            );
+        }
+    };
+    // Its own beacons come back from loopback and from its own address.
+    hear(&mut st, Ipv4Addr::LOCALHOST);
+    hear(&mut st, ours);
+    assert_eq!(st.view().twin, None);
+    // The copy, elsewhere.
+    hear(&mut st, Ipv4Addr::new(192, 0, 2, 7));
+    let twin = st.view().twin.expect("the copy is noticed");
+    assert!(twin.contains("192.0.2.7"), "{twin}");
+    assert!(from_here(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), &[]));
+    assert!(!from_here(IpAddr::V4(ours), &[]));
+}
