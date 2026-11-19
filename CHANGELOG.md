@@ -57,6 +57,10 @@ release page, and a release is refused if it has none.
   downloading or saving anything. The running window shows the rate with each computer; the
   report says whether it was on and how much went each way, so a run with it and one without
   can be compared. Off unless chosen; remembered on this computer.
+- **Two computers with one identity are noticed.** A computer whose NewQ settings folder was
+  copied from another (a cloned disk) has that computer's identity, and the others can't tell
+  the two apart. Both now show the warning a second copy of NewQ on one computer already gave,
+  and the log says to remove `node.json` on one of them (NewQ makes a new one).
 - **Advice for Windows show computers.** The README's display computer section now says how
   to stop Windows Update installing a graphics driver in the middle of a show (it happened in
   a test: the screens blinked): pause updates before a show, and on Windows Pro the policy *Do
@@ -76,7 +80,10 @@ release page, and a release is refused if it has none.
   on a display computer's screens while they show its card): *Start at login was switched off
   (an older NewQ had switched it on by itself); tick it to have it back*. On the primary that
   computer's tick reads off. A tick you set from now on is never taken away. (A tick set by
-  hand in 0.24.3 can't be told apart from one made by itself, so it goes too, once.)
+  hand in 0.24.3 can't be told apart from one made by itself, so it goes too, once.) **After
+  updating, before the next show, tick *Starts at login* again for each display computer that
+  should start NewQ by itself** (on the primary's *Show network* page, or on that computer), or
+  it won't come back on its own after a power cut or a restart.
 - **NewQ no longer stays on the computer's software renderer after the graphics card resets.** A
   Windows laptop whose displays were rearranged mid-test had its graphics driver reset, and NewQ
   took the only thing offered at that moment, *Microsoft Basic Render Driver*, and kept it: a

@@ -877,6 +877,17 @@ impl State {
 
     // ---- what is heard and said ----
 
+    /// Whether a beacon from `ip` can be this computer's own come back: from
+    /// one of its addresses (looked at again before saying no: an address
+    /// may have just changed).
+    fn sent_from_here(&mut self, ip: IpAddr) -> bool {
+        if from_here(ip, &self.adapters) {
+            return true;
+        }
+        self.adapters = super::paths::own_adapters();
+        from_here(ip, &self.adapters)
+    }
+
     fn heard(&mut self, h: Heard, now: Instant) {
         let b = h.beacon;
         let Some(own_port) = self.net.as_ref().map(|n| n.port) else {
@@ -884,8 +895,11 @@ impl State {
         };
         if b.id == self.me.id {
             // Its own beacon comes back; one with this id from another port
-            // is a second NewQ with this computer's identity.
-            if b.tcp_port != 0 && b.tcp_port != own_port {
+            // is a second NewQ with this computer's identity, and so is one
+            // from an address that isn't this computer's (its `node.json`
+            // copied to another computer: same id, same port).
+            let elsewhere = b.tcp_port == own_port && !self.sent_from_here(h.from.ip());
+            if b.tcp_port != 0 && (b.tcp_port != own_port || elsewhere) {
                 let at = SocketAddr::new(h.from.ip(), b.tcp_port);
                 let count = match self.twin_self {
                     // By port alone: on a LAN its beacons come from each of
@@ -894,9 +908,15 @@ impl State {
                     _ => 1,
                 };
                 if count == TWIN_SWITCHES as u32 {
-                    log::warn!(
-                        "show network: another NewQ with this computer's identity is running (it listens at {at}; this one on port {own_port})"
-                    );
+                    if elsewhere {
+                        log::warn!(
+                            "show network: another computer ({at}) has this computer's identity: its node.json was copied from here (remove it there, and NewQ makes a new one)"
+                        );
+                    } else {
+                        log::warn!(
+                            "show network: another NewQ with this computer's identity is running (it listens at {at}; this one on port {own_port})"
+                        );
+                    }
                 }
                 self.twin_self = Some((at, now, count));
             }
@@ -2354,6 +2374,15 @@ impl State {
 /// Two ports one id's beacons went back and forth between, at least
 /// `TWIN_SWITCHES` times, in the last `TWIN_WINDOW` (oldest first): two NewQs
 /// with one identity. A NewQ started again moves its port once, which isn't.
+/// Whether `ip` is one of this computer's addresses (`adapters`, loopback).
+/// (Only IPv4 is beaconed: any other is taken as its own.)
+fn from_here(ip: IpAddr, adapters: &[super::paths::Adapter]) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || adapters.iter().any(|a| a.ip == v4),
+        IpAddr::V6(_) => true,
+    }
+}
+
 fn twin_ports(ports: &VecDeque<(u16, Instant)>, now: Instant) -> Option<(u16, u16)> {
     let fresh: Vec<u16> = ports
         .iter()

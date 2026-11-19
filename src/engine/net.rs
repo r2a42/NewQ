@@ -229,6 +229,10 @@ impl Engine {
                 *x += by;
             }
         }
+        // Where the cues just ended did, for what follows them.
+        for t in self.net_ended.values_mut() {
+            *t += by;
+        }
         self.runs.net_shift(by);
     }
 
