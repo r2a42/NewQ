@@ -71,6 +71,12 @@ release page, and a release is refused if it has none.
   26 ms off and "put right" (the network test's *in step with the primary again … moved -26 ms*
   lines). Such a cue now begins a frame or two into itself on every computer, rather than at its
   start a frame or two late. Playing alone is unchanged.
+- **A computer joining the show network copies the media nearest the playhead first, every time.**
+  On a busy computer it could begin with the show's first file instead, and the file the show
+  was about to play then waited behind it.
+- **A later NewQ's new kinds of network message no longer drop the connection.** A message about
+  the network test, a playback command or a heartbeat of a kind this NewQ doesn't know is now
+  let pass, so computers running a newer NewQ from this one onwards stay connected to it.
 
 ## 0.24.3
 
