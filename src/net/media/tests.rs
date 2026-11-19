@@ -20,6 +20,68 @@ use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------------ order
 
+#[test]
+fn a_computer_hears_of_the_order_before_the_port_whatever_the_timing() {
+    // 0.24.4's review (C8): a computer joining just after the order went to
+    // another (`soon` false) at a pass that sends the port to all (`again`)
+    // was given the port with no order, and fetched in the manifest's order.
+    use super::manager::{Sends, sends};
+    let b = [false, true];
+    for told in b {
+        for served in b {
+            for has_order in b {
+                for soon in b {
+                    for again in b {
+                        for order_again in b {
+                            let s = Sends {
+                                told,
+                                served,
+                                has_order,
+                                soon,
+                                again,
+                                order_again,
+                            };
+                            let (order, server) = sends(s);
+                            assert!(!order || has_order, "{s:?}");
+                            // Never the port to one without the order.
+                            assert!(!server || told || order, "{s:?}");
+                            // One never given the port: the order at once.
+                            if !served && has_order {
+                                assert!(order || told, "{s:?}");
+                                assert!(server, "{s:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The case that went wrong.
+    let joined = Sends {
+        told: false,
+        served: false,
+        has_order: true,
+        soon: false,
+        again: true,
+        order_again: false,
+    };
+    assert_eq!(sends(joined), (true, true));
+    // Its order changed: the new order at most once a second, the port as before.
+    let changed = Sends {
+        told: false,
+        served: true,
+        ..joined
+    };
+    assert_eq!(sends(changed), (false, false));
+    assert_eq!(
+        sends(Sends {
+            soon: true,
+            ..changed
+        }),
+        (true, true)
+    );
+}
+
 fn file_cue(show: &mut Show, list: u32, name: &str) -> CueId {
     let at = show.list_end(list);
     let mut c = show.make_cue(

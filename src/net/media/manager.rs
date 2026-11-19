@@ -693,8 +693,10 @@ struct PrimarySide {
     order_due: bool,
     order_sent: Option<Instant>,
     sig_look: Option<Instant>,
-    /// Computers that have the order and the port.
+    /// Computers that have the order as it is now.
     told: HashSet<NodeId>,
+    /// Computers given the port since they connected (never before an order).
+    served: HashSet<NodeId>,
     told_at: Option<Instant>,
     order_told_at: Option<Instant>,
     /// The served version's id when its facts were last looked at.
@@ -775,6 +777,7 @@ impl PrimarySide {
             order_sent: None,
             sig_look: None,
             told: HashSet::new(),
+            served: HashSet::new(),
             told_at: None,
             order_told_at: None,
             facts_checked: None,
@@ -1025,26 +1028,31 @@ impl PrimarySide {
         let order_again = self.order_told_at.is_none_or(|t| {
             now.duration_since(t) >= cfg.every.max(Duration::from_millis(200)) * 10
         });
+        self.served.retain(|id| ours.iter().any(|p| p.id == *id));
         for p in &ours {
-            let new = !self.told.contains(&p.id);
+            let (order, server) = sends(Sends {
+                told: self.told.contains(&p.id),
+                served: self.served.contains(&p.id),
+                has_order: self.order.is_some(),
+                soon,
+                again,
+                order_again,
+            });
             // The order ahead of the port: a follower starts fetching when it
             // hears of the port, and may read the two in separate passes.
-            if let Some(o) = &self.order
-                && ((new && soon) || order_again)
-            {
+            if order && let Some(o) = &self.order {
                 out.push(Outgoing::To(p.id, Msg::MediaOrder { paths: o.clone() }));
                 self.told.insert(p.id);
                 self.order_sent = Some(now);
             }
-            if again || new {
+            if server {
                 let sources: Vec<String> = full
                     .iter()
                     .filter(|(id, _)| *id != p.id)
                     .map(|(_, a)| a.clone())
                     .collect();
-                if again || soon {
-                    out.push(Outgoing::To(p.id, Msg::MediaServer { port, sources }));
-                }
+                out.push(Outgoing::To(p.id, Msg::MediaServer { port, sources }));
+                self.served.insert(p.id);
             }
         }
         if order_again {
@@ -1054,6 +1062,35 @@ impl PrimarySide {
             self.told_at = Some(now);
         }
     }
+}
+
+/// What the primary knows of one computer at a pass (`PrimarySide::tell`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Sends {
+    /// It has the order as it is now.
+    pub told: bool,
+    /// It has been given the port since it connected.
+    pub served: bool,
+    pub has_order: bool,
+    /// The order may go (none went in the last `every`).
+    pub soon: bool,
+    /// The port goes to everyone again (every few seconds).
+    pub again: bool,
+    /// The order goes to everyone again.
+    pub order_again: bool,
+}
+
+/// Whether the order and the port go to a computer this pass. A computer
+/// never hears of the port before it has an order (it would fetch in the
+/// manifest's order meanwhile): one never given the port gets the order at
+/// once, ahead of it; one whose order changed gets the order at most about
+/// once a second (`soon`) and the port only every few seconds (`again`).
+pub(super) fn sends(s: Sends) -> (bool, bool) {
+    let first = !s.served;
+    let order = s.has_order && ((!s.told && (s.soon || first)) || s.order_again);
+    let told = s.told || order;
+    let server = told && (s.again || (first || (!s.told && s.soon)));
+    (order, server)
 }
 
 /// The version's numbers for the pages: files and bytes, the files missing
