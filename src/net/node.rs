@@ -814,6 +814,50 @@ pub fn lock_node_dir(dir: &Path, wait: std::time::Duration) -> Result<NodeLock, 
 /// the old one to let go of the node folder.
 pub const RESTARTING_ENV: &str = "NEWQ_RESTARTING";
 
+/// What a NewQ that finds the node folder held does (`main.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhenHeld {
+    /// Started by someone: hand the show to the open NewQ, and say so in a
+    /// dialog if it can't start.
+    Ask,
+    /// Started by itself with nobody to read a dialog (`--display`: NewQ
+    /// Display, start at login): hand over; if the open NewQ took it, end
+    /// quietly; if not, wait for it to close, however long that takes.
+    HandOverOrWait,
+    /// Started again by the NewQ before it (`RESTARTING_ENV`), which is
+    /// closing: wait for it, however long that takes, and hand nothing over
+    /// (it might take it on its way out). A display computer is never left
+    /// without NewQ, nor with a dialog nobody sees.
+    Wait,
+}
+
+pub fn when_held(restarting: bool, display: bool) -> WhenHeld {
+    if restarting {
+        WhenHeld::Wait
+    } else if display {
+        WhenHeld::HandOverOrWait
+    } else {
+        WhenHeld::Ask
+    }
+}
+
+/// Hold `dir`'s lock however long another holds it, calling `waiting` with the
+/// time so far every `step`. Err: the lock couldn't be tried (start anyway).
+pub fn wait_for_node_dir(
+    dir: &Path,
+    step: std::time::Duration,
+    mut waiting: impl FnMut(std::time::Duration),
+) -> Result<NodeLock, String> {
+    let began = std::time::Instant::now();
+    loop {
+        match lock_node_dir(dir, step) {
+            Ok(lock) => return Ok(lock),
+            Err(LockRefused::Held) => waiting(began.elapsed()),
+            Err(LockRefused::Untried(e)) => return Err(e),
+        }
+    }
+}
+
 /// What a second copy says before it closes, when the open NewQ took its
 /// request (`hand_over`): it was brought to the front, with the show if any.
 pub fn already_open_words(show: Option<&Path>, taken: bool) -> String {
@@ -912,6 +956,38 @@ mod lock_tests {
         std::thread::sleep(Duration::from_millis(300));
         drop(first);
         assert!(waiter.join().unwrap(), "the waiting one got it");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A copy started again by the one before it, or as a display computer,
+    /// waits for the folder however long the other takes to close, and never
+    /// asks anyone.
+    #[test]
+    fn an_unattended_start_waits_for_the_node_folder_as_long_as_it_takes() {
+        assert_eq!(when_held(true, false), WhenHeld::Wait);
+        assert_eq!(when_held(true, true), WhenHeld::Wait);
+        assert_eq!(when_held(false, true), WhenHeld::HandOverOrWait);
+        assert_eq!(when_held(false, false), WhenHeld::Ask);
+        let d = std::env::temp_dir().join(format!(
+            "newq-node-wait-{}-{}",
+            std::process::id(),
+            random_u64()
+        ));
+        let first = lock_node_dir(&d, Duration::ZERO).expect("the first holds it");
+        let waiter = {
+            let d = d.clone();
+            std::thread::spawn(move || {
+                let mut said = 0;
+                let lock = wait_for_node_dir(&d, Duration::from_millis(50), |_| said += 1);
+                (lock.is_ok(), said)
+            })
+        };
+        // Longer than any fixed wait would be, in steps.
+        std::thread::sleep(Duration::from_millis(400));
+        drop(first);
+        let (got, said) = waiter.join().unwrap();
+        assert!(got, "it got the folder once the other let go");
+        assert!(said >= 3, "it said it was waiting: {said}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
