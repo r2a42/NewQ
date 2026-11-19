@@ -274,3 +274,19 @@ Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then
    Driver" (refresh "Unknown", NewQ read 64 Hz; NewQ was offered only the NVIDIA and Basic Render
    Driver adapters). NewQ could say so plainly per screen ("install the graphics driver") instead of
    only "drew 4 fps". Proposed, not yet agreed by the owner.
+32. **A sound cue whose output isn't on a follower is restarted every heartbeat** (0.24.4 run of
+   2026-11-19, network part, `computers/Assistant/newq.log`): cue 3 (Sound) "started 0.51 s in", "1.01 s
+   in"... 317 times, one per 0.5 s, for the whole cue, every lap. The laptop's sound output is the
+   primary's only ("its sound output plays on other computers"), so the cue ends at once there,
+   `net_correct` sees it missing and starts it part way, it ends again... Also gave "played less than
+   the primary for about 3 min". `net_correct` (and the measuring) must count a cue whose output plays
+   elsewhere as present here, or never start it; and never start the same cue again and again
+   (`NetCorrection::fixed` is per instance, and each restart is a new instance).
+33. **Cue-list part: the laptop couldn't compare for ~47 s each lap, then put the "Stereo trailer"
+   group right** (same run): from about 63 s to 110 s of each 153 s lap every heartbeat was
+   `uncompared` (`Measurer::unmatched`: commands not matched), then at 110 s: "timeline run from
+   32.71 s", "timeline stopped", "timeline clock moved", "cue 20 (Stereo trailer) moved -198 ms" (the
+   worst 11.9 frames; -52 to -198 ms each lap). Only 1 command in the whole part (it runs on
+   auto-follow). Unknown why the heartbeats stopped matching (a group-as-timeline `Run` the follower
+   and primary disagree on? the "Round again" GoTo?). Reproduce with `play_tests.rs::World` on the
+   Medium cue-list show before guessing.
