@@ -212,10 +212,12 @@ fn main() -> anyhow::Result<()> {
     // One NewQ per node folder (this computer's place in a show network):
     // taken before the log is begun, so a second copy doesn't put the open
     // one's log aside, and before `node.json` is written.
+    let asked = std::time::Instant::now();
     let node_lock = match hold_node_folder() {
         Ok(lock) => lock,
         Err(code) => std::process::exit(code),
     };
+    let held_after = asked.elapsed();
     // The log goes to a file in the log folder (and to the console where
     // there is one), at the level of `NEWQ_LOG` or, once the settings of
     // this computer are read, the one chosen there.
@@ -235,6 +237,12 @@ fn main() -> anyhow::Result<()> {
         },
         logging::level().name()
     );
+    if held_after > std::time::Duration::from_secs(1) {
+        log::info!(
+            "waited {:.0} s for the NewQ that held the node folder to close",
+            held_after.as_secs_f64()
+        );
+    }
     if node_lock.is_none() {
         log::warn!(
             "the node folder couldn't be locked: a second NewQ on this computer wouldn't be stopped"
