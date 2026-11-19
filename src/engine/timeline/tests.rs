@@ -985,7 +985,15 @@ fn a_video_that_runs_out_during_a_free_run_pause_ends_loops_or_holds_as_it_is_se
     let (began, part) = watch_fade(&mut e, &show, clip, 0.05, 6.0);
     let began = began.expect("it faded");
     assert!(part && (0.95..1.15).contains(&began), "{began}");
-    assert!(active(&e, clip).is_none() && paused_at(&mut e, &show, key(g)) == Some(0.5));
+    // Faded out by its time, it goes when its picture runs out: the six
+    // seconds of show time above took a fraction of a real second, which a
+    // busy machine's decoder may not have reached the end in (seen under load:
+    // its time 6.05 s, unseen, the decoder not at its 1.5 s end yet).
+    assert_eq!(opacity(&e, clip).unwrap_or(0.0), 0.0, "faded out");
+    until(&mut e, &show, None, "it to end", 20, |e| {
+        active(e, clip).is_none()
+    });
+    assert_eq!(paused_at(&mut e, &show, key(g)), Some(0.5));
     // End with no fade-out of its own: the default fade, two seconds.
     let (show, g, clip) = run_out_show(
         CueType::Video,
