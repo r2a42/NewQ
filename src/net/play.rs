@@ -117,6 +117,10 @@ pub enum Command {
     TimelineLeave {
         key: TimelineKey,
     },
+    /// A command a later NewQ sends that this one doesn't know: acknowledged
+    /// and not done (a frame that can't be read would close the session).
+    #[serde(other)]
+    Unknown,
 }
 
 impl Command {
@@ -170,6 +174,10 @@ pub enum RunWord {
     Cueing,
     Running,
     Paused,
+    /// A word a later NewQ sends that this one doesn't know: nothing to
+    /// compare with (as while cueing).
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

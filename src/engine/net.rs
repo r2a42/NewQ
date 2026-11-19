@@ -370,6 +370,9 @@ impl Engine {
             Command::TimelineGoOne { key } => self.timeline_go_one(show, *key),
             Command::TimelineContinue { key } => self.timeline_continue(show, *key),
             Command::TimelineLeave { key } => self.timeline_leave(show, *key),
+            Command::Unknown => {
+                log::debug!("show network: a command from a later NewQ, not known here")
+            }
         }
     }
 
@@ -708,8 +711,8 @@ fn run_fix(
             .then_some(RunFix::Stop);
     };
     match t.state {
-        // Getting ready: nothing to compare yet.
-        RunWord::Cueing => None,
+        // Getting ready (or a word from a later NewQ): nothing to compare yet.
+        RunWord::Cueing | RunWord::Unknown => None,
         RunWord::Stopped => {
             matches!(my_state, S::Running | S::Paused { .. } | S::Cueing).then_some(RunFix::Stop)
         }

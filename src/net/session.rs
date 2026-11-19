@@ -203,7 +203,7 @@ fn read_loop(
             continue;
         }
         match proto::decode(&body) {
-            Ok(Msg::Unknown) => {}
+            Ok(Msg::Unknown) => log::debug!("show network: a message from a later NewQ, passed by"),
             Ok(m) => {
                 if events
                     .send(Event::Session(SessionEvent::Msg(id, m)))
