@@ -253,3 +253,24 @@ Fable agent (model "fable") of everything since 0.24.2, its findings fixed, then
    NewQ sending `Local`/`Whole`/`Mute` (0.24.2+) to an older one drops that session again and again.
    Give `NetTest` (and any other tagged enum inside `Msg`) an `Unknown` catch-all like `Msg::Unknown`,
    and test that an unknown kind is ignored, not fatal.
+
+## After the 0.24.4 test (2026-11-19): fix after the testing, not now
+
+30. **Display computer's start-up picture** (owner, 2026-11-19). Starting `NewQ Display.exe` showed a
+   white rectangle (about half the screen, off-centre) on black: "ugly and unprofessional". What the
+   owner wants:
+   - At start: the ID card only (the old grey text on black is fine), so you can see the projectors
+     and screens are on and working, until the **first cue is loaded on the primary**.
+   - After that: **black** unless a cue is playing, or Identify is pressed. The card must never come
+     back between cues (it is for start-up only; check `Show::wait_cards`/`play::card_shows`, which
+     today can show it again while not in step).
+   - Identify: computer name, display number and IP address for a few seconds on black.
+   Likely cause of the white box (unconfirmed): an output window on Windows before its first frame is
+   drawn (the system paints it white) at its 960x540 starting size, before it goes full screen; on this
+   laptop the panel was on Windows' basic display driver at about 4 fps, which makes it last. Fix both:
+   no window shown until it has drawn (or a black background), and the card rules above.
+31. **Warn about a screen on Windows' basic display driver.** The 0.24.4 test's 4 fps panel was the
+   laptop's AMD iGPU disabled / Code 31: Windows drove the panel through "Microsoft Basic Display
+   Driver" (refresh "Unknown", NewQ read 64 Hz; NewQ was offered only the NVIDIA and Basic Render
+   Driver adapters). NewQ could say so plainly per screen ("install the graphics driver") instead of
+   only "drew 4 fps". Proposed, not yet agreed by the owner.
