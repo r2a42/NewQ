@@ -27,6 +27,12 @@ release page, and a release is refused if it has none.
   never comes back in that run: between cues the screens are black, even if a computer drops out
   of step for a moment or restarts. *Identify* now shows the computer's name, the screen's number
   and its address on black for a few seconds, then what was there comes back.
+- **Films in "start all together" groups end together on every computer of a show network.** A
+  film in such a group ended on each computer when that computer ran out of it: a display
+  computer without the sound when the picture ran out, the computer playing the sound once it had
+  played it out, which for a film whose sound runs on past its picture is a few tenths of a second
+  later. What came after the group then started that much apart and was put right on screen. Now
+  a film or a sound is over where the shared clock takes it to its length, on every computer.
 
 ## 0.24.4
 

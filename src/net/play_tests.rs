@@ -158,6 +158,9 @@ struct World {
     last_cue: Vec<Option<(f64, f64)>>,
     jumps: Vec<Vec<f64>>,
     ticks_seen: Vec<u64>,
+    /// Per computer: heartbeats the network test couldn't compare there, as
+    /// `app/play.rs` judges it (`Follower::has_done`, `Measurer::unmatched`).
+    uncompared: Vec<u32>,
 }
 
 fn frame(t: f64) -> i64 {
@@ -220,6 +223,7 @@ impl World {
             last_cue: vec![None; followers + 1],
             jumps: vec![Vec::new(); followers + 1],
             ticks_seen: vec![0; followers + 1],
+            uncompared: vec![0; followers + 1],
         }
     }
 
@@ -354,6 +358,12 @@ impl World {
                     c.anchor += self.state_offset + j;
                 }
                 if let Some(f) = self.nodes[to].follower.as_mut() {
+                    if !f.has_done(&s)
+                        && (s.cues.iter().any(|c| !c.stopping)
+                            || s.runs.iter().any(|r| r.anchor.is_some()))
+                    {
+                        self.uncompared[to] += 1;
+                    }
                     f.heard(s);
                 }
             }
@@ -1287,10 +1297,13 @@ fn chained_show() -> (Show, CueId, CueId, CueId) {
 /// The largest difference (seconds) between the primary's anchor of a cue,
 /// or of a timeline's clock, and a follower's, of those both play now.
 fn anchors_apart(w: &World) -> f64 {
-    let p = w.nodes[w.primary].engine.net_state(0.0);
+    // (A cue started at this tick is anchored at the next: until then, where
+    // its time says it began.)
+    let state = |e: &Engine| e.net_state(e.net_shared_time().unwrap_or(0.0));
+    let p = state(&w.nodes[w.primary].engine);
     let mut worst: f64 = 0.0;
     for n in w.nodes.iter().skip(1) {
-        let f = n.engine.net_state(0.0);
+        let f = state(&n.engine);
         for c in &p.cues {
             if let Some(h) = f.cues.iter().find(|h| h.cue == c.cue) {
                 worst = worst.max((h.anchor - c.anchor).abs());
@@ -1358,4 +1371,121 @@ fn cues_that_follow_one_another_start_together_at_any_frame_rate() {
             worst * 1000.0
         );
     }
+}
+
+// ---- Issue 33: trailers in timeline groups, the sound on one computer ----
+
+/// As Test Mode's cue-list part ends its lap: a cue, then a timeline group
+/// holding a film whose sound runs 0.4 s past its picture (`longer`), then
+/// another holding 0.8 s of `film`, each following the last, then a long
+/// wait. The first cue, the two groups, the wait.
+fn trailer_show(
+    film: &std::path::Path,
+    longer: &std::path::Path,
+) -> (Show, CueId, [CueId; 2], CueId) {
+    use crate::show::{ContinueMode, CueKind, CueType, GroupMode, Transition};
+    let mut show = Show::default();
+    let wait = |show: &mut Show, len: f64| {
+        let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+        if let CueKind::Wait(w) = &mut c.kind {
+            w.duration = len;
+        }
+        c.continue_mode = ContinueMode::AutoFollow;
+        let id = c.id;
+        show.cues.push(c);
+        id
+    };
+    let first = wait(&mut show, 0.5);
+    let mut groups = [CueId(0); 2];
+    for (k, (file, end)) in [(longer, None), (film, Some(0.8))].into_iter().enumerate() {
+        let mut g = show.make_cue(CueType::Group, None, show.cues.len());
+        if let CueKind::Group(gc) = &mut g.kind {
+            gc.mode = GroupMode::Timeline;
+        }
+        g.continue_mode = ContinueMode::AutoFollow;
+        groups[k] = g.id;
+        show.cues.push(g);
+        let mut c = show.make_cue(CueType::Video, Some(file.to_path_buf()), show.cues.len());
+        c.parent = Some(groups[k]);
+        let m = c.kind.media_mut().expect("a film");
+        m.end = end;
+        m.transition = Transition::Crossfade;
+        m.fade_in = 0.2;
+        m.fade_out = 0.2;
+        show.cues.push(c);
+    }
+    let last = wait(&mut show, 1000.0);
+    (show, first, groups, last)
+}
+
+/// Issue 33 of the 0.24.4 test, through the commands and heartbeats (a Mac
+/// primary playing the sound, a Windows display computer with none): GO, and
+/// the rest by auto-follow. The first trailer's group ended on the display
+/// computer when its picture ran out and on the primary when its card had
+/// been sent the last of the sound, so the next group started a few hundred
+/// ms apart and was put right at every lap ("timeline run from…", "timeline
+/// stopped", "moved -198 ms"). Now each film is over where the shared clock
+/// takes it to its length: the groups start together and nothing is put
+/// right. (The heartbeats the network test couldn't compare there are
+/// counted too, but they didn't come from this: issue 33's stretch of them
+/// is not reproduced here.)
+#[test]
+fn trailers_in_timeline_groups_follow_one_another_together_with_the_sound_on_one_computer() {
+    let Some((ff, film)) = crate::media::test_media("testsrc_10s.mp4") else {
+        return;
+    };
+    let Some(longer) = crate::media::film_with_longer_sound(&ff, 0.4) else {
+        return;
+    };
+    let (show, first, groups, last) = trailer_show(&film, &longer);
+    let mut w = World::new(1, Network::wired(), 33);
+    w.ts.show = show;
+    for n in &mut w.nodes {
+        n.engine.ff = Some(ff.clone());
+    }
+    // The primary's sound is played at the clock's pace; the display
+    // computer has no sound output.
+    w.nodes[0].engine.audio = crate::media::audio::AudioOut::silent();
+    w.run(4.0);
+    assert!(w.locked(4.0), "the follower didn't lock");
+    w.nodes[0].engine.playhead = Some(first);
+    w.acts(&[(4.5, Act::Go)]);
+    // From here at the pace of the real clock, which the films' decoders and
+    // the sound keep.
+    let began = std::time::Instant::now();
+    let mut t = 4.0;
+    let mut worst: f64 = 0.0;
+    // (A heartbeat may come before the follower's tick that does the GO:
+    // those up to a moment after it aren't counted.)
+    let mut after_go = 0;
+    while t < 9.0 {
+        t += 0.01;
+        let ahead = (t - 4.0) - began.elapsed().as_secs_f64();
+        if ahead > 0.0 {
+            std::thread::sleep(std::time::Duration::from_secs_f64(ahead));
+        }
+        w.run(t);
+        worst = worst.max(anchors_apart(&w));
+        if t < 4.8 {
+            after_go = w.uncompared[1];
+        }
+    }
+    for (k, n) in w.nodes.iter().enumerate() {
+        assert!(
+            n.engine.active.iter().any(|a| a.cue_id == last),
+            "computer {k}: the chain reached its end; {:?}",
+            n.engine.messages
+        );
+        let runs = n.engine.net_state(0.0).runs;
+        for g in groups {
+            assert!(
+                runs.iter().any(|r| r.key == TimelineKey::Group(g)),
+                "computer {k}: both trailers ran"
+            );
+        }
+    }
+    let f = w.nodes[1].follower.as_ref().expect("a follower");
+    assert_eq!(f.corrections, 0, "{:?}", f.corrected);
+    assert_eq!(w.uncompared[1], after_go, "heartbeats not compared");
+    assert!(worst < 0.002, "{:.1} ms apart", worst * 1000.0);
 }

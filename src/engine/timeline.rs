@@ -1853,7 +1853,10 @@ impl Engine {
             .iter()
             .any(|p| (p.run == Some(i) && !p.waits_for_fade) || p.start.run == Some(i))
             || self.active.iter().any(|a| {
+                // (A file the shared clock has taken to its length is over,
+                // while its card plays the last of it out.)
                 a.run == Some(i)
+                    && !a.over_by_clock
                     && (!a.held
                         || (a.clocked && a.ends_at.is_some_and(|e| e > run.pos + SAME_TIME)))
             })
