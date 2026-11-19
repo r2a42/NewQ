@@ -425,6 +425,16 @@ impl Leader {
                 at,
                 cmd,
             };
+            // (For the log: what the primary did, and when, is seen nowhere
+            // else; a follower says when one never reached it, `heard`.)
+            log::info!(
+                "show network: command {} at {:.3} ({:.0} ms ahead) to {} computer(s): {:?}",
+                t.seq,
+                t.at,
+                (at - now) * 1000.0,
+                followers.len(),
+                t.cmd
+            );
             self.own.push(t.clone());
             if !followers.is_empty() {
                 self.out
@@ -573,6 +583,8 @@ pub struct Follower {
     /// came, or a heartbeat said so (`PlayState::shows_start`). Never set
     /// back; a display computer's start-up card goes for good.
     pub saw_start: bool,
+    /// The primary's last command said in the log as never had here (`heard`).
+    said_missing: Option<(u64, u64)>,
 }
 
 impl Follower {
@@ -616,6 +628,21 @@ impl Follower {
     pub fn heard(&mut self, s: PlayState) {
         self.new_epoch(s.epoch);
         self.saw_start |= s.shows_start();
+        // Done there, never here and not on its way: the network test can't
+        // compare (`has_done`) until a correction puts this computer where
+        // the primary is. Said once, for the log.
+        if s.seq > self.floor
+            && !self.done.contains(&s.seq)
+            && !self.queue.iter().any(|t| t.seq <= s.seq)
+            && self.said_missing != Some((s.epoch, s.seq))
+        {
+            self.said_missing = Some((s.epoch, s.seq));
+            log::info!(
+                "show network: the primary has done its command {} and this computer only up to {} (one not come here yet, or lost)",
+                s.seq,
+                self.floor
+            );
+        }
         self.primary_show = Some(s.show);
         self.state = Some(s);
     }
