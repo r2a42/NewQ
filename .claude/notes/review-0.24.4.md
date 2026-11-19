@@ -34,3 +34,29 @@ C8. **`MediaServer` can reach a new computer before any `MediaOrder`** (`manager
 C9. Minor: `fleet.rs` `file_name` collisions (non-ASCII -> `_`, two computers of one name share
    `computers/<name>/`); `gui::logs_inside` claims every log is inside when one is missing; `log_since` after
    a rotation reads the old offset in the new file; a 4 MB `LogTail` frame could delay pings past 6 s.
+
+## B. Graphics, windows, UI, display computers
+
+B1. **A hard cut now shows a gap with neither picture** (confirmed by trace; `app.rs` ~2386-2389, also
+   ~2336, 2364, 2601-2612, 2423). The new cue's layer is left out until `is_filled`, but the cue it replaces
+   is already gone on that tick, and the job is still sent: black (or what's underneath) until the next pass,
+   ~1 cut in 4 at 60 Hz, and as long as the uploads thread is held up (the very 100-180 ms Mac waits it was
+   built for). Same for a video texture re-made after a seek to another size, a still at another size, a
+   display computer's card (each text change makes a new texture: the waiting card blinks), the fps label.
+   Fix: write a new texture's first picture on the main thread where it is created and use the thread for
+   later frames; keep the old card/label texture until the new one is filled.
+B2. **A restarted uploads thread loses first pictures for good** (`app.rs` ~2206-2218, `upload.rs` ~139-156):
+   pending jobs die with the thread but the main thread recorded them as sent; never filled, never shown,
+   `uploads_waiting` stays true (4 ms loop). No restart backoff; `NEWQ_TEST_PANIC` has no uploads kind.
+   Fix: on restart clear `textures`, `patterns`, `fps_labels`, `play.cards`; restart at most every 1-2 s; add
+   an `uploads` panic kind and a test.
+B3. **Card and fps-label textures from the old device survive a rebuild** (`app.rs` ~1253-1256): `watch_gpu`
+   clears `textures`/`patterns` but not `fps_labels`/`play.cards` -> wgpu validation errors per frame, card
+   not drawn until its text changes; now hit on purpose by the software->hardware switch. Fix: clear both.
+B4. **Only the uploads thread polls for a lost device** (`app.rs` ~1207, `upload.rs` ~253-262): stuck in
+   `write_texture` on a dying driver, nobody polls. Fix: uploader stamps an atomic per poll; the main thread
+   polls itself when the stamp is over ~1 s old.
+B5. Minor: `watch_software` on a machine with no card makes a fresh wgpu instance every 30 s all run (slow
+   down/stop after a while when no loss happened this run); `Gpu::new` sets `GPU_NAME`/`SOFTWARE` before
+   `request_device` succeeds (stale status on failure); `App::new` doesn't keep `start_at_login_cleaned` if
+   prefs can't be saved, so every start removes an entry the user ticked since.
