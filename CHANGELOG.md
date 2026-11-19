@@ -107,8 +107,12 @@ release page, and a release is refused if it has none.
   computer used to start it at the first frame it drew after the end, so computers drawing at
   different rates drifted a few milliseconds further apart at every cue, until a cue was about
   26 ms off and "put right" (the network test's *in step with the primary again … moved -26 ms*
-  lines). Such a cue now begins a frame or two into itself on every computer, rather than at its
-  start a frame or two late. Playing alone is unchanged.
+  lines). A sound or film counts as ended when the shared clock reaches its length (not once its
+  sound device has played its last buffers out), and a group ends in the frame its last cue does,
+  so what follows is seen in time. It is never placed more than a couple of frames back (less
+  than a sound's slack for one with sound): seen later than that, after a stall or a file that
+  ran on past its end, it starts from its beginning at that frame, as before, rather than skipping
+  its first moments of sound and picture. Playing alone is unchanged.
 - **A computer joining the show network copies the media nearest the playhead first, every time.**
   On a busy computer it could begin with the show's first file instead, and the file the show
   was about to play then waited behind it.
