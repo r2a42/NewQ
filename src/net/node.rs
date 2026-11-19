@@ -577,6 +577,10 @@ pub enum Refusal {
     NotPrimary,
     /// The other computer runs a NewQ that speaks another protocol.
     Version,
+    /// A reason a later NewQ gives that this one doesn't know (the message's
+    /// text says it).
+    #[serde(other)]
+    Unknown,
 }
 
 impl Refusal {
@@ -598,6 +602,7 @@ impl Refusal {
             ),
             Refusal::NotPrimary => format!("{refuser} takes orders only from a primary."),
             Refusal::Version => format!("{refuser} runs another version of NewQ."),
+            Refusal::Unknown => format!("{refuser} refused, for a reason this NewQ doesn't know."),
         }
     }
 }

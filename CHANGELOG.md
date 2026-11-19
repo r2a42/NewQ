@@ -118,7 +118,10 @@ release page, and a release is refused if it has none.
   was about to play then waited behind it.
 - **A later NewQ's new kinds of network message no longer drop the connection.** A message about
   the network test, a playback command or a heartbeat of a kind this NewQ doesn't know is now
-  let pass, so computers running a newer NewQ from this one onwards stay connected to it.
+  let pass, and so is a kind of timeline, of pause, of control action or of network adapter
+  it doesn't know inside one it does, so computers running a newer NewQ from this one onwards
+  stay connected to it. A show with such a timeline or pause in a control cue now opens (the
+  cue does nothing) rather than being refused.
 
 ## 0.24.3
 

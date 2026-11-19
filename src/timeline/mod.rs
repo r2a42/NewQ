@@ -16,11 +16,57 @@ use crate::show::{AudioOutputId, CueColor, CueId, OutputId};
 use serde::{Deserialize, Serialize};
 
 /// Which timeline: a timeline group (its clips are its children) or a cue list
-/// that is a timeline (its clips are its top-level cues).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// that is a timeline (its clips are its top-level cues). A kind a later NewQ
+/// writes (in a show or a network message) reads as `TimelineKey::UNKNOWN`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum TimelineKey {
     Group(CueId),
     List(u32),
+}
+
+impl TimelineKey {
+    /// A timeline named in a way this NewQ doesn't know (a later one's): a
+    /// list no show has, so it finds nothing, rather than a show that can't
+    /// be opened or a network message that closes the connection.
+    pub const UNKNOWN: TimelineKey = TimelineKey::List(u32::MAX);
+}
+
+impl<'de> Deserialize<'de> for TimelineKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Lenient;
+        impl<'de> serde::de::Visitor<'de> for Lenient {
+            type Value = TimelineKey;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a timeline")
+            }
+            // (A later kind with no data is written as its name alone.)
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<TimelineKey, E> {
+                Ok(TimelineKey::UNKNOWN)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TimelineKey, A::Error> {
+                let Some(kind) = map.next_key::<String>()? else {
+                    return Ok(TimelineKey::UNKNOWN);
+                };
+                let key = match kind.as_str() {
+                    "Group" => TimelineKey::Group(map.next_value()?),
+                    "List" => TimelineKey::List(map.next_value()?),
+                    _ => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        TimelineKey::UNKNOWN
+                    }
+                };
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(key)
+            }
+        }
+        d.deserialize_any(Lenient)
+    }
 }
 
 /// A place on a timeline: a time, a marker, or the start of a clip.
@@ -32,7 +78,9 @@ pub enum TimelinePoint {
 }
 
 /// What a timeline pause cue does to the content while the clock is stopped.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// A kind a later NewQ writes (in a show or a network message) reads as
+/// `Nothing`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub enum PauseFreeze {
     /// The clips playing go on playing (or looping): only the clock stops.
     #[default]
@@ -41,6 +89,16 @@ pub enum PauseFreeze {
     Everything,
     /// Only the clips the cue names (`ControlCue::clips`) hold.
     Clips,
+}
+
+impl<'de> Deserialize<'de> for PauseFreeze {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "Everything" => PauseFreeze::Everything,
+            "Clips" => PauseFreeze::Clips,
+            _ => PauseFreeze::Nothing,
+        })
+    }
 }
 
 impl PauseFreeze {
