@@ -9,10 +9,10 @@ release page, and a release is refused if it has none.
 - **The number on a test pattern is a setting.** A *Number* checkbox beside a display's (and sub
   display's) *Test pattern* choice turns the display's number on or off. It is on as before, and a
   show only records it when it is off.
-- **SMPTE colour bars are the default test pattern**, in 16:9 and 16:10. A display's *Test pattern*
-  now starts with SMPTE bars (75% bars, reversed blue row, -I/white/+Q and PLUGE strips, the
-  display's number over them) in whichever of the two shapes is nearer the display it is shown on;
-  two more choices force 16:9 or 16:10. They are made for a computer's full-range picture: black
+- **SMPTE colour bars are the default test pattern.** A display's *Test pattern* now starts with
+  SMPTE bars (75% bars, reversed blue row, -I/white/+Q and PLUGE strips, the display's number over
+  them), always 4:3 in the middle with grey beside them on a wider display, whatever its shape:
+  16:9, 16:10, an ultrawide, an edge-blended pair; a 4:3 projector or narrower is all bars. They are made for a computer's full-range picture: black
   is one black throughout, and the PLUGE strip just above black is 4%. The older *Colour bars and
   number* is still in the list, and a show that chose it keeps it; a show that never chose now
   shows the SMPTE bars. A test pattern this version doesn't know (from a later NewQ) shows the
