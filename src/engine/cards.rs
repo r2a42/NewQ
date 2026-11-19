@@ -131,7 +131,7 @@ impl Engine {
             {
                 c.pending = None;
                 if let (Ok(img), ActiveKind::Image(im)) = (r, &mut a.kind) {
-                    im.image = Some(img);
+                    im.image = Some(Arc::new(img));
                     im.version += 1;
                 }
             }

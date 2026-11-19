@@ -20,6 +20,7 @@ use crate::show::{
     OutputId, PartOf, PatternKind, RemoteSettings, Show, StreamOut, display_state,
 };
 use crate::ui::{self, MonitorInfo, OutputRoute, PreviewOutput, UiState};
+use crate::upload;
 
 // The computers playing together (stage 4a): the shared clock, commands, the
 // heartbeat and show sync (`app/play.rs`).
@@ -360,8 +361,9 @@ pub struct App {
     cycle_cpu: Option<Duration>,
     /// Where the show engine's time went, if its last tick was slow.
     engine_note: Option<String>,
-    /// The slowest picture made this cycle: (instance, width, height, time).
-    slowest_upload: Option<(u64, u32, u32, Duration)>,
+    /// The slowest picture made this cycle: (instance, width, height, time,
+    /// whether its texture was made then).
+    slowest_upload: Option<(u64, u32, u32, Duration, bool)>,
     /// A presenter-style remote's keys (see `clicker`).
     clicker: Arc<crate::clicker::Shared>,
     /// Rouses the event loop (the remote-control threads and the system's
@@ -388,6 +390,14 @@ pub struct App {
     /// The frame-rate label drawn on an output's picture, by output: the words
     /// it says and its texture.
     fps_labels: HashMap<OutputId, (String, Arc<LayerTexture>)>,
+    /// Writes the pictures into their textures off the main thread (`upload`).
+    uploader: Option<crate::upload::Uploader>,
+    /// A layer was left out last pass because its first picture wasn't in
+    /// its texture yet: draw again soon.
+    uploads_waiting: bool,
+    /// Upload on the main thread as before (`NEWQ_UPLOADS_ON_MAIN=1`, or the
+    /// thread could not be started).
+    uploads_on_main: bool,
     /// `NEWQ_AUTOSTART`: press GO this long after starting, once.
     autostart: Option<Instant>,
     /// A recovery file from a session that didn't end properly, to offer once.
@@ -579,6 +589,9 @@ impl App {
             preview_meter: Default::default(),
             live_sampler: None,
             fps_labels: HashMap::new(),
+            uploader: None,
+            uploads_waiting: false,
+            uploads_on_main: std::env::var_os("NEWQ_UPLOADS_ON_MAIN").is_some(),
             autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
                 let secs = if v == "1" {
                     5.0
@@ -1188,8 +1201,11 @@ impl App {
             log::warn!("destroying the graphics device, as asked");
             gpu.device.destroy();
         }
-        if let Some(gpu) = &self.gpu {
-            // The loss is reported when the device is polled.
+        // The loss is reported when the device is polled: the upload thread
+        // does it (a poll waits for the locks the render threads hold).
+        if let Some(gpu) = &self.gpu
+            && self.uploader.is_none()
+        {
             let _ = gpu.device.poll(wgpu::PollType::Poll);
         }
         if self.recovery.is_none() {
@@ -1237,6 +1253,7 @@ impl App {
             self.stop_streams();
             self.textures.clear();
             self.patterns.clear();
+            self.uploader = None;
         }
         let Some(rec) = &mut self.recovery else {
             return;
@@ -2095,6 +2112,7 @@ impl App {
     fn fps_label(
         labels: &mut HashMap<OutputId, (String, Arc<LayerTexture>)>,
         gpu: &Gpu,
+        up: Option<&upload::Uploader>,
         id: OutputId,
         text: &str,
         canvas: (u32, u32),
@@ -2112,9 +2130,9 @@ impl App {
             cue.valign = crate::show::TextVAlign::Top;
             cue.bold = true;
             let img = crate::text::render(&cue, (w, h));
-            let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
-            tex.upload_rgba(&gpu.queue, &img.data);
-            labels.insert(id, (text.to_string(), Arc::new(tex)));
+            let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
+            upload::rgba(up, gpu, &tex, img.data);
+            labels.insert(id, (text.to_string(), tex));
         }
         OutputLayer {
             texture: labels[&id].1.clone(),
@@ -2185,6 +2203,20 @@ impl App {
     fn update_outputs(&mut self, playing: bool) {
         let Some(gpu) = self.gpu.clone() else { return };
         let gpu = &gpu;
+        if !self.uploads_on_main && self.uploader.as_ref().is_none_or(|u| u.ended()) {
+            if self.uploader.is_some() {
+                log::warn!("the thread that uploads pictures stopped; starting another");
+            }
+            self.uploader = match crate::upload::Uploader::start(gpu.clone()) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    log::warn!("pictures are uploaded on the main thread: {e}");
+                    self.uploads_on_main = true;
+                    None
+                }
+            };
+        }
+        let was_waiting = std::mem::take(&mut self.uploads_waiting);
         self.ui.previews.clear();
         let configs: Vec<OutputSetup> = self
             .show
@@ -2279,6 +2311,7 @@ impl App {
             let has_picture = !engine_layers.is_empty();
             for l in engine_layers {
                 let began = Instant::now();
+                let before = self.textures.get(&l.instance).map(|e| Arc::as_ptr(&e.0));
                 let entry = match &l.source {
                     LayerSource::Video(p) => {
                         let Some(frame) = p.current() else { continue };
@@ -2290,6 +2323,7 @@ impl App {
                             };
                             (Arc::new(tex), 0)
                         };
+                        let up = self.uploader.as_ref();
                         let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
                         // A seek can bring a player of another size (the output
                         // was resized since the cue started), or of another kind of
@@ -2302,27 +2336,29 @@ impl App {
                             *entry = new_texture();
                         }
                         if entry.1 != p.serial {
-                            match frame.hap {
-                                Some(_) => entry.0.upload_bc(&gpu.queue, &frame.data),
-                                None if p.rgba => entry.0.upload_rgba(&gpu.queue, &frame.data),
-                                None => entry.0.upload_yuv(&gpu.queue, &frame.data),
-                            }
+                            let kind = match frame.hap {
+                                Some(_) => upload::Kind::Bc,
+                                None if p.rgba => upload::Kind::Rgba,
+                                None => upload::Kind::Yuv,
+                            };
+                            upload::copy(up, gpu, &entry.0, kind, &frame.data);
                             entry.1 = p.serial;
                         }
                         entry
                     }
                     LayerSource::Image(img, version) => {
                         let version = *version;
+                        let up = self.uploader.as_ref();
                         let new_texture = || {
-                            let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
-                            tex.upload_rgba(&gpu.queue, &img.data);
-                            (Arc::new(tex), version)
+                            let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
+                            upload::image(up, gpu, &tex, img);
+                            (tex, version)
                         };
                         let entry = self.textures.entry(l.instance).or_insert_with(new_texture);
                         // A clock or timer is drawn again as the time changes.
                         if entry.1 != version {
                             if (entry.0.width, entry.0.height) == (img.width, img.height) {
-                                entry.0.upload_rgba(&gpu.queue, &img.data);
+                                upload::image(up, gpu, &entry.0, img);
                                 entry.1 = version;
                             } else {
                                 *entry = new_texture();
@@ -2331,16 +2367,25 @@ impl App {
                         entry
                     }
                     LayerSource::Solid(color) => {
+                        let up = self.uploader.as_ref();
                         self.textures.entry(l.instance).or_insert_with(|| {
-                            let tex = LayerTexture::new_rgba(gpu, 2, 2);
-                            tex.upload_rgba(&gpu.queue, &color.repeat(4));
-                            (Arc::new(tex), 1)
+                            let tex = Arc::new(LayerTexture::new_rgba(gpu, 2, 2));
+                            upload::rgba(up, gpu, &tex, color.repeat(4));
+                            (tex, 1)
                         })
                     }
                 };
                 let took = began.elapsed();
-                if self.slowest_upload.is_none_or(|(.., d)| took > d) {
-                    self.slowest_upload = Some((l.instance, entry.0.width, entry.0.height, took));
+                if self.slowest_upload.is_none_or(|(.., d, _)| took > d) {
+                    let made = before != Some(Arc::as_ptr(&entry.0));
+                    self.slowest_upload =
+                        Some((l.instance, entry.0.width, entry.0.height, took, made));
+                }
+                // Not shown until its first picture is in (the upload thread
+                // may be held up): a new texture holds nothing worth showing.
+                if !entry.0.is_filled() {
+                    self.uploads_waiting = true;
+                    continue;
                 }
                 layers.push(OutputLayer {
                     texture: entry.0.clone(),
@@ -2367,19 +2412,26 @@ impl App {
                             .map(|(f, _)| crate::fps::text(f))
                     });
                 if let Some(text) = reading {
-                    layers.push(Self::fps_label(
+                    let label = Self::fps_label(
                         &mut self.fps_labels,
                         gpu,
+                        self.uploader.as_ref(),
                         source,
                         &text,
                         canvas,
-                    ));
+                    );
+                    if label.texture.is_filled() {
+                        layers.push(label);
+                    } else {
+                        self.uploads_waiting = true;
+                    }
                 }
             }
             // The test pattern of the picture it shows part of, so projectors
             // can be lined up across their overlap.
             if source != id
                 && let Some((tex, ..)) = self.patterns.get(&source)
+                && tex.is_filled()
             {
                 layers.push(OutputLayer {
                     texture: tex.clone(),
@@ -2411,16 +2463,21 @@ impl App {
                     .get(&id)
                     .is_none_or(|(_, n, s, k)| *n != number || *s != size || *k != kind)
                 {
-                    let tex = LayerTexture::new_rgba(gpu, size.0, size.1);
-                    tex.upload_rgba(&gpu.queue, &pattern::render(kind, size.0, size.1, number));
-                    self.patterns
-                        .insert(id, (Arc::new(tex), number, size, kind));
+                    let tex = Arc::new(LayerTexture::new_rgba(gpu, size.0, size.1));
+                    let px = pattern::render(kind, size.0, size.1, number);
+                    upload::rgba(self.uploader.as_ref(), gpu, &tex, px);
+                    self.patterns.insert(id, (tex, number, size, kind));
                     pattern_changed = true;
                 }
             } else if self.patterns.remove(&id).is_some() {
                 pattern_changed = true;
             }
-            if let Some((tex, ..)) = self.patterns.get(&id) {
+            let pattern = self.patterns.get(&id).filter(|(tex, ..)| {
+                let filled = tex.is_filled();
+                self.uploads_waiting |= !filled;
+                filled
+            });
+            if let Some((tex, ..)) = pattern {
                 // On a display showing part of a picture, the pattern covers
                 // that part (the layer is placed on the whole picture).
                 let transform = match part {
@@ -2543,12 +2600,16 @@ impl App {
                 Some(card) => {
                     let fresh = self.play.cards.get(m).is_none_or(|(c, _)| *c != card);
                     if fresh {
-                        let tex = card_texture(gpu, &card, screen.size);
+                        let tex = card_texture(gpu, self.uploader.as_ref(), &card, screen.size);
                         self.play.cards.insert(*m, (card, tex));
                         screen.needs_redraw = true;
                     }
                     if let Some((_, tex)) = self.play.cards.get(m) {
-                        list.push(card_group(tex.clone(), screen.size));
+                        if tex.is_filled() {
+                            list.push(card_group(tex.clone(), screen.size));
+                        } else {
+                            self.uploads_waiting = true;
+                        }
                     }
                 }
                 None => {
@@ -2574,7 +2635,13 @@ impl App {
                 .find(|o| !o.is_sub_display())
                 .map(|o| o.blend.clamped())
                 .unwrap_or_default();
-            if playing || screen.needs_redraw || sent != screen.sent || blend != screen.blend {
+            // (A picture that came in since the last pass is drawn too.)
+            if playing
+                || was_waiting
+                || screen.needs_redraw
+                || sent != screen.sent
+                || blend != screen.blend
+            {
                 screen.needs_redraw = false;
                 screen.sent = sent;
                 screen.blend = blend;
@@ -2583,6 +2650,10 @@ impl App {
                 }
             }
             self.ui.screens.insert(*m, (screen.size, list));
+        }
+        // The previews in the main window show it as it comes in, too.
+        if was_waiting && let Some(ctl) = &self.control {
+            ctl.window.request_redraw();
         }
     }
 
@@ -3432,7 +3503,7 @@ impl App {
             {
                 text.push_str(&format!("; in the show engine: {n}"));
             }
-            if let Some((instance, w, h, d)) = self.slowest_upload
+            if let Some((instance, w, h, d, made)) = self.slowest_upload
                 && d >= Duration::from_millis(15)
             {
                 let name = self
@@ -3446,8 +3517,13 @@ impl App {
                         |c| format!("cue {} ({})", c.number, c.name),
                     );
                 text.push_str(&format!(
-                    "; the slowest picture was {name}'s, {w}x{h}, {} ms",
-                    d.as_millis()
+                    "; the slowest picture was {name}'s, {w}x{h}, {} ms{}",
+                    d.as_millis(),
+                    if made {
+                        " (its texture was made then)"
+                    } else {
+                        " (a frame handed to the upload thread)"
+                    }
                 ));
             }
             log::warn!("event loop stalled for {:.0} ms: {text}", dt * 1000.0);
@@ -3611,12 +3687,15 @@ impl App {
         });
         self.crumbs
             .lap("making the pictures (textures and uploads)");
-        // The uploads just made are held until something is submitted, and the
-        // windows that submit may not be drawing (a Mac stops presenting a
-        // window that is in the background): a minute of video is gigabytes.
         if let Some(gpu) = &self.gpu {
-            gpu.flush_uploads();
-            self.crumbs.lap("handing the uploads to the graphics card");
+            // The upload thread submits what it writes. Without it, the
+            // uploads just made are held until something is submitted, and the
+            // windows that submit may not be drawing (a Mac stops presenting a
+            // window that is in the background): a minute of video is gigabytes.
+            if self.uploader.is_none() {
+                gpu.flush_uploads();
+                self.crumbs.lap("handing the uploads to the graphics card");
+            }
             // For the stats log, every few seconds (the report is not free).
             if self.last_gpu_note.elapsed() >= Duration::from_secs(2) {
                 self.last_gpu_note = Instant::now();
@@ -3665,7 +3744,7 @@ impl App {
                 next = next.min(t);
             }
         }
-        if playing {
+        if playing || self.uploads_waiting {
             next = next.min(now + TICK_WHILE_PLAYING);
         }
         if let Some(t) = self.play_wake(now) {
@@ -3940,7 +4019,12 @@ fn route_outputs(
 
 /// A display computer's card (or Identify's name) as a picture the shape of
 /// its monitor: grey words in the middle of black.
-fn card_texture(gpu: &Gpu, card: &play::Card, size: (u32, u32)) -> Arc<LayerTexture> {
+fn card_texture(
+    gpu: &Gpu,
+    up: Option<&upload::Uploader>,
+    card: &play::Card,
+    size: (u32, u32),
+) -> Arc<LayerTexture> {
     let w = 1280u32;
     let h = ((w as f32 * size.1 as f32 / size.0.max(1) as f32) as u32).clamp(2, 4096);
     let mut cue = crate::show::TextCue::new(None);
@@ -3975,9 +4059,9 @@ fn card_texture(gpu: &Gpu, card: &play::Card, size: (u32, u32)) -> Arc<LayerText
             }
         }
     }
-    let tex = LayerTexture::new_rgba(gpu, img.width, img.height);
-    tex.upload_rgba(&gpu.queue, &img.data);
-    Arc::new(tex)
+    let tex = Arc::new(LayerTexture::new_rgba(gpu, img.width, img.height));
+    upload::rgba(up, gpu, &tex, img.data);
+    tex
 }
 
 /// The card over the whole of a monitor.

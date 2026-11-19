@@ -61,6 +61,7 @@ mod text;
 mod timecode;
 mod timeline;
 mod ui;
+mod upload;
 mod web;
 
 use winit::event_loop::EventLoop;
