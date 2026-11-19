@@ -43,7 +43,14 @@ pub enum NetTest {
     Report(Box<Report>),
     /// A computer to its primary: its own `newq.log` since the test began
     /// (`log_since`; at most `LOG_WHOLE`, the end kept).
-    LogTail { run: u64, text: String },
+    /// `more`: a piece, and more follow (`log_pieces`; unwritten on the last,
+    /// so a log of one piece reads as before 0.24.4).
+    LogTail {
+        run: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        more: bool,
+    },
     // ---- Every test across the network (`net::measure_local`) ----
     /// A computer to its primary: what it measured of itself (memory,
     /// processor, frame rates, dropouts) since its last such report.
@@ -140,6 +147,16 @@ pub struct Row {
     /// before 0.24.3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shown_apart_ms: Option<f64>,
+    /// Heartbeats since the last row at which the primary played something
+    /// and nothing could be compared here: this computer had not done the
+    /// commands the primary had (one lost), or had done others. A NewQ before
+    /// 0.24.4 sends none.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub uncompared: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A command as it arrived.
@@ -175,7 +192,7 @@ pub const ROW_EVERY: f64 = 0.5;
 pub const SEND_EVERY: f64 = 1.0;
 /// The most of a computer's log sent at the end of a part (bytes): its log
 /// since the test began, the end kept if longer. A display computer's log for
-/// an hour is some tens of KB; this goes as one frame, after the part.
+/// an hour is some tens of KB; this goes after the part, in pieces of `LOG_PIECE`.
 pub const LOG_WHOLE: usize = 4 * 1024 * 1024;
 /// At most this many notes of each kind in one report (a burst is cut).
 const MAX_NOTES: usize = 200;
@@ -211,7 +228,20 @@ pub struct Measurer {
     /// seen twice in a row.
     last_beat: Option<(f64, Beat)>,
     shown_apart: Option<f64>,
+    /// The clock offsets the recent heartbeats showed (their shared time,
+    /// `seen_offset`): the least of them is the one used (`SEEN_WINDOW`).
+    seen: std::collections::VecDeque<(f64, f64)>,
+    /// Heartbeats since the last row at which the primary played something
+    /// and nothing could be compared here (`unmatched`).
+    uncompared: u32,
 }
+
+/// The clock offset a heartbeat shows is the least of those of the
+/// heartbeats of the last this many seconds. A heartbeat that waited on its
+/// way (in the session behind other frames, or for the main loop here: under
+/// the network test's load, tens of ms) shows the clock later than it is,
+/// never earlier; the clock's own offset moves far slower than this.
+pub const SEEN_WINDOW: f64 = 5.0;
 
 /// How far apart each key was at a heartbeat (began, shown; ms).
 type Beat = HashMap<Key, (f64, Option<f64>)>;
@@ -277,6 +307,7 @@ impl Measurer {
         if self.run.is_none() {
             return;
         }
+        let seen = seen.map(|e| self.least_seen(theirs.time, e));
         let (pairs, compared, missing) = pairs_between(theirs, ours);
         let now: Beat = pairs
             .into_iter()
@@ -308,6 +339,30 @@ impl Measurer {
         self.missing = self.missing.max(missing);
         if let Some(a) = sound_apart_between(theirs, ours) {
             self.sound_apart = Some(self.sound_apart.map_or(a, |w: f64| w.max(a)));
+        }
+    }
+
+    /// The clock offset `seen` shown by the heartbeat made at `at` (shared
+    /// time), taken with those of the last `SEEN_WINDOW` seconds: the least.
+    /// What a heartbeat waited on its way isn't read as the screens apart.
+    fn least_seen(&mut self, at: f64, seen: f64) -> f64 {
+        // (A heartbeat from before the last: the shared clock was put back.)
+        self.seen
+            .retain(|(t, _)| *t <= at && at - *t <= SEEN_WINDOW);
+        self.seen.push_back((at, seen));
+        self.seen.iter().map(|(_, s)| *s).fold(seen, f64::min)
+    }
+
+    /// The primary's heartbeat came and couldn't be compared here (this
+    /// computer hasn't done the commands it had, or has done others): if
+    /// something played there, the row says so (`Row::uncompared`).
+    pub fn unmatched(&mut self, theirs: &PlayState) {
+        if self.run.is_none() {
+            return;
+        }
+        if theirs.cues.iter().any(|c| !c.stopping) || theirs.runs.iter().any(|r| r.anchor.is_some())
+        {
+            self.uncompared += 1;
         }
     }
 
@@ -386,6 +441,7 @@ impl Measurer {
             missing: std::mem::take(&mut self.missing),
             sound_apart_ms: self.sound_apart.take().map(round2),
             shown_apart_ms: self.shown_apart.take().map(round2),
+            uncompared: std::mem::take(&mut self.uncompared),
         };
         if self.pending.rows.len() < MAX_NOTES {
             self.pending.rows.push(row);
@@ -462,8 +518,10 @@ pub fn apart_between(theirs: &PlayState, ours: &PlayState) -> (Option<f64>, u32,
 /// This computer's shared clock less the primary's, as a heartbeat shows it:
 /// made at the primary's shared time `theirs`, taken in here at `here` by
 /// this computer's shared clock, after a way of about half the round trip
-/// `rtt` (seconds). The heartbeat's own waits (to be sent, to be read here)
-/// count as clock error, so it errs towards "apart".
+/// `rtt` (seconds: the shortest recent, `ClockHandle::best_rtt`, the way with
+/// no wait). The heartbeat's own waits (to be sent, to be read here) make it
+/// larger, never smaller: `Measurer::heartbeat` takes the least of the last
+/// `SEEN_WINDOW` seconds.
 pub fn seen_offset(here: f64, theirs: f64, rtt: Option<f64>) -> f64 {
     here - theirs - rtt.unwrap_or(0.0).max(0.0) / 2.0
 }
@@ -557,44 +615,101 @@ pub fn correction_ms(words: &str) -> Option<f64> {
     None
 }
 
-/// Where a computer's log for a test begins: the size of `newq.log` when the
+/// A place in `newq.log`: how long it was, and which file it was (a hash of
+/// its first `head_len` bytes: each file the log writer begins starts with
+/// its own time), so that after the log was put aside (`newq.earlier.log`)
+/// the place is still found, whatever the size of the new file.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LogAt {
+    pub len: u64,
+    head: u64,
+    head_len: u32,
+}
+
+/// Bytes of a log's start that tell its files apart.
+const HEAD: usize = 256;
+
+impl LogAt {
+    /// `len` bytes into a log not otherwise known (the tests' own logs).
+    #[cfg(test)]
+    pub fn at(len: u64) -> LogAt {
+        LogAt {
+            len,
+            ..LogAt::default()
+        }
+    }
+
+    /// The end of the file at `path` now.
+    pub fn of(path: &Path) -> LogAt {
+        let len = std::fs::metadata(path).map_or(0, |m| m.len());
+        let head = head_of(path, HEAD.min(len as usize));
+        LogAt {
+            len,
+            head: head.map_or(0, |(h, _)| h),
+            head_len: head.map_or(0, |(_, n)| n),
+        }
+    }
+
+    /// Whether the file at `path` is the one this place is in (None: not
+    /// known, the file was empty).
+    fn is_in(&self, path: &Path) -> Option<bool> {
+        if self.head_len == 0 {
+            return None;
+        }
+        Some(head_of(path, self.head_len as usize) == Some((self.head, self.head_len)))
+    }
+}
+
+/// An FNV hash of the first `n` bytes of the file at `path` (None: it has
+/// fewer, or can't be read).
+fn head_of(path: &Path, n: usize) -> Option<(u64, u32)> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    std::fs::File::open(path).ok()?.read_exact(&mut buf).ok()?;
+    let h = buf.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    Some((h, n as u32))
+}
+
+/// Where a computer's log for a test begins: where `newq.log` was when the
 /// test's first part began here, kept for the parts that follow (the
 /// primary's `NetTest::Whole`). A test of one part: where it began.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LogMark {
-    /// The run that began last, and the log's size then.
-    began: Option<(u64, u64)>,
-    /// The test of several parts, and the log's size when its first began.
-    whole: Option<(u64, u64)>,
+    /// The run that began last, and where the log was then.
+    began: Option<(u64, LogAt)>,
+    /// The test of several parts, and where the log was when its first began.
+    whole: Option<(u64, LogAt)>,
     /// The run that is a part of `whole`.
     part: Option<u64>,
 }
 
 impl LogMark {
-    /// Run `run` began, with the log `len` bytes long.
-    pub fn begin(&mut self, run: u64, len: u64) {
+    /// Run `run` began, with the log at `at`.
+    pub fn begin(&mut self, run: u64, at: LogAt) {
         if self.began.is_none_or(|(r, _)| r != run) {
-            self.began = Some((run, len));
+            self.began = Some((run, at));
         }
     }
 
     /// Run `run` (which began) is a part of test `test`.
     pub fn whole(&mut self, run: u64, test: u64) {
-        let Some((r, len)) = self.began.filter(|(r, _)| *r == run) else {
+        let Some((r, at)) = self.began.filter(|(r, _)| *r == run) else {
             return;
         };
         if self.whole.is_none_or(|(t, _)| t != test) {
-            self.whole = Some((test, len));
+            self.whole = Some((test, at));
         }
         self.part = Some(r);
     }
 
-    /// Where the log for run `run` begins (bytes into `newq.log`).
-    pub fn from(&self, run: u64) -> u64 {
+    /// Where the log for run `run` begins.
+    pub fn from(&self, run: u64) -> LogAt {
         match (self.part, self.whole, self.began) {
-            (Some(p), Some((_, len)), _) if p == run => len,
-            (_, _, Some((r, len))) if r == run => len,
-            _ => 0,
+            (Some(p), Some((_, at)), _) if p == run => at,
+            (_, _, Some((r, at))) if r == run => at,
+            _ => LogAt::default(),
         }
     }
 }
@@ -603,19 +718,28 @@ impl LogMark {
 pub const LEFT_OUT: &str =
     "(The start of this computer's log for the test is left out: there was more than is sent.)";
 
-/// `newq.log` in `dir` from `from` bytes on (after the end of
-/// `newq.earlier.log` from there, if the log was put aside since), at most
-/// `max` bytes, the end kept and then from the start of a line.
-pub fn log_since(dir: &Path, from: u64, max: usize) -> String {
+/// `newq.log` in `dir` from `from` on (after the end of `newq.earlier.log`
+/// from there, if the log was put aside since), at most `max` bytes, the end
+/// kept and then from the start of a line. Put aside twice since: both files
+/// there are, said to be cut.
+pub fn log_since(dir: &Path, from: LogAt, max: usize) -> String {
     let now = dir.join("newq.log");
+    let earlier = dir.join("newq.earlier.log");
     let len = std::fs::metadata(&now).map_or(0, |m| m.len());
-    let (mut text, mut cut) = if len < from {
-        // Put aside since: the earlier part from the mark, then all of this.
-        let (a, cut) = read_from(&dir.join("newq.earlier.log"), from, max);
-        let (b, cut_too) = read_from(&now, 0, max);
-        (a + &b, cut || cut_too)
+    // Which file the mark is in: by its first bytes where known, else by size
+    // (a file shorter than the mark is a new one).
+    let here = from.is_in(&now).unwrap_or(len >= from.len);
+    let (mut text, mut cut) = if here {
+        read_from(&now, from.len, max)
     } else {
-        read_from(&now, from, max)
+        // Put aside since: the earlier part from the mark, then all of this.
+        let (start, lost) = match from.is_in(&earlier) {
+            Some(false) => (0, true),
+            _ => (from.len, false),
+        };
+        let (a, cut) = read_from(&earlier, start, max);
+        let (b, cut_too) = read_from(&now, 0, max);
+        (a + &b, cut || cut_too || lost)
     };
     if text.len() > max {
         let mut at = text.len() - max;
@@ -632,6 +756,39 @@ pub fn log_since(dir: &Path, from: u64, max: usize) -> String {
         text.insert_str(0, &format!("{LEFT_OUT}\n"));
     }
     text
+}
+
+/// The most of a log in one `NetTest::LogTail` (bytes), as the show is sent.
+pub const LOG_PIECE: usize = 256 * 1024;
+
+/// The pieces a log goes to the primary in (`NetTest::LogTail`, `more` on all
+/// but the last), each at most `LOG_PIECE` bytes: one frame of megabytes
+/// holds the session past `hub::SILENT_FOR` on a slow link (under about
+/// 5.5 Mbit/s for 4 MB), and the primary lets the computer go, log and all.
+pub fn log_pieces(run: u64, text: String) -> Vec<NetTest> {
+    if text.len() <= LOG_PIECE {
+        return vec![NetTest::LogTail {
+            run,
+            text,
+            more: false,
+        }];
+    }
+    let mut pieces = Vec::new();
+    let mut rest = text.as_str();
+    while !rest.is_empty() {
+        let mut at = rest.len().min(LOG_PIECE);
+        while !rest.is_char_boundary(at) {
+            at -= 1;
+        }
+        let (piece, after) = rest.split_at(at);
+        rest = after;
+        pieces.push(NetTest::LogTail {
+            run,
+            text: piece.to_string(),
+            more: !rest.is_empty(),
+        });
+    }
+    pieces
 }
 
 /// The file at `path` from `from` bytes on, at most its last `max` bytes,
@@ -704,6 +861,7 @@ mod tests {
             NetTest::LogTail {
                 run: 3,
                 text: "a\nb".into(),
+                more: false,
             },
             NetTest::Report(Box::new(Report {
                 run: 3,
@@ -939,6 +1097,55 @@ mod tests {
     }
 
     #[test]
+    fn heartbeats_that_waited_on_their_way_dont_read_as_the_screens_apart() {
+        // 0.24.4's review (A4): under the network load heartbeats wait in the
+        // session and for the main loop, tens of ms now and then, and every
+        // wait read as the clock (and so the screens) that far off.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        let theirs = state(&[(1, 10.0)], None);
+        let ours = state(&[(1, 10.0)], None);
+        let mut t = 20.0;
+        for n in 0..40 {
+            // In step, clocks the same; every other heartbeat waits 30-60 ms.
+            let wait = if n % 2 == 1 {
+                0.030 + 0.001 * f64::from(n)
+            } else {
+                0.0
+            };
+            let seen = seen_offset(t + 0.001 + wait, t, Some(0.002));
+            m.heartbeat(&at(theirs.clone(), t), &at(ours.clone(), t), Some(seen));
+            t += 0.25;
+        }
+        let r = row(&mut m, t);
+        assert!(r.shown_apart_ms.is_some_and(|a| a < 1.0), "{r:?}");
+        // A clock that is wrong stays wrong in every heartbeat: still seen.
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        for n in 0..40 {
+            let wait = if n % 2 == 1 { 0.045 } else { 0.0 };
+            let seen = seen_offset(t + 0.041 + wait, t, Some(0.002));
+            m.heartbeat(&at(theirs.clone(), t), &at(ours.clone(), t), Some(seen));
+            t += 0.25;
+        }
+        assert_eq!(row(&mut m, t).shown_apart_ms, Some(40.0));
+    }
+
+    #[test]
+    fn a_heartbeat_that_cant_be_compared_while_the_primary_plays_is_counted() {
+        let mut m = Measurer::default();
+        m.begin(1, 0.0);
+        m.unmatched(&at(state(&[], None), 10.0));
+        assert_eq!(row(&mut m, 10.1).uncompared, 0, "nothing played there");
+        m.unmatched(&at(state(&[(1, 9.0)], None), 10.25));
+        m.unmatched(&at(state(&[], Some(5.0)), 10.5));
+        assert_eq!(row(&mut m, 10.7).uncompared, 2);
+        // Not written when none (an older NewQ reads the row as before).
+        let json = serde_json::to_string(&Row::default()).unwrap();
+        assert!(!json.contains("uncompared"), "{json}");
+    }
+
+    #[test]
     fn a_difference_at_one_heartbeat_alone_is_not_counted() {
         // 0.24.2's timeline test: a loop going round (6 s) between the
         // primary's heartbeat and the look here read as 990 frames apart.
@@ -977,39 +1184,98 @@ mod tests {
     #[test]
     fn a_tests_log_goes_back_to_its_first_part_and_the_log_put_aside_is_read() {
         let mut k = LogMark::default();
-        assert_eq!(k.from(1), 0);
+        let from = |k: &LogMark, run| k.from(run).len;
+        assert_eq!(from(&k, 1), 0);
         // A test of one part: from where it began.
-        k.begin(1, 100);
-        k.begin(1, 150);
-        assert_eq!(k.from(1), 100);
+        k.begin(1, LogAt::at(100));
+        k.begin(1, LogAt::at(150));
+        assert_eq!(from(&k, 1), 100);
         // Parts of one test: each from where the first began.
-        k.begin(2, 500);
+        k.begin(2, LogAt::at(500));
         k.whole(2, 77);
-        assert_eq!(k.from(2), 500);
-        k.begin(3, 900);
+        assert_eq!(from(&k, 2), 500);
+        k.begin(3, LogAt::at(900));
         k.whole(3, 77);
-        assert_eq!(k.from(3), 500);
+        assert_eq!(from(&k, 3), 500);
         // Another test starts afresh.
-        k.begin(4, 1200);
+        k.begin(4, LogAt::at(1200));
         k.whole(4, 78);
-        assert_eq!(k.from(4), 1200);
-        k.begin(5, 1300);
-        assert_eq!(k.from(5), 1300, "alone, no Whole");
+        assert_eq!(from(&k, 4), 1200);
+        k.begin(5, LogAt::at(1300));
+        assert_eq!(from(&k, 5), 1300, "alone, no Whole");
 
         let dir = std::env::temp_dir().join(format!("newq_since_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("newq.log"), "a\nb\nc\n").unwrap();
-        assert_eq!(log_since(&dir, 2, 1000), "b\nc\n");
+        assert_eq!(log_since(&dir, LogAt::at(2), 1000), "b\nc\n");
         // Put aside since the mark: the earlier part from it, then the new.
         std::fs::write(dir.join("newq.earlier.log"), "0123456789\nx\n").unwrap();
         std::fs::write(dir.join("newq.log"), "new\n").unwrap();
-        assert_eq!(log_since(&dir, 11, 1000), "x\nnew\n");
+        assert_eq!(log_since(&dir, LogAt::at(11), 1000), "x\nnew\n");
         // Too long: the end, from a line, said.
         let long: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(dir.join("newq.log"), &long).unwrap();
-        let t = log_since(&dir, 0, 60);
+        let t = log_since(&dir, LogAt::default(), 60);
         assert!(t.starts_with("(The start of this computer's log"), "{t}");
         assert!(t.ends_with("line 99\n") && t.contains("\nline "), "{t}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_since_the_mark_is_found_after_it_was_put_aside_and_the_new_one_grew() {
+        // 0.24.4's review (C9): put aside since the mark and grown past it,
+        // the new file was read from the old file's offset.
+        let dir = std::env::temp_dir().join(format!("newq_rotated_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("newq.log");
+        std::fs::write(&log, "10:00 first file begins\nbefore\n").unwrap();
+        let mark = LogAt::of(&log);
+        assert_eq!(log_since(&dir, mark, 1000), "");
+        let mut first = std::fs::read_to_string(&log).unwrap();
+        first.push_str("during 1\n");
+        std::fs::write(&log, &first).unwrap();
+        // Put aside; the new file is soon longer than the mark.
+        std::fs::rename(&log, dir.join("newq.earlier.log")).unwrap();
+        let second = "10:05 second file begins\nduring 2\nduring 3 and a long line\n";
+        assert!(second.len() as u64 > mark.len);
+        std::fs::write(&log, second).unwrap();
+        assert_eq!(log_since(&dir, mark, 1000), format!("during 1\n{second}"));
+        // Put aside twice: what there is, said to be cut.
+        std::fs::rename(&log, dir.join("newq.earlier.log")).unwrap();
+        std::fs::write(&log, "10:09 third\nduring 4\n").unwrap();
+        let t = log_since(&dir, mark, 1000);
+        assert!(t.starts_with(LEFT_OUT) && t.ends_with("during 4\n"), "{t}");
+        assert!(t.contains("during 3"), "{t}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_log_goes_in_pieces_that_join_up_and_a_short_one_as_before() {
+        let short = log_pieces(4, "a\nb\n".into());
+        assert_eq!(
+            short,
+            vec![NetTest::LogTail {
+                run: 4,
+                text: "a\nb\n".into(),
+                more: false
+            }]
+        );
+        // As an older primary reads it: no `more`.
+        let json = serde_json::to_string(&short[0]).unwrap();
+        assert!(!json.contains("more"), "{json}");
+        let long: String = (0..60_000).map(|i| format!("línea {i}\n")).collect();
+        let pieces = log_pieces(4, long.clone());
+        assert!(pieces.len() >= 3);
+        let mut joined = String::new();
+        for (n, p) in pieces.iter().enumerate() {
+            let NetTest::LogTail { text, more, .. } = p else {
+                panic!("{p:?}")
+            };
+            assert!(text.len() <= LOG_PIECE);
+            assert_eq!(*more, n + 1 < pieces.len());
+            joined.push_str(text);
+        }
+        assert_eq!(joined, long);
     }
 }

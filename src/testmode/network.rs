@@ -69,6 +69,14 @@ pub fn is_test_show(show: &Show) -> bool {
     show.name == SHOW_NAME
 }
 
+/// Whether `show` is any test's (this one's, or one Test Mode makes from the
+/// user's show: "Test Mode: Short", "Test Mode: full check" and so on): a
+/// follower measuring for a test stops when its primary's own show comes
+/// back in its place.
+pub fn is_any_test_show(show: &Show) -> bool {
+    is_test_show(show) || show.name.starts_with("Test Mode: ")
+}
+
 /// Why the network test can't start here, if it can't: it runs on a primary
 /// with at least one computer in step.
 pub fn refusal(st: &UiState) -> Option<String> {
@@ -985,7 +993,7 @@ pub fn finish(
     if !run.fleet.computers.is_empty() {
         report.push_str("\nEach computer's own log\n");
         for c in run.fleet.computers.values() {
-            report.push_str(&format!("  {}\n", c.log_words()));
+            report.push_str(&format!("  {}\n", c.log_words(&run.fleet.log_path(c.id))));
         }
         report
             .push_str("  (A display computer makes no zip of its own: its log comes back here.)\n");

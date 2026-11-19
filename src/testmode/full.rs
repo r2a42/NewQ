@@ -361,28 +361,30 @@ pub fn launch(
     show: &mut Show,
     engine: &mut Engine,
     st: &mut UiState,
-) -> Result<FullRun, String> {
+) -> Result<FullRun, super::session::NotLaunched> {
+    use super::session::NotLaunched;
     let (stash, plan) = match placed {
         Some((stash, plan)) => (Some(stash), plan),
         None => {
             if let Some(why) = st.test_refusal() {
-                return Err(why);
+                return Err(NotLaunched::refused(why));
             }
             (None, plan_for(&prep, &media, show, st, false))
         }
     };
     let folder = prep.folder.clone();
-    let stats = StatsLog::create(
+    let stats = match StatsLog::create(
         &folder.join("stats.csv"),
         Duration::from_secs(2),
         prep.log_dir.join("newq.log"),
-    )
-    .map_err(|e| {
-        format!(
-            "Can't write the test's log in {}: {e}. Nothing was changed.",
-            folder.display()
-        )
-    })?;
+    ) {
+        Ok(s) => s,
+        // The user's show, if it was put aside, goes back with the reason.
+        Err(e) => {
+            let e = format!("Can't write the test's log in {}: {e}", folder.display());
+            return Err(NotLaunched::new(e, stash));
+        }
+    };
     let events = std::fs::File::create(folder.join("events.log"))
         .ok()
         .map(std::io::BufWriter::new);

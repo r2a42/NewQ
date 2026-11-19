@@ -3806,6 +3806,9 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // A test ended by the quit told the computers so (`End`): sent before
+        // the show network closes, or they would measure on, muted.
+        self.net_test_flush();
         // Let every stream finish what it has been given, so a recording's file
         // is closed (a MOV or MP4 cut off before that cannot be played). Each
         // is bounded (`CaptureThread::stop`), and they stop together.

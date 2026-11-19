@@ -66,7 +66,16 @@ pub struct TestMode {
     /// That test's id, for the computers of a show network (`Fleet::test`):
     /// each sends its log from the first part on. 0: a test of one part.
     test_id: u64,
+    /// The runs across the network that have ended (the last few), and when
+    /// each computer still reporting for one was last told so again
+    /// (`end_again`).
+    ended_runs: Vec<u64>,
+    end_said: HashMap<(crate::net::node::NodeId, u64), f64>,
 }
+
+/// A computer still reporting for a run that ended is told it is over again
+/// this often (seconds of shared time): its `End` was lost.
+const END_AGAIN: f64 = 2.0;
 
 impl Default for TestMode {
     fn default() -> TestMode {
@@ -87,6 +96,8 @@ impl Default for TestMode {
             fleet: None,
             seq: None,
             test_id: 0,
+            ended_runs: Vec::new(),
+            end_said: HashMap::new(),
         }
     }
 }
@@ -1119,6 +1130,7 @@ impl TestMode {
         st.test_carry.keep = self.seq.as_ref().is_some_and(|s| s.more_follow());
         st.test_carry.parts_run = self.seq.is_some();
         let mut inbox = std::mem::take(&mut self.net_in);
+        self.end_again(&inbox, now);
         // A test across the show network: what the computers sent, and
         // telling one that came back to measure.
         if let Some(f) = &mut self.fleet {
@@ -1146,6 +1158,20 @@ impl TestMode {
         }
         self.update_phase(show, engine, st, now, inbox);
         self.sequence_step(show, engine, st);
+        let ended = self
+            .fleet
+            .as_deref()
+            .into_iter()
+            .chain(match &self.phase {
+                Phase::Network(r) => Some(&r.fleet),
+                _ => None,
+            })
+            .filter(|f| f.ended.is_some())
+            .map(|f| f.run)
+            .collect::<Vec<_>>();
+        for run in ended {
+            self.note_ended(run);
+        }
         if let Some(f) = &mut self.fleet {
             self.net_out.append(&mut f.out);
             let said = std::mem::take(&mut f.said);
@@ -1218,7 +1244,11 @@ impl TestMode {
                     Then::Level { prep, built } => {
                         match launch(*prep, Some((stash, *built)), show, engine, st) {
                             Ok(run) => self.phase = Phase::Running(Box::new(run)),
-                            Err(e) => self.notice = Some(e),
+                            Err(e) => {
+                                let why = self.not_launched(e, show, engine, st, now).words(true);
+                                log::error!("test mode: {why}");
+                                self.notice = Some(why);
+                            }
                         }
                     }
                     Then::Full { prep, media, plan } => {
@@ -1233,8 +1263,10 @@ impl TestMode {
                         ) {
                             Ok(run) => self.phase = Phase::Full(Box::new(run)),
                             Err(e) => {
+                                let why = self.not_launched(e, show, engine, st, now).why;
+                                log::error!("test mode: the full check could not start: {why}");
                                 self.phase = Phase::Done(Box::new(super::full::could_not_start(
-                                    &folder, &log_dir, &e,
+                                    &folder, &log_dir, &why,
                                 )));
                             }
                         }
@@ -1389,6 +1421,7 @@ impl TestMode {
                 match launch(*p, None, show, engine, st) {
                     Ok(run) => self.phase = Phase::Running(Box::new(run)),
                     Err(e) => {
+                        let e = e.words(false);
                         log::error!("test mode: {e}");
                         self.notice = Some(e);
                     }
@@ -1471,8 +1504,9 @@ impl TestMode {
                     );
                     return;
                 }
-                let launched =
-                    made.and_then(|media| super::full::launch(*p, media, None, show, engine, st));
+                let launched = made.and_then(|media| {
+                    super::full::launch(*p, media, None, show, engine, st).map_err(|e| e.why)
+                });
                 match launched {
                     Ok(run) => self.phase = Phase::Full(Box::new(run)),
                     Err(e) => {
@@ -1588,6 +1622,70 @@ impl TestMode {
             }
             other => self.phase = other,
         }
+    }
+
+    /// Run `run` across the network is over (the last few are kept).
+    fn note_ended(&mut self, run: u64) {
+        if !self.ended_runs.contains(&run) {
+            self.ended_runs.push(run);
+            if self.ended_runs.len() > 8 {
+                self.ended_runs.remove(0);
+            }
+        }
+    }
+
+    /// A computer still reporting for a run that is over (its `End` was lost:
+    /// a blip at the end, or the primary closing) is told so again, now and
+    /// then, or it would measure on (muted, under the network load) for hours.
+    fn end_again(
+        &mut self,
+        inbox: &[(crate::net::node::NodeId, crate::net::measure::NetTest)],
+        now: f64,
+    ) {
+        use crate::net::measure::NetTest;
+        for (from, m) in inbox {
+            let run = match m {
+                NetTest::Report(r) if !r.last => r.run,
+                NetTest::Local(r) if !r.last => r.run,
+                _ => continue,
+            };
+            if !self.ended_runs.contains(&run) {
+                continue;
+            }
+            let said = self.end_said.get(&(*from, run)).copied();
+            if said.is_none_or(|t| now - t >= END_AGAIN || now < t) {
+                log::info!(
+                    "test mode: a computer still measures run {run}, which is over: told again"
+                );
+                self.end_said.insert((*from, run), now);
+                self.net_out.push((Some(*from), NetTest::End { run }));
+            }
+        }
+        self.end_said
+            .retain(|(_, r), _| self.ended_runs.contains(r));
+    }
+
+    /// A test across the show network that could not start after it was
+    /// spread (its folder or log couldn't be made): the user's show back here
+    /// (and so everywhere), and the computers, told to measure a moment ago,
+    /// told it is over. What is left says why.
+    fn not_launched(
+        &mut self,
+        mut e: NotLaunched,
+        show: &mut Show,
+        engine: &mut Engine,
+        st: &mut UiState,
+        now: f64,
+    ) -> NotLaunched {
+        if let Some(stash) = e.stash.take() {
+            st.end_test(show, engine, *stash);
+        }
+        if let Some(mut f) = self.fleet.take() {
+            f.end(now);
+            self.net_out.append(&mut f.out);
+            self.note_ended(f.run);
+        }
+        e
     }
 
     /// Put a test's show in place and send it, with its media, to the
@@ -1787,6 +1885,49 @@ fn compare_done(
     }
 }
 
+/// A test that could not start: why, and the user's show if it had been put
+/// aside for it (across a show network), so that it is never dropped with
+/// the error: the caller puts it back (`TestMode::not_launched`).
+pub struct NotLaunched {
+    /// Why, in a sentence without its full stop.
+    pub why: String,
+    pub stash: Option<Box<TestStash>>,
+    /// It was refused before anything was done (`why` says all).
+    refused: bool,
+}
+
+impl NotLaunched {
+    /// It went wrong on the way (`e`), with the show put aside or not.
+    pub fn new(why: String, stash: Option<TestStash>) -> NotLaunched {
+        NotLaunched {
+            why,
+            stash: stash.map(Box::new),
+            refused: false,
+        }
+    }
+
+    /// It was refused before anything was done.
+    pub fn refused(why: String) -> NotLaunched {
+        NotLaunched {
+            why,
+            stash: None,
+            refused: true,
+        }
+    }
+
+    /// Why, and that nothing was changed (`across`: on any computer).
+    pub fn words(&self, across: bool) -> String {
+        match (self.refused, across) {
+            (true, _) => self.why.clone(),
+            (false, true) => format!(
+                "{}. Your show is back on every computer; nothing was changed.",
+                self.why
+            ),
+            (false, false) => format!("{}. Nothing was changed.", self.why),
+        }
+    }
+}
+
 /// Start a test; `placed`, across a show network, is the user's show put
 /// aside and the test show already in place.
 fn launch(
@@ -1795,37 +1936,40 @@ fn launch(
     show: &mut Show,
     engine: &mut Engine,
     st: &mut UiState,
-) -> Result<Run, String> {
+) -> Result<Run, NotLaunched> {
     let resolved = prep.fetch.status.lock().resolved.clone();
     let (stash, built) = match placed {
         Some((stash, built)) => (Some(stash), built),
         None => {
             if let Some(why) = st.test_refusal() {
-                return Err(why);
+                return Err(NotLaunched::refused(why));
             }
             (None, build(&prep, show, false))
         }
     };
     let name = prep.flavour.name(prep.level);
     let folder = run_folder(&prep.log_dir, prep.level, prep.flavour, unix_now());
-    std::fs::create_dir_all(&folder).map_err(|e| {
-        format!(
-            "Can't make the folder for the test's log files ({}): {e}. Nothing was changed.",
-            folder.display()
-        )
-    })?;
     let log_path = prep.log_dir.join("newq.log");
-    let stats = StatsLog::create(
-        &folder.join("stats.csv"),
-        Duration::from_secs(prep.level.stats_every()),
-        log_path.clone(),
-    )
-    .map_err(|e| {
-        format!(
-            "Can't write the test's log in {}: {e}. Nothing was changed.",
-            folder.display()
-        )
-    })?;
+    let made = std::fs::create_dir_all(&folder)
+        .map_err(|e| {
+            format!(
+                "Can't make the folder for the test's log files ({}): {e}",
+                folder.display()
+            )
+        })
+        .and_then(|()| {
+            StatsLog::create(
+                &folder.join("stats.csv"),
+                Duration::from_secs(prep.level.stats_every()),
+                log_path.clone(),
+            )
+            .map_err(|e| format!("Can't write the test's log in {}: {e}", folder.display()))
+        });
+    let stats = match made {
+        Ok(s) => s,
+        // The user's show, if it was put aside, goes back with the reason.
+        Err(e) => return Err(NotLaunched::new(e, stash)),
+    };
     let open = |name: &str| {
         std::fs::File::create(folder.join(name))
             .ok()

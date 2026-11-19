@@ -34,6 +34,9 @@ use std::time::{Duration, Instant};
 
 /// A computer silent this long is said in the window to be away (s).
 pub const AWAY_SECS: f64 = 3.0;
+/// Every computer is told to measure again this often while a test plays
+/// (seconds): it keeps measuring as long (`app::play::MEASURE_AT_MOST`).
+pub const BEGIN_AGAIN: f64 = 60.0;
 /// After the end, the computers' last reports are waited for this long (s).
 pub const ENDING_LIMIT: f64 = 8.0;
 /// How long the media may take to reach every computer before the test gives up.
@@ -276,18 +279,21 @@ pub struct Computer {
     watched: Watched,
     pub media: MediaState,
     pub log_tail: Option<String>,
+    /// Its log's pieces so far (`NetTest::LogTail` with `more`).
+    log_coming: String,
+    /// It reads `NetTest::Whole` (0.24.3 and later: 0.24.2 closes the
+    /// session at a message it doesn't know).
+    whole_ok: bool,
     finding_log: FindingLog,
 }
 
 impl Computer {
-    /// Where its log is in the zip, in a sentence (the report's).
-    pub fn log_words(&self) -> String {
+    /// Where its log is in the zip (`path`: `Fleet::log_path`), in a
+    /// sentence (the report's).
+    pub fn log_words(&self, path: &str) -> String {
         let name = &self.notes.name;
         if self.log_tail.is_some() {
-            format!(
-                "{name}'s own log is in this zip: {} (all of it since the test began)",
-                log_path(name)
-            )
+            format!("{name}'s own log is in this zip: {path} (all of it since the test began)")
         } else {
             format!(
                 "{name}'s own log did not come back: it is newq.log in NewQ's log folder on {name} (Settings ▸ General ▸ Recovery and logs shows where)"
@@ -304,6 +310,8 @@ impl Computer {
             watched: Watched::default(),
             media: MediaState::Waiting,
             log_tail: None,
+            log_coming: String::new(),
+            whole_ok: false,
             finding_log: FindingLog::default(),
         }
     }
@@ -389,6 +397,7 @@ impl Fleet {
             .filter(|p| p.ours && p.connected)
             .map(|p| {
                 let mut c = Computer::new(p.id, &p.name);
+                c.whole_ok = takes_whole(&p.version);
                 if let Some(s) = &p.status {
                     c.notes.link = s.link;
                     // (Frames are counted at the slowest screen.)
@@ -636,8 +645,11 @@ impl Fleet {
             },
         ));
         if self.test != 0 {
+            // Not to a NewQ that can't read it (`takes_whole`).
             let test = self.test;
-            self.out.push((None, NetTest::Whole { run, test }));
+            for (id, _) in self.computers.iter().filter(|(_, c)| c.whole_ok) {
+                self.out.push((Some(*id), NetTest::Whole { run, test }));
+            }
         }
         if self.muted {
             self.out.push((None, NetTest::Mute { run, muted: true }));
@@ -680,10 +692,14 @@ impl Fleet {
                 .get(&p.id)
                 .and_then(|c| c.last_heard)
                 .is_none_or(|h| now - h > AWAY_SECS);
-            if quiet && told.is_none_or(|t| now - t > AWAY_SECS) {
+            // Again now and then to every computer: a follower stops
+            // measuring by itself when it hasn't heard it for hours (a part
+            // of a Long test is longer).
+            let again = told.is_none_or(|t| now - t > BEGIN_AGAIN);
+            if again || (quiet && told.is_none_or(|t| now - t > AWAY_SECS)) {
                 self.told.insert(p.id, now);
                 self.out.push((Some(p.id), begin.clone()));
-                if self.test != 0 {
+                if self.test != 0 && takes_whole(&p.version) {
                     let test = self.test;
                     self.out.push((Some(p.id), NetTest::Whole { run, test }));
                 }
@@ -764,9 +780,15 @@ impl Fleet {
                 }
                 c.local.take(*r);
             }
-            NetTest::LogTail { run, text } if run == self.run => {
-                c.notes.log_tail = true;
-                c.log_tail = Some(text);
+            NetTest::LogTail { run, text, more } if run == self.run => {
+                // In pieces (`measure::log_pieces`), at most a log's worth.
+                if c.log_coming.len() + text.len() <= 2 * crate::net::measure::LOG_WHOLE {
+                    c.log_coming.push_str(&text);
+                }
+                if !more {
+                    c.notes.log_tail = true;
+                    c.log_tail = Some(std::mem::take(&mut c.log_coming));
+                }
             }
             _ => {}
         }
@@ -979,7 +1001,35 @@ impl Fleet {
 
     /// Each computer's verdict over a test `secs` long.
     pub fn verdicts(&self, secs: f64) -> Vec<ComputerVerdict> {
-        self.computers.values().map(|c| c.verdict(secs)).collect()
+        self.computers
+            .values()
+            .map(|c| {
+                let mut v = c.verdict(secs);
+                v.log = c.log_tail.is_some().then(|| self.log_path(c.id));
+                v
+            })
+            .collect()
+    }
+
+    /// Where computer `id`'s own log goes in the test's folder and zip:
+    /// `computers/<name>/newq.log`, with a short id after the name where
+    /// another computer's name makes the same folder (ignoring case, as a Mac
+    /// or Windows does). The same in every part of a test (`sequence::gather`
+    /// keeps the longest of each).
+    pub fn log_path(&self, id: NodeId) -> String {
+        let name = self
+            .computers
+            .get(&id)
+            .map_or_else(|| id.short(), |c| c.notes.name.clone());
+        let folder = file_name(&name);
+        let shared = self.computers.iter().any(|(other, c)| {
+            *other != id && file_name(&c.notes.name).to_lowercase() == folder.to_lowercase()
+        });
+        if shared {
+            format!("{COMPUTERS}/{folder}-{}/newq.log", id.short())
+        } else {
+            log_path(&name)
+        }
     }
 
     /// Findings that were shown along the way and had gone by the end.
@@ -1017,7 +1067,7 @@ impl Fleet {
                 let _ = writeln!(s, "    {}", v.headline);
             }
             if let Some(c) = self.computers.values().find(|c| c.notes.name == v.name) {
-                let _ = writeln!(s, "    {}", c.log_words());
+                let _ = writeln!(s, "    {}", c.log_words(&self.log_path(c.id)));
             }
             for l in &v.lines {
                 let _ = writeln!(s, "    {l}");
@@ -1046,7 +1096,7 @@ impl Fleet {
         let _ = std::fs::write(folder.join("computers.txt"), computers_text(net));
         for c in self.computers.values() {
             if let Some(t) = &c.log_tail {
-                let path = folder.join(log_path(&c.notes.name));
+                let path = folder.join(self.log_path(c.id));
                 if let Some(dir) = path.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
@@ -1148,16 +1198,34 @@ pub fn log_path(name: &str) -> String {
 /// The folder of a test's folder that holds the computers' logs.
 pub const COMPUTERS: &str = "computers";
 
+/// A computer's name as a folder's: letters and digits of any script kept
+/// ("Bühne", "舞台"), the rest `_` (a name of none: "computer").
 fn file_name(name: &str) -> String {
-    name.chars()
+    let s: String = name
+        .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' {
+            if ch.is_alphanumeric() || ch == '-' {
                 ch
             } else {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if s.chars().all(|c| c == '_') {
+        "computer".into()
+    } else {
+        s
+    }
+}
+
+/// Whether a NewQ of `version` reads `NetTest::Whole` (0.24.3 on; 0.24.2
+/// knew no `Unknown` and closed the session at it, so a test of several
+/// parts dropped its session over and over).
+pub fn takes_whole(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let n: Vec<u64> = core.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    let at = |i: usize| n.get(i).copied().unwrap_or(0);
+    (at(0), at(1), at(2)) >= (0, 24, 3)
 }
 
 pub fn megabytes(b: u64) -> String {
@@ -1424,6 +1492,141 @@ mod tests {
             report.contains("Left: never connected for the load"),
             "{report}"
         );
+    }
+
+    fn peer_of(id: u64, name: &str, version: &str) -> crate::net::hub::PeerView {
+        crate::net::hub::PeerView {
+            id: NodeId(id),
+            name: name.into(),
+            version: version.into(),
+            ours: true,
+            connected: true,
+            ..Default::default()
+        }
+    }
+
+    fn st_with(peers: Vec<crate::net::hub::PeerView>) -> UiState {
+        let mut st = UiState::default();
+        st.net = std::sync::Arc::new(NetView {
+            peers,
+            ..Default::default()
+        });
+        st
+    }
+
+    #[test]
+    fn whole_goes_only_to_a_newq_that_reads_it() {
+        // 0.24.4's review (A2): 0.24.2 has no catch-all, so `Whole` closed its
+        // session, and a test of several parts dropped it over and over.
+        assert!(!takes_whole("0.24.2") && !takes_whole("0.23.9") && !takes_whole(""));
+        assert!(takes_whole("0.24.3") && takes_whole("0.24.4-rc1") && takes_whole("1.0.0"));
+        let st = st_with(vec![
+            peer_of(2, "Old", "0.24.2"),
+            peer_of(3, "New", crate::net::proto::VERSION),
+        ]);
+        let mut f = Fleet::new(&st, Vec::new(), false);
+        f.test = 77;
+        f.begin(1.0);
+        let wholes: Vec<Option<NodeId>> = f
+            .out
+            .iter()
+            .filter(|(_, m)| matches!(m, NetTest::Whole { .. }))
+            .map(|(to, _)| *to)
+            .collect();
+        assert_eq!(wholes, vec![Some(NodeId(3))]);
+        assert!(
+            f.out
+                .iter()
+                .any(|(to, m)| to.is_none() && matches!(m, NetTest::Begin { .. }))
+        );
+        // Told again (each computer quiet): still not to the old one.
+        f.out.clear();
+        f.keep_up(&st, 10.0);
+        let again: Vec<Option<NodeId>> = f
+            .out
+            .iter()
+            .filter(|(_, m)| matches!(m, NetTest::Whole { .. }))
+            .map(|(to, _)| *to)
+            .collect();
+        assert_eq!(again, vec![Some(NodeId(3))]);
+    }
+
+    #[test]
+    fn every_computer_is_told_to_measure_again_now_and_then() {
+        // 0.24.4's review (C4): a follower gave up measuring after 3 h; a
+        // Long part is longer. Told again, it keeps going as long as it plays.
+        let st = st_with(vec![peer_of(2, "Left", crate::net::proto::VERSION)]);
+        let mut f = Fleet::new(&st, Vec::new(), false);
+        f.begin(100.0);
+        let report = |f: &mut Fleet, now: f64| {
+            let r = crate::net::measure::Report {
+                run: f.run,
+                seq: 1,
+                ..Default::default()
+            };
+            f.take(NodeId(2), NetTest::Report(Box::new(r)), now, &st.net);
+        };
+        let begins = |f: &Fleet| {
+            f.out
+                .iter()
+                .filter(|(_, m)| matches!(m, NetTest::Begin { .. }))
+                .count()
+        };
+        f.out.clear();
+        let mut now = 100.0;
+        while now < 100.0 + 3.0 * BEGIN_AGAIN {
+            report(&mut f, now);
+            f.keep_up(&st, now);
+            now += 1.0;
+        }
+        assert!((2..=3).contains(&begins(&f)), "{:?}", f.out);
+    }
+
+    #[test]
+    fn two_computers_of_one_name_keep_their_own_logs_and_names_stay_readable() {
+        let st = st_with(vec![
+            peer_of(0x1111_2222_3333_4444, "Stage", "0.24.4"),
+            peer_of(0x5555_6666_7777_8888, "stage", "0.24.4"),
+            peer_of(9, "Bühne 2", "0.24.4"),
+            peer_of(10, "???", "0.24.4"),
+        ]);
+        let mut f = Fleet::new(&st, Vec::new(), false);
+        let a = f.log_path(NodeId(0x1111_2222_3333_4444));
+        let b = f.log_path(NodeId(0x5555_6666_7777_8888));
+        assert_ne!(a.to_lowercase(), b.to_lowercase());
+        assert!(
+            a.starts_with("computers/Stage-") && b.starts_with("computers/stage-"),
+            "{a} {b}"
+        );
+        assert_eq!(f.log_path(NodeId(9)), "computers/Bühne_2/newq.log");
+        assert_eq!(f.log_path(NodeId(10)), "computers/computer/newq.log");
+        // Their logs, in pieces, each to its own folder.
+        let run = f.run;
+        for (id, text) in [
+            (0x1111_2222_3333_4444, "first"),
+            (0x5555_6666_7777_8888, "second"),
+        ] {
+            let long = text.repeat(200_000);
+            for p in crate::net::measure::log_pieces(run, long) {
+                f.take(NodeId(id), p, 1.0, &st.net);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("newq_fleet_logs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        f.write(&dir, &st.net);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&a)).unwrap(),
+            "first".repeat(200_000)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&b)).unwrap(),
+            "second".repeat(200_000)
+        );
+        let v = f.verdicts(60.0);
+        let logs: Vec<Option<&str>> = v.iter().map(|v| v.log.as_deref()).collect();
+        assert_eq!(logs.iter().filter(|l| l.is_some()).count(), 2, "{logs:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

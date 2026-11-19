@@ -36,10 +36,13 @@ pub const LATE_FRAMES_NOTE: u32 = 20;
 pub const GAP_SECS: f64 = 3.0;
 /// The clock may still be settling for this long after the test begins (s).
 pub const SETTLING_SECS: f64 = 5.0;
-/// A clock error bound over this (ms) is no measure: the clock has lost track
+/// A clock error bound of this or more (ms; `clock::REPORT_CAP_MS`) is no measure: the clock has lost track
 /// of the primary's (0.24.2 sent 2,605,312 ms, still marked locked, just
 /// before the lock went). Such a row counts as not locked.
 pub const CLOCK_LOST_MS: f64 = 1000.0;
+/// Not in step (or nothing compared while the primary played) for longer than
+/// this at a stretch (s): a problem. A command makes a moment of it.
+pub const NOT_IN_STEP_PROBLEM_SECS: f64 = 3.0;
 /// Something played on the primary and not here for this long (s): a problem.
 pub const MISSING_PROBLEM_SECS: f64 = 2.0;
 /// A display drawing slowly (`proto::slow_below`) in this many reports (a
@@ -50,7 +53,7 @@ pub const SLOW_DRAWING_PROBLEM_SECS: u32 = 3;
 pub const SOUND_NOTE_MS: f64 = 60.0;
 
 /// How the network figures are made, said in every network report.
-pub const HOW_MEASURED: &str = "How it is measured: at each of the primary's heartbeats (four a second) each computer compares every playing cue's time on its screens, by its own shared clock, with the primary's, as the heartbeat says it was when it was made, allowing half a round trip for its way (\"apart on the screens\": it holds the clock's own error, and errs towards apart by the heartbeat's waits). A difference counts only when two heartbeats in a row show it (a loop going round between the primary's heartbeat and the computer's look shows at one). It notes the largest twice a second. Frames are counted at the computer's slowest screen that drew: a difference shorter than one of its refreshes can't be seen there. \"Began\" compares when each cue began by the shared clock: a command carries the primary's time, so it can't see a wrong clock. Each command's lead is how long before its shared time it arrived. The clock error is the clock's own bound while locked, usually well above the real error; a bound over a second means the clock had lost track, and counts as not locked. network.csv has every row.";
+pub const HOW_MEASURED: &str = "How it is measured: at each of the primary's heartbeats (four a second) each computer compares every playing cue's time on its screens, by its own shared clock, with the primary's, as the heartbeat says it was when it was made, allowing half the shortest recent round trip for its way, and taking the least clock offset the heartbeats of the last 5 s showed: a heartbeat that waited on its way (behind other messages, or for a busy computer) shows the clock later, never earlier, so its wait isn't read as the screens apart (\"apart on the screens\": it holds the clock's own error). A difference counts only when two heartbeats in a row show it (a loop going round between the primary's heartbeat and the computer's look shows at one). It notes the largest twice a second. Frames are counted at the computer's slowest screen that drew: a difference shorter than one of its refreshes can't be seen there. \"Began\" compares when each cue began by the shared clock: a command carries the primary's time, so it can't see a wrong clock. Each command's lead is how long before its shared time it arrived. The clock error is the clock's own bound while locked, usually well above the real error; a bound of a second or more means the clock had lost track, and counts as not locked. network.csv has every row.";
 
 /// What software can't see, said in every report.
 pub const CANNOT_SEE: &str = "What this test can't see: each display draws at its own moment within its refresh, so two projectors without genlock can be up to one refresh apart even when NewQ chose the same frame on both (film the Sync flash to see it). Sound from two computers is not locked to the sample: it is meant for separate rooms or separate speakers, not one sound from two computers. The numbers come from the computers' own clocks; the network itself is measured by the round trips.";
@@ -239,7 +242,7 @@ impl ComputerNotes {
     pub fn clock_kept(r: &Row) -> bool {
         r.locked
             && r.clock_error_ms
-                .is_none_or(|e| e.is_finite() && e <= CLOCK_LOST_MS)
+                .is_none_or(|e| e.is_finite() && e < CLOCK_LOST_MS)
     }
 
     fn worst_clock(&self) -> Option<f64> {
@@ -272,6 +275,8 @@ pub struct ComputerVerdict {
     /// The numbers, a line each.
     pub lines: Vec<String>,
     pub findings: Vec<Finding>,
+    /// Where its own log is in the zip (None: it did not come back).
+    pub log: Option<String>,
 }
 
 /// Everything judged.
@@ -286,6 +291,16 @@ pub struct Judged {
 
 fn finding(severity: Severity, text: String) -> Finding {
     Finding { severity, text }
+}
+
+/// The most rows in a row for which `f` holds.
+fn longest_run(rows: &[Row], f: impl Fn(&Row) -> bool) -> usize {
+    let (mut most, mut now) = (0, 0);
+    for r in rows {
+        now = if f(r) { now + 1 } else { 0 };
+        most = most.max(now);
+    }
+    most
 }
 
 /// "2 min", "45 s", "1 h 05 min".
@@ -433,6 +448,7 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
             headline: text,
             lines,
             findings: f,
+            log: None,
         };
     }
     // How far apart: what the screens show (by this computer's clock against
@@ -644,6 +660,25 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
             ),
         ));
     }
+    // Not in step, or nothing could be compared while the primary played (a
+    // lost command: nothing reads apart, as nothing is compared), for longer
+    // than a moment. (Rows not locked are counted above.)
+    let stuck = longest_run(&c.rows, |r| {
+        r.t >= SETTLING_SECS
+            && ComputerNotes::clock_kept(r)
+            && (!r.in_step || (r.compared == 0 && r.uncompared > 0))
+    }) as f64
+        * crate::net::measure::ROW_EVERY;
+    if stuck > NOT_IN_STEP_PROBLEM_SECS {
+        f.push(finding(
+            Severity::Problem,
+            format!(
+                "{} was not in step with the primary for about {} at a stretch, so what it played could not be compared (a command lost, or the show not the primary's)",
+                c.name,
+                span(stuck)
+            ),
+        ));
+    }
     // Its own computer.
     if let Some(s) = c.stalls.iter().max_by_key(|s| s.ms) {
         lines.push(format!(
@@ -707,6 +742,7 @@ pub fn judge_computer(c: &ComputerNotes, secs: f64) -> ComputerVerdict {
         headline,
         lines,
         findings: f,
+        log: None,
     }
 }
 
@@ -768,7 +804,7 @@ pub fn csv(computers: &[ComputerNotes]) -> String {
                 "{},{:.2},{},{},{},{},{},{},{},{},{},{},{}",
                 csv_field(&c.name),
                 r.t,
-                num(r.clock_error_ms.filter(|e| *e <= CLOCK_LOST_MS)),
+                num(r.clock_error_ms.filter(|e| *e < CLOCK_LOST_MS)),
                 num(r.rtt_ms),
                 u8::from(kept),
                 u8::from(r.in_step),
@@ -868,8 +904,57 @@ mod tests {
                 missing: 0,
                 sound_apart_ms: None,
                 shown_apart_ms: None,
+                uncompared: 0,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_computer_that_compared_nothing_while_the_primary_played_is_a_problem() {
+        // 0.24.4's review (C5): after a lost command every heartbeat found a
+        // command done here that the primary hadn't had yet (or the other
+        // way), nothing was compared, nothing read apart: it passed.
+        let mut c = good("Left");
+        for r in &mut c.rows[100..200] {
+            r.in_step = false;
+            r.compared = 0;
+            r.apart_ms = None;
+            r.uncompared = 2;
+        }
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound, "{:?}", v.findings);
+        assert!(
+            v.findings.iter().any(|f| f
+                .text
+                .starts_with("Left was not in step with the primary for about 50 s at a stretch")),
+            "{:?}",
+            v.findings
+        );
+        // Compared nothing though it says it is in step (the follower's own
+        // look agreed): the same.
+        let mut c = good("Left");
+        for r in &mut c.rows[100..120] {
+            r.compared = 0;
+            r.apart_ms = None;
+            r.uncompared = 2;
+        }
+        assert_eq!(judge_computer(&c, 120.0).verdict, Verdict::ProblemsFound);
+        // A moment out of step at each command, and nothing playing: fine.
+        let mut c = good("Left");
+        for i in (20..230).step_by(9) {
+            c.rows[i].in_step = false;
+            c.rows[i + 1].in_step = false;
+        }
+        for r in &mut c.rows[60..120] {
+            r.compared = 0;
+            r.apart_ms = None;
+        }
+        let v = judge_computer(&c, 120.0);
+        assert!(
+            !v.findings.iter().any(|f| f.text.contains("not in step")),
+            "{:?}",
+            v.findings
+        );
     }
 
     fn commands(n: usize, late: usize) -> Vec<CommandNote> {
@@ -1038,6 +1123,30 @@ mod tests {
         let v = judge_computer(&ComputerNotes::new("Right"), 120.0);
         assert_eq!(v.verdict, Verdict::ProblemsFound);
         assert!(v.headline.starts_with("No measurements came from Right"));
+    }
+
+    #[test]
+    fn a_clock_bound_at_the_cap_is_a_lost_clock_not_a_second_of_error() {
+        // 0.24.4's review (C7): a follower caps its bound at
+        // `REPORT_CAP_MS` (1000 ms) when it has lost track, and 1000 was
+        // taken as a measure: "Clock error up to 1000 ms".
+        assert_eq!(crate::net::clock::REPORT_CAP_MS, CLOCK_LOST_MS);
+        let mut c = good("Left");
+        for r in &mut c.rows[100..140] {
+            r.clock_error_ms = Some(crate::net::clock::REPORT_CAP_MS);
+        }
+        assert!(!c.rows[100..140].iter().any(ComputerNotes::clock_kept));
+        let v = judge_computer(&c, 120.0);
+        let texts: Vec<&str> = v.findings.iter().map(|f| f.text.as_str()).collect();
+        assert!(
+            texts.contains(&"Left's clock was not locked to the primary's for about 20 s"),
+            "{texts:?}"
+        );
+        assert!(!v.lines.iter().any(|l| l.contains("1000")), "{:?}", v.lines);
+        assert!(!csv(std::slice::from_ref(&c)).contains(",1000.00,"));
+        // Just under it is still a measure (a bad one).
+        c.rows[100].clock_error_ms = Some(999.0);
+        assert!(ComputerNotes::clock_kept(&c.rows[100]));
     }
 
     #[test]
