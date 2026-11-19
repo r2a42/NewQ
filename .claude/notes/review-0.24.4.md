@@ -60,3 +60,30 @@ B5. Minor: `watch_software` on a machine with no card makes a fresh wgpu instanc
    down/stop after a while when no loss happened this run); `Gpu::new` sets `GPU_NAME`/`SOFTWARE` before
    `request_device` succeeds (stale status on failure); `App::new` doesn't keep `start_at_login_cleaned` if
    prefs can't be saved, so every start removes an entry the user ticked since.
+
+## A. Show network and the engine's network paths
+
+A1. **A sound that follows another cue can lose its first 40-250 ms in a show network** (`engine.rs`
+   `ENDED_LATE_MAX` 0.25, `chain_backdate`, `net_backdate`, `keep_to`): what follows is anchored up to 250 ms
+   back, and an anchored sound more than `SOUND_SLACK` (40 ms) behind skips forward; a picture's first frames
+   are never shown. Fix: cap the chain backdate at ~2-3 frames (0.05 s), or `SOUND_SLACK` when the cue has a
+   voice; a larger overrun starts at the tick as in 0.24.2.
+A2. **A several-part test with a 0.24.2 follower drops its session in a loop**: `NetTest::Whole` is sent to
+   any peer; 0.24.2 has no catch-all. Fix: send `Whole` only to peers on 0.24.3+ (`PeerView.version`).
+   (Test Mode agent.)
+A3. **The 4 MB log frame can get the follower dropped on a slow link** (< ~5.5 Mbit/s): `last_rx` is set only
+   per whole message. Fix: send the log in <= 256 KB pieces, or refresh `last_rx` on bytes read. (Same as
+   C9's last point; Test Mode agent.)
+A4. **Under network load, "screens apart" measures heartbeat delay** (`seen_offset`): any wait in the TCP
+   session or main loop counts as clock error. Fix: while locked, bound the heartbeat-derived offset by the
+   clock's own error, or report it as heartbeat delay. (Joins C3; Test Mode agent.)
+A5. **Forward-compatibility gaps**: `paths::AdapterKind`, `timeline::TimelineKey`, `timeline::PauseFreeze` are
+   reachable from `Msg` with no `#[serde(other)]`. Fix: catch-alls or lenient decoding.
+A6. **A restarted display computer can end with a modal dialog and no NewQ** (`main.rs` 91-147) if the old
+   copy takes > ~28 s to exit. Fix: with `RESTARTING_ENV` or `--display`, keep waiting and never show the
+   dialog.
+A7. Small: `net_shift_shared` doesn't shift `net_ended`; the load server never prunes ended connections
+   (fd leak per reconnect); a cloned `node.json` on two machines (same id, same port) isn't detected as a
+   twin (a beacon with our id from an address not ours).
+   Also: a CHANGELOG line that the first start of this version removes start-at-login entries once (re-tick
+   display computers before a show).
