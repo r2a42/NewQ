@@ -2924,6 +2924,8 @@ impl App {
                 let mut test = std::mem::take(&mut self.ui.test);
                 test.shutdown(&mut self.show, &mut self.engine, &mut self.ui);
                 self.ui.test = test;
+                // The computers told the test is over before anything else.
+                self.net_test_flush();
                 self.engine.stop_all(0.0);
                 event_loop.exit();
             }

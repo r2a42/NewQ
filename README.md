@@ -1466,12 +1466,16 @@ run first, as one test. No command line.
   to keep in step, how far what its screens show was from the primary's, its
   own stalls and late frames, and whether it is wired or on Wi-Fi. *Apart on
   the screens* compares each cue's time now by the computer's own clock with
-  the primary's as its heartbeat says, so a clock that is wrong shows there;
-  *began* (also in `network.csv`) compares when cues began, which a wrong clock
+  the primary's as its heartbeat says (allowing for the shortest recent round
+  trip, and taking the least of the last five seconds' heartbeats, so a message
+  that waited on its way isn't read as the screens apart), so a clock that is
+  wrong shows there; *began* (also in `network.csv`) compares when cues began, which a wrong clock
   can't upset. Frames are counted at the computer's slowest screen: a
   difference shorter than one of its refreshes can't be seen on it. A
   difference seen at one heartbeat alone (a loop going round between the two
-  looks) isn't counted.
+  looks) isn't counted. A computer not in step for more than three seconds at
+  a stretch (or comparing nothing while the primary played, as after a lost
+  command) is a problem.
 - **The answer**, per computer, in plain words: *In step: worst 0.4 frames apart
   over 2 min*, or what went wrong (*Late commands: 3 of 40 arrived after their
   time; use a wire*, *Clock error up to 6 ms: Wi-Fi*, *clock not locked to the
@@ -1485,7 +1489,8 @@ run first, as one test. No command line.
   report, `network.csv` (every computer's measurements twice a second),
   `events.log`, this computer's log, and **each computer's own log** since the
   test began, as `computers/<name>/newq.log` (one per computer for the whole
-  test, however many parts; the report names it). A display computer makes no
+  test, however many parts; two computers of one name get a short id after
+  it; the report names it, and the window says whose did not come back). A display computer makes no
   zip of its own: everything comes back to the primary's, so that one file is
   all there is to send.
 - **The Sync flash: see it with your own eyes.** The test starts with it, and

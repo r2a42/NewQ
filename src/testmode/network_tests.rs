@@ -655,6 +655,13 @@ fn the_measurements_of_two_followers_reach_the_primary_and_the_show_comes_back_e
             c.findings,
             d.report
         );
+        // In step all along: never "not in step" (C5 counts a stretch).
+        assert!(
+            !c.findings.iter().any(|f| f.text.contains("not in step")),
+            "{}: {:?}",
+            c.name,
+            c.findings
+        );
         assert!(
             c.lines.iter().any(|l| l.contains(" commands, 0 late")),
             "{:?}",
@@ -967,6 +974,11 @@ fn a_short_test_plays_on_every_computer_and_each_ones_own_measurements_come_back
             !c.findings
                 .iter()
                 .any(|f| f.text.contains("No measurements")),
+            "{:?}",
+            c.findings
+        );
+        assert!(
+            !c.findings.iter().any(|f| f.text.contains("not in step")),
             "{:?}",
             c.findings
         );
