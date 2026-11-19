@@ -5675,6 +5675,7 @@ fn displays_panel(
                     ("display_pattern", d.id.0),
                     &mut d.test_pattern,
                     &mut d.pattern,
+                    &mut d.pattern_number,
                 );
             });
             let state_size = match state {
@@ -6707,7 +6708,13 @@ fn edge_blend_editor(ui: &mut Ui, d: &mut OutputConfig, size: (u32, u32)) {
 
 /// The "Test pattern" checkbox and the choice of which of the patterns it
 /// shows. Choosing one turns the pattern on.
-fn pattern_picker(ui: &mut Ui, id: (&str, u64), on: &mut bool, kind: &mut PatternKind) {
+fn pattern_picker(
+    ui: &mut Ui,
+    id: (&str, u64),
+    on: &mut bool,
+    kind: &mut PatternKind,
+    number: &mut bool,
+) {
     ui.checkbox(on, "Test pattern")
         .on_hover_text("Show a picture for lining the display up: choose which on the right");
     egui::ComboBox::from_id_salt(id)
@@ -6729,6 +6736,9 @@ fn pattern_picker(ui: &mut Ui, id: (&str, u64), on: &mut bool, kind: &mut Patter
         })
         .response
         .on_hover_text(kind.description());
+    ui.checkbox(number, "Number").on_hover_text(
+        "Draw the display's number over the test pattern (on the patterns that have room for it)",
+    );
 }
 
 fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
@@ -6822,6 +6832,7 @@ fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut 
                     ("sub_pattern", v.id.0),
                     &mut v.test_pattern,
                     &mut v.pattern,
+                    &mut v.pattern_number,
                 );
             });
             let editing = st.area_edit == Some(v.id);

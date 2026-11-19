@@ -421,7 +421,8 @@ stays on the computer until you send it yourself.
   press it again to go back to the one chosen. It is kept per computer, and
   while a display's corners are being edited only that display is shown.
   *Test pattern* shows a picture for lining a display up, with a dropdown of
-  fifteen beside it (choosing one turns the pattern on; it works the same on
+  fifteen beside it and a *Number* checkbox that turns the display's number
+  on the patterns off (choosing one turns the pattern on; it works the same on
   sub displays, and the choice is saved with the show). The first, and the one a
   display starts with, is *SMPTE colour bars*: the 75% bars, the reversed blue
   row, and the -I, white, +Q and black-level (PLUGE) strips, with the display's
