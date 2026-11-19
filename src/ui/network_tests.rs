@@ -1007,6 +1007,22 @@ fn a_monitor_drawing_slowly_is_said_on_the_page() {
 }
 
 #[test]
+fn a_screen_on_windows_basic_display_driver_is_said_on_its_computers_row() {
+    let mut s = proto::StatusReport {
+        monitors: vec![
+            monitor("B173HAN04.9", 1920, 1080),
+            monitor("DISPLAY2", 1920, 1080),
+        ],
+        ..Default::default()
+    };
+    s.monitors[0].basic_driver = true;
+    assert_eq!(
+        super::slow_drawing("WNO-2", &s),
+        vec!["⚠ WNO-2's screen 1 (B173HAN04.9) is run by Windows' basic display driver: install the graphics driver for that computer. Until then its pictures are very slow (a few frames a second)".to_string()]
+    );
+}
+
+#[test]
 fn a_computer_drawing_in_software_is_said_on_the_page() {
     let s = proto::StatusReport {
         software_drawing: Some(crate::adapters::SoftwareDrawing {

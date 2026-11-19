@@ -13,6 +13,13 @@ release page, and a release is refused if it has none.
   keeps the cue's time in silence, as playing; a film whose sound plays elsewhere shows its
   pictures without a warning. And whatever the reason, a cue started on a computer to match the
   primary that stops again at once is not started again until the primary starts it anew.
+- **NewQ says when a screen has no graphics driver (Windows).** When a graphics chip's driver is
+  missing or has failed, Windows runs that screen through its basic display driver and pictures
+  on it come a few times a second. NewQ now says so for that screen, with what to do: *Screen 1
+  (B173HAN04.9) is run by Windows' basic display driver: install the graphics driver for this
+  computer*: in the status bar and the Displays settings, on the primary's row for a display
+  computer, and as a problem in Test Mode's report.
+
 - **A display computer starts cleanly.** Opening NewQ Display on Windows showed a white box over
   part of each screen before anything else. Now a screen shows nothing until NewQ has drawn on it
   full screen: from start-up, only the computer's card (its name, screen and address), so you can

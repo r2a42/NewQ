@@ -115,6 +115,8 @@ pub struct MonitorNotes {
     pub slow: Vec<f32>,
     pub slowest: Option<f32>,
     pub late_permille: u32,
+    /// Run by Windows' basic display driver at some time in the test.
+    pub basic_driver: bool,
 }
 
 impl MonitorNotes {
@@ -128,6 +130,7 @@ impl MonitorNotes {
         }
         self.slowest = Some(self.slowest.map_or(r.fps, |s| s.min(r.fps)));
         self.late_permille = self.late_permille.max(r.late_permille);
+        self.basic_driver |= r.basic_driver;
     }
 
     /// The rate it should draw at: its display's refresh (60 if unknown).
@@ -356,6 +359,12 @@ pub fn drawing_findings(who: &str, monitors: &[MonitorNotes]) -> (Vec<String>, V
     for m in monitors {
         let what = format!("{who}'s monitor {} ({})", m.index + 1, m.name);
         let should = m.should();
+        if m.basic_driver {
+            f.push(finding(
+                Severity::Problem,
+                crate::adapters::basic_driver_report(who, m.index, &m.name),
+            ));
+        }
         if let Some(s) = m.slowest {
             lines.push(format!(
                 "Monitor {} ({}): drew at least {s:.0} frames a second (its display {})",
@@ -1223,6 +1232,7 @@ mod tests {
             refresh_hz: Some(refresh),
             fps: refresh,
             late_permille: 0,
+            basic_driver: false,
         };
         // Reported alone (no screen drew): at its reported refresh.
         let has = |v: &ComputerVerdict, t: &str| v.lines.iter().any(|l| l.contains(t));
@@ -1307,6 +1317,52 @@ mod tests {
     }
 
     #[test]
+    fn a_screen_on_windows_basic_display_driver_is_a_problem_that_says_what_to_do() {
+        // 0.24.4's test: the laptop's panel was on Windows' basic display
+        // driver (its AMD driver had failed) and drew about 4 frames a second.
+        let mut c = good("WNO-2");
+        let rate = |index, name: &str, fps, basic_driver| MonitorRate {
+            index,
+            name: name.into(),
+            refresh_hz: Some(64.0),
+            fps,
+            late_permille: 0,
+            basic_driver,
+        };
+        for i in 0..80 {
+            c.take(Report {
+                seq: i + 1,
+                link: Link::Wired,
+                monitors: vec![
+                    rate(0, "B173HAN04.9", 4.0, true),
+                    rate(1, "DISPLAY2", 60.0, false),
+                ],
+                ..Default::default()
+            });
+        }
+        let v = judge_computer(&c, 120.0);
+        assert_eq!(v.verdict, Verdict::ProblemsFound);
+        assert_eq!(
+            v.headline,
+            "WNO-2's screen 1 (B173HAN04.9) was run by Windows' basic display driver: install the graphics driver for that computer. Its pictures were very slow, whatever the timing says"
+        );
+        // Its slow drawing is said too; the other screen says nothing.
+        assert_eq!(v.findings.len(), 2, "{:?}", v.findings);
+        // This computer's own screens, as Test Mode alone judges them.
+        let mut own = Vec::new();
+        note_drawing(&mut own, &[rate(0, "B173HAN04.9", 60.0, true)]);
+        let (_, f) = drawing_findings("This computer", &own);
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].text.starts_with(
+                "This computer's screen 1 (B173HAN04.9) was run by Windows' basic display driver"
+            ),
+            "{:?}",
+            f[0].text
+        );
+    }
+
+    #[test]
     fn a_display_drawing_four_frames_a_second_is_a_problem_in_plain_words() {
         // 0.24.1's first test on two computers: in step by the times, while
         // the display computer's built-in screen drew about 4 frames a second.
@@ -1317,6 +1373,7 @@ mod tests {
             refresh_hz: Some(refresh),
             fps,
             late_permille: if fps < 30.0 { 1000 } else { 0 },
+            basic_driver: false,
         };
         for i in 0..80 {
             c.take(Report {

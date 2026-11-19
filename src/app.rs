@@ -694,6 +694,18 @@ impl App {
         // an answer that came and went would make a display come and go.
         if changed || self.identities.len() != self.monitors.len() {
             self.identities = self.monitors.iter().map(crate::monitor::identify).collect();
+            // Said once each time the monitors change, in the status bar too.
+            for (i, id) in self.identities.iter().enumerate() {
+                if id.basic_driver {
+                    let name = id
+                        .title
+                        .clone()
+                        .or_else(|| self.monitors[i].name())
+                        .unwrap_or_else(|| format!("Display {}", i + 1));
+                    self.engine
+                        .problem(crate::adapters::basic_driver_sentence(None, i, &name));
+                }
+            }
         }
         self.ui.monitors = self
             .monitors
@@ -706,6 +718,7 @@ impl App {
                 size: (m.size().width, m.size().height),
                 refresh_hz: m.refresh_rate_millihertz().map(|r| r as f32 / 1000.0),
                 primary: primary.as_ref() == Some(m),
+                basic_driver: self.identities[i].basic_driver,
             })
             .collect();
         self.scan_devices();
@@ -796,6 +809,7 @@ impl App {
                         // when the rate does.
                         drawing_fps: drawing_fps.map(f32::round),
                         late_permille,
+                        basic_driver: m.basic_driver,
                     }
                 })
                 .collect(),
@@ -2604,6 +2618,7 @@ impl App {
                         refresh_hz: m.refresh_hz,
                         fps: fps?,
                         late_permille: late.unwrap_or(0),
+                        basic_driver: m.basic_driver,
                     })
                 })
                 .collect();

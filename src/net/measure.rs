@@ -105,6 +105,10 @@ pub struct MonitorRate {
     pub fps: f32,
     /// Its late frames, in thousandths (the most seen).
     pub late_permille: u32,
+    /// Run by Windows' basic display driver (`adapters::is_basic_display_driver`).
+    /// Left out when not.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub basic_driver: bool,
 }
 
 /// A look at one moment (every `ROW_EVERY` seconds).
@@ -1020,6 +1024,7 @@ mod tests {
             refresh_hz: Some(64.0),
             fps,
             late_permille: late,
+            basic_driver: false,
         };
         // Not measuring: nothing kept.
         m.drawing(&[rate(0, 4.0, 1000)]);

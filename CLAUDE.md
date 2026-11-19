@@ -472,7 +472,14 @@ The README describes the features; this file is about working on the code.
   integrated, virtual, other; software (`Kind::of`: Cpu or Basic Render Driver, llvmpipe…) only alone),
   `SOFTWARE_GRACE` (3 s after a loss), `look_every`, `switch_back`/`failed_switch`/`after_failed_switches`
   (30 s, 2 min, 8 min, give up), `SoftwareDrawing` (`StatusReport.software_drawing`, serde default),
-  `status`. `Gpu::new(instance, window, allow_software)`; every rebuild uses a fresh `gpu::instance_for`
+  `status`. Windows' basic display driver per screen (no driver for its chip, Code 31):
+  `monitor::windows_adapter` (`EnumDisplayDevicesW` on the output's `\\.\DISPLAYn`: `DeviceString`, and the
+  untranslated `Service` of `video_service_key(DeviceKey)`) -> `adapters::is_basic_display_driver` (pure)
+  -> `Identity`/`MonitorInfo::basic_driver` -> `MonitorReport.basic_driver` and `MonitorRate.basic_driver`
+  (serde default, unwritten when false); words `basic_driver_sentence`/`_report`, said by
+  `ui/network::slow_drawing`, `net_judge::drawing_findings` (a Problem), `basic_driver_status` (status
+  bar), `monitor_label` and an `Engine::problem` when the monitors change. The Windows call never ran here.
+  `Gpu::new(instance, window, allow_software)`; every rebuild uses a fresh `gpu::instance_for`
   (an old DXGI factory never sees the card back). `app.rs`: `SoftwareWatch` looks on a `gpu-look` thread
   (`gpu::hardware_offered`) and sets `to_hardware`, which `watch_gpu` rebuilds by the loss path.
   `gpu::drawing_in_software()` feeds `LocalFacts.software`, `slow_drawing` and Test Mode. `render.rs::Ready`:

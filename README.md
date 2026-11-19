@@ -1055,6 +1055,18 @@ stays on the computer until you send it yourself.
   lost since) looks for a card for its first quarter of an hour, then stops
   (restart NewQ to look again). A display change in the middle of a frame no
   longer stops an output window's drawing.
+- **A screen without its graphics driver (Windows):** when the driver for the
+  graphics chip a screen is wired to is missing or has failed (Device Manager
+  shows the chip with a warning, often *Code 31* or *Code 43*), Windows runs
+  that screen through its *Microsoft Basic Display Adapter*, and every picture
+  on it is drawn a few times a second. NewQ says so for that screen, plainly:
+  *Screen 1 (B173HAN04.9) is run by Windows' basic display driver: install the
+  graphics driver for this computer*: in the status bar (and in *Displays*
+  beside the monitor), on the primary's row for a display computer, and as a
+  problem in Test Mode's report. Install the graphics driver from the
+  computer's or the chip's maker (on a laptop, often both the built-in and the
+  separate graphics card need theirs), then restart the computer. Macs and
+  Linux say nothing new.
 
 ## Show network: several computers
 

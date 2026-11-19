@@ -120,6 +120,11 @@ pub struct MonitorReport {
     /// clearly longer than a refresh).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub late_permille: Option<u32>,
+    /// Windows drives it through its basic display driver (no graphics
+    /// driver for its card): its pictures are very slow. Left out when not;
+    /// a NewQ before 0.24.5 neither sends nor reads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub basic_driver: bool,
 }
 
 impl MonitorReport {
@@ -698,6 +703,33 @@ mod tests {
         let mut data = MAGIC.to_vec();
         data.extend(serde_json::to_vec(&b).unwrap());
         assert_eq!(decode_beacon(&data).unwrap().system, "");
+    }
+
+    /// A screen on Windows' basic display driver is told only when it is, and
+    /// a status from a NewQ that doesn't know of it reads.
+    #[test]
+    fn a_screen_on_the_basic_display_driver_is_in_the_status_only_when_so() {
+        let plain = MonitorReport {
+            identity: "B173HAN04.9".into(),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("basic_driver").is_none());
+        let back: MonitorReport = serde_json::from_value(v).unwrap();
+        assert!(!back.basic_driver);
+        let basic = MonitorReport {
+            basic_driver: true,
+            ..plain
+        };
+        let v = serde_json::to_value(&basic).unwrap();
+        assert_eq!(v["basic_driver"], true);
+        assert_eq!(serde_json::from_value::<MonitorReport>(v).unwrap(), basic);
+        // The network test's rates the same way.
+        let r = crate::net::measure::MonitorRate::default();
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("basic_driver").is_none());
+        let back: crate::net::measure::MonitorRate = serde_json::from_value(v).unwrap();
+        assert!(!back.basic_driver);
     }
 
     /// Drawing in software is told only when it happens, and a status from a

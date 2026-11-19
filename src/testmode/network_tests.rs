@@ -386,6 +386,7 @@ impl Rig {
                 refresh_hz: Some(60.0),
                 fps: c.fps,
                 late_permille: 0,
+                basic_driver: false,
             }]);
             if let Some(r) = c
                 .measure

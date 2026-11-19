@@ -41,6 +41,9 @@ pub struct MonitorInfo {
     pub size: (u32, u32),
     pub refresh_hz: Option<f32>,
     pub primary: bool,
+    /// Windows drives it through its basic display driver: no graphics
+    /// driver for its card (`adapters::is_basic_display_driver`).
+    pub basic_driver: bool,
 }
 
 impl MonitorInfo {
@@ -2324,6 +2327,12 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
             );
         }
         crate::adapters::status(ui);
+        let basic: Vec<(String, bool)> = st
+            .monitors
+            .iter()
+            .map(|m| (m.title().to_string(), m.basic_driver))
+            .collect();
+        crate::adapters::basic_driver_status(ui, &basic);
         network::status(ui, st);
         net_media::status(ui, st);
         if st.keeping_awake {
@@ -5017,7 +5026,11 @@ pub(crate) fn monitor_label(st: &UiState, i: usize) -> String {
             .map(|r| format!(" @ {r:.0} Hz"))
             .unwrap_or_default(),
         if m.primary { " primary" } else { "" }
-    )
+    ) + if m.basic_driver {
+        " ⚠ Windows' basic display driver: install the graphics driver"
+    } else {
+        ""
+    }
 }
 
 /// Where the show's sound goes: named outputs on audio devices.
@@ -14845,6 +14858,7 @@ mod tests {
             size: (1920, 1080),
             refresh_hz: None,
             primary: false,
+            basic_driver: false,
         }
     }
 
