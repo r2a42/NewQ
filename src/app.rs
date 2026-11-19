@@ -248,7 +248,15 @@ impl SoftwareWatch {
 /// A test-pattern texture, with the output number and size it shows.
 /// A drawn test pattern: its picture, the display number and size it was
 /// drawn for, and which pattern it is.
-type Pattern = (Arc<LayerTexture>, usize, (u32, u32), PatternKind);
+/// A display's test pattern: its picture, number, drawn size, kind and the canvas
+/// it was drawn for.
+type Pattern = (
+    Arc<LayerTexture>,
+    usize,
+    (u32, u32),
+    PatternKind,
+    (u32, u32),
+);
 
 /// What of an output's placement was last sent to a window: id, warp, mesh and
 /// the part of the picture the mesh sees.
@@ -2495,9 +2503,9 @@ impl App {
             // and grid stay true on a sub display of any size.
             let mut pattern_changed = false;
             if want_pattern {
-                // The automatic SMPTE bars take their shape from the canvas itself,
-                // not from the rounded size they are drawn at below.
-                let kind = pattern::resolve(kind, own_canvas.0, own_canvas.1);
+                // The SMPTE bars take their shape from the canvas itself, not from
+                // the rounded size they are drawn at below.
+                let shape = own_canvas.0.max(1) as f32 / own_canvas.1.max(1) as f32;
                 // Drawn small and stretched, except the patterns made of single
                 // pixels, which need the display's own size (up to 4K).
                 let size = if kind.pixel_exact() {
@@ -2510,15 +2518,14 @@ impl App {
                     let step = |v: u32| ((v as f32 * scale / 32.0).round() as u32).max(1) * 32;
                     (step(own_canvas.0), step(own_canvas.1))
                 };
-                if self
-                    .patterns
-                    .get(&id)
-                    .is_none_or(|(_, n, s, k)| *n != number || *s != size || *k != kind)
-                {
+                if self.patterns.get(&id).is_none_or(|(_, n, s, k, c)| {
+                    *n != number || *s != size || *k != kind || *c != own_canvas
+                }) {
                     let tex = Arc::new(LayerTexture::new_rgba(gpu, size.0, size.1));
-                    let px = pattern::render(kind, size.0, size.1, number);
+                    let px = pattern::render_shaped(kind, size.0, size.1, number, shape);
                     upload::first(self.uploader.as_ref(), gpu, &tex, upload::Kind::Rgba, &px);
-                    self.patterns.insert(id, (tex, number, size, kind));
+                    self.patterns
+                        .insert(id, (tex, number, size, kind, own_canvas));
                     pattern_changed = true;
                 }
             } else if self.patterns.remove(&id).is_some() {

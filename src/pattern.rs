@@ -8,15 +8,28 @@ const WHITE: [u8; 3] = [255, 255, 255];
 const BLACK: [u8; 3] = [0, 0, 0];
 
 /// Draw `kind` at `w` by `h` pixels. `number` is the display's number, drawn
-/// large on the patterns that have room for it (0 = draw none).
+/// large on the patterns that have room for it (0 = draw none). The app draws
+/// through `render_shaped`; this is for a picture seen at the size it is drawn.
+#[cfg(test)]
 pub fn render(kind: PatternKind, w: u32, h: u32, number: usize) -> Vec<u8> {
+    render_shaped(kind, w, h, number, w.max(1) as f32 / h.max(1) as f32)
+}
+
+/// `render` for a picture that is stretched to a display of the shape `shape`
+/// (width over height): the patterns are drawn at a rounded size, and the SMPTE
+/// bars need the shape they will be seen at to stay 4:3.
+pub fn render_shaped(kind: PatternKind, w: u32, h: u32, number: usize, shape: f32) -> Vec<u8> {
     let (w, h) = (w.max(2), h.max(2));
-    let kind = resolve(kind, w, h);
+    let shape = if shape.is_finite() && shape > 0.0 {
+        shape
+    } else {
+        w as f32 / h as f32
+    };
     let digits = Digits::new(w, h, number);
     let mut px = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         for x in 0..w {
-            let c = colour(kind, x, y, w, h, &digits);
+            let c = colour(kind, x, y, w, h, shape, &digits);
             let i = ((y * w + x) * 4) as usize;
             px[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
@@ -24,15 +37,22 @@ pub fn render(kind: PatternKind, w: u32, h: u32, number: usize) -> Vec<u8> {
     px
 }
 
-fn colour(kind: PatternKind, x: u32, y: u32, w: u32, h: u32, digits: &Digits) -> [u8; 3] {
+fn colour(
+    kind: PatternKind,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    shape: f32,
+    digits: &Digits,
+) -> [u8; 3] {
     let number = |c: [u8; 3]| match digits.at(x as f32, y as f32) {
         Some(true) => WHITE,
         Some(false) => BLACK,
         None => c,
     };
     match kind {
-        PatternKind::Smpte | PatternKind::Smpte169 => number(smpte(x, y, w, h, 16.0 / 9.0)),
-        PatternKind::Smpte1610 => number(smpte(x, y, w, h, 16.0 / 10.0)),
+        PatternKind::Smpte => number(smpte(x, y, w, h, shape)),
         PatternKind::Bars => number(bars(x, y, w, h)),
         PatternKind::Grid => number(grid(x, y, w, h)),
         PatternKind::Crosshatch => crosshatch(x, y, w),
@@ -51,24 +71,10 @@ fn colour(kind: PatternKind, x: u32, y: u32, w: u32, h: u32, digits: &Digits) ->
     }
 }
 
-/// The SMPTE bars in the shape of the display when the choice is the automatic
-/// one: 16:9, or 16:10 when the display's shape is nearer that (the halfway
-/// point is about 1.69). The other patterns are left as they are.
-pub fn resolve(kind: PatternKind, w: u32, h: u32) -> PatternKind {
-    if kind != PatternKind::Smpte {
-        return kind;
-    }
-    let aspect = w.max(1) as f32 / h.max(1) as f32;
-    if (aspect - 16.0 / 10.0).abs() < (aspect - 16.0 / 9.0).abs() {
-        PatternKind::Smpte1610
-    } else {
-        PatternKind::Smpte169
-    }
-}
-
 /// SMPTE colour bars (ECR 1-1978, as RP 219 lays them out for wide pictures):
-/// a 4:3 picture's worth of bars in the middle with 40% grey at the sides, so
-/// `aspect` (16:9 or 16:10) only changes how wide the side panels are.
+/// a 4:3 picture's worth of bars in the middle with 40% grey at the sides, as
+/// wide as the display's `shape` (width over height) leaves, so the bars are 4:3
+/// on any display; one narrower than 4:3 is filled with them.
 /// From the top: seven bars at 75%, a row of reversed blue bars, then the
 /// -I, white and +Q blocks and the PLUGE strips for setting the black level.
 ///
@@ -78,7 +84,7 @@ pub fn resolve(kind: PatternKind, w: u32, h: u32) -> PatternKind {
 /// `ABOVE_BLACK`, about 4% (just visible when the black level is right); "below
 /// black" can't be sent in full range (it would be under 0), so that strip is black
 /// too, where studio-range bars would show 4% under it.
-fn smpte(x: u32, y: u32, w: u32, h: u32, aspect: f32) -> [u8; 3] {
+fn smpte(x: u32, y: u32, w: u32, h: u32, shape: f32) -> [u8; 3] {
     const GREY: [u8; 3] = [102, 102, 102];
     const BARS: [[u8; 3]; 7] = [
         [191, 191, 191],
@@ -98,7 +104,7 @@ fn smpte(x: u32, y: u32, w: u32, h: u32, aspect: f32) -> [u8; 3] {
         BLACK,
         [191, 191, 191],
     ];
-    let side = ((1.0 - (4.0 / 3.0) / aspect) / 2.0).clamp(0.0, 0.25);
+    let side = ((1.0 - (4.0 / 3.0) / shape) / 2.0).clamp(0.0, 0.49);
     let (fx, fy) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
     let u = (fx - side) / (1.0 - 2.0 * side);
     let inside = (0.0..1.0).contains(&u);
@@ -397,12 +403,12 @@ mod tests {
     }
 
     #[test]
-    fn there_are_fifteen_with_names_and_every_one_draws_a_whole_opaque_picture() {
-        assert_eq!(PatternKind::ALL.len(), 15);
+    fn there_are_thirteen_with_names_and_every_one_draws_a_whole_opaque_picture() {
+        assert_eq!(PatternKind::ALL.len(), 13);
         let mut labels: Vec<&str> = PatternKind::ALL.iter().map(|k| k.label()).collect();
         labels.sort();
         labels.dedup();
-        assert_eq!(labels.len(), 15, "labels are different");
+        assert_eq!(labels.len(), 13, "labels are different");
         for k in PatternKind::ALL {
             assert!(!k.description().is_empty());
             let p = pic(k, 1);
@@ -413,20 +419,16 @@ mod tests {
 
     #[test]
     fn no_two_patterns_are_the_same_picture() {
-        // The automatic SMPTE bars are one of the two shapes on this 16:9
-        // picture, so they are the 16:9 ones; the rest all differ.
-        let all: Vec<Vec<u8>> = PatternKind::ALL
-            .iter()
-            .filter(|k| **k != PatternKind::Smpte)
-            .map(|k| pic(*k, 1))
-            .collect();
-        let kinds: Vec<PatternKind> = PatternKind::ALL
-            .into_iter()
-            .filter(|k| *k != PatternKind::Smpte)
-            .collect();
+        let all: Vec<Vec<u8>> = PatternKind::ALL.iter().map(|k| pic(*k, 1)).collect();
         for i in 0..all.len() {
             for j in i + 1..all.len() {
-                assert_ne!(all[i], all[j], "{:?} and {:?}", kinds[i], kinds[j]);
+                assert_ne!(
+                    all[i],
+                    all[j],
+                    "{:?} and {:?}",
+                    PatternKind::ALL[i],
+                    PatternKind::ALL[j]
+                );
             }
         }
     }
@@ -434,7 +436,7 @@ mod tests {
     #[test]
     fn the_smpte_bars_are_the_default_and_have_the_standard_layout() {
         assert_eq!(PatternKind::default(), PatternKind::Smpte);
-        let p = pic(PatternKind::Smpte169, 1);
+        let p = pic(PatternKind::Smpte, 1);
         // 16:9: side panels of 12.5% (24 of 192 pixels) in 40% grey, then the
         // seven bars at 75%, white to blue (each 24 pixels wide, from 24).
         let top = 5;
@@ -479,7 +481,7 @@ mod tests {
         assert_eq!(at(&p, 5, castle), [102, 102, 102]);
         // One black: every dark pixel is black or the above-black strip, nowhere
         // a studio-range black (16) beside a full-range one.
-        let p = pic(PatternKind::Smpte169, 0);
+        let p = pic(PatternKind::Smpte, 0);
         for px in p.chunks(4) {
             let c = [px[0], px[1], px[2]];
             assert!(
@@ -490,66 +492,66 @@ mod tests {
     }
 
     #[test]
-    fn the_smpte_bars_pick_16_9_or_16_10_to_suit_the_display_and_can_be_forced() {
-        // 16:9 and the shapes near it; 16:10 and the shapes near that.
-        for (w, h) in [(1920, 1080), (1366, 768), (3840, 2160), (1360, 768)] {
-            assert_eq!(resolve(PatternKind::Smpte, w, h), PatternKind::Smpte169);
-        }
-        for (w, h) in [(1280, 800), (1440, 900), (1680, 1050), (2560, 1600)] {
-            assert_eq!(resolve(PatternKind::Smpte, w, h), PatternKind::Smpte1610);
-        }
-        // Wider and narrower than either take the nearer; nothing divides by 0.
-        assert_eq!(
-            resolve(PatternKind::Smpte, 3440, 1440),
-            PatternKind::Smpte169
-        );
-        assert_eq!(
-            resolve(PatternKind::Smpte, 1024, 768),
-            PatternKind::Smpte1610
-        );
-        assert_eq!(resolve(PatternKind::Smpte, 0, 0), PatternKind::Smpte1610);
-        // A choice that isn't the automatic one is left alone.
-        assert_eq!(
-            resolve(PatternKind::Smpte1610, 1920, 1080),
-            PatternKind::Smpte1610
-        );
-        assert_eq!(
-            resolve(PatternKind::Smpte169, 1280, 800),
-            PatternKind::Smpte169
-        );
-        assert_eq!(resolve(PatternKind::Grid, 1280, 800), PatternKind::Grid);
-        // The pictures: automatic is what it resolves to, and the two shapes
-        // differ (the side panels are 12.5% and 8.3% of the width).
-        assert_eq!(
-            render(PatternKind::Smpte, 192, 108, 1),
-            render(PatternKind::Smpte169, 192, 108, 1)
-        );
-        assert_eq!(
-            render(PatternKind::Smpte, 160, 100, 2),
-            render(PatternKind::Smpte1610, 160, 100, 2)
-        );
-        assert_ne!(
-            render(PatternKind::Smpte169, 192, 108, 1),
-            render(PatternKind::Smpte1610, 192, 108, 1)
-        );
-        let p = render(PatternKind::Smpte1610, 160, 100, 2);
-        let px = |x: u32, y: u32| {
-            let i = ((y * 160 + x) * 4) as usize;
-            [p[i], p[i + 1], p[i + 2]]
+    fn the_smpte_bars_are_4_3_on_any_display_with_grey_beside_them() {
+        // Where the first bar starts and the last ends, in a picture `w` wide of
+        // the shape `shape` (drawn at that size, or stretched to it).
+        let edges = |w: u32, h: u32, shape: f32| {
+            let p = render_shaped(PatternKind::Smpte, w, h, 0, shape);
+            let row: Vec<[u8; 3]> = (0..w)
+                .map(|x| {
+                    let i = ((5 * w + x) * 4) as usize;
+                    [p[i], p[i + 1], p[i + 2]]
+                })
+                .collect();
+            let first = row.iter().position(|c| *c == [191, 191, 191]).unwrap();
+            let last = row.iter().rposition(|c| *c == [0, 0, 191]).unwrap();
+            (first as u32, last as u32 + 1, row[0])
         };
-        assert_eq!(px(10, 5), [102, 102, 102], "inside the 13 pixel side panel");
-        assert_eq!(px(16, 5), [191, 191, 191], "the first bar");
+        // 16:9, 16:10, 21:9, 32:9 and 4:3 displays: the bars' block is 4:3 of the
+        // height it is seen at, and the rest of the width is grey (none at 4:3).
+        for (w, h) in [
+            (1920, 1080),
+            (1920, 1200),
+            (2560, 1080),
+            (3840, 1080),
+            (1024, 768),
+        ] {
+            let (a, b, side) = edges(w, h, w as f32 / h as f32);
+            let block = (b - a) as f32 / h as f32;
+            assert!((block - 4.0 / 3.0).abs() < 0.01, "{w}x{h}: {block}");
+            assert!((a as i32 - (w - b) as i32).abs() <= 1, "{w}x{h} centred");
+            let grey = a > 0;
+            assert_eq!(grey, w * 3 > h * 4, "{w}x{h}");
+            if grey {
+                assert_eq!(side, [102, 102, 102], "{w}x{h}");
+            }
+        }
+        // Narrower than 4:3 (a portrait sub display): bars across the whole width.
+        let (a, b, _) = edges(540, 960, 540.0 / 960.0);
+        assert_eq!((a, b), (0, 540));
+        // Drawn small and stretched to the display: the shape it is seen at counts,
+        // not the size it was drawn at (a 16:10 display drawn at a 16:9 size).
+        let (a, b, _) = edges(1280, 720, 16.0 / 10.0);
+        let seen = (b - a) as f32 / 1280.0 * 16.0 / 10.0;
+        assert!((seen - 4.0 / 3.0).abs() < 0.01, "{seen}");
+        // Nothing divides by 0 or panics on a nonsense shape.
+        for shape in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                render_shaped(PatternKind::Smpte, 20, 10, 1, shape).len(),
+                800
+            );
+        }
         // The number is drawn over them, as on the other patterns.
         assert_ne!(
-            render(PatternKind::Smpte169, 192, 108, 1),
-            render(PatternKind::Smpte169, 192, 108, 8)
+            render(PatternKind::Smpte, 192, 108, 1),
+            render(PatternKind::Smpte, 192, 108, 8)
         );
     }
 
     #[test]
     fn number_0_draws_no_number_and_leaves_the_pattern_whole() {
         for k in [
-            PatternKind::Smpte169,
+            PatternKind::Smpte,
             PatternKind::Bars,
             PatternKind::Grid,
             PatternKind::Circles,
@@ -558,8 +560,8 @@ mod tests {
             assert_ne!(pic(k, 0), pic(k, 1), "{k:?} shows a number when asked");
         }
         // Where the number goes, the SMPTE bars show their own green bar.
-        assert_eq!(at(&pic(PatternKind::Smpte169, 0), 96, 40), [0, 191, 0]);
-        assert_ne!(at(&pic(PatternKind::Smpte169, 1), 96, 40), [0, 191, 0]);
+        assert_eq!(at(&pic(PatternKind::Smpte, 0), 96, 40), [0, 191, 0]);
+        assert_ne!(at(&pic(PatternKind::Smpte, 1), 96, 40), [0, 191, 0]);
         // Tiny pictures with no number don't panic either.
         assert_eq!(render(PatternKind::Smpte, 2, 2, 0).len(), 16);
     }
@@ -743,8 +745,6 @@ mod tests {
     fn the_number_is_drawn_where_there_is_room_and_nowhere_else() {
         for k in [
             PatternKind::Smpte,
-            PatternKind::Smpte169,
-            PatternKind::Smpte1610,
             PatternKind::Bars,
             PatternKind::Grid,
             PatternKind::Circles,
