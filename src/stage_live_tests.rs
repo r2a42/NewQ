@@ -593,14 +593,28 @@ pub(crate) fn blended_pair_show() -> (Show, [crate::stage3d::ProjectorId; 2]) {
 }
 
 /// Writes the light's demonstration show to `NEWQ_DEMO_SHOW` (by hand, to
-/// look at it headless).
+/// look at it headless). `NEWQ_DEMO_NO_BLEND` takes the blends off;
+/// `NEWQ_DEMO_SIDE` stands the right projector well off to the side, aimed
+/// at the screen's middle, so the stage's walls cast shadows.
 #[test]
 #[ignore]
 fn write_the_lights_demonstration_show() {
     let Some(path) = std::env::var_os("NEWQ_DEMO_SHOW") else {
         return;
     };
-    let (show, _) = blended_pair_show();
+    let (mut show, [_, right]) = blended_pair_show();
+    if std::env::var_os("NEWQ_DEMO_NO_BLEND").is_some() {
+        for o in &mut show.outputs {
+            o.blend = Default::default();
+        }
+    }
+    if std::env::var_os("NEWQ_DEMO_SIDE").is_some() {
+        let middle = show.stage3d.surfaces[0].placement.position;
+        let p = show.projector_mut(right).unwrap();
+        p.placement.position[0] += 9.0;
+        p.placement.position[1] -= 2.0;
+        p.aim_at(middle, 16.0 / 9.0);
+    }
     show.save(std::path::Path::new(&path)).unwrap();
 }
 
