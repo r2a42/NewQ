@@ -1140,6 +1140,57 @@ stays on the computer until you send it yourself.
   separate graphics card need theirs), then restart the computer. Macs and
   Linux say nothing new.
 
+## The 3D stage
+
+See the show in the room before you are in it: a model of the venue, the
+screens placed in it, and each screen showing what its display is showing now,
+test patterns and cues alike. It is for planning (previz): projectors are not
+simulated yet, and the 3D model does not drive the outputs.
+
+- **Where it is.** *Settings ▸ 3D stage* has a 3D view at the top and
+  everything about the stage below it. Until the Preview pane's modes arrive,
+  a *3D stage* button over the Preview pane swaps it for a 3D view (and back).
+- **Start.** *Load a venue model…* or *Add a screen*. A model is optional:
+  screens can be placed on their own, on a floor grid in metres.
+- **Venue models.** glTF (`.glb`, or `.gltf` with its files beside it) and OBJ
+  (`.obj`, with its `.mtl` and pictures). glTF is in metres with Y up; for an
+  OBJ choose what its numbers are in (metres, centimetres, millimetres, inches,
+  feet) and whether Z is up (3ds Max, SketchUp and CAD programs). **FBX can't be
+  read yet:** export the model as glTF (`.glb`) from your 3D program (Blender,
+  Maya, 3ds Max, Cinema 4D and SketchUp all can), or as OBJ. *Brightness* dims
+  a bright model so the screens stand out; the model is read on a thread of its
+  own, and a very large one is said in the status bar.
+- **Screens.** *+ Add a screen*: a flat 16:9 screen, a curved wall (part of a
+  cylinder, its width measured along the curve), a jumbotron (four screens
+  round a hung box, and one underneath) or an angled LED wall (panels in
+  columns, each turned a little). Each has a name, a position and a turn (yaw,
+  pitch, roll), its size, and what it **shows**: a display's picture, or only
+  part of it (*Only part of the picture*: left, top, width, height), for a
+  screen that shows its share of a wider picture. A projector of a blended pair
+  shows the whole picture the pair makes, as the audience sees it.
+  *Duplicate* and *Delete* are beside the name. A new screen shows the first
+  display.
+- **Looking round.** Drag to turn round the stage; right-drag, middle-drag or
+  Shift-drag to slide; the wheel to come closer; double-click (or **F**) to see
+  all of it. Click a screen to pick it: its settings open on the page.
+  *Viewpoint ▸ Save this view…* keeps where you are looking from, with a name;
+  *Viewpoint* goes back to it. *Grid* shows a floor grid in metres; *X-ray*
+  makes the venue's walls see-through, so the screens show through them.
+- **A display can show the stage.** Under *Displays that show the stage*, a
+  display can show the stage from a saved viewpoint (or all of it) instead of
+  its cues: on its monitor, in any stream or recording it sends, and on the
+  projectors that share its picture. It is drawn at the display's size every
+  time something changes, never held back as a preview is. A display that
+  shows the stage can't also be a picture on one of the stage's screens (it
+  would show itself): that screen is left blank.
+- **The previews still give way.** The 3D views are previews: while a display
+  falls behind they are drawn less often, smaller, then held, as every
+  preview is. A display that shows the stage is not.
+- **In a show network** the stage is part of the show, so every computer has
+  it. The venue's model file is not yet sent with the media: copy it to the
+  same place on each computer that draws the stage, or that computer draws the
+  screens without the room and says the venue didn't load.
+
 ## Show network: several computers
 
 *New, and not yet tried on a real show network: try it between your own
@@ -2289,6 +2340,7 @@ night is about 3,000 rows.
 | Ctrl+C / Ctrl+X / Ctrl+V (tracks editor) | Copy / cut the picked clips / paste at the playhead on their tracks |
 | Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
+| F (pointing at a 3D view) | See all of the 3D stage (double-click does too) |
 
 Space, 0, Esc and the cues' hotkeys also work, the same way, while an output window
 has focus (a cue given 0 takes it from GO there too); in show mode, so do the arrows

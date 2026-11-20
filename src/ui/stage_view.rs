@@ -51,6 +51,8 @@ pub struct StageShared {
     pub(super) actions: Vec<Action>,
     /// The screen picked (in a view or on the settings page).
     pub picked: Option<SurfaceId>,
+    /// The screen last opened on the settings page for being picked.
+    pub opened_for: Option<SurfaceId>,
     /// The 3D view at the top of Settings ▸ 3D stage.
     pub settings_view: StageViewState,
     /// TEMPORARY HOST (until the Preview pane's modes land): the Preview
@@ -106,6 +108,9 @@ impl Default for StageViewState {
         }
     }
 }
+
+/// The 3D view at the top of Settings ▸ 3D stage.
+pub const SETTINGS_VIEW: PreviewId = PreviewId::Other("stage-settings", 0);
 
 /// Pictures are asked for in steps of this many pixels, so a pane being
 /// resized doesn't make a new target every frame.
@@ -346,10 +351,14 @@ fn overlay(
                     )
                     .on_hover_text("See the screens through the venue's walls");
                 }
-                if ui
-                    .button("Edit…")
-                    .on_hover_text("The venue, the screens and the viewpoints: Settings ▸ 3D stage")
-                    .clicked()
+                // (Not on the settings page itself.)
+                if id != SETTINGS_VIEW
+                    && ui
+                        .button("Edit…")
+                        .on_hover_text(
+                            "The venue, the screens and the viewpoints: Settings ▸ 3D stage",
+                        )
+                        .clicked()
                 {
                     st.stage
                         .actions
