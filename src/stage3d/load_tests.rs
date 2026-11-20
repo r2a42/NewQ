@@ -286,6 +286,90 @@ fn a_mirrored_node_keeps_its_triangles_facing_out() {
     assert!(face[2] > 0.0, "{face:?}");
     // A material with nothing set is white (glTF's default).
     assert_eq!(v.parts[0].paint, Paint::Colour([1.0, 1.0, 1.0, 1.0]));
+    assert!(m.normals.iter().all(|n| n[2] > 0.99), "{:?}", m.normals);
+
+    // With the file's own normals (+Z) too: still facing +Z, not inside out.
+    let mut bin = t.bin[..68].to_vec();
+    bin.extend(f32s(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]));
+    json["buffers"][0]["byteLength"] = json!(bin.len());
+    json["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "buffer": 0, "byteOffset": 68, "byteLength": 36 }));
+    json["accessors"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC3" }));
+    json["meshes"][0]["primitives"][0]["attributes"]["NORMAL"] = json!(3);
+    let path = d.write("normals.glb", glb(&json, &bin));
+    let v = load_venue(&path, &venue()).unwrap();
+    let m = &v.parts[0].mesh;
+    assert!(
+        m.normals.iter().all(|n| close3(*n, [0.0, 0.0, 1.0])),
+        "{:?}",
+        m.normals
+    );
+    let [a, b, c] = [0, 1, 2].map(|i| m.positions[m.indices[i] as usize]);
+    assert!(geometry::cross(geometry::sub(b, a), geometry::sub(c, a))[2] > 0.0);
+}
+
+#[test]
+fn glb_data_it_cant_read_is_left_out_or_refused_in_words() {
+    let d = Dir::new("types");
+    let t = tri(&png(2, 2, [0, 0, 0, 255]));
+    let good = tri_json(&t, json!({ "byteLength": t.bin.len() }), json!({}));
+    // Positions as shorts (only quantized files may): left out, so nothing.
+    let mut j = good.clone();
+    j["accessors"][0]["componentType"] = json!(5122);
+    let p = d.write("a.glb", glb(&j, &t.bin));
+    let e = load_venue(&p, &venue()).unwrap_err();
+    assert!(
+        e.contains("no triangles") || e.contains("can't read"),
+        "{e}"
+    );
+    // Indices as floats.
+    let mut j = good.clone();
+    j["accessors"][2]["componentType"] = json!(5126);
+    let p = d.write("b.glb", glb(&j, &t.bin));
+    assert!(load_venue(&p, &venue()).is_err());
+    // Quantized meshes are refused in words.
+    let mut j = good.clone();
+    j["extensionsUsed"] = json!(["KHR_mesh_quantization"]);
+    j["extensionsRequired"] = json!(["KHR_mesh_quantization"]);
+    let p = d.write("c.glb", glb(&j, &t.bin));
+    let e = load_venue(&p, &venue()).unwrap_err();
+    assert!(e.contains("KHR_mesh_quantization"), "{e}");
+}
+
+#[test]
+fn an_obj_with_a_jpeg_picture() {
+    let d = Dir::new("jpeg");
+    let img = image::RgbImage::from_pixel(8, 8, image::Rgb([40, 120, 200]));
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
+    d.write("wall.jpg", jpeg.into_inner());
+    d.write("wall.mtl", "newmtl w\nmap_Kd wall.jpg\n");
+    let obj = "mtllib wall.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\n\
+               vt 0 0\nvt 1 0\nvt 0 1\nusemtl w\nf 1/1 2/2 3/3\n";
+    let path = d.write("wall.obj", obj);
+    let v = load_venue(&path, &venue()).unwrap();
+    assert!(v.warnings.is_empty(), "{:?}", v.warnings);
+    let Paint::Image {
+        rgba,
+        width,
+        height,
+        ..
+    } = &v.parts[0].paint
+    else {
+        panic!("{:?}", v.parts[0].paint);
+    };
+    assert_eq!((*width, *height), (8, 8));
+    let p = &rgba[0..4];
+    let near = |a: u8, b: u8| a.abs_diff(b) <= 4;
+    assert!(
+        near(p[0], 40) && near(p[1], 120) && near(p[2], 200) && p[3] == 255,
+        "{p:?}"
+    );
 }
 
 #[test]
@@ -555,6 +639,19 @@ fn a_huge_model_is_cut_with_a_warning_and_a_big_one_warned_about() {
     assert_eq!(v.triangles, 10);
     assert!(
         v.warnings[0].contains("12 triangles; only the first 10"),
+        "{:?}",
+        v.warnings
+    );
+    // One piece bigger than the limit: as much of it as fits.
+    let mut b = Builder::new(1.0);
+    (b.limit, b.warn_at) = (10, 5);
+    let mut scan = tri();
+    scan.indices = [0, 1, 2].repeat(25);
+    b.add("a", look, scan, &crate::stage3d::scene::IDENTITY);
+    let v = b.finish("scan", &venue()).unwrap();
+    assert_eq!((v.triangles, v.parts[0].mesh.triangles()), (10, 10));
+    assert!(
+        v.warnings[0].contains("25 triangles; only the first 10"),
         "{:?}",
         v.warnings
     );
