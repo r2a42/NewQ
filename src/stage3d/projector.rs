@@ -53,6 +53,9 @@ pub const DEFAULT_PIXELS: (u32, u32) = (1920, 1080);
 /// view's near plane is.
 pub const LENS_NEAR: f32 = 0.05;
 
+/// How far inside the picture's edge its outline is found (a share of it).
+pub const FOOTPRINT_INSET: f32 = 1e-4;
+
 /// Brightness steps offered (lumens).
 pub const BRIGHTNESS: [f32; 5] = [3000.0, 5000.0, 10_000.0, 20_000.0, 30_000.0];
 
@@ -583,8 +586,12 @@ impl Projector {
         around.push((0.0, 0.0));
         let mut out = Footprint::default();
         let mut piece: Vec<[f32; 3]> = Vec::new();
+        // A hair inside the edge: a picture fitted to a screen exactly has
+        // its edge on the screen's, where a ray may pass either side.
+        let inside = |t: f32| FOOTPRINT_INSET + t * (1.0 - 2.0 * FOOTPRINT_INSET);
         for (k, (u, v)) in around.into_iter().enumerate() {
-            let hit = render3d::pick(scene, &self.ray(u, v, aspect), wanted).map(|h| h.point);
+            let ray = self.ray(inside(u), inside(v), aspect);
+            let hit = render3d::pick(scene, &ray, wanted).map(|h| h.point);
             if k % n == 0 && k / n < 4 {
                 out.corners[k / n] = hit;
             }
