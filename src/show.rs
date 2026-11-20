@@ -734,6 +734,11 @@ pub struct OutputConfig {
     /// whole display by default.
     #[serde(default, skip_serializing_if = "is_whole")]
     pub area: Corners,
+    /// Display: its picture is the 3D stage seen from a viewpoint, not its
+    /// cues (`stage3d::StageSource`). None, and unwritten, for a display that
+    /// shows its cues as always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::stage3d::StageSource>,
     /// Older shows: where an output was placed, folded into the fields
     /// above by `Show::migrate_legacy`.
     #[serde(default, skip_serializing)]
@@ -769,6 +774,7 @@ impl OutputConfig {
             twins: 1,
             within: None,
             area: Corners::default(),
+            source: None,
             placement: None,
             display: None,
             needs_monitor: false,

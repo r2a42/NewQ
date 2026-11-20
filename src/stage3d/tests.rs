@@ -316,3 +316,104 @@ fn the_shape_key_follows_the_stage() {
     show.stage3d.surface_mut(s).unwrap().placement.yaw = 1.0;
     assert_ne!(show.stage3d.shape_key(), after);
 }
+
+#[test]
+fn a_display_shows_the_stage_only_when_asked_and_old_files_load() {
+    let mut show = Show::default();
+    let d = show.outputs[0].id;
+    let json = serde_json::to_string(&show).unwrap();
+    assert!(!json.contains("\"source\""), "unwritten when None: {json}");
+    show.outputs[0].source = Some(StageSource::default());
+    let json = serde_json::to_string(&show).unwrap();
+    assert!(json.contains("\"source\":{}"), "{json}");
+    let back: Show = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.outputs[0].source, Some(StageSource::default()));
+    show.outputs[0].source = Some(StageSource {
+        viewpoint: Some("FOH".into()),
+    });
+    let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
+    assert_eq!(
+        back.outputs[0]
+            .source
+            .as_ref()
+            .unwrap()
+            .viewpoint
+            .as_deref(),
+        Some("FOH")
+    );
+    // A display from 0.24 (no source) shows its cues.
+    let old: crate::show::OutputConfig =
+        serde_json::from_str(r#"{"id":5,"name":"Old","enabled":true}"#).unwrap();
+    assert!(old.source.is_none());
+    assert!(show.shows_stage(d));
+}
+
+#[test]
+fn a_display_showing_the_stage_is_never_a_picture_on_it() {
+    let mut show = Show::default();
+    let a = show.outputs[0].id;
+    let b = show.add_display();
+    let s1 = show.add_surface(None);
+    let s2 = show.add_surface(None);
+    show.stage3d.surface_mut(s1).unwrap().feed = Feed::whole_picture(&show, a);
+    show.stage3d.surface_mut(s2).unwrap().feed = Feed::whole_picture(&show, b);
+    let scene = show.stage3d.scene(&show, None);
+    assert_eq!(outputs_in(&scene), vec![a, b]);
+    // B shows the stage: its surface is unfed, A's still shows A.
+    show.outputs.iter_mut().find(|o| o.id == b).unwrap().source = Some(StageSource::default());
+    let scene = show.stage3d.scene(&show, None);
+    assert_eq!(outputs_in(&scene), vec![a]);
+    assert!(
+        scene
+            .parts
+            .iter()
+            .any(|p| p.paint == Paint::Colour(UNFED_GREY))
+    );
+    // A projector that shows part of a picture that shows the stage is
+    // that picture too.
+    let (wide, left, _right) = show.add_blended_pair(1920, 1080, 0.1);
+    assert_eq!(show.whole_picture(left), wide);
+    show.stage3d.surface_mut(s2).unwrap().feed = Feed::Display {
+        output: left,
+        region: WHOLE,
+    };
+    assert_eq!(outputs_in(&show.stage3d.scene(&show, None)), vec![a, left]);
+    show.outputs
+        .iter_mut()
+        .find(|o| o.id == wide)
+        .unwrap()
+        .source = Some(StageSource::default());
+    assert!(show.shows_stage(left));
+    assert_eq!(outputs_in(&show.stage3d.scene(&show, None)), vec![a]);
+}
+
+#[test]
+fn a_display_sees_the_stage_from_its_viewpoint_or_all_of_it() {
+    let mut show = Show::default();
+    show.stage3d.viewpoints.push(Viewpoint {
+        name: "Balcony".into(),
+        eye: [0.0, 8.0, 20.0],
+        target: [0.0, 2.0, 0.0],
+        fov_deg: 40.0,
+    });
+    let named = StageSource {
+        viewpoint: Some("Balcony".into()),
+    };
+    let cam = show.stage_camera(&named, None, 16.0 / 9.0);
+    assert_eq!(cam.eye, [0.0, 8.0, 20.0]);
+    assert_eq!(cam.fov_y_deg, 40.0);
+    // A name no longer there, or none: from in front, all of it in view.
+    let gone = StageSource {
+        viewpoint: Some("Gone".into()),
+    };
+    let bounds = Some(([-10.0, 0.0, -2.0], [10.0, 6.0, 2.0]));
+    for s in [gone, StageSource::default()] {
+        let cam = show.stage_camera(&s, bounds, 16.0 / 9.0);
+        assert_eq!(cam.target, [0.0, 3.0, 0.0]);
+        assert!(cam.eye[2] > 12.0 && cam.eye[1] > 3.0, "{cam:?}");
+        assert!(cam.eye.iter().all(|v| v.is_finite()));
+    }
+    // Nothing to frame: the default camera.
+    let cam = show.stage_camera(&StageSource::default(), None, 0.0);
+    assert_eq!(cam, scene::Camera::default());
+}
