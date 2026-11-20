@@ -6,9 +6,10 @@
 </p>
 
 NewQ is a free, cross-platform show playback and control system for theatre and
-live events, in the spirit of QLab. The same program runs a slideshow from one
-laptop, or a rig of networked computers playing video, sound and live cameras to
-projectors and LED walls across a venue.
+live events. The same program runs a slideshow from one laptop, or a rig of
+networked computers playing video, sound and live cameras to projectors and LED
+walls across a venue. It gathers the best ideas from years of show software into
+one program, and adds the ones nobody else ships.
 
 - **Small shows:** drop in pictures, films, sound, a PowerPoint or a PDF, and
   press GO. A presenter remote, a speaker timer and a clock are built in.
@@ -2415,7 +2416,7 @@ space like a hardware video mixer.
 
 QLab is a trademark of Figure 53, LLC. NewQ is an independent project, written
 from scratch and not affiliated with or endorsed by Figure 53; it mentions QLab
-only to say what kind of program it is. NewQ contains no QLab code, files or
+only to say which control messages it understands. NewQ contains no QLab code, files or
 text.
 
 ## License
