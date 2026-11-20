@@ -15,6 +15,7 @@ use super::settings::{hint, section, warning};
 use super::stage_view::{self, VenueStatus};
 use super::{Action, UiState};
 use crate::show::{OutputId, Show};
+use crate::stage3d::samples::SampleVenue;
 use crate::stage3d::{
     Facet, Feed, LengthUnit, Placement, StageSource, Surface, SurfaceId, SurfaceShape, UpAxis,
     Venue, Viewpoint, WHOLE, geometry,
@@ -126,6 +127,74 @@ pub enum StageEdit {
     SetVenue(PathBuf),
     AddSurface(Preset),
     AddViewpoint(Viewpoint),
+    /// Use one of NewQ's sample venues, and with `usual` its usual screens
+    /// (showing the first display) and viewpoints.
+    UseSample {
+        kind: SampleVenue,
+        usual: bool,
+    },
+    /// Write a sample venue as a .glb (to change in a 3D program). Not an
+    /// edit of the show.
+    ExportGlb(SampleVenue, PathBuf),
+}
+
+impl StageEdit {
+    pub fn edits_the_show(&self) -> bool {
+        !matches!(self, StageEdit::ExportGlb(..))
+    }
+}
+
+/// Use sample `kind` as the venue (keeping where the old venue was put), and
+/// with `usual` add its usual screens, each showing the first display, and
+/// its viewpoints. The screens added.
+pub fn use_sample(show: &mut Show, kind: SampleVenue, usual: bool) -> Vec<SurfaceId> {
+    let venue = match show.stage3d.venue.take() {
+        Some(old) => Venue {
+            placement: old.placement,
+            visible: old.visible,
+            brightness: old.brightness,
+            ..Venue::sample(kind)
+        },
+        None => Venue::sample(kind),
+    };
+    show.stage3d.venue = Some(venue);
+    if !usual {
+        return Vec::new();
+    }
+    let feed = first_feed(show);
+    let ids = show.add_sample_screens(kind);
+    for id in &ids {
+        if let Some(s) = show.stage3d.surface_mut(*id) {
+            s.feed = feed.clone();
+        }
+    }
+    show.stage3d.add_sample_viewpoints(kind);
+    ids
+}
+
+/// A menu of the sample venues; the one chosen, and whether with its usual
+/// screens and viewpoints.
+pub(super) fn sample_menu(ui: &mut Ui, label: &str) -> Option<(SampleVenue, bool)> {
+    let key = egui::Id::new("stage_sample_usual");
+    let mut chosen = None;
+    ui.menu_button(label, |ui| {
+        let mut usual = ui.data(|d| d.get_temp::<bool>(key)).unwrap_or(true);
+        ui.checkbox(&mut usual, "With its usual screens and viewpoints");
+        ui.data_mut(|d| d.insert_temp(key, usual));
+        ui.separator();
+        for k in SampleVenue::ALL {
+            if ui.button(k.label()).clicked() {
+                chosen = Some((k, usual));
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text(
+        "A venue made by NewQ: an arena, theatres, a black box, a club, a festival stage, a \
+         ballroom. Export it as .glb to change it in a 3D program.",
+    );
+    chosen
 }
 
 /// The first display a new screen shows: the whole picture of the first
@@ -166,23 +235,56 @@ pub fn add_surface(show: &mut Show, preset: Preset) -> SurfaceId {
 }
 
 /// Make edit `e` (through `ui::apply`, after the show-mode and lock checks).
-pub fn apply(e: StageEdit, show: &mut Show, st: &mut UiState) {
+pub fn apply(e: StageEdit, show: &mut Show, engine: &mut crate::engine::Engine, st: &mut UiState) {
     match e {
         StageEdit::SetVenue(path) => {
+            // A file in place of a sample: the sample goes.
             let venue = match show.stage3d.venue.take() {
-                Some(old) => Venue { path, ..old },
+                Some(old) => Venue {
+                    path,
+                    sample: None,
+                    ..old
+                },
                 None => Venue::new(path),
             };
             show.stage3d.venue = Some(venue);
             // See it from the start.
             st.stage.settings_view = Default::default();
-            if let Some(v) = &mut st.stage.temp_host {
+            for v in st.preview_stage.values_mut() {
                 *v = Default::default();
             }
         }
         StageEdit::AddSurface(preset) => {
             let id = add_surface(show, preset);
             st.stage.picked = Some(id);
+        }
+        StageEdit::UseSample { kind, usual } => {
+            use_sample(show, kind, usual);
+            // From its first seat if it has one (an arena from outside is a
+            // roof), else all of it.
+            let fresh = || match show.stage3d.viewpoints.first() {
+                Some(v) if usual => stage_view::StageViewState::from_viewpoint(v),
+                _ => Default::default(),
+            };
+            st.stage.settings_view = fresh();
+            for v in st.preview_stage.values_mut() {
+                *v = fresh();
+            }
+        }
+        StageEdit::ExportGlb(kind, path) => {
+            // Made and written on a thread: an arena is a few megabytes.
+            let name = kind.label();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("sample-glb".into())
+                .spawn(move || {
+                    let bytes = crate::stage3d::samples::sample_glb(kind);
+                    let _ = tx.send(std::fs::write(&path, bytes).map(|_| path));
+                });
+            match spawned {
+                Ok(_) => st.stage.exports.push(rx),
+                Err(e) => engine.problem(format!("{name} wasn't saved: {e}")),
+            }
         }
         StageEdit::AddViewpoint(v) => {
             let mut v = v;
@@ -269,6 +371,9 @@ fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut V
                     if ui.button("Load a venue model…").clicked() {
                         actions.push(Action::AskFile(super::DialogFor::Venue));
                     }
+                    if let Some((kind, usual)) = sample_menu(ui, "Use a sample venue ⏷") {
+                        actions.push(Action::Stage(StageEdit::UseSample { kind, usual }));
+                    }
                 });
                 hint(
                     ui,
@@ -279,11 +384,48 @@ fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut V
             }
             Some(v) => {
                 let mut remove = false;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(file_label(&v.path)).strong())
-                        .on_hover_text(v.path.display().to_string());
-                    if ui.button("Change…").clicked() {
+                let mut usual = None;
+                ui.horizontal_wrapped(|ui| {
+                    match v.sample {
+                        Some(kind) => {
+                            ui.label(RichText::new(format!("Sample: {}", kind.label())).strong());
+                        }
+                        None => {
+                            ui.label(RichText::new(file_label(&v.path)).strong())
+                                .on_hover_text(v.path.display().to_string());
+                        }
+                    }
+                    if ui
+                        .button("Load a model…")
+                        .on_hover_text("Use a model file instead (glTF or OBJ)")
+                        .clicked()
+                    {
                         actions.push(Action::AskFile(super::DialogFor::Venue));
+                    }
+                    if let Some((kind, usual)) = sample_menu(ui, "Sample ⏷") {
+                        actions.push(Action::Stage(StageEdit::UseSample { kind, usual }));
+                    }
+                    if let Some(kind) = v.sample {
+                        if ui
+                            .button("Export as .glb…")
+                            .on_hover_text(
+                                "Save this sample as a glTF model, to change in Blender or \
+                                 another 3D program, then load it back",
+                            )
+                            .clicked()
+                        {
+                            actions.push(Action::AskFile(super::DialogFor::SampleGlb(kind)));
+                        }
+                        if ui
+                            .button("Add the usual screens")
+                            .on_hover_text(
+                                "The screens this venue usually has, and its viewpoints, each \
+                                 screen showing the first display",
+                            )
+                            .clicked()
+                        {
+                            usual = Some(kind);
+                        }
                     }
                     if ui.button("Remove").clicked() {
                         remove = true;
@@ -310,29 +452,33 @@ fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut V
                         ui.label("Shown");
                         ui.checkbox(&mut v.visible, "");
                         ui.end_row();
-                        ui.label("The file is in");
-                        egui::ComboBox::from_id_salt("venue_units")
-                            .selected_text(v.units.label())
-                            .show_ui(ui, |ui| {
-                                for u in LengthUnit::ALL {
-                                    ui.selectable_value(&mut v.units, u, u.label());
-                                }
-                            })
-                            .response
-                            .on_hover_text(
-                                "What the model's numbers are: glTF is in metres; an OBJ is \
-                                 in whatever its program used",
-                            );
-                        ui.end_row();
-                        ui.label("Up is");
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut v.up, UpAxis::Y, "Y");
-                            ui.selectable_value(&mut v.up, UpAxis::Z, "Z")
+                        if v.sample.is_some() {
+                            // A sample is in metres, Y up.
+                        } else {
+                            ui.label("The file is in");
+                            egui::ComboBox::from_id_salt("venue_units")
+                                .selected_text(v.units.label())
+                                .show_ui(ui, |ui| {
+                                    for u in LengthUnit::ALL {
+                                        ui.selectable_value(&mut v.units, u, u.label());
+                                    }
+                                })
+                                .response
                                 .on_hover_text(
-                                    "For a model from a Z-up program (3ds Max, SketchUp, CAD)",
+                                    "What the model's numbers are: glTF is in metres; an OBJ is \
+                                 in whatever its program used",
                                 );
-                        });
-                        ui.end_row();
+                            ui.end_row();
+                            ui.label("Up is");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut v.up, UpAxis::Y, "Y");
+                                ui.selectable_value(&mut v.up, UpAxis::Z, "Z")
+                                    .on_hover_text(
+                                        "For a model from a Z-up program (3ds Max, SketchUp, CAD)",
+                                    );
+                            });
+                            ui.end_row();
+                        }
                         ui.label("Brightness");
                         ui.add(
                             egui::Slider::new(&mut v.brightness, 0.05..=4.0)
@@ -345,6 +491,15 @@ fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut V
                     });
                 if remove {
                     show.stage3d.venue = None;
+                }
+                if let Some(kind) = usual {
+                    let feed = first_feed(show);
+                    for id in show.add_sample_screens(kind) {
+                        if let Some(s) = show.stage3d.surface_mut(id) {
+                            s.feed = feed.clone();
+                        }
+                    }
+                    show.stage3d.add_sample_viewpoints(kind);
                 }
             }
         }

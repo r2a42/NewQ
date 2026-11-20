@@ -48,7 +48,13 @@ fn a_display_that_shows_the_stage_is_not_offered_to_a_screen() {
 fn edits_from_a_view_go_through_the_show_edit_path() {
     let mut show = Show::default();
     let mut st = UiState::default();
-    apply(StageEdit::AddSurface(Preset::Curved), &mut show, &mut st);
+    let mut e = crate::engine::Engine::for_tests();
+    apply(
+        StageEdit::AddSurface(Preset::Curved),
+        &mut show,
+        &mut e,
+        &mut st,
+    );
     assert_eq!(show.stage3d.surfaces.len(), 1);
     assert_eq!(st.stage.picked, Some(show.stage3d.surfaces[0].id));
     let vp = Viewpoint {
@@ -57,8 +63,13 @@ fn edits_from_a_view_go_through_the_show_edit_path() {
         target: [0.0, 2.0, 0.0],
         fov_deg: 50.0,
     };
-    apply(StageEdit::AddViewpoint(vp.clone()), &mut show, &mut st);
-    apply(StageEdit::AddViewpoint(vp), &mut show, &mut st);
+    apply(
+        StageEdit::AddViewpoint(vp.clone()),
+        &mut show,
+        &mut e,
+        &mut st,
+    );
+    apply(StageEdit::AddViewpoint(vp), &mut show, &mut e, &mut st);
     let names: Vec<&str> = show
         .stage3d
         .viewpoints
@@ -70,12 +81,14 @@ fn edits_from_a_view_go_through_the_show_edit_path() {
     apply(
         StageEdit::SetVenue(PathBuf::from("/venues/a.glb")),
         &mut show,
+        &mut e,
         &mut st,
     );
     show.stage3d.venue.as_mut().unwrap().units = LengthUnit::Centimetres;
     apply(
         StageEdit::SetVenue(PathBuf::from("/venues/b.obj")),
         &mut show,
+        &mut e,
         &mut st,
     );
     let v = show.stage3d.venue.as_ref().unwrap();
@@ -83,7 +96,6 @@ fn edits_from_a_view_go_through_the_show_edit_path() {
     assert_eq!(v.units, LengthUnit::Centimetres);
     // They are edits of the show: refused in show mode like any other.
     assert!(Action::Stage(StageEdit::AddSurface(Preset::Flat)).edits_the_show());
-    let mut e = crate::engine::Engine::for_tests();
     st.show_mode = true;
     crate::ui::apply(
         Action::Stage(StageEdit::AddSurface(Preset::Flat)),
@@ -96,4 +108,60 @@ fn edits_from_a_view_go_through_the_show_edit_path() {
         1,
         "show mode keeps it as it was"
     );
+}
+
+#[test]
+fn a_sample_venue_comes_with_its_screens_and_a_file_takes_its_place() {
+    let mut show = Show::default();
+    let d = show.outputs[0].id;
+    let mut st = UiState::default();
+    let mut e = crate::engine::Engine::for_tests();
+    apply(
+        StageEdit::UseSample {
+            kind: SampleVenue::Arena,
+            usual: true,
+        },
+        &mut show,
+        &mut e,
+        &mut st,
+    );
+    let v = show.stage3d.venue.clone().unwrap();
+    assert_eq!(v.sample, Some(SampleVenue::Arena));
+    assert!(!show.stage3d.surfaces.is_empty());
+    assert!(
+        show.stage3d
+            .surfaces
+            .iter()
+            .all(|s| s.feed.output() == Some(d))
+    );
+    assert!(!show.stage3d.viewpoints.is_empty());
+    // Another sample without its screens keeps the screens there are.
+    let n = show.stage3d.surfaces.len();
+    show.stage3d.venue.as_mut().unwrap().brightness = 0.5;
+    assert!(use_sample(&mut show, SampleVenue::Club, false).is_empty());
+    assert_eq!(show.stage3d.surfaces.len(), n);
+    let v = show.stage3d.venue.as_ref().unwrap();
+    assert_eq!((v.sample, v.brightness), (Some(SampleVenue::Club), 0.5));
+    // A model file in its place: no sample any more.
+    apply(
+        StageEdit::SetVenue(PathBuf::from("/venues/hall.glb")),
+        &mut show,
+        &mut e,
+        &mut st,
+    );
+    let v = show.stage3d.venue.as_ref().unwrap();
+    assert_eq!(v.sample, None);
+    assert_eq!(v.path, PathBuf::from("/venues/hall.glb"));
+    // Writing a sample out is not an edit of the show (allowed in show mode).
+    let path = std::env::temp_dir().join(format!("newq-sample-{}.glb", std::process::id()));
+    let x = StageEdit::ExportGlb(SampleVenue::BlackBox, path.clone());
+    assert!(!Action::Stage(x.clone()).edits_the_show());
+    apply(x, &mut show, &mut e, &mut st);
+    let rx = st.stage.exports.pop().unwrap();
+    let written = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    assert!(std::fs::metadata(&written).unwrap().len() > 1000);
+    let _ = std::fs::remove_file(&path);
 }

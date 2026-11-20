@@ -42,7 +42,7 @@ fn run(show: &Show, st: &mut UiState, view: &mut StageViewState) {
     };
     let mut out = ctx.run_ui(input, |ui| {
         egui::CentralPanel::default().show(ui, |ui| {
-            draw(ui, show, st, view, PreviewId::Other("stage", 0));
+            draw(ui, show, st, view, PreviewId::Stage(0));
         });
     });
     out.textures_delta.clear();
@@ -58,7 +58,7 @@ fn a_view_asks_the_governor_and_only_then_for_a_picture() {
     assert!(st.stage.requests.is_empty());
     crate::ui::stage_edit::add_surface(&mut show, Preset::Flat);
     run(&show, &mut st, &mut view);
-    let id = PreviewId::Other("stage", 0);
+    let id = PreviewId::Stage(0);
     assert!(st.preview_governor.asked.borrow().contains(&id));
     assert_eq!(st.stage.requests.len(), 1);
     let r = &st.stage.requests[0];
@@ -108,7 +108,7 @@ fn an_empty_stage_offers_a_start_and_a_view_asks_through_actions() {
         }
         let mut out = ctx.run_ui(input, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                draw(ui, &show, &mut st, &mut view, PreviewId::Other("stage", 0));
+                draw(ui, &show, &mut st, &mut view, PreviewId::Stage(0));
             });
         });
         out.textures_delta.clear();
@@ -156,7 +156,7 @@ fn a_click_on_a_screen_picks_it_and_a_drag_turns_the_view() {
         };
         let mut out = ctx.run_ui(input, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                draw(ui, &show, st, view, PreviewId::Other("stage", 0));
+                draw(ui, &show, st, view, PreviewId::Stage(0));
             });
         });
         out.textures_delta.clear();

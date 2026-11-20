@@ -7,6 +7,9 @@
 //! - Over the picture: the saved viewpoints (and saving this one), a floor
 //!   grid, an x-ray of the venue and "See all".
 //!
+//! Hosted by a Preview pane in 3D mode (`PreviewId::Stage(host)`, its state in
+//! `UiState::preview_stage`) and by Settings ▸ 3D stage (`SETTINGS_VIEW`).
+//!
 //! Drawing obeys the preview governor (`preview_pace`): each frame the view
 //! asks `UiState::preview_budget` and, when it may draw, asks the app for a
 //! picture (`StageShared::requests`), which the stage's thread draws
@@ -51,13 +54,12 @@ pub struct StageShared {
     pub(super) actions: Vec<Action>,
     /// The screen picked (in a view or on the settings page).
     pub picked: Option<SurfaceId>,
+    /// Sample venues being written as .glb (`StageEdit::ExportGlb`).
+    pub exports: Vec<std::sync::mpsc::Receiver<std::io::Result<std::path::PathBuf>>>,
     /// The screen last opened on the settings page for being picked.
     pub opened_for: Option<SurfaceId>,
     /// The 3D view at the top of Settings ▸ 3D stage.
     pub settings_view: StageViewState,
-    /// TEMPORARY HOST (until the Preview pane's modes land): the Preview
-    /// pane shows the 3D view while this is on (`ui::output_previews`).
-    pub temp_host: Option<StageViewState>,
 }
 
 /// How the venue's model stands.
@@ -88,8 +90,12 @@ pub struct ViewRequest {
 #[derive(Clone, Debug)]
 pub struct StageViewState {
     pub orbit: Orbit,
-    /// Looked at everything once (done at the first picture with something in it).
-    framed: bool,
+    /// The bounds it last looked at all of by itself: until the user moves
+    /// the camera, it looks at all of the stage again when that changes (a
+    /// venue that loads after its screens were seen).
+    framed: Option<Bounds>,
+    /// The user has moved the camera (or chosen a viewpoint).
+    moved: bool,
     pub grid: bool,
     /// The venue's opacity: below 1 the screens show through its walls.
     pub xray: f32,
@@ -101,10 +107,22 @@ impl Default for StageViewState {
     fn default() -> Self {
         StageViewState {
             orbit: Orbit::default(),
-            framed: false,
+            framed: None,
+            moved: false,
             grid: true,
             xray: 1.0,
             saving: None,
+        }
+    }
+}
+
+impl StageViewState {
+    /// A view looking from viewpoint `v` (as if chosen from its menu).
+    pub fn from_viewpoint(v: &Viewpoint) -> StageViewState {
+        StageViewState {
+            orbit: Orbit::from_camera(&v.camera()),
+            moved: true,
+            ..StageViewState::default()
         }
     }
 }
@@ -159,11 +177,12 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
     let px = request_size(rect.size() * ppp);
     let aspect = rect.width().max(1.0) / rect.height().max(1.0);
     let bounds = st.stage.bounds;
-    if !view.framed
-        && let Some(b) = &bounds
+    if !view.moved
+        && let Some(b) = bounds
+        && view.framed != Some(b)
     {
-        view.orbit.frame(b, aspect);
-        view.framed = true;
+        view.orbit.frame(&b, aspect);
+        view.framed = Some(b);
     }
 
     // The mouse.
@@ -175,6 +194,7 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
         )
     });
     let delta = response.drag_delta() * ppp;
+    view.moved |= response.dragged() || (response.hovered() && scroll != 0.0);
     if response.dragged_by(egui::PointerButton::Primary) && !shift {
         view.orbit.orbit(delta.x, delta.y);
     } else if response.dragged_by(egui::PointerButton::Secondary)
@@ -319,7 +339,7 @@ fn overlay(
                     for v in &show.stage3d.viewpoints {
                         if ui.button(&v.name).clicked() {
                             view.orbit = Orbit::from_camera(&v.camera());
-                            view.framed = true;
+                            view.moved = true;
                             ui.close();
                         }
                     }
@@ -477,8 +497,13 @@ fn empty(ui: &mut Ui, show: &Show, st: &mut UiState) {
                     .actions
                     .push(Action::Stage(StageEdit::AddSurface(Preset::Flat)));
             }
-            // HOOK(samples): when `stage3d::samples` lands, offer "Use a sample
-            // venue" here (a menu of the samples, each an `Action::Stage`).
+            if let Some((kind, usual)) =
+                crate::ui::stage_edit::sample_menu(ui, "Use a sample venue ⏷")
+            {
+                st.stage
+                    .actions
+                    .push(Action::Stage(StageEdit::UseSample { kind, usual }));
+            }
         });
         if !edit {
             ui.label(
