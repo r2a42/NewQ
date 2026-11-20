@@ -16,6 +16,7 @@
 
 pub mod geometry;
 pub mod load;
+pub mod samples;
 pub mod scene;
 
 use crate::show::{OutputId, Show};
@@ -185,12 +186,18 @@ fn is_whole(r: &[f32; 4]) -> bool {
     *r == WHOLE
 }
 
-/// The venue: a model file of the room, stage or arena.
+/// The venue: a model file of the room, stage or arena, or one of NewQ's
+/// own sample venues (`samples`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Venue {
     /// The model file (.glb, .gltf or .obj). Kept relative to the show file
-    /// when saved, as cues' files are.
+    /// when saved, as cues' files are. Empty (and unwritten) for a sample.
+    #[serde(default, skip_serializing_if = "is_no_path")]
     pub path: PathBuf,
+    /// One of NewQ's sample venues, made in code; `path` is unused when set.
+    /// Samples are in metres, Y up, whatever `units` and `up` say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<samples::SampleVenue>,
     /// Where the model is put, after its units and up axis.
     #[serde(default, skip_serializing_if = "Placement::is_default")]
     pub placement: Placement,
@@ -208,15 +215,28 @@ pub struct Venue {
     pub brightness: f32,
 }
 
+fn is_no_path(p: &std::path::Path) -> bool {
+    p.as_os_str().is_empty()
+}
+
 impl Venue {
     pub fn new(path: PathBuf) -> Self {
         Venue {
             path,
+            sample: None,
             placement: Placement::default(),
             units: LengthUnit::Metres,
             up: UpAxis::Y,
             visible: true,
             brightness: 1.0,
+        }
+    }
+
+    /// One of NewQ's sample venues (`samples::sample_venue` makes it).
+    pub fn sample(kind: samples::SampleVenue) -> Self {
+        Venue {
+            sample: Some(kind),
+            ..Venue::new(PathBuf::new())
         }
     }
 
@@ -232,11 +252,17 @@ impl Venue {
     /// Whether a model loaded for `loaded_for` must be loaded again for this
     /// venue (units, up axis and placement don't need it).
     pub fn needs_reload(&self, loaded_for: &Venue) -> bool {
-        self.path != loaded_for.path || self.brightness() != loaded_for.brightness()
+        self.path != loaded_for.path
+            || self.sample != loaded_for.sample
+            || self.brightness() != loaded_for.brightness()
     }
 
-    /// The model's file coordinates to the world.
+    /// The model's file coordinates to the world. A sample is in metres and
+    /// Y up already: only its placement counts.
     pub fn matrix(&self) -> Mat4 {
+        if self.sample.is_some() {
+            return self.placement.matrix();
+        }
         geometry::mul(
             &self.placement.matrix(),
             &geometry::mul(&self.up.to_y_up(), &geometry::scale(self.units.metres())),
@@ -459,6 +485,25 @@ impl Stage3d {
         Scene { parts }
     }
 
+    /// A sample venue's viewpoints (`samples::viewpoints`) placed where the
+    /// venue is, leaving out any whose name is already saved.
+    pub fn add_sample_viewpoints(&mut self, kind: samples::SampleVenue) {
+        let m = self
+            .venue
+            .as_ref()
+            .map_or(scene::IDENTITY, |v| v.placement.matrix());
+        for v in samples::viewpoints(kind) {
+            if self.viewpoints.iter().any(|w| w.name == v.name) {
+                continue;
+            }
+            self.viewpoints.push(Viewpoint {
+                eye: geometry::point(&m, v.eye),
+                target: geometry::point(&m, v.target),
+                ..v
+            });
+        }
+    }
+
     /// The venue's corners in the world, once loaded: to frame it in view.
     pub fn venue_bounds(&self, loaded: &LoadedVenue) -> Option<load::Bounds> {
         let v = self.venue.as_ref()?;
@@ -511,6 +556,41 @@ impl Show {
             feed: Feed::None,
         });
         id
+    }
+
+    /// Add a sample venue's usual screens (`samples::screens`), unfed, where
+    /// they belong in it: the venue's position and turn (yaw) are followed;
+    /// a venue tipped or rolled isn't. Ids from the show's.
+    pub fn add_sample_screens(&mut self, kind: samples::SampleVenue) -> Vec<SurfaceId> {
+        let venue = self
+            .stage3d
+            .venue
+            .as_ref()
+            .map_or_else(Placement::default, |v| v.placement);
+        let turn = geometry::rotation_y(if venue.yaw.is_finite() {
+            venue.yaw
+        } else {
+            0.0
+        });
+        let mut ids = Vec::new();
+        for s in samples::screens(kind) {
+            let id = SurfaceId(self.alloc_id());
+            let p = geometry::point(&turn, s.placement.position);
+            self.stage3d.surfaces.push(Surface {
+                id,
+                name: s.name.to_string(),
+                visible: true,
+                placement: Placement {
+                    position: [0, 1, 2].map(|i| p[i] + venue.position[i]),
+                    yaw: s.placement.yaw + venue.yaw,
+                    ..s.placement
+                },
+                shape: s.shape,
+                feed: Feed::None,
+            });
+            ids.push(id);
+        }
+        ids
     }
 
     pub fn remove_surface(&mut self, id: SurfaceId) {

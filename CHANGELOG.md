@@ -14,6 +14,11 @@ release page, and a release is refused if it has none.
   preview in NewQ is drawn less often, then smaller, then paused if need be, and the Preview pane
   says so; they come back once the displays have been smooth for a while.
   Settings ▸ General ▸ *Previews* can also keep them at a lower rate on this computer.
+- **Sample venues for the 3D stage.** Without a model of your own you can pick one of seven
+  built-in spaces: an arena, a proscenium theatre, a thrust stage, a black box studio, a club, a
+  festival main stage and a ballroom, each to real sizes in metres, with the screens such a venue
+  usually has (a centre-hung scoreboard, an upstage LED wall, side screens, a cyc, a DJ wall) ready
+  to add and a few places to look from.
 
 ## 0.24.7
 

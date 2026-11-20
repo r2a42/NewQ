@@ -79,7 +79,13 @@ pub struct LoadedVenue {
 /// is a sentence for the user; a model that reads with something missing
 /// (a texture, its materials) loads with `warnings`. Never panics on a bad
 /// file.
+///
+/// A sample venue (`Venue::sample`) is made in code instead, and `path` is
+/// not looked at.
 pub fn load_venue(path: &Path, venue: &Venue) -> Result<LoadedVenue, String> {
+    if let Some(kind) = venue.sample {
+        return super::samples::sample_venue(kind, venue);
+    }
     // The readers are trusted not to panic, but a damaged file must never
     // take the program down.
     let read = std::panic::catch_unwind(|| read_model(path, venue));
@@ -151,12 +157,12 @@ fn read_model(path: &Path, venue: &Venue) -> Result<LoadedVenue, String> {
 
 /// A material, as far as the venue view cares.
 #[derive(Clone, Debug)]
-struct Look {
-    colour: [f32; 4],
-    texture: Option<Arc<image::RgbaImage>>,
+pub(super) struct Look {
+    pub(super) colour: [f32; 4],
+    pub(super) texture: Option<Arc<image::RgbaImage>>,
 }
 
-struct Builder {
+pub(super) struct Builder {
     brightness: f32,
     /// Per material key, its look and its triangles so far.
     parts: Vec<(Look, Mesh)>,
@@ -171,7 +177,7 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(brightness: f32) -> Self {
+    pub(super) fn new(brightness: f32) -> Self {
         Builder {
             brightness,
             parts: Vec::new(),
@@ -194,7 +200,13 @@ impl Builder {
     /// Add triangles of one material: positions placed by `m`, normals
     /// carried with them (or worked out when there are none), the winding
     /// turned round when `m` mirrors.
-    fn add(&mut self, key: &str, look: impl FnOnce() -> Look, mut piece: Mesh, m: &Mat4) {
+    pub(super) fn add(
+        &mut self,
+        key: &str,
+        look: impl FnOnce() -> Look,
+        mut piece: Mesh,
+        m: &Mat4,
+    ) {
         let n = piece.positions.len();
         piece.indices.truncate(piece.indices.len() / 3 * 3);
         if piece.indices.iter().any(|i| *i as usize >= n) {
@@ -261,7 +273,7 @@ impl Builder {
         mesh.indices.extend(piece.indices.iter().map(|i| i + base));
     }
 
-    fn finish(mut self, name: &str, venue: &Venue) -> Result<LoadedVenue, String> {
+    pub(super) fn finish(mut self, name: &str, venue: &Venue) -> Result<LoadedVenue, String> {
         if self.triangles == 0 {
             return Err(format!("{name} has no triangles to show."));
         }
