@@ -6,6 +6,18 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Previews only give way when the displays really suffer.** They used to slow down at every
+  single late frame, even one nobody could see (a 25 fps film on a 100 Hz display shows each
+  picture for four refreshes), and could end up paused for a whole show. Now only a late frame
+  that held back a new picture counts, judged as a share over a few seconds, and the moment after
+  a GO or a jump isn't counted. They also come back sooner: a step every two smooth seconds,
+  never waiting more than about 20. There is a 60 fps step before 30.
+- **New preview settings** in Settings ▸ General ▸ Previews: turn the previews off altogether
+  (each preview then says so, with a button to turn them back on), limit their frame rate (now
+  with 60 fps too) and their resolution (Full, Half or Quarter, the 3D view included), and choose
+  how soon they give way: *Relaxed* (the default, about 5% of new pictures late), *Strict* (about
+  1%) or *Off* (they never give way, so on a busy computer the displays may stutter).
+
 ## 0.25.0
 
 - **The 3D stage.** *Settings ▸ 3D stage* puts your screens in a model of the venue (glTF or OBJ;

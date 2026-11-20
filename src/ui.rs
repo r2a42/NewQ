@@ -4682,7 +4682,7 @@ impl UiState {
         id: crate::preview_pace::PreviewId,
     ) -> crate::preview_pace::PreviewBudget {
         self.preview_governor
-            .ask(id, std::time::Instant::now(), self.prefs.preview_cap)
+            .ask(id, std::time::Instant::now(), self.prefs.preview_limits())
     }
 
     /// Note which Preview panes are showing, and let go of what the ones that
@@ -4710,6 +4710,33 @@ impl UiState {
             .collect();
         self.preview_panes_open = open;
     }
+}
+
+/// While this computer's previews are off (Settings ▸ General ▸ Previews): one
+/// line saying so in place of the picture, with a button that turns them back
+/// on. True while they are off (the caller draws nothing more).
+pub(crate) fn previews_off_line(ui: &mut Ui, st: &mut UiState) -> bool {
+    if !st.prefs.previews_off {
+        return false;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(crate::preview_pace::OFF_WORDS).weak());
+        if ui
+            .button("Turn previews on")
+            .on_hover_text(
+                "Also in Settings ▸ General ▸ Previews. The displays are not affected either way.",
+            )
+            .clicked()
+        {
+            st.prefs.previews_off = false;
+            if let Some(dir) = &st.layout_dir
+                && let Err(e) = st.prefs.save(dir)
+            {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
+    });
+    true
 }
 
 /// How compositor preview `id` draws now, showing `shows` (an output's id):
@@ -5335,7 +5362,9 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
         st.multiview_editor = None;
     }
     // Small, and only while the preview draws less than it would.
-    let notice = st.preview_governor.notice(st.prefs.preview_cap);
+    let notice = (!st.prefs.previews_off)
+        .then(|| st.preview_governor.notice(st.prefs.preview_limits()))
+        .flatten();
     if let Some(text) = &notice {
         ui.label(RichText::new(text).weak().small()).on_hover_text(
             "The previews in this window are drawn less often and smaller while the displays need the room, and back up once they have been smooth for a while. The displays themselves are not affected. Settings ▸ General ▸ Previews.",
@@ -5347,6 +5376,11 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
         d.insert_temp(test_key("preview_mode", host), mode);
     });
 
+    // Previews off: a line in place of the pictures (lining up corners still
+    // shows the display it lines up; the 3D view says so itself).
+    if mode != PreviewMode::Stage && !editing && previews_off_line(ui, st) {
+        return;
+    }
     if mode == PreviewMode::Stage {
         // Its own state, taken out while it draws (it is given the rest).
         let mut view = st.preview_stage.remove(&host).unwrap_or_default();
@@ -15956,6 +15990,70 @@ mod tests {
                 Some("Preview at 30 fps (this computer's setting)")
             );
             assert_eq!(pace.unwrap().scale, 1.0);
+        }
+    }
+
+    #[test]
+    fn previews_switched_off_draw_nothing_and_say_so_with_a_way_back() {
+        use crate::preview_pace::PreviewId;
+        for multiview in [false, true] {
+            let mut st = UiState {
+                previews: (1..=3).map(preview).collect(),
+                ..UiState::default()
+            };
+            st.prefs.previews_off = true;
+            st.layout.preview_mut(0).mode = mode_of(multiview);
+            let ctx = egui::Context::default();
+            let mut show = Show::default();
+            let pane = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 900.0));
+            // Where the button is, from the first frame.
+            let mut button: Option<Rect> = None;
+            for n in 0..6 {
+                let mut input = RawInput {
+                    screen_rect: Some(pane),
+                    time: Some(n as f64 * 0.1),
+                    ..Default::default()
+                };
+                if let Some(r) = button.filter(|_| n == 2 || n == 3) {
+                    let at = r.center();
+                    input.events.push(egui::Event::PointerMoved(at));
+                    input.events.push(egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed: n == 2,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut o = ctx.run_ui(input, |ui| {
+                    output_previews(ui, &mut show, &mut st, true, 0);
+                });
+                o.textures_delta.clear();
+                if button.is_none() {
+                    // No preview asked for a picture: none is drawn.
+                    assert!(st.preview_governor.asked.borrow().is_empty());
+                    let words = format!("{:?}", o.shapes);
+                    assert!(
+                        words.contains(crate::preview_pace::OFF_WORDS),
+                        "{multiview}"
+                    );
+                    button = o.shapes.iter().find_map(|s| match &s.shape {
+                        egui::Shape::Text(t) if t.galley.text() == "Turn previews on" => {
+                            Some(t.visual_bounding_rect())
+                        }
+                        _ => None,
+                    });
+                    assert!(button.is_some(), "the button is there");
+                }
+            }
+            // The button turned them on, and the pane drew its pictures again.
+            assert!(!st.prefs.previews_off, "{multiview}");
+            assert!(
+                st.preview_governor
+                    .asked
+                    .borrow()
+                    .iter()
+                    .any(|id| matches!(id, PreviewId::Single(0) | PreviewId::Tile(0, _)))
+            );
         }
     }
 

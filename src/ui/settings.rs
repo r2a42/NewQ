@@ -377,14 +377,15 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
         );
     });
     section(ui, "Previews (this computer)", |ui| {
-        preview_cap(ui, st);
+        preview_settings(ui, st);
         hint(
             ui,
-            "The previews in this window (the Preview pane, single or multiview, and the \
-             timeline workspace's monitor) give way to the displays: while a display falls \
-             behind, they are drawn less often, then smaller, then paused, and \
-             back up once the displays have been smooth for a while. The Preview pane says \
-             so while it happens. A limit here keeps them at that rate or below all the time.",
+            "The previews in this window (the Preview pane, single, multiview or 3D, and the \
+             timeline workspace's monitor) come second to the displays: while a display \
+             misses pictures people would see, they are drawn less often, then smaller, \
+             then paused, and back up a couple of seconds after the displays are smooth. \
+             The Preview pane says so while it happens. The limits here hold them at or \
+             below that all the time.",
         );
     });
     section(ui, "Show", |ui| {
@@ -459,26 +460,84 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
     });
 }
 
-/// The most the main window's previews draw a second, on this computer.
-fn preview_cap(ui: &mut Ui, st: &mut UiState) {
-    use crate::preview_pace::Cap;
-    ui.horizontal(|ui| {
-        ui.label("Preview rate");
-        let before = st.prefs.preview_cap;
-        egui::ComboBox::from_id_salt("settings_preview_cap")
-            .selected_text(before.label())
-            .show_ui(ui, |ui| {
-                for c in Cap::ALL {
-                    ui.selectable_value(&mut st.prefs.preview_cap, c, c.label());
+/// The previews' settings on this computer: on or off, their most pictures a
+/// second and size, and how much the displays may miss before they give way.
+fn preview_settings(ui: &mut Ui, st: &mut UiState) {
+    use crate::preview_pace::{Cap, SizeCap, Strictness};
+    let before = (
+        st.prefs.previews_off,
+        st.prefs.preview_cap,
+        st.prefs.preview_size,
+        st.prefs.preview_strictness,
+    );
+    egui::Grid::new("settings_previews")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Previews");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut st.prefs.previews_off, false, "On")
+                    .on_hover_text("Previews are drawn, as well as the displays leave room for.");
+                ui.selectable_value(&mut st.prefs.previews_off, true, "Off")
+                    .on_hover_text(
+                        "No preview pictures at all; each preview says so, with a button to turn them back on. The displays are not affected.",
+                    );
+            });
+            ui.end_row();
+            ui.label("Frame rate");
+            egui::ComboBox::from_id_salt("settings_preview_cap")
+                .selected_text(st.prefs.preview_cap.label())
+                .show_ui(ui, |ui| {
+                    for c in Cap::ALL {
+                        ui.selectable_value(&mut st.prefs.preview_cap, c, c.label())
+                            .on_hover_text(c.words());
+                    }
+                });
+            ui.end_row();
+            ui.label("Resolution");
+            egui::ComboBox::from_id_salt("settings_preview_size")
+                .selected_text(st.prefs.preview_size.label())
+                .show_ui(ui, |ui| {
+                    for s in SizeCap::ALL {
+                        ui.selectable_value(&mut st.prefs.preview_size, s, s.label())
+                            .on_hover_text(s.words());
+                    }
+                });
+            ui.end_row();
+            ui.label("Give way");
+            ui.horizontal(|ui| {
+                for s in Strictness::ALL {
+                    ui.selectable_value(&mut st.prefs.preview_strictness, s, s.label())
+                        .on_hover_text(s.words());
                 }
             });
-        if st.prefs.preview_cap != before
-            && let Some(dir) = &st.layout_dir
-            && let Err(e) = st.prefs.save(dir)
-        {
-            log::warn!("could not save the settings of this computer: {e}");
-        }
-    });
+            ui.end_row();
+        });
+    // What the choices made mean, one sentence each.
+    let off = st.prefs.previews_off;
+    hint(
+        ui,
+        if off {
+            "Off: no preview pictures at all; the displays are not affected."
+        } else {
+            "On: previews are drawn, as well as the displays leave room for."
+        },
+    );
+    hint(ui, st.prefs.preview_cap.words());
+    hint(ui, st.prefs.preview_size.words());
+    hint(ui, st.prefs.preview_strictness.words());
+    let after = (
+        st.prefs.previews_off,
+        st.prefs.preview_cap,
+        st.prefs.preview_size,
+        st.prefs.preview_strictness,
+    );
+    if after != before
+        && let Some(dir) = &st.layout_dir
+        && let Err(e) = st.prefs.save(dir)
+    {
+        log::warn!("could not save the settings of this computer: {e}");
+    }
 }
 
 /// How the timeline editor's view keeps a running playhead in sight.

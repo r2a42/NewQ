@@ -1277,7 +1277,15 @@ pub struct LayerTexture {
     /// A picture has been written into it (see `upload::Uploader`): until
     /// then it holds nothing worth showing (a YUV texture of zeros is green).
     filled: std::sync::atomic::AtomicBool,
+    /// When a picture was last written into it, by `WRITES` (0: never). An
+    /// output window compares what it draws with what it drew last by these
+    /// (`render::Shot`): a stamp from one counter for every texture, so a
+    /// new texture never reads as an old one's same picture.
+    stamp: std::sync::atomic::AtomicU64,
 }
+
+/// Every picture written into any layer texture, counted: `LayerTexture::stamp`.
+static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
     plane_for(device, w, h, format, wgpu::TextureUsages::empty())
@@ -1486,6 +1494,7 @@ impl LayerTexture {
             extra: std::sync::Mutex::new(std::collections::HashMap::new()),
             maker,
             filled: std::sync::atomic::AtomicBool::new(false),
+            stamp: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1524,7 +1533,15 @@ impl LayerTexture {
     }
 
     fn mark_filled(&self) {
+        let n = WRITES.fetch_add(1, Ordering::Relaxed) + 1;
+        self.stamp.store(n, Ordering::Release);
         self.filled.store(true, Ordering::Release);
+    }
+
+    /// Which picture it holds: a new stamp for each picture written (or drawn)
+    /// into it, unique across textures; 0 before the first.
+    pub fn stamp(&self) -> u64 {
+        self.stamp.load(Ordering::Acquire)
     }
 
     /// Upload a yuv420p frame (Y plane followed by U and V).
