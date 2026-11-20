@@ -93,6 +93,9 @@ pub struct Show {
     /// (its name, address and how it stands): `WaitCards`.
     #[serde(default, skip_serializing_if = "WaitCards::is_default")]
     pub wait_cards: WaitCards,
+    /// The 3D stage: a venue model and the screens in it (`stage3d`).
+    #[serde(default, skip_serializing_if = "crate::stage3d::Stage3d::is_empty")]
+    pub stage3d: crate::stage3d::Stage3d,
 }
 
 /// When a display computer shows its start-up card (its name, address, who
@@ -342,6 +345,7 @@ impl Default for Show {
             library_folders: Vec::new(),
             no_transfer_cards: false,
             wait_cards: WaitCards::UntilReady,
+            stage3d: Default::default(),
         };
         let id = OutputId(show.alloc_id());
         show.outputs.push(OutputConfig::new(id, "Display 1".into()));
@@ -3573,6 +3577,8 @@ impl Show {
                 o.part_of = None;
             }
         }
+        // Nor does a screen of the 3D stage show it (or a sub display of it).
+        self.forget_missing_feeds();
         let fallback = self.outputs.first().map(|o| o.id);
         let gone =
             |out: Option<OutputId>| out.is_some_and(|o| self.outputs.iter().all(|x| x.id != o));
@@ -4013,6 +4019,12 @@ impl Show {
                 m.motion.sanitize();
             }
         }
+        if let Some(v) = &mut show.stage3d.venue
+            && v.path.is_relative()
+            && !v.path.as_os_str().is_empty()
+        {
+            v.path = base.join(&v.path);
+        }
         show.normalize_groups();
         show.normalize_lists();
         show.relay_slides();
@@ -4024,6 +4036,7 @@ impl Show {
             }
         }
         show.sanitize_blending();
+        show.forget_missing_feeds();
         // Guard against hand-edited files with stale counters.
         let max_id = show
             .cues
@@ -4031,6 +4044,7 @@ impl Show {
             .map(|c| c.id.0)
             .chain(show.outputs.iter().map(|o| o.id.0))
             .chain(show.audio_outputs.iter().map(|o| o.id.0))
+            .chain(show.stage3d.surfaces.iter().map(|s| s.id.0))
             .max()
             .unwrap_or(0);
         show.next_id = show.next_id.max(max_id + 1);
@@ -4049,6 +4063,11 @@ impl Show {
             {
                 m.file = rel.to_path_buf();
             }
+        }
+        if let Some(v) = &mut copy.stage3d.venue
+            && let Ok(rel) = v.path.strip_prefix(base)
+        {
+            v.path = rel.to_path_buf();
         }
         let text = serde_json::to_string_pretty(&copy)?;
         // Write beside the file and rename over it, so a crash mid-write

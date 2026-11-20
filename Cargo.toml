@@ -43,6 +43,13 @@ roxmltree = "0.21.2"
 hayro = "0.8"
 qrcode = { version = "0.14", default-features = false }
 if-addrs = "0.15"
+# The 3D stage's venue models (src/stage3d/load.rs): glTF/GLB and OBJ+MTL, and
+# their textures (PNG and JPEG). gltf's own `import` is left out: buffers and
+# pictures are read by load.rs.
+gltf = { version = "1.4.1", default-features = false, features = ["utils", "names"] }
+tobj = { version = "4.0.5", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.23"
 
 # Same versions as winit's, to ask a Mac for each display's name.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -82,6 +89,3 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
-
-[dev-dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
