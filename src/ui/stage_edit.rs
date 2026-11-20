@@ -14,7 +14,6 @@ use egui::{RichText, Ui};
 use super::settings::{hint, section, warning};
 use super::stage_view::{self, VenueStatus};
 use super::{Action, UiState};
-use crate::preview_pace::PreviewId;
 use crate::show::{OutputId, Show};
 use crate::stage3d::{
     Facet, Feed, LengthUnit, Placement, StageSource, Surface, SurfaceId, SurfaceShape, UpAxis,
@@ -245,13 +244,7 @@ pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut
         let mut view = std::mem::take(&mut st.stage.settings_view);
         let h = 300.0f32.min(ui.available_width() * 0.6).max(160.0);
         ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
-            stage_view::draw(
-                ui,
-                show,
-                st,
-                &mut view,
-                PreviewId::Other("stage-settings", 0),
-            );
+            stage_view::draw(ui, show, st, &mut view, stage_view::SETTINGS_VIEW);
         });
         st.stage.settings_view = view;
         hint(
@@ -457,6 +450,8 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
         let mut remove = None;
         let mut copy = None;
         let ids: Vec<SurfaceId> = show.stage3d.surfaces.iter().map(|s| s.id).collect();
+        let newly_picked = st.stage.picked != st.stage.opened_for;
+        st.stage.opened_for = st.stage.picked;
         for id in ids {
             let picked = st.stage.picked == Some(id);
             let Some(s) = show.stage3d.surface_mut(id) else {
@@ -469,7 +464,8 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
                     ui.visuals().text_color()
                 }))
                 .id_salt(("surface", id.0))
-                .open(picked.then_some(true));
+                // A screen picked in a view opens here, once (then it can be closed).
+                .open((picked && newly_picked).then_some(true));
             let r = header.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Name");
@@ -491,8 +487,12 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
                         shape_rows(ui, id, &mut s.shape, unit);
                     });
             });
+            if picked && newly_picked {
+                r.header_response.scroll_to_me(Some(egui::Align::TOP));
+            }
             if r.header_response.clicked() {
-                st.stage.picked = if picked { None } else { Some(id) };
+                st.stage.picked = Some(id);
+                st.stage.opened_for = Some(id);
             }
         }
         if let Some(s) = copy {
