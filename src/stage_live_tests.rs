@@ -510,6 +510,7 @@ fn previews_give_way_while_the_thread_is_behind_with_the_displays() {
             size: (64, 36),
             camera: Camera::default(),
             options: Options::default(),
+            lines: Default::default(),
         })
     };
     let display = [seen(b, Camera::default())];

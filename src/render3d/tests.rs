@@ -1012,3 +1012,227 @@ fn a_little_stage_draws() {
     let p = px(&pixels, size.0, mid[0] as u32, mid[1] as u32);
     assert!(brightness(p) > 3 * 60, "{p:?}\n{report}");
 }
+
+/// Whether a pixel within one of `at` (in a picture `w` wide) is near `colour`.
+fn line_near(pixels: &[u8], w: u32, h: u32, at: [f32; 2], colour: [u8; 3]) -> bool {
+    let (x, y) = (at[0].round() as i64, at[1].round() as i64);
+    (-1..=1).any(|dy| {
+        (-1..=1).any(|dx| {
+            let (qx, qy) = (x + dx, y + dy);
+            qx >= 0
+                && qy >= 0
+                && (qx as u32) < w
+                && (qy as u32) < h
+                && near(px(pixels, w, qx as u32, qy as u32), colour, 40)
+        })
+    })
+}
+
+/// Black, no multisampling: a line is its own colour on its pixels.
+fn plain() -> Options {
+    Options {
+        quality: Quality {
+            msaa: false,
+            scale: 1.0,
+        },
+        background: [0.0, 0.0, 0.0],
+        ..Options::default()
+    }
+}
+
+#[test]
+fn lines_are_drawn_over_everything_where_the_camera_says() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    // A wall in front of the line: the line still shows, over it.
+    let scene = Scene {
+        throws: Vec::new(),
+        parts: vec![part(
+            square(),
+            1,
+            moved([0.0, 0.0, 1.0], 3.0),
+            Paint::Colour([0.2, 0.2, 0.2, 1.0]),
+            false,
+        )],
+    };
+    let line = Line {
+        a: [-1.0, 0.5, -1.0],
+        b: [1.0, 0.5, -1.0],
+        colour: [1.0, 0.0, 0.0, 1.0],
+    };
+    let camera = looking_down_z(4.0);
+    let size = (160u32, 120u32);
+    for format in [RGBA, wgpu::TextureFormat::Rgba8UnormSrgb] {
+        let tex = target(&gpu, size, format);
+        let view = tex.create_view(&Default::default());
+        let stats = r.render_with_lines(
+            &gpu,
+            &Target {
+                view: &view,
+                format,
+                size,
+                owner: 0,
+            },
+            &scene,
+            &camera,
+            &no_outputs,
+            &plain(),
+            &[line],
+        );
+        assert_eq!(stats.lines, 1);
+        let pixels = read(&gpu, &tex);
+        for t in [0.1f32, 0.5, 0.9] {
+            let p = [-1.0 + 2.0 * t, 0.5, -1.0];
+            let at = camera.project(p, size).unwrap();
+            assert!(
+                line_near(&pixels, size.0, size.1, at, [255, 0, 0]),
+                "{format:?}: no line at {at:?}"
+            );
+        }
+        // Away from it, the wall.
+        let off = camera.project([0.0, -0.3, 1.0], size).unwrap();
+        assert!(!line_near(&pixels, size.0, size.1, off, [255, 0, 0]));
+    }
+    // Without lines, nothing is drawn for them.
+    let (_, stats) = draw(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &no_outputs,
+        &plain(),
+        size,
+        RGBA,
+    );
+    assert_eq!(stats.lines, 0);
+}
+
+/// A show with a flat screen and a projector made to fill it, its lens
+/// shifted up, and the scene of it.
+fn fitted_projector() -> (crate::show::Show, crate::stage3d::Projector, Scene) {
+    let mut show = crate::show::Show::default();
+    let s = show.add_surface(None);
+    show.stage3d.surface_mut(s).unwrap().placement.position = [0.0, 3.0, -4.0];
+    let id = show.add_projector();
+    let surface = show.stage3d.surface(s).unwrap().clone();
+    let p = show.projector_mut(id).unwrap();
+    p.lens.shift = [0.0, 0.25];
+    p.placement = p.fit_to(&surface, 16.0 / 9.0).unwrap();
+    let p = p.clone();
+    let scene = show.stage3d.scene(&show, None);
+    (show, p, scene)
+}
+
+#[test]
+fn a_projectors_cone_and_outline_are_drawn_where_its_picture_lands() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    let (show, p, scene) = fitted_projector();
+    let aspect = 16.0 / 9.0;
+    let from = show.stage3d.projectors_from(&scene);
+    // (The screen a touch bigger to be found on: a ray down its exact edge
+    // may pass either side.)
+    let mut bigger = show.clone();
+    if let crate::stage3d::SurfaceShape::Flat { width, height } =
+        &mut bigger.stage3d.surfaces[0].shape
+    {
+        *width += 0.01;
+        *height += 0.01;
+    }
+    let found_on = bigger.stage3d.scene(&bigger, None);
+    let fp = p.footprint(&found_on, &|i, _| i < from, aspect, 8);
+    assert!(fp.corners.iter().all(Option::is_some), "{:?}", fp.corners);
+    let yellow = [1.0, 0.85, 0.2, 1.0];
+    let mut lines: Vec<Line> = p
+        .cone(&fp, aspect, 30.0)
+        .into_iter()
+        .map(|[a, b]| Line {
+            a,
+            b,
+            colour: yellow,
+        })
+        .collect();
+    for piece in &fp.outline {
+        for w in piece.windows(2) {
+            lines.push(Line {
+                a: w[0],
+                b: w[1],
+                colour: yellow,
+            });
+        }
+    }
+    // Seen from the side and above, so the cone isn't edge on.
+    let camera = Camera {
+        eye: [9.0, 8.0, 6.0],
+        target: [0.0, 3.0, 0.0],
+        ..Camera::default()
+    };
+    let size = (320u32, 240u32);
+    let tex = target(&gpu, size, RGBA);
+    let view = tex.create_view(&Default::default());
+    let stats = r.render_with_lines(
+        &gpu,
+        &Target {
+            view: &view,
+            format: RGBA,
+            size,
+            owner: 1,
+        },
+        &scene,
+        &camera,
+        &no_outputs,
+        &plain(),
+        &lines,
+    );
+    assert_eq!(stats.lines as usize, lines.len());
+    let pixels = read(&gpu, &tex);
+    let y = [255, 217, 51];
+    // The picture's corners (on the screen's corners) and the lens.
+    for c in fp.corners.iter().flatten() {
+        let at = camera.project(*c, size).unwrap();
+        assert!(
+            line_near(&pixels, size.0, size.1, at, y),
+            "corner {c:?} at {at:?}"
+        );
+    }
+    let at = camera.project(p.position(), size).unwrap();
+    assert!(line_near(&pixels, size.0, size.1, at, y), "lens at {at:?}");
+    // Half way along a cone edge.
+    let c = fp.corners[2].unwrap();
+    let m = maths::scale(maths::add(c, p.position()), 0.5);
+    let at = camera.project(m, size).unwrap();
+    assert!(line_near(&pixels, size.0, size.1, at, y), "edge at {at:?}");
+}
+
+#[test]
+fn looking_through_a_shifted_lens_sees_the_screen_it_fills_letterboxed() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    let (_show, p, scene) = fitted_projector();
+    let camera = p.camera(16.0 / 9.0);
+    // A 4:3 target: the 16:9 picture with a band above and below.
+    let size = (160u32, 120u32);
+    let (pixels, _) = draw(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &no_outputs,
+        &plain(),
+        size,
+        RGBA,
+    );
+    let [l, t, rr, b] = camera.picture_in(size);
+    assert_eq!((l, rr), (0.0, 160.0));
+    assert!((t - 15.0).abs() < 1e-3 && (b - 105.0).abs() < 1e-3);
+    let grey = (crate::stage3d::UNFED_GREY[0] * 255.0).round() as u8;
+    let is_screen = |x: u32, y: u32| near(px(&pixels, size.0, x, y), [grey; 3], 4);
+    // The screen fills the picture, to a pixel or two of each corner...
+    for (x, y) in [(80, 60), (2, 17), (157, 17), (2, 102), (157, 102)] {
+        assert!(is_screen(x, y), "{x},{y}: {:?}", px(&pixels, size.0, x, y));
+    }
+    // ...and not the bands.
+    for (x, y) in [(80, 5), (80, 114), (5, 12), (150, 109)] {
+        assert!(!is_screen(x, y), "{x},{y}: {:?}", px(&pixels, size.0, x, y));
+    }
+}

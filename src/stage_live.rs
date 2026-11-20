@@ -482,7 +482,14 @@ impl StageLive {
                 continue;
             }
             let options = Options::default();
-            let sig = signature(self.scene_key, &o.camera, &options, &target, pictures_key);
+            let sig = signature(
+                self.scene_key,
+                &o.camera,
+                &options,
+                &target,
+                pictures_key,
+                &[],
+            );
             if fresh || self.drawn_with.get(&key) != Some(&sig) {
                 marks.push((key, sig));
                 scale = 1.0;
@@ -493,6 +500,7 @@ impl StageLive {
                     scene: self.scene.clone(),
                     camera: o.camera,
                     options,
+                    lines: Arc::default(),
                 });
             }
         }
@@ -507,7 +515,14 @@ impl StageLive {
             if displays_behind {
                 continue;
             }
-            let sig = signature(self.scene_key, &r.camera, &r.options, &target, pictures_key);
+            let sig = signature(
+                self.scene_key,
+                &r.camera,
+                &r.options,
+                &target,
+                pictures_key,
+                &r.lines,
+            );
             if fresh || self.drawn_with.get(&key) != Some(&sig) {
                 marks.push((key, sig));
                 scale = scale.max(r.options.quality.scale.clamp(0.1, 1.0));
@@ -518,6 +533,7 @@ impl StageLive {
                     scene: self.scene.clone(),
                     camera: r.camera,
                     options: r.options,
+                    lines: r.lines,
                 });
             }
         }
@@ -734,11 +750,19 @@ fn signature(
     options: &Options,
     target: &Arc<LayerTexture>,
     pictures: u64,
+    lines: &[crate::render3d::Line],
 ) -> u64 {
     let mut h = crate::stage3d::scene::Fnv::new();
     h.bytes(&scene.to_le_bytes());
     h.bytes(&pictures.to_le_bytes());
     h.bytes(format!("{camera:?}{options:?}").as_bytes());
+    // Picking another projector changes its lines, not the scene.
+    for l in lines {
+        l.a.iter()
+            .chain(&l.b)
+            .chain(&l.colour)
+            .for_each(|v| h.f32(*v));
+    }
     h.bytes(&(Arc::as_ptr(target) as usize).to_le_bytes());
     h.0
 }

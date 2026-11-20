@@ -182,6 +182,7 @@ fn a_displays_picture_is_on_its_screen_the_right_way_round() {
             scene: scene.clone(),
             camera,
             options: Options::default(),
+            lines: Default::default(),
         }],
         serial: 1,
     };
@@ -241,6 +242,7 @@ fn a_display_that_shows_the_stage_has_a_picture_without_any_feed() {
             target: target.clone(),
             scene,
             camera,
+            lines: Default::default(),
             options: Options {
                 background: [0.0, 0.0, 0.5],
                 ..Options::default()
@@ -276,6 +278,7 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
         scene: scene.clone(),
         camera,
         options: Options::default(),
+        lines: Default::default(),
     };
     let first = StageJob {
         feeds: vec![FeedJob {

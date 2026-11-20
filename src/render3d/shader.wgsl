@@ -204,3 +204,34 @@ fn vs_axes(@builtin(vertex_index) i: u32) -> AOut {
 fn fs_axes(in: AOut) -> @location(0) vec4<f32> {
     return finish(in.colour, 1.0, in.world);
 }
+
+// ----- Lines over the view: a projector's cone and its picture's outline -------
+
+struct LIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) colour: vec4<f32>,
+};
+
+struct LOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) colour: vec4<f32>,
+};
+
+@vertex
+fn vs_line(v: LIn) -> LOut {
+    var o: LOut;
+    // A line passing by the eye is cut at the near plane by the clipper.
+    o.clip = f.view_proj * vec4<f32>(v.pos, 1.0);
+    o.colour = v.colour;
+    return o;
+}
+
+@fragment
+fn fs_line(in: LOut) -> @location(0) vec4<f32> {
+    // No fog: an overlay, not part of the room.
+    var c = in.colour.rgb;
+    if (f.ground.w > 0.5) {
+        c = srgb_to_linear(c);
+    }
+    return vec4<f32>(c, in.colour.a);
+}
