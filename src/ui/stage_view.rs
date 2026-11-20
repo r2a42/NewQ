@@ -394,8 +394,9 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
         // No projectors, no light; the white point by itself when asked.
         view.light &= !show.stage3d.projectors.is_empty();
         if view.light && view.auto_white {
-            // In whole nits, as the slider shows it (else it rounds it back
-            // each frame, and the view would be drawn again each frame).
+            // In whole nits, as shown (the slider, once it is used, rounds
+            // to them: a value it rounded back each frame would draw the view
+            // again each frame).
             view.white_nits = super::stage_projectors::auto_white(show, st)
                 .round()
                 .max(1.0);
@@ -783,15 +784,22 @@ fn light_bar(ui: &mut Ui, rect: Rect, view: &mut StageViewState) {
                         .on_hover_text(
                             "Full white is the brightest projector's light on its screen",
                         );
-                    ui.add_enabled(
-                        !view.auto_white,
-                        egui::Slider::new(&mut view.white_nits, 5.0..=5000.0)
-                            .logarithmic(true)
-                            .clamping(egui::SliderClamping::Always)
-                            .max_decimals(0)
-                            .suffix(" nits"),
-                    )
-                    .on_hover_text("How bright a place must be to show as full white");
+                    let hint = "How bright a place must be to show as full white";
+                    if view.auto_white {
+                        // Just the number: a narrow pane keeps it in view.
+                        ui.label(format!("white at {:.0} nits", view.white_nits))
+                            .on_hover_text(hint);
+                    } else {
+                        ui.spacing_mut().slider_width = 90.0;
+                        ui.add(
+                            egui::Slider::new(&mut view.white_nits, 5.0..=5000.0)
+                                .logarithmic(true)
+                                .clamping(egui::SliderClamping::Always)
+                                .max_decimals(0)
+                                .suffix(" nits"),
+                        )
+                        .on_hover_text(hint);
+                    }
                 }
             });
         });
