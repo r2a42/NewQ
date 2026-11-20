@@ -593,6 +593,12 @@ fn overlay(
             Color32::from_rgb(255, 225, 150),
         );
     }
+    // The projectors' sums land later: come round again to show them.
+    st.stage.projectors.take_answers();
+    if st.stage.projectors.waiting() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
     // What is happening, at the bottom.
     let status = status_words(st, id);
     if !status.is_empty() {

@@ -411,3 +411,35 @@ fn a_projector_is_picked_in_the_view_and_looked_through() {
         "{eye:?}"
     );
 }
+
+/// Writes a show with a sample theatre and two projectors to
+/// `NEWQ_PROJECTOR_SHOW`, for trying the app by hand (headless runs).
+#[test]
+#[ignore]
+fn write_a_show_with_two_projectors() {
+    let Some(path) = std::env::var_os("NEWQ_PROJECTOR_SHOW") else {
+        return;
+    };
+    let mut show = Show::default();
+    show.add_display();
+    crate::ui::stage_edit::use_sample(
+        &mut show,
+        crate::stage3d::samples::SampleVenue::Proscenium,
+        true,
+    );
+    let st = UiState::default();
+    let screens: Vec<SurfaceId> = show.stage3d.surfaces.iter().map(|s| s.id).collect();
+    let last = *screens.last().unwrap();
+    add_aimed_at(&mut show, &st, screens[0]);
+    let two = add_aimed_at(&mut show, &st, last);
+    // The second hung higher and to one side (a balcony rail), pointing at
+    // its screen, brighter.
+    let target = screen_middle(show.stage3d.surface(last).unwrap());
+    if let Some(p) = show.projector_mut(two) {
+        p.placement.position[1] += 4.0;
+        p.placement.position[0] += 3.0;
+        p.lumens = 20_000.0;
+        p.aim_at(target, HD);
+    }
+    show.save(std::path::Path::new(&path)).unwrap();
+}
