@@ -264,6 +264,8 @@ pub(super) fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirro
     };
     show.outputs.clear();
     let main = show.add_display();
+    // The 3D stage's screens showed the displays that have gone.
+    show.forget_missing_feeds();
     let assign = |show: &mut Show, id: crate::show::OutputId, d: &DisplayChoice| {
         if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
             o.monitor = Some(d.reference.clone());
