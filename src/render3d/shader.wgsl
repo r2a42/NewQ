@@ -184,8 +184,9 @@ struct AOut {
 @vertex
 fn vs_axes(@builtin(vertex_index) i: u32) -> AOut {
     let axis = i / 2u;
-    var dir = vec3<f32>(0.0);
-    dir[axis] = 1.0;
+    // Picked by comparison, not by writing a component at a run-time index:
+    // Windows' DirectX 12 refused that pipeline (the axes blanked the view).
+    let dir = vec3<f32>(f32(axis == 0u), f32(axis == 1u), f32(axis == 2u));
     let world = dir * f.extra.x * f32(i % 2u) + vec3<f32>(0.0, 0.003, 0.0);
     var o: AOut;
     o.clip = f.view_proj * vec4<f32>(world, 1.0);
