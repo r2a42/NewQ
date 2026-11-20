@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 use winit::window::Window;
 
 /// A single-slot, latest-wins handoff between threads.
-struct Mailbox<T> {
+pub(crate) struct Mailbox<T> {
     slot: Mutex<Option<T>>,
     cv: Condvar,
 }
 
 impl<T> Mailbox<T> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Mailbox {
             slot: Mutex::new(None),
             cv: Condvar::new(),
@@ -28,7 +28,7 @@ impl<T> Mailbox<T> {
     }
 
     /// Post a value. If one is already waiting, `merge(old, new)` decides what remains.
-    fn put(&self, value: T, merge: impl FnOnce(T, T) -> T) {
+    pub(crate) fn put(&self, value: T, merge: impl FnOnce(T, T) -> T) {
         let mut slot = self.slot.lock();
         *slot = Some(match slot.take() {
             Some(old) => merge(old, value),
@@ -38,7 +38,7 @@ impl<T> Mailbox<T> {
     }
 
     /// Wait up to `wait` for a value.
-    fn take_timeout(&self, wait: std::time::Duration) -> Option<T> {
+    pub(crate) fn take_timeout(&self, wait: std::time::Duration) -> Option<T> {
         let mut slot = self.slot.lock();
         if slot.is_none() {
             self.cv.wait_for(&mut slot, wait);
@@ -46,7 +46,7 @@ impl<T> Mailbox<T> {
         slot.take()
     }
 
-    fn take(&self) -> T {
+    pub(crate) fn take(&self) -> T {
         let mut slot = self.slot.lock();
         loop {
             if let Some(v) = slot.take() {
@@ -353,7 +353,7 @@ pub struct OutputGroup {
 }
 
 impl OutputGroup {
-    fn draw(&self) -> DrawGroup<'_> {
+    pub(crate) fn draw(&self) -> DrawGroup<'_> {
         DrawGroup {
             layers: self
                 .layers
