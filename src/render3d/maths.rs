@@ -117,6 +117,27 @@ pub fn perspective_reversed(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat
     m
 }
 
+/// `perspective_reversed` for a frustum that needn't be even about the axis
+/// (a shifted lens): its edges one metre ahead, reversed depth as there.
+pub fn frustum_reversed(f: &super::camera::Frustum, near: f32, far: f32) -> Mat4 {
+    let w = f.right - f.left;
+    let h = f.top - f.bottom;
+    let (w, h) = (
+        if w.abs() > 1e-9 { w } else { 1e-9 },
+        if h.abs() > 1e-9 { h } else { 1e-9 },
+    );
+    let mut m = [[0.0; 4]; 4];
+    m[0][0] = 2.0 / w;
+    m[1][1] = 2.0 / h;
+    // Where the axis is in the picture: x and y are moved in proportion to depth.
+    m[2][0] = (f.right + f.left) / w;
+    m[2][1] = (f.top + f.bottom) / h;
+    m[2][2] = near / (far - near);
+    m[2][3] = -1.0;
+    m[3][2] = near * far / (far - near);
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

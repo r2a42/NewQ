@@ -151,6 +151,7 @@ mod tests {
             fov_y_deg: 60.0,
             near: 0.1,
             far: 100.0,
+            ..Camera::default()
         }
     }
 

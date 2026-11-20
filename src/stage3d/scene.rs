@@ -90,9 +90,21 @@ pub struct Camera {
     pub eye: [f32; 3],
     pub target: [f32; 3],
     pub up: [f32; 3],
+    /// The picture's height as an angle, top to bottom. With a `shift`, the
+    /// picture is this tall but off the view's axis.
     pub fov_y_deg: f32,
     pub near: f32,
     pub far: f32,
+    /// How far the picture's middle is off the view's axis, as a share of
+    /// its width (x, right) and height (y, up): a projector's lens shift
+    /// (0.5 up puts the picture's bottom edge on the axis). 0 for an
+    /// ordinary camera.
+    pub shift: [f32; 2],
+    /// A picture shape of its own, width per height (a projector's): drawn
+    /// into a target of another shape, the view is widened (or made taller)
+    /// round it, so the whole picture is seen and nothing is stretched.
+    /// None: the target's shape.
+    pub aspect: Option<f32>,
 }
 
 impl Default for Camera {
@@ -105,6 +117,8 @@ impl Default for Camera {
             fov_y_deg: 50.0,
             near: 0.05,
             far: 2000.0,
+            shift: [0.0; 2],
+            aspect: None,
         }
     }
 }
