@@ -689,6 +689,49 @@ fn images_and_meshes_are_kept_by_key_and_let_go() {
 }
 
 #[test]
+fn a_mesh_too_big_for_the_device_is_left_out_not_made() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    // The square (4 corners, 128 bytes) fits; the cube (24 corners, 768
+    // bytes) doesn't.
+    r.limit_buffers(256);
+    let scene = Scene {
+        parts: vec![
+            part(
+                cube(),
+                7,
+                moved([0.0, 0.0, -1.0], 3.0),
+                Paint::Colour([1.0, 0.0, 0.0, 1.0]),
+                false,
+            ),
+            part(
+                square(),
+                1,
+                maths::IDENTITY,
+                Paint::Colour([0.0, 0.0, 1.0, 1.0]),
+                false,
+            ),
+        ],
+    };
+    for _ in 0..3 {
+        let (pixels, stats) = draw(
+            &gpu,
+            &mut r,
+            &scene,
+            &looking_down_z(2.0),
+            &no_outputs,
+            &Options::default(),
+            (32, 32),
+            RGBA,
+        );
+        assert_eq!(stats.parts, 1);
+        assert!(near(px(&pixels, 32, 16, 16), [0, 0, 255], 2));
+    }
+    assert_eq!(r.meshes.len(), 1);
+    assert!(r.too_big.contains(&7));
+}
+
+#[test]
 fn see_through_venues_show_the_screen_behind_a_wall() {
     let Some(gpu) = test_gpu() else { return };
     let mut r = Renderer::new(&gpu);
