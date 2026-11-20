@@ -18,7 +18,7 @@
 //! the `Level`; `Cap` is the per-computer ceiling (`Prefs::preview_cap`).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -154,6 +154,9 @@ pub struct Reading {
     pub late_permille: u32,
     /// Main-loop stalls (over 100 ms) since the last reading.
     pub stalls: u32,
+    /// Made up (`NEWQ_PREVIEW_PRESSURE`): never learned as the outputs' own
+    /// trouble, so the previews stay given way for as long as it lasts.
+    pub forced: bool,
 }
 
 impl Reading {
@@ -173,11 +176,13 @@ impl Reading {
                 late_frames: 0,
                 late_permille: f,
                 stalls: if playing { stalls } else { 0 },
+                forced: true,
             },
             None if playing => Reading {
                 late_frames,
                 late_permille,
                 stalls,
+                forced: false,
             },
             None => Reading::default(),
         }
@@ -196,7 +201,23 @@ impl Reading {
     }
 }
 
-/// Steps the previews down fast and up slowly.
+/// Steps the previews down fast and up slowly, and learns when giving way
+/// doesn't help.
+///
+/// The first sign of trouble steps them down at once, a step a second while it
+/// goes on. Some trouble isn't theirs: a system compositor's hiccup, a lid
+/// change, a screen on a basic display driver drops a frame every few seconds
+/// whatever the previews do. So once the previews have stood at a level for
+/// `MEASURE` (in practice paused, since trouble anywhere else steps them lower)
+/// and the outputs still have trouble there at about the rate they had on the
+/// way down, the previews were not the cause: they go straight back up (to
+/// `ceiling`) and that rate is remembered as the outputs' own (`Floor`). From
+/// then on, at that level or above, trouble at up to about that rate is let
+/// be; clearly more (`surge`) steps them down at once, as before. Should the
+/// trouble surge within `MEASURE` of going back up, the previews were the
+/// cause after all: down again, and the next return waits twice as long and
+/// stops a level lower. The remembered rate fades (`FLOOR_HALF_LIFE`), so the
+/// question is asked again now and then.
 #[derive(Clone, Debug, Default)]
 pub struct Governor {
     level: Level,
@@ -210,6 +231,107 @@ pub struct Governor {
     patience: Duration,
     /// When it last stepped up.
     stepped_up: Option<Instant>,
+    /// Trouble (see `observe`) seen at this level since it was reached.
+    here: u64,
+    /// The highest level the previews go back to when giving way didn't
+    /// help (Full, until going back up was followed by more trouble).
+    ceiling: Level,
+    /// Since when the level has been under the ceiling, and the trouble seen
+    /// since (the way down's rate, against which the level reached is judged).
+    below_since: Option<Instant>,
+    below: u64,
+    /// How long a level is stood at before it is judged (`MEASURE`, doubled
+    /// by each return that failed).
+    measure: Duration,
+    /// The outputs' own trouble, learned: let be at or above its level.
+    floor: Option<Floor>,
+    /// How long a floor under full rate holds before the level above is
+    /// tried (`FORGIVE_AFTER`, doubled by each try that failed).
+    raise_wait: Duration,
+    /// Trouble in the last `RECENT`, by when (for the surge test).
+    recent: VecDeque<(Instant, u32)>,
+    /// When a late share alone last counted as trouble.
+    share_counted: Option<Instant>,
+    /// What it decided, for the log, taken once.
+    news: Option<News>,
+    /// When it last found the previews weren't the cause.
+    not_theirs: Option<Instant>,
+}
+
+/// The outputs' own trouble, learned: the previews gave way and it went on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Floor {
+    /// Trouble at up to the rate is let be at this level and above.
+    level: Level,
+    /// Trouble a second (it fades from `learned`), and what the trial found
+    /// (never let be more than that).
+    rate: f64,
+    found: f64,
+    /// When it was learned or last seen to go on (the rate fades from then).
+    learned: Instant,
+    /// The trouble let be since `window` began: while it goes on at the rate,
+    /// the rate is kept; once it stops, the rate fades.
+    seen: u64,
+    window: Instant,
+    /// When the previews last went up on its say-so (to the floor's level),
+    /// or it settled.
+    since: Instant,
+    /// Gone up to try the level above a floor that held: if that fails, back
+    /// to this one.
+    fallback: Option<Level>,
+    /// Still within `measure` of going up: a surge now means the previews
+    /// were the cause after all.
+    trying: bool,
+}
+
+impl Floor {
+    fn rate_now(&self, now: Instant) -> f64 {
+        let age = now.saturating_duration_since(self.learned).as_secs_f64();
+        self.rate * 0.5f64.powf(age / Governor::FLOOR_HALF_LIFE.as_secs_f64())
+    }
+}
+
+/// What the governor decided, beyond a step: for the log.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum News {
+    /// The outputs went on having trouble while the previews gave way
+    /// (`per_minute` at `at`, `before` a minute on the way there): not the
+    /// previews' doing; back up to `back_to`.
+    NotTheirs {
+        at: Level,
+        per_minute: f64,
+        before: f64,
+        back_to: Level,
+    },
+    /// Back at `level`, the trouble rose: the previews' doing after all.
+    TheirsAfterAll { level: Level },
+    /// The trouble rose clearly above what the outputs have by themselves.
+    Surge { level: Level },
+}
+
+impl News {
+    /// A line for the log.
+    pub fn words(&self) -> String {
+        match self {
+            News::NotTheirs {
+                at,
+                per_minute,
+                before,
+                back_to,
+            } => format!(
+                "previews: the outputs' late frames and stalls went on while the previews were at {at:?} \
+                 ({per_minute:.1} a minute; {before:.1} on the way down): not the previews' doing; \
+                 back to {back_to:?}, letting about that rate be"
+            ),
+            News::TheirsAfterAll { level } => format!(
+                "previews: back at {level:?} the outputs' trouble rose: the previews' doing after all; \
+                 giving way again (the next return waits longer, a level lower)"
+            ),
+            News::Surge { level } => format!(
+                "previews: at {level:?} the outputs' trouble rose clearly above what they have by themselves: giving way again"
+            ),
+        }
+    }
 }
 
 impl Governor {
@@ -227,11 +349,45 @@ impl Governor {
     pub const PATIENCE_MOST: Duration = Duration::from_secs(160);
     /// Trouble this soon after a step up makes the next wait longer.
     pub const RELAPSE_WITHIN: Duration = Duration::from_secs(30);
-    /// Smooth at full rate this long: the wait is back to `PATIENCE`.
+    /// Smooth at full rate this long: the wait is back to `PATIENCE`. And a
+    /// learned floor under full rate that held this long tries the level above.
     pub const FORGIVE_AFTER: Duration = Duration::from_secs(300);
+    /// How long a level is stood at, trouble still coming, before it is judged
+    /// whether giving way helped (doubled by each failed return, up to
+    /// `PATIENCE_MOST`).
+    pub const MEASURE: Duration = Duration::from_secs(15);
+    /// Giving way helped when the trouble at the level reached is under this
+    /// share of the way down's (by counts, `SLACK` allowed for chance).
+    pub const HELPED_UNDER: f64 = 0.5;
+    /// The surge test looks at the trouble in the last this long...
+    pub const RECENT: Duration = Duration::from_secs(10);
+    /// ... against this many times the learned rate's, plus `SLACK`.
+    pub const SURGE_FACTOR: f64 = 2.0;
+    /// Trouble allowed to chance in either test.
+    pub const SLACK: f64 = 3.0;
+    /// The learned rate halves in this long, so the question is asked again.
+    pub const FLOOR_HALF_LIFE: Duration = Duration::from_secs(300);
+    /// The trouble let be is looked at over this long, to keep the rate
+    /// while it goes on.
+    pub const FLOOR_WINDOW: Duration = Duration::from_secs(120);
+    /// The longest a floor under full rate holds before the level above is tried.
+    pub const RAISE_MOST: Duration = Duration::from_secs(2400);
+    /// Under this many a second, the learned rate is forgotten: the first
+    /// sign of trouble steps the previews down again.
+    pub const FORGET_UNDER: f64 = 0.02;
 
     pub fn level(&self) -> Level {
         self.level
+    }
+
+    /// What it last decided beyond a step, once (for the log).
+    pub fn take_news(&mut self) -> Option<News> {
+        self.news.take()
+    }
+
+    /// When it last found the outputs' trouble wasn't the previews' doing.
+    pub fn not_theirs(&self) -> Option<Instant> {
+        self.not_theirs
     }
 
     /// Take a reading made at `now`; the level the previews are to draw at.
@@ -239,35 +395,248 @@ impl Governor {
         if self.patience.is_zero() {
             self.patience = Self::PATIENCE;
         }
+        if self.measure.is_zero() {
+            self.measure = Self::MEASURE;
+        }
+        if self.raise_wait.is_zero() {
+            self.raise_wait = Self::FORGIVE_AFTER;
+        }
+        // How much trouble this is: each late frame and stall, and a late
+        // share alone (it lasts a second after one late frame) once a second.
+        let mut weight = r.late_frames.saturating_add(r.stalls);
+        if weight == 0
+            && r.pressed()
+            && self
+                .share_counted
+                .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1))
+        {
+            self.share_counted = Some(now);
+            weight = 1;
+        }
+        self.here += u64::from(weight);
+        if self.below_since.is_some() {
+            self.below += u64::from(weight);
+        }
+        if weight > 0 {
+            self.recent.push_back((now, weight));
+        }
+        while self
+            .recent
+            .front()
+            .is_some_and(|(t, _)| now.saturating_duration_since(*t) > Self::RECENT)
+        {
+            self.recent.pop_front();
+        }
+        if self
+            .floor
+            .is_some_and(|f| f.rate_now(now) < Self::FORGET_UNDER)
+        {
+            self.floor = None;
+        }
+        // Forced pressure (for trying the steps) is never taken as the outputs'.
+        let floor = self.floor.filter(|f| !r.forced && self.level <= f.level);
+        if let Some(f) = &mut self.floor
+            && floor.is_some()
+            && !f.trying
+        {
+            f.seen += u64::from(weight);
+        }
         let since = |t: Option<Instant>| t.map(|t| now.saturating_duration_since(t));
         if r.pressed() {
             self.calm_since = None;
             let may = since(self.changed).is_none_or(|d| d >= Self::STEP_DOWN_EVERY);
-            if may && self.level != Level::Paused {
+            let let_be = floor.is_some_and(|f| !self.surge(now, &f));
+            if may && !let_be && self.level != Level::Paused {
                 if since(self.stepped_up).is_some_and(|d| d < Self::RELAPSE_WITHIN) {
                     self.patience = (self.patience * 2).min(Self::PATIENCE_MOST);
                     self.stepped_up = None;
                 }
-                self.level = self.level.down();
-                self.changed = Some(now);
+                match floor {
+                    Some(f) if f.trying => {
+                        // Went up on the floor's say-so, and it got worse.
+                        self.news = Some(News::TheirsAfterAll { level: self.level });
+                        match f.fallback {
+                            Some(back) => {
+                                self.raise_wait = (self.raise_wait * 2).min(Self::RAISE_MOST);
+                                self.floor = Some(Floor {
+                                    level: back,
+                                    since: now,
+                                    seen: 0,
+                                    window: now,
+                                    fallback: None,
+                                    trying: false,
+                                    ..f
+                                });
+                                self.ceiling = back;
+                                self.move_to(now, back);
+                            }
+                            None => {
+                                self.measure = (self.measure * 2).min(Self::PATIENCE_MOST);
+                                self.floor = None;
+                                let down = self.level.down();
+                                self.ceiling = down;
+                                self.move_to(now, down);
+                            }
+                        }
+                    }
+                    Some(f) => {
+                        self.news = Some(News::Surge { level: self.level });
+                        // At the floor's own level, the outputs' trouble has
+                        // changed: it is learned afresh. Above it, it stands.
+                        if self.level == f.level {
+                            self.floor = None;
+                        }
+                        self.move_to(now, self.level.down());
+                    }
+                    None => self.move_to(now, self.level.down()),
+                }
             }
         } else if r.calm() {
             let calm_since = *self.calm_since.get_or_insert(now);
             let calm = now.saturating_duration_since(calm_since);
             let settled = since(self.changed).is_none_or(|d| d >= self.patience);
             if self.level != Level::Full && calm >= self.patience && settled {
-                self.level = self.level.up();
-                self.changed = Some(now);
+                self.move_to(now, self.level.up());
                 self.stepped_up = Some(now);
                 self.calm_since = Some(now);
             } else if self.level == Level::Full && calm >= Self::FORGIVE_AFTER {
                 self.patience = Self::PATIENCE;
+                self.measure = Self::MEASURE;
             }
         } else {
             // Neither: hold where it is, and the calm starts again.
             self.calm_since = None;
         }
+        if !r.forced {
+            self.learn(now);
+        }
         self.level
+    }
+
+    /// Clearly more trouble than the outputs have by themselves (`f`) in the
+    /// last `RECENT` (since the previews last went up on its say-so).
+    fn surge(&self, now: Instant, f: &Floor) -> bool {
+        let seen: u64 = self
+            .recent
+            .iter()
+            .filter(|(t, _)| *t > f.since)
+            .map(|(_, w)| u64::from(*w))
+            .sum();
+        seen as f64
+            > Self::SLACK + Self::SURGE_FACTOR * f.rate_now(now) * Self::RECENT.as_secs_f64()
+    }
+
+    /// Whether giving way helped, once there is enough to tell; and the
+    /// floor's own course (settling, trying the level above).
+    fn learn(&mut self, now: Instant) {
+        if let Some(f) = &mut self.floor
+            && f.trying
+            && now.saturating_duration_since(f.since) >= self.measure
+        {
+            if f.fallback.take().is_some() {
+                self.raise_wait = Self::FORGIVE_AFTER;
+            }
+            f.trying = false;
+            f.since = now;
+            f.seen = 0;
+            f.window = now;
+        }
+        if let Some(f) = &mut self.floor
+            && !f.trying
+        {
+            // While the trouble let be goes on at about the rate, the rate is
+            // kept (never above what the trial found); once it stops, it fades.
+            let window = now.saturating_duration_since(f.window);
+            if window >= Self::FLOOR_WINDOW {
+                let seen = f.seen as f64 / window.as_secs_f64();
+                if seen >= f.rate_now(now) {
+                    f.rate = seen.min(f.found);
+                    f.learned = now;
+                }
+                f.seen = 0;
+                f.window = now;
+            }
+        }
+        if let Some(f) = self.floor
+            && !f.trying
+            && f.level != Level::Full
+            && self.level == f.level
+            && now.saturating_duration_since(f.since) >= self.raise_wait
+        {
+            // A floor under full rate that has held a while: try the level above.
+            let up = f.level.up();
+            self.floor = Some(Floor {
+                level: up,
+                since: now,
+                fallback: Some(f.level),
+                trying: true,
+                ..f
+            });
+            self.ceiling = up;
+            self.move_to(now, up);
+            return;
+        }
+        let (Some(below_since), Some(changed)) = (self.below_since, self.changed) else {
+            return;
+        };
+        let stood = now.saturating_duration_since(changed);
+        if self.here == 0 || stood < self.measure {
+            return;
+        }
+        let stood = stood.as_secs_f64();
+        // The way down: from going under the ceiling to reaching this level.
+        let way = changed
+            .saturating_duration_since(below_since)
+            .as_secs_f64()
+            .max(1.0);
+        let before = self.below.saturating_sub(self.here) as f64 / way;
+        if (self.here as f64) + Self::SLACK < Self::HELPED_UNDER * before * stood {
+            return; // It helped: clearly less trouble here than on the way down.
+        }
+        let here = self.here as f64 / stood;
+        // The outputs' own rate: all the trouble since the previews gave way
+        // (more of it to go on than this level's alone).
+        let own = self.below as f64 / (way + stood);
+        let back_to = self.ceiling;
+        self.news = Some(News::NotTheirs {
+            at: self.level,
+            per_minute: here * 60.0,
+            before: before * 60.0,
+            back_to,
+        });
+        self.not_theirs = Some(now);
+        self.floor = Some(Floor {
+            level: back_to,
+            rate: own,
+            found: own,
+            learned: now,
+            seen: 0,
+            window: now,
+            since: now,
+            fallback: None,
+            trying: true,
+        });
+        self.calm_since = None;
+        self.stepped_up = None;
+        self.move_to(now, back_to);
+    }
+
+    /// Be at `level` from `now`.
+    fn move_to(&mut self, now: Instant, level: Level) {
+        self.level = level;
+        self.changed = Some(now);
+        self.here = 0;
+        if level == Level::Full {
+            self.ceiling = Level::Full;
+        }
+        if level <= self.ceiling {
+            self.ceiling = level;
+            self.below_since = None;
+            self.below = 0;
+        } else if self.below_since.is_none() {
+            self.below_since = Some(now);
+            self.below = 0;
+        }
     }
 }
 
@@ -289,6 +658,8 @@ pub enum PreviewId {
     Workspace,
     /// A preview host's 3D view (`ui::stage_view`), by the host.
     Stage(u8),
+    /// The Displays page's area editor, by the monitor it shows.
+    Area(usize),
     /// Any other kind, by its name and number. (None yet.)
     #[allow(dead_code)]
     Other(&'static str, u32),
@@ -299,7 +670,7 @@ impl PreviewId {
     pub fn host(self) -> Option<u8> {
         match self {
             PreviewId::Single(h) | PreviewId::Tile(h, _) | PreviewId::Stage(h) => Some(h),
-            PreviewId::Workspace | PreviewId::Other(..) => None,
+            PreviewId::Workspace | PreviewId::Area(_) | PreviewId::Other(..) => None,
         }
     }
 }
@@ -348,6 +719,11 @@ impl PreviewGovernor {
     /// Take a reading (the app, each pass); the governed level.
     pub fn observe(&mut self, now: Instant, r: Reading) -> Level {
         self.governor.observe(now, r)
+    }
+
+    /// What the governor last decided beyond a step, once (for the log).
+    pub fn take_news(&mut self) -> Option<News> {
+        self.governor.take_news()
     }
 
     /// The level the governor has set (before the computer's cap).
@@ -404,7 +780,11 @@ impl PreviewGovernor {
     /// What the Preview pane's header says, if anything: only while the
     /// previews draw less than they would.
     pub fn notice(&self, cap: Cap) -> Option<String> {
-        notice(self.governed(), cap)
+        let lately = self
+            .governor
+            .not_theirs()
+            .is_some_and(|t| t.elapsed() < NOT_THEIRS_SAID);
+        notice(self.governed(), cap, lately)
     }
 }
 
@@ -429,8 +809,14 @@ pub fn window_fps(level: Level, full: f64, least: f64) -> f64 {
     }
 }
 
-/// What the Preview pane's header says while the previews draw less.
-pub fn notice(governed: Level, cap: Cap) -> Option<String> {
+/// How long the Preview pane says the previews came back because the
+/// outputs' trouble wasn't theirs.
+pub const NOT_THEIRS_SAID: Duration = Duration::from_secs(20);
+
+/// What the Preview pane's header says while the previews draw less, or
+/// (`not_theirs`: for a while after) that they came back because the
+/// outputs' late frames weren't their doing.
+pub fn notice(governed: Level, cap: Cap, not_theirs: bool) -> Option<String> {
     let level = effective(governed, cap);
     let why = if governed > cap.level() {
         "to keep the outputs smooth"
@@ -443,6 +829,9 @@ pub fn notice(governed: Level, cap: Cap) -> Option<String> {
         _ => "",
     };
     match level {
+        _ if not_theirs && governed <= cap.level() => {
+            Some("Previews back: the outputs' late frames aren't theirs".to_string())
+        }
         Level::Full => None,
         Level::Paused => Some("Previews paused to protect the outputs".to_string()),
         _ => Some(format!("Preview at {} fps{size} {why}", level.fps()?)),
@@ -471,21 +860,25 @@ mod tests {
         late_frames: 3,
         late_permille: 200,
         stalls: 0,
+        forced: false,
     };
     const ONE_LATE: Reading = Reading {
         late_frames: 1,
         late_permille: 0,
         stalls: 0,
+        forced: false,
     };
     const SMOOTH: Reading = Reading {
         late_frames: 0,
         late_permille: 0,
         stalls: 0,
+        forced: false,
     };
     const SOME: Reading = Reading {
         late_frames: 0,
         late_permille: 15,
         stalls: 0,
+        forced: false,
     };
 
     /// Feed `r` every 100 ms for `secs`; the levels seen, in order, without
@@ -555,7 +948,11 @@ mod tests {
             run(&mut g, &mut t, 0.1, LATE),
             vec![Level::Fps30, Level::Fps15]
         );
-        assert_eq!(run(&mut g, &mut t, 30.0, LATE).last(), Some(&Level::Paused));
+        // Down to paused; and since the outputs go on just as late with the
+        // previews paused, they weren't the cause: back to full rate.
+        let seen = run(&mut g, &mut t, 30.0, LATE);
+        assert!(seen.contains(&Level::Paused), "{seen:?}");
+        assert_eq!(seen.last(), Some(&Level::Full), "{seen:?}");
     }
 
     #[test]
@@ -622,7 +1019,8 @@ mod tests {
             Reading {
                 late_frames: 2,
                 late_permille: 200,
-                stalls: 1
+                stalls: 1,
+                forced: false,
             }
         );
         // Nothing playing: the last cue's share and a show loading's stall are not now.
@@ -637,6 +1035,236 @@ mod tests {
         assert_eq!(g.level(), Level::Paused);
         run(&mut g, &mut t, 70.0, r(None, false, 5, 400, 1));
         assert_eq!(g.level(), Level::Full);
+    }
+
+    /// Readings every `step` ms for `secs` from `world` (the time since the
+    /// start, in ms, and the level the previews are at); the level after each.
+    fn sim(
+        g: &mut Governor,
+        t: &mut Instant,
+        secs: u64,
+        step: u64,
+        mut world: impl FnMut(u64, Level) -> Reading,
+    ) -> Vec<Level> {
+        let start = *t;
+        (0..secs * 1000 / step)
+            .map(|_| {
+                *t += Duration::from_millis(step);
+                let ms = t.duration_since(start).as_millis() as u64;
+                let r = world(ms, g.level());
+                g.observe(*t, r)
+            })
+            .collect()
+    }
+
+    /// An output that drops a frame every `period` ms whatever the previews
+    /// do (a compositor's hiccup), its late share `tail` ‰ for the second
+    /// after, and every third one a main-loop stall too.
+    fn hiccups(period: u64, tail: u32, step: u64) -> impl FnMut(u64, Level) -> Reading {
+        move |ms, _| {
+            let n = ms / period;
+            let into = ms % period;
+            if n == 0 {
+                SMOOTH
+            } else if into < step {
+                Reading {
+                    late_frames: 1,
+                    late_permille: tail,
+                    stalls: u32::from(n.is_multiple_of(3)),
+                    forced: false,
+                }
+            } else if into < 1000 {
+                Reading {
+                    late_permille: tail,
+                    ..SMOOTH
+                }
+            } else {
+                SMOOTH
+            }
+        }
+    }
+
+    /// The share of `levels` at full rate.
+    fn full_share(levels: &[Level]) -> f64 {
+        levels.iter().filter(|l| **l == Level::Full).count() as f64 / levels.len() as f64
+    }
+
+    #[test]
+    fn late_frames_the_previews_dont_cause_dont_keep_them_down() {
+        // The review's case: one late frame every 2, 5 or 9 s had the previews
+        // paused after 10, 25 or 45 s, for the rest of the show.
+        for period in [2_000, 5_000, 9_000] {
+            for tail in [17, 33] {
+                for step in [16, 100] {
+                    let mut g = Governor::default();
+                    let mut t = Instant::now();
+                    let levels = sim(&mut g, &mut t, 1200, step, hiccups(period, tail, step));
+                    let at = |s: u64| (s * 1000 / step) as usize;
+                    let what =
+                        format!("every {period} ms, tail {tail}‰, a reading every {step} ms");
+                    // The first sign still steps them down at once...
+                    assert_eq!(levels[at(period / 1000) + 1], Level::Fps30, "{what}");
+                    // ... and they are back at full rate within a bounded time
+                    // (paused at most `MEASURE` and a little)...
+                    let back = levels[at(period / 1000)..]
+                        .iter()
+                        .position(|l| *l == Level::Full)
+                        .map(|i| i * step as usize / 1000);
+                    let bound = 6 * period / 1000 + Governor::MEASURE.as_secs() + 10;
+                    assert!(
+                        back.is_some_and(|s| s as u64 <= bound),
+                        "{what}: back after {back:?} s"
+                    );
+                    let paused =
+                        levels.iter().filter(|l| **l == Level::Paused).count() * step as usize;
+                    assert!(paused <= 20_000, "{what}: paused {paused} ms");
+                    // ... and stay up.
+                    let rest = &levels[at(back.unwrap() as u64 + period / 1000)..];
+                    assert!(full_share(rest) > 0.95, "{what}: {}", full_share(rest));
+                    assert!(g.not_theirs().is_some(), "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn when_the_previews_are_the_cause_they_stay_down_and_go_up_carefully() {
+        // Full rate and 30 a second are too much for this computer; 15 is fine.
+        let world = |_: u64, l: Level| if l <= Level::Fps30 { LATE } else { SMOOTH };
+        let mut g = Governor::default();
+        let mut t = Instant::now();
+        let levels = sim(&mut g, &mut t, 1200, 50, world);
+        assert_eq!(g.take_news(), None, "nothing learned: giving way helped");
+        assert!(g.not_theirs().is_none());
+        // Never paused: 15 a second is enough.
+        assert!(levels.iter().all(|l| *l <= Level::Fps15), "{levels:?}");
+        // Mostly at 15: each try at 30 is cut short, and the tries thin out.
+        let troubled = levels.iter().filter(|l| **l <= Level::Fps30).count() as f64;
+        assert!(troubled / (levels.len() as f64) < 0.02, "{troubled}");
+        let mut ups = Vec::new();
+        for (i, w) in levels.windows(2).enumerate() {
+            if w[1] < w[0] {
+                ups.push(i * 50 / 1000);
+            }
+        }
+        // The waits double to `PATIENCE_MOST`: about one try in 160 s after.
+        assert!(ups.len() <= 12, "went up at {ups:?} s");
+        let gaps: Vec<usize> = ups.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.iter().skip(3).all(|g| *g >= 150),
+            "went up at {ups:?} s"
+        );
+        // Each time it relapses, it goes down again at once.
+        let mut run_at_30 = 0;
+        for l in &levels {
+            if *l == Level::Fps30 {
+                run_at_30 += 1;
+                assert!(run_at_30 * 50 <= 1100, "stayed at 30 too long");
+            } else {
+                run_at_30 = 0;
+            }
+        }
+    }
+
+    #[test]
+    fn previews_that_cause_some_of_it_settle_where_they_do_not() {
+        // Full rate is too much; and the outputs hiccup every 3 s besides.
+        let mut hiccup = hiccups(3_000, 33, 50);
+        let world = move |ms: u64, l: Level| {
+            let r = hiccup(ms, l);
+            if l == Level::Full { LATE } else { r }
+        };
+        let mut g = Governor::default();
+        let mut t = Instant::now();
+        let levels = sim(&mut g, &mut t, 1200, 50, world);
+        // After learning, mostly at 30 a second: neither full (its trouble)
+        // nor lower (the hiccups aren't the previews').
+        let last = &levels[levels.len() / 2..];
+        let at_30 = last.iter().filter(|l| **l == Level::Fps30).count() as f64;
+        assert!(
+            at_30 / last.len() as f64 > 0.9,
+            "{}",
+            at_30 / last.len() as f64
+        );
+        assert!(full_share(last) < 0.01, "{}", full_share(last));
+    }
+
+    #[test]
+    fn learned_hiccups_do_not_flap_and_new_trouble_still_steps_down_at_once() {
+        // Thirty minutes of a late frame every 2 s.
+        let mut g = Governor::default();
+        let mut t = Instant::now();
+        let levels = sim(&mut g, &mut t, 1800, 50, hiccups(2_000, 33, 50));
+        let changes = levels.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(changes <= 40, "{changes} changes");
+        assert!(full_share(&levels) > 0.9, "{}", full_share(&levels));
+        assert!(matches!(g.take_news(), Some(News::NotTheirs { .. })));
+        assert_eq!(g.level(), Level::Full);
+        // Then the previews become too much: down at once, and they stay down.
+        let mut hiccup = hiccups(2_000, 33, 50);
+        let world = move |ms: u64, l: Level| {
+            let r = hiccup(ms, l);
+            if l <= Level::Fps30 { LATE } else { r }
+        };
+        let levels = sim(&mut g, &mut t, 120, 50, world);
+        let down = levels.iter().position(|l| *l > Level::Full).unwrap();
+        assert!(down * 50 <= 1500, "{} ms", down * 50);
+        assert!(full_share(&levels[levels.len() / 4..]) < 0.02);
+    }
+
+    #[test]
+    fn once_the_outputs_own_trouble_stops_it_is_forgotten() {
+        let mut g = Governor::default();
+        let mut t = Instant::now();
+        sim(&mut g, &mut t, 300, 50, hiccups(2_000, 33, 50));
+        assert_eq!(g.level(), Level::Full);
+        // While it goes on, a late frame is let be...
+        g.observe(t + Duration::from_millis(50), ONE_LATE);
+        assert_eq!(g.level(), Level::Full);
+        // ... but once it has stopped a while, the first sign steps down again.
+        sim(&mut g, &mut t, 45 * 60, 100, |_, _| SMOOTH);
+        t += Duration::from_millis(100);
+        assert_eq!(g.observe(t, ONE_LATE), Level::Fps30);
+    }
+
+    #[test]
+    fn forced_pressure_is_never_taken_for_the_outputs_own() {
+        let mut g = Governor::default();
+        let mut t = Instant::now();
+        let r = Reading::of(Some(1000), true, 0, 0, 0);
+        assert!(r.forced);
+        let levels = sim(&mut g, &mut t, 300, 50, |_, _| r);
+        assert_eq!(g.level(), Level::Paused);
+        assert_eq!(levels.iter().filter(|l| **l == Level::Full).count(), 0);
+        assert_eq!(g.take_news(), None);
+    }
+
+    #[test]
+    fn the_notice_says_briefly_when_the_previews_came_back_because_it_wasnt_them() {
+        assert_eq!(
+            notice(Level::Full, Cap::Automatic, true).as_deref(),
+            Some("Previews back: the outputs' late frames aren't theirs")
+        );
+        // Not while they still give way, nor under the computer's own limit
+        // when the governor holds them lower.
+        assert_eq!(
+            notice(Level::Fps15, Cap::Automatic, true).as_deref(),
+            Some("Preview at 15 fps to keep the outputs smooth")
+        );
+        let mut g = PreviewGovernor::default();
+        let mut t = Instant::now();
+        let mut world = hiccups(2_000, 33, 50);
+        for i in 0..1200 {
+            t += Duration::from_millis(50);
+            g.observe(t, world(i * 50 + 50, g.governed()));
+        }
+        assert!(matches!(g.take_news(), Some(News::NotTheirs { .. })));
+        assert!(g.take_news().is_none(), "taken once");
+        assert!(
+            News::TheirsAfterAll { level: Level::Full }
+                .words()
+                .contains("after all")
+        );
     }
 
     #[test]
@@ -686,21 +1314,21 @@ mod tests {
         assert_eq!(effective(Level::Full, Cap::Automatic), Level::Full);
         assert_eq!(effective(Level::Full, Cap::Fps15), Level::Fps15);
         assert_eq!(effective(Level::Paused, Cap::Fps30), Level::Paused);
-        assert_eq!(notice(Level::Full, Cap::Automatic), None);
+        assert_eq!(notice(Level::Full, Cap::Automatic, false), None);
         assert_eq!(
-            notice(Level::Fps15, Cap::Automatic).as_deref(),
+            notice(Level::Fps15, Cap::Automatic, false).as_deref(),
             Some("Preview at 15 fps to keep the outputs smooth")
         );
         assert_eq!(
-            notice(Level::Half, Cap::Automatic).as_deref(),
+            notice(Level::Half, Cap::Automatic, false).as_deref(),
             Some("Preview at 5 fps, half size, to keep the outputs smooth")
         );
         assert_eq!(
-            notice(Level::Paused, Cap::Automatic).as_deref(),
+            notice(Level::Paused, Cap::Automatic, false).as_deref(),
             Some("Previews paused to protect the outputs")
         );
         assert_eq!(
-            notice(Level::Full, Cap::Fps30).as_deref(),
+            notice(Level::Full, Cap::Fps30, false).as_deref(),
             Some("Preview at 30 fps (this computer's setting)")
         );
         // The main window: never under what its own controls need.
