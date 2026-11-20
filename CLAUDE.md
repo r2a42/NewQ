@@ -453,6 +453,28 @@ The README describes the features; this file is about working on the code.
   display. Tests drive it with the mouse (`TimelineRects`, `Draw::Full` for the whole window and undo,
   the list tab's `Win`; cfg(test) notes such as `timeline_clip_text` and `timeline_state`); tried
   headless under xvfb in both interfaces.
+- The 3D stage (0.25.0; plan and the FBX verdict: `.claude/notes/stage3d-plan.md`). `src/stage3d/`:
+  `mod.rs` `Show::stage3d` (`Stage3d`: `venue: Option<Venue>`, `surfaces`, `viewpoints`, `units`;
+  unwritten while empty, every field at its default too). Metres, degrees, right-handed, Y up; a
+  `Placement` is `T * Ry(yaw) * Rx(pitch) * Rz(roll)`. `Surface` (`SurfaceId` from `alloc_id`, in
+  `load`'s next-id guard) has a `SurfaceShape` (Flat, Curved: `width` along the arc, concave unless
+  `convex`; Faceted: `Facet`s with their own `uv` region) and a `Feed` (None or a display's
+  `region`, `[x, y, w, h]` as `PartOf::area`); `Show::whole_picture` is what a blended projector's
+  screen shows. `forget_missing_feeds` runs in `remove_output`, `load` and `use_displays_as`; the
+  venue's path is kept relative like cues' files. `Stage3d::scene(show, Option<&LoadedVenue>)` makes
+  the renderer's `Scene`: venue lit with `Venue::matrix` (units, up axis, placement), screens unlit
+  `Paint::Output` with the feed and piece regions composed, `UNFED_GREY` without one (or for a display
+  that isn't there). `scene.rs` the neutral types the renderer draws (`Mesh`, `Paint`, `Part`,
+  `Camera`, `Scene`; conventions in its header: CCW front faces, UV (0,0) top-left, column-major
+  `m[col][row]`, the renderer applies a region). `geometry.rs` pure meshes (`surface_mesh` ->
+  `Piece`s; `arc`, `jumbotron`, `angled_wall` presets; sizes and counts clamped, `MAX_FACETS`) and the
+  matrix sums. `load.rs` `load_venue` (worker thread; `catch_unwind` as a last guard): glTF/GLB via
+  `gltf` (no `import`: buffers and pictures read here, views/accessors checked first) and OBJ+MTL via
+  `tobj`; merged per material, node transforms baked, brightness baked (`Venue::needs_reload`),
+  `WARN_TRIANGLES`/`MAX_TRIANGLES`, `MAX_TEXTURE`; FBX refused in words (`FBX_WORDS`). Tests make
+  their models in the test (`load_tests.rs`). Not wired in yet: the renderer (`render3d`), the
+  Preview pane's 3D mode and editing UI, `relink.rs` and the network media manifest (which don't
+  know the venue file).
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
