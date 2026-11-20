@@ -13,6 +13,9 @@ pub struct Hit {
     pub point: Vec3,
     /// How far along the ray (metres from its start).
     pub distance: f32,
+    /// The face met, one long, turned towards where the ray came from (faces
+    /// count from both sides).
+    pub normal: Vec3,
 }
 
 /// The nearest part that `ray` meets, among those `wanted` says yes to (the
@@ -50,10 +53,18 @@ pub fn pick(scene: &Scene, ray: &Ray, wanted: &dyn Fn(usize, &Part) -> bool) -> 
             if let Some(d) = meets_triangle(ray, *a, *b, *c)
                 && best.is_none_or(|h| d < h.distance)
             {
+                let n = maths::normalize(maths::cross(maths::sub(*b, *a), maths::sub(*c, *a)))
+                    .unwrap_or([0.0, 0.0, 1.0]);
+                let n = if maths::dot(n, ray.dir) > 0.0 {
+                    maths::scale(n, -1.0)
+                } else {
+                    n
+                };
                 best = Some(Hit {
                     part: i,
                     point: maths::add(ray.origin, maths::scale(ray.dir, d)),
                     distance: d,
+                    normal: n,
                 });
             }
         }
@@ -171,6 +182,8 @@ mod tests {
         assert_eq!(hit.part, 1);
         assert!((hit.point[2] - 1.0).abs() < 1e-4 && hit.point[0].abs() < 1e-4);
         assert!((hit.distance - 9.0).abs() < 1e-4);
+        // Its face, towards the camera.
+        assert!((hit.normal[2] - 1.0).abs() < 1e-5, "{:?}", hit.normal);
         // Leaving the front one out finds the one behind it.
         let not_1 = |i: usize, _: &Part| i != 1;
         assert_eq!(

@@ -154,6 +154,17 @@ impl Default for Options {
     }
 }
 
+/// A straight line drawn over the view (a projector's cone, its picture's
+/// outline): from `a` to `b` in the world, in `colour` (display values, alpha
+/// for how strongly). Drawn last, over everything, one pixel wide, so it
+/// shows through walls; a line passing by the eye is cut at the near plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Line {
+    pub a: [f32; 3],
+    pub b: [f32; 3],
+    pub colour: [f32; 4],
+}
+
 /// Where to draw: a view of a texture with `RENDER_ATTACHMENT` usage, its
 /// format and size in pixels.
 pub struct Target<'a> {
@@ -181,6 +192,8 @@ pub struct FrameStats {
     pub drawn: (u32, u32),
     pub meshes_cached: usize,
     pub images_cached: usize,
+    /// Lines drawn over the picture (`render_with_lines`).
+    pub lines: u32,
     /// The processor time `render` took (making the frame and submitting it;
     /// the graphics card's own time is not measured).
     pub cpu_time: std::time::Duration,
@@ -200,6 +213,13 @@ struct Vertex {
     pos: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LineVertex {
+    pos: [f32; 3],
+    colour: [f32; 4],
 }
 
 #[repr(C)]
@@ -253,6 +273,7 @@ struct Pipelines {
     /// pass throws away the whole frame).
     grid: Option<wgpu::RenderPipeline>,
     axes: Option<wgpu::RenderPipeline>,
+    lines: Option<wgpu::RenderPipeline>,
 }
 
 /// The textures drawn into for one owner, size, format and sample count.
@@ -518,6 +539,22 @@ impl Renderer {
         outputs: &dyn Fn(OutputId) -> Option<&'a wgpu::TextureView>,
         options: &Options,
     ) -> FrameStats {
+        self.render_with_lines(gpu, target, scene, camera, outputs, options, &[])
+    }
+
+    /// `render`, with `lines` drawn over the picture (`Line`). A GPU that
+    /// won't make the lines' pipeline draws the view without them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_lines<'a>(
+        &mut self,
+        gpu: &Gpu,
+        target: &Target<'_>,
+        scene: &Scene,
+        camera: &Camera,
+        outputs: &dyn Fn(OutputId) -> Option<&'a wgpu::TextureView>,
+        options: &Options,
+        lines: &[Line],
+    ) -> FrameStats {
         let started = Instant::now();
         if self.tidied.elapsed() >= TIDY_EVERY {
             self.tidy();
@@ -656,6 +693,25 @@ impl Renderer {
             missing_pictures: missing,
             ..FrameStats::default()
         };
+        // The lines, as a list of ends (only the ones that are numbers).
+        let line_ends: Vec<LineVertex> = lines
+            .iter()
+            .filter(|l| maths::finite(l.a) && maths::finite(l.b))
+            .flat_map(|l| {
+                let colour = l.colour.map(|v| num(v, 1.0).clamp(0.0, 1.0));
+                [
+                    LineVertex { pos: l.a, colour },
+                    LineVertex { pos: l.b, colour },
+                ]
+            })
+            .collect();
+        let line_buffer = (!line_ends.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("3d lines"),
+                contents: bytemuck::cast_slice(&line_ends),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3d") });
         {
@@ -751,6 +807,14 @@ impl Renderer {
             }
             if draws.iter().any(|d| d.3) {
                 draw_parts(&mut pass, &mut stats, true);
+            }
+            if let (Some(buffer), Some(pipe)) = (&line_buffer, &pipes.lines) {
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, &self.frame_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..line_ends.len() as u32, 0..1);
+                stats.draw_calls += 1;
+                stats.lines += line_ends.len() as u32 / 2;
             }
         }
         if let Some((_, group)) = self.targets.get(&target_key).and_then(|t| t.small.as_ref()) {
@@ -1138,7 +1202,7 @@ impl Renderer {
                 cache: None,
             })
         };
-        use wgpu::CompareFunction::{Greater, GreaterEqual};
+        use wgpu::CompareFunction::{Always, Greater, GreaterEqual};
         use wgpu::PrimitiveTopology::{LineList, TriangleList};
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         // An overlay this GPU won't make is left out (and said once), not
@@ -1197,6 +1261,25 @@ impl Renderer {
                     LineList,
                     None,
                     depth(true, GreaterEqual),
+                )
+            }),
+            lines: checked("3d lines", &|| {
+                let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+                make(
+                    "3d lines",
+                    &self.frame_pipeline_layout,
+                    "vs_line",
+                    "fs_line",
+                    &[Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<LineVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &attributes,
+                    })],
+                    LineList,
+                    alpha,
+                    // Over everything (walls too), and never in the depth
+                    // buffer: a line on a screen doesn't flicker with it.
+                    depth(false, Always),
                 )
             }),
         };

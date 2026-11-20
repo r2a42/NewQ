@@ -22,7 +22,7 @@
 
 use crate::gpu::{Gpu, LayerTexture, Slot};
 use crate::render::{Mailbox, OutputGroup};
-use crate::render3d::{Camera, FrameStats, Options, Renderer, Scene, Target};
+use crate::render3d::{Camera, FrameStats, Line, Options, Renderer, Scene, Target};
 use crate::show::OutputId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,6 +63,9 @@ pub struct ViewJob {
     pub scene: Arc<Scene>,
     pub camera: Camera,
     pub options: Options,
+    /// Drawn over the picture (a preview's projector cones); none on a
+    /// display's picture.
+    pub lines: Arc<Vec<Line>>,
 }
 
 #[derive(Clone, Default)]
@@ -325,13 +328,14 @@ impl StageDrawer {
                 owner: v.key,
             };
             let feeds = &self.feeds;
-            let s = self.renderer.render(
+            let s = self.renderer.render_with_lines(
                 gpu,
                 &target,
                 &v.scene,
                 &v.camera,
                 &|o| feeds.get(&o).map(|f| &f.view),
                 &v.options,
+                &v.lines,
             );
             v.target.mark_drawn();
             stats.push((v.key, s));

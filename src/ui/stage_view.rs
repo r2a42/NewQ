@@ -94,6 +94,8 @@ pub struct ViewRequest {
     pub size: (u32, u32),
     pub camera: Camera,
     pub options: Options,
+    /// Drawn over the picture: the projectors' cones and outlines.
+    pub lines: Arc<Vec<render3d::Line>>,
 }
 
 /// One 3D view's own state: where its camera is, what it shows.
@@ -249,6 +251,7 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
             size: px,
             camera,
             options,
+            lines: Arc::default(),
         });
     }
     let painter = ui.painter_at(rect);
