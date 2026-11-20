@@ -197,15 +197,104 @@ pub struct Popout {
     pub size: Option<[f32; 2]>,
 }
 
+/// Written as `LayoutFile`, so that 0.24 reads the file too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(from = "LayoutFile", into = "LayoutFile")]
 pub struct Layout {
     pub dock: DockState<Pane>,
-    #[serde(default)]
     pub popouts: Vec<Popout>,
     /// Each preview's mode and output, by instance (`Pane::Preview(n)`, and
     /// `OPERATOR_PREVIEW`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub previews: BTreeMap<u8, PreviewPane>,
+    /// 0.24's Multiview setting has been taken into `previews`
+    /// (`take_old_multiview`), once. 0.24 writes the file without it, so
+    /// after a downgrade its setting is taken again.
+    pub took_multiview: bool,
+}
+
+/// `layout.json` as written. 0.24 reads `dock` and `popouts` (and ignores the
+/// rest), and gives up on the whole file, and writes its default over it, at
+/// a pane it doesn't know (a second Preview, `{"Preview": n}`) or one twice.
+/// So those two hold the first Preview pane only, as 0.24 had it; the whole
+/// arrangement, the other Preview panes with it, is in `panes` (written only
+/// when it differs) and `more_popouts`.
+#[derive(Serialize, Deserialize)]
+struct LayoutFile {
+    dock: DockState<Pane>,
+    #[serde(default)]
+    popouts: Vec<Popout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    panes: Option<DockState<Pane>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    more_popouts: Vec<Popout>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    previews: BTreeMap<u8, PreviewPane>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    took_multiview: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A pane 0.24 doesn't know.
+fn later_pane(p: Pane) -> bool {
+    matches!(p, Pane::Preview(n) if n != 0)
+}
+
+impl From<LayoutFile> for Layout {
+    fn from(f: LayoutFile) -> Layout {
+        let mut popouts = f.popouts;
+        popouts.extend(f.more_popouts);
+        Layout {
+            dock: f.panes.unwrap_or(f.dock),
+            popouts,
+            previews: f.previews,
+            took_multiview: f.took_multiview,
+        }
+    }
+}
+
+impl From<Layout> for LayoutFile {
+    fn from(l: Layout) -> LayoutFile {
+        let later: Vec<Pane> = l
+            .dock
+            .iter_all_tabs()
+            .map(|(_, p)| *p)
+            .filter(|p| later_pane(*p))
+            .collect();
+        let (dock, panes) = if later.is_empty() {
+            (l.dock, None)
+        } else {
+            let mut older = l.dock.clone();
+            // With the first Preview closed, the first other one stands in for
+            // it (so a layout of a second preview alone isn't empty to 0.24).
+            let first_open =
+                l.dock.find_tab(&PREVIEW).is_some() || l.popouts.iter().any(|p| p.pane == PREVIEW);
+            let mut stand_in = None;
+            if !first_open
+                && let Some((_, tab)) = older.iter_all_tabs_mut().find(|(_, p)| later_pane(**p))
+            {
+                stand_in = Some(*tab);
+                *tab = PREVIEW;
+            }
+            for p in later.into_iter().filter(|p| Some(*p) != stand_in) {
+                if let Some(path) = older.find_tab(&p) {
+                    older.remove_tab(path);
+                }
+            }
+            (older, Some(l.dock))
+        };
+        let (more_popouts, popouts) = l.popouts.into_iter().partition(|p| later_pane(p.pane));
+        LayoutFile {
+            dock,
+            popouts,
+            panes,
+            more_popouts,
+            previews: l.previews,
+            took_multiview: l.took_multiview,
+        }
+    }
 }
 
 impl Default for Layout {
@@ -221,6 +310,7 @@ impl Default for Layout {
             dock,
             popouts: Vec::new(),
             previews: BTreeMap::new(),
+            took_multiview: false,
         }
     }
 }
@@ -354,8 +444,14 @@ impl Layout {
 
     /// 0.24's Multiview button was one setting for the Preview pane and the
     /// Operator view (`Prefs::multiview`): on, they show the multiview, unless
-    /// a mode of their own is already kept. Whether there was anything to take.
+    /// a mode of their own is already kept. Once per layout (`took_multiview`:
+    /// `Prefs::multiview` is written again, for 0.24, and must not overrule a
+    /// mode chosen since). Whether the layout changed.
     pub fn take_old_multiview(&mut self, on: bool) -> bool {
+        if self.took_multiview {
+            return false;
+        }
+        self.took_multiview = true;
         if on {
             for n in [0, OPERATOR_PREVIEW] {
                 self.previews.entry(n).or_insert(PreviewPane {
@@ -364,7 +460,13 @@ impl Layout {
                 });
             }
         }
-        on
+        true
+    }
+
+    /// What 0.24's Multiview setting would be now (`Prefs::multiview`): the
+    /// first Preview pane shows the multiview.
+    pub fn old_multiview(&self) -> bool {
+        self.preview(0).mode == PreviewMode::Multiview
     }
 
     /// The lowest Preview instance not showing (a closed one's number is free
@@ -927,5 +1029,177 @@ mod tests {
         l.save(&dir).unwrap();
         assert_eq!(Layout::load(&dir).docked_panes(), vec![second]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 0.24's layout types and its `Layout::load`, copied from 0.24's
+    /// `dock.rs`: to check that 0.24 reads what this NewQ writes.
+    mod v024 {
+        use egui_dock::DockState;
+        use serde::Deserialize;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+        pub enum Pane {
+            Cues,
+            Inspector,
+            Cart,
+            Preview,
+            Active,
+            Settings,
+            Timeline,
+        }
+
+        pub const ALL: [Pane; 7] = [
+            Pane::Cues,
+            Pane::Inspector,
+            Pane::Cart,
+            Pane::Preview,
+            Pane::Active,
+            Pane::Settings,
+            Pane::Timeline,
+        ];
+
+        #[derive(Debug, Deserialize)]
+        pub struct Popout {
+            pub pane: Pane,
+            #[serde(default)]
+            pub pos: Option<[f32; 2]>,
+            #[serde(default)]
+            pub size: Option<[f32; 2]>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        pub struct Layout {
+            pub dock: DockState<Pane>,
+            #[serde(default)]
+            pub popouts: Vec<Popout>,
+        }
+
+        impl Layout {
+            pub fn docked_panes(&self) -> Vec<Pane> {
+                self.dock.iter_all_tabs().map(|(_, p)| *p).collect()
+            }
+        }
+
+        /// What 0.24 makes of `text`: None where it would give up on it, start
+        /// with its default arrangement and write that over the file.
+        pub fn load(text: &str) -> Option<Layout> {
+            fn fix(v: &mut serde_json::Value) {
+                match v {
+                    serde_json::Value::Object(map) => {
+                        for (key, child) in map.iter_mut() {
+                            if (key == "min" || key == "max")
+                                && let serde_json::Value::Object(point) = child
+                            {
+                                for axis in ["x", "y"] {
+                                    if point.get(axis).is_some_and(|n| n.is_null()) {
+                                        point.insert(axis.into(), 0.0.into());
+                                    }
+                                }
+                            }
+                            fix(child);
+                        }
+                    }
+                    serde_json::Value::Array(items) => items.iter_mut().for_each(fix),
+                    _ => {}
+                }
+            }
+            let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
+            fix(&mut value);
+            let l: Layout = serde_json::from_value(value).ok()?;
+            // `is_valid`: every pane at most once, one surface.
+            let mut seen = std::collections::HashSet::new();
+            let docked = l.docked_panes();
+            let valid = docked
+                .iter()
+                .copied()
+                .chain(l.popouts.iter().map(|p| p.pane))
+                .all(|p| seen.insert(p))
+                && l.dock.surfaces_count() == 1;
+            let open = |p: &Pane| docked.contains(p) || l.popouts.iter().any(|q| q.pane == *p);
+            (valid && ALL.iter().any(open)).then_some(l)
+        }
+    }
+
+    #[test]
+    fn what_this_newq_writes_is_read_by_0_24_with_one_preview_where_it_was() {
+        let check = |l: &Layout, what: &str| -> v024::Layout {
+            let text = serde_json::to_string(l).unwrap();
+            let old = v024::load(&text).unwrap_or_else(|| panic!("{what}: 0.24 gives up: {text}"));
+            // No empty tile left where a later preview was.
+            for node in old.dock.main_surface().iter() {
+                if let Some(leaf) = node.get_leaf() {
+                    assert!(!leaf.is_empty(), "{what}: {text}");
+                }
+            }
+            // And this NewQ reads all of it back.
+            let back = Layout::from_json(&text).unwrap();
+            assert!(back.is_valid(), "{what}");
+            assert_eq!(
+                sorted(back.docked_panes()),
+                sorted(l.docked_panes()),
+                "{what}"
+            );
+            assert_eq!(back.popouts, l.popouts, "{what}");
+            assert_eq!(back.previews, l.previews, "{what}");
+            assert_eq!(back.took_multiview, l.took_multiview, "{what}");
+            old
+        };
+        let old = check(&Layout::default(), "the default");
+        assert_eq!(old.docked_panes().len(), 4);
+        // Two previews side by side, a third in a window of its own.
+        let mut l = Layout::default();
+        l.new_preview().unwrap();
+        let third = l.new_preview().unwrap();
+        l.pop_out(third);
+        l.preview_mut(1).mode = PreviewMode::Multiview;
+        l.took_multiview = true;
+        let old = check(&l, "three previews");
+        let panes = old.docked_panes();
+        assert_eq!(
+            panes.iter().filter(|p| **p == v024::Pane::Preview).count(),
+            1
+        );
+        assert!(panes.contains(&v024::Pane::Cues) && panes.contains(&v024::Pane::Active));
+        assert!(old.popouts.is_empty(), "{:?}", old.popouts);
+        // The first one popped out, the others docked: 0.24 has it popped out.
+        let mut l = Layout::default();
+        l.new_preview().unwrap();
+        l.pop_out(PREVIEW);
+        l.set_popout_geometry(PREVIEW, Some([10.0, 20.0]), [640.0, 480.0]);
+        let old = check(&l, "the first popped out");
+        assert!(!old.docked_panes().contains(&v024::Pane::Preview));
+        assert_eq!(old.popouts.len(), 1);
+        assert_eq!(old.popouts[0].pane, v024::Pane::Preview);
+        assert_eq!(
+            (old.popouts[0].pos, old.popouts[0].size),
+            (Some([10.0, 20.0]), Some([640.0, 480.0]))
+        );
+        // The first closed: the second stands in for it.
+        let mut l = Layout::default();
+        l.new_preview().unwrap();
+        l.close(PREVIEW);
+        let old = check(&l, "the first closed");
+        assert_eq!(
+            old.docked_panes()
+                .iter()
+                .filter(|p| **p == v024::Pane::Preview)
+                .count(),
+            1
+        );
+        // A second preview alone.
+        let mut l = Layout::default();
+        let second = l.new_preview().unwrap();
+        for p in Pane::ALL {
+            l.close(p);
+        }
+        assert_eq!(l.docked_panes(), vec![second]);
+        let old = check(&l, "a second preview alone");
+        assert_eq!(old.docked_panes(), vec![v024::Pane::Preview]);
+        // A layout with one preview is written exactly as 0.24 wrote it.
+        let text = serde_json::to_string(&Layout::default()).unwrap();
+        assert!(
+            !text.contains("panes") && !text.contains("more_popouts"),
+            "{text}"
+        );
     }
 }

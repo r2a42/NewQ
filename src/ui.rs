@@ -16212,6 +16212,10 @@ mod tests {
         assert!(st.want_new_preview);
     }
 
+    fn text_of(layout: &crate::dock::Layout) -> String {
+        serde_json::to_string(layout).unwrap()
+    }
+
     #[test]
     fn the_old_multiview_setting_becomes_the_previews_mode_once() {
         use crate::dock::{Layout, OPERATOR_PREVIEW, PreviewMode};
@@ -16230,25 +16234,47 @@ mod tests {
             "an old file still loads"
         );
         let mut layout = Layout::default();
-        assert!(layout.take_old_multiview(std::mem::take(&mut prefs.multiview)));
+        assert!(layout.take_old_multiview(prefs.multiview));
         assert_eq!(layout.preview(0).mode, PreviewMode::Multiview);
         assert_eq!(
             layout.preview(OPERATOR_PREVIEW).mode,
             PreviewMode::Multiview
         );
-        // Never written again: the next start has nothing to take.
+        // Written on while the first pane shows the multiview, so 0.24 keeps
+        // it; and taken only once per layout, so it never overrules a mode
+        // chosen since.
+        assert!(layout.old_multiview());
+        prefs.save(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("prefs.json")).unwrap();
+        assert!(text.contains("\"multiview\":true"), "{text}");
+        layout.preview_mut(0).mode = PreviewMode::Single;
+        let text = serde_json::to_string(&layout).unwrap();
+        let mut layout = Layout::from_json(&text).unwrap();
+        assert!(!layout.take_old_multiview(true), "taken already");
+        assert_eq!(layout.preview(0).mode, PreviewMode::Single);
+        assert!(!layout.old_multiview());
+        prefs.multiview = layout.old_multiview();
         prefs.save(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join("prefs.json")).unwrap();
         assert!(!text.contains("multiview"), "{text}");
         let again = crate::prefs::Prefs::load(&dir);
         assert!(!again.multiview && again.hw_decode);
+        // A layout 0.24 wrote (without the mark) takes its setting again.
+        let mut old: serde_json::Value = serde_json::from_str(&text_of(&layout)).unwrap();
+        old.as_object_mut().unwrap().remove("took_multiview");
+        old.as_object_mut().unwrap().remove("previews");
+        let mut layout = Layout::from_json(&old.to_string()).unwrap();
+        assert!(layout.take_old_multiview(true));
+        assert_eq!(layout.preview(0).mode, PreviewMode::Multiview);
         // A mode already kept is not overruled, and off takes nothing.
         let mut layout = Layout::default();
         layout.preview_mut(0).mode = PreviewMode::Stage;
         layout.take_old_multiview(true);
         assert_eq!(layout.preview(0).mode, PreviewMode::Stage);
         let mut layout = Layout::default();
-        assert!(!layout.take_old_multiview(false));
+        assert!(layout.take_old_multiview(false), "marked as taken");
+        assert!(layout.previews.is_empty());
+        assert!(!layout.take_old_multiview(true));
         assert!(layout.previews.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
