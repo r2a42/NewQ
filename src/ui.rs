@@ -316,6 +316,10 @@ pub struct UiState {
     pub preview_output: Option<OutputId>,
     /// The multiview's Layout window is open.
     pub multiview_editor: bool,
+    /// The one governor of every preview (`preview_pace`): the app tells it
+    /// how the outputs are doing each pass; each preview asks it
+    /// (`preview_budget`) before it draws.
+    pub preview_governor: crate::preview_pace::PreviewGovernor,
     /// The bars of playing cues that were moved by hand, by cue instance.
     scrubs: HashMap<u64, Scrub>,
     /// A Shift-drag that moves all the bars together.
@@ -4597,6 +4601,27 @@ fn multiview_count(n: usize) -> String {
     }
 }
 
+impl UiState {
+    /// May preview `id` draw now, and how big (`preview_pace`)? Every preview,
+    /// of whatever kind, asks this each frame it would draw.
+    pub(crate) fn preview_budget(
+        &self,
+        id: crate::preview_pace::PreviewId,
+    ) -> crate::preview_pace::PreviewBudget {
+        self.preview_governor
+            .ask(id, std::time::Instant::now(), self.prefs.preview_cap)
+    }
+}
+
+/// How compositor preview `id` draws now: None at full rate (straight into the
+/// window every frame), else less often, smaller or held (`render::Pace`).
+pub(crate) fn preview_pace(
+    st: &UiState,
+    id: crate::preview_pace::PreviewId,
+) -> Option<crate::render::Pace> {
+    crate::render::Pace::of(st.preview_budget(id))
+}
+
 /// What a tile of the multiview is dragged as: its place.
 #[derive(Clone, Copy, Debug)]
 struct TileDrag(usize);
@@ -4685,7 +4710,13 @@ fn tile_interact(
 }
 
 /// Paint `e`'s live picture fitted in `bars` (black round it) through slot `n`.
-fn paint_tile(ui: &mut Ui, e: &PreviewOutput, bars: egui::Rect, n: usize) -> egui::Rect {
+fn paint_tile(
+    ui: &mut Ui,
+    e: &PreviewOutput,
+    bars: egui::Rect,
+    n: usize,
+    pace: Option<crate::render::Pace>,
+) -> egui::Rect {
     let rect = preview::fit_picture(e.canvas, bars);
     ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
     preview::outline(ui, rect, bars);
@@ -4703,6 +4734,7 @@ fn paint_tile(ui: &mut Ui, e: &PreviewOutput, bars: egui::Rect, n: usize) -> egu
                 },
             }],
             slot: Slot::Multi(n as u8),
+            pace,
         },
     ));
     rect
@@ -4793,7 +4825,13 @@ fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>) {
                         ui.add(egui::Label::new(head).truncate());
                         let (bars, _) =
                             ui.allocate_exact_size(Vec2::new(tile_w, cell_h), Sense::hover());
-                        let _rect = paint_tile(ui, e, bars, number);
+                        let _rect = paint_tile(
+                            ui,
+                            e,
+                            bars,
+                            number,
+                            preview_pace(st, crate::preview_pace::PreviewId::Tile(number as u8)),
+                        );
                         tile_interact(ui, bars, number, Some(e.id), st, edits);
                         #[cfg(test)]
                         {
@@ -4880,7 +4918,13 @@ fn multiview_layout(
         }
         match e {
             Some(e) => {
-                let _rect = paint_tile(ui, e, cell, i);
+                let _rect = paint_tile(
+                    ui,
+                    e,
+                    cell,
+                    i,
+                    preview_pace(st, crate::preview_pace::PreviewId::Tile(i as u8)),
+                );
                 #[cfg(test)]
                 drawn.push((_rect, cell));
                 ui.put(
@@ -5086,6 +5130,15 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
     if chosen != id {
         st.preview_output = Some(chosen);
     }
+    // Small, and only while the preview draws less than it would.
+    let notice = st.preview_governor.notice(st.prefs.preview_cap);
+    if let Some(text) = &notice {
+        ui.label(RichText::new(text).weak().small()).on_hover_text(
+            "The previews in this window are drawn less often and smaller while the displays need the room, and back up once they have been smooth for a while. The displays themselves are not affected. Settings ▸ General ▸ Previews.",
+        );
+    }
+    #[cfg(test)]
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("preview_notice"), notice));
 
     if multi {
         multiview_grid(ui, show, st);
@@ -5133,6 +5186,12 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
                 },
             }],
             slot: Slot::Preview,
+            // Lining up corners wants every frame.
+            pace: {
+                // Asked whatever happens; lining up corners wants every frame.
+                let pace = preview_pace(st, crate::preview_pace::PreviewId::Single);
+                if editing { None } else { pace }
+            },
         },
     ));
     if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == id) {
@@ -7239,6 +7298,7 @@ fn area_editor(
             OutputPreview {
                 groups: groups.clone(),
                 slot: Slot::Screen,
+                pace: None,
             },
         ));
     }
@@ -15537,6 +15597,73 @@ mod tests {
         let l = show.multiview.expect("a layout was made");
         assert_eq!(l.shape, Shape::Grid { cols: 2, rows: 2 });
         assert_eq!(l.tiles, vec![o(1), o(3), o(2), o(4)]);
+    }
+
+    #[test]
+    fn every_preview_asks_the_governor_and_says_when_it_gives_way() {
+        use crate::preview_pace::{Cap, Level, PreviewId};
+        // The pane drawn with `level`, `cap` and the multiview on or off: what
+        // its header said, which previews asked, and the single preview's pace.
+        let draw = |level: Level, cap: Cap, multiview: bool| {
+            let mut st = UiState {
+                previews: (1..=3).map(preview).collect(),
+                ..UiState::default()
+            };
+            st.preview_governor.force(level);
+            st.prefs.multiview = multiview;
+            st.prefs.preview_cap = cap;
+            let ctx = egui::Context::default();
+            let mut show = Show::default();
+            let pane = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 900.0));
+            for _ in 0..2 {
+                let input = RawInput {
+                    screen_rect: Some(pane),
+                    ..Default::default()
+                };
+                let mut o = ctx.run_ui(input, |ui| output_previews(ui, &mut show, &mut st, true));
+                o.textures_delta.clear();
+            }
+            let said = ctx
+                .data(|d| d.get_temp::<Option<String>>(egui::Id::new("preview_notice")))
+                .expect("the pane was drawn");
+            let asked: HashSet<PreviewId> =
+                st.preview_governor.asked.borrow().iter().copied().collect();
+            (said, asked, preview_pace(&st, PreviewId::Single))
+        };
+        // The single preview and every multiview tile ask, at every level.
+        for level in Level::ALL {
+            let (_, asked, _) = draw(level, Cap::Automatic, false);
+            assert_eq!(asked, HashSet::from([PreviewId::Single]), "{level:?}");
+            let (_, asked, _) = draw(level, Cap::Automatic, true);
+            let tiles: HashSet<PreviewId> = (0..3).map(PreviewId::Tile).collect();
+            assert_eq!(asked, tiles, "{level:?}");
+        }
+        for multiview in [false, true] {
+            let (said, _, pace) = draw(Level::Full, Cap::Automatic, multiview);
+            assert_eq!(said, None, "nothing said at full rate");
+            assert_eq!(pace, None, "drawn straight, as before");
+            let (said, _, pace) = draw(Level::Half, Cap::Automatic, multiview);
+            assert_eq!(
+                said.as_deref(),
+                Some("Preview at 5 fps, half size, to keep the outputs smooth")
+            );
+            let pace = pace.unwrap();
+            assert_eq!(pace.scale, 0.5);
+            assert!(!pace.hold);
+            assert!((pace.every.as_secs_f64() - 0.2).abs() < 1e-6);
+            let (said, _, pace) = draw(Level::Paused, Cap::Automatic, multiview);
+            assert_eq!(
+                said.as_deref(),
+                Some("Previews paused to protect the outputs")
+            );
+            assert!(pace.unwrap().hold);
+            let (said, _, pace) = draw(Level::Full, Cap::Fps30, multiview);
+            assert_eq!(
+                said.as_deref(),
+                Some("Preview at 30 fps (this computer's setting)")
+            );
+            assert_eq!(pace.unwrap().scale, 1.0);
+        }
     }
 
     #[test]

@@ -358,6 +358,17 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
             "Also in the Window menu, under Timeline. Hover a choice for what it does.",
         );
     });
+    section(ui, "Previews (this computer)", |ui| {
+        preview_cap(ui, st);
+        hint(
+            ui,
+            "The previews in this window (the Preview pane, single or multiview, and the \
+             timeline workspace's monitor) give way to the displays: while a display falls \
+             behind, they are drawn less often, then smaller, then paused, and \
+             back up once the displays have been smooth for a while. The Preview pane says \
+             so while it happens. A limit here keeps them at that rate or below all the time.",
+        );
+    });
     section(ui, "Show", |ui| {
         egui::Grid::new("settings_show")
             .num_columns(2)
@@ -427,6 +438,28 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
         );
         ui.add_space(4.0);
         log_detail(ui, st);
+    });
+}
+
+/// The most the main window's previews draw a second, on this computer.
+fn preview_cap(ui: &mut Ui, st: &mut UiState) {
+    use crate::preview_pace::Cap;
+    ui.horizontal(|ui| {
+        ui.label("Preview rate");
+        let before = st.prefs.preview_cap;
+        egui::ComboBox::from_id_salt("settings_preview_cap")
+            .selected_text(before.label())
+            .show_ui(ui, |ui| {
+                for c in Cap::ALL {
+                    ui.selectable_value(&mut st.prefs.preview_cap, c, c.label());
+                }
+            });
+        if st.prefs.preview_cap != before
+            && let Some(dir) = &st.layout_dir
+            && let Err(e) = st.prefs.save(dir)
+        {
+            log::warn!("could not save the settings of this computer: {e}");
+        }
     });
 }
 

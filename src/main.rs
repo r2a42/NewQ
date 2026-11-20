@@ -42,6 +42,7 @@ mod pdf;
 mod power;
 mod pptx;
 mod prefs;
+mod preview_pace;
 mod projector;
 mod reaper;
 mod recovery;

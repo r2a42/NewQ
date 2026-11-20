@@ -10,6 +10,10 @@ release page, and a release is refused if it has none.
   how many tiles (2 to 16, as a grid or one large tile with small ones along the bottom) and which
   display each shows; drag a tile onto another to swap them, or click its name to change it. The
   layout is saved with the show. Shows without one look as they did.
+- **The previews make way for the displays.** At the first sign a display is dropping frames, every
+  preview in NewQ is drawn less often, then smaller, then paused if need be, and the Preview pane
+  says so; they come back once the displays have been smooth for a while.
+  Settings ▸ General ▸ *Previews* can also keep them at a lower rate on this computer.
 
 ## 0.24.7
 

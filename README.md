@@ -447,6 +447,18 @@ stays on the computer until you send it yourself.
   turn), so like other edits it can't be changed in show mode; a display that is
   deleted leaves its tiles empty. A show with no
   layout of its own shows every display, as before.
+  The previews give way to the displays: at the first late frame on a display's
+  window (or when NewQ's main loop is held up) while something plays, every
+  preview (single, multiview, the timeline workspace's monitor, in the main
+  window or a popped-out pane) draws less, a step a second: 30, 15, then 5
+  pictures a second, then at half and a quarter of its size, then paused. Each
+  keeps showing its last picture in between, so none goes black, and a display
+  that only the previews show has its pictures copied to the graphics card no
+  more often than that. The Preview pane says so ("Preview at 15 fps to keep the
+  outputs smooth", "Previews paused to protect the outputs"). Once the displays
+  have been smooth for ten seconds they step back up one step at a time, waiting
+  longer each time the trouble comes straight back. Settings ▸ General ▸ *Previews* can also hold
+  them at 30, 15 or 5 a second on this computer (*Automatic* by default).
   *Test pattern* shows a picture for lining a display up, with a dropdown of
   fourteen beside it and a *Number* checkbox that turns the display's number
   on the patterns off (greyed for the patterns with no room for one; choosing a

@@ -87,7 +87,10 @@ pub(crate) fn viewport_px(rect: Rect, pixels_per_point: f32) -> [f32; 4] {
 /// of the window: egui sets the viewport clamped to the window, which would
 /// squeeze the picture into the part in sight. The clip rect (already set as
 /// the scissor) still keeps it to the pane.
-pub(crate) struct WholeViewport(pub OutputPreview);
+///
+/// A paced preview (`OutputPreview::pace`) is drawn into a picture of its own
+/// at its `rect`'s size in pixels, when due, and that picture is shown here.
+pub(crate) struct WholeViewport(pub OutputPreview, pub Rect);
 
 impl egui_wgpu::CallbackTrait for WholeViewport {
     fn prepare(
@@ -98,6 +101,18 @@ impl egui_wgpu::CallbackTrait for WholeViewport {
         encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(pace) = self.0.pace {
+            let px = (
+                self.1.width() * screen.pixels_per_point,
+                self.1.height() * screen.pixels_per_point,
+            );
+            if self
+                .0
+                .prepare_paced(pace, px, device, queue, encoder, resources)
+            {
+                return Vec::new();
+            }
+        }
         self.0.prepare(device, queue, screen, encoder, resources)
     }
 
@@ -115,6 +130,9 @@ impl egui_wgpu::CallbackTrait for WholeViewport {
         if cut && w >= 1.0 && h >= 1.0 {
             pass.set_viewport(x, y, w, h, 0.0, 1.0);
         }
+        if self.0.pace.is_some() && self.0.paint_paced(pass, resources) {
+            return;
+        }
         self.0.paint(info, pass, resources);
     }
 }
@@ -123,7 +141,7 @@ impl egui_wgpu::CallbackTrait for WholeViewport {
 pub(crate) fn callback(rect: Rect, preview: OutputPreview) -> egui::Shape {
     egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
         rect,
-        WholeViewport(preview),
+        WholeViewport(preview, rect),
     ))
 }
 
