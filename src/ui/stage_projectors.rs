@@ -144,7 +144,7 @@ enum Ask {
 
 enum Answer {
     Footprint(ProjectorId, u64, Arc<Footprint>),
-    Here(Option<Here>),
+    Here(u64, Option<Here>),
 }
 
 /// The thread the ray tests are done on: latest wins (a footprint per
@@ -178,10 +178,14 @@ impl Worker {
                     while let Ok(more) = asks.try_recv() {
                         take(more);
                     }
-                    if let Some(a) = here
-                        && answers.send(Answer::Here(work_here(a))).is_err()
-                    {
-                        return;
+                    if let Some(a) = here {
+                        let key = match &a {
+                            Ask::Here { key, .. } => *key,
+                            Ask::Footprint { .. } => 0,
+                        };
+                        if answers.send(Answer::Here(key, work_here(a))).is_err() {
+                            return;
+                        }
                     }
                     for (_, a) in footprints {
                         if let Ask::Footprint {
@@ -274,6 +278,7 @@ pub struct ProjectorsUi {
     /// The light under the pointer, and what was last asked.
     pub here: Option<Here>,
     here_asked: Option<u64>,
+    here_waiting: bool,
     /// Each view's lines, with the key they were made for.
     lines: HashMap<Option<ProjectorId>, (u64, Arc<Vec<Line>>)>,
     /// "Which lens from here?" answers, by projector.
@@ -323,6 +328,7 @@ impl ProjectorsUi {
             self.worker = None;
             self.asked.clear();
             self.here_asked = None;
+            self.here_waiting = false;
         }
     }
 
@@ -339,12 +345,18 @@ impl ProjectorsUi {
                     }
                     self.footprints.insert(id, (key, fp));
                 }
-                Ok(Answer::Here(h)) => self.here = h,
+                Ok(Answer::Here(key, h)) => {
+                    self.here = h;
+                    if self.here_asked == Some(key) {
+                        self.here_waiting = false;
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.worker = None;
                     self.asked.clear();
                     self.here_asked = None;
+                    self.here_waiting = false;
                     break;
                 }
             }
@@ -379,6 +391,12 @@ impl ProjectorsUi {
         // An old outline shown while the new one is made would mislead;
         // the cone alone is drawn until then.
         None
+    }
+
+    /// Whether the worker has answers to come: the views draw again soon
+    /// to show them (nothing else wakes the window when they land).
+    pub fn waiting(&self) -> bool {
+        self.worker.is_some() && (!self.asked.is_empty() || self.here_waiting)
     }
 
     /// Whether every footprint asked for has come.
@@ -550,6 +568,7 @@ pub fn ask_here(show: &Show, st: &mut UiState, ray: Ray) {
         return;
     }
     st.stage.projectors.here_asked = Some(key);
+    st.stage.projectors.here_waiting = true;
     let kinds = match &st.stage.projectors.kinds {
         Some((k, kinds)) if *k == st.stage.scene_key => kinds.clone(),
         _ => {
