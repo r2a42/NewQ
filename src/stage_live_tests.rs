@@ -487,3 +487,48 @@ fn a_venue_still_arriving_is_read_once_it_has_come() {
     assert!(shared.scene.parts[0].lit, "the room is in the scene");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// While the thread is behind with the displays (a job waiting behind one
+/// whose displays are still being drawn) the previews wait, keeping their
+/// pictures; one job under way is normal, and they are drawn then.
+#[test]
+fn previews_give_way_while_the_thread_is_behind_with_the_displays() {
+    let Some(gpu) = crate::gpu::Gpu::headless() else {
+        assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+        return;
+    };
+    let (show, _a, b) = stage_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    live.output_layer(&gpu, b, (160, 90));
+    let pictures = HashMap::new();
+    let preview = PreviewId::Stage(1);
+    let ask = |shared: &mut StageShared| {
+        shared.requests.push(crate::ui::stage_view::ViewRequest {
+            id: preview,
+            size: (64, 36),
+            camera: Camera::default(),
+            options: Options::default(),
+        })
+    };
+    let display = [seen(b, Camera::default())];
+    live.set_behind(true);
+    ask(&mut shared);
+    live.send(&gpu, &show, &mut shared, &display, &pictures, true);
+    assert_eq!(live.serial, 1, "the display is drawn");
+    assert!(live.drawn_with.contains_key(&ViewKey::Output(b)));
+    assert!(!live.drawn_with.contains_key(&ViewKey::Preview(preview)));
+    assert!(shared.targets.contains_key(&preview), "its picture is kept");
+    wait(&mut live);
+    // Not behind: drawn.
+    live.set_behind(false);
+    ask(&mut shared);
+    live.send(&gpu, &show, &mut shared, &display, &pictures, true);
+    assert_eq!(live.serial, 2);
+    assert!(live.drawn_with.contains_key(&ViewKey::Preview(preview)));
+    wait(&mut live);
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}

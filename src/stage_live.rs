@@ -133,6 +133,8 @@ pub struct StageLive {
     /// Every display showing the stage was one only the previews show, last
     /// pass: their pictures are preview work (`feeds_a_display`).
     governed_only: bool,
+    /// As if the thread were behind with the displays (set by a test).
+    force_behind: bool,
     /// The displays whose pictures a display showing the stage needs.
     needed_by_outputs: HashSet<OutputId>,
     /// When each preview last asked for a picture (a pane closed lets its
@@ -301,10 +303,15 @@ impl StageLive {
                 let failed = v.failed.as_ref().is_some_and(|(f, generation)| {
                     reload_key(f) == reload_key(want) && *generation == media_generation()
                 });
-                let arriving = v
-                    .arriving
+                // (One for a venue no longer wanted is forgotten, so it
+                // brings the loop round for nothing.)
+                if v.arriving
                     .as_ref()
-                    .is_some_and(|(a, _)| reload_key(a) == reload_key(want));
+                    .is_some_and(|(a, _)| reload_key(a) != reload_key(want))
+                {
+                    v.arriving = None;
+                }
+                let arriving = v.arriving.is_some();
                 let look_again = v.arriving.as_ref().is_none_or(|(_, at)| now >= *at);
                 if current {
                     v.settling = None;
@@ -447,7 +454,13 @@ impl StageLive {
             self.thread = None;
             self.drawn_with.clear();
         }
-        let behind = self.thread.as_ref().is_some_and(|t| t.done() < self.serial);
+        // Behind with the displays: a job is waiting while another's
+        // displays are still being drawn (one job under way is normal).
+        let behind = self.force_behind
+            || self
+                .thread
+                .as_ref()
+                .is_some_and(|t| t.displays_done().saturating_add(1) < self.serial);
         let displays_behind = behind && outputs.iter().any(|o| o.seen);
         self.governed_only = !outputs.is_empty() && outputs.iter().all(|o| !o.seen);
         let asked: Vec<_> = std::mem::take(&mut shared.requests);
@@ -635,6 +648,12 @@ impl StageLive {
     #[cfg(test)]
     pub fn locate_with(&mut self, f: fn(&std::path::Path) -> Found) {
         self.venue.locate = f;
+    }
+
+    /// Behave as if the thread were behind with the displays (for a test).
+    #[cfg(test)]
+    pub fn set_behind(&mut self, behind: bool) {
+        self.force_behind = behind;
     }
 
     /// Whether the drawing thread is running (for a test).

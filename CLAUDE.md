@@ -513,7 +513,7 @@ The README describes the features; this file is about working on the code.
   shows is preview work at the previews' pace; the previews' `ViewRequest`s; each drawn again only
   when its signature (with `feeds_key`, the stage's pictures' layers) changed or something plays;
   displays first (`ViewJob::display`, `StageJob::merged` sorts them, `displays_done`), previews wait
-  while the thread is behind with them; a thread that stopped is noticed every pass, never busy, and
+  while a job waits behind one whose displays are being drawn (`set_behind` in tests); a thread that stopped is noticed every pass, never busy, and
   restarted by `wake_at` after `RESTART_EVERY`; idle `IDLE_RELEASE` (30 s) quits the thread and with
   it all it kept on the card; feeds by
   `feed_groups`: the whole picture's layers on its canvas with no keystone, mesh or blend, sub
