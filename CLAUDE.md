@@ -514,6 +514,25 @@ The README describes the features; this file is about working on the code.
   laid out on (the source picture for a `part_of`). `audio::LoadMeter` averages NewQ's mixing over
   `STEADY_BUFFERS` buffers, each capped at 1; `audio::cause`/`stream_errors_late()` tell the system calling
   late from slow mixing (`analysis::dropout_cause`).
+- `src/render3d/`: the 3D stage's renderer (0.25.0 previz, `.claude/notes/stage3d-plan.md`; not wired in
+  yet, `#![allow(dead_code)]`). `scene.rs` is a copy of `stage3d::scene`'s neutral types (`Mesh`, `Paint`,
+  `Part`, `Camera`, `Scene`) to be made one; conventions: right-handed, Y up, metres, uv (0,0) the picture's
+  top-left, `Paint::Output::region` (left, top, width, height) like `PartOf::area`, nothing culled.
+  `Renderer` (one per `Gpu`): `render(gpu, &Target{view, format, size}, scene, camera, outputs: &dyn
+  Fn(OutputId) -> Option<&TextureView>, &Options) -> FrameStats` (draw calls, triangles, missing pictures)
+  submits through `Gpu::submit` itself (its uniforms are written per call, so two renders can't share a
+  submit). One uber-shader (`shader.wgsl`), colours in display values like the compositor's: lit = headlight
+  from the eye + sky/ground ambient, Lambert in linear light, both faces, `lift` adds grey to dark colours;
+  unlit = full brightness; a display with no picture is dark grey with an edge; optional grid (fragment-drawn
+  1 m / 5 m lines) and axes; `venue_opacity` < 1 is the x-ray (lit parts drawn last, blended). Reversed Z
+  (Depth32Float, clear 0, `Greater`). `Quality { msaa, scale }`: 4× where the adapter offers it for the
+  format and depth (`samples_for`), a scale below 1 draws smaller and scales up (`blit.wgsl`). Meshes are
+  kept by `mesh_key`, pictures by `key`, let go after `FORGET_AFTER` unused; bad meshes (stray indices, no
+  normals or uvs, NaNs) are mended or skipped. `camera.rs` (pure): `Camera::{sane, view, projection,
+  project, ray}`, `Orbit` (`orbit`/`pan`/`dolly` from mouse deltas, `frame`/`frame_scene` zoom to fit,
+  `from_camera`); `pick.rs` (pure): `pick(scene, ray, wanted)` -> `Hit { part, point, distance }`. GPU
+  tests in `render3d/tests.rs` (lavapipe under `WGPU_BACKEND=vulkan`; `NEWQ_RENDER3D_PNG=<path>` writes the
+  little stage of `a_little_stage_draws`). No real GPU or display tried.
 - `src/awake.rs`: `KeepAwake` holds the computer awake (caffeinate, `SetThreadExecutionState`,
   systemd-inhibit) while a test runs; `SleepWatch` notices a sleep by the wall clock running ahead of
   `Instant`, which stops in sleep on a Mac and Linux (Test Mode reports it and leaves the laps it
