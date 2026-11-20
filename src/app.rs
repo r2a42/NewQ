@@ -441,6 +441,10 @@ pub struct App {
     /// A layer was left out last pass because its first picture wasn't in
     /// its texture yet: draw again soon.
     uploads_waiting: bool,
+    /// The 3D stage: its venue, scene, views and drawing thread (`stage_live`).
+    stage: crate::stage_live::StageLive,
+    /// The stage's thread is drawing, or its venue loading: come round soon.
+    stage_busy: bool,
     /// Upload on the main thread as before (`NEWQ_UPLOADS_ON_MAIN=1`, or the
     /// thread could not be started).
     uploads_on_main: bool,
@@ -675,6 +679,8 @@ impl App {
             fps_labels: HashMap::new(),
             uploader: None,
             uploads_waiting: false,
+            stage: Default::default(),
+            stage_busy: false,
             uploads_on_main: std::env::var_os("NEWQ_UPLOADS_ON_MAIN").is_some(),
             uploads_restarted: None,
             autostart: std::env::var("NEWQ_AUTOSTART").ok().and_then(|v| {
@@ -1390,6 +1396,8 @@ impl App {
                 screen.sent.clear();
                 screen.needs_redraw = true;
             }
+            // The 3D stage's thread, targets and pictures were on it too.
+            stopping.extend(self.stage.forget_device(&mut self.ui.stage));
             self.recovery = Some(GpuRecovery {
                 stopping,
                 since: Instant::now(),
@@ -2383,6 +2391,31 @@ impl App {
             };
         }
         let was_waiting = std::mem::take(&mut self.uploads_waiting);
+        // The 3D stage: its venue and scene, and whether a picture of it came in.
+        let mut said = Vec::new();
+        self.stage.begin(&self.show, &mut self.ui.stage, &mut said);
+        for s in said {
+            match s {
+                crate::stage_live::Said::Note(m) => self.engine.log(m),
+                crate::stage_live::Said::Problem(m) => self.engine.problem(m),
+            }
+        }
+        if self.stage.landed() {
+            if self.show.outputs.iter().any(|o| o.source.is_some()) {
+                for s in self.screens.values_mut() {
+                    s.needs_redraw = true;
+                }
+            }
+            if let Some(ctl) = &self.control {
+                ctl.window.request_redraw();
+            }
+            for p in &self.popouts {
+                p.window.request_redraw();
+            }
+        }
+        let stage_bounds = self.ui.stage.bounds.map(|b| (b.min, b.max));
+        let mut stage_outputs: Vec<(OutputId, crate::render3d::Camera)> = Vec::new();
+        let mut pictures: HashMap<OutputId, crate::stage_live::PictureLayers> = HashMap::new();
         self.ui.previews.clear();
         let configs: Vec<OutputSetup> = self
             .show
@@ -2474,12 +2507,17 @@ impl App {
             };
 
             let engine_layers = self.engine.layers(source);
-            let has_picture = !engine_layers.is_empty();
+            // A display that shows the 3D stage (or whose whole picture does)
+            // has the stage's picture in place of its cues.
+            let stage_source = self.show.output(source).and_then(|o| o.source.clone());
+            let has_picture = !engine_layers.is_empty() || stage_source.is_some();
             // An output only the previews show here (no window, no stream) is
             // preview work: while the previews give way, its pictures are
             // uploaded no more often than the previews draw, and not at all
             // while they are paused; in between it shows what is uploaded.
-            let preview_only = target.is_none() && !self.streams.contains_key(&id);
+            let preview_only = target.is_none()
+                && !self.streams.contains_key(&id)
+                && !self.stage.feeds_a_display(id);
             let level = crate::preview_pace::effective(
                 self.ui.preview_governor.governed(),
                 self.ui.prefs.preview_cap,
@@ -2491,7 +2529,14 @@ impl App {
                     self.preview_uploads.get(&id).copied(),
                     now,
                 );
-            let mut layers = if upload {
+            let mut layers = if let Some(src) = &stage_source {
+                if !stage_outputs.iter().any(|(o, _)| *o == source) {
+                    let aspect = canvas.0.max(1) as f32 / canvas.1.max(1) as f32;
+                    let camera = self.show.stage_camera(src, stage_bounds, aspect);
+                    stage_outputs.push((source, camera));
+                }
+                vec![self.stage.output_layer(gpu, source, canvas)]
+            } else if upload {
                 if preview_only {
                     self.preview_uploads.insert(id, now);
                 }
@@ -2624,6 +2669,15 @@ impl App {
                 }
             }
 
+            if part.is_none() {
+                pictures.insert(
+                    id,
+                    crate::stage_live::PictureLayers {
+                        layers: layers.clone(),
+                        canvas,
+                    },
+                );
+            }
             groups.insert(
                 id,
                 OutputGroup {
@@ -2656,6 +2710,14 @@ impl App {
         }
 
         self.update_streams(&groups);
+        self.stage_busy = self.stage.send(
+            gpu,
+            &self.show,
+            &mut self.ui.stage,
+            &stage_outputs,
+            &pictures,
+            playing || was_waiting,
+        ) || self.stage.venue_busy();
 
         // What each display's window is managing, for the Preview pane.
         self.ui.output_fps.clear();
@@ -3926,7 +3988,7 @@ impl App {
                 next = next.min(t);
             }
         }
-        if playing || self.uploads_waiting {
+        if playing || self.uploads_waiting || self.stage_busy {
             next = next.min(now + TICK_WHILE_PLAYING);
         }
         // An output window waiting to be shown is looked at again soon.
