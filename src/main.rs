@@ -53,6 +53,7 @@ mod slides_export;
 mod soak;
 mod speed;
 mod splash;
+mod stage3d;
 mod stats;
 mod stream;
 mod streamlink;
