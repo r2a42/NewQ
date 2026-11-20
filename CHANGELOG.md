@@ -6,6 +6,11 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Arrange the multiview yourself.** *Layout…* beside the Preview pane's *Multiview* button picks
+  how many tiles (2 to 16, as a grid or one large tile with small ones along the bottom) and which
+  display each shows; drag a tile onto another to swap them, or click its name to change it. The
+  layout is saved with the show. Shows without one look as they did.
+
 ## 0.24.7
 
 - **The HD colour bars are the default test pattern.** A display's *Test pattern* now starts with

@@ -33,6 +33,7 @@ mod media;
 mod mediamtx;
 mod mesh;
 mod monitor;
+mod multiview;
 mod ndi;
 mod net;
 mod output;

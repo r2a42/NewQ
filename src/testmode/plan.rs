@@ -263,6 +263,8 @@ pub(super) fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirro
         return;
     };
     show.outputs.clear();
+    // The user's multiview names displays that are gone: the test's are shown in turn.
+    show.multiview = None;
     let main = show.add_display();
     // The 3D stage's screens showed the displays that have gone.
     show.forget_missing_feeds();
@@ -1728,6 +1730,26 @@ mod tests {
             twins: 1,
             label: name.into(),
         }
+    }
+
+    #[test]
+    fn the_shows_multiview_layout_goes_with_its_displays() {
+        let mut original = Show::default();
+        let a = original.add_display();
+        original.multiview = Some(crate::multiview::Layout::new(
+            crate::multiview::Shape::Grid { cols: 2, rows: 1 },
+            &[a],
+        ));
+        let built = build(
+            &original,
+            Level::Short,
+            &HashMap::new(),
+            &[choice("Left", 1)],
+        );
+        assert_eq!(built.show.multiview, None);
+        // With no displays chosen the show's own are kept, and its layout.
+        let built = build(&original, Level::Short, &HashMap::new(), &[]);
+        assert_eq!(built.show.multiview, original.multiview);
     }
 
     #[test]

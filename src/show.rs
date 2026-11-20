@@ -96,6 +96,15 @@ pub struct Show {
     /// The 3D stage: a venue model and the screens in it (`stage3d`).
     #[serde(default, skip_serializing_if = "crate::stage3d::Stage3d::is_empty")]
     pub stage3d: crate::stage3d::Stage3d,
+    /// The Preview pane's multiview as the user arranged it (`multiview.rs`):
+    /// how many tiles and which output each shows. None: every output in an
+    /// automatic grid, as before there was a choice.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::multiview::lenient"
+    )]
+    pub multiview: Option<crate::multiview::Layout>,
 }
 
 /// When a display computer shows its start-up card (its name, address, who
@@ -346,6 +355,7 @@ impl Default for Show {
             no_transfer_cards: false,
             wait_cards: WaitCards::UntilReady,
             stage3d: Default::default(),
+            multiview: None,
         };
         let id = OutputId(show.alloc_id());
         show.outputs.push(OutputConfig::new(id, "Display 1".into()));
@@ -3570,6 +3580,14 @@ impl Show {
     /// Remove a display or sub display (and a display's sub displays). Cues
     /// that were sent to what went are sent to the first display left.
     pub fn remove_output(&mut self, id: OutputId) {
+        // The multiview's tiles that showed it (or one of its sub displays) are empty.
+        if let Some(layout) = &mut self.multiview {
+            for o in &self.outputs {
+                if o.id == id || o.within == Some(id) {
+                    layout.forget(o.id);
+                }
+            }
+        }
         self.outputs.retain(|o| o.id != id && o.within != Some(id));
         // What showed part of a display that has gone shows its own picture.
         for o in &mut self.outputs {
@@ -7875,6 +7893,47 @@ mod tests {
             let back: Show = serde_json::from_str(&serde_json::to_string(&show).unwrap()).unwrap();
             assert_eq!(back.wait_cards, w);
         }
+    }
+
+    #[test]
+    fn the_multiview_layout_follows_the_show_and_is_not_written_unset() {
+        use crate::multiview::{Layout, Shape};
+        // Unset (every show before it, and a new one): not in the file.
+        let show = Show::default();
+        let json = serde_json::to_string(&show).unwrap();
+        assert!(!json.contains("multiview"), "{json}");
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.multiview, None);
+        // Set: kept.
+        let mut show = Show::default();
+        let a = show.add_display();
+        show.multiview = Some(Layout::new(Shape::Grid { cols: 3, rows: 3 }, &[a]));
+        let json = serde_json::to_string(&show).unwrap();
+        let back: Show = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.multiview, show.multiview);
+        // One a later NewQ wrote, in a shape this one doesn't know: the show opens.
+        let later = json.replace(r#"{"grid":{"cols":3,"rows":3}}"#, r#"{"ring":7}"#);
+        assert_ne!(later, json);
+        let back: Show = serde_json::from_str(&later).unwrap();
+        assert_eq!(back.multiview, None);
+    }
+
+    #[test]
+    fn removing_a_display_empties_its_tiles_and_its_sub_displays_tiles() {
+        use crate::multiview::{Layout, Shape};
+        let mut show = Show::default();
+        let a = show.add_display();
+        let b = show.add_display();
+        let sub = show.add_sub_display(b);
+        show.multiview = Some(Layout::new(
+            Shape::Grid { cols: 2, rows: 2 },
+            &[a, b, sub, b],
+        ));
+        show.remove_output(b);
+        assert_eq!(
+            show.multiview.unwrap().tiles,
+            vec![Some(a), None, None, None]
+        );
     }
 
     #[test]
