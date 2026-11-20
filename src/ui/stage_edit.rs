@@ -362,6 +362,7 @@ pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut
     });
     venue_section(ui, show, st, actions);
     surfaces_section(ui, show, st);
+    super::stage_projectors::section_ui(ui, show, st);
     viewpoints_section(ui, show);
     sources_section(ui, show);
 }
@@ -551,7 +552,7 @@ fn degrees(ui: &mut Ui, v: &mut f32) -> egui::Response {
     )
 }
 
-fn placement_rows(ui: &mut Ui, salt: &str, p: &mut Placement, unit: LengthUnit) {
+pub(super) fn placement_rows(ui: &mut Ui, salt: &str, p: &mut Placement, unit: LengthUnit) {
     ui.label("Position");
     ui.push_id((salt, "pos"), |ui| {
         ui.horizontal(|ui| {

@@ -9,6 +9,7 @@ pub(crate) use network::{login_note, own_addresses, path_to, peer_address};
 mod settings;
 // The 3D stage (0.25.0): its view in a preview and its settings page.
 pub(crate) mod stage_edit;
+pub(crate) mod stage_projectors;
 pub(crate) mod stage_view;
 mod timeline;
 

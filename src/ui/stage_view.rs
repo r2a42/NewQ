@@ -60,6 +60,9 @@ pub struct StageShared {
     pub opened_for: Option<SurfaceId>,
     /// The 3D view at the top of Settings ▸ 3D stage.
     pub settings_view: StageViewState,
+    /// The projectors: the one picked, their outlines, the light under the
+    /// pointer (`stage_projectors`).
+    pub projectors: super::stage_projectors::ProjectorsUi,
 }
 
 /// How the venue's model stands.
@@ -113,6 +116,9 @@ pub struct StageViewState {
     pub xray: f32,
     /// A name being typed for "Save this view…".
     saving: Option<String>,
+    /// Looking through this projector's lens (a drag or the wheel leaves it,
+    /// orbiting from where it was).
+    pub through: Option<crate::stage3d::ProjectorId>,
 }
 
 impl Default for StageViewState {
@@ -124,6 +130,7 @@ impl Default for StageViewState {
             grid: true,
             xray: 1.0,
             saving: None,
+            through: None,
         }
     }
 }
@@ -209,6 +216,23 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
         )
     });
     let delta = response.drag_delta() * ppp;
+    // Looking through a projector: the lens's camera, until the mouse moves
+    // the view (which then turns round from where the lens was).
+    let lens = view
+        .through
+        .and_then(|p| super::stage_projectors::look_through(show, st, p));
+    if lens.is_none() {
+        view.through = None;
+    }
+    if let Some(cam) = lens
+        && (response.dragged()
+            || (response.hovered() && scroll != 0.0)
+            || response.double_clicked()
+            || ui.input(|i| i.key_pressed(egui::Key::Escape)))
+    {
+        view.orbit = Orbit::from_camera(&cam);
+        view.through = None;
+    }
     view.moved |= response.dragged() || (response.hovered() && scroll != 0.0);
     if response.dragged_by(egui::PointerButton::Primary) && !shift {
         view.orbit.orbit(delta.x, delta.y);
@@ -226,19 +250,47 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
     {
         view.orbit.frame(b, aspect);
     }
-    let camera = view.orbit.camera();
+    let camera = match view.through {
+        Some(p) => super::stage_projectors::look_through(show, st, p)
+            .unwrap_or_else(|| view.orbit.camera()),
+        None => view.orbit.camera(),
+    };
+    // Where the picture is (the target's shape, fitted in the rect), for
+    // the pointer's rays.
+    let shown_at = st.stage.targets.get(&id).map_or(rect, |t| {
+        super::preview::fit_picture((t.width, t.height), rect)
+    });
+    let ray_at = |at: Pos2| {
+        let pixel = [(at.x - shown_at.min.x) * ppp, (at.y - shown_at.min.y) * ppp];
+        let size = (
+            (shown_at.width() * ppp).round().max(1.0) as u32,
+            (shown_at.height() * ppp).round().max(1.0) as u32,
+        );
+        camera.ray(pixel, size)
+    };
     if response.clicked()
         && let Some(at) = response.interact_pointer_pos()
     {
-        let pixel = [(at.x - rect.min.x) * ppp, (at.y - rect.min.y) * ppp];
-        let size = (
-            (rect.width() * ppp).round() as u32,
-            (rect.height() * ppp).round() as u32,
-        );
-        let ray = camera.ray(pixel, size);
+        let ray = ray_at(at);
         let scene = st.stage.scene.clone();
-        let hit = render3d::pick(&scene, &ray, &|_, p| !p.lit);
-        st.stage.picked = hit.and_then(|h| show.stage3d.part_surface(&scene, h.part));
+        // The screens and the projectors' bodies (not the venue).
+        let from = show.stage3d.projectors_from(&scene);
+        let hit = render3d::pick(&scene, &ray, &|i, p| !p.lit || i >= from);
+        let projector = hit.and_then(|h| show.stage3d.part_projector(&scene, h.part));
+        st.stage.projectors.picked = projector;
+        st.stage.picked = match projector {
+            Some(_) => None,
+            None => hit.and_then(|h| show.stage3d.part_surface(&scene, h.part)),
+        };
+    }
+    // The light under the pointer, worked out off this thread.
+    if !show.stage3d.projectors.is_empty()
+        && !response.dragged()
+        && let Some(at) = response.hover_pos()
+    {
+        super::stage_projectors::ask_here(show, st, ray_at(at));
+    } else if !response.hovered() {
+        st.stage.projectors.here = None;
     }
 
     // Ask for a picture when the governor lets it (the last one stays).
@@ -246,12 +298,13 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
     let has = st.stage.targets.contains_key(&id);
     if wants_picture(budget, has) {
         let options = view_options(view, budget.scale, bounds.as_ref());
+        let lines = super::stage_projectors::view_lines(show, st, view.through);
         st.stage.requests.push(ViewRequest {
             id,
             size: px,
             camera,
             options,
-            lines: Arc::default(),
+            lines,
         });
     }
     let painter = ui.painter_at(rect);
@@ -266,6 +319,29 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
                 pace: None,
             },
         ));
+        // Through a lens: what lies outside its picture is shaded.
+        if view.through.is_some() {
+            letterbox(&painter, &camera, (t.width, t.height), shown);
+        }
+    }
+    // The picked projector's name, where it stands.
+    if let Some(pid) = st.stage.projectors.picked
+        && view.through != Some(pid)
+        && let Some(p) = show.projector(pid)
+    {
+        let size = (rect.width().max(1.0) as u32, rect.height().max(1.0) as u32);
+        if let Some([x, y]) = camera.project(p.position(), size) {
+            let at = rect.min + vec2(x, y);
+            if rect.contains(at) {
+                painter.text(
+                    at + vec2(9.0, -9.0),
+                    Align2::LEFT_BOTTOM,
+                    &p.name,
+                    egui::FontId::proportional(13.0),
+                    Color32::from_rgb(255, 210, 90),
+                );
+            }
+        }
     }
     // The picked screen's name, where it is.
     if let Some(sid) = st.stage.picked
@@ -301,6 +377,41 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
             egui::CursorIcon::Grab
         });
     }
+}
+
+/// Shade what lies outside a lens's own picture (`Camera::picture_in`) in a
+/// target of `size` shown at `shown`, and frame the picture.
+fn letterbox(painter: &egui::Painter, camera: &Camera, size: (u32, u32), shown: Rect) {
+    let [l, t, r, b] = camera.picture_in(size);
+    let sx = shown.width() / size.0.max(1) as f32;
+    let sy = shown.height() / size.1.max(1) as f32;
+    let frame = Rect::from_min_max(
+        shown.min + vec2(l * sx, t * sy),
+        shown.min + vec2(r * sx, b * sy),
+    );
+    let shade = Color32::from_black_alpha(190);
+    for band in [
+        Rect::from_min_max(shown.min, egui::pos2(shown.max.x, frame.min.y)),
+        Rect::from_min_max(egui::pos2(shown.min.x, frame.max.y), shown.max),
+        Rect::from_min_max(
+            egui::pos2(shown.min.x, frame.min.y),
+            egui::pos2(frame.min.x, frame.max.y),
+        ),
+        Rect::from_min_max(
+            egui::pos2(frame.max.x, frame.min.y),
+            egui::pos2(shown.max.x, frame.max.y),
+        ),
+    ] {
+        if band.width() > 0.5 && band.height() > 0.5 {
+            painter.rect_filled(band, 0.0, shade);
+        }
+    }
+    painter.rect_stroke(
+        frame,
+        0.0,
+        egui::Stroke::new(1.0, Color32::from_rgb(255, 210, 90)),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// The view's picture as a layer filling its own canvas.
@@ -356,7 +467,23 @@ fn overlay(
                         if ui.button(&v.name).clicked() {
                             view.orbit = Orbit::from_camera(&v.camera());
                             view.moved = true;
+                            view.through = None;
                             ui.close();
+                        }
+                    }
+                    if !show.stage3d.projectors.is_empty() {
+                        ui.separator();
+                        for p in &show.stage3d.projectors {
+                            if ui
+                                .button(format!("Through {}", p.name))
+                                .on_hover_text("See the room as this projector's lens sees it")
+                                .clicked()
+                            {
+                                view.through = Some(p.id);
+                                view.moved = true;
+                                st.stage.projectors.picked = Some(p.id);
+                                ui.close();
+                            }
                         }
                     }
                     ui.separator();
@@ -374,6 +501,7 @@ fn overlay(
                     .clicked()
                     && let Some(b) = &st.stage.bounds
                 {
+                    view.through = None;
                     view.orbit.frame(b, aspect);
                 }
                 ui.checkbox(&mut view.grid, "Grid")
@@ -443,6 +571,27 @@ fn overlay(
             Some(false) => view.saving = None,
             None => {}
         }
+    }
+    // Through a lens, and the light under the pointer.
+    let mut corner = Vec::new();
+    if let Some(p) = view.through.and_then(|p| show.projector(p)) {
+        corner.push(format!("Through {} · drag or Esc to leave", p.name));
+    }
+    if let Some(h) = &st.stage.projectors.here {
+        corner.push(super::stage_projectors::here_words(h, show.stage3d.units));
+    }
+    let n = corner.len();
+    for (i, words) in corner.iter().enumerate() {
+        ui.painter().text(
+            Pos2::new(
+                rect.max.x - 8.0,
+                rect.max.y - 22.0 - 16.0 * (n - 1 - i) as f32,
+            ),
+            Align2::RIGHT_BOTTOM,
+            words,
+            egui::FontId::proportional(12.0),
+            Color32::from_rgb(255, 225, 150),
+        );
     }
     // What is happening, at the bottom.
     let status = status_words(st, id);
