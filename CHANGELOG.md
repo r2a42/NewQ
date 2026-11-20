@@ -29,6 +29,15 @@ release page, and a release is refused if it has none.
   screen, the Displays page's four corners are still the quicker way. Worked out by sums only: not
   tried with a real projector. A show with projectors still opens in 0.25, which leaves them out
   (and drops them if it saves the show).
+- **See the projectors' light in the 3D view.** Tick *Light* over a 3D view and each projector
+  throws its display's picture into the room: onto the screens and the set, fading with distance
+  and angle, with shadows, adding up where projectors overlap. It throws what the display really
+  sends, corners and edge blend included, so you can watch your blend even out the overlap before
+  you rig. *Show* switches between the *Picture* (with an automatic or hand-set exposure),
+  *Brightness* (nits at full white), *Overlap* (how many projectors light each place) and *Pixel
+  size*, each with a colour key. Up to 16 projectors per view; it gives way to the displays like
+  every preview. Worked out by sums and drawn on a software graphics card only: not tried with real
+  projectors or on a real graphics card.
 
 ## 0.25.0
 

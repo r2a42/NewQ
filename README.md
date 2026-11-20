@@ -1291,9 +1291,35 @@ bright the picture is, on any screen, curved wall or set.
   lux, 157 nits. Left out: lenses being dimmer at the edges, a screen's gain
   falling off to the side, black not being black, and light bouncing round the
   room. Treat the numbers as a guide.
-- **Not yet:** the projectors' light drawn on the screens, and the 3D model
-  driving the outputs (mapping). The read-outs are sums: nothing here has met
-  a real projector or a light meter.
+- **Light.** Tick *Light* over a 3D view (the Preview pane's *3D* mode or
+  the view on *Settings ▸ 3D stage*) and each projector throws its display's
+  picture into the room: onto the screens and the venue, fading with distance
+  and angle, with shadows where something is in the way, and adding up where
+  projectors overlap. What it throws is what its display sends, its corners,
+  mesh, part of a wide picture and edge blend included, so you can see your
+  blend at work: set the blend widths and the bright band in the overlap
+  fades. A projector with no display throws plain white. A screen no
+  projector reaches (an LED wall) keeps its own picture. *Show* chooses what
+  you see:
+  - *Picture*: the light as it lands. *Auto exposure* shows the brightest
+    projector's light on its screen as full white; untick it to set the nits
+    shown as white yourself.
+  - *Brightness*: how bright each place is at full white, in colours (under
+    50, 50 to 100, 100 to 200, 200 to 400, 400 nits or more).
+  - *Overlap*: how many projectors light each place (one, two, three or more).
+  - *Pixel size*: how big a pixel is where it lands (under 1 mm up to 10 mm or
+    more; the finest projector's where they overlap).
+
+  The colours have a key in the view's corner. The light is the view's own,
+  like the grid: each view has its own, nothing is saved in the show. A view
+  lights at most 16 projectors (it says so if there are more). It is preview
+  work: it gives way to the displays like every preview, drawing smaller
+  pictures and shadows when they need the computer. A display that shows the
+  stage shows it without light. A graphics card that can't draw the light
+  shows the view without it, and says so.
+- **Not yet:** the 3D model driving the outputs (mapping). The read-outs and
+  the light are sums: nothing here has met a real projector, a light meter or
+  a real graphics card (only a software one).
 - A show with projectors opened in 0.25 plays as before; saving it there
   drops the projectors.
 

@@ -116,6 +116,61 @@ Changes from the plan:
 Not tested here: any real GPU, projector, light meter or room. The lux and nits follow section
 3.1's first-order model and say "about".
 
+### P2, light (branch `projectors-p2`, 2026-11-20)
+
+What a user can do: tick *Light* over any 3D view (it appears when the show has projectors) and
+each shown projector, up to 16, throws its display's picture into the room: onto the screens and
+the venue, falling off with distance and angle, shadowed by whatever is in the way (other
+projectors' bodies included), adding up where pictures overlap. *Show* picks *Picture* (with *Auto
+exposure*, or the nits shown as white by hand), *Brightness* (nits at full white in five bands),
+*Overlap* (one, two, three or more) or *Pixel size* (five bands in mm); each colour view has a key.
+What is thrown is what the display sends: its keystone, mesh, part of a wide picture and edge
+blend, so a blended pair's overlap evens out as the blend is set. A projector with no display
+throws white; a screen no projector reaches keeps its own picture (an LED wall).
+
+Code: `stage3d/light.rs` (`throw_of`, `throw_uv`, `throw_lux`, bands, `auto_white`), `render3d/lit.rs`
+and `light.wgsl` (the light kit, its shader module, shadow maps), `render3d/mod.rs` (`render_lit`,
+`LightView`, `Options::light`/`white_nits`, `checked` lifted out), `stage_render.rs` (`ThrowJob`,
+the throws' array), `stage_live.rs` (`ProjectorThrow`, `ThrowPicture`, `light_up`, the lit scene),
+`app.rs` (`projector_throws`, `throw_picture`), `ui/stage_view.rs` (the toggle, the bar, the
+legend, notices), `stage_projectors::auto_white`. `scene::Part::catch` (a screen's gain and side).
+
+Changes from the plan:
+
+- **The light has its own shader module, entry point (`fs_lit`) and bind group 3**, not a loop in
+  `fs_part` and bindings in group 0 (3.3): a GPU that refuses any of it (the module, the lit
+  pipelines, the shadow pipeline) leaves the light out with a log line and a notice in the view,
+  and the plain view is untouched. `checked` now pushes an Internal scope as well as Validation:
+  wgpu classes a backend's shader compiler failing (what DirectX 12 did) as Internal, which the
+  0.25 helper did not catch.
+- **Shadow maps reuse `vs_part`** with the frame uniform's matrix swapped per layer (16 slices of
+  one buffer), no new vertex code. They are kept per size (1024, or 512 when the view is governed
+  below full size) and drawn again only when a throw's lens or any part's mesh or transform changes.
+  Bias is in the lookup only (a push along the normal, in proportion to depth, and a relative depth
+  slack); no pipeline depth bias.
+- **Brightness is at full white**, not of the picture (so it agrees with the pointer's read-out);
+  *Exposure* belongs to the Picture view (8.2 put it under Brightness).
+- **Which screens take light** is decided per screen on the CPU: a screen whose box meets any
+  throw's frustum is lit by projectors (a front screen only from its front), any other keeps its
+  feed (the plan's rule, 3.3; no `emits` field yet, open question 5).
+- **The throw is drawn on the stage thread, not from a function shared with the window's path**:
+  `app.rs::throw_picture` takes the display's group from `update_outputs` (the same layers and
+  geometry the window gets) with `warp = pin` (not where the window sits on its monitor), its sub
+  displays by their areas, and its blend. A display that shows the stage throws nothing (never drawn
+  from itself). The throw layer is 960 × 540 at full scale (16:9 always; the projector's own shape is
+  in its matrix).
+- **A display that shows the stage is drawn without light in P2** (3.6 offered it as a
+  `StageSource` option): no show field, no cost on an output.
+- The throws' matrix is made from `Projector::frustum` directly (not `Camera::view_projection`,
+  which clamps the angle), and the aspect comes from `stage_projectors::shape_of`, as P1's lines,
+  so the light sits inside the outline.
+- naga is a dev-dependency so a test writes the light's shader as HLSL (5.1, 6.0) and MSL; that
+  proves naga's writers take it, not that DirectX's or Metal's compilers do.
+- More than 16 shown projectors: the first 16 are lit and the view says so in words (3.5).
+
+Not tested here: any real GPU (only lavapipe), Windows' DirectX 12 or a Mac's Metal compiling the
+shader, shadow acne on real drivers, the cost on a weak card, any projector, light meter or room.
+
 ---
 
 ## 1. What the code is today (the facts the design rests on)
