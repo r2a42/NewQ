@@ -577,7 +577,7 @@ The README describes the features; this file is about working on the code.
   Screens, `CORNER_PIN_WORDS`; `add_aimed_at`; rows with `readout_words`, *Fit to a screen*, `which_lens`;
   "My projectors" in `my-projectors.json` in the log folder, `ProjectorsUi::library_dir` for tests);
   `ProjectorsUi` (`StageShared::projectors`) runs a `projector-sums` worker (latest wins; footprints and
-  the light under the pointer, `ask_here`/`Here`; `waiting` makes a view repaint) so no venue ray test is
+  the light under the pointer, `ask_here`/`Here`, shown only in the view that asked, `here_in`; `waiting` makes a view repaint) so no venue ray test is
   on the main thread; `view_lines` gives each `ViewRequest` its lines (cached by key). `stage_view`:
   bodies picked by click, `StageViewState::through` (*Viewpoint ▸ Through …*; drag, wheel, double-click
   or Esc leave to an orbit from the lens), `letterbox`. Tests: `projector_tests.rs`, `light_tests.rs`,
@@ -633,7 +633,7 @@ The README describes the features; this file is about working on the code.
   `maths::frustum_reversed`), `picture_in`, `clip_to_near`; `project` and `ray` use the same frustum.
   `render_with_lines` draws `Line`s last, over everything (a `LineList` pipeline made through `checked`;
   `FrameStats::lines`), for a preview's projector cones: `ViewRequest`/`ViewJob::lines`, hashed into
-  `stage_live::signature`; a display's job has none. `pick::Hit::normal` (towards the ray).
+  `stage_live::signature`; a display's job has none. `pick::Hit::normal` (towards the ray), `front`/`front_normal` (the CCW front: the light sums use a screen's own).
   `Renderer` (one per `Gpu`): `render(gpu, &Target{view, format, size}, scene, camera, outputs: &dyn
   Fn(OutputId) -> Option<&TextureView>, &Options) -> FrameStats` (draw calls, triangles, missing pictures)
   submits through `Gpu::submit` itself (its uniforms are written per call, so two renders can't share a
