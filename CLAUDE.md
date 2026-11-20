@@ -475,6 +475,20 @@ The README describes the features; this file is about working on the code.
   their models in the test (`load_tests.rs`). Not wired in yet: the renderer (`render3d`), the
   Preview pane's 3D mode and editing UI, `relink.rs` and the network media manifest (which don't
   know the venue file).
+  Sample venues: `samples.rs` (pure) makes seven in code (`SampleVenue` Arena, Proscenium, Thrust,
+  BlackBox, Club, Festival, Ballroom; `ALL`, `label`, lenient: an unknown name reads as BlackBox). In
+  the show `Venue::sample` (`"sample": "Arena"`, `path` empty and unwritten); `load_venue` makes it
+  instead of reading the path (`sample_venue`, through `load::Builder`, so the same `LoadedVenue`:
+  a part per material, plain lit colours, brightness baked); `Venue::matrix` is the placement alone
+  (metres, Y up); `needs_reload` compares `sample`. All: floor y = 0 (the pit to `lowest()`), stage
+  towards -Z, audience +Z, origin per variant's doc. Pieces: `face` (winds to a hint, Newell normal,
+  flat normals, no zero-area halves), `cuboid`, `block`, `prism`, `bar`, and seating as a stepped
+  `Rake` swept along a `Path` (rounded rectangle, U, fan, straight). `screens(kind)` are
+  `StarterScreen`s (name, placement, shape) added unfed by `Show::add_sample_screens` (ids from
+  `alloc_id`; follows the venue's position and yaw, not pitch or roll); `viewpoints(kind)` and
+  `Stage3d::add_sample_viewpoints` (by the venue's matrix, once per name). Tests in
+  `samples/tests.rs` (budget, size, winding, screens inside, facing and seen from the first viewpoint
+  by a ray test); the ignored `draw_the_samples` rasterises each into `NEWQ_SAMPLE_PICTURES`.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
