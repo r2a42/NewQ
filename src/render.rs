@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use winit::window::Window;
+use winit::window::{Window, WindowId};
 
 /// A single-slot, latest-wins handoff between threads.
 pub(crate) struct Mailbox<T> {
@@ -1091,11 +1091,9 @@ fn control_loop(
         egui_wgpu::RendererOptions::default(),
     );
     let compositor = gpu.compositor.pipeline(&gpu.device, config.format);
-    renderer.callback_resources.insert(PreviewCache::new(
-        &gpu.device,
-        config.format,
-        compositor.clone(),
-    ));
+    let mut previews = PreviewCache::new(&gpu.device, config.format, compositor.clone());
+    previews.window = Some(window.id());
+    renderer.callback_resources.insert(previews);
     renderer
         .callback_resources
         .insert(PreviewPipeline(compositor));
@@ -1186,18 +1184,24 @@ pub struct Pace {
     pub scale: f32,
     /// Paused: keep showing the last picture (one with none yet draws one).
     pub hold: bool,
+    /// What the preview shows (an output's id, a monitor's number): the
+    /// last picture is kept only for the same, so a slot that now shows
+    /// something else (another output chosen, multiview tiles renumbered)
+    /// draws a fresh picture at once, paused or not.
+    pub shows: u64,
 }
 
 impl Pace {
-    /// How a compositor-drawn preview follows the governor's budget: None at
-    /// full rate (straight into the window, as always). The cadence is kept
-    /// here on the render thread by `every`, so a frame of the main window
-    /// that never reaches it (latest wins) loses no picture.
-    pub fn of(budget: crate::preview_pace::PreviewBudget) -> Option<Pace> {
+    /// How a compositor-drawn preview of `shows` follows the governor's
+    /// budget: None at full rate (straight into the window, as always). The
+    /// cadence is kept here on the render thread by `every`, so a frame of
+    /// the main window that never reaches it (latest wins) loses no picture.
+    pub fn of(budget: crate::preview_pace::PreviewBudget, shows: u64) -> Option<Pace> {
         (!budget.is_full()).then_some(Pace {
             every: budget.every,
             scale: budget.scale,
             hold: budget.paused,
+            shows,
         })
     }
 
@@ -1219,26 +1223,26 @@ impl Pace {
     }
 }
 
-/// When a paced preview that was not drawn this frame is next due, in
-/// milliseconds since the program began (0: none). The app draws the main
-/// window again then, so the last picture of a run isn't left stale.
-static PREVIEW_DUE: AtomicU32 = AtomicU32::new(0);
+/// When a paced preview that was not drawn this frame is next due, by the
+/// window it is in (None: not known). The app draws that window again then,
+/// so the last picture of a run isn't left stale.
+static PREVIEW_DUE: std::sync::Mutex<Vec<(Option<WindowId>, Instant)>> =
+    std::sync::Mutex::new(Vec::new());
 
-/// Note that a paced preview wants drawing at `at` (the earliest wins).
-fn note_preview_due(at: Instant) {
-    let ms = u32::try_from(at.saturating_duration_since(start()).as_millis())
-        .unwrap_or(u32::MAX)
-        .max(1);
-    let _ = PREVIEW_DUE.try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
-        (old == 0 || ms < old).then_some(ms)
-    });
+/// Note that a paced preview in `window` wants drawing at `at` (the earliest
+/// wins).
+fn note_preview_due(window: Option<WindowId>, at: Instant) {
+    let mut due = PREVIEW_DUE.lock().unwrap_or_else(|e| e.into_inner());
+    match due.iter_mut().find(|(w, _)| *w == window) {
+        Some((_, t)) => *t = (*t).min(at),
+        None => due.push((window, at)),
+    }
 }
 
-/// When the main window should be drawn again for a paced preview's next
-/// picture, if one was held back. Taken once.
-pub fn take_preview_due() -> Option<Instant> {
-    let ms = PREVIEW_DUE.swap(0, Ordering::Relaxed);
-    (ms != 0).then(|| start() + Duration::from_millis(u64::from(ms)))
+/// When each window should be drawn again for a paced preview's next
+/// picture, if one was held back (None: whichever has previews). Taken once.
+pub fn take_preview_due() -> Vec<(Option<WindowId>, Instant)> {
+    std::mem::take(&mut *PREVIEW_DUE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// The pictures paced previews are drawn into, by slot, with what draws them
@@ -1252,6 +1256,8 @@ struct PreviewCache {
     sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
     pictures: HashMap<usize, Cached>,
+    /// The window it draws in (for `note_preview_due`).
+    window: Option<WindowId>,
 }
 
 struct Cached {
@@ -1262,6 +1268,10 @@ struct Cached {
     drawn: Instant,
     /// When it was last shown (one unused for a while is let go).
     used: Instant,
+    /// What it is a picture of (`Pace::shows`), and its shape (across over
+    /// down, of the preview it was drawn for).
+    shows: u64,
+    aspect: f32,
 }
 
 const SHOW_PICTURE_SHADER: &str = r#"
@@ -1370,6 +1380,7 @@ impl PreviewCache {
             sampler,
             format,
             pictures: HashMap::new(),
+            window: None,
         }
     }
 }
@@ -1433,19 +1444,25 @@ impl OutputPreview {
             .pictures
             .retain(|_, c| now.saturating_duration_since(c.used) < PreviewCache::KEEP_UNUSED);
         let size = pace.size_for(px);
+        let aspect = px.0.max(1.0) / px.1.max(1.0);
+        let window = cache.window;
         let key = self.slot.index();
         if let Some(c) = cache.pictures.get_mut(&key) {
             c.used = now;
-            // Paused: the last picture, whatever its size, and nothing new.
-            if pace.hold {
-                return true;
-            }
-            // A little early counts: a window drawn at the preview's rate would
-            // otherwise miss every other picture by a hair.
-            let next = c.drawn + pace.every.saturating_sub(Duration::from_millis(2));
-            if c.size == size && now < next {
-                note_preview_due(next);
-                return true;
+            // The last picture is only kept for the same thing in the same
+            // shape: another output in this slot gets its own at once.
+            if c.shows == pace.shows && (c.aspect / aspect - 1.0).abs() < 0.02 {
+                // Paused: the last picture, whatever its size, and nothing new.
+                if pace.hold {
+                    return true;
+                }
+                // A little early counts: a window drawn at the preview's rate
+                // would otherwise miss every other picture by a hair.
+                let next = c.drawn + pace.every.saturating_sub(Duration::from_millis(2));
+                if c.size == size && now < next {
+                    note_preview_due(window, next);
+                    return true;
+                }
             }
         }
         let PreviewCache {
@@ -1497,6 +1514,8 @@ impl OutputPreview {
                         bind,
                         drawn: now,
                         used: now,
+                        shows: pace.shows,
+                        aspect,
                     },
                 );
                 pictures.get_mut(&key).expect("just put in")
@@ -1525,6 +1544,8 @@ impl OutputPreview {
         }
         c.drawn = now;
         c.used = now;
+        c.shows = pace.shows;
+        c.aspect = aspect;
         true
     }
 
@@ -1730,6 +1751,7 @@ mod pace_tests {
             every: Duration::from_millis(66),
             scale: 0.5,
             hold: false,
+            shows: 1,
         };
         assert_eq!(half.size_for((800.0, 450.0)), (400, 225));
         // A pane resized by a few pixels keeps the same picture.
@@ -1739,6 +1761,7 @@ mod pace_tests {
             every: Duration::from_millis(33),
             scale: 1.0,
             hold: false,
+            shows: 1,
         };
         assert_eq!(whole.size_for((1920.0, 1080.0)), (1920, 1080));
         // Nothing to draw in, or more than a picture may be: still a picture.
@@ -1918,6 +1941,7 @@ mod pace_tests {
             every: Duration::from_secs(30),
             scale: 0.5,
             hold: false,
+            shows: 1,
         });
         let preview = |tex: &Arc<LayerTexture>, pace| OutputPreview {
             groups: vec![group(tex, id)],
@@ -1943,13 +1967,18 @@ mod pace_tests {
             preview_frame(&gpu, &mut res, &preview(&blue, slow)),
             [255, 0, 0, 255]
         );
-        let due = take_preview_due().expect("a picture held back says when");
+        let due = take_preview_due()
+            .into_iter()
+            .map(|(_, t)| t)
+            .min()
+            .expect("a picture held back says when");
         assert!(due > Instant::now() + Duration::from_secs(25), "{due:?}");
         // Once due (here: a pace with no wait), the new picture.
         let quick = Some(Pace {
             every: Duration::ZERO,
             scale: 0.5,
             hold: false,
+            shows: 1,
         });
         assert_eq!(
             preview_frame(&gpu, &mut res, &preview(&blue, quick)),
@@ -1960,17 +1989,20 @@ mod pace_tests {
             every: Duration::from_secs(30),
             scale: 1.0,
             hold: false,
+            shows: 1,
         });
         assert_eq!(
             preview_frame(&gpu, &mut res, &preview(&red, bigger)),
             [255, 0, 0, 255]
         );
-        // Paused: the last picture stays, whatever comes and whatever its size.
+        // Paused: the last picture of the same output stays, whatever comes
+        // and whatever its size.
         let paused = crate::preview_pace::Level::Paused;
         let hold = Some(Pace {
             every: paused.every(),
             scale: paused.scale(),
             hold: true,
+            shows: 1,
         });
         assert_eq!(
             preview_frame(&gpu, &mut res, &preview(&blue, hold)),
@@ -1983,6 +2015,29 @@ mod pace_tests {
             pace: hold,
         };
         assert_eq!(preview_frame(&gpu, &mut res, &fresh), [0, 0, 255, 255]);
+        // The slot shows another output now (another chosen while paused, the
+        // tiles renumbered): never the old one's picture under its name, but
+        // one fresh picture, which is then held.
+        let other = |pace: Option<Pace>| pace.map(|p| Pace { shows: 2, ..p });
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&blue, other(hold))),
+            [0, 0, 255, 255]
+        );
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&red, other(hold))),
+            [0, 0, 255, 255],
+            "held again"
+        );
+        // Not paused, the same: no waiting out the last output's time.
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&red, slow)),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&blue, slow)),
+            [255, 0, 0, 255],
+            "paced again"
+        );
     }
 
     #[test]
@@ -2016,6 +2071,7 @@ mod pace_tests {
                 every: level.every(),
                 scale: level.scale(),
                 hold: level == crate::preview_pace::Level::Paused,
+                shows: 1,
             });
             for slot in [Slot::Preview, Slot::Multi(0), Slot::Multi(15)] {
                 let p = OutputPreview {

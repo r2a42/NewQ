@@ -4712,13 +4712,15 @@ impl UiState {
     }
 }
 
-/// How compositor preview `id` draws now: None at full rate (straight into the
-/// window every frame), else less often, smaller or held (`render::Pace`).
+/// How compositor preview `id` draws now, showing `shows` (an output's id):
+/// None at full rate (straight into the window every frame), else less often,
+/// smaller or held (`render::Pace`).
 pub(crate) fn preview_pace(
     st: &UiState,
     id: crate::preview_pace::PreviewId,
+    shows: u64,
 ) -> Option<crate::render::Pace> {
-    crate::render::Pace::of(st.preview_budget(id))
+    crate::render::Pace::of(st.preview_budget(id), shows)
 }
 
 /// What a tile of the multiview is dragged as: its place.
@@ -4933,6 +4935,7 @@ fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>, host: u8
                             preview_pace(
                                 st,
                                 crate::preview_pace::PreviewId::Tile(host, number as u8),
+                                e.id.0,
                             ),
                         );
                         tile_interact(ui, bars, number, Some(e.id), st, edits);
@@ -5027,7 +5030,11 @@ fn multiview_layout(
                     e,
                     cell,
                     (host, i),
-                    preview_pace(st, crate::preview_pace::PreviewId::Tile(host, i as u8)),
+                    preview_pace(
+                        st,
+                        crate::preview_pace::PreviewId::Tile(host, i as u8),
+                        e.id.0,
+                    ),
                 );
                 #[cfg(test)]
                 drawn.push((_rect, cell));
@@ -5405,7 +5412,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
             slot: Slot::single(host),
             pace: {
                 // Asked whatever happens; lining up corners wants every frame.
-                let pace = preview_pace(st, crate::preview_pace::PreviewId::Single(host));
+                let pace = preview_pace(st, crate::preview_pace::PreviewId::Single(host), e.id.0);
                 if editing { None } else { pace }
             },
         },
@@ -7508,13 +7515,16 @@ fn area_editor(
     let bars = outer.shrink(margin);
     let rect = preview::fit_picture(screen_size, bars);
     ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
-    if let Some((_, groups)) = monitor.and_then(|m| st.screens.get(&m)) {
+    if let Some(m) = monitor
+        && let Some((_, groups)) = st.screens.get(&m)
+    {
         ui.painter().add(preview::callback(
             rect,
             OutputPreview {
                 groups: groups.clone(),
                 slot: Slot::Screen,
-                pace: None,
+                // A preview like any other: it gives way to the outputs.
+                pace: preview_pace(st, crate::preview_pace::PreviewId::Area(m), m as u64),
             },
         ));
     }
@@ -15911,7 +15921,7 @@ mod tests {
                 .expect("the pane was drawn");
             let asked: HashSet<PreviewId> =
                 st.preview_governor.asked.borrow().iter().copied().collect();
-            (said, asked, preview_pace(&st, PreviewId::Single(0)))
+            (said, asked, preview_pace(&st, PreviewId::Single(0), 1))
         };
         // The single preview and every multiview tile ask, at every level.
         for level in Level::ALL {
@@ -16027,7 +16037,7 @@ mod tests {
         assert_eq!(asked, want);
         // ...and both give way: half size, five a second.
         for id in [PreviewId::Single(0), PreviewId::Tile(1, 0)] {
-            let pace = preview_pace(&st, id).expect("paced");
+            let pace = preview_pace(&st, id, 1).expect("paced");
             assert_eq!(pace.scale, 0.5, "{id:?}");
             assert!((pace.every.as_secs_f64() - 0.2).abs() < 1e-6, "{id:?}");
         }
