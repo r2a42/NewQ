@@ -61,6 +61,16 @@ impl Camera {
                     [0.0, 0.0, -forward[1].signum()]
                 }
             });
+        let shift = self.shift.map(|v| {
+            if v.is_finite() {
+                v.clamp(-MAX_SHIFT, MAX_SHIFT)
+            } else {
+                0.0
+            }
+        });
+        let aspect = self
+            .aspect
+            .filter(|a| a.is_finite() && (0.01..=100.0).contains(a));
         Camera {
             eye,
             target,
@@ -68,6 +78,59 @@ impl Camera {
             fov_y_deg: fov,
             near,
             far,
+            shift,
+            aspect,
+        }
+    }
+
+    /// The picture's edges one metre in front of the eye, in view space, for
+    /// a target `aspect` wide per one high (see `Frustum`): with a shape of
+    /// its own (`Camera::aspect`), widened or heightened round the picture
+    /// to the target's shape, so the picture is all in view and unstretched.
+    pub fn frustum(&self, aspect: f32) -> Frustum {
+        let c = self.sane();
+        let target = if aspect.is_finite() && aspect > 1e-4 {
+            aspect
+        } else {
+            1.0
+        };
+        let own = c.aspect.unwrap_or(target);
+        let half_h = (c.fov_y_deg.to_radians() * 0.5).tan();
+        let half_w = half_h * own;
+        let cx = c.shift[0] * 2.0 * half_w;
+        let cy = c.shift[1] * 2.0 * half_h;
+        let (mut hw, mut hh) = (half_w, half_h);
+        if c.aspect.is_some() {
+            if target > own {
+                hw = hh * target;
+            } else {
+                hh = hw / target;
+            }
+        }
+        Frustum {
+            left: cx - hw,
+            right: cx + hw,
+            bottom: cy - hh,
+            top: cy + hh,
+        }
+    }
+
+    /// Where the camera's own picture is in a target of `size`, in pixels
+    /// from its top-left (`[left, top, right, bottom]`): all of it without
+    /// a shape of its own, else the part a letterbox leaves.
+    pub fn picture_in(&self, size: (u32, u32)) -> [f32; 4] {
+        let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+        let c = self.sane();
+        let Some(own) = c.aspect else {
+            return [0.0, 0.0, w, h];
+        };
+        let target = w / h;
+        if target > own {
+            let pw = h * own;
+            [(w - pw) * 0.5, 0.0, (w + pw) * 0.5, h]
+        } else {
+            let ph = w / own;
+            [0.0, (h - ph) * 0.5, w, (h + ph) * 0.5]
         }
     }
 
@@ -81,12 +144,7 @@ impl Camera {
     /// reversed (near 1, far 0): see `maths::perspective_reversed`.
     pub fn projection(&self, aspect: f32) -> Mat4 {
         let c = self.sane();
-        let aspect = if aspect.is_finite() && aspect > 1e-4 {
-            aspect
-        } else {
-            1.0
-        };
-        maths::perspective_reversed(c.fov_y_deg.to_radians(), aspect, c.near, c.far)
+        maths::frustum_reversed(&self.frustum(aspect), c.near, c.far)
     }
 
     /// World to clip.
@@ -110,21 +168,49 @@ impl Camera {
     pub fn ray(&self, pixel: [f32; 2], size: (u32, u32)) -> Ray {
         let c = self.sane();
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
-        let x = pixel[0] / w * 2.0 - 1.0;
-        let y = 1.0 - pixel[1] / h * 2.0;
+        let fr = self.frustum(w / h);
+        let x = fr.left + pixel[0] / w * (fr.right - fr.left);
+        let y = fr.top - pixel[1] / h * (fr.top - fr.bottom);
         let f = maths::normalize(maths::sub(c.target, c.eye)).unwrap_or([0.0, 0.0, -1.0]);
         let s = maths::normalize(maths::cross(f, c.up)).unwrap_or([1.0, 0.0, 0.0]);
         let u = maths::cross(s, f);
-        let t = (c.fov_y_deg.to_radians() * 0.5).tan();
-        let dir = maths::add(
-            f,
-            maths::add(maths::scale(s, x * t * w / h), maths::scale(u, y * t)),
-        );
+        let dir = maths::add(f, maths::add(maths::scale(s, x), maths::scale(u, y)));
         Ray {
             origin: c.eye,
             dir: maths::normalize(dir).unwrap_or(f),
         }
     }
+}
+
+/// A view's edges one metre in front of the eye, in view space (right +X,
+/// up +Y, looking down -Z): what the perspective is made from. An ordinary
+/// camera's is even about its axis; a shifted lens's is not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frustum {
+    pub left: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub top: f32,
+}
+
+/// How far a lens shift may move the picture, in pictures: anything more is
+/// a typing slip.
+pub const MAX_SHIFT: f32 = 3.0;
+
+/// The part of the segment from `a` to `b` (view space, looking down -Z) in
+/// front of the plane `near` metres ahead, or None when it is all behind:
+/// for drawing a line that passes by the eye.
+pub fn clip_to_near(a: Vec3, b: Vec3, near: f32) -> Option<(Vec3, Vec3)> {
+    let (da, db) = (-a[2] - near, -b[2] - near);
+    if !(da.is_finite() && db.is_finite()) || (da < 0.0 && db < 0.0) {
+        return None;
+    }
+    if da >= 0.0 && db >= 0.0 {
+        return Some((a, b));
+    }
+    let t = da / (da - db);
+    let m = maths::add(a, maths::scale(maths::sub(b, a), t));
+    Some(if da < 0.0 { (m, b) } else { (a, m) })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -258,6 +344,7 @@ impl Orbit {
             fov_y_deg: o.fov_y_deg,
             near: (o.distance * 0.002).clamp(0.01, 1.0),
             far: (o.distance * 100.0).max(2000.0),
+            ..Camera::default()
         }
     }
 
@@ -365,6 +452,7 @@ mod tests {
             fov_y_deg: 60.0,
             near: 0.1,
             far: 100.0,
+            ..Camera::default()
         }
     }
 
@@ -393,6 +481,104 @@ mod tests {
         }
     }
 
+    /// A lens 1 m wide... at 1 m: half its height 0.5 (so fov 2·atan 0.5),
+    /// twice as wide as high, shifted half a picture up: at 1 m in front its
+    /// picture runs from x -1 to 1 and from y 0 (on the axis) to 1.
+    fn shifted() -> Camera {
+        Camera {
+            eye: [0.0; 3],
+            target: [0.0, 0.0, -1.0],
+            up: [0.0, 1.0, 0.0],
+            fov_y_deg: 2.0 * 0.5f32.atan().to_degrees(),
+            near: 0.1,
+            far: 100.0,
+            shift: [0.0, 0.5],
+            aspect: Some(2.0),
+        }
+    }
+
+    fn at(p: Option<[f32; 2]>, x: f32, y: f32) -> bool {
+        p.is_some_and(|p| (p[0] - x).abs() < 0.01 && (p[1] - y).abs() < 0.01)
+    }
+
+    #[test]
+    fn a_shifted_lens_puts_known_points_on_known_pixels() {
+        let c = shifted();
+        let f = c.frustum(2.0);
+        assert!((f.left + 1.0).abs() < 1e-5 && (f.right - 1.0).abs() < 1e-5);
+        assert!(f.bottom.abs() < 1e-5 && (f.top - 1.0).abs() < 1e-5);
+        let size = (200, 100);
+        // On the axis: the picture's bottom edge, in the middle.
+        assert!(at(c.project([0.0, 0.0, -2.0], size), 100.0, 100.0));
+        // The picture's top-right corner, at any distance.
+        assert!(at(c.project([1.0, 1.0, -1.0], size), 200.0, 0.0));
+        assert!(at(c.project([3.0, 3.0, -3.0], size), 200.0, 0.0));
+        assert!(at(c.project([0.5, 0.5, -1.0], size), 150.0, 50.0));
+        assert!(at(c.project([-1.0, 0.25, -1.0], size), 0.0, 75.0));
+        // Shifted right a quarter: the axis is a quarter of the way in.
+        let right = Camera {
+            shift: [0.25, 0.0],
+            ..c
+        };
+        assert!(at(right.project([0.0, 0.0, -5.0], size), 50.0, 50.0));
+        // The view matrix of a shifted lens is its own: the shift is in the
+        // projection, so the eye and the aim stay where they are.
+        assert_eq!(right.view(), c.view());
+    }
+
+    #[test]
+    fn a_picture_of_its_own_shape_is_letterboxed_not_stretched() {
+        let c = shifted();
+        // Twice as wide a target: room either side, the picture the same.
+        let size = (400, 100);
+        assert_eq!(c.picture_in(size), [100.0, 0.0, 300.0, 100.0]);
+        assert!(at(c.project([1.0, 1.0, -1.0], size), 300.0, 0.0));
+        assert!(at(c.project([-1.0, 0.0, -1.0], size), 100.0, 100.0));
+        // A taller one: room above and below.
+        let size = (200, 200);
+        assert_eq!(c.picture_in(size), [0.0, 50.0, 200.0, 150.0]);
+        assert!(at(c.project([1.0, 1.0, -1.0], size), 200.0, 50.0));
+        // An ordinary camera fills its target.
+        assert_eq!(
+            cam([0.0; 3], [0.0, 0.0, -1.0]).picture_in(size),
+            [0.0, 0.0, 200.0, 200.0]
+        );
+    }
+
+    #[test]
+    fn rays_and_projections_agree_for_a_shifted_lens() {
+        let c = Camera {
+            eye: [2.0, 3.0, 9.0],
+            target: [-1.0, 1.0, 0.0],
+            shift: [-0.2, 0.6],
+            aspect: Some(1.6),
+            ..shifted()
+        };
+        for size in [(640u32, 400u32), (800, 300), (300, 600)] {
+            for p in [[10.0, 20.0], [320.0, 180.0], [290.0, 299.0]] {
+                let r = c.ray(p, size);
+                let point = maths::add(r.origin, maths::scale(r.dir, 6.0));
+                let back = c.project(point, size).unwrap();
+                assert!(
+                    (back[0] - p[0]).abs() < 0.05 && (back[1] - p[1]).abs() < 0.05,
+                    "{size:?} {p:?} -> {back:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_past_the_eye_is_cut_at_the_near_plane() {
+        let (a, b) = ([0.0, 0.0, 1.0], [0.0, 0.0, -3.0]);
+        let (p, q) = clip_to_near(a, b, 0.5).unwrap();
+        assert!(close(p, [0.0, 0.0, -0.5], 1e-6) && q == b);
+        let (p, q) = clip_to_near(b, a, 0.5).unwrap();
+        assert!(p == b && close(q, [0.0, 0.0, -0.5], 1e-6));
+        assert!(clip_to_near([0.0, 0.0, 1.0], [1.0, 0.0, 2.0], 0.1).is_none());
+        assert_eq!(clip_to_near(b, b, 0.1), Some((b, b)));
+        assert!(clip_to_near([f32::NAN; 3], b, 0.1).is_none());
+    }
+
     #[test]
     fn a_broken_camera_is_made_usable() {
         let c = Camera {
@@ -402,8 +588,12 @@ mod tests {
             fov_y_deg: f32::NAN,
             near: -1.0,
             far: 0.0,
+            shift: [f32::NAN, 1e9],
+            aspect: Some(f32::INFINITY),
         }
         .sane();
+        assert_eq!(c.shift, [0.0, MAX_SHIFT]);
+        assert_eq!(c.aspect, None);
         assert_eq!(c.fov_y_deg, DEFAULT_FOV);
         assert!(c.near > 0.0 && c.far > c.near);
         assert!(maths::look_at(c.eye, c.target, c.up).is_some());
