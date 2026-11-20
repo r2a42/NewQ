@@ -14,6 +14,7 @@ pub enum SettingsPage {
     Network,
     Displays,
     SubDisplays,
+    Stage3d,
     Audio,
     Sync,
     Osc,
@@ -47,12 +48,13 @@ impl SettingsGroup {
 
 impl SettingsPage {
     /// In the order the sidebar lists them.
-    pub const ALL: [SettingsPage; 10] = [
+    pub const ALL: [SettingsPage; 11] = [
         SettingsPage::General,
         SettingsPage::Media,
         SettingsPage::Network,
         SettingsPage::Displays,
         SettingsPage::SubDisplays,
+        SettingsPage::Stage3d,
         SettingsPage::Audio,
         SettingsPage::Sync,
         SettingsPage::Osc,
@@ -67,6 +69,7 @@ impl SettingsPage {
             SettingsPage::Network => "Show network",
             SettingsPage::Displays => "Displays",
             SettingsPage::SubDisplays => "Sub displays",
+            SettingsPage::Stage3d => "3D stage",
             SettingsPage::Audio => "Audio outputs",
             SettingsPage::Sync => "Sync",
             SettingsPage::Osc => "OSC",
@@ -82,6 +85,7 @@ impl SettingsPage {
             }
             SettingsPage::Displays
             | SettingsPage::SubDisplays
+            | SettingsPage::Stage3d
             | SettingsPage::Audio
             | SettingsPage::Sync => SettingsGroup::Output,
             SettingsPage::Osc | SettingsPage::Midi | SettingsPage::Web => SettingsGroup::Control,
@@ -103,6 +107,9 @@ impl SettingsPage {
             }
             SettingsPage::SubDisplays => {
                 "Areas of a display that cues can be sent to as if they were displays."
+            }
+            SettingsPage::Stage3d => {
+                "The venue in 3D and the screens in it, each showing a display's picture."
             }
             SettingsPage::Audio => "Where sound goes: the devices cues can play on.",
             SettingsPage::Sync => "Line the sound up with the picture.",
@@ -164,6 +171,16 @@ pub fn page_badge(page: SettingsPage, show: &Show, st: &UiState) -> Option<Badge
         }
         SettingsPage::SubDisplays => {
             let n = show.outputs.iter().filter(|o| o.is_sub_display()).count();
+            (n > 0).then(|| Badge {
+                text: n.to_string(),
+                color: weak,
+            })
+        }
+        SettingsPage::Stage3d => {
+            if matches!(st.stage.venue, super::stage_view::VenueStatus::Failed(_)) {
+                return badge("⚠", STOP_RED);
+            }
+            let n = show.stage3d.surfaces.len();
             (n > 0).then(|| Badge {
                 text: n.to_string(),
                 color: weak,
@@ -255,6 +272,7 @@ pub fn settings_view(
                     SettingsPage::Network => super::network::page(ui, show, st, actions),
                     SettingsPage::Displays => displays_panel(ui, show, engine, st, actions),
                     SettingsPage::SubDisplays => sub_displays_panel(ui, show, st, actions),
+                    SettingsPage::Stage3d => super::stage_edit::page(ui, show, st, actions),
                     SettingsPage::Audio => audio_panel(ui, show, engine, st, actions),
                     SettingsPage::Sync => sync_page(ui, show, st, actions),
                     SettingsPage::Osc => osc_page(ui, show, st),
