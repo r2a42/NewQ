@@ -5,10 +5,27 @@
   </picture>
 </p>
 
-A simple, free, cross-platform cue-based playback system for theatre and live
-events, in the spirit of QLab but much smaller. It focuses on video, with easy
-fades and crossfades and straightforward output-display selection. It's built
-in Rust on [FFmpeg](https://ffmpeg.org), [wgpu](https://wgpu.rs) and
+NewQ is a free, cross-platform show playback and control system for theatre and
+live events, in the spirit of QLab. The same program runs a slideshow from one
+laptop, or a rig of networked computers playing video, sound and live cameras to
+projectors and LED walls across a venue.
+
+- **Small shows:** drop in pictures, films, sound, a PowerPoint or a PDF, and
+  press GO. A presenter remote, a speaker timer and a clock are built in.
+- **Theatre:** cue lists with fades and crossfades, layers, sound matrix routing
+  and effects, show and edit modes, OSC, MIDI, MIDI Show Control and timecode in
+  and out, projector control and a web remote for a phone.
+- **Large rooms:** timelines, many displays with edge blending and mesh warp,
+  cameras and capture cards, NDI, and streaming or recording any display. A show
+  network keeps several computers in step on one clock, measured within a frame
+  of each other, with a backup that can take control.
+- **Planning:** a 3D view of the venue (a model of your own, or one of the
+  samples) with the screens placed in it, showing what each display will look
+  like in the room.
+- **Before the show:** Test Mode checks that this computer, its displays and
+  the network can play the show, and writes a report you can send.
+
+It's built in Rust on [FFmpeg](https://ffmpeg.org), [wgpu](https://wgpu.rs) and
 [egui](https://github.com/emilk/egui).
 
 ## Download
