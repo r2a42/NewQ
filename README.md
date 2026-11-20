@@ -1166,8 +1166,9 @@ stays on the computer until you send it yourself.
 
 See the show in the room before you are in it: a model of the venue, the
 screens placed in it, and each screen showing what its display is showing now,
-test patterns and cues alike. It is for planning (previz): projectors are not
-simulated yet, and the 3D model does not drive the outputs.
+test patterns and cues alike. It is for planning (previz): projectors can be
+stood in the room to plan a rig (below), but their light isn't drawn yet, and
+the 3D model does not drive the outputs.
 
 - **Where it is.** *Settings ▸ 3D stage* has a 3D view at the top and
   everything about the stage below it; a Preview pane in its *3D* mode shows
@@ -1229,6 +1230,72 @@ simulated yet, and the 3D model does not drive the outputs.
   the files it reads beside it (a glTF's data and pictures, an OBJ's `.mtl` and
   pictures). Until they have come, a computer draws the screens without the
   room and says the venue is still arriving; the room appears once it is here.
+
+### Projectors in the room
+
+Will the picture fill the cyc from the balcony rail, and how bright will it be?
+Stand a projector in the 3D stage and see, before hiring anything.
+
+**For one projector on one flat screen you don't need any of this:** the four
+corners on the *Displays* page line its picture up with less work. Projectors
+here are for planning a rig: where to hang one, which lens, how big, sharp and
+bright the picture is, on any screen, curved wall or set.
+
+- **Add one.** *Settings ▸ 3D stage ▸ Projectors ▸ + Add a projector*:
+  *Aimed at* a screen stands it square in front of that screen, where its
+  picture fills it (a standard zoom, 10,000 lumens, the first display not
+  already a projector); *From My projectors* adds one you kept; *Blank* puts one
+  10 m out, pointing at the stage.
+- **Its lens.** Pick *Ultra short throw (0.25)*, *Short throw (0.5)*,
+  *Standard zoom (1.2 to 2.0)*, *Long zoom (2.0 to 4.0)* or *Very long zoom (4.0
+  to 7.0)*, or type the **throw ratio**: how far away it stands for each metre
+  of picture width (a throw of 2 means 10 m away for a 5 m picture). *Zooms*
+  gives the range a zoom lens goes between, and a slider for where it is set.
+  **Lens shift** moves the picture up or right without tilting the projector,
+  as a share of the picture: 50% up puts the picture's bottom edge level with
+  the lens. Data sheets give shift in different ways, so check yours.
+- **Its brightness** in lumens, as its data sheet says (they tend to be
+  generous), and its **pixels**: its display's where NewQ knows them, else
+  chosen (1280 × 800 up to 4096 × 2160).
+- **Where it stands** (*Position*, in the stage's units) and **which way it
+  points** (*Turn*: yaw, pitch, roll). *Point at* turns it, where it stands,
+  so its picture's middle (lens shift and all) lands on a screen's middle.
+- **What it gives**, under its settings, about the screen its picture's middle
+  lands on: "Picture on Screen 1: 5.8 m by 3.3 m, fills 96% of it", what
+  spills over which edge, "about 520 lux there, about 165 nits to the audience
+  (if nothing is in the way)", how far the lens is, and "One pixel is about 3
+  mm there". A lens set past its zoom's end says so.
+- **Fit to a screen**: *Move it to fill* a screen (square on, at the distance
+  where its picture fills it without spilling, with its lens shift), or, for a
+  zoom lens, *Zoom to fill it from here*. **Which lens from here?** says the
+  throw ratio that fills the screen it points at from where it stands, and the
+  usual lens that does it; *Use that lens* sets it.
+- **In the 3D views** each projector is a small grey box (click it to pick
+  it), with its light drawn as lines: its cone from the lens, and its picture's
+  outline where it lands on the screens and the venue (the picked one's in
+  yellow, the others' in blue). The lines show through walls. *Viewpoint ▸
+  Through Projector 1* (or *Look through* on its row) shows the room as its
+  lens sees it, lens shift and all, with the rest shaded; drag, the wheel or
+  **Esc** leaves it. With the pointer over a screen or the venue the view says
+  what lights it there: "Projector 1 + Projector 2 · about 410 lux · about 130
+  nits · 1 pixel ≈ 3 mm" (the light of each projector that reaches it with
+  nothing in the way, added up).
+- **My projectors.** *Keep in My projectors* keeps a projector's lens,
+  brightness and pixels on this computer (not in the show), to add again in
+  any show. No list of makes and models is built in: wrong numbers would be
+  worse than none.
+- **How the light is worked out**, simply: the lumens spread evenly over the
+  picture, falling off with the square of the distance and with the angle the
+  light meets the surface at; nits are lux times the screen's gain over π (a
+  matt white screen). 10,000 lumens on a 16:9 picture 6 m wide is about 494
+  lux, 157 nits. Left out: lenses being dimmer at the edges, a screen's gain
+  falling off to the side, black not being black, and light bouncing round the
+  room. Treat the numbers as a guide.
+- **Not yet:** the projectors' light drawn on the screens, and the 3D model
+  driving the outputs (mapping). The read-outs are sums: nothing here has met
+  a real projector or a light meter.
+- A show with projectors opened in 0.25 plays as before; saving it there
+  drops the projectors.
 
 ## Show network: several computers
 
@@ -2380,6 +2447,7 @@ night is about 3,000 rows.
 | Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
 | F (pointing at a 3D view) | See all of the 3D stage (double-click does too) |
+| Esc (in a 3D view looking through a projector) | Leave the look through its lens |
 
 Space, 0, Esc and the cues' hotkeys also work, the same way, while an output window
 has focus (a cue given 0 takes it from GO there too); in show mode, so do the arrows

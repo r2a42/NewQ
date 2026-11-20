@@ -1,6 +1,7 @@
 # The 3D stage after 0.25.0: projector simulation, mapping and line-up (plan)
 
-Written 2026-11-20 against the tree that shipped 0.25.0. Nothing here is built. Statements about
+Written 2026-11-20 against the tree that shipped 0.25.0. Step P1 is built (see "Built so far"
+below); the rest isn't. Statements about
 existing code name the file they were read in; the few taken from CLAUDE.md without opening the
 file say "per CLAUDE.md". Statements about other products say where they come from and how sure
 they are.
@@ -56,6 +57,64 @@ Words used below:
    that path untouched and never makes a small theatre place a projector in 3D to get a picture.
 7. **Six shippable steps over about three releases** (section 7). Three agents can work in
    parallel in each round if new work goes in new files; the collision files are listed.
+
+---
+
+## Built so far
+
+### P1, projectors in the room (branch `projectors-p1`, 2026-11-20)
+
+Owner's rulings taken: simulation first; up to 16 projectors per view; read-outs in lux and nits
+only; generic lens and brightness presets plus "My projectors" per computer, no products list;
+plain words; the corner pin stays the way for one flat screen, and the Projectors section says so.
+
+What a user can do: add a projector (aimed at a screen, from My projectors, or blank); choose its
+display, pixels, lens (five presets in words, or a typed throw ratio, zoom range and lens shift)
+and lumens; type where it stands and its turn, or *Point at* a screen; read the picture's size on
+the screen its middle lands on, how much of the screen it fills, what spills over which edge,
+about how many lux and nits, the distance and the pixel size; *Fit to a screen* (move, or zoom from
+here); *Which lens from here?* (and *Use that lens*); keep it in My projectors. In the 3D views:
+pick a projector by its body, see every projector's cone and its picture's outline as lines (the
+picked one brighter), look through a lens (*Viewpoint ▸ Through …*, letterboxed, lens shift in the
+projection), and read the light under the pointer.
+
+Code: `stage3d/projector.rs` (model and throw calculator), `stage3d/light.rs` (section 3.1's sums,
+with `lit_by`'s shadow test), `render3d/camera.rs` (`Camera::shift`/`aspect`, `Frustum`,
+`picture_in`, `clip_to_near`), `render3d/mod.rs` (`Line`, `render_with_lines`), `stage_render.rs`
+and `stage_live.rs` (lines on preview jobs only, hashed into the signature), `ui/stage_projectors.rs`
+(the section, the worker, the view's lines and read-out), small hooks in `ui/stage_edit.rs` and
+`ui/stage_view.rs`. The contract types for P2 are in: `scene::Throw` and `Scene::throws` (always
+empty for now).
+
+Changes from the plan:
+
+- **The cone and outline are drawn on the GPU, not with egui's painter** (8.2 said the painter):
+  `Renderer::render_with_lines`, a `LineList` pipeline made in an error scope like the grid and
+  axes, drawn last with depth compare `Always`, so lines show through walls as 8.2 accepted. This
+  keeps the lines inside the governed preview (they come with a view's `ViewRequest`, so a
+  governed-down view draws none) and makes them testable on lavapipe. The near plane is the
+  GPU's clipper; `camera::clip_to_near` exists for CPU drawing but isn't used yet.
+- **No drag handles** (8.2's three handles): P1 places projectors by typed numbers, *Point at* and
+  *Fit to a screen*. Handles can come with P2 or P5.
+- **Ray tests are off the main thread.** `render3d::pick` transforms every vertex per ray, so an
+  outline (24 rays a side) on a big venue would stall the main loop. Footprints and the light
+  under the pointer are made on a `projector-sums` worker (latest wins); the view shows the cone
+  alone until the outline lands, and asks to be drawn again while answers are due. The row
+  read-outs test only the screens (small) on the main thread.
+- `Projector::fine`, `mapped` and `line_up` are left out (P4, P5), as asked; a later NewQ's fields
+  are kept by a flattened `extra` map on `Projector` and `Lens`, so they survive a save here.
+- `fit_to` takes the box round any shape (flat, curved, faceted), its front face, the lens on its
+  axis; a `rear` screen is fitted from behind. "Fills" is exact for a flat screen (the picture's
+  quadrilateral clipped to the screen) and not given for other shapes.
+- *Point at* puts the picture's middle (not the lens axis) on the screen's middle, solved by a few
+  steps for a shifted lens.
+- Leaving a look-through view (drag, wheel, double-click, Esc) orbits from the lens's position; the
+  orbit has no shift, so the picture jumps a little for a shifted lens.
+- Section 1.3's first point is already right in CLAUDE.md (the manifest paragraph names the
+  venue); its second (render3d's `scene.rs` is a re-export) is now corrected.
+
+Not tested here: any real GPU, projector, light meter or room. The lux and nits follow section
+3.1's first-order model and say "about".
 
 ---
 
