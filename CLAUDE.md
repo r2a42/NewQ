@@ -601,7 +601,7 @@ The README describes the features; this file is about working on the code.
   `StageLive::send(.., projectors: &[ProjectorThrow], ..)` -> `light_up` (`lit_scene` made again only on
   `lit_key`; a key of the pictures, `groups_key`, xored into a lit view's signature, so a blend width or a
   still redraws it) -> `ThrowJob`s only in a job with a lit view, `throw_size(lit scale)` (960 wide 16:9,
-  the governor's scale). `stage_render`: `Throws` (an `Rgba8Unorm` 16-layer array, a D2 view per layer),
+  the governor's scale). `stage_render`: `Throws` (an `Rgba8Unorm` array of `layers_for` layers, a D2 view per layer),
   each throw composited through `Slot::Stage` with its own `BlendPass` (set, composite, submit, one at a
   time), `StageJob::merged` keeps newer throws by layer; `render_lit` gets the array for a lit view. A
   display that shows the stage is drawn unlit. Tests: `light_tests.rs`, `render3d/lit.rs` (packing,
@@ -665,8 +665,8 @@ The README describes the features; this file is about working on the code.
   `render_lit(.., throw_pictures: Option<&TextureView>)`, used when `Options::light` isn't Off and the
   scene has throws; a `LightKit` made at the first lit view (its own module `shader.wgsl` + `light.wgsl`,
   entry `fs_lit`, bind group 3: `LightsUniform` (vec4s only, 16 `ThrowUniform`s), the pictures array, a
-  sampler, a `Depth32Float` 16-layer shadow array (`SHADOW_SIDE` 1024, `SHADOW_SIDE_LOW` 512 below full
-  scale, kept per side) and a comparison sampler (`GreaterEqual`: reversed depth). Shadow maps by a
+  sampler, a `Depth32Float` shadow array (`SHADOW_SIDE` 1024, `SHADOW_SIDE_LOW` 512 below full
+  scale, kept per side; `layers_for` the throws, a power of two up to 16, as the pictures' array) and a comparison sampler (`GreaterEqual`: reversed depth). Shadow maps by a
   depth-only pipeline over `vs_part` with the frame uniform's `view_proj` swapped per layer
   (`shadow_frames`), drawn only when `shadow_key` (every part's mesh and transform, the lens) changes
   (`FrameStats::shadows_drawn`); lookup pushed along the normal (`NORMAL_PUSH`) and taken `DEPTH_SLACK`

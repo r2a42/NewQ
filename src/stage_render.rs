@@ -30,7 +30,6 @@ use crate::gpu::{Gpu, LayerTexture, Slot};
 use crate::render::{Mailbox, OutputGroup};
 use crate::render3d::{Camera, FrameStats, LightView, Line, Options, Renderer, Scene, Target};
 use crate::show::{EdgeBlend, OutputId};
-use crate::stage3d::light::MAX_THROWS;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -281,13 +280,14 @@ struct Throws {
 }
 
 impl Throws {
-    fn new(gpu: &Gpu, size: (u32, u32)) -> Throws {
+    /// `count` layers (`render3d::lit::layers_for`).
+    fn new(gpu: &Gpu, size: (u32, u32), count: usize) -> Throws {
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("stage throws"),
             size: wgpu::Extent3d {
                 width: size.0,
                 height: size.1,
-                depth_or_array_layers: MAX_THROWS as u32,
+                depth_or_array_layers: count as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -299,7 +299,7 @@ impl Throws {
                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let layers = (0..MAX_THROWS as u32)
+        let layers = (0..count as u32)
             .map(|i| {
                 texture.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("stage throw"),
@@ -435,8 +435,20 @@ impl StageDrawer {
         // The projectors' pictures, each as its window would send it.
         if !job.throws.is_empty() {
             let size = (job.throw_size.0.max(1), job.throw_size.1.max(1));
-            if self.throws.as_ref().is_none_or(|t| t.size != size) {
-                self.throws = Some(Throws::new(gpu, size));
+            // As many layers as the highest one asked for (in powers of two).
+            let count = crate::render3d::lit::layers_for(
+                job.throws
+                    .iter()
+                    .map(|t| t.layer as usize + 1)
+                    .max()
+                    .unwrap_or(1),
+            );
+            if self
+                .throws
+                .as_ref()
+                .is_none_or(|t| t.size != size || t.layers.len() < count)
+            {
+                self.throws = Some(Throws::new(gpu, size, count));
             }
             if let Some(throws) = &mut self.throws {
                 throws.used = now;
