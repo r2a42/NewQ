@@ -973,10 +973,11 @@ fn proscenium(k: &mut Kit) {
     const HOUSE_BACK: f32 = 30.0;
     const HOUSE_HIGH: f32 = 15.0;
     const FLY: f32 = 25.0;
-    // The stage, its apron and the stage house (fly tower).
+    // The stage (ending behind the arch, so no face lies in the arch's), its
+    // apron through the opening, and the stage house (fly tower).
     let deck = k.m("Stage", STAGE_DECK);
-    cuboid(deck, [-9.0, 0.0, -10.0], [9.0, DECK, 0.0]);
-    cuboid(deck, [-6.0, 0.0, 0.0], [6.0, DECK, 1.2]);
+    cuboid(deck, [-9.0, 0.0, -10.0], [9.0, DECK, -0.6]);
+    cuboid(deck, [-6.0, 0.0, -0.6], [6.0, DECK, 1.2]);
     let w = k.m("Walls", THEATRE_WALL);
     rect_x(w, -9.0, [-10.0, -0.6], [0.0, FLY], true);
     rect_x(w, 9.0, [-10.0, -0.6], [0.0, FLY], false);
@@ -1241,10 +1242,10 @@ fn festival(k: &mut Kit) {
     // Front of house: a platform under a tent.
     cuboid(k.m("Platform", WOOD), [-5.0, 0.0, 33.0], [5.0, 0.5, 39.0]);
     let tent = k.m("Tent", CANVAS);
-    cuboid(tent, [-6.0, 3.3, 32.0], [6.0, 3.5, 40.0]);
+    cuboid(tent, [-6.0, 3.8, 32.0], [6.0, 4.0, 40.0]);
     for x in [-5.8, 5.8] {
         for z in [32.2, 39.8] {
-            prism(tent, [x, z], 0.05, 0.0, 3.3, 6);
+            prism(tent, [x, z], 0.05, 0.0, 3.8, 6);
         }
     }
 }
