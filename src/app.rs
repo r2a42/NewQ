@@ -2391,6 +2391,10 @@ impl App {
             };
         }
         let was_waiting = std::mem::take(&mut self.uploads_waiting);
+        // The times of outputs that are gone (an output removed, another show).
+        let outputs = &self.show.outputs;
+        self.preview_uploads
+            .retain(|id, _| outputs.iter().any(|o| o.id == *id));
         // The 3D stage: its venue and scene, and whether a picture of it came in.
         let mut said = Vec::new();
         self.stage.begin(&self.show, &mut self.ui.stage, &mut said);
@@ -3940,11 +3944,15 @@ impl App {
         // window's drawing reads this, never the outputs'.
         let preview_level = self.pace_previews(now, playing);
         // A paced preview held back its next picture: draw the window for it then.
-        if let Some(at) = crate::render::take_preview_due() {
-            if let Some(ctl) = &mut self.control {
+        // Only that window: a pop-out's preview doesn't redraw the main window.
+        for (window, at) in crate::render::take_preview_due() {
+            let ours = |w: &Window| window.is_none_or(|id| id == w.id());
+            if let Some(ctl) = &mut self.control
+                && ours(&ctl.window)
+            {
                 ctl.next_repaint = Some(ctl.next_repaint.map_or(at, |t| t.min(at)));
             }
-            for p in &mut self.popouts {
+            for p in self.popouts.iter_mut().filter(|p| ours(&p.window)) {
                 p.next_repaint = Some(p.next_repaint.map_or(at, |t| t.min(at)));
             }
         }
