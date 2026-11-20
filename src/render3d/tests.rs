@@ -92,6 +92,22 @@ fn draw<'a>(
     size: (u32, u32),
     format: wgpu::TextureFormat,
 ) -> (Vec<u8>, FrameStats) {
+    draw_for(0, gpu, r, scene, camera, outputs, options, size, format)
+}
+
+/// `draw` as a view of its own (`Target::owner`).
+#[allow(clippy::too_many_arguments)]
+fn draw_for<'a>(
+    owner: u64,
+    gpu: &Gpu,
+    r: &mut Renderer,
+    scene: &Scene,
+    camera: &Camera,
+    outputs: &dyn Fn(OutputId) -> Option<&'a wgpu::TextureView>,
+    options: &Options,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+) -> (Vec<u8>, FrameStats) {
     let tex = target(gpu, size, format);
     let view = tex.create_view(&Default::default());
     let stats = r.render(
@@ -100,6 +116,7 @@ fn draw<'a>(
             view: &view,
             format,
             size,
+            owner,
         },
         scene,
         camera,
@@ -293,6 +310,7 @@ fn an_unlit_red_square_covers_the_middle_at_every_quality() {
             view: &view,
             format: RGBA,
             size: (0, 0),
+            owner: 0,
         },
         &scene,
         &looking_down_z(2.0),
@@ -663,27 +681,53 @@ fn images_and_meshes_are_kept_by_key_and_let_go() {
     r.tidy_older_than(std::time::Duration::ZERO);
     assert!(r.meshes.is_empty() && r.images.is_empty() && r.targets.is_empty());
     // A second view of another size keeps its own targets beside the first.
+    let view = |r: &mut Renderer, owner, size, quality: Quality| {
+        draw_for(
+            owner,
+            &gpu,
+            r,
+            &scene,
+            &looking_down_z(2.0),
+            &no_outputs,
+            &Options {
+                quality,
+                ..Options::default()
+            },
+            size,
+            RGBA,
+        )
+    };
+    let full = Quality::default();
+    view(&mut r, 1, (32, 32), full);
+    view(&mut r, 2, (40, 20), full);
+    assert_eq!(r.targets.len(), 2);
+    // The governor's steps at one size are kept side by side...
+    view(&mut r, 2, (40, 20), full.scaled_by(0.5));
+    assert_eq!(r.targets.len(), 3);
+    // ...but a view resized lets its old size go (a pane dragged wider
+    // makes no pile of depth and multisampled textures).
+    for w in [44, 48, 52, 56, 60] {
+        view(&mut r, 2, (w, 20), full);
+    }
+    assert_eq!(r.targets.len(), 2);
+    // A venue read again (new pictures and meshes): the old go at once.
+    let other = Scene {
+        parts: vec![part(cube(), 3, maths::IDENTITY, image(12), true)],
+    };
     draw(
         &gpu,
         &mut r,
-        &scene,
+        &other,
         &looking_down_z(2.0),
         &no_outputs,
         &Options::default(),
         (32, 32),
         RGBA,
     );
-    draw(
-        &gpu,
-        &mut r,
-        &scene,
-        &looking_down_z(2.0),
-        &no_outputs,
-        &Options::default(),
-        (40, 20),
-        RGBA,
-    );
-    assert_eq!(r.targets.len(), 2);
+    assert_eq!((r.meshes.len(), r.images.len()), (2, 2));
+    r.keep_only(&[&other]);
+    assert_eq!((r.meshes.len(), r.images.len()), (1, 1));
+    assert!(r.meshes.contains_key(&3) && r.images.contains_key(&12));
     r.forget_all();
     assert!(r.meshes.is_empty() && r.images.is_empty() && r.targets.is_empty());
 }

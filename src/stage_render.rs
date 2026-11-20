@@ -53,8 +53,12 @@ pub struct FeedJob {
 /// One view of the stage.
 #[derive(Clone)]
 pub struct ViewJob {
-    /// Its key for the stats (`StageThread::stats`).
+    /// Its key for the stats (`StageThread::stats`) and the renderer's
+    /// textures (`render3d::Target::owner`).
     pub key: u64,
+    /// A display's picture (a window or a stream shows it): drawn before
+    /// the previews, and said to have landed as soon as they are.
+    pub display: bool,
     pub target: Arc<LayerTexture>,
     pub scene: Arc<Scene>,
     pub camera: Camera,
@@ -79,6 +83,8 @@ impl StageJob {
                 views.push(v);
             }
         }
+        // The displays first.
+        views.sort_by_key(|v| !v.display);
         let mut feeds = newer.feeds;
         for f in self.feeds {
             if !feeds.iter().any(|n| n.output == f.output) {
@@ -115,12 +121,18 @@ pub fn feed_size(canvas: (u32, u32), scale: f32) -> (u32, u32) {
 enum Work {
     Job(Box<StageJob>),
     Quit,
+    /// Stop as a panic would (a test of what follows).
+    #[cfg(test)]
+    Panic,
 }
 
 pub struct StageThread {
     mailbox: Arc<Mailbox<Work>>,
     handle: JoinHandle<()>,
     done: Arc<AtomicU64>,
+    /// The serial of the last job whose displays are drawn (its previews
+    /// may still be being drawn).
+    displays_done: Arc<AtomicU64>,
     stats: Arc<parking_lot::Mutex<HashMap<u64, FrameStats>>>,
 }
 
@@ -130,6 +142,8 @@ impl StageThread {
         let mb = mailbox.clone();
         let done = Arc::new(AtomicU64::new(0));
         let d = done.clone();
+        let displays_done = Arc::new(AtomicU64::new(0));
+        let dd = displays_done.clone();
         let stats: Arc<parking_lot::Mutex<HashMap<u64, FrameStats>>> = Arc::default();
         let s = stats.clone();
         let handle = std::thread::Builder::new()
@@ -138,12 +152,13 @@ impl StageThread {
                 let _said = crate::crash::OnPanic(|| {
                     log::warn!("the 3D stage's drawing thread stopped unexpectedly");
                 });
-                stage_loop(gpu, mb, d, s)
+                stage_loop(gpu, mb, d, dd, s)
             })?;
         Ok(StageThread {
             mailbox,
             handle,
             done,
+            displays_done,
             stats,
         })
     }
@@ -153,6 +168,8 @@ impl StageThread {
         self.mailbox
             .put(Work::Job(Box::new(job)), |old, new| match (old, new) {
                 (Work::Quit, _) | (_, Work::Quit) => Work::Quit,
+                #[cfg(test)]
+                (Work::Panic, _) | (_, Work::Panic) => Work::Panic,
                 (Work::Job(a), Work::Job(b)) => Work::Job(Box::new(a.merged(*b))),
             });
     }
@@ -162,6 +179,11 @@ impl StageThread {
         self.done.load(Ordering::Acquire)
     }
 
+    /// The serial of the last job whose displays' views are drawn.
+    pub fn displays_done(&self) -> u64 {
+        self.displays_done.load(Ordering::Acquire)
+    }
+
     /// What the last drawing of view `key` cost.
     pub fn stats(&self, key: u64) -> Option<FrameStats> {
         self.stats.lock().get(&key).copied()
@@ -169,6 +191,12 @@ impl StageThread {
 
     pub fn is_finished(&self) -> bool {
         self.handle.is_finished()
+    }
+
+    /// Make the thread stop as a panic would (for a test).
+    #[cfg(test)]
+    pub fn panic(&self) {
+        self.mailbox.put(Work::Panic, |_, p| p);
     }
 
     pub fn quit(self) -> JoinHandle<()> {
@@ -190,6 +218,9 @@ pub struct StageDrawer {
     renderer: Renderer,
     compositor: wgpu::RenderPipeline,
     feeds: HashMap<OutputId, Feed>,
+    /// The scenes the last job drew (when they change, the renderer lets
+    /// go of what only the old ones had: `Renderer::keep_only`).
+    scenes: Vec<Arc<Scene>>,
 }
 
 impl StageDrawer {
@@ -198,11 +229,42 @@ impl StageDrawer {
             renderer: Renderer::new(gpu),
             compositor: gpu.compositor.pipeline(&gpu.device, FORMAT),
             feeds: HashMap::new(),
+            scenes: Vec::new(),
         }
     }
 
-    /// Draw the feeds, then each view; the stats of each view by its key.
-    pub fn draw(&mut self, gpu: &Gpu, job: &StageJob) -> Vec<(u64, FrameStats)> {
+    /// What is kept: the renderer's meshes, pictures and render targets, and
+    /// the feeds.
+    pub fn kept(&self) -> (usize, usize, usize, usize) {
+        let (m, i, t) = self.renderer.kept();
+        (m, i, t, self.feeds.len())
+    }
+
+    /// Draw the feeds, then each view (the displays' first, then
+    /// `after_displays` is called); the stats of each view by its key.
+    pub fn draw(
+        &mut self,
+        gpu: &Gpu,
+        job: &StageJob,
+        after_displays: &mut dyn FnMut(),
+    ) -> Vec<(u64, FrameStats)> {
+        // A new scene (the stage edited, a venue read again): what only the
+        // old one had goes now.
+        let mut scenes: Vec<Arc<Scene>> = Vec::new();
+        for v in &job.views {
+            if !scenes.iter().any(|s| Arc::ptr_eq(s, &v.scene)) {
+                scenes.push(v.scene.clone());
+            }
+        }
+        let same = scenes.len() == self.scenes.len()
+            && scenes
+                .iter()
+                .all(|s| self.scenes.iter().any(|o| Arc::ptr_eq(s, o)));
+        if !same && !scenes.is_empty() {
+            let refs: Vec<&Scene> = scenes.iter().map(|s| s.as_ref()).collect();
+            self.renderer.keep_only(&refs);
+            self.scenes = scenes;
+        }
         let now = Instant::now();
         for f in &job.feeds {
             let size = (f.size.0.max(1), f.size.1.max(1));
@@ -246,7 +308,12 @@ impl StageDrawer {
         self.feeds
             .retain(|_, f| now.saturating_duration_since(f.used) < FEED_KEPT);
         let mut stats = Vec::new();
+        let mut displays = true;
         for v in &job.views {
+            if displays && !v.display {
+                displays = false;
+                after_displays();
+            }
             let Some(view) = v.target.render_view() else {
                 continue;
             };
@@ -254,6 +321,7 @@ impl StageDrawer {
                 view: &view,
                 format: FORMAT,
                 size: (v.target.width, v.target.height),
+                owner: v.key,
             };
             let feeds = &self.feeds;
             let s = self.renderer.render(
@@ -267,6 +335,9 @@ impl StageDrawer {
             v.target.mark_drawn();
             stats.push((v.key, s));
         }
+        if displays {
+            after_displays();
+        }
         stats
     }
 }
@@ -275,6 +346,7 @@ fn stage_loop(
     gpu: Gpu,
     mailbox: Arc<Mailbox<Work>>,
     done: Arc<AtomicU64>,
+    displays_done: Arc<AtomicU64>,
     stats: Arc<parking_lot::Mutex<HashMap<u64, FrameStats>>>,
 ) {
     // Made at the first job: a show with no stage never builds the pipelines.
@@ -283,9 +355,13 @@ fn stage_loop(
         let job = match mailbox.take() {
             Work::Quit => break,
             Work::Job(j) => j,
+            #[cfg(test)]
+            Work::Panic => panic!("a test stops the 3D stage's drawing thread"),
         };
         let d = drawer.get_or_insert_with(|| StageDrawer::new(&gpu));
-        let drawn = d.draw(&gpu, &job);
+        let drawn = d.draw(&gpu, &job, &mut || {
+            displays_done.store(job.serial, Ordering::Release);
+        });
         {
             let mut s = stats.lock();
             for (k, v) in drawn {

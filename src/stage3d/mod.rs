@@ -619,10 +619,22 @@ impl Stage3d {
 
     /// A key that changes when anything the scene is made from changes but
     /// the pictures: for a caller that keeps a `Scene` between frames.
+    /// (Written straight into the hash, never as a string: the app works it
+    /// out only when the stage is no longer equal to the one it kept.)
     pub fn shape_key(&self) -> u64 {
-        let mut h = Fnv::new();
-        h.bytes(serde_json::to_string(self).unwrap_or_default().as_bytes());
-        h.0
+        struct Hashing(Fnv);
+        impl std::io::Write for Hashing {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.bytes(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut h = Hashing(Fnv::new());
+        let _ = serde_json::to_writer(&mut h, self);
+        h.0.0
     }
 }
 

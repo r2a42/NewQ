@@ -177,6 +177,7 @@ fn a_displays_picture_is_on_its_screen_the_right_way_round() {
         }],
         views: vec![ViewJob {
             key: 1,
+            display: true,
             target: target.clone(),
             scene: scene.clone(),
             camera,
@@ -185,7 +186,7 @@ fn a_displays_picture_is_on_its_screen_the_right_way_round() {
         serial: 1,
     };
     let mut drawer = StageDrawer::new(&gpu);
-    let stats = drawer.draw(&gpu, &job);
+    let stats = drawer.draw(&gpu, &job, &mut || {});
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].1.missing_pictures, 0, "{:?}", stats[0].1);
     assert!(target.is_filled());
@@ -236,6 +237,7 @@ fn a_display_that_shows_the_stage_has_a_picture_without_any_feed() {
         feeds: Vec::new(),
         views: vec![ViewJob {
             key: 2,
+            display: true,
             target: target.clone(),
             scene,
             camera,
@@ -247,7 +249,7 @@ fn a_display_that_shows_the_stage_has_a_picture_without_any_feed() {
         serial: 1,
     };
     let mut drawer = StageDrawer::new(&gpu);
-    drawer.draw(&gpu, &job);
+    drawer.draw(&gpu, &job, &mut || {});
     let img = shown(&gpu, &[group(&target, size)], size);
     // The background is the colour asked for; the screen in the middle is grey.
     let edge = pixel(&img, size, 0.02, 0.5);
@@ -269,6 +271,7 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
     let b = Arc::new(LayerTexture::new_target(&gpu, 48, 27));
     let view = |t: &Arc<LayerTexture>, key| ViewJob {
         key,
+        display: key == 2,
         target: t.clone(),
         scene: scene.clone(),
         camera,
@@ -292,6 +295,31 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
     assert_eq!(both.serial, 2);
     assert_eq!(both.views.len(), 2);
     assert_eq!(both.feeds.len(), 1);
+    // A display's view is drawn before a preview's, whichever came first.
+    let order = |j: &StageJob| j.views.iter().map(|v| v.key).collect::<Vec<_>>();
+    assert_eq!(order(&both), [2, 1]);
+    assert_eq!(order(&second.clone().merged(first.clone())), [2, 1]);
+    // Said to have landed once the display's is drawn, before the preview's.
+    let (pa, pb) = (
+        Arc::new(LayerTexture::new_target(&gpu, 32, 18)),
+        Arc::new(LayerTexture::new_target(&gpu, 48, 27)),
+    );
+    let mut drawer = StageDrawer::new(&gpu);
+    let mut at_displays = None;
+    // (In the order asked; merging puts the display's first.)
+    let job = StageJob {
+        feeds: first.feeds.clone(),
+        views: vec![view(&pa, 1), view(&pb, 2)],
+        serial: 2,
+    }
+    .merged(StageJob::default());
+    drawer.draw(&gpu, &job, &mut || {
+        at_displays = Some((pa.is_filled(), pb.is_filled()))
+    });
+    assert_eq!(at_displays, Some((false, true)));
+    assert!(pa.is_filled());
+    // Each view keeps its own render targets.
+    assert_eq!(drawer.kept().2, 2);
     let thread = StageThread::spawn(gpu.clone()).unwrap();
     thread.submit(first);
     thread.submit(second);

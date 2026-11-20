@@ -29,6 +29,11 @@ use std::time::{Duration, Instant};
 pub const RELOAD_SETTLE: Duration = Duration::from_millis(400);
 /// The drawing thread, if it stops, is started again at most this often.
 const RESTART_EVERY: Duration = Duration::from_secs(2);
+/// With no 3D view and no display showing the stage for this long, the
+/// drawing thread goes, and with it everything it kept on the graphics
+/// card (the venue's meshes and pictures, the displays' pictures, the
+/// render targets); it starts again when a view is next asked for.
+pub const IDLE_RELEASE: Duration = Duration::from_secs(30);
 /// The largest side of a display's stage picture.
 const MOST_SIDE: u32 = 4096;
 
@@ -46,6 +51,19 @@ impl ViewKey {
         h.bytes(format!("{self:?}").as_bytes());
         h.0
     }
+}
+
+/// A display that shows the stage, as `send` is told of it.
+#[derive(Clone, Copy, Debug)]
+pub struct StageOutput {
+    pub id: OutputId,
+    /// What it sees the stage with.
+    pub camera: Camera,
+    /// A window or a stream shows it: a display's picture, drawn before the
+    /// previews. One only the previews show is preview work (governed).
+    pub seen: bool,
+    /// For one not `seen`: whether the previews' pace lets it be drawn now.
+    pub due: bool,
 }
 
 /// What a display's picture is made of, for drawing it as the stage shows it.
@@ -70,7 +88,17 @@ struct VenueState {
 pub struct StageLive {
     thread: Option<StageThread>,
     started: Option<Instant>,
+    /// Views were due but there was no thread (it stopped, and may start
+    /// again only `RESTART_EVERY` after the last start).
+    restart_wanted: bool,
+    /// When a view (a preview, a display showing the stage) last wanted the
+    /// thread (`IDLE_RELEASE`).
+    wanted_at: Option<Instant>,
     venue: VenueState,
+    /// The stage as last seen, and its key: the key is worked out again only
+    /// when the stage is not the same (a cheap comparison each pass).
+    stage_seen: Option<crate::stage3d::Stage3d>,
+    stage_key: u64,
     scene_key: u64,
     scene: Arc<Scene>,
     bounds: Option<render3d::Bounds>,
@@ -80,6 +108,10 @@ pub struct StageLive {
     drawn_with: HashMap<ViewKey, u64>,
     serial: u64,
     seen_done: u64,
+    seen_displays: u64,
+    /// Every display showing the stage was one only the previews show, last
+    /// pass: their pictures are preview work (`feeds_a_display`).
+    governed_only: bool,
     /// The displays whose pictures a display showing the stage needs.
     needed_by_outputs: HashSet<OutputId>,
     /// When each preview last asked for a picture (a pane closed lets its
@@ -125,10 +157,22 @@ impl StageLive {
         });
         self.look_after_venue(show, shared, say);
         let stage = &show.stage3d;
-        let mut h = crate::stage3d::scene::Fnv::new();
-        if !stage.is_empty() {
-            h.bytes(&stage.shape_key().to_le_bytes());
+        // (Comparing is cheap; a key is worked out only on a change, and the
+        // copy kept only when the key moved, so a stage with a NaN in it,
+        // never equal to itself, isn't copied every pass.)
+        if self.stage_seen.as_ref() != Some(stage) {
+            let key = if stage.is_empty() {
+                0
+            } else {
+                stage.shape_key()
+            };
+            if key != self.stage_key || self.stage_seen.is_none() {
+                self.stage_seen = Some(stage.clone());
+            }
+            self.stage_key = key;
         }
+        let mut h = crate::stage3d::scene::Fnv::new();
+        h.bytes(&self.stage_key.to_le_bytes());
         let loaded = self
             .venue
             .loaded
@@ -146,13 +190,17 @@ impl StageLive {
         if h.0 != self.scene_key || shared.scene_key != h.0 {
             self.scene_key = h.0;
             let scene = stage.scene(show, self.venue.loaded.as_deref());
-            self.bounds = render3d::scene_bounds(&scene);
+            self.bounds = stage_bounds(stage, &scene, self.venue.loaded.as_deref());
             self.scene = Arc::new(scene);
             shared.scene = self.scene.clone();
             shared.scene_key = h.0;
             shared.bounds = self.bounds;
         }
-        self.needed_by_outputs = if show.outputs.iter().any(|o| o.source.is_some()) {
+        let shown = show
+            .outputs
+            .iter()
+            .any(|o| show.stage_source(o.id).is_some());
+        self.needed_by_outputs = if shown && !self.governed_only {
             feeds_wanted(show, &self.scene)
         } else {
             HashSet::new()
@@ -304,54 +352,85 @@ impl StageLive {
     }
 
     /// End of a pass: hand the drawing thread the views due. `outputs` are
-    /// the displays showing the stage (with the camera each sees it by),
-    /// `pictures` every display's layers, `fresh` whether anything moved
-    /// since the last pass (something plays, a picture came in). Returns
-    /// whether a job is still being drawn.
+    /// the displays showing the stage, `pictures` every display's layers,
+    /// `fresh` whether anything moved since the last pass (something plays,
+    /// a picture came in). A display's view is drawn again when what it
+    /// sees changed, the pictures of the displays on the stage included (a
+    /// test pattern, a still). The displays a window or stream shows come
+    /// first: while the thread is behind with them, the previews (and the
+    /// displays only the previews show) wait. Returns whether a job is
+    /// still being drawn.
     pub fn send(
         &mut self,
         gpu: &Gpu,
         show: &Show,
         shared: &mut StageShared,
-        outputs: &[(OutputId, Camera)],
+        outputs: &[StageOutput],
         pictures: &HashMap<OutputId, PictureLayers>,
         fresh: bool,
     ) -> bool {
+        let now = Instant::now();
+        // A thread that stopped (a panic) draws nothing: what it was given is
+        // to be drawn again by the next one.
+        if self.thread.as_ref().is_some_and(StageThread::is_finished) {
+            log::warn!("the 3D stage's drawing thread stopped; starting another");
+            self.thread = None;
+            self.drawn_with.clear();
+        }
+        let behind = self.thread.as_ref().is_some_and(|t| t.done() < self.serial);
+        let displays_behind = behind && outputs.iter().any(|o| o.seen);
+        self.governed_only = !outputs.is_empty() && outputs.iter().all(|o| !o.seen);
+        let asked: Vec<_> = std::mem::take(&mut shared.requests);
+        let pictures_key = if outputs.is_empty() && asked.is_empty() {
+            0
+        } else {
+            feeds_key(show, &self.scene, pictures)
+        };
         let mut views = Vec::new();
+        // What each view is drawn with, once it is handed over.
+        let mut marks = Vec::new();
         let mut scale = 0.0f32;
-        for (id, camera) in outputs {
-            let key = ViewKey::Output(*id);
+        for o in outputs {
+            let key = ViewKey::Output(o.id);
             let Some(target) = self.targets.get(&key).cloned() else {
                 continue;
             };
+            if !o.seen && (!o.due || displays_behind) {
+                continue;
+            }
             let options = Options::default();
-            let sig = signature(self.scene_key, camera, &options, &target);
+            let sig = signature(self.scene_key, &o.camera, &options, &target, pictures_key);
             if fresh || self.drawn_with.get(&key) != Some(&sig) {
-                self.drawn_with.insert(key, sig);
+                marks.push((key, sig));
                 scale = 1.0;
                 views.push(ViewJob {
                     key: key.number(),
+                    display: o.seen,
                     target,
                     scene: self.scene.clone(),
-                    camera: *camera,
+                    camera: o.camera,
                     options,
                 });
             }
         }
-        let asked: Vec<_> = std::mem::take(&mut shared.requests);
         let mut shown: HashSet<PreviewId> = HashSet::new();
         for r in asked {
             let key = ViewKey::Preview(r.id);
             shown.insert(r.id);
-            self.asked_at.insert(r.id, Instant::now());
+            self.asked_at.insert(r.id, now);
             let target = self.target(gpu, key, capped(r.size));
             shared.targets.insert(r.id, target.clone());
-            let sig = signature(self.scene_key, &r.camera, &r.options, &target);
+            // Giving way to the displays: asked for again next frame.
+            if displays_behind {
+                continue;
+            }
+            let sig = signature(self.scene_key, &r.camera, &r.options, &target, pictures_key);
             if fresh || self.drawn_with.get(&key) != Some(&sig) {
-                self.drawn_with.insert(key, sig);
+                marks.push((key, sig));
                 scale = scale.max(r.options.quality.scale.clamp(0.1, 1.0));
                 views.push(ViewJob {
                     key: key.number(),
+                    display: false,
                     target,
                     scene: self.scene.clone(),
                     camera: r.camera,
@@ -368,60 +447,138 @@ impl StageLive {
             }
         }
         // A display that shows the stage and has gone lets its target go.
-        let live: HashSet<OutputId> = outputs.iter().map(|(o, _)| *o).collect();
+        let live: HashSet<OutputId> = outputs.iter().map(|o| o.id).collect();
         let asked_at = &mut self.asked_at;
-        asked_at.retain(|_, at| at.elapsed() < PREVIEW_KEPT);
+        asked_at.retain(|_, at| now.saturating_duration_since(*at) < PREVIEW_KEPT);
         self.targets.retain(|k, _| match k {
             ViewKey::Output(o) => live.contains(o),
             ViewKey::Preview(p) => asked_at.contains_key(p),
         });
         shared.targets.retain(|p, _| asked_at.contains_key(p));
+        if !outputs.is_empty() || !shown.is_empty() {
+            self.wanted_at = Some(now);
+        }
         if !views.is_empty() {
             self.keep_thread(gpu);
-            if self.thread.is_none() {
-                // Drawn when there is a thread again.
-                self.drawn_with.clear();
-            }
-            let feeds = feed_jobs(show, &self.scene, pictures, scale);
-            self.serial += 1;
-            if let Some(t) = &self.thread {
-                t.submit(StageJob {
-                    feeds,
-                    views,
-                    serial: self.serial,
-                });
+            match &self.thread {
+                Some(t) => {
+                    let feeds = feed_jobs(show, &self.scene, pictures, scale);
+                    self.serial += 1;
+                    // Displays first (`StageJob::merged` keeps them so).
+                    let job = StageJob {
+                        feeds,
+                        views,
+                        serial: self.serial,
+                    }
+                    .merged(StageJob::default());
+                    t.submit(job);
+                    self.drawn_with.extend(marks);
+                    self.restart_wanted = false;
+                }
+                // Drawn when there is a thread again (`wake_at`).
+                None => self.restart_wanted = true,
             }
         }
-        self.thread.as_ref().is_some_and(|t| t.done() < self.serial)
+        // Nothing has wanted a picture for a while: everything the thread
+        // keeps on the graphics card goes with it.
+        if self.thread.is_some()
+            && self
+                .wanted_at
+                .is_none_or(|t| now.saturating_duration_since(t) >= IDLE_RELEASE)
+        {
+            log::info!("3D stage: nothing to draw for a while; its pictures are let go");
+            if let Some(t) = self.thread.take() {
+                drop(t.quit());
+            }
+            self.drawn_with.clear();
+            self.started = None;
+            self.restart_wanted = false;
+        }
+        self.busy()
+    }
+
+    /// Whether the thread is drawing a job handed over (a thread that has
+    /// stopped never is).
+    pub fn busy(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|t| !t.is_finished() && t.done() < self.serial)
+    }
+
+    /// When the main loop should come round for the stage though nothing
+    /// else happens: to start the drawing thread again once it may (a still
+    /// stage is drawn then), or to let it go when idle.
+    pub fn wake_at(&self) -> Option<Instant> {
+        let mut at: Option<Instant> = None;
+        let mut take = |t: Instant| at = Some(at.map_or(t, |a| a.min(t)));
+        if self.restart_wanted && self.thread.is_none() {
+            take(
+                self.started
+                    .map_or_else(Instant::now, |s| s + RESTART_EVERY),
+            );
+        }
+        if self.thread.is_some()
+            && let Some(w) = self.wanted_at
+        {
+            take(w + IDLE_RELEASE);
+        }
+        at
     }
 
     /// Whether a picture has been drawn since this was last asked: the
-    /// windows showing one are to be drawn again.
+    /// windows showing one are to be drawn again. A job's displays land
+    /// before its previews are drawn.
     pub fn landed(&mut self) -> bool {
-        let done = self.thread.as_ref().map_or(0, StageThread::done);
-        let new = done != self.seen_done;
+        let (done, displays) = self
+            .thread
+            .as_ref()
+            .map_or((0, 0), |t| (t.done(), t.displays_done()));
+        let new = done != self.seen_done || displays != self.seen_displays;
         self.seen_done = done;
+        self.seen_displays = displays;
         new
     }
 
-    /// Start the drawing thread, or again if it stopped.
+    /// Start the drawing thread if there is none (at most every
+    /// `RESTART_EVERY` after one stopped).
     fn keep_thread(&mut self, gpu: &Gpu) {
-        if self.thread.as_ref().is_some_and(StageThread::is_finished) {
-            log::warn!("the 3D stage's drawing thread stopped; starting another");
-            self.thread = None;
-            self.drawn_with.clear();
-        }
         if self.thread.is_none() && self.started.is_none_or(|t| t.elapsed() >= RESTART_EVERY) {
             self.started = Some(Instant::now());
             match StageThread::spawn(gpu.clone()) {
                 Ok(t) => {
                     self.seen_done = 0;
+                    self.seen_displays = 0;
                     self.serial = 0;
                     self.thread = Some(t);
                 }
                 Err(e) => log::warn!("could not start drawing the 3D stage: {e}"),
             }
         }
+    }
+
+    /// Whether the drawing thread is running (for a test).
+    #[cfg(test)]
+    pub fn has_thread(&self) -> bool {
+        self.thread.is_some()
+    }
+
+    /// Stop the drawing thread as a panic in it would, and wait until it
+    /// has (for a test).
+    #[cfg(test)]
+    pub fn panic_thread(&self) {
+        if let Some(t) = &self.thread {
+            t.panic();
+            let end = Instant::now() + Duration::from_secs(10);
+            while !t.is_finished() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// As if `IDLE_RELEASE` had passed since a view last asked (for a test).
+    #[cfg(test)]
+    pub fn as_if_idle(&mut self) {
+        self.wanted_at = Instant::now().checked_sub(IDLE_RELEASE);
     }
 
     /// The device is gone: let go of everything made on it. The thread's
@@ -468,12 +625,67 @@ fn capped(size: (u32, u32)) -> (u32, u32) {
     (f(w), f(h))
 }
 
-fn signature(scene: u64, camera: &Camera, options: &Options, target: &Arc<LayerTexture>) -> u64 {
+fn signature(
+    scene: u64,
+    camera: &Camera,
+    options: &Options,
+    target: &Arc<LayerTexture>,
+    pictures: u64,
+) -> u64 {
     let mut h = crate::stage3d::scene::Fnv::new();
     h.bytes(&scene.to_le_bytes());
+    h.bytes(&pictures.to_le_bytes());
     h.bytes(format!("{camera:?}{options:?}").as_bytes());
     h.bytes(&(Arc::as_ptr(target) as usize).to_le_bytes());
     h.0
+}
+
+/// A key for what the pictures of the displays `scene` shows are made of
+/// (each layer's texture, whether it holds a picture yet, and how it is
+/// placed): a display showing the stage is drawn again when it changes,
+/// though nothing plays (a test pattern turned on, a still, a cue gone).
+pub fn feeds_key(show: &Show, scene: &Scene, pictures: &HashMap<OutputId, PictureLayers>) -> u64 {
+    let mut h = crate::stage3d::scene::Fnv::new();
+    let mut ids: Vec<OutputId> = feeds_wanted(show, scene).into_iter().collect();
+    ids.sort_by_key(|o| o.0);
+    for id in ids {
+        h.bytes(&id.0.to_le_bytes());
+        let Some(p) = pictures.get(&id) else {
+            continue;
+        };
+        h.bytes(&p.canvas.0.to_le_bytes());
+        h.bytes(&p.canvas.1.to_le_bytes());
+        for l in &p.layers {
+            h.bytes(&(Arc::as_ptr(&l.texture) as usize).to_le_bytes());
+            h.bytes(&[u8::from(l.texture.is_filled())]);
+            h.bytes(&l.opacity.to_bits().to_le_bytes());
+            h.bytes(format!("{:?}{:?}{:?}{:?}", l.fit, l.transform, l.color, l.fx).as_bytes());
+        }
+    }
+    h.0
+}
+
+/// Around what `scene` shows: its screens' corners, and the venue's box
+/// (`Stage3d::venue_bounds`, worked out when it was read) if it is in the
+/// scene. Never every corner of a big venue on the main thread.
+pub fn stage_bounds(
+    stage: &crate::stage3d::Stage3d,
+    scene: &Scene,
+    loaded: Option<&LoadedVenue>,
+) -> Option<render3d::Bounds> {
+    let screens = Scene {
+        parts: scene.parts.iter().filter(|p| !p.lit).cloned().collect(),
+    };
+    let screens = render3d::scene_bounds(&screens);
+    let venue = loaded
+        .filter(|_| scene.parts.iter().any(|p| p.lit))
+        .and_then(|l| stage.venue_bounds(l));
+    render3d::Bounds::around(
+        screens
+            .into_iter()
+            .flat_map(|b| [b.min, b.max])
+            .chain(venue.into_iter().flat_map(|b| [b.min, b.max])),
+    )
 }
 
 /// The displays whose pictures `scene` shows, and the displays those are
