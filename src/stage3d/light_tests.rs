@@ -269,3 +269,55 @@ fn the_white_point_by_itself_is_the_brightest_projector() {
     assert_eq!(auto_white(&[120.0, 300.0, 40.0]), 300.0);
     assert_eq!(auto_white(&[0.2]), 1.0);
 }
+
+/// The light takes a front screen's side from its normals (`fs_lit`), the
+/// sums from its triangles' winding (`pick`'s front): for every shape a
+/// screen can have they must agree, or a lit curved screen would go dark
+/// where the pointer says it is lit.
+#[test]
+fn every_screens_normals_point_out_of_its_front() {
+    use crate::stage3d::{SurfaceShape, geometry::surface_mesh};
+    let shapes = [
+        SurfaceShape::Flat {
+            width: 4.0,
+            height: 2.25,
+        },
+        SurfaceShape::Curved {
+            width: 8.0,
+            radius: 5.0,
+            height: 3.0,
+            convex: false,
+        },
+        SurfaceShape::Curved {
+            width: 8.0,
+            radius: 5.0,
+            height: 3.0,
+            convex: true,
+        },
+        SurfaceShape::Faceted {
+            facets: crate::stage3d::geometry::jumbotron(4, 4.0, 2.0, true, false),
+        },
+        SurfaceShape::Faceted {
+            facets: crate::stage3d::geometry::angled_wall(3, 2, 2.0, 2.0, 20.0),
+        },
+        SurfaceShape::Faceted {
+            facets: crate::stage3d::geometry::angled_wall(3, 1, 2.0, 2.0, -35.0),
+        },
+    ];
+    for shape in shapes {
+        for piece in surface_mesh(&shape) {
+            let m = &piece.mesh;
+            for t in m.indices.chunks(3) {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.positions[i as usize]);
+                let face = maths::cross(maths::sub(b, a), maths::sub(c, a));
+                for i in t {
+                    let n = m.normals[*i as usize];
+                    assert!(
+                        maths::dot(face, n) > 0.0,
+                        "{shape:?}: a normal against its triangle's front"
+                    );
+                }
+            }
+        }
+    }
+}

@@ -165,7 +165,8 @@ pub const LIGHT_VIEWS: [(LightView, &str, &str); 4] = [
     (
         LightView::Brightness,
         "Brightness",
-        "How bright each place is at full white, in nits, in colours",
+        "How bright each place is at full white, in nits, in colours (edge blends aren't \
+         counted: Picture shows them)",
     ),
     (
         LightView::Overlap,

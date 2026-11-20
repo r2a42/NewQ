@@ -603,12 +603,14 @@ The README describes the features; this file is about working on the code.
   still redraws it) -> `ThrowJob`s only in a job with a lit view, `throw_size(lit scale)` (960 wide 16:9,
   the governor's scale). `stage_render`: `Throws` (an `Rgba8Unorm` array of `layers_for` layers, a D2 view per layer),
   each throw composited through `Slot::Stage` with its own `BlendPass` (set, composite, submit, one at a
-  time), `StageJob::merged` keeps newer throws by layer; `render_lit` gets the array for a lit view. A
+  time) after the displays' views (`draw_throws`), `StageJob::merged` keeps newer throws by layer; `render_lit` gets the array for a lit view. A
   display that shows the stage is drawn unlit. Tests: `light_tests.rs`, `render3d/lit.rs` (packing,
   `box_meets`, naga writes HLSL 5.1/6.0 and MSL: naga is a dev-dependency), `render3d/tests.rs` (four
   colours the right way round front and rear, a box's shadow and no acne, two throws add and match
   `throw_lux`, the three colour views, a refused shader still draws, an LED wall keeps its picture),
-  `stage_render_tests.rs` (blend on the throw's layer, thrown the right way round), `stage_live_tests.rs`
+  `stage_render_tests.rs` (blend on the throw's layer, thrown the right way round, a blended pair's
+  overlap as bright as either alone in light), `light_tests` (every screen shape's normals out of its
+  CCW front, which `fs_lit`'s side relies on), `stage_live_tests.rs`
   (`blended_pair_show`, the ignored `write_the_lights_demonstration_show` with `NEWQ_DEMO_SHOW`; what a
   window sends, `light_up`, only a lit view lit), `ui/stage_view_tests.rs` (`Driven`: Light and the views
   by mouse, notices, legends). Tried headless under xvfb (lavapipe); never a real GPU, Mac, Windows or

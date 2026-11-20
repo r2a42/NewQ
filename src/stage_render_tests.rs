@@ -534,3 +534,132 @@ fn merging_keeps_the_newer_pictures_of_the_projectors_and_the_older_others() {
     };
     assert_eq!(old.merged(smaller).throws.len(), 1);
 }
+
+/// Two projectors overlapping by a quarter of their width, each fading its
+/// side of the overlap with its edge blend: thrown on a wall, the light is as
+/// even across the overlap as either alone (in light, not in pixel values).
+/// Without the blends the overlap is twice as bright.
+#[test]
+fn a_blended_pairs_overlap_is_as_bright_as_either_alone() {
+    use crate::render3d::{Paint, Part};
+    use crate::stage3d::scene::Catch;
+    let Some(gpu) = gpu() else { return };
+    let wall = Part {
+        mesh: Arc::new(crate::stage3d::geometry::quad(12.0, 6.0)),
+        mesh_key: 77,
+        transform: crate::stage3d::scene::IDENTITY,
+        paint: Paint::Colour([0.2, 0.2, 0.2, 1.0]),
+        lit: false,
+        catch: Catch {
+            gain: 1.0,
+            front_only: true,
+        },
+    };
+    // Each picture 4 m wide from 6 m; their middles 3 m apart: 1 m of overlap.
+    let projector = |x: f32| {
+        let mut p = crate::stage3d::Projector::new(crate::stage3d::ProjectorId(1), "P".into());
+        p.placement.position = [x, 0.0, 6.0];
+        p.lens.throw = 1.5;
+        p.lumens = 5000.0;
+        p
+    };
+    let (left, right) = (projector(-1.5), projector(1.5));
+    let throw = |p: &crate::stage3d::Projector, layer| {
+        crate::stage3d::light::throw_of(p, 16.0 / 9.0, (1920, 1080), layer, true)
+    };
+    let scene = Arc::new(Scene {
+        parts: vec![wall],
+        throws: vec![throw(&left, 0), throw(&right, 1)],
+    });
+    let one = crate::stage3d::light::luminance(
+        crate::stage3d::light::illuminance(
+            &left,
+            16.0 / 9.0,
+            [-1.5, 0.0, 0.0],
+            None,
+            crate::stage3d::light::Facing::Front,
+        ),
+        1.0,
+    );
+    let white = {
+        let t = LayerTexture::new_rgba(&gpu, 2, 2);
+        t.upload_rgba(&gpu.queue, &[WHITE; 4].concat());
+        Arc::new(t)
+    };
+    let camera = Camera {
+        eye: [0.0, 0.0, 10.0],
+        target: [0.0, 0.0, 0.0],
+        ..Camera::default()
+    };
+    let size = (480, 240);
+    let target = Arc::new(LayerTexture::new_target(&gpu, size.0, size.1));
+    let job = |blended: bool| StageJob {
+        throws: [(0, 0.0, 0.25), (1, 0.25, 0.0)]
+            .map(|(layer, l, r)| ThrowJob {
+                layer,
+                groups: vec![group(&white, PICTURE)],
+                blend: if blended {
+                    EdgeBlend {
+                        left: l,
+                        right: r,
+                        ..EdgeBlend::default()
+                    }
+                } else {
+                    EdgeBlend::default()
+                },
+            })
+            .to_vec(),
+        throw_size: throw_size(0.5),
+        views: vec![ViewJob {
+            key: 6,
+            display: false,
+            target: target.clone(),
+            scene: scene.clone(),
+            camera,
+            lines: Default::default(),
+            options: Options {
+                light: LightView::Picture,
+                // One projector alone is half of white, in light.
+                white_nits: one * 2.0,
+                headlight: 0.0,
+                ambient: 0.0,
+                ..Options::default()
+            },
+        }],
+        serial: 1,
+        ..StageJob::default()
+    };
+    let mut drawer = StageDrawer::new(&gpu);
+    let light_along = |drawer: &mut StageDrawer, blended: bool| {
+        drawer.draw(&gpu, &job(blended), &mut || {});
+        let img = shown(&gpu, &[group(&target, size)], size);
+        (-12..=12)
+            .map(|i| {
+                let x = i as f32 * 0.25;
+                let s = camera.project([x, 0.0, 0.0], size).unwrap();
+                let v = pixel(&img, size, s[0] / size.0 as f32, s[1] / size.1 as f32);
+                (x, (f32::from(v[0]) / 255.0).powf(2.2))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (x, light) in light_along(&mut drawer, true) {
+        assert!(
+            (light - 0.5).abs() < 0.03,
+            "blended: at {x} m the light is {light}, not 0.5"
+        );
+    }
+    let plain = light_along(&mut drawer, false);
+    let at = |x: f32| {
+        plain
+            .iter()
+            .find(|(px, _)| (*px - x).abs() < 1e-3)
+            .unwrap()
+            .1
+    };
+    assert!((at(-2.5) - 0.5).abs() < 0.03, "{}", at(-2.5));
+    assert!(
+        (at(0.0) - 1.0).abs() < 0.04,
+        "unblended overlap: {}",
+        at(0.0)
+    );
+}
