@@ -126,6 +126,31 @@ impl Default for Camera {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     pub parts: Vec<Part>,
+    /// The projectors whose light the view throws on the parts (step P2 of
+    /// the projection plan; empty, and not drawn, until then).
+    pub throws: Vec<Throw>,
+}
+
+/// One projector's light, as the renderer will want it (step P2): what
+/// `stage3d::light` sums, in numbers a shader can use. Nothing makes or
+/// draws these yet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Throw {
+    /// World to the projector's clip space (its off-axis lens, reversed
+    /// depth, as `Camera::view_projection`).
+    pub view_proj: [[f32; 4]; 4],
+    /// Where the lens is.
+    pub eye: [f32; 3],
+    /// Which way it points (one long).
+    pub axis: [f32; 3],
+    /// Lux on a wall square to the lens one metre away
+    /// (`light::lux_at_one_metre`).
+    pub lux_at_one_metre: f32,
+    /// How its pixels' values become light.
+    pub gamma: f32,
+    /// Its layer in the throws' picture array.
+    pub layer: u32,
+    pub on: bool,
 }
 
 /// The identity matrix, column-major.

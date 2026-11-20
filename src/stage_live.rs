@@ -777,6 +777,7 @@ pub fn stage_bounds(
     loaded: Option<&LoadedVenue>,
 ) -> Option<render3d::Bounds> {
     let screens = Scene {
+        throws: Vec::new(),
         parts: scene.parts.iter().filter(|p| !p.lit).cloned().collect(),
     };
     let screens = render3d::scene_bounds(&screens);

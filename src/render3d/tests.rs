@@ -248,6 +248,7 @@ fn an_unlit_red_square_covers_the_middle_at_every_quality() {
     let Some(gpu) = test_gpu() else { return };
     let mut r = Renderer::new(&gpu);
     let scene = Scene {
+        throws: Vec::new(),
         parts: vec![part(
             square(),
             1,
@@ -341,9 +342,11 @@ fn a_nearer_square_hides_a_farther_one_whatever_the_order() {
     );
     for scene in [
         Scene {
+            throws: Vec::new(),
             parts: vec![green, red],
         },
         Scene {
+            throws: Vec::new(),
             parts: vec![
                 part(
                     square(),
@@ -397,6 +400,7 @@ fn a_lit_cube_is_lighter_where_it_faces_the_camera() {
     let mut r = Renderer::new(&gpu);
     // Turned 25° about Y: its front face is 25° from the view, its side 65°.
     let scene = Scene {
+        throws: Vec::new(),
         parts: vec![part(
             cube(),
             2,
@@ -434,6 +438,7 @@ fn a_lit_cube_is_lighter_where_it_faces_the_camera() {
 
     // A near-black venue is still readable thanks to the lift.
     let dark = Scene {
+        throws: Vec::new(),
         parts: vec![part(
             cube(),
             2,
@@ -520,6 +525,7 @@ fn a_screen_shows_its_display_the_right_way_up_and_its_region() {
     let display = OutputId(7);
     let lookup = |o: OutputId| (o == display).then_some(&picture);
     let screen = |region| Scene {
+        throws: Vec::new(),
         parts: vec![part(
             square(),
             3,
@@ -632,6 +638,7 @@ fn images_and_meshes_are_kept_by_key_and_let_go() {
         key,
     };
     let scene = Scene {
+        throws: Vec::new(),
         parts: vec![
             part(square(), 1, maths::IDENTITY, image(10), false),
             part(square(), 1, moved([0.0, 0.0, -1.0], 1.0), image(10), false),
@@ -713,6 +720,7 @@ fn images_and_meshes_are_kept_by_key_and_let_go() {
     assert_eq!(r.targets.len(), 2);
     // A venue read again (new pictures and meshes): the old go at once.
     let other = Scene {
+        throws: Vec::new(),
         parts: vec![part(cube(), 3, maths::IDENTITY, image(12), true)],
     };
     draw(
@@ -741,6 +749,7 @@ fn a_mesh_too_big_for_the_device_is_left_out_not_made() {
     // bytes) doesn't.
     r.limit_buffers(256);
     let scene = Scene {
+        throws: Vec::new(),
         parts: vec![
             part(
                 cube(),
@@ -781,6 +790,7 @@ fn see_through_venues_show_the_screen_behind_a_wall() {
     let Some(gpu) = test_gpu() else { return };
     let mut r = Renderer::new(&gpu);
     let scene = Scene {
+        throws: Vec::new(),
         parts: vec![
             // A wall in front...
             part(
@@ -883,6 +893,7 @@ fn a_little_stage_draws() {
         .create_view(&Default::default());
     let lookup = |o: OutputId| (o == OutputId(1)).then_some(&picture);
     let scene = Scene {
+        throws: Vec::new(),
         parts: vec![
             part(
                 cube(),

@@ -158,6 +158,7 @@ mod tests {
     #[test]
     fn the_nearest_part_under_the_pointer_is_picked() {
         let scene = Scene {
+            throws: Vec::new(),
             parts: vec![
                 quad([0.0, 0.0, -2.0], 4.0), // behind, bigger
                 quad([0.0, 0.0, 1.0], 2.0),  // in front
@@ -198,6 +199,7 @@ mod tests {
             indices: vec![0, 5, 9, 1],
         });
         let scene = Scene {
+            throws: Vec::new(),
             parts: vec![behind, quad([0.0, 0.0, 30.0], 4.0)],
         };
         let all = |_: usize, _: &Part| true;

@@ -4075,9 +4075,11 @@ impl Show {
             .chain(show.outputs.iter().map(|o| o.id.0))
             .chain(show.audio_outputs.iter().map(|o| o.id.0))
             .chain(show.stage3d.surfaces.iter().map(|s| s.id.0))
+            .chain(show.stage3d.projectors.iter().map(|p| p.id.0))
             .max()
             .unwrap_or(0);
         show.next_id = show.next_id.max(max_id + 1);
+        show.number_projectors();
         show.migrate_legacy();
         Ok(show)
     }
