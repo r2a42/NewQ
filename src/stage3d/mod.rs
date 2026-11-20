@@ -16,13 +16,16 @@
 
 pub mod geometry;
 pub mod glb;
+pub mod light;
 pub mod load;
+pub mod projector;
 pub mod samples;
 pub mod scene;
 
 use crate::show::{OutputId, Show};
 use geometry::Mat4;
 use load::LoadedVenue;
+pub use projector::{Projector, ProjectorId};
 use scene::{Fnv, Mesh, Paint, Part, Scene};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -36,6 +39,44 @@ pub const UNFED_GREY: [f32; 4] = [0.18, 0.18, 0.18, 1.0];
 /// The whole of a picture, as a region.
 pub const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
+/// What a projector's body is painted (lit, like the venue).
+pub const PROJECTOR_GREY: [f32; 4] = [0.62, 0.64, 0.7, 1.0];
+
+/// A projector's body in its own frame: a box wholly behind the lens (which
+/// is at the origin, looking down -Z), so looking through the lens never
+/// sees its inside. 44 cm wide, 18 cm high, 45 cm deep.
+pub fn projector_body() -> Mesh {
+    let (x, y, z0, z1) = (0.22f32, 0.09f32, 0.03f32, 0.48f32);
+    let c = |i: usize| {
+        [
+            if i & 1 == 0 { -x } else { x },
+            if i & 2 == 0 { -y } else { y },
+            if i & 4 == 0 { z0 } else { z1 },
+        ]
+    };
+    // Each face its own corners, so it is shaded flat; CCW from outside.
+    let faces: [([usize; 4], [f32; 3]); 6] = [
+        ([0, 2, 3, 1], [0.0, 0.0, -1.0]),
+        ([4, 5, 7, 6], [0.0, 0.0, 1.0]),
+        ([0, 4, 6, 2], [-1.0, 0.0, 0.0]),
+        ([1, 3, 7, 5], [1.0, 0.0, 0.0]),
+        ([2, 6, 7, 3], [0.0, 1.0, 0.0]),
+        ([0, 1, 5, 4], [0.0, -1.0, 0.0]),
+    ];
+    let mut m = Mesh::default();
+    for (corners, n) in faces {
+        let base = m.positions.len() as u32;
+        for k in corners {
+            m.positions.push(c(k));
+            m.normals.push(n);
+            m.uvs.push([0.0, 0.0]);
+        }
+        m.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    m
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Stage3d {
     /// The model of the room or the stage the screens are in.
@@ -46,6 +87,9 @@ pub struct Stage3d {
     /// Saved camera positions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub viewpoints: Vec<Viewpoint>,
+    /// Projectors standing in the room (`projector`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projectors: Vec<Projector>,
     /// How lengths are shown to the user. Kept in metres whatever this says.
     #[serde(
         default,
@@ -327,6 +371,24 @@ pub struct Surface {
     pub shape: SurfaceShape,
     #[serde(default, skip_serializing_if = "Feed::is_none")]
     pub feed: Feed,
+    /// How much brighter than a matt white surface it looks (the light sums,
+    /// `light::luminance`): 1 for matt white.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub gain: f32,
+    /// A rear-projection screen: lit from behind, seen from the front.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rear: bool,
+}
+
+impl Surface {
+    /// Which side light counts on (`light::Facing`).
+    pub fn facing(&self) -> light::Facing {
+        if self.rear {
+            light::Facing::Both
+        } else {
+            light::Facing::Front
+        }
+    }
 }
 
 /// A surface's shape, in its own frame (see `geometry`): centred on its
@@ -498,6 +560,12 @@ impl Stage3d {
                 s.feed = Feed::None;
             }
         }
+        // A projector whose display has gone is a projector with none.
+        for p in &mut self.projectors {
+            if p.display.is_some_and(|o| !exists(o)) {
+                p.display = None;
+            }
+        }
     }
 
     /// What the 3D view draws: the venue (lit) if it is loaded and shown,
@@ -554,7 +622,47 @@ impl Stage3d {
                 });
             }
         }
-        Scene { parts }
+        // The projectors' bodies, last (`part_projector`), lit.
+        if self.projectors.iter().any(|p| p.visible) {
+            let body = Arc::new(projector_body());
+            let key = body.content_key();
+            for p in self.projectors.iter().filter(|p| p.visible) {
+                parts.push(Part {
+                    mesh: body.clone(),
+                    mesh_key: key,
+                    transform: p.placement.matrix(),
+                    paint: Paint::Colour(PROJECTOR_GREY),
+                    lit: true,
+                });
+            }
+        }
+        Scene {
+            parts,
+            throws: Vec::new(),
+        }
+    }
+
+    /// Where in a `scene` made by `scene` the projectors' bodies begin: the
+    /// parts before are the venue and the screens (what light lands on and
+    /// what can be in its way).
+    pub fn projectors_from(&self, scene: &Scene) -> usize {
+        let n = self.projectors.iter().filter(|p| p.visible).count();
+        scene.parts.len().saturating_sub(n)
+    }
+
+    /// Which projector part `part` of a `scene` made by `scene` is the body
+    /// of, if any: for picking one with the mouse.
+    pub fn part_projector(&self, scene: &Scene, part: usize) -> Option<ProjectorId> {
+        let i = part.checked_sub(self.projectors_from(scene))?;
+        self.projectors
+            .iter()
+            .filter(|p| p.visible)
+            .nth(i)
+            .map(|p| p.id)
+    }
+
+    pub fn projector(&self, id: ProjectorId) -> Option<&Projector> {
+        self.projectors.iter().find(|p| p.id == id)
     }
 
     /// Which surface part `part` of a `scene` made by `scene` belongs to (the
@@ -562,7 +670,7 @@ impl Stage3d {
     /// picking a screen with the mouse.
     pub fn part_surface(&self, scene: &Scene, part: usize) -> Option<SurfaceId> {
         let p = scene.parts.get(part)?;
-        if p.lit {
+        if p.lit || part >= self.projectors_from(scene) {
             return None;
         }
         let venue_parts = scene.parts.iter().take_while(|p| p.lit).count();
@@ -727,6 +835,7 @@ impl Show {
     /// Two viewpoints of one name (the second is named again: a display's
     /// source names the first).
     pub fn sanitize_stage(&mut self) {
+        self.sanitize_projectors();
         // (`is_sub_display` reads only the display itself.)
         for o in &mut self.outputs {
             if o.is_sub_display() && o.source.take().is_some() {
@@ -810,6 +919,8 @@ impl Show {
             placement: Placement::default(),
             shape: shape.unwrap_or_default(),
             feed: Feed::None,
+            gain: 1.0,
+            rear: false,
         });
         id
     }
@@ -843,6 +954,8 @@ impl Show {
                 },
                 shape: s.shape,
                 feed: Feed::None,
+                gain: 1.0,
+                rear: false,
             });
             ids.push(id);
         }

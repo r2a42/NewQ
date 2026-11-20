@@ -693,6 +693,7 @@ mod tests {
         let mut far = maths::IDENTITY;
         far[3] = [20.0, 4.0, -30.0, 1.0];
         let scene = Scene {
+            throws: Vec::new(),
             parts: vec![quad_at(maths::IDENTITY), quad_at(far)],
         };
         let b = scene_bounds(&scene).unwrap();
@@ -743,7 +744,7 @@ mod tests {
             );
         }
         let mut o = Orbit::default();
-        assert!(!o.frame_scene(&Scene { parts: vec![] }, 1.0));
+        assert!(!o.frame_scene(&Scene::default(), 1.0));
         assert_eq!(o, Orbit::default());
     }
 }
