@@ -207,6 +207,25 @@ fn near(a: [u8; 4], b: [u8; 3], tol: i32) -> bool {
 }
 
 #[test]
+fn a_governor_scales_a_preview_and_drops_its_multisampling() {
+    let full = Quality::default();
+    assert_eq!(full.scaled_by(1.0), full);
+    let half = full.scaled_by(0.5);
+    assert_eq!((half.msaa, half.scale), (false, 0.5));
+    assert_eq!(half.drawn_size((1920, 1080)), (960, 540));
+    let quarter = Quality {
+        msaa: true,
+        scale: 0.5,
+    }
+    .scaled_by(0.25);
+    assert_eq!(quarter.drawn_size((1920, 1080)), (240, 135));
+    // Nonsense from the governor leaves the quality as it was.
+    assert_eq!(full.scaled_by(f32::NAN), full);
+    // Never down to nothing.
+    assert_eq!(full.scaled_by(0.0).drawn_size((100, 10)), (10, 1));
+}
+
+#[test]
 fn an_unlit_red_square_covers_the_middle_at_every_quality() {
     let Some(gpu) = test_gpu() else { return };
     let mut r = Renderer::new(&gpu);
@@ -259,6 +278,11 @@ fn an_unlit_red_square_covers_the_middle_at_every_quality() {
             Renderer::samples_for(&gpu, RGBA, quality.msaa)
         );
         eprintln!("{quality:?}: {} samples", stats.samples);
+        assert_eq!(
+            stats.samples_shaded(),
+            u64::from(stats.drawn.0 * stats.drawn.1 * stats.samples)
+        );
+        assert!(stats.cpu_time > std::time::Duration::ZERO);
     }
     // A zero-sized target draws nothing and doesn't fail.
     let tex = target(&gpu, (4, 4), RGBA);
