@@ -555,7 +555,7 @@ The README describes the features; this file is about working on the code.
   `glb.rs` (pure) writes parts as a .glb (mesh, node and `baseColorFactor` material per part;
   `samples::sample_glb`), read back through `load_venue` part for part in a test (so each sample's
   materials have colours of their own). Not offered in the UI yet.
-  Projectors (step P1 of `.claude/notes/projection-plan.md`; no light drawn yet). `stage3d/projector.rs`:
+  Projectors (steps P1 and P2 of `.claude/notes/projection-plan.md`). `stage3d/projector.rs`:
   `Stage3d::projectors` (`Projector`: `ProjectorId` from `alloc_id`, in `load`'s next-id guard, and
   `Show::number_projectors` after it for a missing or doubled id; `Lens { throw, zoom, shift, aspect, gamma }`,
   `lumens`, `display`, `resolution`, `model`; every field but `id` defaulted and unwritten at it, and
@@ -572,8 +572,9 @@ The README describes the features; this file is about working on the code.
   inverse square law and the two cosines (`illuminance`, `Facing`), `luminance` (lux × gain / π),
   `lit_by` (shadow test by `pick`). `Surface::gain`/`rear` (unwritten at 1/false). `Stage3d::scene` puts
   a lit `projector_body` (wholly behind the lens) per shown projector after the screens:
-  `projectors_from`, `part_projector`; `part_surface` stops before them. `scene::Throw`/`Scene::throws`
-  are P2's types, empty. UI: `src/ui/stage_projectors.rs` (`section_ui` on Settings ▸ 3D stage after
+  `projectors_from`, `part_projector`; `part_surface` stops before them. `Part::catch` (`Catch { gain,
+  front_only }`: a screen's gain and side for the light; the venue's default). `Scene::throws` is filled
+  only in `stage_live`'s `lit_scene`. UI: `src/ui/stage_projectors.rs` (`section_ui` on Settings ▸ 3D stage after
   Screens, `CORNER_PIN_WORDS`; `add_aimed_at`; rows with `readout_words`, *Fit to a screen*, `which_lens`;
   "My projectors" in `my-projectors.json` in the log folder, `ProjectorsUi::library_dir` for tests);
   `ProjectorsUi` (`StageShared::projectors`) runs a `projector-sums` worker (latest wins; footprints and
@@ -586,6 +587,32 @@ The README describes the features; this file is about working on the code.
   `write_a_show_with_two_projectors` (`NEWQ_PROJECTOR_SHOW`) makes a show to try by hand. Tried
   headless under xvfb (lavapipe) with the proscenium sample and two projectors; never a real GPU,
   projector, light meter or room.
+  The light (P2): `StageViewState::light`/`light_view` (`render3d::LightView` Picture/Brightness/Overlap/
+  PixelSize)/`auto_white`/`white_nits`, view state only (not the show, not saved); *Light* in the view's
+  bar when the show has projectors, `light_bar` (Show menu `LIGHT_VIEWS`, *Auto exposure* =
+  `stage_projectors::auto_white`, rounded to whole nits since the slider rounds), `legend`/`draw_legend`,
+  `light_notices` (refused GPU, more than `MAX_THROWS`). `light.rs` adds `MAX_THROWS` (16), `throw_of`
+  (matrix straight from `Projector::frustum`, not through `Camera`, whose angle is clamped), `throw_uv`/
+  `throw_lux` (the shader's sum on the CPU, tests compare), `band` with `BRIGHTNESS_STEPS`/
+  `PIXEL_STEPS_MM`/`SCALE`/`OVERLAP` (the shader is given them), `auto_white`, `ROOM_LIGHT`. App:
+  `app.rs::projector_throws` (only when a request has its light on; shape by `stage_projectors::shape_of`,
+  as the lines) and `throw_picture` (the display's group with `warp = pin`, its sub displays by
+  `corner_pin(area)`, `blend.clamped()`; None for a display that shows the stage) ->
+  `StageLive::send(.., projectors: &[ProjectorThrow], ..)` -> `light_up` (`lit_scene` made again only on
+  `lit_key`; a key of the pictures, `groups_key`, xored into a lit view's signature, so a blend width or a
+  still redraws it) -> `ThrowJob`s only in a job with a lit view, `throw_size(lit scale)` (960 wide 16:9,
+  the governor's scale). `stage_render`: `Throws` (an `Rgba8Unorm` 16-layer array, a D2 view per layer),
+  each throw composited through `Slot::Stage` with its own `BlendPass` (set, composite, submit, one at a
+  time), `StageJob::merged` keeps newer throws by layer; `render_lit` gets the array for a lit view. A
+  display that shows the stage is drawn unlit. Tests: `light_tests.rs`, `render3d/lit.rs` (packing,
+  `box_meets`, naga writes HLSL 5.1/6.0 and MSL: naga is a dev-dependency), `render3d/tests.rs` (four
+  colours the right way round front and rear, a box's shadow and no acne, two throws add and match
+  `throw_lux`, the three colour views, a refused shader still draws, an LED wall keeps its picture),
+  `stage_render_tests.rs` (blend on the throw's layer, thrown the right way round), `stage_live_tests.rs`
+  (`blended_pair_show`, the ignored `write_the_lights_demonstration_show` with `NEWQ_DEMO_SHOW`; what a
+  window sends, `light_up`, only a lit view lit), `ui/stage_view_tests.rs` (`Driven`: Light and the views
+  by mouse, notices, legends). Tried headless under xvfb (lavapipe); never a real GPU, Mac, Windows or
+  projector.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
@@ -633,7 +660,19 @@ The README describes the features; this file is about working on the code.
   `maths::frustum_reversed`), `picture_in`, `clip_to_near`; `project` and `ray` use the same frustum.
   `render_with_lines` draws `Line`s last, over everything (a `LineList` pipeline made through `checked`;
   `FrameStats::lines`), for a preview's projector cones: `ViewRequest`/`ViewJob::lines`, hashed into
-  `stage_live::signature`; a display's job has none. `pick::Hit::normal` (towards the ray), `front`/`front_normal` (the CCW front: the light sums use a screen's own).
+  `stage_live::signature`; a display's job has none. `lit.rs` the light (P2; all optional, `checked`,
+  which now pushes Validation and Internal scopes: a backend's shader compiler failing is Internal):
+  `render_lit(.., throw_pictures: Option<&TextureView>)`, used when `Options::light` isn't Off and the
+  scene has throws; a `LightKit` made at the first lit view (its own module `shader.wgsl` + `light.wgsl`,
+  entry `fs_lit`, bind group 3: `LightsUniform` (vec4s only, 16 `ThrowUniform`s), the pictures array, a
+  sampler, a `Depth32Float` 16-layer shadow array (`SHADOW_SIDE` 1024, `SHADOW_SIDE_LOW` 512 below full
+  scale, kept per side) and a comparison sampler (`GreaterEqual`: reversed depth). Shadow maps by a
+  depth-only pipeline over `vs_part` with the frame uniform's `view_proj` swapped per layer
+  (`shadow_frames`), drawn only when `shadow_key` (every part's mesh and transform, the lens) changes
+  (`FrameStats::shadows_drawn`); lookup pushed along the normal (`NORMAL_PUSH`) and taken `DEPTH_SLACK`
+  nearer. An unlit part reaches the light only when `lit::reached` (`box_meets` on `GpuMesh::bounds`), else
+  it keeps its picture (an LED wall); flags.z/w carry gain and side. A refusal sets `light_refused` (never
+  tried again; `FrameStats::light_left_out`); `refuse_light` in tests uses a broken shader. `pick::Hit::normal` (towards the ray), `front`/`front_normal` (the CCW front: the light sums use a screen's own).
   `Renderer` (one per `Gpu`): `render(gpu, &Target{view, format, size}, scene, camera, outputs: &dyn
   Fn(OutputId) -> Option<&TextureView>, &Options) -> FrameStats` (draw calls, triangles, missing pictures)
   submits through `Gpu::submit` itself (its uniforms are written per call, so two renders can't share a
