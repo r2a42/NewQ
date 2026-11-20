@@ -60,8 +60,10 @@ pub struct Prefs {
     /// The new interface (editor, operator and patch views) in place of the panes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub new_layout: bool,
-    /// The Preview pane shows every output at once (a multiview), not the one chosen.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// 0.24's Preview pane showed every output at once (a multiview). Read
+    /// once and moved into the layout's preview modes (`dock::Layout::
+    /// take_old_multiview`); never written.
+    #[serde(default, skip_serializing)]
     pub multiview: bool,
     /// The most the main window's previews are drawn a second (`preview_pace`);
     /// Automatic: full rate unless the outputs need the room.
@@ -242,7 +244,8 @@ mod tests {
             clicker_go: Some(0x51),
             clicker_back: Some(0x49),
             new_layout: true,
-            multiview: true,
+            // Read once and moved into the layout; never written.
+            multiview: false,
             preview_cap: crate::preview_pace::Cap::Fps15,
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,

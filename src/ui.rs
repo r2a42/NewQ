@@ -7,6 +7,7 @@ mod net_media;
 mod network;
 pub(crate) use network::{login_note, own_addresses, path_to, peer_address};
 mod settings;
+pub(crate) mod stage_view;
 mod timeline;
 
 use crate::clicker::{BACK_GUARD, Button, Do};
@@ -311,11 +312,23 @@ pub struct UiState {
     /// Every enabled output, previewed in the main window (set each frame by the app).
     pub previews: Vec<PreviewOutput>,
     pub routes: HashMap<OutputId, OutputRoute>,
-    /// The output shown in the main window's preview (the first when unset
-    /// or gone).
+    /// The output shown on the timeline workspace's monitor (the first when
+    /// unset or gone). Each Preview pane has its own (`dock::PreviewPane::output`).
     pub preview_output: Option<OutputId>,
-    /// The multiview's Layout window is open.
-    pub multiview_editor: bool,
+    /// The multiview's Layout window is open, from the preview host that
+    /// opened it (it draws it: there is one layout, the show's).
+    pub multiview_editor: Option<u8>,
+    /// What each preview host's 3D view keeps between frames.
+    pub preview_stage: HashMap<u8, stage_view::StageViewState>,
+    /// The Preview panes showing, by instance (noted at the start of each frame
+    /// of the main window, since the dock is taken out while it is drawn).
+    pub preview_panes_open: Vec<u8>,
+    /// Those of them in sight: in a window of their own, or in front of their
+    /// tabs in a dock that is drawn (not the new interface's, nor while the
+    /// timeline workspace takes the panes' place).
+    pub preview_panes_seen: Vec<u8>,
+    /// A preview's "+" asked for another (made after the frame).
+    pub want_new_preview: bool,
     /// The one governor of every preview (`preview_pace`): the app tells it
     /// how the outputs are doing each pass; each preview asks it
     /// (`preview_budget`) before it draws.
@@ -818,6 +831,9 @@ enum Action {
     FadeOutCue(CueId),
     /// Show or hide a pane.
     TogglePane(Pane),
+    /// One more Preview pane (docked beside the first, or in a window of its
+    /// own where there is no dock).
+    NewPreview,
     /// Give a pane a window of its own, or put it back in the main window.
     PopOut(Pane),
     DockBack(Pane),
@@ -1023,6 +1039,7 @@ fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<String
 
 pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     st.sync_selection();
+    st.note_preview_panes();
     if st.saved_json.is_none() {
         st.saved_json = serde_json::to_string(show).ok();
     }
@@ -1128,6 +1145,9 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             });
     }
 
+    if std::mem::take(&mut st.want_new_preview) {
+        actions.push(Action::NewPreview);
+    }
     // A follower does nothing but what the network asks of it.
     if locked {
         actions.retain(|a| matches!(a, Action::Net(_)));
@@ -1484,7 +1504,7 @@ fn pane_ui(
             });
         }
         Pane::Cart => scrolled(ui, &mut |ui| cart(ui, show, engine, actions)),
-        Pane::Preview => scrolled(ui, &mut |ui| output_previews(ui, show, st, true)),
+        Pane::Preview(n) => scrolled(ui, &mut |ui| output_previews(ui, show, st, true, n)),
         Pane::Active => scrolled(ui, &mut |ui| active_panel(ui, show, engine, st, actions)),
         Pane::Settings => {
             let locked = st.show_mode;
@@ -1620,6 +1640,9 @@ pub fn draw_popout(
     egui::CentralPanel::default().show(ui, |ui| {
         pane_ui(ui, pane, show, engine, st, &mut actions);
     });
+    if std::mem::take(&mut st.want_new_preview) {
+        actions.push(Action::NewPreview);
+    }
     let acted = !actions.is_empty();
     if acted {
         ui.ctx().request_repaint();
@@ -1676,7 +1699,16 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         ui.close();
     }
     ui.separator();
-    for pane in Pane::ALL {
+    // Every kind, with the other Preview panes after the first.
+    let mut panes: Vec<Pane> = Vec::new();
+    for p in Pane::ALL {
+        panes.push(p);
+        if p == crate::dock::PREVIEW {
+            let more = st.layout.preview_panes();
+            panes.extend(more.into_iter().filter(|n| *n != 0).map(Pane::Preview));
+        }
+    }
+    for pane in panes {
         // The new interface has the timeline editor as a panel of its Editor
         // view, not as a pane, and the workspace is no pane either.
         let workspace = timeline::workspace::chosen(st);
@@ -1734,6 +1766,16 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         if pane == Pane::Timeline {
             timeline_layout_choice(ui, st, actions);
         }
+    }
+    if ui
+        .button("New preview")
+        .on_hover_text(
+            "One more Preview, with its own mode (one output, the multiview or 3D) and output",
+        )
+        .clicked()
+    {
+        actions.push(Action::NewPreview);
+        ui.close();
     }
     ui.separator();
     ui.label(
@@ -4611,6 +4653,32 @@ impl UiState {
         self.preview_governor
             .ask(id, std::time::Instant::now(), self.prefs.preview_cap)
     }
+
+    /// Note which Preview panes are showing, and let go of what the ones that
+    /// have gone had (their settings, the governor's times, their 3D views'
+    /// state, the Layout window they opened): a pane opened later with the
+    /// same number starts afresh. Each frame of the main window, before the
+    /// dock is drawn: a tab's close button closes a pane by itself.
+    pub(crate) fn note_preview_panes(&mut self) {
+        self.layout.forget_closed_previews();
+        let open = self.layout.preview_panes();
+        let kept = |h: u8| h >= crate::dock::PANE_INSTANCES || open.contains(&h);
+        self.preview_governor.retain_hosts(kept);
+        self.preview_stage.retain(|h, _| kept(*h));
+        if self.multiview_editor.is_some_and(|h| !kept(h)) {
+            self.multiview_editor = None;
+        }
+        let dock_drawn = !self.prefs.new_layout && !timeline::workspace::replaces_panes(self);
+        self.preview_panes_seen = open
+            .iter()
+            .copied()
+            .filter(|n| {
+                let pane = Pane::Preview(*n);
+                self.layout.is_popped_out(pane) || (dock_drawn && self.layout.in_front(pane))
+            })
+            .collect();
+        self.preview_panes_open = open;
+    }
 }
 
 /// How compositor preview `id` draws now: None at full rate (straight into the
@@ -4709,12 +4777,13 @@ fn tile_interact(
     });
 }
 
-/// Paint `e`'s live picture fitted in `bars` (black round it) through slot `n`.
+/// Paint `e`'s live picture fitted in `bars` (black round it) through tile `n`'s slot
+/// of preview host `host`.
 fn paint_tile(
     ui: &mut Ui,
     e: &PreviewOutput,
     bars: egui::Rect,
-    n: usize,
+    (host, n): (u8, usize),
     pace: Option<crate::render::Pace>,
 ) -> egui::Rect {
     let rect = preview::fit_picture(e.canvas, bars);
@@ -4733,7 +4802,7 @@ fn paint_tile(
                     slice: e.slice,
                 },
             }],
-            slot: Slot::Multi(n as u8),
+            slot: Slot::tile(host, n as u8),
             pace,
         },
     ));
@@ -4767,11 +4836,11 @@ fn tile_head(ui: &Ui, st: &UiState, name: &str, id: Option<OutputId>) -> egui::t
 /// in an automatic grid (`multiview_auto`). Dragging a tile onto another, or a
 /// tile's menu, changes the layout; on the automatic grid that first makes a
 /// layout of it.
-fn multiview_grid(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
+fn multiview_grid(ui: &mut Ui, show: &mut Show, st: &mut UiState, host: u8) {
     let mut edits = Vec::new();
     match show.multiview.clone() {
-        Some(layout) => multiview_layout(ui, &layout, st, &mut edits),
-        None => multiview_auto(ui, st, &mut edits),
+        Some(layout) => multiview_layout(ui, &layout, st, &mut edits, host),
+        None => multiview_auto(ui, st, &mut edits, host),
     }
     if !edits.is_empty() {
         let ids: Vec<OutputId> = st.previews.iter().map(|p| p.id).collect();
@@ -4791,7 +4860,7 @@ fn multiview_grid(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
 /// (black bars in the rest of its cell, as the single preview has). Each tile draws in a slot
 /// of its own, since the tiles are drawn in the same frame at different sizes; past
 /// `MULTI_SLOTS` outputs, the rest aren't shown.
-fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>) {
+fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>, host: u8) {
     let gap = MULTIVIEW_GAP;
     let tiles = &st.previews[..st.previews.len().min(crate::gpu::MULTI_SLOTS)];
     // Only the width in sight: egui squeezes a picture that runs out of the window.
@@ -4829,8 +4898,11 @@ fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>) {
                             ui,
                             e,
                             bars,
-                            number,
-                            preview_pace(st, crate::preview_pace::PreviewId::Tile(number as u8)),
+                            (host, number),
+                            preview_pace(
+                                st,
+                                crate::preview_pace::PreviewId::Tile(host, number as u8),
+                            ),
                         );
                         tile_interact(ui, bars, number, Some(e.id), st, edits);
                         #[cfg(test)]
@@ -4850,8 +4922,8 @@ fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>) {
     }
     #[cfg(test)]
     ui.data_mut(|d| {
-        d.insert_temp(egui::Id::new("multiview_tiles"), drawn);
-        d.insert_temp(egui::Id::new("multiview_slots"), slots);
+        d.insert_temp(test_key("multiview_tiles", host), drawn);
+        d.insert_temp(test_key("multiview_slots", host), slots);
     });
 }
 
@@ -4863,6 +4935,7 @@ fn multiview_layout(
     layout: &crate::multiview::Layout,
     st: &UiState,
     edits: &mut Vec<TileEdit>,
+    host: u8,
 ) {
     let find = |id: OutputId| st.previews.iter().find(|p| p.id == id);
     let shown = |i: usize| layout.tile(i, |id| find(id).is_some()).and_then(find);
@@ -4922,8 +4995,8 @@ fn multiview_layout(
                     ui,
                     e,
                     cell,
-                    i,
-                    preview_pace(st, crate::preview_pace::PreviewId::Tile(i as u8)),
+                    (host, i),
+                    preview_pace(st, crate::preview_pace::PreviewId::Tile(host, i as u8)),
                 );
                 #[cfg(test)]
                 drawn.push((_rect, cell));
@@ -4952,8 +5025,8 @@ fn multiview_layout(
     }
     #[cfg(test)]
     ui.data_mut(|d| {
-        d.insert_temp(egui::Id::new("multiview_tiles"), drawn);
-        d.insert_temp(egui::Id::new("multiview_slots"), slots);
+        d.insert_temp(test_key("multiview_tiles", host), drawn);
+        d.insert_temp(test_key("multiview_slots", host), slots);
     });
 }
 
@@ -4961,7 +5034,7 @@ fn multiview_layout(
 /// tile with small ones) and what each tile shows.
 fn multiview_editor(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
     use crate::multiview::{Layout, Shape};
-    let mut open = st.multiview_editor;
+    let mut open = st.multiview_editor.is_some();
     let editable = multiview_editable(st);
     let ids: Vec<OutputId> = st.previews.iter().map(|p| p.id).collect();
     egui::Window::new("Multiview layout")
@@ -5040,27 +5113,125 @@ fn multiview_editor(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
                 settings::hint(ui, "The layout is part of the show: it can't be changed in show mode, during a test or on a computer that follows another.");
             }
         });
-    st.multiview_editor = open;
+    if !open {
+        st.multiview_editor = None;
+    }
 }
 
-fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
-    let Some(i) = preview_index(&st.previews, st.preview_output, st.geometry_edit) else {
-        return;
-    };
-    let id = st.previews[i].id;
-    let editing = st.geometry_edit == Some(id);
-    // Every output at once (or the show's layout), when there is more than one or a layout,
-    // and no corners are being edited.
+/// Which preview host lines up corners while they are being edited: the first
+/// Preview pane in sight, or, with none in the new interface, its Operator
+/// view. Only that one shows the output being edited; the others keep their
+/// own mode.
+fn corner_host(st: &UiState) -> u8 {
+    match st.preview_panes_seen.first() {
+        Some(n) => *n,
+        None if st.prefs.new_layout => crate::dock::OPERATOR_PREVIEW,
+        None => 0,
+    }
+}
+
+/// A key for what the tests read back of preview host `host`'s drawing.
+#[cfg(test)]
+fn test_key(name: &'static str, host: u8) -> egui::Id {
+    egui::Id::new((name, host))
+}
+
+/// The mode a preview shows: Single, Multiview or 3D, as a segmented control.
+/// `shown` is what it shows now (one output while corners are lined up here,
+/// or when there is nothing for a multiview); a click sets `setting`.
+fn preview_mode_switch(
+    ui: &mut Ui,
+    setting: &mut crate::dock::PreviewMode,
+    shown: crate::dock::PreviewMode,
+    can_multi: bool,
+    editing: bool,
+) -> Vec<egui::Rect> {
+    use crate::dock::PreviewMode;
+    let mut rects = Vec::new();
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let last = PreviewMode::ALL.len() - 1;
+        for (k, m) in PreviewMode::ALL.into_iter().enumerate() {
+            let r = 4;
+            let corners = egui::CornerRadius {
+                nw: if k == 0 { r } else { 0 },
+                sw: if k == 0 { r } else { 0 },
+                ne: if k == last { r } else { 0 },
+                se: if k == last { r } else { 0 },
+            };
+            let enabled = !editing && (m != PreviewMode::Multiview || can_multi);
+            let r = ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(m.label())
+                        .selected(shown == m)
+                        .corner_radius(corners),
+                )
+                .on_hover_text(m.hint())
+                .on_disabled_hover_text(if editing {
+                    "Showing the output whose corners are being edited"
+                } else {
+                    "There is one output: a multiview shows several (or the show's layout)"
+                });
+            rects.push(r.rect);
+            if r.clicked() {
+                *setting = m;
+            }
+        }
+    });
+    rects
+}
+
+/// The Preview pane of host `host` (a pane's instance, or the Operator view's
+/// `dock::OPERATOR_PREVIEW`), in its own mode (`dock::PreviewPane`): one
+/// output, the multiview, or the 3D stage, chosen in its header.
+fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, host: u8) {
+    use crate::dock::PreviewMode;
+    let settings = st.layout.preview(host);
+    let edits_here = corner_host(st) == host;
+    let index = preview_index(
+        &st.previews,
+        settings.output,
+        st.geometry_edit.filter(|_| edits_here),
+    );
+    let id = index.map(|i| st.previews[i].id);
+    // Lining up corners: this host shows that output whatever its mode.
+    let editing = edits_here && id.is_some() && st.geometry_edit == id;
+    // Every output at once (or the show's layout), when there is more than one or a layout.
     let can_multi = st.previews.len() > 1 || show.multiview.is_some();
-    let multi = st.prefs.multiview && can_multi && !editing;
-    let where_ = route_words(st, id);
+    let mode = match settings.mode {
+        _ if editing => PreviewMode::Single,
+        PreviewMode::Multiview if !can_multi => PreviewMode::Single,
+        m => m,
+    };
+    let mut setting = settings.mode;
     let mut chosen = id;
     // Wrapped: a row wider than a narrow pane would widen the ui past it.
     ui.horizontal_wrapped(|ui| {
+        let _switch = preview_mode_switch(ui, &mut setting, mode, can_multi, editing);
+        let plus = ui
+            .small_button("+")
+            .on_hover_text("Open another preview, with its own mode and output");
+        if plus.clicked() {
+            st.want_new_preview = true;
+        }
+        #[cfg(test)]
+        ui.data_mut(|d| {
+            d.insert_temp(test_key("preview_switch", host), _switch);
+            d.insert_temp(test_key("preview_plus", host), plus.rect);
+        });
+        if mode == PreviewMode::Stage {
+            return;
+        }
+        ui.separator();
+        let Some(i) = index else {
+            ui.label(RichText::new("No display to preview").weak());
+            return;
+        };
         // In the multiview each tile says its own.
-        if !multi {
+        if mode == PreviewMode::Single {
             ui.label(
-                RichText::new(fps_reading(st, id).unwrap_or_else(|| "not drawing".into()))
+                RichText::new(fps_reading(st, st.previews[i].id).unwrap_or_else(|| "not drawing".into()))
                     .monospace()
                     .strong(),
             )
@@ -5080,55 +5251,50 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
             log::warn!("could not save the settings of this computer: {e}");
         }
         ui.separator();
-        if can_multi
-            && ui
-                .add_enabled(!editing, egui::Button::new("Multiview").selected(multi))
-                .on_hover_text("Show every output at once, or only the one chosen")
-                .on_disabled_hover_text("Showing the output whose corners are being edited")
-                .clicked()
-        {
-            st.prefs.multiview = !multi;
-            if let Some(dir) = &st.layout_dir
-                && let Err(e) = st.prefs.save(dir)
-            {
-                log::warn!("could not save the settings of this computer: {e}");
-            }
-        }
-        if multi {
+        if mode == PreviewMode::Multiview {
+            let open_here = st.multiview_editor == Some(host);
             if ui
-                .add(egui::Button::new("Layout…").selected(st.multiview_editor))
+                .add(egui::Button::new("Layout…").selected(open_here))
                 .on_hover_text("How many tiles, how they are arranged and what each shows")
                 .clicked()
             {
-                st.multiview_editor = !st.multiview_editor;
+                st.multiview_editor = if open_here { None } else { Some(host) };
             }
             let count = match &show.multiview {
                 Some(l) => l.shape.label(),
                 None => multiview_count(st.previews.len()),
             };
             ui.label(RichText::new(count).strong());
-        } else if st.previews.len() > 1 {
-            ui.add_enabled_ui(!editing, |ui| {
-                egui::ComboBox::from_id_salt("preview_output")
-                    .selected_text(RichText::new(&st.previews[i].name).strong())
-                    .show_ui(ui, |ui| {
-                        for p in &st.previews {
-                            ui.selectable_value(&mut chosen, p.id, &p.name);
-                        }
-                    })
-                    .response
-                    .on_hover_text("Which output to preview here")
-                    .on_disabled_hover_text("Showing the output whose corners are being edited");
-            });
         } else {
-            ui.label(RichText::new(&st.previews[i].name).strong());
-        }
-        if !multi {
-            ui.label(RichText::new(where_).weak().small());
+            if st.previews.len() > 1 {
+                ui.add_enabled_ui(!editing, |ui| {
+                    egui::ComboBox::from_id_salt(("preview_output", host))
+                        .selected_text(RichText::new(&st.previews[i].name).strong())
+                        .show_ui(ui, |ui| {
+                            for p in &st.previews {
+                                ui.selectable_value(&mut chosen, Some(p.id), &p.name);
+                            }
+                        })
+                        .response
+                        .on_hover_text("Which output to preview here")
+                        .on_disabled_hover_text(
+                            "Showing the output whose corners are being edited",
+                        );
+                });
+            } else {
+                ui.label(RichText::new(&st.previews[i].name).strong());
+            }
+            ui.label(RichText::new(route_words(st, st.previews[i].id)).weak().small());
         }
     });
     if chosen != id {
-        st.preview_output = Some(chosen);
+        st.layout.preview_mut(host).output = chosen;
+    }
+    if setting != settings.mode {
+        st.layout.preview_mut(host).mode = setting;
+    }
+    if mode != PreviewMode::Multiview && st.multiview_editor == Some(host) {
+        st.multiview_editor = None;
     }
     // Small, and only while the preview draws less than it would.
     let notice = st.preview_governor.notice(st.prefs.preview_cap);
@@ -5138,11 +5304,31 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
         );
     }
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("preview_notice"), notice));
+    ui.data_mut(|d| {
+        d.insert_temp(test_key("preview_notice", host), notice);
+        d.insert_temp(test_key("preview_mode", host), mode);
+    });
 
-    if multi {
-        multiview_grid(ui, show, st);
-        if st.multiview_editor {
+    if mode == PreviewMode::Stage {
+        // Its own state, taken out while it draws (it is given the rest).
+        let mut view = st.preview_stage.remove(&host).unwrap_or_default();
+        stage_view::draw(
+            ui,
+            show,
+            st,
+            &mut view,
+            crate::preview_pace::PreviewId::Stage(host),
+        );
+        st.preview_stage.insert(host, view);
+        return;
+    }
+    let Some(i) = index else {
+        return;
+    };
+    let id = st.previews[i].id;
+    if mode == PreviewMode::Multiview {
+        multiview_grid(ui, show, st, host);
+        if st.multiview_editor == Some(host) {
             multiview_editor(ui.ctx(), show, st);
         }
         return;
@@ -5167,7 +5353,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
     let bars = outer.shrink(margin);
     let rect = preview::fit_picture(e.canvas, bars);
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("preview_picture"), rect));
+    ui.data_mut(|d| d.insert_temp(test_key("preview_picture", host), rect));
     ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
     if !editing {
         preview::outline(ui, rect, bars);
@@ -5185,11 +5371,10 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
                     slice: e.slice,
                 },
             }],
-            slot: Slot::Preview,
-            // Lining up corners wants every frame.
+            slot: Slot::single(host),
             pace: {
                 // Asked whatever happens; lining up corners wants every frame.
-                let pace = preview_pace(st, crate::preview_pace::PreviewId::Single);
+                let pace = preview_pace(st, crate::preview_pace::PreviewId::Single(host));
                 if editing { None } else { pace }
             },
         },
@@ -11978,6 +12163,18 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 st.layout.toggle(pane);
             }
         }
+        Action::NewPreview => {
+            let windowed = st.prefs.new_layout || timeline::workspace::replaces_panes(st);
+            let made = if windowed {
+                st.layout.new_preview_window()
+            } else {
+                st.layout.new_preview()
+            };
+            if made.is_none() {
+                log::warn!("no more previews can be opened");
+            }
+            st.note_preview_panes();
+        }
         Action::PopOut(pane) => st.layout.pop_out(pane),
         Action::DockBack(pane) => st.layout.dock_back(pane),
         Action::ResetLayout => st.layout.reset(),
@@ -13550,13 +13747,26 @@ mod tests {
     #[test]
     fn panes_are_popped_out_docked_back_and_reset_through_actions() {
         let (mut show, mut e, mut st) = running();
-        assert!(st.layout.is_open(Pane::Preview) && !st.layout.is_popped_out(Pane::Preview));
-        apply(Action::PopOut(Pane::Preview), &mut show, &mut e, &mut st);
-        assert!(st.layout.is_popped_out(Pane::Preview));
+        assert!(
+            st.layout.is_open(crate::dock::PREVIEW)
+                && !st.layout.is_popped_out(crate::dock::PREVIEW)
+        );
+        apply(
+            Action::PopOut(crate::dock::PREVIEW),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(st.layout.is_popped_out(crate::dock::PREVIEW));
         apply(Action::TogglePane(Pane::Cart), &mut show, &mut e, &mut st);
         apply(Action::PopOut(Pane::Cart), &mut show, &mut e, &mut st);
-        apply(Action::DockBack(Pane::Preview), &mut show, &mut e, &mut st);
-        assert!(st.layout.is_docked(Pane::Preview));
+        apply(
+            Action::DockBack(crate::dock::PREVIEW),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(st.layout.is_docked(crate::dock::PREVIEW));
         apply(Action::ResetLayout, &mut show, &mut e, &mut st);
         assert!(st.layout.popouts.is_empty() && !st.layout.is_open(Pane::Cart));
     }
@@ -15099,6 +15309,15 @@ mod tests {
         }
     }
 
+    /// The mode 0.24's Multiview button meant.
+    fn mode_of(multiview: bool) -> crate::dock::PreviewMode {
+        if multiview {
+            crate::dock::PreviewMode::Multiview
+        } else {
+            crate::dock::PreviewMode::Single
+        }
+    }
+
     #[test]
     fn the_preview_follows_the_menu_but_not_while_editing_corners() {
         let previews = [preview(1), preview(2), preview(3)];
@@ -15134,11 +15353,13 @@ mod tests {
                 pane_ui.set_clip_rect(pane);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(&mut pane_ui, |ui| output_previews(ui, &mut show, st, fill));
+                    .show(&mut pane_ui, |ui| {
+                        output_previews(ui, &mut show, st, fill, 0)
+                    });
             });
             o.textures_delta.clear();
         }
-        ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("preview_picture")))
+        ctx.data(|d| d.get_temp::<Rect>(test_key("preview_picture", 0)))
             .expect("the picture is drawn")
     }
 
@@ -15223,7 +15444,7 @@ mod tests {
         let mut show = Show::default();
         let mut painted = 0;
         for n in 0..3 {
-            ctx.data_mut(|d| d.remove_temp::<Vec<(Rect, Rect)>>(egui::Id::new("multiview_tiles")));
+            ctx.data_mut(|d| d.remove_temp::<Vec<(Rect, Rect)>>(test_key("multiview_tiles", 0)));
             let input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen_px / ppp)),
                 time: Some(1.0 + n as f64 * 0.01),
@@ -15234,13 +15455,15 @@ mod tests {
                 pane_ui.set_clip_rect(pane);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(&mut pane_ui, |ui| output_previews(ui, &mut show, st, true));
+                    .show(&mut pane_ui, |ui| {
+                        output_previews(ui, &mut show, st, true, 0)
+                    });
             });
             o.textures_delta.clear();
             painted = o.shapes.iter().map(|c| count(&c.shape)).sum();
         }
         let tiles = ctx
-            .data(|d| d.get_temp::<Vec<(Rect, Rect)>>(egui::Id::new("multiview_tiles")))
+            .data(|d| d.get_temp::<Vec<(Rect, Rect)>>(test_key("multiview_tiles", 0)))
             .unwrap_or_default();
         (painted, tiles)
     }
@@ -15252,7 +15475,7 @@ mod tests {
             geometry_edit: editing.map(OutputId),
             ..UiState::default()
         };
-        st.prefs.multiview = multiview;
+        st.layout.preview_mut(0).mode = mode_of(multiview);
         let pane = Rect::from_min_size(Pos2::ZERO, vec2(width, 1400.0));
         preview_frames(&mut st, vec2(width, 1400.0), 1.0, pane).0
     }
@@ -15301,7 +15524,7 @@ mod tests {
             p.picture = if n == 3 { (3840, 1080) } else { *c };
             st.previews.push(p);
         }
-        st.prefs.multiview = true;
+        st.layout.preview_mut(0).mode = mode_of(true);
         for ppp in [1.0, 2.0] {
             let screen_px = vec2(1280.0, 760.0) * ppp;
             let right = 1280.0;
@@ -15393,6 +15616,33 @@ mod tests {
                 "{other:?} is in the multiview's slots"
             );
         }
+        // Every preview host (several panes, the Operator view, the
+        // workspace's monitor) has a single slot and tiles of its own, none
+        // shared with another's or with a window's or a stream's.
+        use crate::dock::{OPERATOR_PREVIEW, PANE_INSTANCES, WORKSPACE_PREVIEW};
+        let mut all: HashSet<usize> = (0..8)
+            .map(|n| Slot::Window(n).index())
+            .chain([0, 1].map(|n| Slot::Capture(n).index()))
+            .chain([Slot::Screen.index()])
+            .collect();
+        for host in [
+            0,
+            1,
+            2,
+            3,
+            PANE_INSTANCES - 1,
+            WORKSPACE_PREVIEW,
+            OPERATOR_PREVIEW,
+        ] {
+            let places = std::iter::once(Slot::single(host))
+                .chain((0..MULTI_SLOTS as u8).map(|n| Slot::tile(host, n)));
+            for s in places {
+                assert!(all.insert(s.index()), "{s:?} of host {host} is shared");
+            }
+        }
+        // The first pane's are the slots there have always been.
+        assert_eq!(Slot::single(0), Slot::Preview);
+        assert_eq!(Slot::tile(0, 3), Slot::Multi(3));
     }
 
     /// What the Preview pane drew in each of `frames` (each a list of input
@@ -15426,16 +15676,16 @@ mod tests {
                 pane_ui.set_clip_rect(pane);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(&mut pane_ui, |ui| output_previews(ui, show, st, true));
+                    .show(&mut pane_ui, |ui| output_previews(ui, show, st, true, 0));
             });
             o.textures_delta.clear();
             painted = o.shapes.iter().map(|c| count(&c.shape)).sum();
         }
         let tiles = ctx
-            .data(|d| d.get_temp::<Vec<(Rect, Rect)>>(egui::Id::new("multiview_tiles")))
+            .data(|d| d.get_temp::<Vec<(Rect, Rect)>>(test_key("multiview_tiles", 0)))
             .unwrap_or_default();
         let slots = ctx
-            .data(|d| d.get_temp::<Vec<(u8, Option<OutputId>)>>(egui::Id::new("multiview_slots")))
+            .data(|d| d.get_temp::<Vec<(u8, Option<OutputId>)>>(test_key("multiview_slots", 0)))
             .unwrap_or_default();
         (painted, tiles, slots)
     }
@@ -15458,7 +15708,7 @@ mod tests {
             }
             st.previews.push(p);
         }
-        st.prefs.multiview = true;
+        st.layout.preview_mut(0).mode = mode_of(true);
         let o = |n| Some(OutputId(n));
         let mut show = Show {
             multiview: Some(Layout {
@@ -15518,7 +15768,7 @@ mod tests {
             previews: (1..=4).map(preview).collect(),
             ..UiState::default()
         };
-        st.prefs.multiview = true;
+        st.layout.preview_mut(0).mode = mode_of(true);
         let ids: Vec<OutputId> = (1..=4).map(OutputId).collect();
         let mut show = Show {
             multiview: Some(Layout::new(Shape::Big { small: 3 }, &ids)),
@@ -15568,7 +15818,7 @@ mod tests {
             previews: (1..=4).map(preview).collect(),
             ..UiState::default()
         };
-        st.prefs.multiview = true;
+        st.layout.preview_mut(0).mode = mode_of(true);
         let ids: Vec<OutputId> = (1..=4).map(OutputId).collect();
         let mut show = Show {
             multiview: Some(Layout::new(Shape::Grid { cols: 2, rows: 2 }, &ids)),
@@ -15610,7 +15860,7 @@ mod tests {
                 ..UiState::default()
             };
             st.preview_governor.force(level);
-            st.prefs.multiview = multiview;
+            st.layout.preview_mut(0).mode = mode_of(multiview);
             st.prefs.preview_cap = cap;
             let ctx = egui::Context::default();
             let mut show = Show::default();
@@ -15620,22 +15870,23 @@ mod tests {
                     screen_rect: Some(pane),
                     ..Default::default()
                 };
-                let mut o = ctx.run_ui(input, |ui| output_previews(ui, &mut show, &mut st, true));
+                let mut o =
+                    ctx.run_ui(input, |ui| output_previews(ui, &mut show, &mut st, true, 0));
                 o.textures_delta.clear();
             }
             let said = ctx
-                .data(|d| d.get_temp::<Option<String>>(egui::Id::new("preview_notice")))
+                .data(|d| d.get_temp::<Option<String>>(test_key("preview_notice", 0)))
                 .expect("the pane was drawn");
             let asked: HashSet<PreviewId> =
                 st.preview_governor.asked.borrow().iter().copied().collect();
-            (said, asked, preview_pace(&st, PreviewId::Single))
+            (said, asked, preview_pace(&st, PreviewId::Single(0)))
         };
         // The single preview and every multiview tile ask, at every level.
         for level in Level::ALL {
             let (_, asked, _) = draw(level, Cap::Automatic, false);
-            assert_eq!(asked, HashSet::from([PreviewId::Single]), "{level:?}");
+            assert_eq!(asked, HashSet::from([PreviewId::Single(0)]), "{level:?}");
             let (_, asked, _) = draw(level, Cap::Automatic, true);
-            let tiles: HashSet<PreviewId> = (0..3).map(PreviewId::Tile).collect();
+            let tiles: HashSet<PreviewId> = (0..3).map(|n| PreviewId::Tile(0, n)).collect();
             assert_eq!(asked, tiles, "{level:?}");
         }
         for multiview in [false, true] {
@@ -15666,6 +15917,351 @@ mod tests {
         }
     }
 
+    /// Draw preview hosts `hosts` side by side in one window (as two panes of
+    /// the dock), `frames` times; the mode each showed.
+    fn two_panes(
+        st: &mut UiState,
+        show: &mut Show,
+        hosts: &[u8],
+        frames: usize,
+    ) -> (egui::Context, Vec<crate::dock::PreviewMode>) {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 760.0));
+        let w = screen.width() / hosts.len() as f32;
+        for n in 0..frames {
+            let input = RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.0 + n as f64 * 0.01),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| {
+                for (k, host) in hosts.iter().enumerate() {
+                    let pane = Rect::from_min_size(pos2(k as f32 * w, 0.0), vec2(w, 760.0));
+                    let mut pane_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(pane)
+                            .id_salt(("pane", *host)),
+                    );
+                    pane_ui.set_clip_rect(pane);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("pane_scroll", *host))
+                        .auto_shrink([false, false])
+                        .show(&mut pane_ui, |ui| {
+                            output_previews(ui, show, st, true, *host)
+                        });
+                }
+            });
+            o.textures_delta.clear();
+        }
+        let modes = hosts
+            .iter()
+            .map(|h| {
+                ctx.data(|d| d.get_temp::<crate::dock::PreviewMode>(test_key("preview_mode", *h)))
+                    .expect("the pane was drawn")
+            })
+            .collect();
+        (ctx, modes)
+    }
+
+    #[test]
+    fn two_previews_have_their_own_modes_slots_and_pace_and_both_give_way() {
+        use crate::dock::{Pane, PreviewMode};
+        use crate::preview_pace::{Level, PreviewId};
+        let mut st = UiState {
+            previews: (1..=3).map(preview).collect(),
+            ..UiState::default()
+        };
+        assert_eq!(st.layout.new_preview(), Some(Pane::Preview(1)));
+        st.note_preview_panes();
+        assert_eq!(st.preview_panes_open, vec![0, 1]);
+        st.layout.preview_mut(0).output = Some(OutputId(2));
+        st.layout.preview_mut(1).mode = PreviewMode::Multiview;
+        st.preview_governor.force(Level::Half);
+        let mut show = Show::default();
+        let (ctx, modes) = two_panes(&mut st, &mut show, &[0, 1], 2);
+        assert_eq!(modes, vec![PreviewMode::Single, PreviewMode::Multiview]);
+        // The first shows its own output; the second every output in tiles.
+        let tiles = ctx
+            .data(|d| d.get_temp::<Vec<(u8, Option<OutputId>)>>(test_key("multiview_slots", 1)))
+            .unwrap();
+        assert_eq!(tiles.len(), 3);
+        assert!(ctx.data(|d| d.get_temp::<Rect>(test_key("preview_picture", 0)).is_some()));
+        assert!(ctx.data(|d| d.get_temp::<Rect>(test_key("preview_picture", 1)).is_none()));
+        // Each asked the one governor with its own ids...
+        let asked: HashSet<PreviewId> =
+            st.preview_governor.asked.borrow().iter().copied().collect();
+        let mut want: HashSet<PreviewId> = (0..3).map(|n| PreviewId::Tile(1, n)).collect();
+        want.insert(PreviewId::Single(0));
+        assert_eq!(asked, want);
+        // ...and both give way: half size, five a second.
+        for id in [PreviewId::Single(0), PreviewId::Tile(1, 0)] {
+            let pace = preview_pace(&st, id).expect("paced");
+            assert_eq!(pace.scale, 0.5, "{id:?}");
+            assert!((pace.every.as_secs_f64() - 0.2).abs() < 1e-6, "{id:?}");
+        }
+        // Their slots are their own, not one another's.
+        let mut slots: HashSet<usize> = (0..3)
+            .map(|n| crate::gpu::Slot::tile(1, n).index())
+            .collect();
+        assert!(slots.insert(crate::gpu::Slot::single(0).index()));
+        // The mode is changed in its header (the second's switch to 3D: the
+        // placeholder until the stage is drawn).
+        st.layout.preview_mut(1).mode = PreviewMode::Stage;
+        let (_, modes) = two_panes(&mut st, &mut show, &[0, 1], 2);
+        assert_eq!(modes, vec![PreviewMode::Single, PreviewMode::Stage]);
+        assert!(st.preview_stage.contains_key(&1), "its own 3D view state");
+        // Corners being edited: the first pane shows that output, the other
+        // keeps its own mode.
+        st.layout.preview_mut(0).mode = PreviewMode::Multiview;
+        st.layout.preview_mut(1).mode = PreviewMode::Multiview;
+        st.geometry_edit = Some(OutputId(3));
+        let (_, modes) = two_panes(&mut st, &mut show, &[0, 1], 2);
+        assert_eq!(modes, vec![PreviewMode::Single, PreviewMode::Multiview]);
+        assert_eq!(
+            st.layout.preview(0).mode,
+            PreviewMode::Multiview,
+            "its own mode is kept for after"
+        );
+        // The first pane behind another tab: the second, in sight, lines them up.
+        let first = st.layout.dock.find_tab(&Pane::Preview(0)).unwrap();
+        st.layout
+            .dock
+            .set_focused_node_and_surface(egui_dock::NodePath {
+                surface: first.surface,
+                node: first.node,
+            });
+        st.layout.dock.push_to_focused_leaf(Pane::Cart);
+        st.note_preview_panes();
+        assert_eq!(st.preview_panes_seen, vec![1]);
+        let (_, modes) = two_panes(&mut st, &mut show, &[1], 2);
+        assert_eq!(modes, vec![PreviewMode::Single]);
+        st.layout.close(Pane::Cart);
+        // In the new interface the dock isn't drawn: a preview in a window of
+        // its own lines them up, else the Operator view's.
+        st.prefs.new_layout = true;
+        st.note_preview_panes();
+        assert!(st.preview_panes_seen.is_empty());
+        assert_eq!(corner_host(&st), crate::dock::OPERATOR_PREVIEW);
+        st.layout.pop_out(Pane::Preview(1));
+        st.note_preview_panes();
+        assert_eq!(corner_host(&st), 1);
+        st.layout.dock_back(Pane::Preview(1));
+        st.prefs.new_layout = false;
+        st.note_preview_panes();
+        assert_eq!(corner_host(&st), 0);
+        st.geometry_edit = None;
+        // Closed (by its tab's button, which the layout isn't told of): its
+        // settings, its 3D view and the governor's times for it go.
+        st.layout.preview_mut(1).mode = PreviewMode::Stage;
+        two_panes(&mut st, &mut show, &[0, 1], 1);
+        let path = st.layout.dock.find_tab(&Pane::Preview(1)).unwrap();
+        st.layout.dock.remove_tab(path);
+        st.note_preview_panes();
+        assert_eq!(st.preview_panes_open, vec![0]);
+        assert!(!st.layout.previews.contains_key(&1));
+        assert!(!st.preview_stage.contains_key(&1));
+        // (Keeping only the closed pane's times leaves none: it had none left.)
+        assert!(st.preview_governor.known() > 0, "the first pane's are kept");
+        st.preview_governor.retain_hosts(|h| h == 1);
+        assert_eq!(st.preview_governor.known(), 0);
+        // A new one takes the free number, afresh.
+        assert_eq!(st.layout.new_preview(), Some(Pane::Preview(1)));
+        assert_eq!(st.layout.preview(1).mode, PreviewMode::Single);
+    }
+
+    #[test]
+    fn a_preview_with_one_output_keeps_its_multiview_mode_for_when_there_are_more() {
+        use crate::dock::PreviewMode;
+        let mut st = UiState {
+            previews: vec![preview(1)],
+            ..UiState::default()
+        };
+        st.layout.preview_mut(0).mode = PreviewMode::Multiview;
+        let mut show = Show::default();
+        let (_, modes) = two_panes(&mut st, &mut show, &[0], 2);
+        assert_eq!(modes, vec![PreviewMode::Single]);
+        assert_eq!(st.layout.preview(0).mode, PreviewMode::Multiview);
+        st.previews.push(preview(2));
+        let (_, modes) = two_panes(&mut st, &mut show, &[0], 2);
+        assert_eq!(modes, vec![PreviewMode::Multiview]);
+        // No outputs at all: the header is there (to choose 3D), nothing else.
+        st.previews.clear();
+        let (ctx, modes) = two_panes(&mut st, &mut show, &[0], 2);
+        assert_eq!(modes, vec![PreviewMode::Single]);
+        assert!(ctx.data(|d| d.get_temp::<Rect>(test_key("preview_picture", 0)).is_none()));
+    }
+
+    #[test]
+    fn the_mode_switch_in_the_header_changes_the_mode() {
+        use crate::dock::PreviewMode;
+        let mut st = UiState {
+            previews: (1..=2).map(preview).collect(),
+            ..UiState::default()
+        };
+        let mut show = Show::default();
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0));
+        let mut frame = |st: &mut UiState, events: Vec<Event>, n: f64| {
+            let input = RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.0 + n * 0.05),
+                events,
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| output_previews(ui, &mut show, st, true, 0));
+            o.textures_delta.clear();
+        };
+        frame(&mut st, vec![], 0.0);
+        // Click each segment in turn, where it was drawn.
+        for (k, want) in [
+            PreviewMode::Multiview,
+            PreviewMode::Stage,
+            PreviewMode::Single,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rect = ctx
+                .data(|d| d.get_temp::<Vec<Rect>>(test_key("preview_switch", 0)))
+                .expect("the switch was drawn");
+            let i = PreviewMode::ALL.iter().position(|m| *m == want).unwrap();
+            let p = rect[i].center();
+            let n = 1.0 + k as f64 * 3.0;
+            frame(&mut st, vec![Event::PointerMoved(p)], n);
+            frame(
+                &mut st,
+                vec![Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+                n + 1.0,
+            );
+            frame(
+                &mut st,
+                vec![Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+                n + 2.0,
+            );
+            assert_eq!(st.layout.preview(0).mode, want);
+        }
+        // And "+" asks for another preview, made after the frame.
+        let plus = ctx
+            .data(|d| d.get_temp::<Rect>(test_key("preview_plus", 0)))
+            .unwrap()
+            .center();
+        for (n, pressed) in [(20.0, None), (21.0, Some(true)), (22.0, Some(false))] {
+            let events = match pressed {
+                None => vec![Event::PointerMoved(plus)],
+                Some(pressed) => vec![Event::PointerButton {
+                    pos: plus,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                }],
+            };
+            frame(&mut st, events, n);
+        }
+        assert!(st.want_new_preview);
+    }
+
+    #[test]
+    fn the_old_multiview_setting_becomes_the_previews_mode_once() {
+        use crate::dock::{Layout, OPERATOR_PREVIEW, PreviewMode};
+        let dir = std::env::temp_dir().join(format!("newq_prefs_mv_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // What 0.24 wrote with the Multiview button on.
+        std::fs::write(
+            dir.join("prefs.json"),
+            r#"{"multiview":true,"hw_decode":true}"#,
+        )
+        .unwrap();
+        let mut prefs = crate::prefs::Prefs::load(&dir);
+        assert!(
+            prefs.multiview && prefs.hw_decode,
+            "an old file still loads"
+        );
+        let mut layout = Layout::default();
+        assert!(layout.take_old_multiview(std::mem::take(&mut prefs.multiview)));
+        assert_eq!(layout.preview(0).mode, PreviewMode::Multiview);
+        assert_eq!(
+            layout.preview(OPERATOR_PREVIEW).mode,
+            PreviewMode::Multiview
+        );
+        // Never written again: the next start has nothing to take.
+        prefs.save(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("prefs.json")).unwrap();
+        assert!(!text.contains("multiview"), "{text}");
+        let again = crate::prefs::Prefs::load(&dir);
+        assert!(!again.multiview && again.hw_decode);
+        // A mode already kept is not overruled, and off takes nothing.
+        let mut layout = Layout::default();
+        layout.preview_mut(0).mode = PreviewMode::Stage;
+        layout.take_old_multiview(true);
+        assert_eq!(layout.preview(0).mode, PreviewMode::Stage);
+        let mut layout = Layout::default();
+        assert!(!layout.take_old_multiview(false));
+        assert!(layout.previews.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_interfaces_draw_two_previews_and_one_in_a_window_of_its_own() {
+        use crate::dock::{OPERATOR_PREVIEW, Pane, PreviewMode};
+        let (mut show, mut e, mut st) = running();
+        st.previews = (1..=3).map(preview).collect();
+        let second = st.layout.new_preview().unwrap();
+        st.layout.preview_mut(1).mode = PreviewMode::Multiview;
+        let screen = || RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 760.0))),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let drew = |ctx: &egui::Context, host: u8| {
+            ctx.data(|d| d.get_temp::<PreviewMode>(test_key("preview_mode", host)))
+        };
+        // The classic window: both panes, side by side.
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(screen(), |ui| draw(ui, &mut show, &mut e, &mut st));
+            out.textures_delta.clear();
+        }
+        assert_eq!(drew(&ctx, 0), Some(PreviewMode::Single));
+        assert_eq!(drew(&ctx, 1), Some(PreviewMode::Multiview));
+        // The second popped out: drawn in its window, in its mode.
+        apply(Action::PopOut(second), &mut show, &mut e, &mut st);
+        let window = egui::Context::default();
+        for _ in 0..2 {
+            let mut out = window.run_ui(screen(), |ui| {
+                draw_popout(ui, second, &mut show, &mut e, &mut st)
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(drew(&window, 1), Some(PreviewMode::Multiview));
+        // The Window menu's New preview makes a third.
+        apply(Action::NewPreview, &mut show, &mut e, &mut st);
+        assert_eq!(st.layout.preview_panes(), vec![0, 1, 2]);
+        assert!(st.layout.is_docked(Pane::Preview(2)));
+        // The new interface: the Operator view's preview is its own, and a
+        // new preview there opens in a window of its own.
+        st.prefs.new_layout = true;
+        st.modern_view = modern::View::Operator;
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(screen(), |ui| draw(ui, &mut show, &mut e, &mut st));
+            out.textures_delta.clear();
+        }
+        assert_eq!(drew(&ctx, OPERATOR_PREVIEW), Some(PreviewMode::Single));
+        apply(Action::NewPreview, &mut show, &mut e, &mut st);
+        assert!(st.layout.is_popped_out(Pane::Preview(3)));
+    }
+
     #[test]
     fn the_multiview_cannot_be_rearranged_while_locked() {
         use crate::multiview::{Layout, Shape};
@@ -15677,7 +16273,7 @@ mod tests {
                 show_mode,
                 ..UiState::default()
             };
-            st.prefs.multiview = true;
+            st.layout.preview_mut(0).mode = mode_of(true);
             let ids: Vec<OutputId> = (1..=4).map(OutputId).collect();
             let layout = Layout::new(Shape::Grid { cols: 2, rows: 2 }, &ids);
             let mut show = Show {

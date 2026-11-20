@@ -6,6 +6,12 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Several previews, each in its own mode.** The Preview pane's header now switches between
+  *Single* (one display), *Multiview* and *3D* (the show's 3D stage). *+* in the header, or Window ▸
+  *New preview*, opens another Preview beside it with its own mode and display, so you can watch one
+  projector big and every display small at once; pop any of them out to a window of its own, for a
+  second monitor. They are kept per computer with the window layout. If you used the *Multiview*
+  button before, your Preview opens in Multiview as it did.
 - **Arrange the multiview yourself.** *Layout…* beside the Preview pane's *Multiview* button picks
   how many tiles (2 to 16, as a grid or one large tile with small ones along the bottom) and which
   display each shows; drag a tile onto another to swap them, or click its name to change it. The

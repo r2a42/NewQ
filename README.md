@@ -433,12 +433,25 @@ stays on the computer until you send it yourself.
   any display or sub display; with more than one, a menu above it picks which.
   The preview keeps the display's own shape at any size of its pane (a sub display
   that shows part of another's picture: that part's shape), as large as fits, with
-  black bars beside it or above and below. *Multiview* (the button beside the
-  menu) shows every one at once in a grid, each under its name and in its own
-  shape, as many columns as the pane's width allows (up to sixteen displays);
-  press it again to go back to the one chosen. It is kept per computer, and
-  while a display's corners are being edited only that display is shown.
-  *Layout…* beside it arranges the multiview yourself: from 2 to 16 tiles as a
+  black bars beside it or above and below. The pane's header has three modes:
+  *Single* (one display, chosen in the menu), *Multiview* and *3D* (the show's
+  3D stage). *Multiview* shows every display at once in a grid, each under its
+  name and in its own shape, as many columns as the pane's width allows (up to
+  sixteen displays); *Single* goes back to the one chosen. While a display's
+  corners are being edited the first Preview pane shows only that display, and
+  goes back to its mode afterwards.
+  There can be several Preview panes: *+* in a pane's header, or Window ▸ *New
+  preview*, opens another beside the first, each with its own mode and its own
+  display, and each can be popped out to a window of its own (double-click its
+  tab) and closed again with its tab's ×. The modes, the displays chosen and
+  where the panes are are kept per computer, with the window layout, not in the
+  show; the multiview's arrangement is the show's, and every pane in
+  *Multiview* shows the same one. In the new interface the Operator view's
+  preview has the same modes, and *+* or Window ▸ *New preview* opens a preview
+  in a window of its own. There is no set limit on how many: each one is drawing
+  work for the computer, and like every preview they make way for the displays
+  (below).
+  *Layout…* in the header (in Multiview) arranges the multiview yourself: from 2 to 16 tiles as a
   grid (2 × 1, 3 × 1, 2 × 2, 3 × 2, 4 × 2, 3 × 3, 4 × 3 or 4 × 4) or one large
   tile with three, four or five small ones along the bottom, and which display
   or sub display each tile shows (the same one may be in two tiles; a tile can
@@ -450,8 +463,8 @@ stays on the computer until you send it yourself.
   layout of its own shows every display, as before.
   The previews give way to the displays: at the first late frame on a display's
   window (or when NewQ's main loop is held up) while something plays, every
-  preview (single, multiview, the timeline workspace's monitor, in the main
-  window or a popped-out pane) draws less, a step a second: 30, 15, then 5
+  preview (single, multiview, 3D, the timeline workspace's monitor, in every
+  Preview pane, in the main window or popped out) draws less, a step a second: 30, 15, then 5
   pictures a second, then at half and a quarter of its size, then paused. Each
   keeps showing its last picture in between, so none goes black, and a display
   that only the previews show has its pictures copied to the graphics card no

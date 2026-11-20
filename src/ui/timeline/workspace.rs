@@ -274,7 +274,7 @@ fn monitor(ui: &mut Ui, st: &mut UiState) {
                     slice: e.slice,
                 },
             }],
-            slot: super::super::Slot::Preview,
+            slot: super::super::Slot::single(crate::dock::WORKSPACE_PREVIEW),
             pace: super::super::preview_pace(st, crate::preview_pace::PreviewId::Workspace),
         },
     ));
