@@ -191,6 +191,7 @@ fn a_display_that_shows_the_stage_gets_its_picture() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false,
     );
     wait(&mut live);
@@ -203,6 +204,7 @@ fn a_display_that_shows_the_stage_gets_its_picture() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false
     ));
     assert_eq!(live.serial, serial);
@@ -213,12 +215,13 @@ fn a_display_that_shows_the_stage_gets_its_picture() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         true,
     );
     assert_eq!(live.serial, serial + 1, "a job was sent");
     wait(&mut live);
     // The display stops showing the stage: its target goes.
-    live.send(&gpu, &show, &mut shared, &[], &pictures, false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
     assert!(live.target_of(ViewKey::Output(b)).is_none());
     // The device is lost: everything on it goes, the thread stops.
     if let Some(h) = live.forget_device(&mut shared) {
@@ -287,6 +290,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false,
     );
     wait(&mut live);
@@ -297,6 +301,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false,
     );
     assert_eq!(live.serial, serial, "nothing changed");
@@ -316,6 +321,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false,
     );
     assert_eq!(live.serial, serial + 1);
@@ -326,6 +332,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false,
     );
     assert_eq!(live.serial, serial + 1);
@@ -337,6 +344,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         false,
     );
     assert_eq!(live.serial, serial + 2);
@@ -362,13 +370,13 @@ fn after_the_drawing_thread_stops_a_still_stage_is_drawn_again() {
     let layer = live.output_layer(&gpu, b, (160, 90));
     let pictures = HashMap::new();
     let out = [seen(b, Camera::default())];
-    live.send(&gpu, &show, &mut shared, &out, &pictures, false);
+    live.send(&gpu, &show, &mut shared, &out, &pictures, &[], false);
     wait(&mut live);
     assert!(layer.texture.is_filled());
     live.panic_thread();
     // Something to draw (it plays), with the thread gone: not busy, and the
     // loop is to come back when another may start.
-    let busy = live.send(&gpu, &show, &mut shared, &out, &pictures, true);
+    let busy = live.send(&gpu, &show, &mut shared, &out, &pictures, &[], true);
     assert!(!busy, "a stopped thread is never busy");
     assert!(!live.has_thread(), "not started again within RESTART_EVERY");
     let at = live.wake_at().expect("a time to start it again");
@@ -377,7 +385,7 @@ fn after_the_drawing_thread_stops_a_still_stage_is_drawn_again() {
     // it is drawn all the same.
     std::thread::sleep(at.saturating_duration_since(Instant::now()));
     let serial = live.serial;
-    live.send(&gpu, &show, &mut shared, &out, &pictures, false);
+    live.send(&gpu, &show, &mut shared, &out, &pictures, &[], false);
     assert!(live.has_thread());
     assert_eq!(live.serial, 1, "drawn by the new thread (was {serial})");
     wait(&mut live);
@@ -410,21 +418,21 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
     let mut governed = seen(b, Camera::default());
     governed.seen = false;
     governed.due = false;
-    live.send(&gpu, &show, &mut shared, &[governed], &pictures, true);
+    live.send(&gpu, &show, &mut shared, &[governed], &pictures, &[], true);
     assert_eq!(live.serial, 0);
     assert!(!live.has_thread());
     // B's own pictures are then preview work too.
     live.begin(&show, &mut shared, &mut Vec::new());
     assert!(!live.feeds_a_display(_a));
     governed.due = true;
-    live.send(&gpu, &show, &mut shared, &[governed], &pictures, true);
+    live.send(&gpu, &show, &mut shared, &[governed], &pictures, &[], true);
     assert_eq!(live.serial, 1);
     wait(&mut live);
     // B stops showing the stage; nothing asks for a while.
-    live.send(&gpu, &show, &mut shared, &[], &pictures, false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
     assert!(live.has_thread(), "not at once");
     live.as_if_idle();
-    live.send(&gpu, &show, &mut shared, &[], &pictures, false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
     assert!(!live.has_thread());
     assert_eq!(live.wake_at(), None, "nothing to come back for");
     // Asked for again: started at once.
@@ -435,6 +443,7 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
         &mut shared,
         &[seen(b, Camera::default())],
         &pictures,
+        &[],
         false,
     );
     assert!(live.has_thread());
@@ -516,7 +525,7 @@ fn previews_give_way_while_the_thread_is_behind_with_the_displays() {
     let display = [seen(b, Camera::default())];
     live.set_behind(true);
     ask(&mut shared);
-    live.send(&gpu, &show, &mut shared, &display, &pictures, true);
+    live.send(&gpu, &show, &mut shared, &display, &pictures, &[], true);
     assert_eq!(live.serial, 1, "the display is drawn");
     assert!(live.drawn_with.contains_key(&ViewKey::Output(b)));
     assert!(!live.drawn_with.contains_key(&ViewKey::Preview(preview)));
@@ -525,10 +534,282 @@ fn previews_give_way_while_the_thread_is_behind_with_the_displays() {
     // Not behind: drawn.
     live.set_behind(false);
     ask(&mut shared);
-    live.send(&gpu, &show, &mut shared, &display, &pictures, true);
+    live.send(&gpu, &show, &mut shared, &display, &pictures, &[], true);
     assert_eq!(live.serial, 2);
     assert!(live.drawn_with.contains_key(&ViewKey::Preview(preview)));
     wait(&mut live);
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+/// A proscenium theatre (the sample) with a wide picture blended from two
+/// projectors on its screen: the picture's display shows the test pattern,
+/// each projector's display its half, fading over a quarter of its width.
+/// The projectors stand in the stalls, square to the screen. (The light's
+/// demonstration show, and its tests'.)
+pub(crate) fn blended_pair_show() -> (Show, [crate::stage3d::ProjectorId; 2]) {
+    let mut show = Show::default();
+    let overlap = 0.25;
+    let (wide, left, right) = show.add_blended_pair(1920, 1080, overlap);
+    if let Some(o) = show.outputs.iter_mut().find(|o| o.id == wide) {
+        o.test_pattern = true;
+    }
+    let screens = crate::ui::stage_edit::use_sample(
+        &mut show,
+        crate::stage3d::samples::SampleVenue::Proscenium,
+        true,
+    );
+    for s in &screens {
+        if let Some(s) = show.stage3d.surface_mut(*s) {
+            s.feed = Feed::Display {
+                output: wide,
+                region: WHOLE,
+            };
+        }
+    }
+    let screen = show.stage3d.surface(screens[0]).unwrap().clone();
+    let crate::stage3d::SurfaceShape::Flat { width, .. } = screen.shape else {
+        panic!("the proscenium's screen is flat");
+    };
+    // Each projector's picture: the screen's width over the two less the
+    // overlap.
+    let each = width / (2.0 - overlap);
+    let mut ids = [crate::stage3d::ProjectorId(0); 2];
+    for (k, (display, side)) in [(left, -1.0f32), (right, 1.0)].into_iter().enumerate() {
+        let id = show.add_projector();
+        let p = show.projector_mut(id).unwrap();
+        p.name = if side < 0.0 { "Left" } else { "Right" }.into();
+        p.display = Some(display);
+        p.lumens = 12_000.0;
+        let distance = p.distance_for(each);
+        let x = side * (width - each) / 2.0;
+        let [sx, sy, sz] = screen.placement.position;
+        p.placement.position = [sx + x, sy, sz + distance];
+        p.placement.yaw = screen.placement.yaw;
+        ids[k] = id;
+    }
+    (show, ids)
+}
+
+/// Writes the light's demonstration show to `NEWQ_DEMO_SHOW` (by hand, to
+/// look at it headless).
+#[test]
+#[ignore]
+fn write_the_lights_demonstration_show() {
+    let Some(path) = std::env::var_os("NEWQ_DEMO_SHOW") else {
+        return;
+    };
+    let (show, _) = blended_pair_show();
+    show.save(std::path::Path::new(&path)).unwrap();
+}
+
+/// Each projector as the app hands it over: 16:9, and what its display
+/// sends (`app::throw_picture`).
+fn projector_throws(show: &Show, groups: &HashMap<OutputId, OutputGroup>) -> Vec<ProjectorThrow> {
+    show.stage3d
+        .projectors
+        .iter()
+        .map(|p| ProjectorThrow {
+            id: p.id,
+            pixels: (1920, 1080),
+            aspect: 16.0 / 9.0,
+            picture: p
+                .display
+                .and_then(|d| crate::app::throw_picture(show, d, groups)),
+        })
+        .collect()
+}
+
+/// Each display's group, as `update_outputs` makes them (here with no
+/// layers): its own keystone and part, placed on a monitor's area.
+fn groups_of(show: &Show) -> HashMap<OutputId, OutputGroup> {
+    show.outputs
+        .iter()
+        .map(|o| {
+            let part = show.part_of(o.id).map(|p| p.area).unwrap_or(WHOLE);
+            let pin = crate::gpu::corner_pin(&[
+                [part[0], part[1]],
+                [part[0] + part[2], part[1]],
+                [part[0] + part[2], part[1] + part[3]],
+                [part[0], part[1] + part[3]],
+            ]);
+            let placed = crate::gpu::compose(
+                &crate::gpu::corner_pin(&[[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]]),
+                &pin,
+            );
+            (
+                o.id,
+                OutputGroup {
+                    layers: Vec::new(),
+                    geometry: crate::gpu::Geometry {
+                        canvas: (1920, 1080),
+                        warp: placed,
+                        pin,
+                        mesh: None,
+                        slice: crate::gpu::Geometry::WHOLE,
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_projector_throws_what_its_window_sends_with_its_blend_not_where_it_sits() {
+    let (mut show, [left, _]) = blended_pair_show();
+    let groups = groups_of(&show);
+    let display = show.projector(left).unwrap().display.unwrap();
+    let t = crate::app::throw_picture(&show, display, &groups).unwrap();
+    // Its keystone and part, not its place on the monitor.
+    assert_eq!(t.groups.len(), 1);
+    assert_eq!(t.groups[0].geometry.warp, groups[&display].geometry.pin);
+    assert_ne!(t.groups[0].geometry.warp, groups[&display].geometry.warp);
+    // Its edge blend: the left projector fades at its right.
+    assert_eq!(t.blend.right, 0.25);
+    assert_eq!(t.blend.left, 0.0);
+    // A sub display is in it, in its area.
+    let sub = show.add_sub_display(display);
+    let groups = groups_of(&show);
+    let t = crate::app::throw_picture(&show, display, &groups).unwrap();
+    assert_eq!(t.groups.len(), 2);
+    let _ = sub;
+    // A display that shows the stage throws none (never drawn from itself),
+    // nor one that isn't on.
+    let wide = show.part_of(display).unwrap().display;
+    show.outputs
+        .iter_mut()
+        .find(|o| o.id == wide)
+        .unwrap()
+        .source = Some(StageSource::default());
+    assert!(crate::app::throw_picture(&show, display, &groups).is_none());
+    assert!(crate::app::throw_picture(&show, OutputId(999_999), &groups).is_none());
+}
+
+#[test]
+fn the_light_puts_the_projectors_in_the_scene_and_their_pictures_in_jobs() {
+    let (mut show, [left, right]) = blended_pair_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    let groups = groups_of(&show);
+    let (key, jobs) = live.light_up(&show, &projector_throws(&show, &groups));
+    assert_eq!(live.lit_scene.throws.len(), 2);
+    assert_eq!(live.lit_scene.parts.len(), live.scene.parts.len());
+    assert!(live.lit_scene.throws.iter().all(|t| t.picture && t.on));
+    assert_eq!(
+        jobs.iter().map(|j| j.layer).collect::<Vec<_>>(),
+        [0, 1],
+        "one layer each, in order"
+    );
+    assert_eq!(jobs[0].blend.right, 0.25);
+    assert_eq!(jobs[1].blend.left, 0.25);
+    // The same again: the same scene (not made again), the same key.
+    let scene = live.lit_scene.clone();
+    let (again, _) = live.light_up(&show, &projector_throws(&show, &groups));
+    assert_eq!(again, key);
+    assert!(Arc::ptr_eq(&scene, &live.lit_scene));
+    // A blend's width changes what is sent, not where the light goes.
+    let display = show.projector(left).unwrap().display.unwrap();
+    show.outputs
+        .iter_mut()
+        .find(|o| o.id == display)
+        .unwrap()
+        .blend
+        .right = 0.1;
+    let (wider, _) = live.light_up(&show, &projector_throws(&show, &groups));
+    assert_ne!(wider, key);
+    assert!(Arc::ptr_eq(&scene, &live.lit_scene));
+    // A projector moved: the scene's light is made again.
+    show.projector_mut(right).unwrap().placement.position[0] += 1.0;
+    live.light_up(&show, &projector_throws(&show, &groups));
+    assert!(!Arc::ptr_eq(&scene, &live.lit_scene));
+    // One with no display throws white; one hidden throws nothing.
+    show.projector_mut(right).unwrap().display = None;
+    show.projector_mut(left).unwrap().visible = false;
+    let (_, jobs) = live.light_up(&show, &projector_throws(&show, &groups));
+    assert!(jobs.is_empty());
+    assert_eq!(live.lit_scene.throws.len(), 1);
+    assert!(!live.lit_scene.throws[0].picture);
+    // At most sixteen.
+    for _ in 0..20 {
+        show.add_projector();
+    }
+    live.light_up(&show, &projector_throws(&show, &groups));
+    assert_eq!(
+        live.lit_scene.throws.len(),
+        crate::stage3d::light::MAX_THROWS
+    );
+}
+
+/// A view with its light on draws the projectors' light, and the one beside
+/// it with its light off doesn't; a view with its light on that the
+/// governor holds back sends no job, so no picture is drawn for it.
+#[test]
+fn only_a_view_with_its_light_on_is_lit() {
+    let Some(gpu) = crate::gpu::Gpu::headless() else {
+        assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+        return;
+    };
+    let (show, _) = blended_pair_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    let groups = groups_of(&show);
+    let throws = projector_throws(&show, &groups);
+    let ask = |shared: &mut StageShared, id: PreviewId, light| {
+        shared.requests.push(crate::ui::stage_view::ViewRequest {
+            id,
+            size: (64, 36),
+            camera: Camera::default(),
+            options: Options {
+                light,
+                ..Options::default()
+            },
+            lines: Default::default(),
+        })
+    };
+    let (lit, plain) = (PreviewId::Stage(1), PreviewId::Stage(2));
+    ask(&mut shared, lit, crate::render3d::LightView::Picture);
+    ask(&mut shared, plain, crate::render3d::LightView::Off);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[],
+        &HashMap::new(),
+        &throws,
+        true,
+    );
+    wait(&mut live);
+    // Asked again, so the stats are read.
+    ask(&mut shared, lit, crate::render3d::LightView::Picture);
+    ask(&mut shared, plain, crate::render3d::LightView::Off);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[],
+        &HashMap::new(),
+        &throws,
+        false,
+    );
+    wait(&mut live);
+    assert_eq!(shared.stats[&lit].throws, 2);
+    assert!(!shared.stats[&lit].light_left_out);
+    assert_eq!(shared.stats[&plain].throws, 0);
+    // Nothing asked: no job.
+    let serial = live.serial;
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[],
+        &HashMap::new(),
+        &throws,
+        true,
+    );
+    assert_eq!(live.serial, serial);
     if let Some(h) = live.forget_device(&mut shared) {
         h.join().unwrap();
     }

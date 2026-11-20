@@ -2740,12 +2740,26 @@ impl App {
         }
 
         self.update_streams(&groups);
+        // The projectors in the 3D stage, for the views with their light on:
+        // each one's shape and what its display sends.
+        let light_asked = self
+            .ui
+            .stage
+            .requests
+            .iter()
+            .any(|r| r.options.light != crate::render3d::LightView::Off);
+        let projectors = if light_asked {
+            projector_throws(&self.show, &self.ui, &groups)
+        } else {
+            Vec::new()
+        };
         self.stage_busy = self.stage.send(
             gpu,
             &self.show,
             &mut self.ui.stage,
             &stage_outputs,
             &pictures,
+            &projectors,
             playing || was_waiting,
         ) || self.stage.venue_busy();
 
@@ -4618,6 +4632,74 @@ fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, u
     }
     // Declined, or the question couldn't be asked: keep the copy, out of the way.
     recovery::set_aside(rec);
+}
+
+/// Each visible projector of the 3D stage, as the views with their light on
+/// throw it: its shape (as the views' lines have it) and what its display's
+/// window sends (`throw_picture`).
+fn projector_throws(
+    show: &Show,
+    ui: &UiState,
+    groups: &HashMap<OutputId, OutputGroup>,
+) -> Vec<crate::stage_live::ProjectorThrow> {
+    show.stage3d
+        .projectors
+        .iter()
+        .filter(|p| p.visible)
+        .map(|p| {
+            let (pixels, aspect) = crate::ui::stage_projectors::shape_of(show, ui, p);
+            crate::stage_live::ProjectorThrow {
+                id: p.id,
+                pixels,
+                aspect,
+                picture: p.display.and_then(|d| throw_picture(show, d, groups)),
+            }
+        })
+        .collect()
+}
+
+/// What display `id`'s window sends: its layers through its own keystone,
+/// mesh and part of a picture (not where the window sits on its monitor),
+/// with its sub displays in their areas, and its edge blend. None for a
+/// display that isn't on here, or one that shows the stage (the stage is
+/// never drawn from itself).
+pub(crate) fn throw_picture(
+    show: &Show,
+    id: OutputId,
+    groups: &HashMap<OutputId, OutputGroup>,
+) -> Option<crate::stage_live::ThrowPicture> {
+    let o = show.output(id)?;
+    if show.shows_stage(id) || o.is_sub_display() {
+        return None;
+    }
+    let own = groups.get(&id)?;
+    let pin = own.geometry.pin;
+    let mut list = vec![OutputGroup {
+        layers: own.layers.clone(),
+        geometry: Geometry {
+            warp: pin,
+            ..own.geometry.clone()
+        },
+    }];
+    for s in show.outputs.iter().filter(|s| s.within == Some(id)) {
+        if let Some(g) = groups.get(&s.id) {
+            let warp = gpu::compose(&pin, &gpu::corner_pin(&s.area.0));
+            list.push(OutputGroup {
+                layers: g.layers.clone(),
+                geometry: Geometry {
+                    canvas: g.geometry.canvas,
+                    warp,
+                    pin: warp,
+                    mesh: None,
+                    slice: Geometry::WHOLE,
+                },
+            });
+        }
+    }
+    Some(crate::stage_live::ThrowPicture {
+        groups: list,
+        blend: o.blend.clamped(),
+    })
 }
 
 #[cfg(test)]

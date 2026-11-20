@@ -14,8 +14,12 @@ use crate::preview_pace::PreviewId;
 use crate::render::{OutputGroup, OutputLayer};
 use crate::render3d::{self, Camera, Options, Scene};
 use crate::show::{OutputId, Show};
-use crate::stage_render::{FeedJob, StageJob, StageThread, ViewJob, feed_size};
+use crate::stage_render::{
+    FeedJob, StageJob, StageThread, ThrowJob, ViewJob, feed_size, throw_size,
+};
+use crate::stage3d::ProjectorId;
 use crate::stage3d::Venue;
+use crate::stage3d::light::{self, MAX_THROWS};
 use crate::stage3d::load::{Found, LoadedVenue, Unread, load_venue_with};
 use crate::stage3d::samples::SampleVenue;
 use crate::ui::stage_view::{StageShared, VenueStatus};
@@ -67,6 +71,28 @@ pub struct StageOutput {
     pub seen: bool,
     /// For one not `seen`: whether the previews' pace lets it be drawn now.
     pub due: bool,
+}
+
+/// A projector, as the views with their light on throw its light: its shape
+/// (as the 3D views' lines have it, `stage_projectors::shape_of`) and what
+/// its display sends.
+#[derive(Clone)]
+pub struct ProjectorThrow {
+    pub id: ProjectorId,
+    pub pixels: (u32, u32),
+    pub aspect: f32,
+    /// None: it has no display here (or none that can be drawn): it throws
+    /// plain white.
+    pub picture: Option<ThrowPicture>,
+}
+
+/// What a projector's display sends: what its window shows (its layers
+/// through its keystone or mesh and its part of a picture, its sub displays),
+/// and its edge blend.
+#[derive(Clone)]
+pub struct ThrowPicture {
+    pub groups: Vec<OutputGroup>,
+    pub blend: crate::show::EdgeBlend,
 }
 
 /// What a display's picture is made of, for drawing it as the stage shows it.
@@ -140,6 +166,10 @@ pub struct StageLive {
     /// When each preview last asked for a picture (a pane closed lets its
     /// target go after `PREVIEW_KEPT`).
     asked_at: HashMap<PreviewId, Instant>,
+    /// The scene with the projectors' light in it, for the views with their
+    /// light on, and its key (made again only when that changes).
+    lit_scene: Arc<Scene>,
+    lit_key: u64,
 }
 
 /// A preview's target is kept this long after it last asked for a picture.
@@ -437,6 +467,7 @@ impl StageLive {
     /// first: while the thread is behind with them, the previews (and the
     /// displays only the previews show) wait. Returns whether a job is
     /// still being drawn.
+    #[allow(clippy::too_many_arguments)]
     pub fn send(
         &mut self,
         gpu: &Gpu,
@@ -444,6 +475,7 @@ impl StageLive {
         shared: &mut StageShared,
         outputs: &[StageOutput],
         pictures: &HashMap<OutputId, PictureLayers>,
+        projectors: &[ProjectorThrow],
         fresh: bool,
     ) -> bool {
         let now = Instant::now();
@@ -469,10 +501,20 @@ impl StageLive {
         } else {
             feeds_key(show, &self.scene, pictures)
         };
+        // The projectors' light, for the views with their light on.
+        let lit_asked = asked
+            .iter()
+            .any(|r| r.options.light != render3d::LightView::Off);
+        let (throws_key, throw_jobs) = if lit_asked {
+            self.light_up(show, projectors)
+        } else {
+            (0, Vec::new())
+        };
         let mut views = Vec::new();
         // What each view is drawn with, once it is handed over.
         let mut marks = Vec::new();
         let mut scale = 0.0f32;
+        let mut lit_scale = 0.0f32;
         for o in outputs {
             let key = ViewKey::Output(o.id);
             let Some(target) = self.targets.get(&key).cloned() else {
@@ -515,22 +557,31 @@ impl StageLive {
             if displays_behind {
                 continue;
             }
+            let lit = r.options.light != render3d::LightView::Off;
             let sig = signature(
-                self.scene_key,
+                if lit { self.lit_key } else { self.scene_key },
                 &r.camera,
                 &r.options,
                 &target,
-                pictures_key,
+                pictures_key ^ if lit { throws_key } else { 0 },
                 &r.lines,
             );
             if fresh || self.drawn_with.get(&key) != Some(&sig) {
                 marks.push((key, sig));
-                scale = scale.max(r.options.quality.scale.clamp(0.1, 1.0));
+                let s = r.options.quality.scale.clamp(0.1, 1.0);
+                scale = scale.max(s);
+                if lit {
+                    lit_scale = lit_scale.max(s);
+                }
                 views.push(ViewJob {
                     key: key.number(),
                     display: false,
                     target,
-                    scene: self.scene.clone(),
+                    scene: if lit {
+                        self.lit_scene.clone()
+                    } else {
+                        self.scene.clone()
+                    },
                     camera: r.camera,
                     options: r.options,
                     lines: r.lines,
@@ -564,8 +615,16 @@ impl StageLive {
                     let feeds = feed_jobs(show, &self.scene, pictures, scale);
                     self.serial += 1;
                     // Displays first (`StageJob::merged` keeps them so).
+                    // The projectors' pictures, only for a view with its light on.
+                    let (throws, throw_size) = if lit_scale > 0.0 {
+                        (throw_jobs, throw_size(lit_scale))
+                    } else {
+                        (Vec::new(), (0, 0))
+                    };
                     let job = StageJob {
                         feeds,
+                        throws,
+                        throw_size,
                         views,
                         serial: self.serial,
                     }
@@ -594,6 +653,55 @@ impl StageLive {
             self.restart_wanted = false;
         }
         self.busy()
+    }
+
+    /// The scene with the projectors' light in it (`lit_scene`, made again
+    /// when it changes), a key for what their displays send (a view with its
+    /// light on is drawn again when it changes: a blend's width, a still),
+    /// and the jobs that draw their pictures.
+    fn light_up(&mut self, show: &Show, projectors: &[ProjectorThrow]) -> (u64, Vec<ThrowJob>) {
+        let mut throws = Vec::new();
+        let mut jobs = Vec::new();
+        let mut h = crate::stage3d::scene::Fnv::new();
+        for pt in projectors {
+            if throws.len() >= MAX_THROWS {
+                break;
+            }
+            let Some(p) = show.projector(pt.id).filter(|p| p.visible) else {
+                continue;
+            };
+            let layer = throws.len() as u32;
+            throws.push(light::throw_of(
+                p,
+                pt.aspect,
+                pt.pixels,
+                layer,
+                pt.picture.is_some(),
+            ));
+            if let Some(pic) = &pt.picture {
+                h.bytes(&layer.to_le_bytes());
+                for g in &pic.groups {
+                    groups_key(&mut h, g);
+                }
+                h.bytes(format!("{:?}", pic.blend).as_bytes());
+                jobs.push(ThrowJob {
+                    layer,
+                    groups: pic.groups.clone(),
+                    blend: pic.blend,
+                });
+            }
+        }
+        let mut k = crate::stage3d::scene::Fnv::new();
+        k.bytes(&self.scene_key.to_le_bytes());
+        k.bytes(format!("{throws:?}").as_bytes());
+        if k.0 != self.lit_key || self.lit_scene.parts.len() != self.scene.parts.len() {
+            self.lit_key = k.0;
+            self.lit_scene = Arc::new(Scene {
+                parts: self.scene.parts.clone(),
+                throws,
+            });
+        }
+        (h.0, jobs)
     }
 
     /// Whether the thread is drawing a job handed over (a thread that has
@@ -790,6 +898,30 @@ pub fn feeds_key(show: &Show, scene: &Scene, pictures: &HashMap<OutputId, Pictur
         }
     }
     h.0
+}
+
+/// Into `h`: what a group's picture is made of and how it is placed (each
+/// layer's texture, whether it holds a picture yet, its look; the keystone,
+/// mesh and part).
+fn groups_key(h: &mut crate::stage3d::scene::Fnv, g: &OutputGroup) {
+    let geo = &g.geometry;
+    h.bytes(
+        format!(
+            "{:?}{:?}{:?}{:?}{:?}",
+            geo.canvas,
+            geo.warp,
+            geo.pin,
+            geo.slice,
+            geo.mesh.as_deref()
+        )
+        .as_bytes(),
+    );
+    for l in &g.layers {
+        h.bytes(&(Arc::as_ptr(&l.texture) as usize).to_le_bytes());
+        h.bytes(&[u8::from(l.texture.is_filled())]);
+        h.bytes(&l.opacity.to_bits().to_le_bytes());
+        h.bytes(format!("{:?}{:?}{:?}{:?}", l.fit, l.transform, l.color, l.fx).as_bytes());
+    }
 }
 
 /// Around what `scene` shows: its screens' corners, and the venue's box
