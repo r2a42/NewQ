@@ -108,6 +108,8 @@ pub fn surface_mesh(shape: &SurfaceShape) -> Vec<Piece> {
                 region: region(f.uv),
             })
             .collect(),
+        // A later NewQ's shape: nothing this one can draw.
+        SurfaceShape::Unknown(_) => Vec::new(),
     }
 }
 

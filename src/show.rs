@@ -736,8 +736,13 @@ pub struct OutputConfig {
     pub area: Corners,
     /// Display: its picture is the 3D stage seen from a viewpoint, not its
     /// cues (`stage3d::StageSource`). None, and unwritten, for a display that
-    /// shows its cues as always.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// shows its cues as always. A source a later NewQ wrote that this one
+    /// doesn't know reads as None (`stage3d::lenient_option`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::stage3d::lenient_option"
+    )]
     pub source: Option<crate::stage3d::StageSource>,
     /// Older shows: where an output was placed, folded into the fields
     /// above by `Show::migrate_legacy`.
@@ -4060,6 +4065,7 @@ impl Show {
             }
         }
         show.sanitize_blending();
+        show.sanitize_stage();
         show.forget_missing_feeds();
         // Guard against hand-edited files with stale counters.
         let max_id = show

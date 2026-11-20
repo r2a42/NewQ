@@ -2504,7 +2504,7 @@ impl App {
             let engine_layers = self.engine.layers(source);
             // A display that shows the 3D stage (or whose whole picture does)
             // has the stage's picture in place of its cues.
-            let stage_source = self.show.output(source).and_then(|o| o.source.clone());
+            let stage_source = self.show.stage_source(id).cloned();
             let has_picture = !engine_layers.is_empty() || stage_source.is_some();
             // An output only the previews show here (no window, no stream) is
             // preview work: while the previews give way, its pictures are

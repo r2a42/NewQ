@@ -47,8 +47,40 @@ pub struct Stage3d {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub viewpoints: Vec<Viewpoint>,
     /// How lengths are shown to the user. Kept in metres whatever this says.
-    #[serde(default, skip_serializing_if = "LengthUnit::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "LengthUnit::is_default",
+        deserialize_with = "lenient"
+    )]
     pub units: LengthUnit,
+}
+
+/// A value a later NewQ may write in a way this one doesn't know (a new
+/// unit, a new axis, a new kind of stage source): read as its default, with
+/// a line in the log, rather than refusing the whole show.
+pub fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(T::deserialize(&value).unwrap_or_else(|e| {
+        log::warn!("3D stage: {value} isn't known to this NewQ ({e}); its default is used");
+        T::default()
+    }))
+}
+
+/// `lenient` for an optional value: one this NewQ doesn't know is None.
+pub fn lenient_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(Option::<T>::deserialize(&value).unwrap_or_else(|e| {
+        log::warn!("3D stage: {value} isn't known to this NewQ ({e}); it is left out");
+        None
+    }))
 }
 
 /// A length unit: what a model file's numbers are in, or how the stage's
@@ -203,9 +235,17 @@ pub struct Venue {
     #[serde(default, skip_serializing_if = "Placement::is_default")]
     pub placement: Placement,
     /// What the file's numbers are in (OBJ has no units; glTF is metres).
-    #[serde(default, skip_serializing_if = "LengthUnit::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "LengthUnit::is_default",
+        deserialize_with = "lenient"
+    )]
     pub units: LengthUnit,
-    #[serde(default, skip_serializing_if = "UpAxis::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "UpAxis::is_default",
+        deserialize_with = "lenient"
+    )]
     pub up: UpAxis,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub visible: bool,
@@ -313,6 +353,17 @@ pub enum SurfaceShape {
     Faceted {
         facets: Vec<Facet>,
     },
+    /// A shape a later NewQ wrote that this one doesn't know: kept as it was
+    /// written (and written back so when saved), drawn as nothing here.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
+}
+
+impl SurfaceShape {
+    /// Whether this NewQ knows the shape (can draw and edit it).
+    pub fn is_known(&self) -> bool {
+        !matches!(self, SurfaceShape::Unknown(_))
+    }
 }
 
 impl Default for SurfaceShape {
@@ -353,6 +404,10 @@ pub enum Feed {
         #[serde(default = "whole", skip_serializing_if = "is_whole")]
         region: [f32; 4],
     },
+    /// A feed a later NewQ wrote that this one doesn't know: kept as it was
+    /// written, showing nothing here.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 impl Feed {
@@ -372,7 +427,7 @@ impl Feed {
 
     pub fn output(&self) -> Option<OutputId> {
         match self {
-            Feed::None => None,
+            Feed::None | Feed::Unknown(_) => None,
             Feed::Display { output, .. } => Some(*output),
         }
     }
@@ -589,8 +644,94 @@ impl Show {
     /// Whether display `output` shows the 3D stage, itself or as the
     /// display whose picture it shows a part of.
     pub fn shows_stage(&self, output: OutputId) -> bool {
-        let has = |o: OutputId| self.output(o).is_some_and(|c| c.source.is_some());
-        has(output) || has(self.whole_picture(output))
+        self.stage_source(output).is_some()
+    }
+
+    /// How display `output`'s picture shows the stage, if it does: the
+    /// source of the display whose whole picture it shows (itself, or the one
+    /// it shows part of). A sub display never shows the stage (it is an area
+    /// of a display's picture; `sanitize_stage` clears one written by hand).
+    pub fn stage_source(&self, output: OutputId) -> Option<&StageSource> {
+        let whole = self.whole_picture(output);
+        let c = self.output(whole)?;
+        if c.is_sub_display() {
+            return None;
+        }
+        c.source.as_ref()
+    }
+
+    /// Whether display `output` may be given a stage source of its own: a
+    /// display that shows part of another's picture shows that one's, and a
+    /// sub display is an area of another's (None: it may; Some: why not).
+    pub fn stage_source_refused(&self, output: OutputId) -> Option<&'static str> {
+        let c = self.output(output)?;
+        if c.is_sub_display() {
+            Some("A sub display is an area of another display's picture: it can't show the stage.")
+        } else if self.part_of(output).is_some() {
+            Some(
+                "This display shows part of another display's picture: set the stage on that \
+                 display, and this one shows its part.",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Rename viewpoint `index` to `name`, and every display that shows the
+    /// stage from it with it (in the one edit, so one undo step): a display's
+    /// source names its viewpoint. Refused (false, nothing changed) for an
+    /// empty name or one another viewpoint has, so two viewpoints never
+    /// share a name and a display never moves to another's.
+    pub fn rename_viewpoint(&mut self, index: usize, name: &str) -> bool {
+        let name = name.trim();
+        let taken = self
+            .stage3d
+            .viewpoints
+            .iter()
+            .enumerate()
+            .any(|(i, v)| i != index && v.name == name);
+        let Some(v) = self.stage3d.viewpoints.get_mut(index) else {
+            return false;
+        };
+        if name.is_empty() || taken {
+            return false;
+        }
+        if v.name == name {
+            return true;
+        }
+        let old = std::mem::replace(&mut v.name, name.to_string());
+        for o in &mut self.outputs {
+            if let Some(s) = &mut o.source
+                && s.viewpoint.as_deref() == Some(old.as_str())
+            {
+                s.viewpoint = Some(name.to_string());
+            }
+        }
+        true
+    }
+
+    /// Put right what a hand-edited (or a later NewQ's) file may say: a sub
+    /// display that shows the stage (it would draw a picture within itself).
+    /// Two viewpoints of one name (the second is named again: a display's
+    /// source names the first).
+    pub fn sanitize_stage(&mut self) {
+        // (`is_sub_display` reads only the display itself.)
+        for o in &mut self.outputs {
+            if o.is_sub_display() && o.source.take().is_some() {
+                log::warn!("3D stage: the sub display {} can't show the stage", o.name);
+            }
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for v in &mut self.stage3d.viewpoints {
+            if seen.contains(&v.name) {
+                let mut n = 2;
+                while seen.contains(&format!("{} {n}", v.name)) {
+                    n += 1;
+                }
+                v.name = format!("{} {n}", v.name);
+            }
+            seen.push(v.name.clone());
+        }
     }
 
     /// The camera a display showing the stage sees it with: its viewpoint,
