@@ -327,7 +327,7 @@ fn operator(
                 .show(ui, |ui| {
                     running(ui, show, engine, actions);
                     ui.add_space(10.0);
-                    output_previews(ui, show, st, false);
+                    output_previews(ui, show, st, false, crate::dock::OPERATOR_PREVIEW);
                     ui.add_space(10.0);
                     gear(ui, show, engine, st);
                 });

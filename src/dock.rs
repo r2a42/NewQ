@@ -5,41 +5,62 @@
 
 use egui_dock::{DockState, NodeIndex, TabPath};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// A part of the main window that can be moved, popped out or hidden.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pane {
     Cues,
     Inspector,
     Cart,
-    Preview,
+    /// A Preview pane, by its instance: there can be several, each with its
+    /// own mode and output (`Layout::previews`). 0 is the first, the one there
+    /// has always been.
+    Preview(u8),
     Active,
     Settings,
     /// The timeline editor (opened under the cue list).
     Timeline,
 }
 
+/// The first Preview pane.
+pub const PREVIEW: Pane = Pane::Preview(0);
+
+/// Preview hosts that are not panes, with settings of their own in
+/// `Layout::previews` and render slots and governor ids of their own: the new
+/// interface's Operator view.
+pub const OPERATOR_PREVIEW: u8 = 255;
+/// And the timeline workspace's monitor (one output, chosen in its own menu).
+pub const WORKSPACE_PREVIEW: u8 = 254;
+/// Instances below this are Preview panes.
+pub const PANE_INSTANCES: u8 = 250;
+
 impl Pane {
+    /// One of each kind (the first Preview only): what the Window menu lists.
     pub const ALL: [Pane; 7] = [
         Pane::Cues,
         Pane::Inspector,
         Pane::Cart,
-        Pane::Preview,
+        PREVIEW,
         Pane::Active,
         Pane::Settings,
         Pane::Timeline,
     ];
 
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> String {
         match self {
-            Pane::Cues => "Cue list",
-            Pane::Inspector => "Inspector",
-            Pane::Cart => "Cart",
-            Pane::Preview => "Preview",
-            Pane::Active => "Active",
-            Pane::Settings => "Settings",
-            Pane::Timeline => "Timeline",
+            Pane::Preview(n) if n > 0 => format!("Preview {}", u32::from(n) + 1),
+            Pane::Cues => "Cue list".into(),
+            p => p.name().into(),
+        }
+    }
+
+    /// The Preview pane's instance, if it is one.
+    pub fn preview(self) -> Option<u8> {
+        match self {
+            Pane::Preview(n) => Some(n),
+            _ => None,
         }
     }
 
@@ -48,11 +69,121 @@ impl Pane {
         match self {
             Pane::Settings | Pane::Timeline => Some(Pane::Cues),
             Pane::Cart => Some(Pane::Inspector),
-            Pane::Active => Some(Pane::Preview),
-            Pane::Preview => Some(Pane::Active),
+            Pane::Active => Some(PREVIEW),
+            Pane::Preview(_) => Some(Pane::Active),
             Pane::Cues | Pane::Inspector => None,
         }
     }
+
+    /// The name it is written by.
+    fn name(self) -> &'static str {
+        match self {
+            Pane::Cues => "Cues",
+            Pane::Inspector => "Inspector",
+            Pane::Cart => "Cart",
+            Pane::Preview(_) => "Preview",
+            Pane::Active => "Active",
+            Pane::Settings => "Settings",
+            Pane::Timeline => "Timeline",
+        }
+    }
+}
+
+/// Written as before for every pane but a second (third…) Preview, which is
+/// `{"Preview": n}`: a layout with one preview reads the same to an older NewQ.
+impl Serialize for Pane {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Pane::Preview(n) if *n != 0 => {
+                use serde::ser::SerializeMap;
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("Preview", n)?;
+                m.end()
+            }
+            p => s.serialize_str(p.name()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Pane {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Pane, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        match &v {
+            serde_json::Value::String(name) => Pane::ALL
+                .into_iter()
+                .find(|p| p.name() == name)
+                .ok_or_else(|| D::Error::custom(format!("no pane called {name}"))),
+            serde_json::Value::Object(m) if m.len() == 1 => m
+                .get("Preview")
+                .and_then(|n| n.as_u64())
+                .and_then(|n| u8::try_from(n).ok())
+                .filter(|n| *n < PANE_INSTANCES)
+                .map(Pane::Preview)
+                .ok_or_else(|| D::Error::custom("not a pane")),
+            _ => Err(D::Error::custom("not a pane")),
+        }
+    }
+}
+
+/// What a Preview pane shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum PreviewMode {
+    /// One output, chosen in the pane's menu.
+    #[default]
+    Single,
+    /// Every output at once, or the show's multiview layout.
+    Multiview,
+    /// The show's 3D stage (`ui::stage_view`).
+    Stage,
+}
+
+/// A mode from a later NewQ that this one doesn't know reads as Single.
+impl<'de> Deserialize<'de> for PreviewMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<PreviewMode, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(PreviewMode::ALL
+            .into_iter()
+            .find(|m| serde_json::to_value(m).ok().as_ref() == Some(&v))
+            .unwrap_or_default())
+    }
+}
+
+impl PreviewMode {
+    pub const ALL: [PreviewMode; 3] = [
+        PreviewMode::Single,
+        PreviewMode::Multiview,
+        PreviewMode::Stage,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PreviewMode::Single => "Single",
+            PreviewMode::Multiview => "Multiview",
+            PreviewMode::Stage => "3D",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            PreviewMode::Single => "One output, chosen in the menu beside",
+            PreviewMode::Multiview => "Every output at once, or the show's multiview layout",
+            PreviewMode::Stage => {
+                "The show's 3D stage, with each display's picture on its surfaces"
+            }
+        }
+    }
+}
+
+/// One preview's own settings, kept with the layout (per computer, not in the
+/// show): a Preview pane's, or the Operator view's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPane {
+    #[serde(default)]
+    pub mode: PreviewMode,
+    /// The output shown in Single mode (the first when unset or gone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::show::OutputId>,
 }
 
 /// A pane in a window of its own, and where that window was last.
@@ -71,6 +202,10 @@ pub struct Layout {
     pub dock: DockState<Pane>,
     #[serde(default)]
     pub popouts: Vec<Popout>,
+    /// Each preview's mode and output, by instance (`Pane::Preview(n)`, and
+    /// `OPERATOR_PREVIEW`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub previews: BTreeMap<u8, PreviewPane>,
 }
 
 impl Default for Layout {
@@ -79,12 +214,13 @@ impl Default for Layout {
     fn default() -> Layout {
         let mut dock = DockState::new(vec![Pane::Cues]);
         let tree = dock.main_surface_mut();
-        let [cues, right] = tree.split_right(NodeIndex::root(), 0.66, vec![Pane::Preview]);
+        let [cues, right] = tree.split_right(NodeIndex::root(), 0.66, vec![PREVIEW]);
         tree.split_below(cues, 0.56, vec![Pane::Inspector]);
         tree.split_below(right, 0.55, vec![Pane::Active]);
         Layout {
             dock,
             popouts: Vec::new(),
+            previews: BTreeMap::new(),
         }
     }
 }
@@ -172,6 +308,109 @@ impl Layout {
             self.dock.remove_tab(path);
         }
         self.popouts.retain(|p| p.pane != pane);
+        self.forget_closed_previews();
+    }
+
+    /// The Preview panes showing, docked or in windows of their own, by instance.
+    pub fn preview_panes(&self) -> Vec<u8> {
+        let mut v: Vec<u8> = self
+            .dock
+            .iter_all_tabs()
+            .map(|(_, p)| *p)
+            .chain(self.popouts.iter().map(|p| p.pane))
+            .filter_map(Pane::preview)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Preview `n`'s settings (the defaults if it has none yet).
+    pub fn preview(&self, n: u8) -> PreviewPane {
+        self.previews.get(&n).copied().unwrap_or_default()
+    }
+
+    /// Preview `n`'s settings, to change.
+    pub fn preview_mut(&mut self, n: u8) -> &mut PreviewPane {
+        self.previews.entry(n).or_default()
+    }
+
+    /// Forget the settings of the Preview panes that are gone (a tab's close
+    /// button takes it away without asking `close`), but never the first's
+    /// nor the other hosts'. The instances forgotten.
+    pub fn forget_closed_previews(&mut self) -> Vec<u8> {
+        let open = self.preview_panes();
+        let gone: Vec<u8> = self
+            .previews
+            .keys()
+            .copied()
+            .filter(|n| *n != 0 && *n < PANE_INSTANCES && !open.contains(n))
+            .collect();
+        for n in &gone {
+            self.previews.remove(n);
+        }
+        gone
+    }
+
+    /// 0.24's Multiview button was one setting for the Preview pane and the
+    /// Operator view (`Prefs::multiview`): on, they show the multiview, unless
+    /// a mode of their own is already kept. Whether there was anything to take.
+    pub fn take_old_multiview(&mut self, on: bool) -> bool {
+        if on {
+            for n in [0, OPERATOR_PREVIEW] {
+                self.previews.entry(n).or_insert(PreviewPane {
+                    mode: PreviewMode::Multiview,
+                    output: None,
+                });
+            }
+        }
+        on
+    }
+
+    /// The lowest Preview instance not showing (a closed one's number is free
+    /// again), with fresh settings unless it is the first.
+    fn free_preview(&mut self) -> Option<Pane> {
+        let open = self.preview_panes();
+        let n = (0..PANE_INSTANCES).find(|n| !open.contains(n))?;
+        if n != 0 {
+            self.previews.insert(n, PreviewPane::default());
+        }
+        Some(Pane::Preview(n))
+    }
+
+    /// One more Preview pane, docked beside the first docked preview (side by
+    /// side, sharing its space) or, with none docked, where a preview goes.
+    /// None when there are as many as there can be.
+    pub fn new_preview(&mut self) -> Option<Pane> {
+        let pane = self.free_preview()?;
+        let beside = self
+            .dock
+            .iter_all_tabs()
+            .find_map(|(_, p)| p.preview().map(|_| *p))
+            .and_then(|p| self.docked_path(p));
+        match beside {
+            Some(path) => {
+                self.dock.split(
+                    egui_dock::NodePath {
+                        surface: path.surface,
+                        node: path.node,
+                    },
+                    egui_dock::Split::Right,
+                    0.5,
+                    egui_dock::Node::leaf_with(vec![pane]),
+                );
+            }
+            None => self.open(pane),
+        }
+        Some(pane)
+    }
+
+    /// One more Preview pane, in a window of its own (where there is no dock:
+    /// the new interface).
+    pub fn new_preview_window(&mut self) -> Option<Pane> {
+        let pane = self.free_preview()?;
+        self.pop_out(pane);
+        Some(pane)
     }
 
     pub fn toggle(&mut self, pane: Pane) {
@@ -239,9 +478,10 @@ impl Layout {
             .filter(Layout::is_valid)
             // Never start with nothing to see. The cue list itself is not
             // needed: the cart alone is a fine arrangement.
-            .filter(|l| Pane::ALL.iter().any(|p| l.is_open(*p)))
+            .filter(|l| !l.docked_panes().is_empty() || !l.popouts.is_empty())
             .unwrap_or_default();
         layout.forget_impossible_places();
+        layout.forget_closed_previews();
         // Whatever tab was in front when it was saved (the settings page, say),
         // the cue list is what a show opens to.
         if let Some(path) = layout.docked_path(Pane::Cues) {
@@ -323,12 +563,7 @@ mod tests {
         assert!(l.is_valid());
         assert_eq!(
             sorted(l.docked_panes()),
-            sorted(vec![
-                Pane::Cues,
-                Pane::Inspector,
-                Pane::Preview,
-                Pane::Active
-            ])
+            sorted(vec![Pane::Cues, Pane::Inspector, PREVIEW, Pane::Active])
         );
         // The cart and the settings are not shown until asked for.
         assert!(!l.is_open(Pane::Cart) && !l.is_open(Pane::Settings));
@@ -379,26 +614,26 @@ mod tests {
     #[test]
     fn a_popped_out_pane_leaves_the_window_and_comes_back() {
         let mut l = Layout::default();
-        l.pop_out(Pane::Preview);
-        assert!(l.is_popped_out(Pane::Preview) && !l.is_docked(Pane::Preview));
-        assert!(l.is_open(Pane::Preview) && l.is_valid());
+        l.pop_out(PREVIEW);
+        assert!(l.is_popped_out(PREVIEW) && !l.is_docked(PREVIEW));
+        assert!(l.is_open(PREVIEW) && l.is_valid());
         // Popping out again, or opening it, changes nothing.
-        l.pop_out(Pane::Preview);
-        l.open(Pane::Preview);
+        l.pop_out(PREVIEW);
+        l.open(PREVIEW);
         assert_eq!(l.popouts.len(), 1);
         // Its window's place is remembered.
-        l.set_popout_geometry(Pane::Preview, Some([100.0, 50.0]), [640.0, 480.0]);
+        l.set_popout_geometry(PREVIEW, Some([100.0, 50.0]), [640.0, 480.0]);
         assert_eq!(l.popouts[0].pos, Some([100.0, 50.0]));
-        l.set_popout_geometry(Pane::Preview, None, [700.0, 500.0]);
+        l.set_popout_geometry(PREVIEW, None, [700.0, 500.0]);
         assert_eq!(
             (l.popouts[0].pos, l.popouts[0].size),
             (Some([100.0, 50.0]), Some([700.0, 500.0]))
         );
         // Docking it back puts it beside the active list again, once.
-        l.dock_back(Pane::Preview);
-        assert!(l.is_docked(Pane::Preview) && l.popouts.is_empty() && l.is_valid());
+        l.dock_back(PREVIEW);
+        assert!(l.is_docked(PREVIEW) && l.popouts.is_empty() && l.is_valid());
         let (p, a) = (
-            l.dock.find_tab(&Pane::Preview).unwrap(),
+            l.dock.find_tab(&PREVIEW).unwrap(),
             l.dock.find_tab(&Pane::Active).unwrap(),
         );
         assert_eq!(p.node, a.node, "back beside its companion");
@@ -425,7 +660,7 @@ mod tests {
         assert!(l.is_valid() && l.is_docked(Pane::Inspector));
         // Everything popped out leaves the window empty too, and docking back works.
         let mut l = Layout::default();
-        for p in [Pane::Cues, Pane::Inspector, Pane::Preview, Pane::Active] {
+        for p in [Pane::Cues, Pane::Inspector, PREVIEW, Pane::Active] {
             l.pop_out(p);
         }
         assert!(l.docked_panes().is_empty() && l.popouts.len() == 4);
@@ -436,18 +671,13 @@ mod tests {
     #[test]
     fn reset_puts_everything_back() {
         let mut l = Layout::default();
-        l.pop_out(Pane::Preview);
+        l.pop_out(PREVIEW);
         l.open(Pane::Settings);
         l.close(Pane::Inspector);
         l.reset();
         assert_eq!(
             sorted(l.docked_panes()),
-            sorted(vec![
-                Pane::Cues,
-                Pane::Inspector,
-                Pane::Preview,
-                Pane::Active
-            ])
+            sorted(vec![Pane::Cues, Pane::Inspector, PREVIEW, Pane::Active])
         );
         assert!(l.popouts.is_empty());
     }
@@ -460,8 +690,8 @@ mod tests {
         assert!(Layout::load(&dir).is_docked(Pane::Inspector));
         let mut l = Layout::default();
         l.open(Pane::Settings);
-        l.pop_out(Pane::Preview);
-        l.set_popout_geometry(Pane::Preview, Some([10.0, 20.0]), [800.0, 600.0]);
+        l.pop_out(PREVIEW);
+        l.set_popout_geometry(PREVIEW, Some([10.0, 20.0]), [800.0, 600.0]);
         l.close(Pane::Inspector);
         l.save(&dir).unwrap();
         let back = Layout::load(&dir);
@@ -548,8 +778,8 @@ mod tests {
         let dir = std::env::temp_dir().join("newq_test_layout_places");
         let _ = std::fs::remove_dir_all(&dir);
         let mut l = Layout::default();
-        l.pop_out(Pane::Preview);
-        l.set_popout_geometry(Pane::Preview, Some([10.0, 20.0]), [800.0, 600.0]);
+        l.pop_out(PREVIEW);
+        l.set_popout_geometry(PREVIEW, Some([10.0, 20.0]), [800.0, 600.0]);
         l.pop_out(Pane::Active);
         // Off any screen, and no size at all. (JSON has no NaN or infinity,
         // and a number too big for a float is no layout at all.)
@@ -558,7 +788,7 @@ mod tests {
         let back = Layout::load(&dir);
         let find = |p: Pane| back.popouts.iter().find(|q| q.pane == p).copied().unwrap();
         assert_eq!(
-            (find(Pane::Preview).pos, find(Pane::Preview).size),
+            (find(PREVIEW).pos, find(PREVIEW).size),
             (Some([10.0, 20.0]), Some([800.0, 600.0]))
         );
         assert_eq!(
@@ -591,6 +821,111 @@ mod tests {
         );
         assert!(active(&back, Pane::Cues));
         assert!(!active(&back, Pane::Settings));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn several_previews_each_a_tab_of_its_own_with_its_own_settings() {
+        let mut l = Layout::default();
+        let second = l.new_preview().unwrap();
+        assert_eq!(second, Pane::Preview(1));
+        assert_eq!(second.title(), "Preview 2");
+        assert!(l.is_docked(PREVIEW) && l.is_docked(second) && l.is_valid());
+        // Side by side, not behind each other: both in front.
+        assert!(l.in_front(PREVIEW) && l.in_front(second));
+        assert_ne!(
+            l.dock.find_tab(&PREVIEW).unwrap().node,
+            l.dock.find_tab(&second).unwrap().node
+        );
+        l.preview_mut(1).mode = PreviewMode::Multiview;
+        let third = l.new_preview().unwrap();
+        assert_eq!(third, Pane::Preview(2));
+        assert_eq!(l.preview_panes(), vec![0, 1, 2]);
+        assert_eq!(l.preview(1).mode, PreviewMode::Multiview);
+        assert_eq!(l.preview(2).mode, PreviewMode::Single);
+        // Popped out, it keeps its mode, and comes back.
+        l.pop_out(second);
+        assert!(l.is_popped_out(second) && l.is_valid());
+        assert_eq!(l.preview(1).mode, PreviewMode::Multiview);
+        l.dock_back(second);
+        assert!(l.is_docked(second));
+        assert_eq!(l.preview(1).mode, PreviewMode::Multiview);
+        // Closed, its settings go and its number is free for the next.
+        l.close(second);
+        assert!(!l.previews.contains_key(&1));
+        assert_eq!(l.new_preview(), Some(Pane::Preview(1)));
+        assert_eq!(l.preview(1).mode, PreviewMode::Single);
+        // A tab's close button takes the tab without `close`: the settings go
+        // at the next look.
+        let path = l.dock.find_tab(&third).unwrap();
+        l.preview_mut(2).mode = PreviewMode::Stage;
+        l.dock.remove_tab(path);
+        assert_eq!(l.forget_closed_previews(), vec![2]);
+        // The first keeps its settings when closed, for when it is shown again;
+        // and so do the hosts that aren't panes.
+        l.preview_mut(0).mode = PreviewMode::Stage;
+        l.preview_mut(OPERATOR_PREVIEW).mode = PreviewMode::Multiview;
+        l.close(PREVIEW);
+        assert_eq!(l.preview(0).mode, PreviewMode::Stage);
+        assert_eq!(l.preview(OPERATOR_PREVIEW).mode, PreviewMode::Multiview);
+        // In a window of its own, where there is no dock.
+        let mut l = Layout::default();
+        let w = l.new_preview_window().unwrap();
+        assert_eq!(w, Pane::Preview(1));
+        assert!(l.is_popped_out(w) && l.is_valid());
+        // With no preview docked, a new one goes beside the active list.
+        let mut l = Layout::default();
+        l.close(PREVIEW);
+        assert_eq!(l.new_preview(), Some(PREVIEW));
+        assert_eq!(
+            l.dock.find_tab(&PREVIEW).unwrap().node,
+            l.dock.find_tab(&Pane::Active).unwrap().node
+        );
+    }
+
+    #[test]
+    fn a_layout_with_one_preview_is_written_as_before_and_more_round_trip() {
+        let dir = std::env::temp_dir().join(format!("newq_dock_previews_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The first Preview is written "Preview", as 0.24 does (and reads).
+        let one = serde_json::to_string(&Layout::default()).unwrap();
+        assert!(one.contains("\"Preview\""), "{one}");
+        assert!(!one.contains("previews"), "nothing new written: {one}");
+        // A layout 0.24 wrote loads as one Preview, in Single mode.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FILE), &one).unwrap();
+        let back = Layout::load(&dir);
+        assert_eq!(back.preview_panes(), vec![0]);
+        assert_eq!(back.preview(0).mode, PreviewMode::Single);
+        // Two, one popped out, with their modes and outputs.
+        let mut l = Layout::default();
+        let second = l.new_preview().unwrap();
+        l.preview_mut(1).mode = PreviewMode::Multiview;
+        l.preview_mut(0).output = Some(crate::show::OutputId(7));
+        l.pop_out(second);
+        let text = serde_json::to_string(&l).unwrap();
+        assert!(text.contains("{\"Preview\":1}"), "{text}");
+        l.save(&dir).unwrap();
+        let back = Layout::load(&dir);
+        assert!(back.is_valid() && back.is_popped_out(second) && back.is_docked(PREVIEW));
+        assert_eq!(back.previews, l.previews);
+        // A mode from a later NewQ reads as Single; a preview number out of
+        // range is no layout.
+        let later = text.replace("\"Multiview\"", "\"Hologram\"");
+        assert_eq!(
+            Layout::from_json(&later).unwrap().preview(1).mode,
+            PreviewMode::Single
+        );
+        assert!(Layout::from_json(&text.replace("{\"Preview\":1}", "{\"Preview\":251}")).is_none());
+        // A second Preview alone (the first closed) is something to see.
+        let mut l = Layout::default();
+        let second = l.new_preview().unwrap();
+        for p in Pane::ALL {
+            l.close(p);
+        }
+        assert_eq!(l.docked_panes(), vec![second]);
+        l.save(&dir).unwrap();
+        assert_eq!(Layout::load(&dir).docked_panes(), vec![second]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

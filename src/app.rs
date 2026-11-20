@@ -483,6 +483,22 @@ impl App {
         let layout_dir = crate::crash::log_dir();
         ui.layout = crate::dock::Layout::load(&layout_dir);
         ui.prefs = crate::prefs::Prefs::load(&layout_dir);
+        // 0.24's Multiview button becomes the previews' mode, once: the
+        // setting is never written again.
+        if ui
+            .layout
+            .take_old_multiview(std::mem::take(&mut ui.prefs.multiview))
+        {
+            // The old setting goes only once the layout holds the modes.
+            match ui.layout.save(&layout_dir) {
+                Ok(()) => {
+                    if let Err(e) = ui.prefs.save(&layout_dir) {
+                        log::warn!("could not save the settings of this computer: {e}");
+                    }
+                }
+                Err(e) => log::warn!("could not save the window layout: {e}"),
+            }
+        }
         crate::logging::set_level(ui.prefs.log_level);
         crate::media::video::set_hw_decode(ui.prefs.hw_decode);
         crate::output::set_scripts_allowed(ui.prefs.allow_scripts);
@@ -2785,7 +2801,7 @@ impl App {
             }
             let (w, h) = match want.size {
                 Some([w, h]) => (w, h),
-                None if want.pane == Pane::Preview => (720.0, 440.0),
+                None if matches!(want.pane, Pane::Preview(_)) => (720.0, 440.0),
                 None => (480.0, 620.0),
             };
             let mut attrs = Window::default_attributes()

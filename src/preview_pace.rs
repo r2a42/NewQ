@@ -280,15 +280,28 @@ pub fn effective(governed: Level, cap: Cap) -> Level {
 /// A new kind of preview takes a variant of its own (or `Other`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PreviewId {
-    /// The Preview pane's single output.
-    Single,
-    /// A multiview tile, by its place.
-    Tile(u8),
+    /// A preview host's single output, by the host (a Preview pane's instance,
+    /// or `dock::OPERATOR_PREVIEW`).
+    Single(u8),
+    /// A multiview tile, by its host and its place.
+    Tile(u8, u8),
     /// The timeline workspace's monitor.
     Workspace,
-    /// Any other kind (a 3D view), by its name and number. (None yet.)
+    /// A preview host's 3D view (`ui::stage_view`), by the host.
+    Stage(u8),
+    /// Any other kind, by its name and number. (None yet.)
     #[allow(dead_code)]
     Other(&'static str, u32),
+}
+
+impl PreviewId {
+    /// The preview host it belongs to, if it is one of a host's.
+    pub fn host(self) -> Option<u8> {
+        match self {
+            PreviewId::Single(h) | PreviewId::Tile(h, _) | PreviewId::Stage(h) => Some(h),
+            PreviewId::Workspace | PreviewId::Other(..) => None,
+        }
+    }
 }
 
 /// What a preview may do this frame.
@@ -346,6 +359,20 @@ impl PreviewGovernor {
     #[cfg(test)]
     pub fn force(&mut self, level: Level) {
         self.governor.level = level;
+    }
+
+    /// Forget the previews of the hosts not kept (Preview panes closed): a
+    /// new pane given one's number starts afresh.
+    pub fn retain_hosts(&self, keep: impl Fn(u8) -> bool) {
+        self.last
+            .borrow_mut()
+            .retain(|id, _| id.host().is_none_or(&keep));
+    }
+
+    /// How many previews it keeps a time for (for the tests).
+    #[cfg(test)]
+    pub fn known(&self) -> usize {
+        self.last.borrow().len()
     }
 
     /// May preview `id` draw a picture at `now`, and how big? Under `cap`.
@@ -620,15 +647,25 @@ mod tests {
             p.ask(id, t + Duration::from_millis(ms), Cap::Automatic)
         };
         // Full: every frame, full size.
-        assert_eq!(ask(&p, PreviewId::Single, 0), PreviewBudget::FULL);
+        assert_eq!(ask(&p, PreviewId::Single(0), 0), PreviewBudget::FULL);
         assert!(PreviewBudget::FULL.is_full());
         // 15 a second: a picture when due, per preview.
         p.force(Level::Fps15);
-        let tile = PreviewId::Tile(2);
-        let three_d = PreviewId::Other("3d", 0);
+        let tile = PreviewId::Tile(0, 2);
+        let three_d = PreviewId::Stage(0);
         assert!(ask(&p, tile, 0).draw);
         assert!(!ask(&p, tile, 30).draw, "not yet");
         assert!(ask(&p, three_d, 30).draw, "another preview's own time");
+        // The same tile of another pane is another preview, with its own time.
+        assert!(ask(&p, PreviewId::Tile(1, 2), 30).draw);
+        assert!(ask(&p, PreviewId::Single(1), 30).draw);
+        assert!(!ask(&p, PreviewId::Single(1), 40).draw, "and paced too");
+        // A pane closed: its previews are forgotten, the others' kept.
+        let before = p.known();
+        p.retain_hosts(|h| h != 1);
+        assert_eq!(p.known(), before - 2);
+        assert!(ask(&p, PreviewId::Single(1), 41).draw, "afresh");
+        assert!(!ask(&p, tile, 41).draw, "pane 0's tile still paced");
         assert!(ask(&p, tile, 70).draw);
         assert_eq!(ask(&p, tile, 70).scale, 1.0);
         // Smaller, then paused: nothing drawn, the last picture kept.
