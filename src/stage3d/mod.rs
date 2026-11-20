@@ -15,9 +15,7 @@
 #![allow(dead_code)]
 
 pub mod geometry;
-pub mod glb;
 pub mod load;
-pub mod samples;
 pub mod scene;
 
 use crate::show::{OutputId, Show};
@@ -187,18 +185,12 @@ fn is_whole(r: &[f32; 4]) -> bool {
     *r == WHOLE
 }
 
-/// The venue: a model file of the room, stage or arena, or one of NewQ's
-/// own sample venues (`samples`).
+/// The venue: a model file of the room, stage or arena.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Venue {
     /// The model file (.glb, .gltf or .obj). Kept relative to the show file
-    /// when saved, as cues' files are. Empty (and unwritten) for a sample.
-    #[serde(default, skip_serializing_if = "is_no_path")]
+    /// when saved, as cues' files are.
     pub path: PathBuf,
-    /// One of NewQ's sample venues, made in code; `path` is unused when set.
-    /// Samples are in metres, Y up, whatever `units` and `up` say.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sample: Option<samples::SampleVenue>,
     /// Where the model is put, after its units and up axis.
     #[serde(default, skip_serializing_if = "Placement::is_default")]
     pub placement: Placement,
@@ -216,28 +208,15 @@ pub struct Venue {
     pub brightness: f32,
 }
 
-fn is_no_path(p: &std::path::Path) -> bool {
-    p.as_os_str().is_empty()
-}
-
 impl Venue {
     pub fn new(path: PathBuf) -> Self {
         Venue {
             path,
-            sample: None,
             placement: Placement::default(),
             units: LengthUnit::Metres,
             up: UpAxis::Y,
             visible: true,
             brightness: 1.0,
-        }
-    }
-
-    /// One of NewQ's sample venues (`samples::sample_venue` makes it).
-    pub fn sample(kind: samples::SampleVenue) -> Self {
-        Venue {
-            sample: Some(kind),
-            ..Venue::new(PathBuf::new())
         }
     }
 
@@ -253,17 +232,11 @@ impl Venue {
     /// Whether a model loaded for `loaded_for` must be loaded again for this
     /// venue (units, up axis and placement don't need it).
     pub fn needs_reload(&self, loaded_for: &Venue) -> bool {
-        self.path != loaded_for.path
-            || self.sample != loaded_for.sample
-            || self.brightness() != loaded_for.brightness()
+        self.path != loaded_for.path || self.brightness() != loaded_for.brightness()
     }
 
-    /// The model's file coordinates to the world. A sample is in metres and
-    /// Y up already: only its placement counts.
+    /// The model's file coordinates to the world.
     pub fn matrix(&self) -> Mat4 {
-        if self.sample.is_some() {
-            return self.placement.matrix();
-        }
         geometry::mul(
             &self.placement.matrix(),
             &geometry::mul(&self.up.to_y_up(), &geometry::scale(self.units.metres())),
@@ -378,6 +351,17 @@ impl Feed {
     }
 }
 
+/// A display that shows the 3D stage instead of its cues
+/// (`OutputConfig::source`): seen from a saved viewpoint, by its name, or
+/// with no name (or one no longer there) from in front, with everything in
+/// view. Drawn at the display's own size and at full quality: a display is
+/// never governed as a preview is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StageSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewpoint: Option<String>,
+}
+
 /// A saved camera position.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Viewpoint {
@@ -455,8 +439,13 @@ impl Stage3d {
         let mut meshes: HashMap<u64, Arc<Mesh>> = HashMap::new();
         for s in self.surfaces.iter().filter(|s| s.visible) {
             let place = s.placement.matrix();
+            // A display that shows the stage can't be a picture on it: it
+            // would be drawn from itself (and sampling the texture being drawn
+            // into is an error on the graphics card). It is left unfed.
             let feed = match s.feed {
-                Feed::Display { output, region } if show.output(output).is_some() => {
+                Feed::Display { output, region }
+                    if show.output(output).is_some() && !show.shows_stage(output) =>
+                {
                     Some((output, geometry::region(region)))
                 }
                 _ => None,
@@ -486,23 +475,24 @@ impl Stage3d {
         Scene { parts }
     }
 
-    /// A sample venue's viewpoints (`samples::viewpoints`) placed where the
-    /// venue is, leaving out any whose name is already saved.
-    pub fn add_sample_viewpoints(&mut self, kind: samples::SampleVenue) {
-        let m = self
-            .venue
-            .as_ref()
-            .map_or(scene::IDENTITY, |v| v.placement.matrix());
-        for v in samples::viewpoints(kind) {
-            if self.viewpoints.iter().any(|w| w.name == v.name) {
-                continue;
-            }
-            self.viewpoints.push(Viewpoint {
-                eye: geometry::point(&m, v.eye),
-                target: geometry::point(&m, v.target),
-                ..v
-            });
+    /// Which surface part `part` of a `scene` made by `scene` belongs to (the
+    /// venue's parts, which come first and are lit, belong to none): for
+    /// picking a screen with the mouse.
+    pub fn part_surface(&self, scene: &Scene, part: usize) -> Option<SurfaceId> {
+        let p = scene.parts.get(part)?;
+        if p.lit {
+            return None;
         }
+        let venue_parts = scene.parts.iter().take_while(|p| p.lit).count();
+        let mut i = part.checked_sub(venue_parts)?;
+        for s in self.surfaces.iter().filter(|s| s.visible) {
+            let n = geometry::surface_mesh(&s.shape).len();
+            if i < n {
+                return Some(s.id);
+            }
+            i -= n;
+        }
+        None
     }
 
     /// The venue's corners in the world, once loaded: to frame it in view.
@@ -535,7 +525,73 @@ impl Stage3d {
     }
 }
 
+/// The displays whose pictures `scene` shows (each once, in the order first
+/// met): the pictures to have ready before it is drawn.
+pub fn outputs_in(scene: &Scene) -> Vec<OutputId> {
+    let mut out = Vec::new();
+    for p in &scene.parts {
+        if let Paint::Output { output, .. } = p.paint
+            && !out.contains(&output)
+        {
+            out.push(output);
+        }
+    }
+    out
+}
+
 impl Show {
+    /// Whether display `output` shows the 3D stage, itself or as the
+    /// display whose picture it shows a part of.
+    pub fn shows_stage(&self, output: OutputId) -> bool {
+        let has = |o: OutputId| self.output(o).is_some_and(|c| c.source.is_some());
+        has(output) || has(self.whole_picture(output))
+    }
+
+    /// The camera a display showing the stage sees it with: its viewpoint,
+    /// or with none (or one not there) from in front of `bounds` (the
+    /// stage's, if known), the whole of it in view.
+    pub fn stage_camera(
+        &self,
+        source: &StageSource,
+        bounds: Option<([f32; 3], [f32; 3])>,
+        aspect: f32,
+    ) -> scene::Camera {
+        if let Some(name) = &source.viewpoint
+            && let Some(v) = self.stage3d.viewpoints.iter().find(|v| &v.name == name)
+        {
+            return v.camera();
+        }
+        let Some((min, max)) = bounds else {
+            return scene::Camera::default();
+        };
+        let centre = [0, 1, 2].map(|i| (min[i] + max[i]) * 0.5);
+        let radius = (0..3)
+            .map(|i| (max[i] - min[i]) * 0.5)
+            .map(|h| h * h)
+            .sum::<f32>()
+            .sqrt()
+            .max(0.5);
+        let mut cam = scene::Camera::default();
+        let half_y = (cam.fov_y_deg.to_radians() * 0.5).max(0.01);
+        let aspect = if aspect.is_finite() && aspect > 0.01 {
+            aspect
+        } else {
+            16.0 / 9.0
+        };
+        let half = half_y.min((half_y.tan() * aspect).atan());
+        let distance = radius * 1.05 / half.sin();
+        // A little above, as from the back of the stalls.
+        let (s, c) = 12f32.to_radians().sin_cos();
+        cam.target = centre;
+        cam.eye = [
+            centre[0],
+            centre[1] + distance * s,
+            centre[2] + distance * c,
+        ];
+        cam.far = cam.far.max(distance * 100.0);
+        cam
+    }
+
     /// The display whose picture `output` shows: itself, or, for a display
     /// that shows part of another's picture (a projector of a blended group,
     /// a mirror), that other display.
@@ -557,41 +613,6 @@ impl Show {
             feed: Feed::None,
         });
         id
-    }
-
-    /// Add a sample venue's usual screens (`samples::screens`), unfed, where
-    /// they belong in it: the venue's position and turn (yaw) are followed;
-    /// a venue tipped or rolled isn't. Ids from the show's.
-    pub fn add_sample_screens(&mut self, kind: samples::SampleVenue) -> Vec<SurfaceId> {
-        let venue = self
-            .stage3d
-            .venue
-            .as_ref()
-            .map_or_else(Placement::default, |v| v.placement);
-        let turn = geometry::rotation_y(if venue.yaw.is_finite() {
-            venue.yaw
-        } else {
-            0.0
-        });
-        let mut ids = Vec::new();
-        for s in samples::screens(kind) {
-            let id = SurfaceId(self.alloc_id());
-            let p = geometry::point(&turn, s.placement.position);
-            self.stage3d.surfaces.push(Surface {
-                id,
-                name: s.name.to_string(),
-                visible: true,
-                placement: Placement {
-                    position: [0, 1, 2].map(|i| p[i] + venue.position[i]),
-                    yaw: s.placement.yaw + venue.yaw,
-                    ..s.placement
-                },
-                shape: s.shape,
-                feed: Feed::None,
-            });
-            ids.push(id);
-        }
-        ids
     }
 
     pub fn remove_surface(&mut self, id: SurfaceId) {
