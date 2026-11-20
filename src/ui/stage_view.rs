@@ -73,6 +73,16 @@ pub enum VenueStatus {
         warnings: Vec<String>,
     },
     Failed(String),
+    /// On a show network's computer: the venue's files are still coming
+    /// from the primary. The screens are drawn without the room meanwhile.
+    Arriving(String),
+}
+
+/// What a view and the settings page say while the venue is on its way.
+pub fn arriving_words(name: &str) -> String {
+    format!(
+        "Venue still arriving from the primary: {name}. The screens are shown without the room until it is here."
+    )
 }
 
 /// A picture of the stage one view wants.
@@ -448,6 +458,7 @@ fn status_words(st: &UiState, id: PreviewId) -> String {
     match &st.stage.venue {
         VenueStatus::Loading(name) => parts.push(format!("Loading venue {name}…")),
         VenueStatus::Failed(why) => parts.push(format!("Venue not loaded: {why}")),
+        VenueStatus::Arriving(name) => parts.push(format!("Venue still arriving: {name}")),
         VenueStatus::Loaded { warnings, .. } if !warnings.is_empty() => {
             parts.push(format!("Venue: {}", warnings[0]))
         }

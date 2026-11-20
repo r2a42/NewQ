@@ -645,7 +645,10 @@ fn add_facts(
 ) -> Manifest {
     let mut entries = m.entries.clone();
     let mut any = false;
-    for e in entries.iter_mut().filter(|e| !e.missing && !e.library) {
+    for e in entries
+        .iter_mut()
+        .filter(|e| !e.missing && !e.library && !manifest::is_model_part(Path::new(&e.path)))
+    {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -850,9 +853,12 @@ impl PrimarySide {
             let lacks_facts = cur_id.is_some()
                 && cur_id != self.facts_checked
                 && self.primary.current().is_some_and(|m| {
-                    m.entries
-                        .iter()
-                        .any(|e| !e.missing && !e.library && e.facts.is_none())
+                    m.entries.iter().any(|e| {
+                        !e.missing
+                            && !e.library
+                            && e.facts.is_none()
+                            && !manifest::is_model_part(Path::new(&e.path))
+                    })
                 });
             if cur_id.is_some() && !lacks_facts {
                 self.facts_checked = cur_id.clone();

@@ -346,16 +346,35 @@ pub fn media_in_folder(folder: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every media file a show names, each once, in the show's order.
+/// Every media file a show names, each once, in the show's order, and
+/// then the 3D stage's venue model (a sample venue has no file). The files
+/// the model reads beside it are added on the hashing thread (`build`,
+/// `stage3d::load::venue_files`): finding them reads the model.
 pub fn media_paths(show: &Show) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
+    let venue = show
+        .stage3d
+        .venue
+        .as_ref()
+        .filter(|v| v.sample.is_none())
+        .map(|v| v.path.clone());
     show.cues
         .iter()
         .filter_map(|c| c.kind.file_media())
         .map(|m| m.file.clone())
+        .chain(venue)
         .filter(|f| !f.as_os_str().is_empty())
         .filter(|f| seen.insert(f.clone()))
         .collect()
+}
+
+/// Whether a file is a venue model or one a model reads beside it (its
+/// data, its materials): no FFprobe facts are looked for for it.
+pub fn is_model_part(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    crate::stage3d::load::is_model_file(path) || matches!(ext.as_deref(), Some("bin" | "mtl"))
 }
 
 /// Reading a file to hash it: how much at a time.
@@ -543,8 +562,22 @@ pub fn build(
     cancel: &AtomicBool,
     progress: &Mutex<HashProgress>,
 ) -> Result<Manifest, HashError> {
-    let mut seen: HashSet<&PathBuf> = src.used.iter().collect();
-    let mut files: Vec<(PathBuf, bool)> = src.used.iter().map(|f| (f.clone(), false)).collect();
+    // A venue model's own files (its data, materials and pictures) are used
+    // with it.
+    let mut used: Vec<PathBuf> = Vec::with_capacity(src.used.len());
+    for f in &src.used {
+        used.push(f.clone());
+        if crate::stage3d::load::is_model_file(f) {
+            used.extend(crate::stage3d::load::venue_files(f));
+        }
+    }
+    let mut seen: HashSet<&PathBuf> = HashSet::new();
+    let mut files: Vec<(PathBuf, bool)> = Vec::with_capacity(used.len());
+    for f in &used {
+        if seen.insert(f) {
+            files.push((f.clone(), false));
+        }
+    }
     let listed: Vec<PathBuf> = src
         .library_folders
         .iter()

@@ -235,6 +235,7 @@ impl StageDrawer {
 
     /// What is kept: the renderer's meshes, pictures and render targets, and
     /// the feeds.
+    #[cfg(test)]
     pub fn kept(&self) -> (usize, usize, usize, usize) {
         let (m, i, t) = self.renderer.kept();
         (m, i, t, self.feeds.len())
