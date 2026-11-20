@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub mod geometry;
+pub mod glb;
 pub mod load;
 pub mod samples;
 pub mod scene;

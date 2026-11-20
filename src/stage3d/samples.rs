@@ -117,6 +117,22 @@ pub fn sample_venue(kind: SampleVenue, venue: &Venue) -> Result<LoadedVenue, Str
     b.finish(kind.label(), venue)
 }
 
+/// The sample as a .glb file's bytes, to change in a 3D program and load
+/// back as a model file: metres, Y up, a mesh and material per colour.
+pub fn sample_glb(kind: SampleVenue) -> Vec<u8> {
+    let kit = build(kind);
+    let parts: Vec<super::glb::GlbPart> = kit
+        .parts
+        .iter()
+        .map(|(name, colour, mesh)| super::glb::GlbPart {
+            name,
+            colour: *colour,
+            mesh,
+        })
+        .collect();
+    super::glb::write(&parts)
+}
+
 /// The meshes of a sample by material: (name, linear colour, mesh).
 pub fn build(kind: SampleVenue) -> Kit {
     let mut k = Kit::default();
@@ -974,7 +990,7 @@ fn proscenium(k: &mut Kit) {
         false,
     );
     // The proscenium wall, with its 12 x 7 m opening over the deck.
-    let arch = k.m("Proscenium", THEATRE_WALL);
+    let arch = k.m("Proscenium", [0.16, 0.11, 0.07, 1.0]);
     cuboid(arch, [HOUSE[0], 0.0, -0.6], [-6.0, HOUSE_HIGH, 0.0]);
     cuboid(arch, [6.0, 0.0, -0.6], [HOUSE[1], HOUSE_HIGH, 0.0]);
     cuboid(arch, [-6.0, DECK + 7.0, -0.6], [6.0, HOUSE_HIGH, 0.0]);
@@ -999,7 +1015,7 @@ fn proscenium(k: &mut Kit) {
         x += 2.0;
     }
     // The orchestra pit, in front of the apron.
-    let pit = k.m("Pit", STAGE_DECK);
+    let pit = k.m("Pit", [0.045, 0.04, 0.035, 1.0]);
     rect_y(pit, [-6.0, 6.0], [1.2, 4.2], -PIT_DEPTH, true);
     rect_z(pit, 1.2, [-6.0, 6.0], [-PIT_DEPTH, 0.0], true);
     rect_z(pit, 4.2, [-6.0, 6.0], [-PIT_DEPTH, 0.0], false);
@@ -1116,7 +1132,7 @@ fn black_box(k: &mut Kit) {
     let (x, z, high) = ([-7.5, 7.5], [-6.0, 6.0], 7.0);
     rect_y(k.m("Floor", [0.035, 0.035, 0.035, 1.0]), x, z, 0.0, true);
     walls(k.m("Walls", MASKING), x, z, high);
-    rect_y(k.m("Ceiling", MASKING), x, z, high, false);
+    rect_y(k.m("Ceiling", [0.03, 0.03, 0.032, 1.0]), x, z, high, false);
     // The pipe grid at 6.2 m, every 1.5 m both ways.
     let metal = k.m("Metal", [0.12, 0.12, 0.13, 1.0]);
     let mut gz = -5.25;
@@ -1252,7 +1268,7 @@ fn ballroom(k: &mut Kit) {
     for tx in [-10.0, -5.0, 0.0, 5.0, 10.0] {
         for tz in [-4.0, 1.0, 6.0] {
             prism(k.m("Tables", LINEN), [tx, tz], 0.9, 0.0, 0.75, 16);
-            let chairs = k.m("Chairs", GOLD);
+            let chairs = k.m("Chairs", [0.38, 0.28, 0.12, 1.0]);
             for i in 0..8 {
                 let a = std::f32::consts::TAU * (i as f32 + 0.5) / 8.0;
                 let (cx, cz) = (tx + 1.25 * a.cos(), tz + 1.25 * a.sin());

@@ -63,7 +63,12 @@ fn every_sample_is_made_within_its_budget_on_the_floor_and_its_size() {
                 .any(|(q, n)| q[1].abs() < 1e-5 && n[1] > 0.99)
         });
         assert!(floor_up, "{name}: no floor");
-        for p in &v.parts {
+        for (i, p) in v.parts.iter().enumerate() {
+            // A colour per material, so a written .glb reads back part by part.
+            assert!(
+                v.parts[..i].iter().all(|q| q.paint != p.paint),
+                "{name}: two materials of one colour"
+            );
             let Paint::Colour(c) = p.paint else {
                 panic!("{name}: a sample is plain colours")
             };
@@ -305,6 +310,39 @@ fn the_usual_screens_and_viewpoints_are_added_where_the_venue_stands() {
     assert_eq!(back.stage3d, show.stage3d);
 }
 
+#[test]
+fn a_sample_written_as_glb_reads_back_the_same() {
+    let dir = std::env::temp_dir().join(format!("newq-glb-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for kind in SampleVenue::ALL {
+        let bytes = sample_glb(kind);
+        assert_eq!(&bytes[..4], b"glTF");
+        assert_eq!(bytes.len() % 4, 0);
+        let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        assert_eq!(len, bytes.len());
+        let path = dir.join(format!("{kind:?}.glb"));
+        std::fs::write(&path, &bytes).unwrap();
+        let back = load_venue(&path, &Venue::new(path.clone())).unwrap();
+        let made = loaded(kind);
+        assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+        assert_eq!(back.triangles, made.triangles, "{}", kind.label());
+        assert_eq!(back.bounds, made.bounds, "{}", kind.label());
+        assert_eq!(back.parts.len(), made.parts.len());
+        // The reader may order the materials its own way: match by colour
+        // (every sample's colours are its own per material).
+        for b in &made.parts {
+            let a = back.parts.iter().find(|a| a.paint == b.paint).unwrap();
+            assert_eq!(a.mesh.positions, b.mesh.positions);
+            assert_eq!(a.mesh.indices, b.mesh.indices);
+            for (n, m) in a.mesh.normals.iter().zip(&b.mesh.normals) {
+                assert!((0..3).all(|i| (n[i] - m[i]).abs() < 1e-5));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ----- Pictures, to look at by eye ---------------------------------------------
 
 /// Draw each sample from its viewpoints and from above, with a small
@@ -326,6 +364,13 @@ fn draw_the_samples() {
         let made = loaded(kind);
         let scene = show.stage3d.scene(&show, Some(&made));
         let b = made.bounds.unwrap();
+        eprintln!(
+            "{}: {} triangles, {} materials, {:?} m",
+            kind.label(),
+            made.triangles,
+            made.parts.len(),
+            b.size()
+        );
         let mut views = viewpoints(kind);
         let mid = [0, 1, 2].map(|i| (b.min[i] + b.max[i]) / 2.0);
         let size = b.size();
