@@ -622,6 +622,36 @@ pub fn ask_here(show: &Show, st: &mut UiState, view: PreviewId, ray: Ray) {
     });
 }
 
+/// The white point a view with its light on takes by itself: the brightest
+/// projector's nits where the middle of its picture lands on a screen (on a
+/// matt white wall square to it; 10 m out if it lands on none). Only the
+/// screens are tested, which are small (never the venue on this thread).
+pub fn auto_white(show: &Show, st: &UiState) -> f32 {
+    let scene = &st.stage.scene;
+    let screens_end = show.stage3d.projectors_from(scene);
+    let nits: Vec<f32> = show
+        .stage3d
+        .projectors
+        .iter()
+        .filter(|p| p.visible)
+        .take(light::MAX_THROWS)
+        .map(|p| {
+            let (_, aspect) = shape_of(show, st, p);
+            let ray = p.ray(0.5, 0.5, aspect);
+            let point = render3d::pick(scene, &ray, &|i, part| !part.lit && i < screens_end)
+                .map(|h| h.point)
+                .unwrap_or_else(|| {
+                    render3d::maths::add(ray.origin, render3d::maths::scale(ray.dir, 10.0))
+                });
+            light::luminance(
+                light::illuminance(p, aspect, point, None, Facing::Both),
+                1.0,
+            )
+        })
+        .collect();
+    light::auto_white(&nits)
+}
+
 /// The line under a view for the light under the pointer.
 pub fn here_words(h: &Here, unit: LengthUnit) -> String {
     if h.lit.is_empty() {

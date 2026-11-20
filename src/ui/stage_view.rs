@@ -6,6 +6,11 @@
 //!   a click on a screen picks it (its settings are on Settings ▸ 3D stage).
 //! - Over the picture: the saved viewpoints (and saving this one), a floor
 //!   grid, an x-ray of the venue and "See all".
+//! - With projectors in the stage, *Light*: each projector throws its
+//!   display's picture into the room (`render3d::lit`), seen as the picture
+//!   (with an exposure, by itself or by hand), or in colours with a legend:
+//!   brightness at full white, how many projectors overlap, pixel size. The
+//!   light is the view's own (like the grid), not the show's.
 //!
 //! Hosted by a Preview pane in 3D mode (`PreviewId::Stage(host)`, its state in
 //! `UiState::preview_stage`) and by Settings ▸ 3D stage (`SETTINGS_VIEW`).
@@ -30,7 +35,9 @@ use super::{Action, UiState};
 use crate::gpu::{LayerTexture, Slot};
 use crate::preview_pace::PreviewId;
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
-use crate::render3d::{self, Bounds, Camera, FrameStats, Options, Orbit, Quality, Scene};
+use crate::render3d::{
+    self, Bounds, Camera, FrameStats, LightView, Options, Orbit, Quality, Scene,
+};
 use crate::show::Show;
 use crate::stage3d::{SurfaceId, Viewpoint};
 use crate::ui::stage_edit::{Preset, StageEdit};
@@ -119,6 +126,15 @@ pub struct StageViewState {
     /// Looking through this projector's lens (a drag or the wheel leaves it,
     /// orbiting from where it was).
     pub through: Option<crate::stage3d::ProjectorId>,
+    /// The projectors' light is on in this view.
+    pub light: bool,
+    /// What it shows while on (never `Off`).
+    pub light_view: LightView,
+    /// The Picture view's white point is set by itself (`stage_projectors::
+    /// auto_white`), else it is `white_nits` as the slider left it.
+    pub auto_white: bool,
+    /// The nits shown as full white in the Picture view.
+    pub white_nits: f32,
 }
 
 impl Default for StageViewState {
@@ -131,7 +147,71 @@ impl Default for StageViewState {
             xray: 1.0,
             saving: None,
             through: None,
+            light: false,
+            light_view: LightView::Picture,
+            auto_white: true,
+            white_nits: 100.0,
         }
+    }
+}
+
+/// The views of the light, in the menu's order, with their words.
+pub const LIGHT_VIEWS: [(LightView, &str, &str); 4] = [
+    (
+        LightView::Picture,
+        "Picture",
+        "Each projector's picture as it lands, as bright as its lumens make it",
+    ),
+    (
+        LightView::Brightness,
+        "Brightness",
+        "How bright each place is at full white, in nits, in colours",
+    ),
+    (
+        LightView::Overlap,
+        "Overlap",
+        "How many projectors light each place",
+    ),
+    (
+        LightView::PixelSize,
+        "Pixel size",
+        "How big one pixel is where it lands",
+    ),
+];
+
+/// A key to a view's colours: its title, and each colour with its words.
+pub type Legend = (&'static str, Vec<(String, [f32; 3])>);
+
+/// The key of a view of the light that is in colours (None for the Picture
+/// view).
+pub fn legend(view: LightView) -> Option<Legend> {
+    use crate::stage3d::light::{BRIGHTNESS_STEPS, OVERLAP, PIXEL_STEPS_MM, SCALE};
+    let bands = |steps: &[f32; 4], unit: &str| -> Vec<(String, [f32; 3])> {
+        let n = |v: f32| format!("{v}");
+        let mut rows = vec![(format!("under {} {unit}", n(steps[0])), SCALE[0])];
+        for i in 1..steps.len() {
+            rows.push((
+                format!("{} to {} {unit}", n(steps[i - 1]), n(steps[i])),
+                SCALE[i],
+            ));
+        }
+        rows.push((format!("{} {unit} or more", n(steps[3])), SCALE[4]));
+        rows
+    };
+    match view {
+        LightView::Off | LightView::Picture => None,
+        LightView::Brightness => {
+            Some(("Brightness at full white", bands(&BRIGHTNESS_STEPS, "nits")))
+        }
+        LightView::Overlap => Some((
+            "Projectors lighting it",
+            vec![
+                ("one".to_string(), OVERLAP[0]),
+                ("two".to_string(), OVERLAP[1]),
+                ("three or more".to_string(), OVERLAP[2]),
+            ],
+        )),
+        LightView::PixelSize => Some(("One pixel is", bands(&PIXEL_STEPS_MM, "mm"))),
     }
 }
 
@@ -168,6 +248,19 @@ pub fn view_options(view: &StageViewState, scale: f32, bounds: Option<&Bounds>) 
         grid_extent: (radius * 2.0).clamp(10.0, 500.0),
         axes: view.grid,
         venue_opacity: view.xray.clamp(0.05, 1.0),
+        light: if view.light {
+            match view.light_view {
+                LightView::Off => LightView::Picture,
+                v => v,
+            }
+        } else {
+            LightView::Off
+        },
+        white_nits: if view.white_nits.is_finite() {
+            view.white_nits.clamp(0.1, 1e6)
+        } else {
+            100.0
+        },
         ..Options::default()
     }
 }
@@ -297,6 +390,15 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
     let budget = st.preview_budget(id);
     let has = st.stage.targets.contains_key(&id);
     if wants_picture(budget, has) {
+        // No projectors, no light; the white point by itself when asked.
+        view.light &= !show.stage3d.projectors.is_empty();
+        if view.light && view.auto_white {
+            // In whole nits, as the slider shows it (else it rounds it back
+            // each frame, and the view would be drawn again each frame).
+            view.white_nits = super::stage_projectors::auto_white(show, st)
+                .round()
+                .max(1.0);
+        }
         let options = view_options(view, budget.scale, bounds.as_ref());
         let lines = super::stage_projectors::view_lines(show, st, view.through);
         st.stage.requests.push(ViewRequest {
@@ -506,6 +608,13 @@ fn overlay(
                 }
                 ui.checkbox(&mut view.grid, "Grid")
                     .on_hover_text("A floor grid in metres, and the axes at the centre");
+                if !show.stage3d.projectors.is_empty() {
+                    ui.checkbox(&mut view.light, "Light").on_hover_text(
+                        "Each projector throws its display's picture into the room, with \
+                         shadows, overlap and fall-off (worked out by sums: about right, \
+                         not measured)",
+                    );
+                }
                 if show.stage3d.venue.is_some() {
                     ui.label("X-ray");
                     ui.add(
@@ -530,6 +639,9 @@ fn overlay(
                 }
             });
         });
+    if view.light && !show.stage3d.projectors.is_empty() {
+        light_bar(ui, rect, view);
+    }
     if let Some(name) = &mut view.saving {
         let mut done = None;
         egui::Frame::new()
@@ -580,6 +692,12 @@ fn overlay(
     if let Some(h) = st.stage.projectors.here_in(id) {
         corner.push(super::stage_projectors::here_words(h, show.stage3d.units));
     }
+    if view.light {
+        corner.extend(light_notices(show, st.stage.stats.get(&id)));
+        if let Some((title, rows)) = legend(view.light_view) {
+            draw_legend(ui, rect, title, &rows);
+        }
+    }
     let n = corner.len();
     for (i, words) in corner.iter().enumerate() {
         ui.painter().text(
@@ -608,6 +726,105 @@ fn overlay(
             status,
             egui::FontId::proportional(11.0),
             Color32::from_gray(170),
+        );
+    }
+}
+
+/// What a view with its light on has to say: a graphics card that won't
+/// draw it, more projectors than one view lights.
+pub fn light_notices(show: &Show, stats: Option<&FrameStats>) -> Vec<String> {
+    let mut out = Vec::new();
+    if stats.is_some_and(|s| s.light_left_out) {
+        out.push(
+            "Light: this graphics card can't draw it, so the view is shown without it".to_string(),
+        );
+    }
+    let shown = show.stage3d.projectors.iter().filter(|p| p.visible).count();
+    let most = crate::stage3d::light::MAX_THROWS;
+    if shown > most {
+        out.push(format!(
+            "Light: only the first {most} of the {shown} projectors are lit in this view"
+        ));
+    }
+    out
+}
+
+/// The light's own controls, under the bar: what it shows, and for the
+/// picture its exposure.
+fn light_bar(ui: &mut Ui, rect: Rect, view: &mut StageViewState) {
+    let bar = Rect::from_min_size(rect.min + vec2(6.0, 36.0), vec2(rect.width() - 12.0, 26.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(bar)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    egui::Frame::new()
+        .fill(Color32::from_black_alpha(170))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(&mut child, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Show");
+                let now = LIGHT_VIEWS
+                    .iter()
+                    .find(|(v, ..)| *v == view.light_view)
+                    .map_or("Picture", |(_, w, _)| w);
+                egui::ComboBox::from_id_salt("light-view")
+                    .selected_text(now)
+                    .show_ui(ui, |ui| {
+                        for (v, words, hint) in LIGHT_VIEWS {
+                            ui.selectable_value(&mut view.light_view, v, words)
+                                .on_hover_text(hint);
+                        }
+                    });
+                if view.light_view == LightView::Picture {
+                    ui.checkbox(&mut view.auto_white, "Auto exposure")
+                        .on_hover_text(
+                            "Full white is the brightest projector's light on its screen",
+                        );
+                    ui.add_enabled(
+                        !view.auto_white,
+                        egui::Slider::new(&mut view.white_nits, 5.0..=5000.0)
+                            .logarithmic(true)
+                            .clamping(egui::SliderClamping::Always)
+                            .max_decimals(0)
+                            .suffix(" nits"),
+                    )
+                    .on_hover_text("How bright a place must be to show as full white");
+                }
+            });
+        });
+}
+
+/// A small key to a view's colours, bottom left over the picture.
+fn draw_legend(ui: &Ui, rect: Rect, title: &str, rows: &[(String, [f32; 3])]) {
+    let line = 15.0;
+    let height = line * (rows.len() as f32 + 1.0) + 8.0;
+    let at = Rect::from_min_size(
+        Pos2::new(rect.min.x + 8.0, rect.max.y - 22.0 - height),
+        vec2(170.0, height),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(at, 4.0, Color32::from_black_alpha(170));
+    let font = egui::FontId::proportional(11.5);
+    painter.text(
+        at.min + vec2(6.0, 4.0),
+        Align2::LEFT_TOP,
+        title,
+        font.clone(),
+        Color32::from_gray(220),
+    );
+    for (i, (words, c)) in rows.iter().enumerate() {
+        let y = at.min.y + 4.0 + line * (i as f32 + 1.0);
+        let swatch = Rect::from_min_size(Pos2::new(at.min.x + 6.0, y + 2.0), vec2(16.0, 10.0));
+        let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        painter.rect_filled(swatch, 2.0, Color32::from_rgb(to(c[0]), to(c[1]), to(c[2])));
+        painter.text(
+            Pos2::new(swatch.max.x + 6.0, y),
+            Align2::LEFT_TOP,
+            words,
+            font.clone(),
+            Color32::from_gray(220),
         );
     }
 }
