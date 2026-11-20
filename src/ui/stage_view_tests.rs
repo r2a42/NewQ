@@ -335,6 +335,16 @@ fn the_light_is_switched_on_and_its_views_chosen_with_the_mouse() {
         view.white_nits
     );
     assert!(d.has("Auto exposure"));
+    let shown = format!("white at {:.0} nits", view.white_nits);
+    assert!(d.has(&shown), "{:?}", d.texts);
+    // By hand: the slider, from where it was.
+    let auto = view.white_nits;
+    d.click(&show, &mut st, &mut view, "Auto exposure");
+    assert!(!view.auto_white);
+    assert!(!d.has(&shown));
+    assert_eq!(view.white_nits, auto);
+    d.click(&show, &mut st, &mut view, "Auto exposure");
+    assert!(view.auto_white);
     assert!(
         !d.has("Projectors lighting it"),
         "no legend for the picture"
