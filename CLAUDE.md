@@ -489,6 +489,9 @@ The README describes the features; this file is about working on the code.
   `Stage3d::add_sample_viewpoints` (by the venue's matrix, once per name). Tests in
   `samples/tests.rs` (budget, size, winding, screens inside, facing and seen from the first viewpoint
   by a ray test); the ignored `draw_the_samples` rasterises each into `NEWQ_SAMPLE_PICTURES`.
+  `glb.rs` (pure) writes parts as a .glb (mesh, node and `baseColorFactor` material per part;
+  `samples::sample_glb`), read back through `load_venue` part for part in a test (so each sample's
+  materials have colours of their own). Not offered in the UI yet.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
