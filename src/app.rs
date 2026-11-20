@@ -2396,7 +2396,12 @@ impl App {
             }
         }
         if self.stage.landed() {
-            if self.show.outputs.iter().any(|o| o.source.is_some()) {
+            if self
+                .show
+                .outputs
+                .iter()
+                .any(|o| self.show.stage_source(o.id).is_some())
+            {
                 for s in self.screens.values_mut() {
                     s.needs_redraw = true;
                 }
@@ -2409,7 +2414,7 @@ impl App {
             }
         }
         let stage_bounds = self.ui.stage.bounds.map(|b| (b.min, b.max));
-        let mut stage_outputs: Vec<(OutputId, crate::render3d::Camera)> = Vec::new();
+        let mut stage_outputs: Vec<crate::stage_live::StageOutput> = Vec::new();
         let mut pictures: HashMap<OutputId, crate::stage_live::PictureLayers> = HashMap::new();
         self.ui.previews.clear();
         let configs: Vec<OutputSetup> = self
@@ -2525,10 +2530,27 @@ impl App {
                     now,
                 );
             let mut layers = if let Some(src) = &stage_source {
-                if !stage_outputs.iter().any(|(o, _)| *o == source) {
-                    let aspect = canvas.0.max(1) as f32 / canvas.1.max(1) as f32;
-                    let camera = self.show.stage_camera(src, stage_bounds, aspect);
-                    stage_outputs.push((source, camera));
+                // Seen if a window or stream shows it (or a projector of its
+                // picture); else preview work, drawn at the previews' pace.
+                let seen = target.is_some() || self.streams.contains_key(&id);
+                match stage_outputs.iter_mut().find(|o| o.id == source) {
+                    Some(o) => {
+                        o.seen |= seen;
+                        o.due |= upload;
+                    }
+                    None => {
+                        let aspect = canvas.0.max(1) as f32 / canvas.1.max(1) as f32;
+                        let camera = self.show.stage_camera(src, stage_bounds, aspect);
+                        stage_outputs.push(crate::stage_live::StageOutput {
+                            id: source,
+                            camera,
+                            seen,
+                            due: upload,
+                        });
+                    }
+                }
+                if preview_only && upload {
+                    self.preview_uploads.insert(id, now);
                 }
                 vec![self.stage.output_layer(gpu, source, canvas)]
             } else if upload {
@@ -4001,6 +4023,11 @@ impl App {
         }
         if playing || self.uploads_waiting || self.stage_busy {
             next = next.min(now + TICK_WHILE_PLAYING);
+        }
+        // The 3D stage's drawing thread started again once it may, or let
+        // go when idle.
+        if let Some(t) = self.stage.wake_at() {
+            next = next.min(t.max(now + TICK_WHILE_PLAYING));
         }
         // An output window waiting to be shown is looked at again soon.
         if self.screens.values().any(|s| !s.shown) {

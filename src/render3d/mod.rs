@@ -38,8 +38,8 @@ use wgpu::util::DeviceExt;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Meshes and pictures not drawn for this long are let go.
 pub const FORGET_AFTER: Duration = Duration::from_secs(10);
-/// How often (in renders) the caches are looked over.
-const TIDY_EVERY: u32 = 120;
+/// How often the caches are looked over (when something is drawn).
+const TIDY_EVERY: Duration = Duration::from_secs(2);
 /// The largest picture side kept for a `Paint::Image`; bigger ones are
 /// shrunk on the way in (a preview has no use for more).
 const MAX_IMAGE_SIDE: u32 = 4096;
@@ -160,6 +160,10 @@ pub struct Target<'a> {
     pub view: &'a wgpu::TextureView,
     pub format: wgpu::TextureFormat,
     pub size: (u32, u32),
+    /// Whose picture it is (a view, a display): the depth and multisampled
+    /// textures are kept per owner, and an owner's are let go when its size
+    /// changes (a pane being resized makes no pile of them).
+    pub owner: u64,
 }
 
 /// What a render drew, for the status line.
@@ -248,11 +252,14 @@ struct Pipelines {
     axes: wgpu::RenderPipeline,
 }
 
-/// The textures drawn into for one size, format and sample count.
-type TargetKey = ((u32, u32), wgpu::TextureFormat, u32, bool);
+/// The textures drawn into for one owner, size, format and sample count.
+type TargetKey = (u64, (u32, u32), wgpu::TextureFormat, u32, bool);
 
 struct Targets {
     used: Instant,
+    /// The size of the target they were for (the drawn size is smaller
+    /// when a governor scales the view).
+    full: (u32, u32),
     depth: wgpu::TextureView,
     /// Multisampled colour, resolved into the target (or `small`).
     msaa: Option<wgpu::TextureView>,
@@ -296,7 +303,8 @@ pub struct Renderer {
     /// Meshes too big for it, by key: skipped (and said once), never made
     /// again each render.
     too_big: std::collections::HashSet<u64>,
-    renders: u32,
+    /// When the caches were last looked over.
+    tidied: Instant,
     last: FrameStats,
 }
 
@@ -450,7 +458,7 @@ impl Renderer {
             images: HashMap::new(),
             max_buffer: device.limits().max_buffer_size,
             too_big: std::collections::HashSet::new(),
-            renders: 0,
+            tidied: Instant::now(),
             last: FrameStats::default(),
         }
     }
@@ -508,8 +516,7 @@ impl Renderer {
         options: &Options,
     ) -> FrameStats {
         let started = Instant::now();
-        self.renders = self.renders.wrapping_add(1);
-        if self.renders.is_multiple_of(TIDY_EVERY) {
+        if self.tidied.elapsed() >= TIDY_EVERY {
             self.tidy();
         }
         if target.size.0 == 0 || target.size.1 == 0 {
@@ -520,7 +527,7 @@ impl Renderer {
         let drawn = options.quality.drawn_size(target.size);
         let scaled = drawn != target.size;
         let samples = Self::samples_for(gpu, target.format, options.quality.msaa);
-        let target_key = self.ensure_targets(device, drawn, target.format, samples, scaled);
+        let target_key = self.ensure_targets(device, target, drawn, samples, scaled);
         self.ensure_pipelines(device, target.format, samples);
         if scaled {
             self.ensure_blit(device, target.format);
@@ -784,9 +791,32 @@ impl Renderer {
     }
 
     /// Let go of meshes, pictures and render targets not used for
-    /// `FORGET_AFTER` (done by itself every so many renders).
+    /// `FORGET_AFTER` (done by itself every `TIDY_EVERY` while drawing).
     pub fn tidy(&mut self) {
+        self.tidied = Instant::now();
         self.tidy_older_than(FORGET_AFTER);
+    }
+
+    /// Let go of the meshes and pictures none of `scenes` has (a venue read
+    /// again at another brightness has new pictures: the old ones go at
+    /// once, not after `FORGET_AFTER`).
+    pub fn keep_only(&mut self, scenes: &[&Scene]) {
+        let mut meshes = std::collections::HashSet::new();
+        let mut images = std::collections::HashSet::new();
+        for p in scenes.iter().flat_map(|s| &s.parts) {
+            meshes.insert(p.mesh_key);
+            if let Paint::Image { key, .. } = &p.paint {
+                images.insert(*key);
+            }
+        }
+        self.meshes.retain(|k, _| meshes.contains(k));
+        self.images.retain(|k, _| images.contains(k));
+        self.too_big.retain(|k| meshes.contains(k));
+    }
+
+    /// What is kept: meshes, pictures and sets of render targets.
+    pub fn kept(&self) -> (usize, usize, usize) {
+        (self.meshes.len(), self.images.len(), self.targets.len())
     }
 
     fn tidy_older_than(&mut self, age: Duration) {
@@ -976,16 +1006,21 @@ impl Renderer {
     fn ensure_targets(
         &mut self,
         device: &wgpu::Device,
+        target: &Target,
         size: (u32, u32),
-        format: wgpu::TextureFormat,
         samples: u32,
         scaled: bool,
     ) -> TargetKey {
-        let key = (size, format, samples, scaled);
+        let (owner, format, full) = (target.owner, target.format, target.size);
+        let key = (owner, size, format, samples, scaled);
         if let Some(t) = self.targets.get_mut(&key) {
             t.used = Instant::now();
             return key;
         }
+        // Its owner at another size is gone (a resize): only the governor's
+        // steps at this size are kept beside each other.
+        self.targets
+            .retain(|k, t| k.0 != owner || (t.full == full && k.2 == format));
         let texture = |label, format, samples, usage| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -1021,6 +1056,7 @@ impl Renderer {
             key,
             Targets {
                 used: Instant::now(),
+                full,
                 depth,
                 msaa,
                 small,
