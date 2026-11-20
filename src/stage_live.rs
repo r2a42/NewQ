@@ -17,6 +17,7 @@ use crate::show::{OutputId, Show};
 use crate::stage_render::{FeedJob, StageJob, StageThread, ViewJob, feed_size};
 use crate::stage3d::Venue;
 use crate::stage3d::load::LoadedVenue;
+use crate::stage3d::samples::SampleVenue;
 use crate::ui::stage_view::{StageShared, VenueStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -81,17 +82,47 @@ pub struct StageLive {
     seen_done: u64,
     /// The displays whose pictures a display showing the stage needs.
     needed_by_outputs: HashSet<OutputId>,
+    /// When each preview last asked for a picture (a pane closed lets its
+    /// target go after `PREVIEW_KEPT`).
+    asked_at: HashMap<PreviewId, Instant>,
 }
 
+/// A preview's target is kept this long after it last asked for a picture.
+const PREVIEW_KEPT: Duration = Duration::from_secs(30);
+
 /// The settings of a venue a load depends on.
-fn reload_key(v: &Venue) -> (std::path::PathBuf, u32) {
-    (v.path.clone(), v.brightness().to_bits())
+fn reload_key(v: &Venue) -> (std::path::PathBuf, Option<SampleVenue>, u32) {
+    (v.path.clone(), v.sample, v.brightness().to_bits())
+}
+
+/// What the user calls a venue: its file's name, or the sample's.
+fn venue_name(v: &Venue) -> String {
+    match v.sample {
+        Some(k) => k.label().to_string(),
+        None => file_name(&v.path),
+    }
 }
 
 impl StageLive {
     /// Start of a pass: look after the venue's loading and make the scene
     /// again if the stage has changed. Says what happened in `say`.
     pub fn begin(&mut self, show: &Show, shared: &mut StageShared, say: &mut Vec<Said>) {
+        // Sample venues written as .glb.
+        shared.exports.retain(|rx| match rx.try_recv() {
+            Ok(Ok(path)) => {
+                say.push(Said::Note(format!(
+                    "Saved the sample venue as {}",
+                    path.display()
+                )));
+                false
+            }
+            Ok(Err(e)) => {
+                say.push(Said::Problem(format!("The sample venue wasn't saved: {e}")));
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
         self.look_after_venue(show, shared, say);
         let stage = &show.stage3d;
         let mut h = crate::stage3d::scene::Fnv::new();
@@ -136,7 +167,7 @@ impl StageLive {
                 Ok(Ok(loaded)) => {
                     say.push(Said::Note(format!(
                         "Venue loaded: {} ({} triangles)",
-                        file_name(&venue.path),
+                        venue_name(venue),
                         loaded.triangles
                     )));
                     for w in &loaded.warnings {
@@ -184,7 +215,9 @@ impl StageLive {
                         _ => {
                             let now = Instant::now();
                             // A new file is read at once; a change of brightness waits.
-                            let at = if have.is_some_and(|h| h.path == want.path) {
+                            let at = if have
+                                .is_some_and(|h| h.path == want.path && h.sample == want.sample)
+                            {
                                 now + RELOAD_SETTLE
                             } else {
                                 now
@@ -213,7 +246,7 @@ impl StageLive {
                     }
                 }
                 shared.venue = if v.loading.is_some() || v.settling.is_some() {
-                    VenueStatus::Loading(file_name(&want.path))
+                    VenueStatus::Loading(venue_name(want))
                 } else if let Some(l) = v.loaded.as_ref().filter(|_| current) {
                     VenueStatus::Loaded {
                         triangles: l.triangles,
@@ -310,6 +343,7 @@ impl StageLive {
         for r in asked {
             let key = ViewKey::Preview(r.id);
             shown.insert(r.id);
+            self.asked_at.insert(r.id, Instant::now());
             let target = self.target(gpu, key, capped(r.size));
             shared.targets.insert(r.id, target.clone());
             let sig = signature(self.scene_key, &r.camera, &r.options, &target);
@@ -335,10 +369,13 @@ impl StageLive {
         }
         // A display that shows the stage and has gone lets its target go.
         let live: HashSet<OutputId> = outputs.iter().map(|(o, _)| *o).collect();
+        let asked_at = &mut self.asked_at;
+        asked_at.retain(|_, at| at.elapsed() < PREVIEW_KEPT);
         self.targets.retain(|k, _| match k {
             ViewKey::Output(o) => live.contains(o),
-            ViewKey::Preview(_) => true,
+            ViewKey::Preview(p) => asked_at.contains_key(p),
         });
+        shared.targets.retain(|p, _| asked_at.contains_key(p));
         if !views.is_empty() {
             self.keep_thread(gpu);
             if self.thread.is_none() {

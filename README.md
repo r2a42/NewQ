@@ -1148,10 +1148,14 @@ test patterns and cues alike. It is for planning (previz): projectors are not
 simulated yet, and the 3D model does not drive the outputs.
 
 - **Where it is.** *Settings ▸ 3D stage* has a 3D view at the top and
-  everything about the stage below it. Until the Preview pane's modes arrive,
-  a *3D stage* button over the Preview pane swaps it for a 3D view (and back).
-- **Start.** *Load a venue model…* or *Add a screen*. A model is optional:
-  screens can be placed on their own, on a floor grid in metres.
+  everything about the stage below it; a Preview pane in its *3D* mode shows
+  the stage too (several panes can, each from its own angle).
+- **Start.** *Load a venue model…*, *Use a sample venue* (an arena, a
+  proscenium theatre, a thrust stage, a black box, a club, a festival main stage
+  or a ballroom, with its usual screens and viewpoints if you like), or *Add a
+  screen*. A venue is optional: screens can be placed on their own, on a floor
+  grid in metres. *Export as .glb…* saves a sample as a model to change in
+  Blender or another 3D program; load it back with *Load a model…*.
 - **Venue models.** glTF (`.glb`, or `.gltf` with its files beside it) and OBJ
   (`.obj`, with its `.mtl` and pictures). glTF is in metres with Y up; for an
   OBJ choose what its numbers are in (metres, centimetres, millimetres, inches,
