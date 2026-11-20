@@ -6,11 +6,20 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+## 0.25.0
+
 - **The 3D stage.** *Settings ▸ 3D stage* puts your screens in a model of the venue (glTF or OBJ;
   for FBX, export it as glTF first) and shows each one with its display's picture as it plays:
   flat screens, curved walls, jumbotrons and angled LED walls, a whole picture or part of it, and
   a blended pair as the one picture it makes. Turn round it, slide and zoom with the mouse, click a
   screen to pick it, and save viewpoints. The Preview pane's *3D* mode shows it too.
+  On a show network the display computers draw the stage too, but they don't yet receive a venue
+  model file: copy it to them, or use a sample venue, which needs no file.
+- **Sample venues for the 3D stage.** Without a model of your own you can pick one of seven
+  built-in spaces: an arena, a proscenium theatre, a thrust stage, a black box studio, a club, a
+  festival main stage and a ballroom, each to real sizes in metres, with the screens such a venue
+  usually has (a centre-hung scoreboard, an upstage LED wall, side screens, a cyc, a DJ wall) ready
+  to add and a few places to look from.
 - **A display can show the 3D stage.** Instead of its cues, a display can show the stage from a
   saved viewpoint, on its monitor and in its stream or recording, at full quality. A display that
   shows the stage is never also a picture on its screens.
@@ -28,11 +37,6 @@ release page, and a release is refused if it has none.
   preview in NewQ is drawn less often, then smaller, then paused if need be, and the Preview pane
   says so; they come back once the displays have been smooth for a while.
   Settings ▸ General ▸ *Previews* can also keep them at a lower rate on this computer.
-- **Sample venues for the 3D stage.** Without a model of your own you can pick one of seven
-  built-in spaces: an arena, a proscenium theatre, a thrust stage, a black box studio, a club, a
-  festival main stage and a ballroom, each to real sizes in metres, with the screens such a venue
-  usually has (a centre-hung scoreboard, an upstage LED wall, side screens, a cyc, a DJ wall) ready
-  to add and a few places to look from.
 
 ## 0.24.7
 
