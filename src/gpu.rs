@@ -1149,14 +1149,9 @@ pub enum Slot {
     /// One tile of the Preview pane's multiview (by its place in the grid): the tiles are
     /// drawn in the same frame at different sizes, so each needs its own.
     Multi(u8),
-    /// Every other preview's: by its host (a Preview pane's instance past the
-    /// first, the Operator view, the timeline workspace's monitor: see
-    /// `dock::OPERATOR_PREVIEW`) and its place there (0 its single picture,
-    /// 1 + n its multiview tile n). Several previews may draw at once, in the
-    /// main window and in windows of their own, so none shares another's.
-    /// Made only when first drawn (`LayerTexture::extra`). Made with
-    /// `Slot::single` and `Slot::tile`.
-    View(u8, u8),
+    /// A display's picture drawn for the 3D stage (`stage_render`), one display
+    /// after another on its thread, each submitted before the next is set.
+    Stage,
 }
 
 /// How many windows can draw the same layer at once without sharing a slot.
@@ -1165,10 +1160,7 @@ const WINDOW_SLOTS: usize = 8;
 pub const CAPTURE_SLOTS: usize = 2;
 /// And how many tiles of the multiview (it shows no more than this).
 pub const MULTI_SLOTS: usize = 16;
-/// The slots every layer has from the start (the first preview's among them).
-const SLOTS: usize = 2 + WINDOW_SLOTS + CAPTURE_SLOTS + MULTI_SLOTS;
-/// The places a preview host has: its single picture and its tiles.
-const VIEW_PLACES: usize = 1 + MULTI_SLOTS;
+const SLOTS: usize = 2 + WINDOW_SLOTS + CAPTURE_SLOTS + MULTI_SLOTS + 1;
 
 impl Slot {
     pub(crate) fn index(self) -> usize {
@@ -1178,81 +1170,8 @@ impl Slot {
             Slot::Window(n) => 2 + n as usize % WINDOW_SLOTS,
             Slot::Capture(n) => 2 + WINDOW_SLOTS + n as usize % CAPTURE_SLOTS,
             Slot::Multi(n) => 2 + WINDOW_SLOTS + CAPTURE_SLOTS + n as usize % MULTI_SLOTS,
-            Slot::View(host, place) => {
-                SLOTS + host as usize * VIEW_PLACES + (place as usize).min(VIEW_PLACES - 1)
-            }
+            Slot::Stage => 2 + WINDOW_SLOTS + CAPTURE_SLOTS + MULTI_SLOTS,
         }
-    }
-
-    /// Preview host `host`'s single picture (the first pane's is `Preview`).
-    pub fn single(host: u8) -> Slot {
-        match host {
-            0 => Slot::Preview,
-            h => Slot::View(h, 0),
-        }
-    }
-
-    /// Tile `n` (under `MULTI_SLOTS`) of preview host `host`'s multiview (the
-    /// first pane's are `Multi`).
-    pub fn tile(host: u8, n: u8) -> Slot {
-        let n = n.min(MULTI_SLOTS as u8 - 1);
-        match host {
-            0 => Slot::Multi(n),
-            h => Slot::View(h, 1 + n),
-        }
-    }
-}
-
-/// A slot made when first drawn (`Slot::View`).
-struct ExtraSlot {
-    uniform: wgpu::Buffer,
-    group: wgpu::BindGroup,
-    cells: AtomicU32,
-}
-
-/// What a layer needs to make a slot later.
-struct SlotMaker {
-    device: wgpu::Device,
-    layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    views: [wgpu::TextureView; 3],
-}
-
-impl SlotMaker {
-    fn make(&self) -> (wgpu::Buffer, wgpu::BindGroup) {
-        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("layer uniform"),
-            size: std::mem::size_of::<LayerUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("layer"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.views[0]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&self.views[1]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.views[2]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        (uniform, bind_group)
     }
 }
 
@@ -1265,16 +1184,22 @@ pub struct LayerTexture {
     slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     /// How many cells per side each slot was last set to draw.
     cells: Vec<AtomicU32>,
-    /// The `Slot::View`s, by index, made when first drawn: as many previews
-    /// as there are, each with its own.
-    extra: std::sync::Mutex<std::collections::HashMap<usize, ExtraSlot>>,
-    maker: SlotMaker,
     /// A picture has been written into it (see `upload::Uploader`): until
     /// then it holds nothing worth showing (a YUV texture of zeros is green).
     filled: std::sync::atomic::AtomicBool,
 }
 
 fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+    plane_for(device, w, h, format, wgpu::TextureUsages::empty())
+}
+
+fn plane_for(
+    device: &wgpu::Device,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+    more: wgpu::TextureUsages,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("plane"),
         size: wgpu::Extent3d {
@@ -1286,7 +1211,7 @@ fn plane(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> 
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | more,
         view_formats: &[],
     })
 }
@@ -1344,6 +1269,44 @@ impl LayerTexture {
             h,
             ColorMatrix::Bt709,
         )
+    }
+
+    /// A plain RGBA layer that is drawn into rather than uploaded to: the 3D
+    /// stage's picture (`stage_render`), placed on a display like any other.
+    /// It counts as filled once `mark_drawn` says a picture is in it.
+    pub fn new_target(gpu: &Gpu, w: u32, h: u32) -> LayerTexture {
+        let tex = plane_for(
+            &gpu.device,
+            w.max(1),
+            h.max(1),
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let view = tex.create_view(&Default::default());
+        let dummy = &gpu.compositor.dummy;
+        Self::finish(
+            gpu,
+            Planes::Rgba(tex),
+            [&view, dummy, dummy],
+            w.max(1),
+            h.max(1),
+            ColorMatrix::Bt709,
+        )
+    }
+
+    /// A view to draw into, for a layer made by `new_target`.
+    pub fn render_view(&self) -> Option<wgpu::TextureView> {
+        match &self.planes {
+            Planes::Rgba(t) if t.usage().contains(wgpu::TextureUsages::RENDER_ATTACHMENT) => {
+                Some(t.create_view(&Default::default()))
+            }
+            _ => None,
+        }
+    }
+
+    /// A picture has been drawn into it (`new_target`).
+    pub fn mark_drawn(&self) {
+        self.mark_filled();
     }
 
     /// A texture for Hap frames of `format`, `w` by `h` (both a multiple of 4).
@@ -1417,52 +1380,50 @@ impl LayerTexture {
         matrix: ColorMatrix,
     ) -> LayerTexture {
         let c = &gpu.compositor;
-        let maker = SlotMaker {
-            device: gpu.device.clone(),
-            layout: c.layout.clone(),
-            sampler: c.sampler.clone(),
-            views: views.map(|v| v.clone()),
+        let slot = || {
+            let uniform = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("layer uniform"),
+                size: std::mem::size_of::<LayerUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("layer"),
+                layout: &c.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(views[2]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&c.sampler),
+                    },
+                ],
+            });
+            (uniform, bind_group)
         };
         LayerTexture {
             planes,
             width,
             height,
             matrix,
-            slots: (0..SLOTS).map(|_| maker.make()).collect(),
+            slots: (0..SLOTS).map(|_| slot()).collect(),
             cells: (0..SLOTS).map(|_| AtomicU32::new(1)).collect(),
-            extra: std::sync::Mutex::new(std::collections::HashMap::new()),
-            maker,
             filled: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-
-    /// Run `f` on `slot`'s uniform buffer, bind group and cell count, making
-    /// a `Slot::View` the first time it is drawn.
-    fn with_slot<R>(
-        &self,
-        slot: Slot,
-        f: impl FnOnce(&wgpu::Buffer, &wgpu::BindGroup, &AtomicU32) -> R,
-    ) -> R {
-        let i = slot.index();
-        if let (Some((u, g)), Some(c)) = (self.slots.get(i), self.cells.get(i)) {
-            return f(u, g, c);
-        }
-        let mut extra = self.extra.lock().unwrap_or_else(|p| p.into_inner());
-        let e = extra.entry(i).or_insert_with(|| {
-            let (uniform, group) = self.maker.make();
-            ExtraSlot {
-                uniform,
-                group,
-                cells: AtomicU32::new(1),
-            }
-        });
-        f(&e.uniform, &e.group, &e.cells)
-    }
-
-    /// How many `Slot::View`s have been made (for the tests).
-    #[cfg(test)]
-    pub(crate) fn extra_slots(&self) -> usize {
-        self.extra.lock().map(|e| e.len()).unwrap_or(0)
     }
 
     /// Whether a picture has been written into it.
@@ -1515,6 +1476,7 @@ impl LayerTexture {
             transform,
         );
         let (grid, mx, my, points) = mesh_uniforms(geometry.mesh.as_deref());
+        self.cells[slot.index()].store(grid[0], Ordering::Relaxed);
         let u = LayerUniform {
             rect: place.rect,
             opacity,
@@ -1548,18 +1510,13 @@ impl LayerTexture {
                 1.0 / self.height.max(1) as f32,
             ],
         };
-        self.with_slot(slot, |buffer, _, cells| {
-            cells.store(grid[0], Ordering::Relaxed);
-            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&u));
-        });
+        queue.write_buffer(&self.slots[slot.index()].0, 0, bytemuck::bytes_of(&u));
     }
 
     /// Draw for `slot` with the compositor pipeline already set on `pass`.
     pub fn draw(&self, slot: Slot, pass: &mut wgpu::RenderPass) {
-        let n = self.with_slot(slot, |_, group, cells| {
-            pass.set_bind_group(0, group, &[]);
-            cells.load(Ordering::Relaxed)
-        });
+        pass.set_bind_group(0, &self.slots[slot.index()].1, &[]);
+        let n = self.cells[slot.index()].load(Ordering::Relaxed);
         pass.draw(0..6 * n * n, 0..1);
     }
 
@@ -3012,17 +2969,5 @@ mod tests {
                 assert!(near(p1, [255.0, 0.0, 0.0]), "display 1: {p1:?}");
             }
         }
-        // Two more Preview panes drawing the same layer in one submit: their
-        // slots are made when first drawn, each its own (not the first pane's).
-        assert_eq!(textures[&a].extra_slots(), 0, "none made until drawn");
-        let (t1, t2) = (Target::new(&gpu, SIZE), Target::new(&gpu, SIZE));
-        let first = draw(&one, Slot::single(1), &t1);
-        let second = draw(&two, Slot::tile(2, 5), &t2);
-        gpu.submit([first, second]);
-        let (p1, p2) = (t1.middle(&gpu), t2.middle(&gpu));
-        assert!(near(p1, [255.0, 0.0, 0.0]), "pane 2: {p1:?}");
-        assert!(near(p2, [63.75, 0.0, 127.5]), "pane 3: {p2:?}");
-        assert_eq!(textures[&a].extra_slots(), 2);
-        assert_eq!(textures[&b].extra_slots(), 1);
     }
 }
