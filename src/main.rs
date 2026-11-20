@@ -47,6 +47,7 @@ mod recovery;
 mod relink;
 mod remote;
 mod render;
+mod render3d;
 mod shape;
 mod show;
 mod slides_export;
