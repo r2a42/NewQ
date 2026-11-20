@@ -796,9 +796,11 @@ fn only_a_view_with_its_light_on_is_lit() {
         true,
     );
     wait(&mut live);
-    // Asked again, so the stats are read.
+    // Asked again, so the stats are read; still, with nothing playing, it
+    // is not drawn again (a lit view that doesn't change costs nothing).
     ask(&mut shared, lit, crate::render3d::LightView::Picture);
     ask(&mut shared, plain, crate::render3d::LightView::Off);
+    let drawn = live.serial;
     live.send(
         &gpu,
         &show,
@@ -808,7 +810,7 @@ fn only_a_view_with_its_light_on_is_lit() {
         &throws,
         false,
     );
-    wait(&mut live);
+    assert_eq!(live.serial, drawn, "a still lit view isn't drawn again");
     assert_eq!(shared.stats[&lit].throws, 2);
     assert!(!shared.stats[&lit].light_left_out);
     assert_eq!(shared.stats[&plain].throws, 0);

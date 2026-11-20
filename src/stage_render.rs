@@ -24,7 +24,8 @@
 //! (`ThrowJob`): what its display's window sends, its keystone or mesh and
 //! its edge blend included, into one layer of the throws' picture array, which
 //! the renderer throws into the room (`render3d::lit`). Throws are drawn only
-//! in a job with such a view, after the feeds and through the same slot.
+//! in a job with such a view (a preview), through the same slot, after the
+//! displays' views: an output never waits for them.
 
 use crate::gpu::{Gpu, LayerTexture, Slot};
 use crate::render::{Mailbox, OutputGroup};
@@ -432,7 +433,53 @@ impl StageDrawer {
         }
         self.feeds
             .retain(|_, f| now.saturating_duration_since(f.used) < FEED_KEPT);
-        // The projectors' pictures, each as its window would send it.
+        let mut stats = Vec::new();
+        let mut displays = true;
+        for v in &job.views {
+            if displays && !v.display {
+                displays = false;
+                after_displays();
+                // Only the previews have light: their projectors' pictures
+                // are drawn after the displays' views, never ahead of them.
+                self.draw_throws(gpu, job, now);
+            }
+            let Some(view) = v.target.render_view() else {
+                continue;
+            };
+            let target = Target {
+                view: &view,
+                format: FORMAT,
+                size: (v.target.width, v.target.height),
+                owner: v.key,
+            };
+            let feeds = &self.feeds;
+            let pictures = match v.options.light {
+                LightView::Off => None,
+                _ => self.throws.as_ref().map(|t| &t.array),
+            };
+            let s = self.renderer.render_lit(
+                gpu,
+                &target,
+                &v.scene,
+                &v.camera,
+                &|o| feeds.get(&o).map(|f| &f.view),
+                &v.options,
+                &v.lines,
+                pictures,
+            );
+            v.target.mark_drawn();
+            stats.push((v.key, s));
+        }
+        if displays {
+            after_displays();
+        }
+        stats
+    }
+
+    /// The projectors' pictures, each as its window would send it, into
+    /// their layers of the throws' array (and the array let go once unused
+    /// for a while).
+    fn draw_throws(&mut self, gpu: &Gpu, job: &StageJob, now: Instant) {
         if !job.throws.is_empty() {
             let size = (job.throw_size.0.max(1), job.throw_size.1.max(1));
             // As many layers as the highest one asked for (in powers of two).
@@ -474,44 +521,6 @@ impl StageDrawer {
         {
             self.throws = None;
         }
-        let mut stats = Vec::new();
-        let mut displays = true;
-        for v in &job.views {
-            if displays && !v.display {
-                displays = false;
-                after_displays();
-            }
-            let Some(view) = v.target.render_view() else {
-                continue;
-            };
-            let target = Target {
-                view: &view,
-                format: FORMAT,
-                size: (v.target.width, v.target.height),
-                owner: v.key,
-            };
-            let feeds = &self.feeds;
-            let pictures = match v.options.light {
-                LightView::Off => None,
-                _ => self.throws.as_ref().map(|t| &t.array),
-            };
-            let s = self.renderer.render_lit(
-                gpu,
-                &target,
-                &v.scene,
-                &v.camera,
-                &|o| feeds.get(&o).map(|f| &f.view),
-                &v.options,
-                &v.lines,
-                pictures,
-            );
-            v.target.mark_drawn();
-            stats.push((v.key, s));
-        }
-        if displays {
-            after_displays();
-        }
-        stats
     }
 }
 

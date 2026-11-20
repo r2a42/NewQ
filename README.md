@@ -1305,7 +1305,9 @@ bright the picture is, on any screen, curved wall or set.
     projector's light on its screen as full white; untick it to set the nits
     shown as white yourself.
   - *Brightness*: how bright each place is at full white, in colours (under
-    50, 50 to 100, 100 to 200, 200 to 400, 400 nits or more).
+    50, 50 to 100, 100 to 200, 200 to 400, 400 nits or more). Edge blends
+    aren't counted here (an overlap shows as the sum of both): *Picture* shows
+    them.
   - *Overlap*: how many projectors light each place (one, two, three or more).
   - *Pixel size*: how big a pixel is where it lands (under 1 mm up to 10 mm or
     more; the finest projector's where they overlap).

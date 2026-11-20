@@ -148,8 +148,14 @@ Changes from the plan:
   below full size) and drawn again only when a throw's lens or any part's mesh or transform changes.
   Bias is in the lookup only (a push along the normal, in proportion to depth, and a relative depth
   slack); no pipeline depth bias.
-- **Brightness is at full white**, not of the picture (so it agrees with the pointer's read-out);
-  *Exposure* belongs to the Picture view (8.2 put it under Brightness).
+- **Brightness is at full white**, not of the picture (so it agrees with the pointer's read-out),
+  and so before any edge blend: an overlap reads as the sum of both, the hover text says *Picture*
+  shows blends. *Exposure* belongs to the Picture view (8.2 put it under Brightness).
+- 3.7's blend check is in: `stage_render_tests::a_blended_pairs_overlap_is_as_bright_as_either_alone`
+  (two white throws overlapping a quarter, matched blends: within 3% of one alone, in light, all
+  across; twice without the blends). Every screen shape's normals point out of its CCW front
+  (`light_tests`), so the shader's front and the sums' agree. A lit view that doesn't change isn't
+  drawn again (`stage_live_tests`).
 - **Which screens take light** is decided per screen on the CPU: a screen whose box meets any
   throw's frustum is lit by projectors (a front screen only from its front), any other keeps its
   feed (the plan's rule, 3.3; no `emits` field yet, open question 5).
