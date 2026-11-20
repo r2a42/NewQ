@@ -471,7 +471,14 @@ stays on the computer until you send it yourself.
   more often than that. The Preview pane says so ("Preview at 15 fps to keep the
   outputs smooth", "Previews paused to protect the outputs"). Once the displays
   have been smooth for ten seconds they step back up one step at a time, waiting
-  longer each time the trouble comes straight back. Settings ▸ General ▸ *Previews* can also hold
+  longer each time the trouble comes straight back. Some displays drop a frame
+  every few seconds whatever the previews do (a system hiccup, a laptop lid, a
+  screen without its graphics driver): when the late frames go on at the same
+  rate with the previews paused for 15 seconds, the previews weren't the cause,
+  so they come straight back ("Previews back: the outputs' late frames aren't
+  theirs") and that rate is let be; clearly more trouble steps them down at once
+  again, and if it rises as soon as they are back they were the cause after all.
+  Settings ▸ General ▸ *Previews* can also hold
   them at 30, 15 or 5 a second on this computer (*Automatic* by default).
   *Test pattern* shows a picture for lining a display up, with a dropdown of
   fourteen beside it and a *Number* checkbox that turns the display's number

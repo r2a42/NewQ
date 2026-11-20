@@ -35,7 +35,10 @@ release page, and a release is refused if it has none.
   layout is saved with the show. Shows without one look as they did.
 - **The previews make way for the displays.** At the first sign a display is dropping frames, every
   preview in NewQ is drawn less often, then smaller, then paused if need be, and the Preview pane
-  says so; they come back once the displays have been smooth for a while.
+  says so; they come back once the displays have been smooth for a while. A display that drops a
+  frame now and then whatever the previews do (a system hiccup, a laptop lid, a screen without its
+  graphics driver) no longer keeps them paused: when pausing them doesn't help, they come straight
+  back and the Preview pane says the late frames aren't theirs.
   Settings ▸ General ▸ *Previews* can also keep them at a lower rate on this computer.
 
 ## 0.24.7
