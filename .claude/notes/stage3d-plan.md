@@ -66,7 +66,7 @@ resolution, never the outputs (the governor, pure and tested).
     inverse transpose, winding turned under a mirror; triangles, strips and fans (points and lines
     left out, with a note); base colour factor and base colour texture (PNG/JPEG) on the primitive's
     `texCoord` set, the factor multiplied into the picture. Skins, animation, morph targets, lights,
-    cameras and other material channels are ignored. `KHR_draco_mesh_compression` and
+    cameras and other material channels are ignored. `KHR_draco_mesh_compression`, `KHR_mesh_quantization` and
     `EXT_meshopt_compression` are refused in words; other required extensions are refused unless
     they only change looks (`GLTF_IGNORABLE`). Views and accessors are checked against the buffers
     before reading.

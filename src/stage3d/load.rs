@@ -126,10 +126,20 @@ fn format_of(path: &Path, head: &[u8]) -> Option<Format> {
 
 fn read_model(path: &Path, venue: &Venue) -> Result<LoadedVenue, String> {
     let name = file_name(path);
-    let bytes = std::fs::read(path).map_err(|e| format!("{name} can't be opened: {e}"))?;
+    let opened = |e: std::io::Error| format!("{name} can't be opened: {e}");
+    let mut head = Vec::with_capacity(32);
+    {
+        use std::io::Read as _;
+        std::fs::File::open(path)
+            .and_then(|f| f.take(32).read_to_end(&mut head))
+            .map_err(opened)?;
+    }
     let mut b = Builder::new(venue.brightness());
-    match format_of(path, &bytes[..bytes.len().min(32)]) {
-        Some(Format::Gltf) => read_gltf(path, &bytes, &mut b)?,
+    match format_of(path, &head) {
+        Some(Format::Gltf) => {
+            let bytes = std::fs::read(path).map_err(opened)?;
+            read_gltf(path, &bytes, &mut b)?
+        }
         Some(Format::Obj) => read_obj(path, &mut b)?,
         Some(Format::Fbx) => return Err(FBX_WORDS.into()),
         None => return Err(format!("{name}: {FORMAT_WORDS}")),
@@ -193,13 +203,19 @@ impl Builder {
             );
             return;
         }
-        let tris = piece.indices.len() / 3;
+        let mut tris = piece.indices.len() / 3;
         if tris == 0 {
             return;
         }
-        if self.triangles + tris > self.limit {
-            self.left_out += tris;
-            return;
+        // Past the limit, as much of it as fits.
+        let room = self.limit.saturating_sub(self.triangles);
+        if tris > room {
+            self.left_out += tris - room;
+            tris = room;
+            piece.indices.truncate(room * 3);
+            if tris == 0 {
+                return;
+            }
         }
         self.triangles += tris;
         for p in &mut piece.positions {
@@ -215,9 +231,13 @@ impl Builder {
             }
         }
         if piece.normals.len() == n {
+            // The cofactor matrix is the inverse transpose times the
+            // determinant: under a mirror it turns normals inside out.
             let nm = geometry::normal_matrix(m);
+            let sign = if geometry::det3(m) < 0.0 { -1.0 } else { 1.0 };
             for v in &mut piece.normals {
-                *v = geometry::normalize(geometry::apply3(&nm, *v));
+                let t = geometry::apply3(&nm, *v);
+                *v = geometry::normalize(t.map(|c| c * sign));
             }
         } else {
             piece.normals = smooth_normals(&piece.positions, &piece.indices);
@@ -404,17 +424,20 @@ const GLTF_IGNORABLE: &[&str] = &[
     "KHR_materials_clearcoat",
     "KHR_materials_sheen",
     "KHR_materials_variants",
-    "KHR_mesh_quantization",
     "KHR_lights_punctual",
 ];
 
 fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
+    use gltf::accessor::{DataType, Dimensions};
     let name = file_name(path);
-    let gltf = gltf::Gltf::from_slice(bytes)
+    let mut gltf = gltf::Gltf::from_slice(bytes)
         .map_err(|e| format!("{name} isn't a glTF file NewQ can read ({e})."))?;
     let doc = &gltf.document;
     for ext in doc.extensions_required() {
-        if ext == "KHR_draco_mesh_compression" || ext == "EXT_meshopt_compression" {
+        if ext == "KHR_draco_mesh_compression"
+            || ext == "EXT_meshopt_compression"
+            || ext == "KHR_mesh_quantization"
+        {
             return Err(format!(
                 "{name} is compressed ({ext}), which NewQ can't read. Export it again \
                  without mesh compression."
@@ -432,7 +455,7 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
         let data = match buffer.source() {
             gltf::buffer::Source::Bin => gltf
                 .blob
-                .clone()
+                .take()
                 .ok_or_else(|| format!("{name} is missing its binary part."))?,
             gltf::buffer::Source::Uri(uri) => read_uri(uri, dir)
                 .map_err(|e| format!("{name}'s data ({}) can't be read: {e}", short(uri)))?,
@@ -501,6 +524,43 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
         if let Some(mesh) = node.mesh() {
             for prim in mesh.primitives() {
                 let reader = prim.reader(|buf| buffers.get(buf.index()).map(Vec::as_slice));
+                // The reader takes positions and normals as floats, and the
+                // rest as glTF allows them: anything else is a damaged file
+                // (or quantized, which was refused above).
+                let material = prim.material();
+                let pbr = material.pbr_metallic_roughness();
+                let texture = pbr.base_color_texture();
+                let set = texture.as_ref().map_or(0, |t| t.tex_coord());
+                let is = |a: &gltf::Accessor, dims: Dimensions, types: &[DataType]| {
+                    a.dimensions() == dims && types.contains(&a.data_type())
+                };
+                let fits = |sem: gltf::Semantic, dims: Dimensions, types: &[DataType]| {
+                    prim.get(&sem).is_none_or(|a| is(&a, dims, types))
+                };
+                let readable =
+                    fits(
+                        gltf::Semantic::Positions,
+                        Dimensions::Vec3,
+                        &[DataType::F32],
+                    ) && fits(gltf::Semantic::Normals, Dimensions::Vec3, &[DataType::F32])
+                        && fits(
+                            gltf::Semantic::TexCoords(set),
+                            Dimensions::Vec2,
+                            &[DataType::U8, DataType::U16, DataType::F32],
+                        )
+                        && prim.indices().is_none_or(|a| {
+                            is(
+                                &a,
+                                Dimensions::Scalar,
+                                &[DataType::U8, DataType::U16, DataType::U32],
+                            )
+                        });
+                if !readable {
+                    b.warn(format!(
+                        "Part of {name} is stored in a way NewQ can't read; it is left out."
+                    ));
+                    continue;
+                }
                 let Some(positions) = reader.read_positions() else {
                     continue;
                 };
@@ -519,10 +579,6 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
                         continue;
                     }
                 };
-                let material = prim.material();
-                let pbr = material.pbr_metallic_roughness();
-                let texture = pbr.base_color_texture();
-                let set = texture.as_ref().map_or(0, |t| t.tex_coord());
                 let normals: Vec<[f32; 3]> = reader
                     .read_normals()
                     .map(|n| n.collect())

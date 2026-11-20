@@ -365,9 +365,10 @@ pub fn det3(m: &Mat4) -> f32 {
         + m[2][0] * (m[0][1] * m[1][2] - m[1][1] * m[0][2])
 }
 
-/// The matrix normals are carried by: the inverse transpose of the 3x3 part
-/// (the cofactor matrix, which differs only in length, and normals are made
-/// unit length after).
+/// The matrix normals are carried by: the cofactor matrix of the 3x3 part,
+/// which is its inverse transpose times its determinant. Normals are made unit
+/// length after, but under a mirror (a negative determinant) they come out
+/// inside out and must be turned round.
 pub fn normal_matrix(m: &Mat4) -> [[f32; 3]; 3] {
     let a = |c: usize, r: usize| m[c][r];
     // Columns of the cofactor matrix: the cross products of the columns.
