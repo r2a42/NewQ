@@ -60,10 +60,11 @@ pub struct Prefs {
     /// The new interface (editor, operator and patch views) in place of the panes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub new_layout: bool,
-    /// 0.24's Preview pane showed every output at once (a multiview). Read
-    /// once and moved into the layout's preview modes (`dock::Layout::
-    /// take_old_multiview`); never written.
-    #[serde(default, skip_serializing)]
+    /// 0.24's Preview pane showed every output at once (a multiview). Moved
+    /// into the layout's preview modes once per layout (`dock::Layout::
+    /// take_old_multiview`), and written on (on while the first Preview pane
+    /// shows the multiview, `App::save_layout`) so 0.24 keeps it.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub multiview: bool,
     /// The most the main window's previews are drawn a second (`preview_pace`);
     /// Automatic: full rate unless the outputs need the room.

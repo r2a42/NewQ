@@ -487,21 +487,12 @@ impl App {
         let layout_dir = crate::crash::log_dir();
         ui.layout = crate::dock::Layout::load(&layout_dir);
         ui.prefs = crate::prefs::Prefs::load(&layout_dir);
-        // 0.24's Multiview button becomes the previews' mode, once: the
-        // setting is never written again.
-        if ui
-            .layout
-            .take_old_multiview(std::mem::take(&mut ui.prefs.multiview))
+        // 0.24's Multiview button becomes the previews' mode, once per layout
+        // (the setting is written on, for 0.24, by `save_layout`).
+        if ui.layout.take_old_multiview(ui.prefs.multiview)
+            && let Err(e) = ui.layout.save(&layout_dir)
         {
-            // The old setting goes only once the layout holds the modes.
-            match ui.layout.save(&layout_dir) {
-                Ok(()) => {
-                    if let Err(e) = ui.prefs.save(&layout_dir) {
-                        log::warn!("could not save the settings of this computer: {e}");
-                    }
-                }
-                Err(e) => log::warn!("could not save the window layout: {e}"),
-            }
+            log::warn!("could not save the window layout: {e}");
         }
         crate::logging::set_level(ui.prefs.log_level);
         crate::media::video::set_hw_decode(ui.prefs.hw_decode);
@@ -3051,6 +3042,15 @@ impl App {
             return;
         }
         self.last_layout_save = Instant::now();
+        // 0.24's one Multiview setting, kept as the first Preview pane's mode
+        // is, so going back to 0.24 keeps it.
+        let multiview = self.ui.layout.old_multiview();
+        if self.ui.prefs.multiview != multiview {
+            self.ui.prefs.multiview = multiview;
+            if let Err(e) = self.ui.prefs.save(&dir) {
+                log::warn!("could not save the settings of this computer: {e}");
+            }
+        }
         let Ok(now) = serde_json::to_string(&self.ui.layout) else {
             return;
         };
