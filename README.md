@@ -437,6 +437,16 @@ stays on the computer until you send it yourself.
   shape, as many columns as the pane's width allows (up to sixteen displays);
   press it again to go back to the one chosen. It is kept per computer, and
   while a display's corners are being edited only that display is shown.
+  *Layout…* beside it arranges the multiview yourself: from 2 to 16 tiles as a
+  grid (2 × 1, 3 × 1, 2 × 2, 3 × 2, 4 × 2, 3 × 3, 4 × 3 or 4 × 4) or one large
+  tile with three, four or five small ones along the bottom, and which display
+  or sub display each tile shows (the same one may be in two tiles; a tile can
+  be left empty). In the Preview itself, drag a tile onto another to swap them,
+  and click a tile's name or right-click its picture to choose what it shows.
+  The layout is saved with the show (*Automatic* goes back to every display in
+  turn), so like other edits it can't be changed in show mode; a display that is
+  deleted leaves its tiles empty. A show with no
+  layout of its own shows every display, as before.
   *Test pattern* shows a picture for lining a display up, with a dropdown of
   fourteen beside it and a *Number* checkbox that turns the display's number
   on the patterns off (greyed for the patterns with no room for one; choosing a

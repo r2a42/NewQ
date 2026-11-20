@@ -314,6 +314,8 @@ pub struct UiState {
     /// The output shown in the main window's preview (the first when unset
     /// or gone).
     pub preview_output: Option<OutputId>,
+    /// The multiview's Layout window is open.
+    pub multiview_editor: bool,
     /// The bars of playing cues that were moved by hand, by cue instance.
     scrubs: HashMap<u64, Scrub>,
     /// A Shift-drag that moves all the bars together.
@@ -4595,11 +4597,169 @@ fn multiview_count(n: usize) -> String {
     }
 }
 
+/// What a tile of the multiview is dragged as: its place.
+#[derive(Clone, Copy, Debug)]
+struct TileDrag(usize);
+
+/// A change to the multiview a tile asked for (by dragging or its menu).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TileEdit {
+    Swap(usize, usize),
+    Assign(usize, Option<OutputId>),
+}
+
+/// Whether the multiview's arrangement may be changed here: it is part of the
+/// show, so not in show mode (on a network's primary an edit would send the show
+/// again mid-performance), nor on a computer that follows a primary, nor in a
+/// test's copy of the show.
+fn multiview_editable(st: &UiState) -> bool {
+    !st.show_mode && !network::locked(st) && !st.test_locked
+}
+
+/// The outputs a tile can show, and Empty. What was picked, if anything.
+fn tile_menu(
+    ui: &mut Ui,
+    current: Option<OutputId>,
+    outputs: &[PreviewOutput],
+) -> Option<Option<OutputId>> {
+    let mut pick = None;
+    for p in outputs {
+        if ui
+            .selectable_label(current == Some(p.id), &p.name)
+            .clicked()
+        {
+            pick = Some(Some(p.id));
+        }
+    }
+    ui.separator();
+    if ui.selectable_label(current.is_none(), "Empty").clicked() {
+        pick = Some(None);
+    }
+    if pick.is_some() {
+        ui.close();
+    }
+    pick
+}
+
+/// The picture area of tile `i` as something to drag onto another tile (which
+/// swaps them) and to right-click for what it shows.
+fn tile_interact(
+    ui: &mut Ui,
+    cell: egui::Rect,
+    i: usize,
+    current: Option<OutputId>,
+    st: &UiState,
+    edits: &mut Vec<TileEdit>,
+) {
+    if !multiview_editable(st) {
+        return;
+    }
+    let r = ui
+        .interact(
+            cell,
+            ui.id().with(("multiview_tile", i)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_text("Drag onto another tile to swap them; right-click to choose what it shows");
+    r.dnd_set_drag_payload(TileDrag(i));
+    if let Some(from) = r.dnd_hover_payload::<TileDrag>()
+        && from.0 != i
+    {
+        ui.painter().rect_stroke(
+            cell,
+            0.0,
+            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(from) = r.dnd_release_payload::<TileDrag>()
+        && from.0 != i
+    {
+        edits.push(TileEdit::Swap(from.0, i));
+    }
+    r.context_menu(|ui| {
+        if let Some(pick) = tile_menu(ui, current, &st.previews) {
+            edits.push(TileEdit::Assign(i, pick));
+        }
+    });
+}
+
+/// Paint `e`'s live picture fitted in `bars` (black round it) through slot `n`.
+fn paint_tile(ui: &mut Ui, e: &PreviewOutput, bars: egui::Rect, n: usize) -> egui::Rect {
+    let rect = preview::fit_picture(e.canvas, bars);
+    ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
+    preview::outline(ui, rect, bars);
+    ui.painter().add(preview::callback(
+        rect,
+        OutputPreview {
+            groups: vec![OutputGroup {
+                layers: e.layers.clone(),
+                geometry: Geometry {
+                    canvas: e.picture,
+                    warp: e.warp,
+                    pin: e.warp,
+                    mesh: e.mesh.clone(),
+                    slice: e.slice,
+                },
+            }],
+            slot: Slot::Multi(n as u8),
+        },
+    ));
+    rect
+}
+
+/// A tile's name line: the output's name (strong) and how fast it draws.
+fn tile_head(ui: &Ui, st: &UiState, name: &str, id: Option<OutputId>) -> egui::text::LayoutJob {
+    let mut head = egui::text::LayoutJob::default();
+    RichText::new(name).strong().append_to(
+        &mut head,
+        ui.style(),
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    if let Some(reading) = id.and_then(|id| fps_reading(st, id)) {
+        RichText::new(format!("  {reading}"))
+            .weak()
+            .small()
+            .append_to(
+                &mut head,
+                ui.style(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+    }
+    head
+}
+
+/// The multiview: the layout the show has (`multiview_layout`), else every output
+/// in an automatic grid (`multiview_auto`). Dragging a tile onto another, or a
+/// tile's menu, changes the layout; on the automatic grid that first makes a
+/// layout of it.
+fn multiview_grid(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
+    let mut edits = Vec::new();
+    match show.multiview.clone() {
+        Some(layout) => multiview_layout(ui, &layout, st, &mut edits),
+        None => multiview_auto(ui, st, &mut edits),
+    }
+    if !edits.is_empty() {
+        let ids: Vec<OutputId> = st.previews.iter().map(|p| p.id).collect();
+        let layout = show
+            .multiview
+            .get_or_insert_with(|| crate::multiview::Layout::from_auto(&ids));
+        for e in edits {
+            match e {
+                TileEdit::Swap(a, b) => layout.swap(a, b),
+                TileEdit::Assign(i, o) => layout.assign(i, o),
+            }
+        }
+    }
+}
+
 /// Every output's live picture in a grid, each under its name, in the display's own shape
 /// (black bars in the rest of its cell, as the single preview has). Each tile draws in a slot
 /// of its own, since the tiles are drawn in the same frame at different sizes; past
 /// `MULTI_SLOTS` outputs, the rest aren't shown.
-fn multiview_grid(ui: &mut Ui, st: &UiState) {
+fn multiview_auto(ui: &mut Ui, st: &UiState, edits: &mut Vec<TileEdit>) {
     let gap = MULTIVIEW_GAP;
     let tiles = &st.previews[..st.previews.len().min(crate::gpu::MULTI_SLOTS)];
     // Only the width in sight: egui squeezes a picture that runs out of the window.
@@ -4611,6 +4771,8 @@ fn multiview_grid(ui: &mut Ui, st: &UiState) {
     let tile_w = ((width - gap * (cols as f32 - 1.0)) / cols as f32).max(1.0);
     #[cfg(test)]
     let mut drawn: Vec<(egui::Rect, egui::Rect)> = Vec::new();
+    #[cfg(test)]
+    let mut slots: Vec<(u8, Option<OutputId>)> = Vec::new();
     for (row, chunk) in tiles.chunks(cols).enumerate() {
         // One height for the row, so the names line up; a tall sub display is
         // previewed narrower, not taller.
@@ -4627,48 +4789,17 @@ fn multiview_grid(ui: &mut Ui, st: &UiState) {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_width(tile_w);
-                        let mut head = egui::text::LayoutJob::default();
-                        RichText::new(&e.name).strong().append_to(
-                            &mut head,
-                            ui.style(),
-                            egui::FontSelection::Default,
-                            egui::Align::Center,
-                        );
-                        if let Some(reading) = fps_reading(st, e.id) {
-                            RichText::new(format!("  {reading}"))
-                                .weak()
-                                .small()
-                                .append_to(
-                                    &mut head,
-                                    ui.style(),
-                                    egui::FontSelection::Default,
-                                    egui::Align::Center,
-                                );
-                        }
+                        let head = tile_head(ui, st, &e.name, Some(e.id));
                         ui.add(egui::Label::new(head).truncate());
                         let (bars, _) =
                             ui.allocate_exact_size(Vec2::new(tile_w, cell_h), Sense::hover());
-                        let rect = preview::fit_picture(e.canvas, bars);
+                        let _rect = paint_tile(ui, e, bars, number);
+                        tile_interact(ui, bars, number, Some(e.id), st, edits);
                         #[cfg(test)]
-                        drawn.push((rect, bars));
-                        ui.painter().rect_filled(bars, 0.0, Color32::BLACK);
-                        preview::outline(ui, rect, bars);
-                        ui.painter().add(preview::callback(
-                            rect,
-                            OutputPreview {
-                                groups: vec![OutputGroup {
-                                    layers: e.layers.clone(),
-                                    geometry: Geometry {
-                                        canvas: e.picture,
-                                        warp: e.warp,
-                                        pin: e.warp,
-                                        mesh: e.mesh.clone(),
-                                        slice: e.slice,
-                                    },
-                                }],
-                                slot: Slot::Multi(number as u8),
-                            },
-                        ));
+                        {
+                            drawn.push((_rect, bars));
+                            slots.push((number as u8, Some(e.id)));
+                        }
                         ui.add(
                             egui::Label::new(RichText::new(route_words(st, e.id)).weak().small())
                                 .truncate(),
@@ -4680,7 +4811,192 @@ fn multiview_grid(ui: &mut Ui, st: &UiState) {
         ui.add_space(gap);
     }
     #[cfg(test)]
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("multiview_tiles"), drawn));
+    ui.data_mut(|d| {
+        d.insert_temp(egui::Id::new("multiview_tiles"), drawn);
+        d.insert_temp(egui::Id::new("multiview_slots"), slots);
+    });
+}
+
+/// The multiview as the show arranges it: `multiview::arrange` places the tiles,
+/// each shows its output (or is empty: none chosen, or the output has gone), and
+/// each draws in the slot of its place, so one output may be in two tiles.
+fn multiview_layout(
+    ui: &mut Ui,
+    layout: &crate::multiview::Layout,
+    st: &UiState,
+    edits: &mut Vec<TileEdit>,
+) {
+    let find = |id: OutputId| st.previews.iter().find(|p| p.id == id);
+    let shown = |i: usize| layout.tile(i, |id| find(id).is_some()).and_then(find);
+    let clip = ui.clip_rect();
+    let at = ui.cursor().min;
+    let width = ui.available_width().min(clip.right() - at.x).max(1.0);
+    let line = ui.text_style_height(&egui::TextStyle::Body) + 2.0;
+    let room = crate::multiview::Room {
+        origin: egui::Pos2::ZERO,
+        width,
+        visible: clip.bottom() - at.y,
+        gap: MULTIVIEW_GAP,
+        line,
+    };
+    let (tiles, height) = crate::multiview::arrange(layout.shape, room, |i| {
+        shown(i).map_or((16, 9), |e| e.canvas)
+    });
+    let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let editable = multiview_editable(st);
+    #[cfg(test)]
+    let mut drawn: Vec<(egui::Rect, egui::Rect)> = Vec::new();
+    #[cfg(test)]
+    let mut slots: Vec<(u8, Option<OutputId>)> = Vec::new();
+    let shift = area.min.to_vec2();
+    for (i, t) in tiles.iter().enumerate() {
+        let (head, cell, foot) = (
+            t.head.translate(shift),
+            t.cell.translate(shift),
+            t.foot.translate(shift),
+        );
+        let e = shown(i);
+        let current = layout.tiles.get(i).copied().flatten();
+        // The name; a menu of what the tile shows where it may be changed.
+        let mut head_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(head)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        head_ui.set_clip_rect(head.intersect(clip));
+        let name = e.map_or_else(|| format!("{} · empty", i + 1), |e| e.name.clone());
+        let job = tile_head(&head_ui, st, &name, e.map(|e| e.id));
+        if editable {
+            head_ui
+                .menu_button(job, |ui| {
+                    if let Some(pick) = tile_menu(ui, current, &st.previews) {
+                        edits.push(TileEdit::Assign(i, pick));
+                    }
+                })
+                .response
+                .on_hover_text("Choose what this tile shows");
+        } else {
+            head_ui.add(egui::Label::new(job).truncate());
+        }
+        match e {
+            Some(e) => {
+                let _rect = paint_tile(ui, e, cell, i);
+                #[cfg(test)]
+                drawn.push((_rect, cell));
+                ui.put(
+                    foot,
+                    egui::Label::new(RichText::new(route_words(st, e.id)).weak().small())
+                        .truncate(),
+                );
+            }
+            None => {
+                ui.painter().rect_filled(cell, 0.0, Color32::from_gray(18));
+                ui.painter().text(
+                    cell.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Empty",
+                    egui::FontId::proportional(12.0),
+                    Color32::from_gray(110),
+                );
+                #[cfg(test)]
+                drawn.push((egui::Rect::NOTHING, cell));
+            }
+        }
+        #[cfg(test)]
+        slots.push((i as u8, e.map(|e| e.id)));
+        tile_interact(ui, cell, i, current, st, edits);
+    }
+    #[cfg(test)]
+    ui.data_mut(|d| {
+        d.insert_temp(egui::Id::new("multiview_tiles"), drawn);
+        d.insert_temp(egui::Id::new("multiview_slots"), slots);
+    });
+}
+
+/// The multiview's Layout window: the arrangement (automatic, a grid, one large
+/// tile with small ones) and what each tile shows.
+fn multiview_editor(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
+    use crate::multiview::{Layout, Shape};
+    let mut open = st.multiview_editor;
+    let editable = multiview_editable(st);
+    let ids: Vec<OutputId> = st.previews.iter().map(|p| p.id).collect();
+    egui::Window::new("Multiview layout")
+        .id(egui::Id::new("multiview_layout_window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                ui.label(RichText::new("Arrangement").strong());
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .selectable_label(show.multiview.is_none(), "Automatic")
+                        .on_hover_text("Every output, in a grid that fits the pane")
+                        .clicked()
+                    {
+                        show.multiview = None;
+                    }
+                    for s in Shape::CHOICES {
+                        let on = show.multiview.as_ref().is_some_and(|l| l.shape == s);
+                        if ui.selectable_label(on, s.label()).clicked() && !on {
+                            show.multiview
+                                .get_or_insert_with(|| Layout::from_auto(&ids))
+                                .set_shape(s, &ids);
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                match show.multiview.as_mut() {
+                    None => {
+                        settings::hint(
+                            ui,
+                            "Automatic shows every output in turn. Choose an arrangement to pick what each tile shows.",
+                        );
+                    }
+                    Some(layout) => {
+                        layout.tidy();
+                        ui.label(RichText::new("Tiles").strong());
+                        egui::Grid::new("multiview_tiles_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                for i in 0..layout.tiles.len() {
+                                    let big = matches!(layout.shape, Shape::Big { .. }) && i == 0;
+                                    ui.label(if big {
+                                        "Large tile".to_string()
+                                    } else {
+                                        format!("Tile {}", i + 1)
+                                    });
+                                    let current = layout.tiles[i];
+                                    let text = current
+                                        .and_then(|id| st.previews.iter().find(|p| p.id == id))
+                                        .map_or_else(|| "Empty".to_string(), |p| p.name.clone());
+                                    egui::ComboBox::from_id_salt(("multiview_tile_pick", i))
+                                        .selected_text(text)
+                                        .width(180.0)
+                                        .show_ui(ui, |ui| {
+                                            if let Some(pick) =
+                                                tile_menu(ui, current, &st.previews)
+                                            {
+                                                layout.assign(i, pick);
+                                            }
+                                        });
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(4.0);
+                        settings::hint(
+                            ui,
+                            "Drag a tile onto another in the Preview to swap them; right-click a tile or click its name to choose what it shows. The layout is saved with the show.",
+                        );
+                    }
+                }
+            });
+            if !editable {
+                settings::hint(ui, "The layout is part of the show: it can't be changed in show mode, during a test or on a computer that follows another.");
+            }
+        });
+    st.multiview_editor = open;
 }
 
 fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
@@ -4689,8 +5005,10 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
     };
     let id = st.previews[i].id;
     let editing = st.geometry_edit == Some(id);
-    // Every output at once, when there is more than one and no corners are being edited.
-    let multi = st.prefs.multiview && st.previews.len() > 1 && !editing;
+    // Every output at once (or the show's layout), when there is more than one or a layout,
+    // and no corners are being edited.
+    let can_multi = st.previews.len() > 1 || show.multiview.is_some();
+    let multi = st.prefs.multiview && can_multi && !editing;
     let where_ = route_words(st, id);
     let mut chosen = id;
     // Wrapped: a row wider than a narrow pane would widen the ui past it.
@@ -4718,7 +5036,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
             log::warn!("could not save the settings of this computer: {e}");
         }
         ui.separator();
-        if st.previews.len() > 1
+        if can_multi
             && ui
                 .add_enabled(!editing, egui::Button::new("Multiview").selected(multi))
                 .on_hover_text("Show every output at once, or only the one chosen")
@@ -4733,7 +5051,18 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
             }
         }
         if multi {
-            ui.label(RichText::new(multiview_count(st.previews.len())).strong());
+            if ui
+                .add(egui::Button::new("Layout…").selected(st.multiview_editor))
+                .on_hover_text("How many tiles, how they are arranged and what each shows")
+                .clicked()
+            {
+                st.multiview_editor = !st.multiview_editor;
+            }
+            let count = match &show.multiview {
+                Some(l) => l.shape.label(),
+                None => multiview_count(st.previews.len()),
+            };
+            ui.label(RichText::new(count).strong());
         } else if st.previews.len() > 1 {
             ui.add_enabled_ui(!editing, |ui| {
                 egui::ComboBox::from_id_salt("preview_output")
@@ -4759,7 +5088,10 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool) {
     }
 
     if multi {
-        multiview_grid(ui, st);
+        multiview_grid(ui, show, st);
+        if st.multiview_editor {
+            multiview_editor(ui.ctx(), show, st);
+        }
         return;
     }
 
@@ -14999,6 +15331,241 @@ mod tests {
             assert!(
                 !seen.contains(&other.index()),
                 "{other:?} is in the multiview's slots"
+            );
+        }
+    }
+
+    /// What the Preview pane drew in each of `frames` (each a list of input
+    /// events) in a 1280x900 window, with `show`'s layout: how many pictures were
+    /// painted in the last, the tiles (picture, cell) and (slot, output) of each tile.
+    #[allow(clippy::type_complexity)]
+    fn layout_frames(
+        st: &mut UiState,
+        show: &mut Show,
+        pane: Rect,
+        frames: Vec<Vec<egui::Event>>,
+    ) -> (usize, Vec<(Rect, Rect)>, Vec<(u8, Option<OutputId>)>) {
+        fn count(s: &egui::epaint::Shape) -> usize {
+            match s {
+                egui::epaint::Shape::Callback(_) => 1,
+                egui::epaint::Shape::Vec(v) => v.iter().map(count).sum(),
+                _ => 0,
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut painted = 0;
+        for (n, events) in frames.into_iter().enumerate() {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 900.0))),
+                time: Some(1.0 + n as f64 * 0.05),
+                events,
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| {
+                let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(pane));
+                pane_ui.set_clip_rect(pane);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(&mut pane_ui, |ui| output_previews(ui, show, st, true));
+            });
+            o.textures_delta.clear();
+            painted = o.shapes.iter().map(|c| count(&c.shape)).sum();
+        }
+        let tiles = ctx
+            .data(|d| d.get_temp::<Vec<(Rect, Rect)>>(egui::Id::new("multiview_tiles")))
+            .unwrap_or_default();
+        let slots = ctx
+            .data(|d| d.get_temp::<Vec<(u8, Option<OutputId>)>>(egui::Id::new("multiview_slots")))
+            .unwrap_or_default();
+        (painted, tiles, slots)
+    }
+
+    fn still(n: usize) -> Vec<Vec<egui::Event>> {
+        vec![Vec::new(); n]
+    }
+
+    #[test]
+    fn a_three_by_three_layout_draws_nine_tiles_in_order_each_in_its_slot() {
+        use crate::multiview::{Layout, Shape};
+        // Four outputs, one of them a tall sub display; output 2 is in two tiles,
+        // tile 5 is empty and tile 7 names an output that has gone.
+        let mut st = UiState::default();
+        for n in 1..=4 {
+            let mut p = preview(n);
+            if n == 3 {
+                p.canvas = (1080, 1920);
+                p.picture = (1080, 1920);
+            }
+            st.previews.push(p);
+        }
+        st.prefs.multiview = true;
+        let o = |n| Some(OutputId(n));
+        let mut show = Show {
+            multiview: Some(Layout {
+                shape: Shape::Grid { cols: 3, rows: 3 },
+                tiles: vec![o(1), o(2), o(3), o(4), o(2), None, o(1), o(99), o(4)],
+            }),
+            ..Show::default()
+        };
+        let pane = Rect::from_min_max(pos2(200.0, 50.0), pos2(1100.0, 900.0));
+        let (painted, tiles, slots) = layout_frames(&mut st, &mut show, pane, still(3));
+        assert_eq!(tiles.len(), 9);
+        assert_eq!(painted, 7, "nine tiles less the empty and the gone");
+        assert_eq!(
+            slots,
+            vec![
+                (0, o(1)),
+                (1, o(2)),
+                (2, o(3)),
+                (3, o(4)),
+                (4, o(2)),
+                (5, None),
+                (6, o(1)),
+                (7, None),
+                (8, o(4)),
+            ],
+            "in order, a slot per place"
+        );
+        // Row by row, three across, inside the pane; each picture its display's shape.
+        for (i, (picture, cell)) in tiles.iter().enumerate() {
+            assert!(
+                cell.left() >= pane.left() - 0.5 && cell.right() <= pane.right() + 0.5,
+                "{i}: {cell:?}"
+            );
+            if let Some(id) = slots[i].1 {
+                let c = st.previews.iter().find(|p| p.id == id).unwrap().canvas;
+                let want = c.0 as f32 / c.1 as f32;
+                assert!(
+                    (picture.width() / picture.height() - want).abs() < 0.01 * want,
+                    "{i}: {picture:?}"
+                );
+                assert!(cell.expand(0.5).contains_rect(*picture));
+            }
+        }
+        let tops: Vec<i32> = tiles.iter().map(|(_, c)| c.top() as i32).collect();
+        assert!(tops[0] == tops[1] && tops[1] == tops[2] && tops[2] < tops[3]);
+        assert!(tops[3] == tops[5] && tops[5] < tops[6]);
+        let lefts: Vec<i32> = tiles.iter().map(|(_, c)| c.left() as i32).collect();
+        assert!(lefts[0] < lefts[1] && lefts[1] < lefts[2] && lefts[0] == lefts[3]);
+        // The header names the arrangement.
+        assert_eq!(show.multiview.as_ref().unwrap().shape.label(), "3 × 3");
+    }
+
+    #[test]
+    fn one_large_tile_goes_over_the_small_ones() {
+        use crate::multiview::{Layout, Shape};
+        let mut st = UiState {
+            previews: (1..=4).map(preview).collect(),
+            ..UiState::default()
+        };
+        st.prefs.multiview = true;
+        let ids: Vec<OutputId> = (1..=4).map(OutputId).collect();
+        let mut show = Show {
+            multiview: Some(Layout::new(Shape::Big { small: 3 }, &ids)),
+            ..Show::default()
+        };
+        let pane = Rect::from_min_max(pos2(0.0, 0.0), pos2(900.0, 900.0));
+        let (painted, tiles, slots) = layout_frames(&mut st, &mut show, pane, still(3));
+        assert_eq!(painted, 4);
+        assert_eq!(
+            slots.iter().map(|s| s.1).collect::<Vec<_>>(),
+            [1, 2, 3, 4].map(|n| Some(OutputId(n)))
+        );
+        let big = tiles[0].0;
+        for (small, _) in &tiles[1..] {
+            assert!(small.top() > big.bottom(), "{small:?} under {big:?}");
+            assert!(small.width() * 2.5 < big.width());
+        }
+        assert!((big.width() / big.height() - 16.0 / 9.0).abs() < 0.02);
+    }
+
+    /// Mouse events that drag from `from` to `to`, a frame each step.
+    fn drag_events(from: Pos2, to: Pos2) -> Vec<Vec<egui::Event>> {
+        let press = |p, pressed| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut frames = vec![
+            vec![egui::Event::PointerMoved(from)],
+            vec![press(from, true)],
+        ];
+        for k in 1..=8 {
+            let p = from + (to - from) * (k as f32 / 8.0);
+            frames.push(vec![egui::Event::PointerMoved(p)]);
+        }
+        frames.push(vec![press(to, false)]);
+        frames.push(Vec::new());
+        frames.push(Vec::new());
+        frames
+    }
+
+    #[test]
+    fn dragging_a_tile_onto_another_swaps_them() {
+        use crate::multiview::{Layout, Shape};
+        let mut st = UiState {
+            previews: (1..=4).map(preview).collect(),
+            ..UiState::default()
+        };
+        st.prefs.multiview = true;
+        let ids: Vec<OutputId> = (1..=4).map(OutputId).collect();
+        let mut show = Show {
+            multiview: Some(Layout::new(Shape::Grid { cols: 2, rows: 2 }, &ids)),
+            ..Show::default()
+        };
+        let pane = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 900.0));
+        let (_, tiles, _) = layout_frames(&mut st, &mut show, pane, still(2));
+        let (from, to) = (tiles[0].1.center(), tiles[3].1.center());
+        let mut frames = still(1);
+        frames.extend(drag_events(from, to));
+        let (_, _, slots) = layout_frames(&mut st, &mut show, pane, frames);
+        let o = |n| Some(OutputId(n));
+        assert_eq!(
+            show.multiview.as_ref().unwrap().tiles,
+            vec![o(4), o(2), o(3), o(1)]
+        );
+        assert_eq!(slots[0], (0, o(4)), "drawn as it is now");
+
+        // On the automatic grid, a drag makes a layout of it first.
+        let mut show = Show::default();
+        let (_, tiles, _) = layout_frames(&mut st, &mut show, pane, still(2));
+        assert_eq!(tiles.len(), 4);
+        let mut frames = still(1);
+        frames.extend(drag_events(tiles[1].1.center(), tiles[2].1.center()));
+        layout_frames(&mut st, &mut show, pane, frames);
+        let l = show.multiview.expect("a layout was made");
+        assert_eq!(l.shape, Shape::Grid { cols: 2, rows: 2 });
+        assert_eq!(l.tiles, vec![o(1), o(3), o(2), o(4)]);
+    }
+
+    #[test]
+    fn the_multiview_cannot_be_rearranged_while_locked() {
+        use crate::multiview::{Layout, Shape};
+        // A test's copy of the show, and show mode.
+        for (test_locked, show_mode) in [(true, false), (false, true)] {
+            let mut st = UiState {
+                previews: (1..=4).map(preview).collect(),
+                test_locked,
+                show_mode,
+                ..UiState::default()
+            };
+            st.prefs.multiview = true;
+            let ids: Vec<OutputId> = (1..=4).map(OutputId).collect();
+            let layout = Layout::new(Shape::Grid { cols: 2, rows: 2 }, &ids);
+            let mut show = Show {
+                multiview: Some(layout.clone()),
+                ..Show::default()
+            };
+            let pane = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 900.0));
+            let (_, tiles, _) = layout_frames(&mut st, &mut show, pane, still(2));
+            let mut frames = still(1);
+            frames.extend(drag_events(tiles[0].1.center(), tiles[3].1.center()));
+            layout_frames(&mut st, &mut show, pane, frames);
+            assert_eq!(
+                show.multiview,
+                Some(layout),
+                "test {test_locked} show {show_mode}"
             );
         }
     }
