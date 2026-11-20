@@ -943,6 +943,39 @@ fn a_little_stage_draws() {
         axes: true,
         ..Options::default()
     };
+    // Each of the overlays alone first, with any GPU error caught, so a
+    // failure says which part of the frame went wrong (and why).
+    let mut seen = Vec::new();
+    for (grid, axes) in [(false, false), (true, false), (false, true), (true, true)] {
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let (pixels, _) = draw(
+            &gpu,
+            &mut r,
+            &scene,
+            &orbit.camera(),
+            &lookup,
+            &Options {
+                grid,
+                axes,
+                ..options
+            },
+            size,
+            RGBA,
+        );
+        let error = pollster::block_on(scope.pop());
+        let mid = orbit.camera().project([0.0, 4.5, -6.0], size).unwrap();
+        let p = px(&pixels, size.0, mid[0] as u32, mid[1] as u32);
+        let lit = pixels.chunks(4).filter(|p| p[3] != 0).count();
+        seen.push(format!(
+            "grid {grid} axes {axes}: middle {p:?}, {lit} pixels written, error {error:?}"
+        ));
+    }
+    let report = format!(
+        "{} ({:?})\n{}",
+        gpu.adapter.get_info().name,
+        gpu.adapter.get_info().backend,
+        seen.join("\n")
+    );
     let (pixels, stats) = draw(
         &gpu,
         &mut r,
@@ -965,5 +998,5 @@ fn a_little_stage_draws() {
     // The screen shows the picture (the bars at its top, not the missing grey).
     let mid = orbit.camera().project([0.0, 4.5, -6.0], size).unwrap();
     let p = px(&pixels, size.0, mid[0] as u32, mid[1] as u32);
-    assert!(brightness(p) > 3 * 60, "{p:?}");
+    assert!(brightness(p) > 3 * 60, "{p:?}\n{report}");
 }

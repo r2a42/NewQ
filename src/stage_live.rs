@@ -665,7 +665,10 @@ impl StageLive {
     /// Stop the drawing thread as a panic in it would, and wait until it
     /// has (for a test).
     #[cfg(test)]
-    pub fn panic_thread(&self) {
+    /// The thread is taken as just started, so the restart waits its
+    /// `RESTART_EVERY` however slowly the first picture was drawn.
+    pub fn panic_thread(&mut self) {
+        self.started = Some(Instant::now());
         if let Some(t) = &self.thread {
             t.panic();
             let end = Instant::now() + Duration::from_secs(10);
