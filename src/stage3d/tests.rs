@@ -417,3 +417,148 @@ fn a_display_sees_the_stage_from_its_viewpoint_or_all_of_it() {
     let cam = show.stage_camera(&StageSource::default(), None, 0.0);
     assert_eq!(cam, scene::Camera::default());
 }
+
+#[test]
+fn a_later_newqs_stage_loads_keeping_what_this_one_doesnt_know() {
+    // A shape, a feed, a unit, an up axis and a display's source from a
+    // later NewQ: the show still opens.
+    let mut show = Show::default();
+    let display = show.outputs[0].id;
+    let known = show.add_surface(None);
+    show.stage3d.surfaces[0].feed = Feed::whole_picture(&show, display);
+    let mut json: serde_json::Value = serde_json::to_value(&show).unwrap();
+    let stage = &mut json["stage3d"];
+    stage["units"] = "Furlongs".into();
+    let sphere = serde_json::json!({ "Sphere": { "radius": 3.0, "segments": 64 } });
+    let hologram = serde_json::json!({ "Hologram": { "output": 7 } });
+    stage["surfaces"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": 900, "name": "Dome", "shape": sphere, "feed": hologram
+        }));
+    stage["venue"] = serde_json::json!({ "path": "room.obj", "up": "W", "units": "Leagues" });
+    json["outputs"][0]["source"] = "Camera".into();
+    let text = serde_json::to_string(&json).unwrap();
+    let back: Show = serde_json::from_str(&text).expect("a later NewQ's stage loads");
+    let st = &back.stage3d;
+    assert_eq!(st.units, LengthUnit::Metres);
+    let v = st.venue.as_ref().unwrap();
+    assert_eq!((v.units, v.up), (LengthUnit::Metres, UpAxis::Y));
+    assert_eq!(back.outputs[0].source, None);
+    assert_eq!(st.surfaces.len(), 2);
+    assert_eq!(st.surfaces[0].id, known);
+    let dome = &st.surfaces[1];
+    assert!(!dome.shape.is_known());
+    assert_eq!(dome.feed.output(), None);
+    // Drawn as nothing; the known screen is still drawn and picked.
+    let scene = st.scene(&back, None);
+    assert_eq!(scene.parts.len(), 1);
+    assert_eq!(st.part_surface(&scene, 0), Some(known));
+    // Saved again, the later shape and feed are written as they were.
+    let again: serde_json::Value = serde_json::to_value(&back).unwrap();
+    assert_eq!(again["stage3d"]["surfaces"][1]["shape"], sphere);
+    assert_eq!(again["stage3d"]["surfaces"][1]["feed"], hologram);
+    // Known ones still read as themselves, not as unknown.
+    assert!(st.surfaces[0].shape.is_known());
+    assert!(matches!(st.surfaces[0].feed, Feed::Display { .. }));
+    let none: Feed = serde_json::from_str("\"None\"").unwrap();
+    assert_eq!(none, Feed::None);
+    let source: Option<StageSource> = serde_json::from_str(r#"{"viewpoint":"Desk"}"#).unwrap();
+    assert_eq!(source.unwrap().viewpoint.as_deref(), Some("Desk"));
+}
+
+fn viewpoint(name: &str) -> Viewpoint {
+    Viewpoint {
+        name: name.into(),
+        eye: [0.0, 2.0, 10.0],
+        target: [0.0; 3],
+        fov_deg: 50.0,
+    }
+}
+
+#[test]
+fn renaming_a_viewpoint_takes_its_displays_with_it_and_names_stay_unique() {
+    let mut show = Show::default();
+    let a = show.outputs[0].id;
+    let b = show.add_display();
+    show.stage3d.viewpoints = vec![viewpoint("Desk"), viewpoint("Balcony")];
+    let from = |n: &str| {
+        Some(StageSource {
+            viewpoint: Some(n.into()),
+        })
+    };
+    show.outputs[0].source = from("Desk");
+    show.outputs.iter_mut().find(|o| o.id == b).unwrap().source = from("Balcony");
+    // Typed a letter at a time: each step renames, and A follows.
+    for typed in ["Des", "Desk", "Desk l", "Desk left"] {
+        assert!(show.rename_viewpoint(0, typed));
+    }
+    assert_eq!(show.stage3d.viewpoints[0].name, "Desk left");
+    assert_eq!(show.output(a).unwrap().source, from("Desk left"));
+    assert_eq!(show.output(b).unwrap().source, from("Balcony"));
+    // A name another has (on the way to another name) is refused: the two
+    // displays never end up on one viewpoint.
+    assert!(!show.rename_viewpoint(0, "Balcony"));
+    assert!(!show.rename_viewpoint(0, "  "));
+    assert_eq!(show.stage3d.viewpoints[0].name, "Desk left");
+    assert_eq!(show.output(a).unwrap().source, from("Desk left"));
+    assert!(!show.rename_viewpoint(5, "Nowhere"));
+    // A file with two of one name: the second is named again on loading.
+    show.stage3d.viewpoints.push(viewpoint("Balcony"));
+    show.sanitize_stage();
+    let names: Vec<&str> = show
+        .stage3d
+        .viewpoints
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(names, ["Desk left", "Balcony", "Balcony 2"]);
+    assert_eq!(show.output(b).unwrap().source, from("Balcony"));
+}
+
+#[test]
+fn a_sub_display_never_shows_the_stage_and_a_projector_shows_its_pictures() {
+    let mut show = Show::default();
+    let a = show.outputs[0].id;
+    let sub = show.add_sub_display(a);
+    // Written by hand: a sub display with a source would draw the stage
+    // within a picture the stage may show.
+    show.outputs
+        .iter_mut()
+        .find(|o| o.id == sub)
+        .unwrap()
+        .source = Some(StageSource::default());
+    assert!(!show.shows_stage(sub));
+    assert!(show.stage_source(sub).is_none());
+    assert!(show.stage_source_refused(sub).is_some());
+    let dir = temp_dir("sub-source");
+    let path = dir.join("sub.newq");
+    std::fs::write(&path, serde_json::to_string(&show).unwrap()).unwrap();
+    let loaded = Show::load(&path).unwrap();
+    assert_eq!(loaded.output(sub).unwrap().source, None);
+    let _ = std::fs::remove_dir_all(&dir);
+    // A projector of a blended pair takes the whole picture's, and may not
+    // be given its own; the whole picture may.
+    let (wide, left, _right) = show.add_blended_pair(1920, 1080, 0.1);
+    assert!(show.stage_source_refused(left).is_some());
+    assert!(show.stage_source_refused(wide).is_none());
+    assert!(show.stage_source_refused(a).is_none());
+    show.outputs
+        .iter_mut()
+        .find(|o| o.id == left)
+        .unwrap()
+        .source = Some(StageSource::default());
+    assert!(!show.shows_stage(left), "its own is ignored");
+    show.outputs
+        .iter_mut()
+        .find(|o| o.id == wide)
+        .unwrap()
+        .source = Some(StageSource {
+        viewpoint: Some("Desk".into()),
+    });
+    assert_eq!(
+        show.stage_source(left).and_then(|s| s.viewpoint.as_deref()),
+        Some("Desk")
+    );
+}

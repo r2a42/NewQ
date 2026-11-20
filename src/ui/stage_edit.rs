@@ -21,6 +21,10 @@ use crate::stage3d::{
     Venue, Viewpoint, WHOLE, geometry,
 };
 
+/// What the page says of a screen whose shape a later NewQ wrote.
+pub const UNKNOWN_SHAPE_WORDS: &str =
+    "Made by a newer NewQ: this one can't show or change its shape. It is kept as it is.";
+
 /// A screen to start from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
@@ -117,6 +121,7 @@ fn shape_height(shape: &SurfaceShape) -> f32 {
                 1.0
             }
         }
+        SurfaceShape::Unknown(_) => 1.0,
     }
 }
 
@@ -679,7 +684,7 @@ fn feed_rows(ui: &mut Ui, id: SurfaceId, feed: &mut Feed, choices: &[(OutputId, 
                 if ui.selectable_label(current == Some(*o), label).clicked() {
                     let region = match feed {
                         Feed::Display { region, .. } => *region,
-                        Feed::None => WHOLE,
+                        Feed::None | Feed::Unknown(_) => WHOLE,
                     };
                     *feed = Feed::Display { output: *o, region };
                 }
@@ -765,6 +770,11 @@ fn shape_rows(ui: &mut Ui, id: SurfaceId, shape: &mut SurfaceShape, unit: Length
                 ui.label(format!("{} flat faces", facets.len()));
                 rebuild(ui, id, facets, unit);
             });
+            ui.end_row();
+        }
+        SurfaceShape::Unknown(_) => {
+            ui.label("Shape");
+            ui.label(RichText::new(UNKNOWN_SHAPE_WORDS).weak());
             ui.end_row();
         }
     }
@@ -859,10 +869,40 @@ fn viewpoints_section(ui: &mut Ui, show: &mut Show) {
             return;
         }
         let mut remove = None;
+        let mut rename = None;
+        let names: Vec<String> = show
+            .stage3d
+            .viewpoints
+            .iter()
+            .map(|v| v.name.clone())
+            .collect();
         for (i, v) in show.stage3d.viewpoints.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.push_id(("viewpoint", i), |ui| {
-                    ui.text_edit_singleline(&mut v.name);
+                    // Typed into a draft: the name changes (and the displays
+                    // that show the stage from it with it) only while it is
+                    // a name no other viewpoint has.
+                    let key = ui.id().with("draft");
+                    let mut draft = ui
+                        .data(|d| d.get_temp::<String>(key))
+                        .unwrap_or_else(|| v.name.clone());
+                    let r = ui.text_edit_singleline(&mut draft);
+                    if r.changed() {
+                        rename = Some((i, draft.clone()));
+                    }
+                    if r.has_focus() {
+                        ui.data_mut(|d| d.insert_temp(key, draft.clone()));
+                    } else {
+                        ui.data_mut(|d| d.remove::<String>(key));
+                    }
+                    let typed = draft.trim();
+                    if typed.is_empty() {
+                        ui.label(RichText::new("It needs a name").weak());
+                    } else if typed != v.name
+                        && names.iter().enumerate().any(|(j, n)| j != i && n == typed)
+                    {
+                        ui.label(RichText::new("Another viewpoint has this name").weak());
+                    }
                     ui.label(RichText::new("field of view").weak());
                     ui.add(
                         egui::DragValue::new(&mut v.fov_deg)
@@ -874,6 +914,9 @@ fn viewpoints_section(ui: &mut Ui, show: &mut Show) {
                     }
                 });
             });
+        }
+        if let Some((i, name)) = rename {
+            show.rename_viewpoint(i, &name);
         }
         if let Some(i) = remove {
             show.stage3d.viewpoints.remove(i);
@@ -902,12 +945,24 @@ fn sources_section(ui: &mut Ui, show: &mut Show) {
             .filter_map(|s| s.feed.output())
             .map(|o| show.whole_picture(o))
             .collect();
+        // A display that shows part of another's picture shows that one's.
+        let refused: Vec<(OutputId, &'static str)> = show
+            .outputs
+            .iter()
+            .filter_map(|o| Some((o.id, show.stage_source_refused(o.id)?)))
+            .collect();
         egui::Grid::new("stage_sources")
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 for o in show.outputs.iter_mut().filter(|o| !o.is_sub_display()) {
                     ui.label(&o.name);
+                    if let Some((_, why)) = refused.iter().find(|(r, _)| *r == o.id) {
+                        ui.label(RichText::new("Its part of the other picture").weak())
+                            .on_hover_text(*why);
+                        ui.end_row();
+                        continue;
+                    }
                     let text = match &o.source {
                         None => "Its cues".to_string(),
                         Some(StageSource { viewpoint: None }) => "The stage: all of it".into(),

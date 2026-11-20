@@ -360,7 +360,7 @@ impl App {
         if self.play.have == Some(hash) {
             return;
         }
-        let show: crate::show::Show = match serde_json::from_str(&json) {
+        let mut show: crate::show::Show = match serde_json::from_str(&json) {
             Ok(s) => s,
             Err(e) => {
                 self.engine.problem(format!(
@@ -369,6 +369,9 @@ impl App {
                 return;
             }
         };
+        // (The hash stays the bytes', so putting this right never puts the
+        // computer out of step.)
+        show.sanitize_stage();
         self.show = show;
         self.ui.took_synced_show(&self.show, &mut self.engine);
         self.ui.check_media(&self.show);
@@ -408,9 +411,10 @@ impl App {
         let Ok(json) = std::fs::read_to_string(&path) else {
             return false;
         };
-        let Ok(show) = serde_json::from_str::<crate::show::Show>(&json) else {
+        let Ok(mut show) = serde_json::from_str::<crate::show::Show>(&json) else {
             return false;
         };
+        show.sanitize_stage();
         self.show = show;
         self.engine.playhead = self.show.cues.first().map(|c| c.id);
         self.ui.took_synced_show(&self.show, &mut self.engine);
