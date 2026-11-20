@@ -7810,6 +7810,10 @@ mod tests {
         let Some((mut e, show, _, instance)) = playing_video(false) else {
             return;
         };
+        // The cue's start was a jolt (the previews' governor lets its misses
+        // be), and so is the jump landing, once.
+        let before = e.jolts();
+        assert!(before >= 1);
         e.seek(&show, instance, 8.0).unwrap();
         e.seek(&show, instance, 3.0).unwrap();
         run_until(&mut e, &show, "the seek to land", |e| {
@@ -7817,6 +7821,9 @@ mod tests {
         });
         let now = elapsed(&e, instance);
         assert!((3.0..4.5).contains(&now), "elapsed {now}");
+        assert_eq!(e.jolts(), before + 1);
+        run_for(&mut e, &show, 0.3);
+        assert_eq!(e.jolts(), before + 1, "playing on is no jolt");
     }
 
     #[test]

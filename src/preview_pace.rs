@@ -451,6 +451,9 @@ pub struct Governor {
     news: Option<News>,
     /// When it last found the previews weren't the cause.
     not_theirs: Option<Instant>,
+    /// When a reading was last trouble (over the line, or a stall): a level is
+    /// judged only while the trouble goes on there.
+    troubled_at: Option<Instant>,
 }
 
 /// The outputs' own trouble, learned: the previews gave way and it went on.
@@ -549,8 +552,10 @@ impl Governor {
     pub const PATIENCE: Duration = Duration::from_secs(2);
     /// The most it waits before a step up.
     pub const PATIENCE_MOST: Duration = Duration::from_secs(20);
-    /// Trouble this soon after a step up makes the next wait longer.
-    pub const RELAPSE_WITHIN: Duration = Duration::from_secs(20);
+    /// Trouble this soon after a step up makes the next wait longer (what the
+    /// step up brought shows within a second or two; trouble later, a stall at
+    /// the next GO, say, is no sign the step was too far).
+    pub const RELAPSE_WITHIN: Duration = Duration::from_secs(4);
     /// Smooth at full rate this long: the waits are back to the start.
     pub const FORGIVE_AFTER: Duration = Duration::from_secs(60);
     /// How long a level is stood at, trouble still coming, before it is judged
@@ -725,6 +730,7 @@ impl Governor {
         let missing = self.missing(share);
         if forced || missing || r.stalls > 0 {
             self.calm_since = None;
+            self.troubled_at = Some(now);
             // At most once a window of trouble; a stall, or trouble right
             // after a step up (the previews' doing, by the look of it), sooner.
             let relapse = self.stepped_up.is_some() && self.stepped_up == self.changed;
@@ -878,6 +884,15 @@ impl Governor {
         if self.here == 0 || stood < self.measure {
             return;
         }
+        // Under the line here, giving way helped, whatever stray misses there
+        // are: only a level still in trouble is judged (in practice Paused,
+        // since trouble anywhere else steps them lower).
+        if self
+            .troubled_at
+            .is_none_or(|t| now.saturating_duration_since(t) > Self::WINDOW)
+        {
+            return;
+        }
         let stood = stood.as_secs_f64();
         // The way down: from going under the ceiling to reaching this level.
         let way = changed
@@ -1006,6 +1021,11 @@ impl PreviewBudget {
     }
 }
 
+/// A picture this much early is due: a window drawn at the previews' own rate
+/// (60 a second at `Level::Fps60`) would otherwise skip every other picture by
+/// a hair (`render::Pace` allows the same).
+const EARLY: Duration = Duration::from_millis(2);
+
 /// The one governor of every preview in the app.
 #[derive(Default)]
 pub struct PreviewGovernor {
@@ -1076,7 +1096,7 @@ impl PreviewGovernor {
         let due = !paused
             && last
                 .get(&id)
-                .is_none_or(|t| now.saturating_duration_since(*t) >= every);
+                .is_none_or(|t| now.saturating_duration_since(*t) + EARLY >= every);
         if due {
             last.insert(id, now);
         }
@@ -1408,7 +1428,7 @@ mod tests {
         let levels = sim(&mut g, &mut t, 300, 16, world(false));
         assert!(levels.iter().any(|l| *l > Level::Full));
         // And once own trouble was learned, a GO's misses are no surge
-        // (0.24.6's "the previews' doing after all" two seconds after a GO).
+        // (the owner's Mac's "the previews' doing after all" two seconds after a GO).
         let mut g = Governor::default();
         sim(&mut g, &mut t, 60, 16, film(60.0, 16, |_, _| 0.3));
         assert!(matches!(g.take_news(), Some(News::NotTheirs { .. })));
@@ -1428,6 +1448,86 @@ mod tests {
             share_at(&levels, Level::Full)
         );
         assert!(!matches!(g.take_news(), Some(News::TheirsAfterAll { .. })));
+    }
+
+    #[test]
+    fn previews_that_cause_some_of_it_settle_where_they_do_not() {
+        // A tenth of the pictures late at full rate and 60 a second (the
+        // previews' doing), and besides a seen miss now and then at any level
+        // (the outputs' own): they settle at 30, and nothing is mistaken for
+        // the outputs' own trouble.
+        for every in [20_000, 7_000] {
+            let mut stray = missing_every(60.0, every, 16);
+            let mut film = film(60.0, 16, |_, l| if l <= Level::Fps60 { 0.1 } else { 0.0 });
+            let world = move |ms: u64, l: Level| {
+                let mut r = film(ms, l);
+                r.shown[0].late += stray(ms, l).shown[0].late;
+                r
+            };
+            let mut g = Governor::default();
+            let mut t = Instant::now();
+            let levels = sim(&mut g, &mut t, 600, 16, world);
+            let rest = &levels[levels.len() / 4..];
+            assert!(
+                share_at(rest, Level::Fps30) > 0.85,
+                "every {every} ms: {}",
+                share_at(rest, Level::Fps30)
+            );
+            assert!(
+                levels.iter().all(|l| *l <= Level::Fps30),
+                "every {every} ms"
+            );
+            assert!(g.not_theirs().is_none(), "every {every} ms");
+        }
+    }
+
+    #[test]
+    fn at_sixty_a_second_a_window_drawn_at_sixty_draws_every_picture() {
+        // The window draws every 16.7 ms, give or take a millisecond: the
+        // preview at 60 draws every time, not every other time.
+        let mut p = PreviewGovernor::default();
+        p.force(Level::Fps60);
+        let t = Instant::now();
+        let id = PreviewId::Single(0);
+        let mut drawn = 0;
+        let mut at = 0.0;
+        for n in 0..600 {
+            at += 1000.0 / 60.0 + if n % 2 == 0 { -1.0 } else { 1.0 };
+            let when = t + Duration::from_secs_f64(at / 1000.0);
+            drawn += u32::from(p.ask(id, when, Limits::default()).draw);
+        }
+        assert!(drawn >= 590, "{drawn} of 600");
+        // A window drawn at 120 a second draws the preview at about 60.
+        let mut p = PreviewGovernor::default();
+        p.force(Level::Fps60);
+        let drawn = (0..1200)
+            .filter(|n| {
+                let when = t + Duration::from_secs_f64(f64::from(*n) / 120.0);
+                p.ask(id, when, Limits::default()).draw
+            })
+            .count();
+        assert!((590..=610).contains(&drawn), "{drawn} in 10 s");
+    }
+
+    #[test]
+    fn a_stall_at_every_go_is_still_trouble() {
+        // The brief's rule: a stall steps down at once, a GO or not. With a
+        // stall at a GO every 10 s, how far do the previews walk?
+        let mut g = Governor::default();
+        let mut t = Instant::now();
+        let mut film = film(60.0, 16, |_, _| 0.0);
+        let levels = sim(&mut g, &mut t, 300, 16, |ms, l| {
+            let go = ms % 10_000 < 16;
+            Reading {
+                stalls: u32::from(go),
+                jolted: go,
+                ..film(ms, l)
+            }
+        });
+        let lowest = levels.iter().max().unwrap();
+        // One step at each GO, back up two seconds later.
+        assert_eq!(*lowest, Level::Fps60);
+        assert!(share_at(&levels, Level::Full) > 0.75);
     }
 
     #[test]
