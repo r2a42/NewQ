@@ -3075,6 +3075,9 @@ impl App {
         self.late_seen = late;
         let before = self.ui.preview_governor.governed();
         let level = self.ui.preview_governor.observe(now, reading);
+        if let Some(news) = self.ui.preview_governor.take_news() {
+            log::info!("{}", news.words());
+        }
         if level != before {
             log::info!(
                 "previews: {level:?} ({}{} fps, {}x size; the outputs' late frames {} since the last look, {}‰, stalls {})",
