@@ -63,6 +63,13 @@ pub struct Prefs {
     /// The Preview pane shows every output at once (a multiview), not the one chosen.
     #[serde(default, skip_serializing_if = "is_false")]
     pub multiview: bool,
+    /// The most the main window's previews are drawn a second (`preview_pace`);
+    /// Automatic: full rate unless the outputs need the room.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::preview_pace::Cap::is_automatic"
+    )]
+    pub preview_cap: crate::preview_pace::Cap,
     /// How much the log says (see `logging`).
     #[serde(default, skip_serializing_if = "is_default_level")]
     pub log_level: crate::logging::LogLevel,
@@ -236,6 +243,7 @@ mod tests {
             clicker_back: Some(0x49),
             new_layout: true,
             multiview: true,
+            preview_cap: crate::preview_pace::Cap::Fps15,
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,
             timeline_follow: TimelineFollow::Centre,
@@ -265,6 +273,14 @@ mod tests {
         .unwrap();
         let later = Prefs::load(&dir);
         assert!(later.hw_decode && later.test_load.is_off());
+        // So is a preview limit it doesn't know: Automatic.
+        std::fs::write(
+            dir.join(FILE),
+            "{\"preview_cap\":\"Fps1\",\"hw_decode\":true}",
+        )
+        .unwrap();
+        let later = Prefs::load(&dir);
+        assert!(later.hw_decode && later.preview_cap.is_automatic());
         std::fs::write(dir.join(FILE), "not json").unwrap();
         assert_eq!(Prefs::load(&dir), Prefs::default());
         // A file from before a setting existed.
@@ -275,6 +291,7 @@ mod tests {
         assert!(!json.contains("test_"), "{json}");
         assert!(!json.contains("new_layout"), "{json}");
         assert!(!json.contains("multiview"), "{json}");
+        assert!(!json.contains("preview_cap"), "{json}");
         assert!(
             !json.contains("let_computer_sleep") && !json.contains("fps_on_output"),
             "{json}"

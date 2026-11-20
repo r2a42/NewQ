@@ -6,6 +6,7 @@
 use crate::gpu::{BlendPass, DrawGroup, DrawLayer, Geometry, Gpu, LayerTexture, Look, Slot};
 use crate::show::{ColorAdjust, EdgeBlend, Fit, LayerTransform};
 use parking_lot::{Condvar, Mutex};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
@@ -206,9 +207,14 @@ static LATE: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 static FPS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 static FPS_AT: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
-fn now_ms() -> u32 {
+/// When the program began, as these counters count it.
+fn start() -> Instant {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u32
+    *START.get_or_init(Instant::now)
+}
+
+fn now_ms() -> u32 {
+    start().elapsed().as_millis() as u32
 }
 
 /// The rate the window on display number `monitor` is drawing at, while it
@@ -235,6 +241,29 @@ pub fn late_frames_permille() -> u32 {
         .unwrap_or(0)
 }
 
+/// Every late frame of every output window this run (`FrameTimer::was_late`):
+/// the previews' governor gives way at the first.
+static LATE_FRAMES: AtomicU32 = AtomicU32::new(0);
+
+/// How many output frames have been late this run.
+pub fn late_frames_total() -> u32 {
+    LATE_FRAMES.load(Ordering::Relaxed)
+}
+
+/// As `late_frames_permille`, but only of the output windows drawing now (a
+/// window that stopped keeps the share of its last frames).
+pub fn late_frames_drawing() -> u32 {
+    let now = now_ms();
+    (0..LATE.len())
+        .filter(|&i| {
+            let at = FPS_AT[i].load(Ordering::Relaxed);
+            at != 0 && u128::from(now.wrapping_sub(at)) < crate::fps::FRESH.as_millis()
+        })
+        .map(|i| LATE[i].load(Ordering::Relaxed))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Judges whether a window's frames are late: a frame takes as long as the
 /// display's refresh (when presenting waits for it) or less, so one taking
 /// much longer is late. The yardstick is the display's refresh interval when
@@ -252,6 +281,9 @@ struct FrameTimer {
     last_took: Duration,
     frames: u32,
     late: u32,
+    /// The last frame was late (only judged against a known refresh, and
+    /// while drawing continuously).
+    was_late: bool,
 }
 
 impl FrameTimer {
@@ -276,6 +308,7 @@ impl FrameTimer {
             .map(|l| start.duration_since(l).saturating_sub(self.last_took));
         self.last_start = Some(start);
         self.last_took = took;
+        self.was_late = false;
         if idle.is_none_or(|g| g > Duration::from_millis(150)) {
             // Not playing continuously: start counting again.
             self.frames = 0;
@@ -288,6 +321,7 @@ impl FrameTimer {
         let yardstick = self.refresh.unwrap_or(quickest);
         if took > yardstick.mul_f32(1.6) + Duration::from_millis(2) {
             self.late += 1;
+            self.was_late = self.refresh.is_some();
         }
         if self.frames >= Self::WINDOW {
             let share = self.late * 1000 / self.frames;
@@ -540,7 +574,11 @@ fn output_loop(
             FPS[i].store((rate * 10.0).round() as u32, Ordering::Relaxed);
             FPS_AT[i].store(now_ms().max(1), Ordering::Relaxed);
         }
-        if let Some(share) = timer.frame(started, started.elapsed()) {
+        let share = timer.frame(started, started.elapsed());
+        if timer.was_late {
+            LATE_FRAMES.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(share) = share {
             late.store(share, Ordering::Relaxed);
             // The window may have been moved to another display.
             timer.refresh = refresh_of(&window);
@@ -1052,9 +1090,15 @@ fn control_loop(
         config.format,
         egui_wgpu::RendererOptions::default(),
     );
-    renderer.callback_resources.insert(PreviewPipeline(
-        gpu.compositor.pipeline(&gpu.device, config.format),
+    let compositor = gpu.compositor.pipeline(&gpu.device, config.format);
+    renderer.callback_resources.insert(PreviewCache::new(
+        &gpu.device,
+        config.format,
+        compositor.clone(),
     ));
+    renderer
+        .callback_resources
+        .insert(PreviewPipeline(compositor));
     // The textures this renderer has been given in full. A partial update to
     // one it doesn't have (egui believes an earlier renderer holds it) would
     // panic; skipping it just leaves a stale patch until egui sends it whole.
@@ -1131,23 +1175,218 @@ fn control_loop(
 /// renderer's callback resources.
 struct PreviewPipeline(wgpu::RenderPipeline);
 
+/// How a preview in the main window is drawn while it gives way to the outputs
+/// (`preview_pace`): into a picture of its own, no more often than `every` and
+/// at `scale` of the size it is shown at; between times the last picture is
+/// shown again, so it never flickers or goes black. A preview without one draws
+/// its layers straight into the window, every frame, as it always did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pace {
+    pub every: Duration,
+    pub scale: f32,
+    /// Paused: keep showing the last picture (one with none yet draws one).
+    pub hold: bool,
+}
+
+impl Pace {
+    /// How a compositor-drawn preview follows the governor's budget: None at
+    /// full rate (straight into the window, as always). The cadence is kept
+    /// here on the render thread by `every`, so a frame of the main window
+    /// that never reaches it (latest wins) loses no picture.
+    pub fn of(budget: crate::preview_pace::PreviewBudget) -> Option<Pace> {
+        (!budget.is_full()).then_some(Pace {
+            every: budget.every,
+            scale: budget.scale,
+            hold: budget.paused,
+        })
+    }
+
+    /// Pictures are made in steps of this many pixels across, so a pane being
+    /// resized doesn't make a new one every frame.
+    const STEP: u32 = 16;
+    /// The largest made, either way.
+    const MOST: u32 = 4096;
+
+    /// The size of the picture made for a preview `px` pixels big: `scale` of
+    /// it, rounded up to `STEP` across, in the preview's shape.
+    pub fn size_for(self, px: (f32, f32)) -> (u32, u32) {
+        let (w, h) = (px.0.max(1.0), px.1.max(1.0));
+        let want = (w * self.scale.clamp(0.05, 1.0)).ceil() as u32;
+        let across = want.div_ceil(Self::STEP).max(1) * Self::STEP;
+        let across = across.min(Self::MOST);
+        let down = ((across as f32 * h / w).round() as u32).clamp(1, Self::MOST);
+        (across, down)
+    }
+}
+
+/// When a paced preview that was not drawn this frame is next due, in
+/// milliseconds since the program began (0: none). The app draws the main
+/// window again then, so the last picture of a run isn't left stale.
+static PREVIEW_DUE: AtomicU32 = AtomicU32::new(0);
+
+/// Note that a paced preview wants drawing at `at` (the earliest wins).
+fn note_preview_due(at: Instant) {
+    let ms = u32::try_from(at.saturating_duration_since(start()).as_millis())
+        .unwrap_or(u32::MAX)
+        .max(1);
+    let _ = PREVIEW_DUE.try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+        (old == 0 || ms < old).then_some(ms)
+    });
+}
+
+/// When the main window should be drawn again for a paced preview's next
+/// picture, if one was held back. Taken once.
+pub fn take_preview_due() -> Option<Instant> {
+    let ms = PREVIEW_DUE.swap(0, Ordering::Relaxed);
+    (ms != 0).then(|| start() + Duration::from_millis(u64::from(ms)))
+}
+
+/// The pictures paced previews are drawn into, by slot, with what draws them
+/// and shows them; kept in the egui renderer's callback resources.
+struct PreviewCache {
+    /// The compositor, for the window's format.
+    compositor: wgpu::RenderPipeline,
+    /// Shows a picture over the preview's rect.
+    show: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    format: wgpu::TextureFormat,
+    pictures: HashMap<usize, Cached>,
+}
+
+struct Cached {
+    size: (u32, u32),
+    view: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+    /// When it was last drawn.
+    drawn: Instant,
+    /// When it was last shown (one unused for a while is let go).
+    used: Instant,
+}
+
+const SHOW_PICTURE_SHADER: &str = r#"
+@group(0) @binding(0) var pic: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+// One triangle over the viewport.
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> VOut {
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    var o: VOut;
+    o.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    o.uv = vec2<f32>(x, y);
+    return o;
+}
+
+@fragment
+fn fs(v: VOut) -> @location(0) vec4<f32> {
+    return textureSample(pic, smp, v.uv);
+}
+"#;
+
+impl PreviewCache {
+    /// Let go of a picture not shown for this long.
+    const KEEP_UNUSED: Duration = Duration::from_secs(10);
+
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        compositor: wgpu::RenderPipeline,
+    ) -> PreviewCache {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("preview picture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("preview picture"),
+            source: wgpu::ShaderSource::Wgsl(SHOW_PICTURE_SHADER.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("preview picture"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let show = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("preview picture"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("preview picture"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        PreviewCache {
+            compositor,
+            show,
+            layout,
+            sampler,
+            format,
+            pictures: HashMap::new(),
+        }
+    }
+}
+
 /// Draws outputs into a rectangle of the egui UI, using the same compositor
 /// as a real output window: one output on its own, or a whole screen.
 pub struct OutputPreview {
     pub groups: Vec<OutputGroup>,
     /// Which uniforms to use; each kind of preview needs its own.
     pub slot: Slot,
+    /// Drawn less often and smaller while the outputs need the room (`Pace`);
+    /// None: straight into the window every frame.
+    pub pace: Option<Pace>,
 }
 
-impl egui_wgpu::CallbackTrait for OutputPreview {
-    fn prepare(
-        &self,
-        _device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
-        _resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
+impl OutputPreview {
+    fn write_uniforms(&self, queue: &wgpu::Queue) {
         for g in &self.groups {
             for l in &g.layers {
                 l.texture.write_uniform(
@@ -1164,6 +1403,161 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
                 );
             }
         }
+    }
+
+    fn draw_layers(&self, pass: &mut wgpu::RenderPass) {
+        for l in self.groups.iter().flat_map(|g| &g.layers) {
+            if l.opacity > 0.0 {
+                l.texture.draw(self.slot, pass);
+            }
+        }
+    }
+
+    /// A paced preview `px` pixels big: draw its picture if it is due (or has
+    /// none yet, or a new size), else note when it will be. Returns whether a
+    /// picture is there to show.
+    pub(crate) fn prepare_paced(
+        &self,
+        pace: Pace,
+        px: (f32, f32),
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> bool {
+        let Some(cache) = resources.get_mut::<PreviewCache>() else {
+            return false;
+        };
+        let now = Instant::now();
+        cache
+            .pictures
+            .retain(|_, c| now.saturating_duration_since(c.used) < PreviewCache::KEEP_UNUSED);
+        let size = pace.size_for(px);
+        let key = self.slot.index();
+        if let Some(c) = cache.pictures.get_mut(&key) {
+            c.used = now;
+            // Paused: the last picture, whatever its size, and nothing new.
+            if pace.hold {
+                return true;
+            }
+            // A little early counts: a window drawn at the preview's rate would
+            // otherwise miss every other picture by a hair.
+            let next = c.drawn + pace.every.saturating_sub(Duration::from_millis(2));
+            if c.size == size && now < next {
+                note_preview_due(next);
+                return true;
+            }
+        }
+        let PreviewCache {
+            compositor,
+            layout,
+            sampler,
+            format,
+            pictures,
+            ..
+        } = cache;
+        let c = match pictures.get_mut(&key) {
+            Some(c) if c.size == size => c,
+            _ => {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("preview picture"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: *format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("preview picture"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(sampler),
+                        },
+                    ],
+                });
+                pictures.insert(
+                    key,
+                    Cached {
+                        size,
+                        view,
+                        bind,
+                        drawn: now,
+                        used: now,
+                    },
+                );
+                pictures.get_mut(&key).expect("just put in")
+            }
+        };
+        self.write_uniforms(queue);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preview picture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &c.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(compositor);
+            self.draw_layers(&mut pass);
+        }
+        c.drawn = now;
+        c.used = now;
+        true
+    }
+
+    /// Show a paced preview's last picture over the viewport set on `pass`;
+    /// false when there is none (it was drawn straight, as unpaced).
+    pub(crate) fn paint_paced(
+        &self,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) -> bool {
+        let Some(cache) = resources.get::<PreviewCache>() else {
+            return false;
+        };
+        let Some(c) = cache.pictures.get(&self.slot.index()) else {
+            return false;
+        };
+        pass.set_pipeline(&cache.show);
+        pass.set_bind_group(0, &c.bind, &[]);
+        pass.draw(0..3, 0..1);
+        true
+    }
+}
+
+impl egui_wgpu::CallbackTrait for OutputPreview {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        self.write_uniforms(queue);
         Vec::new()
     }
 
@@ -1177,14 +1571,9 @@ impl egui_wgpu::CallbackTrait for OutputPreview {
             return;
         };
         pass.set_pipeline(pipeline);
-        for l in self.groups.iter().flat_map(|g| &g.layers) {
-            if l.opacity > 0.0 {
-                l.texture.draw(self.slot, pass);
-            }
-        }
+        self.draw_layers(pass);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::Mailbox;
@@ -1275,6 +1664,31 @@ mod late_tests {
     }
 
     #[test]
+    fn each_late_frame_is_told_at_once_against_a_known_refresh() {
+        let mut t = FrameTimer::with_refresh(Some(Duration::from_micros(16_667)));
+        let start = Instant::now();
+        let mut late = Vec::new();
+        for (i, took) in [16, 16, 16, 40, 16, 16].into_iter().enumerate() {
+            t.frame(
+                start + Duration::from_millis(17 * i as u64 + if i > 3 { 24 } else { 0 }),
+                Duration::from_millis(took),
+            );
+            late.push(t.was_late);
+        }
+        // The first frame starts the count; the slow one is told on its own frame.
+        assert_eq!(late, [false, false, false, true, false, false]);
+        // With no refresh known, single frames aren't told (the share still is).
+        let mut t = FrameTimer::default();
+        for i in 0..5u64 {
+            t.frame(
+                start + Duration::from_millis(17 * i),
+                Duration::from_millis(if i == 3 { 40 } else { 16 }),
+            );
+            assert!(!t.was_late);
+        }
+    }
+
+    #[test]
     fn a_still_picture_redrawn_now_and_then_says_nothing() {
         let mut t = FrameTimer::default();
         // Frames seconds apart never fill a window, and reset it.
@@ -1302,5 +1716,316 @@ mod late_tests {
         let slow: Vec<(u64, u64)> = vec![(34, 33); 130];
         let mut t = FrameTimer::with_refresh(Some(Duration::from_micros(16_667)));
         assert_eq!(run(&mut t, &slow), Some(1000));
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+    use crate::fx::VideoFx;
+
+    #[test]
+    fn a_paced_picture_is_made_in_steps_in_the_previews_shape() {
+        let half = Pace {
+            every: Duration::from_millis(66),
+            scale: 0.5,
+            hold: false,
+        };
+        assert_eq!(half.size_for((800.0, 450.0)), (400, 225));
+        // A pane resized by a few pixels keeps the same picture.
+        assert_eq!(half.size_for((790.0, 444.0)), (400, 225));
+        assert_eq!(half.size_for((801.0, 450.0)).0, 416);
+        let whole = Pace {
+            every: Duration::from_millis(33),
+            scale: 1.0,
+            hold: false,
+        };
+        assert_eq!(whole.size_for((1920.0, 1080.0)), (1920, 1080));
+        // Nothing to draw in, or more than a picture may be: still a picture.
+        assert_eq!(whole.size_for((0.0, -5.0)), (16, 16));
+        let (w, h) = whole.size_for((20_000.0, 100.0));
+        assert!(w <= 4096 && h >= 1, "{w}x{h}");
+    }
+
+    fn gpu() -> Option<Gpu> {
+        let gpu = Gpu::headless();
+        if gpu.is_none() && std::env::var_os("NEWQ_REQUIRE_GPU").is_some() {
+            panic!("NEWQ_REQUIRE_GPU is set but there is no GPU adapter");
+        }
+        gpu
+    }
+
+    const SIZE: (u32, u32) = (64, 36);
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    fn solid(gpu: &Gpu, px: [u8; 4]) -> Arc<LayerTexture> {
+        let t = LayerTexture::new_rgba(gpu, 2, 2);
+        t.upload_rgba(&gpu.queue, &px.repeat(4));
+        Arc::new(t)
+    }
+
+    /// One layer of `tex` filling a picture of `SIZE`, placed by `warp`.
+    fn group(tex: &Arc<LayerTexture>, warp: crate::gpu::Homography) -> OutputGroup {
+        OutputGroup {
+            layers: vec![OutputLayer {
+                texture: tex.clone(),
+                opacity: 1.0,
+                fit: Fit::Stretch,
+                transform: LayerTransform::default(),
+                color: ColorAdjust::default(),
+                fx: VideoFx::default(),
+            }],
+            geometry: Geometry {
+                canvas: SIZE,
+                warp,
+                pin: warp,
+                mesh: None,
+                slice: Geometry::WHOLE,
+            },
+        }
+    }
+
+    /// A target of `SIZE`, and what reading it back needs.
+    fn target(gpu: &Gpu) -> (wgpu::Texture, wgpu::TextureView) {
+        let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size: wgpu::Extent3d {
+                width: SIZE.0,
+                height: SIZE.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let v = t.create_view(&Default::default());
+        (t, v)
+    }
+
+    /// Submit `cmds`, then read `tex` back (RGBA, row by row).
+    fn read(gpu: &Gpu, mut enc: wgpu::CommandEncoder, tex: &wgpu::Texture) -> Vec<u8> {
+        let row = SIZE.0 * 4; // 256: already aligned
+        let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: u64::from(row * SIZE.1),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(SIZE.1),
+                },
+            },
+            wgpu::Extent3d {
+                width: SIZE.0,
+                height: SIZE.1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        slice.get_mapped_range().expect("mapped").to_vec()
+    }
+
+    fn encoder(gpu: &Gpu) -> wgpu::CommandEncoder {
+        gpu.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+    }
+
+    /// A frame of the main window with `p` in it, as the control window draws
+    /// one (every callback's prepare on the frame's encoder, then the pass);
+    /// the middle pixel of what it showed.
+    fn preview_frame(
+        gpu: &Gpu,
+        res: &mut egui_wgpu::CallbackResources,
+        p: &OutputPreview,
+    ) -> [u8; 4] {
+        let (tex, view) = target(gpu);
+        let mut enc = encoder(gpu);
+        let px = (SIZE.0 as f32, SIZE.1 as f32);
+        let paced = p
+            .pace
+            .is_some_and(|pace| p.prepare_paced(pace, px, &gpu.device, &gpu.queue, &mut enc, res));
+        if !paced {
+            p.write_uniforms(&gpu.queue);
+        }
+        {
+            let mut pass = enc
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("window"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            if !(paced && p.paint_paced(&mut pass, res)) {
+                let PreviewPipeline(pipeline) = res.get::<PreviewPipeline>().unwrap();
+                pass.set_pipeline(pipeline);
+                p.draw_layers(&mut pass);
+            }
+        }
+        let px = read(gpu, enc, &tex);
+        let i = ((SIZE.1 / 2 * SIZE.0 + SIZE.0 / 2) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    /// What an output window of `SIZE` shows of `groups`, the whole picture.
+    fn output_frame(gpu: &Gpu, groups: &[OutputGroup]) -> Vec<u8> {
+        let (tex, view) = target(gpu);
+        let pipeline = gpu.compositor.pipeline(&gpu.device, FORMAT);
+        let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
+        let cmd = gpu.composite(&pipeline, Slot::Window(0), &view, &draw, None);
+        gpu.submit([cmd]);
+        read(gpu, encoder(gpu), &tex)
+    }
+
+    #[test]
+    fn a_paced_preview_shows_its_last_picture_between_times_and_never_black() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter here; skipping the paced preview test");
+            return;
+        };
+        let compositor = gpu.compositor.pipeline(&gpu.device, FORMAT);
+        let mut res = egui_wgpu::CallbackResources::default();
+        res.insert(PreviewCache::new(&gpu.device, FORMAT, compositor.clone()));
+        res.insert(PreviewPipeline(compositor));
+        let red = solid(&gpu, [255, 0, 0, 255]);
+        let blue = solid(&gpu, [0, 0, 255, 255]);
+        let id = crate::gpu::IDENTITY;
+        let slow = Some(Pace {
+            every: Duration::from_secs(30),
+            scale: 0.5,
+            hold: false,
+        });
+        let preview = |tex: &Arc<LayerTexture>, pace| OutputPreview {
+            groups: vec![group(tex, id)],
+            slot: Slot::Multi(3),
+            pace,
+        };
+        // Unpaced, as before: what is there now, every frame.
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&red, None)),
+            [255, 0, 0, 255]
+        );
+        // Paced: the first frame draws (it has no picture yet), at half size.
+        let _ = take_preview_due();
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&red, slow)),
+            [255, 0, 0, 255]
+        );
+        let made = res.get::<PreviewCache>().unwrap().pictures[&Slot::Multi(3).index()].size;
+        assert_eq!(made, (32, 18));
+        // The picture changes before it is due: the last one is shown, not black,
+        // and the window is asked to draw again when it is due.
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&blue, slow)),
+            [255, 0, 0, 255]
+        );
+        let due = take_preview_due().expect("a picture held back says when");
+        assert!(due > Instant::now() + Duration::from_secs(25), "{due:?}");
+        // Once due (here: a pace with no wait), the new picture.
+        let quick = Some(Pace {
+            every: Duration::ZERO,
+            scale: 0.5,
+            hold: false,
+        });
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&blue, quick)),
+            [0, 0, 255, 255]
+        );
+        // A new size is drawn at once, whatever the wait.
+        let bigger = Some(Pace {
+            every: Duration::from_secs(30),
+            scale: 1.0,
+            hold: false,
+        });
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&red, bigger)),
+            [255, 0, 0, 255]
+        );
+        // Paused: the last picture stays, whatever comes and whatever its size.
+        let paused = crate::preview_pace::Level::Paused;
+        let hold = Some(Pace {
+            every: paused.every(),
+            scale: paused.scale(),
+            hold: true,
+        });
+        assert_eq!(
+            preview_frame(&gpu, &mut res, &preview(&blue, hold)),
+            [255, 0, 0, 255]
+        );
+        // And a preview with no picture yet draws one, so none is black.
+        let fresh = OutputPreview {
+            groups: vec![group(&blue, id)],
+            slot: Slot::Multi(9),
+            pace: hold,
+        };
+        assert_eq!(preview_frame(&gpu, &mut res, &fresh), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn an_outputs_own_picture_is_the_same_whatever_the_preview_does() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter here; skipping");
+            return;
+        };
+        let compositor = gpu.compositor.pipeline(&gpu.device, FORMAT);
+        let mut res = egui_wgpu::CallbackResources::default();
+        res.insert(PreviewCache::new(&gpu.device, FORMAT, compositor.clone()));
+        res.insert(PreviewPipeline(compositor));
+        // A half-red, half-green picture, so a wrong placement would show.
+        let tex = LayerTexture::new_rgba(&gpu, 2, 1);
+        tex.upload_rgba(&gpu.queue, &[255, 0, 0, 255, 0, 255, 0, 255]);
+        let tex = Arc::new(tex);
+        let out = [group(&tex, crate::gpu::IDENTITY)];
+        let before = output_frame(&gpu, &out);
+        assert_eq!(&before[..4], &[255, 0, 0, 255]);
+        // The same layer previewed at every step (other placements, smaller,
+        // held), between the output's frames.
+        let squeezed = crate::gpu::corner_pin(&[[0.2, 0.1], [0.7, 0.0], [0.9, 0.8], [0.0, 1.0]]);
+        for level in [
+            crate::preview_pace::Level::Full,
+            crate::preview_pace::Level::Fps30,
+            crate::preview_pace::Level::Half,
+            crate::preview_pace::Level::Quarter,
+            crate::preview_pace::Level::Paused,
+        ] {
+            let pace = level.fps().map(|_| Pace {
+                every: level.every(),
+                scale: level.scale(),
+                hold: level == crate::preview_pace::Level::Paused,
+            });
+            for slot in [Slot::Preview, Slot::Multi(0), Slot::Multi(15)] {
+                let p = OutputPreview {
+                    groups: vec![group(&tex, squeezed)],
+                    slot,
+                    pace,
+                };
+                preview_frame(&gpu, &mut res, &p);
+            }
+            assert_eq!(output_frame(&gpu, &out), before, "{level:?}");
+        }
     }
 }

@@ -422,6 +422,14 @@ pub struct App {
     battery_logged: Option<Option<bool>>,
     /// How fast the main window is drawing.
     preview_meter: crate::fps::FpsMeter,
+    /// Main-loop stalls the governor has already been told of.
+    stalls_seen: u32,
+    /// And late output frames.
+    late_seen: u32,
+    /// When each output only the previews show last had its pictures uploaded.
+    preview_uploads: HashMap<OutputId, Instant>,
+    /// `NEWQ_PREVIEW_PRESSURE`: late frames to take the outputs as having.
+    forced_pressure: Option<u32>,
     /// Measures for the statistics window while it is open, and whether it
     /// is writing a file.
     live_sampler: Option<(crate::stats::StatsLog, bool)>,
@@ -641,6 +649,12 @@ impl App {
             engine_note: None,
             slowest_upload: None,
             preview_meter: Default::default(),
+            late_seen: crate::render::late_frames_total(),
+            preview_uploads: HashMap::new(),
+            stalls_seen: crate::crumbs::stall_count(),
+            forced_pressure: crate::preview_pace::forced_pressure(
+                std::env::var("NEWQ_PREVIEW_PRESSURE").ok().as_deref(),
+            ),
             live_sampler: None,
             fps_labels: HashMap::new(),
             uploader: None,
@@ -2445,14 +2459,37 @@ impl App {
 
             let engine_layers = self.engine.layers(source);
             let has_picture = !engine_layers.is_empty();
-            let mut layers = picture_layers(
-                &mut self.textures,
-                gpu,
-                self.uploader.as_ref(),
-                engine_layers,
-                &mut self.uploads_waiting,
-                &mut self.slowest_upload,
+            // An output only the previews show here (no window, no stream) is
+            // preview work: while the previews give way, its pictures are
+            // uploaded no more often than the previews draw, and not at all
+            // while they are paused; in between it shows what is uploaded.
+            let preview_only = target.is_none() && !self.streams.contains_key(&id);
+            let level = crate::preview_pace::effective(
+                self.ui.preview_governor.governed(),
+                self.ui.prefs.preview_cap,
             );
+            let now = Instant::now();
+            let upload = !preview_only
+                || crate::preview_pace::uploads_due(
+                    level,
+                    self.preview_uploads.get(&id).copied(),
+                    now,
+                );
+            let mut layers = if upload {
+                if preview_only {
+                    self.preview_uploads.insert(id, now);
+                }
+                picture_layers(
+                    &mut self.textures,
+                    gpu,
+                    self.uploader.as_ref(),
+                    engine_layers,
+                    &mut self.uploads_waiting,
+                    &mut self.slowest_upload,
+                )
+            } else {
+                held_layers(&self.textures, engine_layers)
+            };
 
             // The frame rate, in the corner, if asked for and only over a
             // picture: an idle output stays black.
@@ -2941,6 +2978,44 @@ impl App {
                 Err(e) => log::warn!("could not save the window layout: {e}"),
             }
         }
+    }
+
+    /// Tell the previews' governor what the outputs went through since the last
+    /// pass (their late frames, main-loop stalls) and keep its level in the UI's
+    /// state; the level the previews draw at, the computer's limit included.
+    fn pace_previews(&mut self, now: Instant, playing: bool) -> crate::preview_pace::Level {
+        let stalls = crate::crumbs::stall_count();
+        let late = crate::render::late_frames_total();
+        let reading = crate::preview_pace::Reading::of(
+            self.forced_pressure,
+            playing,
+            late.wrapping_sub(self.late_seen),
+            crate::render::late_frames_drawing(),
+            stalls.wrapping_sub(self.stalls_seen),
+        );
+        self.stalls_seen = stalls;
+        self.late_seen = late;
+        let before = self.ui.preview_governor.governed();
+        let level = self.ui.preview_governor.observe(now, reading);
+        if level != before {
+            log::info!(
+                "previews: {level:?} ({}{} fps, {}x size; the outputs' late frames {} since the last look, {}‰, stalls {})",
+                if level == crate::preview_pace::Level::Paused {
+                    "paused, "
+                } else {
+                    ""
+                },
+                level.fps().map_or("full".to_string(), |f| f.to_string()),
+                level.scale(),
+                reading.late_frames,
+                reading.late_permille,
+                reading.stalls
+            );
+            if let Some(ctl) = &self.control {
+                ctl.window.request_redraw();
+            }
+        }
+        crate::preview_pace::effective(level, self.ui.prefs.preview_cap)
     }
 
     fn render_control(&mut self, event_loop: &ActiveEventLoop) {
@@ -3780,13 +3855,31 @@ impl App {
         self.reveal_windows(event_loop);
         self.crumbs.lap("showing windows");
 
+        // The previews give way while the outputs fall behind; only the main
+        // window's drawing reads this, never the outputs'.
+        let preview_level = self.pace_previews(now, playing);
+        // A paced preview held back its next picture: draw the window for it then.
+        if let Some(at) = crate::render::take_preview_due() {
+            if let Some(ctl) = &mut self.control {
+                ctl.next_repaint = Some(ctl.next_repaint.map_or(at, |t| t.min(at)));
+            }
+            for p in &mut self.popouts {
+                p.next_repaint = Some(p.next_repaint.map_or(at, |t| t.min(at)));
+            }
+        }
+        let with_previews = crate::preview_pace::window_fps(
+            preview_level,
+            CONTROL_FPS_WITH_EMBEDDED,
+            CONTROL_FPS_WHEN_PLAYING,
+        );
+
         let mut next = now + Duration::from_millis(500);
         if let Some(ctl) = &mut self.control {
             let previews = !self.ui.previews.is_empty();
             let mut due = ctl.next_repaint.is_some_and(|t| t <= now) || (previews && removed_layer);
             if playing {
                 let fps = if previews {
-                    CONTROL_FPS_WITH_EMBEDDED
+                    with_previews
                 } else {
                     CONTROL_FPS_WHEN_PLAYING
                 };
@@ -3805,7 +3898,7 @@ impl App {
         for p in &mut self.popouts {
             let mut due = p.next_repaint.is_some_and(|t| t <= now);
             if playing {
-                let frame = Duration::from_secs_f64(1.0 / CONTROL_FPS_WITH_EMBEDDED);
+                let frame = Duration::from_secs_f64(1.0 / with_previews);
                 due |= now.duration_since(p.last_paint) >= frame;
                 next = next.min(p.last_paint + frame);
             }
@@ -4211,6 +4304,28 @@ fn picture_layers(
         });
     }
     layers
+}
+
+/// The layers as they are on the graphics card now, nothing uploaded or made:
+/// a preview-only output's while the previews give way (`update_outputs`).
+fn held_layers(
+    textures: &HashMap<u64, (Arc<LayerTexture>, u64)>,
+    engine_layers: Vec<crate::engine::LayerRef<'_>>,
+) -> Vec<OutputLayer> {
+    engine_layers
+        .into_iter()
+        .filter_map(|l| {
+            let (t, _) = textures.get(&l.instance)?;
+            t.is_filled().then(|| OutputLayer {
+                texture: t.clone(),
+                opacity: l.opacity,
+                fit: l.fit,
+                transform: l.transform,
+                color: l.color,
+                fx: l.fx,
+            })
+        })
+        .collect()
 }
 
 /// A display computer's card (or Identify's name) as a picture the shape of

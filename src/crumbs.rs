@@ -131,7 +131,17 @@ static STALLS: std::sync::Mutex<Vec<Stall>> = std::sync::Mutex::new(Vec::new());
 /// Kept until taken, no more than this (a test takes them every frame).
 const STALLS_KEPT: usize = 500;
 
+/// Every stall noted this run, counted (for the preview's governor, which
+/// must not take them from Test Mode).
+static STALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// How many stalls have been noted this run.
+pub fn stall_count() -> u32 {
+    STALL_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn note_stall(s: Stall) {
+    STALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut v) = STALLS.lock() {
         if v.len() >= STALLS_KEPT {
             v.remove(0);

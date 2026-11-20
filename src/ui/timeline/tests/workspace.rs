@@ -508,6 +508,14 @@ fn the_workspace_is_comfortable_at_1280_by_760_in_both_interfaces() {
                 && monitor.expand(0.5).contains_rect(picture),
             "{what}: {picture:?} in {monitor:?}"
         );
+        // It asked the previews' governor, as every preview does.
+        assert!(
+            f.st.preview_governor
+                .asked
+                .borrow()
+                .contains(&crate::preview_pace::PreviewId::Workspace),
+            "{what}"
+        );
         // The clip's timeline rows are at the top of the inspector, in sight.
         let rows: Rect = noted(&m, "ws_rows").unwrap();
         assert!(m.rows().contains(&"run_out"), "{what}");
