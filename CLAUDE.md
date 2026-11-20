@@ -526,7 +526,10 @@ The README describes the features; this file is about working on the code.
   unlit = full brightness; a display with no picture is dark grey with an edge; optional grid (fragment-drawn
   1 m / 5 m lines) and axes; `venue_opacity` < 1 is the x-ray (lit parts drawn last, blended). Reversed Z
   (Depth32Float, clear 0, `Greater`). `Quality { msaa, scale }`: 4× where the adapter offers it for the
-  format and depth (`samples_for`), a scale below 1 draws smaller and scales up (`blit.wgsl`). Meshes are
+  format and depth (`samples_for`), a scale below 1 draws smaller and scales up (`blit.wgsl`); a preview
+  passes its quality through `Quality::scaled_by(governor)` (multisampling off below 1), a 3D view that is a
+  display's source doesn't; a frame not drawn is no call at all (the target keeps its picture); targets are
+  kept per size, so the governor's steps don't churn. `FrameStats` has `cpu_time` and `samples_shaded`. Meshes are
   kept by `mesh_key`, pictures by `key`, let go after `FORGET_AFTER` unused; bad meshes (stray indices, no
   normals or uvs, NaNs) are mended or skipped. `camera.rs` (pure): `Camera::{sane, view, projection,
   project, ray}`, `Orbit` (`orbit`/`pan`/`dolly` from mouse deltas, `frame`/`frame_scene` zoom to fit,

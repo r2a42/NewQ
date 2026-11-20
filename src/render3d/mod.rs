@@ -78,6 +78,22 @@ impl Quality {
         }
     }
 
+    /// This quality with its scale multiplied by `governor` (a preview
+    /// governor's 1, 0.5 or 0.25 that frame), and multisampling dropped below
+    /// full scale. A preview passes its own quality through this; a 3D view
+    /// that is a display's source (an output, not a preview) never does.
+    pub fn scaled_by(self, governor: f32) -> Quality {
+        let g = if governor.is_finite() {
+            governor.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        Quality {
+            msaa: self.msaa && g >= 1.0,
+            scale: self.scale() * g,
+        }
+    }
+
     /// The size drawn for a target of `size`.
     pub fn drawn_size(&self, size: (u32, u32)) -> (u32, u32) {
         let s = self.scale();
@@ -161,6 +177,17 @@ pub struct FrameStats {
     pub drawn: (u32, u32),
     pub meshes_cached: usize,
     pub images_cached: usize,
+    /// The processor time `render` took (making the frame and submitting it;
+    /// the graphics card's own time is not measured).
+    pub cpu_time: std::time::Duration,
+}
+
+impl FrameStats {
+    /// Samples shaded: the drawn size times the multisampling, a rough
+    /// measure of the card's work for the frame beside `triangles`.
+    pub fn samples_shaded(&self) -> u64 {
+        u64::from(self.drawn.0) * u64::from(self.drawn.1) * u64::from(self.samples.max(1))
+    }
 }
 
 #[repr(C)]
@@ -456,6 +483,10 @@ impl Renderer {
     /// a filterable colour texture with `TEXTURE_BINDING` usage, not the
     /// target); a display with none draws as a dark grey panel.
     ///
+    /// A frame not wanted (a preview governor's "don't draw") is simply not
+    /// rendered: nothing here runs by itself, so it costs nothing, and the
+    /// target keeps the last picture drawn into it.
+    ///
     /// Cheap at any size: the depth and multisampled textures are kept for
     /// the next render of the same size, the pipelines per format, the
     /// meshes by `Part::mesh_key` and pictures by `Paint::Image::key`.
@@ -468,6 +499,7 @@ impl Renderer {
         outputs: &dyn Fn(OutputId) -> Option<&'a wgpu::TextureView>,
         options: &Options,
     ) -> FrameStats {
+        let started = Instant::now();
         self.renders = self.renders.wrapping_add(1);
         if self.renders.is_multiple_of(TIDY_EVERY) {
             self.tidy();
@@ -738,6 +770,7 @@ impl Renderer {
         }
         stats.meshes_cached = self.meshes.len();
         stats.images_cached = self.images.len();
+        stats.cpu_time = started.elapsed();
         self.last = stats;
         stats
     }
