@@ -245,6 +245,9 @@ fn monitor(ui: &mut Ui, st: &mut UiState) {
     if chosen != st.previews[i].id {
         st.preview_output = Some(chosen);
     }
+    if super::super::previews_off_line(ui, st) {
+        return;
+    }
     let e = &st.previews[i];
     // As much of the panel as the picture needs (the panel's height is the
     // bin's line), the display's own shape inside it.

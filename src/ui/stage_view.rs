@@ -181,6 +181,9 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
         empty(ui, show, st);
         return;
     }
+    if super::previews_off_line(ui, st) {
+        return;
+    }
     let size = ui.available_size().max(vec2(80.0, 60.0));
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let ppp = ui.ctx().pixels_per_point();
@@ -464,7 +467,7 @@ fn status_words(st: &UiState, id: PreviewId) -> String {
         }
         _ => {}
     }
-    if let Some(n) = st.preview_governor.notice(st.prefs.preview_cap) {
+    if let Some(n) = st.preview_governor.notice(st.prefs.preview_limits()) {
         parts.push(n);
     }
     if let Some(s) = st.stage.stats.get(&id) {

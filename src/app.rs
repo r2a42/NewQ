@@ -424,8 +424,14 @@ pub struct App {
     preview_meter: crate::fps::FpsMeter,
     /// Main-loop stalls the governor has already been told of.
     stalls_seen: u32,
-    /// And late output frames.
-    late_seen: u32,
+    /// And each output window's new pictures and seen misses
+    /// (`render::shown_totals`).
+    shown_seen: [crate::preview_pace::Shown; crate::preview_pace::WINDOWS],
+    /// And the engine's cues started and jumps landed (`Engine::jolts`).
+    jolts_seen: u64,
+    /// A picture layer was put up new since the governor last looked (a cue's
+    /// first frame): its misses are the start's, not the previews'.
+    layers_made: bool,
     /// When each output only the previews show last had its pictures uploaded.
     preview_uploads: HashMap<OutputId, Instant>,
     /// `NEWQ_PREVIEW_PRESSURE`: late frames to take the outputs as having.
@@ -660,7 +666,9 @@ impl App {
             engine_note: None,
             slowest_upload: None,
             preview_meter: Default::default(),
-            late_seen: crate::render::late_frames_total(),
+            shown_seen: crate::render::shown_totals(),
+            jolts_seen: 0,
+            layers_made: false,
             preview_uploads: HashMap::new(),
             stalls_seen: crate::crumbs::stall_count(),
             forced_pressure: crate::preview_pace::forced_pressure(
@@ -2518,10 +2526,14 @@ impl App {
             let preview_only = target.is_none()
                 && !self.streams.contains_key(&id)
                 && !self.stage.feeds_a_display(id);
-            let level = crate::preview_pace::effective(
-                self.ui.preview_governor.governed(),
-                self.ui.prefs.preview_cap,
-            );
+            let level = if self.ui.prefs.previews_off {
+                crate::preview_pace::Level::Paused
+            } else {
+                crate::preview_pace::effective(
+                    self.ui.preview_governor.governed(),
+                    self.ui.prefs.preview_cap,
+                )
+            };
             let now = Instant::now();
             let upload = !preview_only
                 || crate::preview_pace::uploads_due(
@@ -2564,6 +2576,7 @@ impl App {
                     engine_layers,
                     &mut self.uploads_waiting,
                     &mut self.slowest_upload,
+                    &mut self.layers_made,
                 )
             } else {
                 held_layers(&self.textures, engine_layers)
@@ -3085,42 +3098,63 @@ impl App {
     }
 
     /// Tell the previews' governor what the outputs went through since the last
-    /// pass (their late frames, main-loop stalls) and keep its level in the UI's
-    /// state; the level the previews draw at, the computer's limit included.
+    /// pass (their seen misses, main-loop stalls, cues started) and keep its
+    /// level in the UI's state; the level the previews draw at, the computer's
+    /// limit included (Paused while its previews are off).
     fn pace_previews(&mut self, now: Instant, playing: bool) -> crate::preview_pace::Level {
+        use crate::preview_pace::{Level, Shown};
         let stalls = crate::crumbs::stall_count();
-        let late = crate::render::late_frames_total();
+        let shown = crate::render::shown_totals();
+        let since: [Shown; crate::preview_pace::WINDOWS] =
+            std::array::from_fn(|i| shown[i].since(self.shown_seen[i]));
+        let jolts = self.engine.jolts();
+        let jolted = jolts != self.jolts_seen || std::mem::take(&mut self.layers_made);
         let reading = crate::preview_pace::Reading::of(
             self.forced_pressure,
             playing,
-            late.wrapping_sub(self.late_seen),
-            crate::render::late_frames_drawing(),
+            since,
             stalls.wrapping_sub(self.stalls_seen),
+            jolted,
         );
         self.stalls_seen = stalls;
-        self.late_seen = late;
+        self.shown_seen = shown;
+        self.jolts_seen = jolts;
         let before = self.ui.preview_governor.governed();
-        let level = self.ui.preview_governor.observe(now, reading);
+        // (Before: a step starts the window again.)
+        let worst = self.ui.preview_governor.worst();
+        let level =
+            self.ui
+                .preview_governor
+                .observe(now, reading, self.ui.prefs.preview_strictness);
         if let Some(news) = self.ui.preview_governor.take_news() {
             log::info!("{}", news.words());
         }
         if level != before {
+            let total = reading.total();
             log::info!(
-                "previews: {level:?} ({}{} fps, {}x size; the outputs' late frames {} since the last look, {}‰, stalls {})",
-                if level == crate::preview_pace::Level::Paused {
+                "previews: {level:?} ({}{} fps, {}x size; {:?}); the worst output's seen misses over the last {} s: {} of {} new pictures ({:.1}%); since the last look {} of {}, stalls {}",
+                if level == Level::Paused {
                     "paused, "
                 } else {
                     ""
                 },
                 level.fps().map_or("full".to_string(), |f| f.to_string()),
                 level.scale(),
-                reading.late_frames,
-                reading.late_permille,
+                self.ui.prefs.preview_strictness,
+                crate::preview_pace::Governor::WINDOW.as_secs(),
+                worst.late,
+                worst.pictures,
+                100.0 * f64::from(worst.late) / f64::from(worst.pictures.max(1)),
+                total.late,
+                total.pictures,
                 reading.stalls
             );
             if let Some(ctl) = &self.control {
                 ctl.window.request_redraw();
             }
+        }
+        if self.ui.prefs.previews_off {
+            return Level::Paused;
         }
         crate::preview_pace::effective(level, self.ui.prefs.preview_cap)
     }
@@ -4333,6 +4367,7 @@ fn picture_layers(
     engine_layers: Vec<crate::engine::LayerRef<'_>>,
     waiting: &mut bool,
     slowest: &mut Option<(u64, u32, u32, Duration, bool)>,
+    made_any: &mut bool,
 ) -> Vec<OutputLayer> {
     let mut layers = Vec::new();
     for l in engine_layers {
@@ -4400,8 +4435,9 @@ fn picture_layers(
             }),
         };
         let took = began.elapsed();
+        let made = before != Some(Arc::as_ptr(&entry.0));
+        *made_any |= made;
         if slowest.is_none_or(|(.., d, _)| took > d) {
-            let made = before != Some(Arc::as_ptr(&entry.0));
             *slowest = Some((l.instance, entry.0.width, entry.0.height, took, made));
         }
         // A texture that holds nothing yet is not worth showing (a YUV one of
@@ -5068,7 +5104,15 @@ mod tests {
             textures.retain(|k, _| live.contains(k));
             let mut waiting = false;
             let mut slowest = None;
-            let out = picture_layers(textures, gpu, Some(up), layers, &mut waiting, &mut slowest);
+            let out = picture_layers(
+                textures,
+                gpu,
+                Some(up),
+                layers,
+                &mut waiting,
+                &mut slowest,
+                &mut false,
+            );
             (out, waiting)
         }
 
@@ -5243,6 +5287,7 @@ mod tests {
                 vec![layer(1, LayerSource::Image(&a, 1))],
                 &mut waiting,
                 &mut None,
+                &mut false,
             );
             assert_eq!(out.len(), 1);
             assert!(!waiting);

@@ -73,6 +73,25 @@ pub struct Prefs {
         skip_serializing_if = "crate::preview_pace::Cap::is_automatic"
     )]
     pub preview_cap: crate::preview_pace::Cap,
+    /// The largest size the previews are drawn at (`preview_pace::SizeCap`):
+    /// the governor never goes above it.
+    #[serde(default, skip_serializing_if = "crate::preview_pace::SizeCap::is_full")]
+    pub preview_size: crate::preview_pace::SizeCap,
+    /// How much the displays may miss before the previews give way
+    /// (`preview_pace::Strictness`; Relaxed unless chosen).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::preview_pace::Strictness::is_relaxed"
+    )]
+    pub preview_strictness: crate::preview_pace::Strictness,
+    /// No preview pictures at all on this computer: each preview says so, with
+    /// a button that turns them back on. The displays are untouched.
+    #[serde(
+        default,
+        skip_serializing_if = "is_false",
+        deserialize_with = "lenient_bool"
+    )]
+    pub previews_off: bool,
     /// How much the log says (see `logging`).
     #[serde(default, skip_serializing_if = "is_default_level")]
     pub log_level: crate::logging::LogLevel,
@@ -198,9 +217,23 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// A yes or no that a later NewQ might write as something else: anything but
+/// `true` is no, and the rest of the file is kept.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)? == serde_json::Value::Bool(true))
+}
+
 const FILE: &str = "prefs.json";
 
 impl Prefs {
+    /// The previews' ceilings on this computer.
+    pub fn preview_limits(&self) -> crate::preview_pace::Limits {
+        crate::preview_pace::Limits {
+            rate: self.preview_cap,
+            size: self.preview_size,
+        }
+    }
+
     /// The saved settings; the defaults if there are none or they can't be read.
     pub fn load(dir: &Path) -> Prefs {
         std::fs::read_to_string(dir.join(FILE))
@@ -223,6 +256,42 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_preview_settings_default_to_relaxed_and_are_written_only_when_chosen() {
+        use crate::preview_pace::{SizeCap, Strictness};
+        // A file from before them: Relaxed, full size, previews on.
+        let old: Prefs =
+            serde_json::from_str(r#"{"hw_decode":true,"preview_cap":"Fps30"}"#).unwrap();
+        assert_eq!(old.preview_strictness, Strictness::Relaxed);
+        assert_eq!(old.preview_size, SizeCap::Full);
+        assert!(!old.previews_off && old.hw_decode);
+        // Relaxed (and the other defaults) are not written.
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("preview_strictness"), "{json}");
+        assert!(
+            !json.contains("preview_size") && !json.contains("previews_off"),
+            "{json}"
+        );
+        // The others are, and read back.
+        let p = Prefs {
+            preview_strictness: Strictness::Off,
+            preview_size: SizeCap::Quarter,
+            previews_off: true,
+            ..Prefs::default()
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""preview_strictness":"Off""#), "{json}");
+        assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap(), p);
+        // A later NewQ's words for them read as the defaults, the rest kept.
+        let later: Prefs = serde_json::from_str(
+            r#"{"preview_strictness":"Gentle","preview_size":"Tiny","previews_off":"sometimes","hw_decode":true}"#,
+        )
+        .unwrap();
+        assert_eq!(later.preview_strictness, Strictness::Relaxed);
+        assert_eq!(later.preview_size, SizeCap::Full);
+        assert!(!later.previews_off && later.hw_decode);
+    }
 
     #[test]
     fn settings_are_saved_and_a_missing_or_damaged_file_gives_the_defaults() {
@@ -248,6 +317,9 @@ mod tests {
             // Read once and moved into the layout; never written.
             multiview: false,
             preview_cap: crate::preview_pace::Cap::Fps15,
+            preview_size: crate::preview_pace::SizeCap::Half,
+            preview_strictness: crate::preview_pace::Strictness::Strict,
+            previews_off: true,
             log_level: crate::logging::LogLevel::Debug,
             timeline_layout: TimelineLayout::Workspace,
             timeline_follow: TimelineFollow::Centre,
@@ -295,7 +367,7 @@ mod tests {
         assert!(!json.contains("test_"), "{json}");
         assert!(!json.contains("new_layout"), "{json}");
         assert!(!json.contains("multiview"), "{json}");
-        assert!(!json.contains("preview_cap"), "{json}");
+        assert!(!json.contains("preview"), "{json}");
         assert!(
             !json.contains("let_computer_sleep") && !json.contains("fps_on_output"),
             "{json}"

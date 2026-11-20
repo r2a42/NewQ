@@ -461,25 +461,40 @@ stays on the computer until you send it yourself.
   turn), so like other edits it can't be changed in show mode; a display that is
   deleted leaves its tiles empty. A show with no
   layout of its own shows every display, as before.
-  The previews give way to the displays: at the first late frame on a display's
-  window (or when NewQ's main loop is held up) while something plays, every
-  preview (single, multiview, 3D, the timeline workspace's monitor, in every
-  Preview pane, in the main window or popped out) draws less, a step a second: 30, 15, then 5
-  pictures a second, then at half and a quarter of its size, then paused. Each
+  The previews come second to the displays, but they are drawn as well as the
+  displays leave room for. They give way only when a display really misses pictures
+  people would see: a frame that was late *and* had a new picture to show (a
+  film's next frame, a fade, a moving or animated layer, a clock, the 3D stage). A
+  missed refresh while the picture stays the same doesn't count: a 25 fps film on
+  a 100 Hz display shows each picture for four refreshes. What counts is the share
+  of a display's new pictures that came late over the last three seconds, and the
+  second after a cue starts or a timeline jumps isn't counted (pausing the previews
+  couldn't spare the displays that). When it is too much while something plays (or
+  NewQ's main loop is held up), every preview (single, multiview, 3D, the timeline
+  workspace's monitor, in every Preview pane, in the main window or popped out)
+  draws less, a step at most every three seconds while it goes on: 60, 30, 15, then
+  5 pictures a second, then at half and a quarter of its size, then paused. Each
   keeps showing its last picture in between, so none goes black, and a display
   that only the previews show has its pictures copied to the graphics card no
   more often than that. The Preview pane says so ("Preview at 15 fps to keep the
-  outputs smooth", "Previews paused to protect the outputs"). Once the displays
-  have been smooth for ten seconds they step back up one step at a time, waiting
-  longer each time the trouble comes straight back. Some displays drop a frame
-  every few seconds whatever the previews do (a system hiccup, a laptop lid, a
-  screen without its graphics driver): when the late frames go on at the same
-  rate with the previews paused for 15 seconds, the previews weren't the cause,
-  so they come straight back ("Previews back: the outputs' late frames aren't
-  theirs") and that rate is let be; clearly more trouble steps them down at once
-  again, and if it rises as soon as they are back they were the cause after all.
-  Settings ▸ General ▸ *Previews* can also hold
-  them at 30, 15 or 5 a second on this computer (*Automatic* by default).
+  outputs smooth", "Previews paused to protect the outputs"). Two smooth seconds
+  later they step back up a level, waiting longer (up to 20 seconds) each time
+  the trouble comes straight back. Some displays miss pictures whatever the
+  previews do (a system hiccup, a laptop lid, a screen without its graphics
+  driver): when the misses go on at the same rate with the previews paused for a
+  few seconds, the previews weren't the cause, so they come straight back
+  ("Previews back: the outputs' missed pictures aren't theirs") and that rate is
+  let be; clearly more trouble steps them down again, and if it rises as soon as
+  they are back they were the cause after all.
+  Settings ▸ General ▸ *Previews* (this computer's own):
+  - *Previews* On or Off. Off draws no preview pictures at all; each preview
+    says so, with a button that turns them back on. The displays don't change.
+  - *Frame rate*: Automatic, or at most 60, 30, 15 or 5 a second.
+  - *Resolution*: Full, Half or Quarter: the largest size every preview (the 3D
+    view too) is drawn at; giving way never goes above it.
+  - *Give way*: **Relaxed** (the default) when about 5% of a display's new
+    pictures come late, **Strict** at about 1%, or **Off**: the previews never
+    give way, and on a busy computer the displays may stutter.
   *Test pattern* shows a picture for lining a display up, with a dropdown of
   fourteen beside it and a *Number* checkbox that turns the display's number
   on the patterns off (greyed for the patterns with no room for one; choosing a
@@ -1204,8 +1219,8 @@ simulated yet, and the 3D model does not drive the outputs.
   stage, and a sub display can't show the stage. Renaming a viewpoint keeps the
   displays that show the stage from it.
 - **The previews still give way.** The 3D views are previews: while a display
-  falls behind they are drawn less often, smaller, then held, as every
-  preview is. A display that shows the stage is not (unless only the previews
+  misses pictures they are drawn less often, smaller, then held, as every
+  preview is, and never above the *Resolution* set for the previews. A display that shows the stage is not (unless only the previews
   show it: no window and no stream). With no 3D view open and no display
   showing the stage for half a minute, what the stage held on the graphics
   card is let go.

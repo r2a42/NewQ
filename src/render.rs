@@ -241,27 +241,75 @@ pub fn late_frames_permille() -> u32 {
         .unwrap_or(0)
 }
 
-/// Every late frame of every output window this run (`FrameTimer::was_late`):
-/// the previews' governor gives way at the first.
-static LATE_FRAMES: AtomicU32 = AtomicU32::new(0);
+/// For each output window (by render slot, as `LATE`), every frame this run
+/// that put a new picture on its display (`Shot`: a layer's texture written
+/// again, a layer moved, faded or coloured, the screen's geometry or blend
+/// changed), and of those the late ones: a "seen" miss, a refresh that showed
+/// the old picture where a new one was due. A late frame that showed the same
+/// picture as the one before it (a 25 fps film's three refreshes in four on a
+/// 100 Hz display) is not among them: nobody could see it. The previews'
+/// governor judges by these (`preview_pace`).
+static NEW_PICTURES: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+static SEEN_LATE: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
-/// How many output frames have been late this run.
-pub fn late_frames_total() -> u32 {
-    LATE_FRAMES.load(Ordering::Relaxed)
+/// Each output window's new pictures and seen misses this run (`NEW_PICTURES`).
+pub fn shown_totals() -> [crate::preview_pace::Shown; 8] {
+    std::array::from_fn(|i| crate::preview_pace::Shown {
+        pictures: NEW_PICTURES[i].load(Ordering::Relaxed),
+        late: SEEN_LATE[i].load(Ordering::Relaxed),
+    })
 }
 
-/// As `late_frames_permille`, but only of the output windows drawing now (a
-/// window that stopped keeps the share of its last frames).
-pub fn late_frames_drawing() -> u32 {
-    let now = now_ms();
-    (0..LATE.len())
-        .filter(|&i| {
-            let at = FPS_AT[i].load(Ordering::Relaxed);
-            at != 0 && u128::from(now.wrapping_sub(at)) < crate::fps::FRESH.as_millis()
-        })
-        .map(|i| LATE[i].load(Ordering::Relaxed))
-        .max()
-        .unwrap_or(0)
+/// What an output window put on its display at a frame, as plain values (no
+/// texture kept alive): two frames alike showed the same picture.
+#[derive(Clone, Debug, PartialEq)]
+struct Shot {
+    size: (u32, u32),
+    blend: EdgeBlend,
+    groups: Vec<(Geometry, Vec<LayerShot>)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LayerShot {
+    stamp: u64,
+    opacity: f32,
+    fit: Fit,
+    transform: LayerTransform,
+    color: ColorAdjust,
+    fx: crate::fx::VideoFx,
+}
+
+impl Shot {
+    fn of(size: (u32, u32), groups: &[OutputGroup], blend: EdgeBlend) -> Shot {
+        Shot {
+            size,
+            blend,
+            groups: groups
+                .iter()
+                .map(|g| {
+                    let layers = g
+                        .layers
+                        .iter()
+                        .map(|l| LayerShot {
+                            stamp: l.texture.stamp(),
+                            opacity: l.opacity,
+                            fit: l.fit,
+                            transform: l.transform,
+                            color: l.color,
+                            fx: l.fx,
+                        })
+                        .collect();
+                    (g.geometry.clone(), layers)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Whether a frame showing `now` puts a new picture up after `last` (the last
+/// one presented; none: it does, as a frame that can't be told counts).
+fn is_new_picture(last: Option<&Shot>, now: &Shot) -> bool {
+    last != Some(now)
 }
 
 /// Judges whether a window's frames are late: a frame takes as long as the
@@ -496,6 +544,8 @@ fn output_loop(
         placement(&window)
     );
     let mut waits = WaitLog::default();
+    // What the last frame presented showed (`Shot`).
+    let mut last_shot: Option<Shot> = None;
     let mut ready = Ready::new(format!("output {slot:?} on {monitor}"));
     ready.configure(&gpu, &surface, &config, "it would not configure at start");
     loop {
@@ -542,6 +592,8 @@ fn output_loop(
             continue;
         }
         let view = frame.texture.create_view(&Default::default());
+        let shot = Shot::of(size, &groups, blend);
+        let fresh = is_new_picture(last_shot.as_ref(), &shot);
         let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
         if trace {
             let ops: Vec<String> = draw
@@ -575,8 +627,13 @@ fn output_loop(
             FPS_AT[i].store(now_ms().max(1), Ordering::Relaxed);
         }
         let share = timer.frame(started, started.elapsed());
-        if timer.was_late {
-            LATE_FRAMES.fetch_add(1, Ordering::Relaxed);
+        if fresh {
+            let i = slot_index(slot);
+            NEW_PICTURES[i].fetch_add(1, Ordering::Relaxed);
+            if timer.was_late {
+                SEEN_LATE[i].fetch_add(1, Ordering::Relaxed);
+            }
+            last_shot = Some(shot);
         }
         if let Some(share) = share {
             late.store(share, Ordering::Relaxed);
@@ -1806,6 +1863,45 @@ mod pace_tests {
                 slice: Geometry::WHOLE,
             },
         }
+    }
+
+    #[test]
+    fn a_frame_is_a_new_picture_only_when_something_in_it_changed() {
+        let Some(gpu) = gpu() else { return };
+        let tex = solid(&gpu, [255, 0, 0, 255]);
+        let blend = EdgeBlend::default();
+        let shot = |groups: &[OutputGroup]| Shot::of(SIZE, groups, blend);
+        let first = shot(&[group(&tex, crate::gpu::IDENTITY)]);
+        // The first frame can't be told: it counts.
+        assert!(is_new_picture(None, &first));
+        // The same layers, nothing written: the same picture (a missed refresh
+        // here shows nothing different).
+        let again = shot(&[group(&tex, crate::gpu::IDENTITY)]);
+        assert!(!is_new_picture(Some(&first), &again));
+        // A new frame written into the texture: new.
+        tex.upload_rgba(&gpu.queue, &[0, 255, 0, 255].repeat(4));
+        let written = shot(&[group(&tex, crate::gpu::IDENTITY)]);
+        assert!(is_new_picture(Some(&again), &written));
+        // A fade, a move, an effect: new, though the texture is the same.
+        let mut faded = group(&tex, crate::gpu::IDENTITY);
+        faded.layers[0].opacity = 0.5;
+        assert!(is_new_picture(Some(&written), &shot(&[faded])));
+        let mut moved = group(&tex, crate::gpu::IDENTITY);
+        moved.layers[0].transform.x = 0.1;
+        assert!(is_new_picture(Some(&written), &shot(&[moved])));
+        let mut blurred = group(&tex, crate::gpu::IDENTITY);
+        blurred.layers[0].fx.blur = 1.0;
+        assert!(is_new_picture(Some(&written), &shot(&[blurred])));
+        // Another texture with the same picture is another picture: each write
+        // has its own stamp.
+        let other = solid(&gpu, [0, 255, 0, 255]);
+        assert_ne!(other.stamp(), tex.stamp());
+        assert!(is_new_picture(
+            Some(&written),
+            &shot(&[group(&other, crate::gpu::IDENTITY)])
+        ));
+        // A layer gone: new.
+        assert!(is_new_picture(Some(&written), &shot(&[])));
     }
 
     /// A target of `SIZE`, and what reading it back needs.

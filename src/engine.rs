@@ -1164,6 +1164,9 @@ pub struct Engine {
     /// settings for a few seconds, so a bad file isn't retried every tick.
     failed_preps: HashMap<CueId, (PrepSig, Instant)>,
     next_instance: u64,
+    /// Jumps within a playing cue that have landed (a seek, a timeline's jump
+    /// carrying a clip): with `started_total`, `jolts`.
+    seeks: u64,
     /// `started_total` when the show was last opened (`show_opened`).
     started_before_show: u64,
     /// Cues started early to crossfade over the child ahead of them in a "play
@@ -1254,6 +1257,7 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
+            seeks: 0,
             started_before_show: 0,
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
@@ -1305,6 +1309,7 @@ impl Engine {
             prepared: Vec::new(),
             failed_preps: HashMap::new(),
             next_instance: 1,
+            seeks: 0,
             started_before_show: 0,
             started_early: HashMap::new(),
             cameras: vec![TEST_PATTERN_DEVICE.to_string()],
@@ -3819,6 +3824,8 @@ impl Engine {
         // a cue that ends is dropped by `retain_mut` after its turn.
         let slowest: std::cell::Cell<Option<(CueId, Duration)>> = std::cell::Cell::new(None);
         let mut turn: Option<(CueId, Instant)> = None;
+        // Jumps that landed this tick (`jolts`).
+        let seeks_done = std::cell::Cell::new(0u64);
         let note = |turn: &mut Option<(CueId, Instant)>| {
             if let Some((id, at)) = turn.take() {
                 let took = at.elapsed();
@@ -3883,7 +3890,12 @@ impl Engine {
             if a.started {
                 a.age += dt;
             }
-            if let Some(note) = apply_seek(a, paused) {
+            let was_seeking = a.seeking.is_some();
+            let seek_note = apply_seek(a, paused);
+            if was_seeking && a.seeking.is_none() {
+                seeks_done.set(seeks_done.get() + 1);
+            }
+            if let Some(note) = seek_note {
                 messages.push(format!(
                     "Cue {}: {note}",
                     cue.map(|c| c.number.as_str()).unwrap_or("?")
@@ -4399,6 +4411,7 @@ impl Engine {
             true
         });
         note(&mut turn);
+        self.seeks += seeks_done.get();
         self.slowest_cue = slowest.get();
         self.crumbs
             .lap("playing the cues (and dropping those that ended)");
@@ -4939,6 +4952,13 @@ impl Engine {
     /// How many cues have been started since the program began.
     pub fn started_total(&self) -> u64 {
         self.next_instance - 1
+    }
+
+    /// Cues started and jumps landed since the program began: the moments a
+    /// display's picture changes all at once, whose missed refreshes the
+    /// previews' governor doesn't count (`preview_pace::Governor::GRACE`).
+    pub fn jolts(&self) -> u64 {
+        self.started_total() + self.seeks
     }
 
     /// A show was opened (or Test Mode gave the operator's show back): the
