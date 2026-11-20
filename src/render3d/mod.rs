@@ -290,6 +290,12 @@ pub struct Renderer {
     targets: HashMap<TargetKey, Targets>,
     meshes: HashMap<u64, GpuMesh>,
     images: HashMap<u64, GpuImage>,
+    /// The largest buffer the device takes (`max_buffer_size`; smaller in
+    /// a test).
+    max_buffer: u64,
+    /// Meshes too big for it, by key: skipped (and said once), never made
+    /// again each render.
+    too_big: std::collections::HashSet<u64>,
     renders: u32,
     last: FrameStats,
 }
@@ -442,6 +448,8 @@ impl Renderer {
             targets: HashMap::new(),
             meshes: HashMap::new(),
             images: HashMap::new(),
+            max_buffer: device.limits().max_buffer_size,
+            too_big: std::collections::HashSet::new(),
             renders: 0,
             last: FrameStats::default(),
         }
@@ -787,6 +795,13 @@ impl Renderer {
         self.targets.retain(|_, t| t.used.elapsed() < age);
     }
 
+    /// Take buffers of at most `bytes` (a test's stand-in for a device's
+    /// `max_buffer_size`).
+    #[cfg(test)]
+    pub fn limit_buffers(&mut self, bytes: u64) {
+        self.max_buffer = bytes.min(self.max_buffer);
+    }
+
     /// Let go of everything made for drawing (the device stays).
     pub fn forget_all(&mut self) {
         self.meshes.clear();
@@ -864,6 +879,25 @@ impl Renderer {
             .is_some_and(|m| m.vertex_count == mesh.positions.len())
         {
             return true;
+        }
+        if self.too_big.contains(&part.mesh_key) {
+            return false;
+        }
+        // A buffer bigger than the device takes is an error that ends the
+        // drawing thread: such a part is left out (the loader cuts a
+        // venue's into pieces that fit, so this is a last guard).
+        let bytes = |n: usize, each: usize| (n as u64).saturating_mul(each as u64);
+        let wanted = bytes(mesh.positions.len(), size_of::<Vertex>())
+            .max(bytes(mesh.indices.len(), size_of::<u32>()));
+        if wanted > self.max_buffer {
+            log::warn!(
+                "3D stage: a part of {} corners is too big for the graphics card \
+                 ({wanted} bytes, at most {}); it is left out",
+                mesh.positions.len(),
+                self.max_buffer
+            );
+            self.too_big.insert(part.mesh_key);
+            return false;
         }
         // (One with nothing to draw is left alone: another part may already
         // be drawing what the key holds.)

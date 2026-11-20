@@ -23,6 +23,10 @@ use std::sync::Arc;
 pub const WARN_TRIANGLES: usize = 2_000_000;
 /// Triangles past this many are left out (with a warning).
 pub const MAX_TRIANGLES: usize = 8_000_000;
+/// A part (one material's triangles) with more corners than this is cut into
+/// pieces: the renderer's corners are 32 bytes, and a graphics card may take
+/// buffers no bigger than 256 MB (8,388,608 corners).
+pub const MAX_PART_VERTICES: usize = 4_000_000;
 /// A picture wider or taller than this is made smaller to fit.
 pub const MAX_TEXTURE: u32 = 4096;
 /// What a part with no colour of its own is painted (a light grey).
@@ -83,18 +87,134 @@ pub struct LoadedVenue {
 /// A sample venue (`Venue::sample`) is made in code instead, and `path` is
 /// not looked at.
 pub fn load_venue(path: &Path, venue: &Venue) -> Result<LoadedVenue, String> {
+    load_venue_with(path, venue, &|p| Found::Here(p.to_path_buf())).map_err(|e| match e {
+        Unread::Failed(why) => why,
+        Unread::Arriving => format!("{} is still arriving.", file_name(path)),
+    })
+}
+
+/// Where a file a model names is on this computer: the file itself, or on
+/// a show network's follower the store's copy (`net::media::local_path`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Found {
+    Here(PathBuf),
+    /// On its way from the primary: the model is read once it has come.
+    Arriving,
+    Missing,
+}
+
+/// Why a venue wasn't read.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unread {
+    /// A sentence for the user.
+    Failed(String),
+    /// A file it needs is still on its way (a show network's follower).
+    Arriving,
+}
+
+/// A model's picture file bigger than this is not read.
+pub const MAX_PICTURE_FILE: u64 = 256 << 20;
+/// An OBJ's materials file bigger than this is not read.
+pub const MAX_MATERIALS_FILE: u64 = 64 << 20;
+
+/// `load_venue`, every file found through `locate`: the model's own (`path`
+/// as the show names it) and the files it names beside it (`side_path`
+/// of their names), which are read only when they are regular files, never
+/// past their size, and never outside the model's folder.
+pub fn load_venue_with(
+    path: &Path,
+    venue: &Venue,
+    locate: &dyn Fn(&Path) -> Found,
+) -> Result<LoadedVenue, Unread> {
     if let Some(kind) = venue.sample {
-        return super::samples::sample_venue(kind, venue);
+        return super::samples::sample_venue(kind, venue).map_err(Unread::Failed);
     }
     // The readers are trusted not to panic, but a damaged file must never
     // take the program down.
-    let read = std::panic::catch_unwind(|| read_model(path, venue));
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        read_model(path, venue, locate)
+    }));
     read.unwrap_or_else(|_| {
-        Err(format!(
+        Err(Unread::Failed(format!(
             "{} looks damaged: it couldn't be read.",
             file_name(path)
-        ))
+        )))
     })
+}
+
+/// Where a file a model names (`name`, as the model writes it) is, beside
+/// the model at `model`: put together as text, with the model's own kind
+/// of separator (a Windows primary's `C:\…` on any computer). None for a
+/// name that would leave the model's folder: absolute, a drive or UNC
+/// path, a URL, or one with `..` in it. Subfolders are fine.
+pub fn side_path(model: &Path, name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    let b = name.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    if name.is_empty()
+        || name.starts_with('/')
+        || name.starts_with('\\')
+        || drive
+        || name.contains("://")
+    {
+        return None;
+    }
+    let parts: Vec<&str> = name
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        return None;
+    }
+    let text = model.to_string_lossy();
+    Some(PathBuf::from(match text.rfind(['/', '\\']) {
+        Some(i) => {
+            let sep = &text[i..=i];
+            format!("{}{sep}{}", &text[..i], parts.join(sep))
+        }
+        None => parts.join(std::path::MAIN_SEPARATOR_STR),
+    }))
+}
+
+/// A regular file's bytes, at most `most` of them; with `whole`, a longer
+/// file is refused rather than cut.
+fn read_capped(path: &Path, most: u64, whole: bool) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("it isn't a file".into());
+    }
+    if whole && meta.len() > most {
+        return Err(format!("it is over {} MB", most >> 20));
+    }
+    let mut out = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(most).read_to_end(&mut out))
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// A file the model at `model` names, read through `locate` (see
+/// `read_capped`); one still on its way marks the build as waiting for it.
+fn read_side(
+    model: &Path,
+    name: &str,
+    most: u64,
+    whole: bool,
+    locate: &dyn Fn(&Path) -> Found,
+    b: &mut Builder,
+) -> Result<Vec<u8>, String> {
+    let Some(shown) = side_path(model, name) else {
+        return Err("it is outside the model's folder".into());
+    };
+    match locate(&shown) {
+        Found::Here(p) => read_capped(&p, most, whole),
+        Found::Arriving => {
+            b.arriving = true;
+            Err("it is still arriving".into())
+        }
+        Found::Missing => Err("it isn't on this computer".into()),
+    }
 }
 
 fn file_name(path: &Path) -> String {
@@ -130,27 +250,36 @@ fn format_of(path: &Path, head: &[u8]) -> Option<Format> {
     }
 }
 
-fn read_model(path: &Path, venue: &Venue) -> Result<LoadedVenue, String> {
+fn read_model(
+    path: &Path,
+    venue: &Venue,
+    locate: &dyn Fn(&Path) -> Found,
+) -> Result<LoadedVenue, Unread> {
     let name = file_name(path);
-    let opened = |e: std::io::Error| format!("{name} can't be opened: {e}");
-    let mut head = Vec::with_capacity(32);
-    {
-        use std::io::Read as _;
-        std::fs::File::open(path)
-            .and_then(|f| f.take(32).read_to_end(&mut head))
-            .map_err(opened)?;
-    }
+    let failed = Unread::Failed;
+    let local = match locate(path) {
+        Found::Here(p) => p,
+        Found::Arriving => return Err(Unread::Arriving),
+        Found::Missing => return Err(failed(format!("{name} isn't on this computer."))),
+    };
+    let opened = |e: String| failed(format!("{name} can't be opened: {e}"));
+    // A regular file only (a pipe or a device would be read for ever).
+    let head = read_capped(&local, 32, false).map_err(opened)?;
     let mut b = Builder::new(venue.brightness());
-    match format_of(path, &head) {
+    let read = match format_of(path, &head) {
         Some(Format::Gltf) => {
-            let bytes = std::fs::read(path).map_err(opened)?;
-            read_gltf(path, &bytes, &mut b)?
+            let bytes = read_capped(&local, u64::MAX, false).map_err(opened)?;
+            read_gltf(path, &bytes, &mut b, locate)
         }
-        Some(Format::Obj) => read_obj(path, &mut b)?,
-        Some(Format::Fbx) => return Err(FBX_WORDS.into()),
-        None => return Err(format!("{name}: {FORMAT_WORDS}")),
+        Some(Format::Obj) => read_obj(path, &local, &mut b, locate),
+        Some(Format::Fbx) => return Err(failed(FBX_WORDS.into())),
+        None => return Err(failed(format!("{name}: {FORMAT_WORDS}"))),
+    };
+    if b.arriving {
+        return Err(Unread::Arriving);
     }
-    b.finish(&name, venue)
+    read.map_err(failed)?;
+    b.finish(&name, venue).map_err(failed)
 }
 
 // ----- Building the parts ------------------------------------------------------
@@ -171,9 +300,13 @@ pub(super) struct Builder {
     left_out: usize,
     warnings: Vec<String>,
     bounds: Option<Bounds>,
+    /// A file the model needs is still on its way (`Found::Arriving`).
+    arriving: bool,
     /// `MAX_TRIANGLES` and `WARN_TRIANGLES` (smaller in tests).
     limit: usize,
     warn_at: usize,
+    /// `MAX_PART_VERTICES` (smaller in tests).
+    part_vertices: usize,
 }
 
 impl Builder {
@@ -186,8 +319,10 @@ impl Builder {
             left_out: 0,
             warnings: Vec::new(),
             bounds: None,
+            arriving: false,
             limit: MAX_TRIANGLES,
             warn_at: WARN_TRIANGLES,
+            part_vertices: MAX_PART_VERTICES,
         }
     }
 
@@ -232,10 +367,6 @@ impl Builder {
         self.triangles += tris;
         for p in &mut piece.positions {
             *p = geometry::point(m, *p);
-            self.bounds = Some(match self.bounds {
-                None => Bounds { min: *p, max: *p },
-                Some(b) => b.with(*p),
-            });
         }
         if geometry::det3(m) < 0.0 {
             for t in piece.indices.chunks_mut(3) {
@@ -294,20 +425,29 @@ impl Builder {
         }
         let brightness = self.brightness;
         let mut pictures: HashMap<usize, (Arc<Vec<u8>>, u64)> = HashMap::new();
-        let parts = self
-            .parts
-            .into_iter()
-            .filter(|(_, m)| !m.indices.is_empty())
-            .map(|(look, mesh)| {
-                let paint = paint_of(&look, brightness, &mut pictures);
+        let mut parts = Vec::new();
+        for (look, mesh) in self.parts {
+            if mesh.indices.is_empty() {
+                continue;
+            }
+            let paint = paint_of(&look, brightness, &mut pictures);
+            // In pieces the graphics card takes, with only the corners the
+            // triangles kept use.
+            for mesh in split_mesh(mesh, self.part_vertices) {
+                for p in &mesh.positions {
+                    self.bounds = Some(match self.bounds {
+                        None => Bounds { min: *p, max: *p },
+                        Some(b) => b.with(*p),
+                    });
+                }
                 let mesh_key = mesh.content_key();
-                VenuePart {
+                parts.push(VenuePart {
                     mesh: Arc::new(mesh),
                     mesh_key,
-                    paint,
-                }
-            })
-            .collect();
+                    paint: paint.clone(),
+                });
+            }
+        }
         Ok(LoadedVenue {
             parts,
             bounds: self.bounds,
@@ -316,6 +456,62 @@ impl Builder {
             loaded_for: venue.clone(),
         })
     }
+}
+
+/// `mesh` in pieces of at most `most` corners each, every piece holding only
+/// the corners its triangles use (a model cut at `MAX_TRIANGLES` keeps no
+/// corners of the triangles left out). The mesh itself when it fits and
+/// every corner is used.
+fn split_mesh(mesh: Mesh, most: usize) -> Vec<Mesh> {
+    let most = most.max(3);
+    let n = mesh.positions.len();
+    let mut used = vec![false; n];
+    for i in &mesh.indices {
+        if let Some(u) = used.get_mut(*i as usize) {
+            *u = true;
+        }
+    }
+    if n <= most && used.iter().all(|u| *u) {
+        return vec![mesh];
+    }
+    drop(used);
+    let mut remap = vec![u32::MAX; n];
+    let mut taken: Vec<u32> = Vec::new();
+    let mut out = Vec::new();
+    let mut cur = Mesh::default();
+    for t in mesh.indices.chunks_exact(3) {
+        if t.iter().any(|i| *i as usize >= n) {
+            continue;
+        }
+        let new = t
+            .iter()
+            .enumerate()
+            .filter(|(k, i)| remap[**i as usize] == u32::MAX && !t[..*k].contains(i))
+            .count();
+        if cur.positions.len() + new > most {
+            for i in taken.drain(..) {
+                remap[i as usize] = u32::MAX;
+            }
+            out.push(std::mem::take(&mut cur));
+        }
+        for &i in t {
+            let r = &mut remap[i as usize];
+            if *r == u32::MAX {
+                *r = cur.positions.len() as u32;
+                let i = i as usize;
+                cur.positions.push(mesh.positions[i]);
+                cur.normals
+                    .push(mesh.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]));
+                cur.uvs.push(mesh.uvs.get(i).copied().unwrap_or_default());
+                taken.push(i as u32);
+            }
+            cur.indices.push(*r);
+        }
+    }
+    if !cur.indices.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn group_digits(n: usize) -> String {
@@ -439,7 +635,12 @@ const GLTF_IGNORABLE: &[&str] = &[
     "KHR_lights_punctual",
 ];
 
-fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
+fn read_gltf(
+    path: &Path,
+    bytes: &[u8],
+    b: &mut Builder,
+    locate: &dyn Fn(&Path) -> Found,
+) -> Result<(), String> {
     use gltf::accessor::{DataType, Dimensions};
     let name = file_name(path);
     let mut gltf = gltf::Gltf::from_slice(bytes)
@@ -461,7 +662,6 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
             ));
         }
     }
-    let dir = path.parent().unwrap_or(Path::new("."));
     let mut buffers: Vec<Vec<u8>> = Vec::new();
     for buffer in doc.buffers() {
         let data = match buffer.source() {
@@ -469,8 +669,11 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
                 .blob
                 .take()
                 .ok_or_else(|| format!("{name} is missing its binary part."))?,
-            gltf::buffer::Source::Uri(uri) => read_uri(uri, dir)
-                .map_err(|e| format!("{name}'s data ({}) can't be read: {e}", short(uri)))?,
+            // No more than the file says the buffer holds.
+            gltf::buffer::Source::Uri(uri) => {
+                read_uri(uri, path, buffer.length() as u64, false, locate, b)
+                    .map_err(|e| format!("{name}'s data ({}) can't be read: {e}", short(uri)))?
+            }
         };
         if data.len() < buffer.length() {
             return Err(format!(
@@ -604,7 +807,7 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
                 let picture = image.and_then(|img| {
                     pictures
                         .entry(img.index())
-                        .or_insert_with(|| gltf_picture(&img, &buffers, dir, b))
+                        .or_insert_with(|| gltf_picture(&img, &buffers, path, locate, b))
                         .clone()
                 });
                 let colour = pbr.base_color_factor();
@@ -637,7 +840,8 @@ fn read_gltf(path: &Path, bytes: &[u8], b: &mut Builder) -> Result<(), String> {
 fn gltf_picture(
     img: &gltf::Image,
     buffers: &[Vec<u8>],
-    dir: &Path,
+    model: &Path,
+    locate: &dyn Fn(&Path) -> Found,
     b: &mut Builder,
 ) -> Option<Arc<image::RgbaImage>> {
     let what = img.name().map_or_else(
@@ -650,16 +854,18 @@ fn gltf_picture(
             data.get(view.offset()..view.offset() + view.length())?
                 .to_vec()
         }
-        gltf::image::Source::Uri { uri, .. } => match read_uri(uri, dir) {
-            Ok(d) => d,
-            Err(e) => {
-                b.warn(format!(
-                    "The picture {} can't be read ({e}); its part is drawn in colour.",
-                    short(uri)
-                ));
-                return None;
+        gltf::image::Source::Uri { uri, .. } => {
+            match read_uri(uri, model, MAX_PICTURE_FILE, true, locate, b) {
+                Ok(d) => d,
+                Err(e) => {
+                    b.warn(format!(
+                        "The picture {} can't be read ({e}); its part is drawn in colour.",
+                        short(uri)
+                    ));
+                    return None;
+                }
             }
-        },
+        }
     };
     decode_picture(&bytes, &what, b)
 }
@@ -673,8 +879,15 @@ fn short(uri: &str) -> String {
 }
 
 /// A buffer's or a picture's bytes: a `data:` URI's, or a file's beside the
-/// model.
-fn read_uri(uri: &str, dir: &Path) -> Result<Vec<u8>, String> {
+/// model (`read_side`).
+fn read_uri(
+    uri: &str,
+    model: &Path,
+    most: u64,
+    whole: bool,
+    locate: &dyn Fn(&Path) -> Found,
+    b: &mut Builder,
+) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     if let Some(rest) = uri.strip_prefix("data:") {
         let (head, data) = rest.split_once(',').ok_or("a data URI without data")?;
@@ -685,8 +898,7 @@ fn read_uri(uri: &str, dir: &Path) -> Result<Vec<u8>, String> {
             .decode(data.trim())
             .map_err(|e| e.to_string());
     }
-    let path = dir.join(percent_decode(uri));
-    std::fs::read(&path).map_err(|e| e.to_string())
+    read_side(model, &percent_decode(uri), most, whole, locate, b)
 }
 
 /// `%20` and the like, as glTF URIs have them.
@@ -736,7 +948,14 @@ fn fan(i: &[u32]) -> Vec<u32> {
 
 // ----- OBJ ---------------------------------------------------------------------
 
-fn read_obj(path: &Path, b: &mut Builder) -> Result<(), String> {
+/// `path` as the show names it (the names of its materials file and
+/// pictures are beside it), `local` where it is read from.
+fn read_obj(
+    path: &Path,
+    local: &Path,
+    b: &mut Builder,
+    locate: &dyn Fn(&Path) -> Found,
+) -> Result<(), String> {
     let name = file_name(path);
     let options = tobj::LoadOptions {
         triangulate: true,
@@ -744,18 +963,41 @@ fn read_obj(path: &Path, b: &mut Builder) -> Result<(), String> {
         ignore_points: true,
         ignore_lines: true,
     };
-    let (models, materials) =
-        tobj::load_obj(path, &options).map_err(|e| format!("{name} can't be read as OBJ: {e}."))?;
+    let file = std::fs::File::open(local).map_err(|e| format!("{name} can't be opened: {e}"))?;
+    let mut reader = std::io::BufReader::new(file);
+    // Its materials files, through `read_side` (so never outside its folder,
+    // never a pipe, never past `MAX_MATERIALS_FILE`).
+    let side = std::cell::RefCell::new((false, Vec::<String>::new()));
+    let (models, materials) = tobj::load_obj_buf(&mut reader, &options, |mtl| {
+        let mut probe = Builder::new(1.0);
+        let text = mtl.to_string_lossy();
+        match read_side(path, &text, MAX_MATERIALS_FILE, true, locate, &mut probe) {
+            Ok(bytes) => tobj::load_mtl_buf(&mut std::io::Cursor::new(bytes)),
+            Err(e) => {
+                let mut s = side.borrow_mut();
+                s.0 |= probe.arriving;
+                s.1.push(format!("{text}: {e}"));
+                Err(tobj::LoadError::OpenFileFailed)
+            }
+        }
+    })
+    .map_err(|e| format!("{name} can't be read as OBJ: {e}."))?;
+    let (arriving, why) = side.into_inner();
+    b.arriving |= arriving;
     let materials = match materials {
         Ok(m) => m,
         Err(e) => {
+            let e = if why.is_empty() {
+                e.to_string()
+            } else {
+                why.join("; ")
+            };
             b.warn(format!(
                 "{name}'s materials file can't be read ({e}); the model is drawn in grey."
             ));
             Vec::new()
         }
     };
-    let dir = path.parent().unwrap_or(Path::new("."));
     let mut pictures: HashMap<PathBuf, Option<Arc<image::RgbaImage>>> = HashMap::new();
     for model in models {
         let mesh = model.mesh;
@@ -780,15 +1022,23 @@ fn read_obj(path: &Path, b: &mut Builder) -> Result<(), String> {
                 let [r, g, bl] = mat.diffuse.unwrap_or([0.7, 0.7, 0.7]);
                 let alpha = mat.dissolve.unwrap_or(1.0);
                 let texture = mat.diffuse_texture.as_deref().and_then(|t| {
-                    let Some(file) = texture_file(dir, t) else {
-                        b.warn(format!(
-                            "The picture {t} isn't beside the model; its part is drawn in colour."
-                        ));
-                        return None;
+                    let file = match texture_file(path, t, locate) {
+                        Found::Here(f) => f,
+                        Found::Arriving => {
+                            b.arriving = true;
+                            return None;
+                        }
+                        Found::Missing => {
+                            b.warn(format!(
+                                "The picture {t} isn't beside the model; its part is drawn in \
+                                 colour."
+                            ));
+                            return None;
+                        }
                     };
                     pictures
                         .entry(file.clone())
-                        .or_insert_with(|| match std::fs::read(&file) {
+                        .or_insert_with(|| match read_capped(&file, MAX_PICTURE_FILE, true) {
                             Ok(bytes) => decode_picture(&bytes, t, b),
                             Err(e) => {
                                 b.warn(format!("The picture {t} can't be read ({e})."));
@@ -828,18 +1078,165 @@ fn read_obj(path: &Path, b: &mut Builder) -> Result<(), String> {
     Ok(())
 }
 
-/// Where an MTL's `map_Kd` picture is: its name may have Windows' `\`, and
-/// options before it (`-bm 1 wall.png`).
-fn texture_file(dir: &Path, name: &str) -> Option<PathBuf> {
-    let name = name.trim().replace('\\', "/");
-    let mut tries = vec![dir.join(&name)];
+/// The names an MTL's `map_Kd` picture may be found by, most likely first:
+/// its name may have Windows' `\`, options before it (`-bm 1 wall.png`), or
+/// a folder from another computer (only its file name is looked for then).
+fn texture_tries(name: &str) -> Vec<String> {
+    let name = name.trim();
+    let mut tries = vec![name.to_string()];
     if let Some(last) = name.split_whitespace().last() {
-        tries.push(dir.join(last));
+        tries.push(last.to_string());
     }
-    if let Some(file) = Path::new(&name).file_name() {
-        tries.push(dir.join(file));
+    if let Some(file) = name.rsplit(['/', '\\']).next() {
+        tries.push(file.to_string());
     }
-    tries.into_iter().find(|p| p.is_file())
+    tries.dedup();
+    tries
+}
+
+/// Where an MTL's `map_Kd` picture is, beside the model at `model`: the
+/// first of `texture_tries` that is a file here. One the show network's
+/// primary didn't have either is `Missing`; one still coming, `Arriving`.
+fn texture_file(model: &Path, name: &str, locate: &dyn Fn(&Path) -> Found) -> Found {
+    let mut missing = false;
+    let mut arriving = false;
+    for t in texture_tries(name) {
+        let Some(shown) = side_path(model, &t) else {
+            continue;
+        };
+        match locate(&shown) {
+            Found::Here(p) if p.is_file() => return Found::Here(p),
+            Found::Here(_) | Found::Missing => missing = true,
+            Found::Arriving => arriving = true,
+        }
+    }
+    // (Only one of the names is in a primary's list of files: the others
+    // are "on their way" until that list is the show's.)
+    if arriving && !missing {
+        Found::Arriving
+    } else {
+        Found::Missing
+    }
+}
+
+// ----- The files a model reads ----------------------------------------------
+
+/// The most of a glTF's JSON (or an OBJ's materials file) `venue_files` reads.
+const MOST_JSON: u64 = 64 << 20;
+
+/// Whether a file is a venue model NewQ reads (by its name).
+pub fn is_model_file(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    matches!(ext.as_deref(), Some("glb" | "gltf" | "obj"))
+}
+
+/// The files the venue model at `path` reads besides itself, as
+/// `side_path` names them (each once, in the order met): a glTF's buffers
+/// and pictures kept in files of their own; an OBJ's materials files and
+/// the pictures they name. What a show network's primary hands its
+/// computers with the model. A name the model gives that isn't there is
+/// listed too (the primary's list says it is missing, so a computer
+/// doesn't wait for it). Reads the model (a .glb only as far as its JSON);
+/// nothing for a file it can't read.
+pub fn venue_files(path: &Path) -> Vec<PathBuf> {
+    let Ok(head) = read_capped(path, 32, false) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut add = |p: PathBuf| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    match format_of(path, &head) {
+        Some(Format::Gltf) => {
+            let json = if head.starts_with(b"glTF") {
+                // The header, then the first chunk: the JSON.
+                let len = head
+                    .get(12..16)
+                    .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                let is_json = head.get(16..20) == Some(&0x4E4F_534Au32.to_le_bytes()[..]);
+                if !is_json {
+                    return Vec::new();
+                }
+                read_capped(path, 20 + u64::from(len).min(MOST_JSON), false)
+                    .map(|b| b.get(20..).unwrap_or_default().to_vec())
+            } else {
+                read_capped(path, MOST_JSON, true)
+            };
+            let Ok(json) = json else {
+                return Vec::new();
+            };
+            let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&json) else {
+                return Vec::new();
+            };
+            for list in ["buffers", "images"] {
+                for item in doc[list].as_array().into_iter().flatten() {
+                    if let Some(uri) = item["uri"].as_str()
+                        && !uri.starts_with("data:")
+                        && let Some(p) = side_path(path, &percent_decode(uri))
+                    {
+                        add(p);
+                    }
+                }
+            }
+        }
+        Some(Format::Obj) => {
+            let mut materials = Vec::new();
+            for_lines(path, u64::MAX, &mut |line| {
+                if line.split_whitespace().next() == Some("mtllib")
+                    && let Some((_, name)) = line.split_once(' ')
+                    && let Some(p) = side_path(path, name)
+                {
+                    materials.push(p);
+                }
+            });
+            for mtl in materials {
+                add(mtl.clone());
+                for_lines(&mtl, MOST_JSON, &mut |line| {
+                    if line.split_whitespace().next() != Some("map_Kd") {
+                        return;
+                    }
+                    let Some(name) = line.get(6..).map(str::trim).filter(|n| !n.is_empty()) else {
+                        return;
+                    };
+                    // As `texture_file` looks: the first that is there, or
+                    // else the first it would have looked for.
+                    let tries: Vec<PathBuf> = texture_tries(name)
+                        .iter()
+                        .filter_map(|t| side_path(path, t))
+                        .collect();
+                    if let Some(p) = tries.iter().find(|p| p.is_file()).or(tries.first()) {
+                        add(p.clone());
+                    }
+                });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Each line of a regular file (at most `most` bytes long), trimmed.
+fn for_lines(path: &Path, most: u64, each: &mut dyn FnMut(&str)) {
+    use std::io::BufRead as _;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= most) {
+        return;
+    }
+    let Ok(f) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut r = std::io::BufReader::new(f);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => each(String::from_utf8_lossy(&buf).trim()),
+        }
+    }
 }
 
 #[cfg(test)]

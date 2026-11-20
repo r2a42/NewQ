@@ -662,22 +662,300 @@ fn a_huge_model_is_cut_with_a_warning_and_a_big_one_warned_about() {
 #[test]
 fn texture_names_from_other_systems_are_found() {
     let d = Dir::new("names");
+    let model = d.0.join("room.obj");
+    let here = |p: &Path| Found::Here(p.to_path_buf());
     d.write("maps/brick.jpg", b"x");
     assert_eq!(
-        texture_file(&d.0, "maps\\brick.jpg"),
-        Some(d.0.join("maps/brick.jpg"))
+        texture_file(&model, "maps\\brick.jpg", &here),
+        Found::Here(d.0.join("maps/brick.jpg"))
     );
     assert_eq!(
-        texture_file(&d.0, "-bm 0.5 maps/brick.jpg"),
-        Some(d.0.join("maps/brick.jpg"))
+        texture_file(&model, "-bm 0.5 maps/brick.jpg", &here),
+        Found::Here(d.0.join("maps/brick.jpg"))
     );
-    assert!(texture_file(&d.0, "C:\\Users\\me\\maps\\brick.jpg").is_none());
+    assert_eq!(
+        texture_file(&model, "C:\\Users\\me\\maps\\brick.jpg", &here),
+        Found::Missing
+    );
     d.write("brick.jpg", b"x");
     assert_eq!(
-        texture_file(&d.0, "C:\\Users\\me\\maps\\brick.jpg"),
-        Some(d.0.join("brick.jpg"))
+        texture_file(&model, "C:\\Users\\me\\maps\\brick.jpg", &here),
+        Found::Here(d.0.join("brick.jpg"))
     );
     assert_eq!(percent_decode("a%20b%zz%2"), "a b%zz%2");
+}
+
+#[test]
+fn side_files_stay_in_the_models_folder() {
+    let model = Path::new("/shows/venue/room.gltf");
+    let side = |n: &str| side_path(model, n).map(|p| p.to_string_lossy().into_owned());
+    assert_eq!(side("wall.png").as_deref(), Some("/shows/venue/wall.png"));
+    assert_eq!(
+        side("maps\\./brick.png").as_deref(),
+        Some("/shows/venue/maps/brick.png")
+    );
+    for refused in [
+        "",
+        "../secret.bin",
+        "maps/../../x.png",
+        "/etc/passwd",
+        "\\\\server\\share\\x.png",
+        "//server/share/x.png",
+        "C:\\Windows\\x.png",
+        "c:x.png",
+        "file:///etc/passwd",
+        "https://example.com/x.png",
+    ] {
+        assert_eq!(side(refused), None, "{refused}");
+    }
+    // A Windows primary's model, named on any computer.
+    assert_eq!(
+        side_path(Path::new("C:\\Shows\\room.obj"), "maps/brick.png")
+            .unwrap()
+            .to_string_lossy(),
+        "C:\\Shows\\maps\\brick.png"
+    );
+}
+
+/// A triangle's glTF with no picture.
+fn no_picture() -> serde_json::Value {
+    json!({ "images": [], "textures": [], "materials": [{ "pbrMetallicRoughness": {} }] })
+}
+
+#[test]
+fn a_model_reads_only_files_beside_it_and_no_more_than_it_says() {
+    let d = Dir::new("escape");
+    let t = tri(&[]);
+    // Data beside the folder, named with `..`: refused.
+    let outside = Dir::new("escape-outside");
+    outside.write("data.bin", &t.bin);
+    let name = format!(
+        "../{}/data.bin",
+        outside.0.file_name().unwrap().to_string_lossy()
+    );
+    let json = tri_json(
+        &t,
+        json!({ "byteLength": t.bin.len(), "uri": name }),
+        no_picture(),
+    );
+    let path = d.write("venue.gltf", serde_json::to_vec(&json).unwrap());
+    let e = load_venue(&path, &venue()).unwrap_err();
+    assert!(e.contains("outside the model's folder"), "{e}");
+    // Absolute: refused too.
+    let abs = outside.0.join("data.bin").to_string_lossy().into_owned();
+    let json = tri_json(
+        &t,
+        json!({ "byteLength": t.bin.len(), "uri": abs }),
+        no_picture(),
+    );
+    let path = d.write("venue.gltf", serde_json::to_vec(&json).unwrap());
+    assert!(load_venue(&path, &venue()).is_err());
+    // Not a file (a folder): refused, not read for ever.
+    std::fs::create_dir_all(d.0.join("data.bin")).unwrap();
+    let json = tri_json(
+        &t,
+        json!({ "byteLength": t.bin.len(), "uri": "data.bin" }),
+        no_picture(),
+    );
+    let path = d.write("venue.gltf", serde_json::to_vec(&json).unwrap());
+    let e = load_venue(&path, &venue()).unwrap_err();
+    assert!(e.contains("isn't a file"), "{e}");
+    std::fs::remove_dir(d.0.join("data.bin")).unwrap();
+    // A buffer file longer than the model says: only what it says is read.
+    let mut long = t.bin.clone();
+    long.extend(std::iter::repeat_n(7u8, 4096));
+    d.write("data.bin", &long);
+    let v = load_venue(&path, &venue()).unwrap();
+    assert_eq!(v.triangles, 1);
+    #[cfg(unix)]
+    {
+        // A pipe beside it, named as the model's picture: not waited on.
+        let fifo = d.0.join("wall.png");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            let json = tri_json(
+                &t,
+                json!({ "byteLength": t.bin.len(), "uri": "data.bin" }),
+                json!({
+                    "images": [{ "uri": "wall.png" }],
+                    "materials": [{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]
+                }),
+            );
+            let path = d.write("venue.gltf", serde_json::to_vec(&json).unwrap());
+            let v = load_venue(&path, &venue()).unwrap();
+            assert!(v.warnings[0].contains("isn't a file"), "{:?}", v.warnings);
+        }
+    }
+    // An OBJ whose materials file is outside its folder: drawn in grey.
+    d.write(
+        "room.obj",
+        OBJ.replace("mtllib room.mtl", "mtllib ../room.mtl"),
+    );
+    let v = load_venue(&d.0.join("room.obj"), &venue()).unwrap();
+    assert!(
+        v.warnings[0].contains("outside the model's folder"),
+        "{:?}",
+        v.warnings
+    );
+}
+
+#[test]
+fn the_files_a_model_reads_are_listed_for_the_network() {
+    let d = Dir::new("files");
+    // A glTF: its buffer and its picture, not what is inside it.
+    let t = tri(&[]);
+    let json = tri_json(
+        &t,
+        json!({ "byteLength": t.bin.len(), "uri": "data/venue%20data.bin" }),
+        json!({
+            "images": [{ "uri": "wall.png" }, { "uri": "data:image/png;base64,AAAA" }, { "uri": "../x.png" }],
+        }),
+    );
+    let gltf = d.write("venue.gltf", serde_json::to_vec(&json).unwrap());
+    assert_eq!(
+        venue_files(&gltf),
+        vec![d.0.join("data/venue data.bin"), d.0.join("wall.png")]
+    );
+    // A GLB: only its JSON is read.
+    let mut j = tri_json(&t, json!({ "byteLength": t.bin.len() }), json!({}));
+    j["images"] = json!([{ "uri": "maps/wall.jpg" }]);
+    let glb_path = d.write("venue.glb", glb(&j, &t.bin));
+    assert_eq!(venue_files(&glb_path), vec![d.0.join("maps/wall.jpg")]);
+    // An OBJ: its materials file and the pictures it names (the one that is
+    // there, or the first looked for when none is).
+    d.write("room.mtl", MTL);
+    let obj = d.write("room.obj", OBJ);
+    assert_eq!(
+        venue_files(&obj),
+        vec![d.0.join("room.mtl"), d.0.join("textures/wood floor.png")]
+    );
+    d.write("wood floor.png", png(2, 2, [1, 2, 3, 255]));
+    assert_eq!(
+        venue_files(&obj),
+        vec![d.0.join("room.mtl"), d.0.join("wood floor.png")]
+    );
+    assert!(is_model_file(&obj) && is_model_file(&glb_path) && is_model_file(&gltf));
+    assert!(!is_model_file(&d.0.join("room.mtl")));
+    assert!(venue_files(&d.0.join("nothing.obj")).is_empty());
+}
+
+#[test]
+fn a_venue_waits_for_its_files_on_a_show_networks_computer() {
+    let d = Dir::new("arriving");
+    d.write("textures/wood floor.png", png(2, 2, [50, 60, 70, 255]));
+    d.write("room.mtl", MTL);
+    let path = d.write("room.obj", OBJ);
+    // The model itself still coming.
+    let none = |_: &Path| Found::Arriving;
+    assert_eq!(
+        load_venue_with(&path, &venue(), &none).unwrap_err(),
+        Unread::Arriving
+    );
+    // The model here (at another path, a store's), its picture coming.
+    let store = Dir::new("arriving-store");
+    let local = store.write("ab/0123.obj", OBJ);
+    let mtl = store.write("cd/4567.mtl", MTL);
+    let names = (path.clone(), d.0.join("room.mtl"));
+    let picture = d.0.join("textures/wood floor.png");
+    let coming = |p: &Path| {
+        if p == names.0 {
+            Found::Here(local.clone())
+        } else if p == names.1 {
+            Found::Here(mtl.clone())
+        } else if p == picture {
+            Found::Arriving
+        } else {
+            // Names not in the primary's list: on their way until it is.
+            Found::Arriving
+        }
+    };
+    assert_eq!(
+        load_venue_with(&path, &venue(), &coming).unwrap_err(),
+        Unread::Arriving
+    );
+    // Come: read from the store's copies.
+    let pic = store.write("ef/89ab.png", png(2, 2, [50, 60, 70, 255]));
+    let come = |p: &Path| {
+        if p == picture {
+            Found::Here(pic.clone())
+        } else {
+            coming(p)
+        }
+    };
+    let v = load_venue_with(&path, &venue(), &come).unwrap();
+    assert!(v.warnings.is_empty(), "{:?}", v.warnings);
+    assert!(
+        v.parts
+            .iter()
+            .any(|p| matches!(p.paint, Paint::Image { .. }))
+    );
+    // One the primary hadn't either: drawn in colour, not waited for.
+    let gone = |p: &Path| {
+        if p == picture {
+            Found::Missing
+        } else {
+            coming(p)
+        }
+    };
+    let v = load_venue_with(&path, &venue(), &gone).unwrap();
+    assert_eq!(v.warnings.len(), 1, "{:?}", v.warnings);
+}
+
+#[test]
+fn a_part_too_big_for_the_graphics_card_is_cut_into_pieces() {
+    // Flat-shaded triangles: three corners each, none shared.
+    let mut scan = Mesh::default();
+    for k in 0..10u32 {
+        let x = k as f32;
+        scan.positions
+            .extend([[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]]);
+        scan.indices.extend([3 * k, 3 * k + 1, 3 * k + 2]);
+    }
+    let look = || Look {
+        colour: DEFAULT_COLOUR,
+        texture: None,
+    };
+    let mut b = Builder::new(1.0);
+    b.part_vertices = 7;
+    b.add("a", look, scan.clone(), &crate::stage3d::scene::IDENTITY);
+    let v = b.finish("scan", &venue()).unwrap();
+    // 30 corners in pieces of at most 7 (whole triangles): 6, 6, 6, 6, 6.
+    assert_eq!(v.parts.len(), 5);
+    for p in &v.parts {
+        assert!(p.mesh.positions.len() <= 7);
+        assert_eq!(p.mesh.normals.len(), p.mesh.positions.len());
+        assert_eq!(p.mesh.uvs.len(), p.mesh.positions.len());
+        assert!(
+            p.mesh
+                .indices
+                .iter()
+                .all(|i| (*i as usize) < p.mesh.positions.len())
+        );
+    }
+    assert_eq!(
+        v.parts.iter().map(|p| p.mesh.triangles()).sum::<usize>(),
+        10
+    );
+    let b = v.bounds.unwrap();
+    assert!(close3(b.min, [0.0; 3]) && close3(b.max, [10.0, 1.0, 0.0]));
+    // Cut at the triangle limit: the corners of the triangles left out go
+    // too (and from the bounds).
+    let mut b = Builder::new(1.0);
+    (b.limit, b.warn_at) = (4, 2);
+    b.add("a", look, scan, &crate::stage3d::scene::IDENTITY);
+    let v = b.finish("scan", &venue()).unwrap();
+    assert_eq!(v.parts.len(), 1);
+    assert_eq!(v.parts[0].mesh.positions.len(), 12);
+    let b = v.bounds.unwrap();
+    assert!(close3(b.max, [4.0, 1.0, 0.0]), "{b:?}");
+    // A mesh that fits and uses every corner is kept as it is.
+    let m = Mesh {
+        positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 3],
+        uvs: vec![[0.0; 2]; 3],
+        indices: vec![0, 1, 2],
+    };
+    assert_eq!(split_mesh(m.clone(), 7), vec![m]);
 }
 
 #[test]
