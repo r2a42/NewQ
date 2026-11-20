@@ -448,6 +448,7 @@ fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut V
                         }
                     }
                     VenueStatus::Failed(why) => warning(ui, why),
+                    VenueStatus::Arriving(name) => hint(ui, &stage_view::arriving_words(name)),
                     VenueStatus::None => {}
                 }
                 egui::Grid::new("stage_venue")

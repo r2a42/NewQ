@@ -1170,7 +1170,12 @@ simulated yet, and the 3D model does not drive the outputs.
   read yet:** export the model as glTF (`.glb`) from your 3D program (Blender,
   Maya, 3ds Max, Cinema 4D and SketchUp all can), or as OBJ. *Brightness* dims
   a bright model so the screens stand out; the model is read on a thread of its
-  own, and a very large one is said in the status bar.
+  own, and a very large one is said in the status bar (one too big for the
+  graphics card in one piece is drawn in pieces). A model reads only files in
+  its own folder (and folders within it): a name with `..`, a drive or a full
+  path is refused, as is anything that isn't a plain file.
+  A screen made by a newer NewQ, of a shape this one doesn't know, is kept as
+  it is (and saved so) but not drawn.
 - **Screens.** *+ Add a screen*: a flat 16:9 screen, a curved wall (part of a
   cylinder, its width measured along the curve), a jumbotron (four screens
   round a hung box, and one underneath) or an angled LED wall (panels in
@@ -1191,16 +1196,24 @@ simulated yet, and the 3D model does not drive the outputs.
   display can show the stage from a saved viewpoint (or all of it) instead of
   its cues: on its monitor, in any stream or recording it sends, and on the
   projectors that share its picture. It is drawn at the display's size every
-  time something changes, never held back as a preview is. A display that
-  shows the stage can't also be a picture on one of the stage's screens (it
-  would show itself): that screen is left blank.
+  time something changes (a picture on one of the screens too, a test pattern
+  or a still, though nothing plays), before any preview, never held back as a
+  preview is. A display that shows the stage can't also be a picture on one of
+  the stage's screens (it would show itself): that screen is left blank. A
+  projector that shows part of another display's picture shows that display's
+  stage, and a sub display can't show the stage. Renaming a viewpoint keeps the
+  displays that show the stage from it.
 - **The previews still give way.** The 3D views are previews: while a display
   falls behind they are drawn less often, smaller, then held, as every
-  preview is. A display that shows the stage is not.
+  preview is. A display that shows the stage is not (unless only the previews
+  show it: no window and no stream). With no 3D view open and no display
+  showing the stage for half a minute, what the stage held on the graphics
+  card is let go.
 - **In a show network** the stage is part of the show, so every computer has
-  it. The venue's model file is not yet sent with the media: copy it to the
-  same place on each computer that draws the stage, or that computer draws the
-  screens without the room and says the venue didn't load.
+  it, and the venue's model goes to the other computers with the media, with
+  the files it reads beside it (a glTF's data and pictures, an OBJ's `.mtl` and
+  pictures). Until they have come, a computer draws the screens without the
+  room and says the venue is still arriving; the room appears once it is here.
 
 ## Show network: several computers
 

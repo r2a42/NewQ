@@ -718,6 +718,13 @@ impl Scheduler {
                         used.push(e.object());
                     }
                 }
+                // Used files the order doesn't name (no cue plays them: the
+                // 3D stage's venue model and its files) after it.
+                for e in m.present().filter(|e| !e.library) {
+                    if seen.insert(e.object()) {
+                        used.push(e.object());
+                    }
+                }
             }
             None => {
                 for e in m.present().filter(|e| !e.library) {

@@ -471,11 +471,28 @@ The README describes the features; this file is about working on the code.
   matrix sums. `load.rs` `load_venue` (worker thread; `catch_unwind` as a last guard): glTF/GLB via
   `gltf` (no `import`: buffers and pictures read here, views/accessors checked first) and OBJ+MTL via
   `tobj`; merged per material, node transforms baked, brightness baked (`Venue::needs_reload`),
-  `WARN_TRIANGLES`/`MAX_TRIANGLES`, `MAX_TEXTURE`; FBX refused in words (`FBX_WORDS`). Tests make
-  their models in the test (`load_tests.rs`). Not wired in: `relink.rs` and the network media
-  manifest (which don't know the venue file: a follower draws the screens without the room).
+  `WARN_TRIANGLES`/`MAX_TRIANGLES`, `MAX_TEXTURE`; FBX refused in words (`FBX_WORDS`). A material's
+  triangles are cut into parts of at most `MAX_PART_VERTICES` (4M; the card's buffers are 256 MB
+  under `downlevel_defaults`) by `split_mesh`, which keeps only used corners (`Builder::part_vertices`
+  smaller in tests). Every file is found through `load_venue_with(path, venue, locate)` (`Found`
+  Here/Arriving/Missing; `Unread::Arriving` is never a failure): side files by `side_path` (textual,
+  the model's separator; refuses absolute, drive, UNC, URL, `..`), read by `read_capped` (regular
+  files only; a glTF buffer at most its byteLength, `MAX_PICTURE_FILE`, `MAX_MATERIALS_FILE`); OBJ
+  through `tobj::load_obj_buf`; `texture_tries`/`texture_file` (Missing beats Arriving: only one name
+  is in a primary's list). `venue_files(path)` lists those files (a .glb's JSON chunk only; a name
+  not there is listed too, so the primary's list says it is missing). Network: `manifest::media_paths`
+  adds the venue, `manifest::build` adds `venue_files` on the hashing thread, `Puller` ranking puts
+  used files the order doesn't name after it, `add_facts` skips `is_model_part`. Tests make their
+  models in the test (`load_tests.rs`; `net/store/tests.rs::a_venue_model_and_its_files_reach_…`).
+  Not in `relink.rs` (its list is by cue). Lenient reading: `SurfaceShape::Unknown`/`Feed::Unknown`
+  (`#[serde(untagged)]` variants keep a later NewQ's value and write it back; drawn as nothing),
+  `lenient`/`lenient_option` for `LengthUnit`, `UpAxis`, `OutputConfig::source`.
   `OutputConfig::source: Option<StageSource { viewpoint }>` (unwritten when None): a display that
-  shows the stage; `Show::shows_stage` (itself or its `whole_picture`) makes `scene` leave a screen
+  shows the stage; `Show::stage_source` (the `whole_picture`'s, never a sub display's; the one rule
+  for app.rs and `shows_stage`), `stage_source_refused` (the page's reason for a projector or sub
+  display), `sanitize_stage` (in `load`, `take_show`, `play_load_kept`: a sub display's source
+  cleared, duplicate viewpoint names renamed), `rename_viewpoint` (sources follow, a taken name
+  refused; the page types into a draft). `Show::shows_stage` (itself or its `whole_picture`) makes `scene` leave a screen
   fed by it unfed (`UNFED_GREY`): the stage is never drawn from itself (sampling the target being
   drawn is a wgpu error). `Show::stage_camera` (the viewpoint, else all of the bounds from in front),
   `outputs_in(scene)`, `Stage3d::part_surface` (a picked part's screen: venue parts come first, lit).
@@ -485,16 +502,25 @@ The README describes the features; this file is about working on the code.
   `Gpu::submit` each before the next display's uniforms are written: a layer can be on two displays),
   then `ViewJob`s drawn by `render3d::Renderer` into a `LayerTexture::new_target` (RENDER_ATTACHMENT;
   `render_view`, `mark_drawn`); `feed_size` (1024 longest, times the governor's scale, at least 256).
-  `src/stage_live.rs` (`App::stage`): `begin` (venue on a "venue-load" thread, a brightness change
-  waits `RELOAD_SETTLE`, a failure isn't retried until the venue changes; the scene made again only
-  when its key changes, into `UiState::stage` with its bounds), `output_layer` (a display showing the
+  `src/stage_live.rs` (`App::stage`): `begin` (venue on a "venue-load" thread through `locate` =
+  `net::media::local_path`, a brightness change waits `RELOAD_SETTLE`, a failure isn't retried until
+  the venue or `media_generation` changes, a venue on its way is `VenueStatus::Arriving`, looked at
+  every `ARRIVING_LOOK`; `stage_seen` compared each pass, `shape_key` (hashed through a writer) only
+  on a change; the scene made again only when its key changes, into `UiState::stage` with
+  `stage_bounds`: the venue's box and the screens), `output_layer` (a display showing the
   stage gets its target as its only layer, `Fit::Stretch`, so window, keystone, blend, streams and
-  `part_of` projectors work unchanged), `send` (the previews' `ViewRequest`s and the displays showing
-  the stage, each drawn again only when its signature changed or something plays; feeds by
+  `part_of` projectors work unchanged), `send` (`StageOutput { seen, due }`: one no window or stream
+  shows is preview work at the previews' pace; the previews' `ViewRequest`s; each drawn again only
+  when its signature (with `feeds_key`, the stage's pictures' layers) changed or something plays;
+  displays first (`ViewJob::display`, `StageJob::merged` sorts them, `displays_done`), previews wait
+  while the thread is behind with them; a thread that stopped is noticed every pass, never busy, and
+  restarted by `wake_at` after `RESTART_EVERY`; idle `IDLE_RELEASE` (30 s) quits the thread and with
+  it all it kept on the card; feeds by
   `feed_groups`: the whole picture's layers on its canvas with no keystone, mesh or blend, sub
   displays in their `area`), `landed` (the screens showing it and the control window redraw),
   `forget_device` (in `watch_gpu`'s `stopping`). `feeds_a_display` keeps those displays' uploads off
-  the previews' pace. `App::stage_busy` keeps the loop coming round. `src/ui/stage_view.rs`:
+  the previews' pace (not when every stage display is preview work, `governed_only`).
+  `App::stage_busy` keeps the loop coming round; `wake_at` brings it back. `src/ui/stage_view.rs`:
   `StageShared` (`UiState::stage`: scene, bounds, `VenueStatus`, `requests`, `targets` by `PreviewId`,
   `actions` drained into `ui::draw`/`draw_popout`, `picked`) and `draw(ui, &Show, st, &mut
   StageViewState, PreviewId)`: orbit/pan/dolly/frame/pick, overlay (viewpoints, See all, Grid, X-ray,
@@ -582,9 +608,12 @@ The README describes the features; this file is about working on the code.
   format and depth (`samples_for`), a scale below 1 draws smaller and scales up (`blit.wgsl`); a preview
   passes its quality through `Quality::scaled_by(governor)` (multisampling off below 1), a 3D view that is a
   display's source doesn't; a frame not drawn is no call at all (the target keeps its picture); targets are
-  kept per size, so the governor's steps don't churn. `FrameStats` has `cpu_time` and `samples_shaded`. Meshes are
-  kept by `mesh_key`, pictures by `key`, let go after `FORGET_AFTER` unused; bad meshes (stray indices, no
-  normals or uvs, NaNs) are mended or skipped. `camera.rs` (pure): `Camera::{sane, view, projection,
+  kept per `Target::owner` (the view) and size, an owner's other sizes dropped on a resize, so the
+  governor's steps don't churn and a resize makes no pile. `FrameStats` has `cpu_time` and `samples_shaded`. Meshes are
+  kept by `mesh_key`, pictures by `key`, let go after `FORGET_AFTER` unused (looked over every `TIDY_EVERY`,
+  2 s, while drawing) or at once by `keep_only` when the stage-render thread's scenes change; bad meshes
+  (stray indices, no normals or uvs, NaNs) are mended or skipped; one bigger than the device's
+  `max_buffer_size` is skipped and remembered (`too_big`, `limit_buffers` in tests). `camera.rs` (pure): `Camera::{sane, view, projection,
   project, ray}`, `Orbit` (`orbit`/`pan`/`dolly` from mouse deltas, `frame`/`frame_scene` zoom to fit,
   `from_camera`); `pick.rs` (pure): `pick(scene, ray, wanted)` -> `Hit { part, point, distance }`. GPU
   tests in `render3d/tests.rs` (lavapipe under `WGPU_BACKEND=vulkan`; `NEWQ_RENDER3D_PNG=<path>` writes the

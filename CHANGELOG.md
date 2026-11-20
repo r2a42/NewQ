@@ -13,16 +13,18 @@ release page, and a release is refused if it has none.
   flat screens, curved walls, jumbotrons and angled LED walls, a whole picture or part of it, and
   a blended pair as the one picture it makes. Turn round it, slide and zoom with the mouse, click a
   screen to pick it, and save viewpoints. The Preview pane's *3D* mode shows it too.
-  On a show network the display computers draw the stage too, but they don't yet receive a venue
-  model file: copy it to them, or use a sample venue, which needs no file.
+  On a show network the display computers draw the stage too, and the venue model goes to them
+  with the media (with its data, materials and pictures); until it has come they show the screens
+  without the room.
 - **Sample venues for the 3D stage.** Without a model of your own you can pick one of seven
   built-in spaces: an arena, a proscenium theatre, a thrust stage, a black box studio, a club, a
   festival main stage and a ballroom, each to real sizes in metres, with the screens such a venue
   usually has (a centre-hung scoreboard, an upstage LED wall, side screens, a cyc, a DJ wall) ready
   to add and a few places to look from.
 - **A display can show the 3D stage.** Instead of its cues, a display can show the stage from a
-  saved viewpoint, on its monitor and in its stream or recording, at full quality. A display that
-  shows the stage is never also a picture on its screens.
+  saved viewpoint, on its monitor and in its stream or recording, at full quality, ahead of the
+  previews. A display that shows the stage is never also a picture on its screens, and renaming a
+  viewpoint keeps the displays that look from it.
 - **Several previews, each in its own mode.** The Preview pane's header now switches between
   *Single* (one display), *Multiview* and *3D* (the show's 3D stage). *+* in the header, or Window ▸
   *New preview*, opens another Preview beside it with its own mode and display, so you can watch one

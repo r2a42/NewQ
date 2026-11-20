@@ -1507,3 +1507,79 @@ fn the_primary_notices_a_file_edited_after_everyone_has_it() {
     });
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The 3D stage's venue model goes to the show network's computers with the
+/// files it reads beside it (its materials file, its pictures), though no
+/// cue names them and the order to fetch in names only the cues' files; a
+/// computer reads it from its store by the primary's names.
+#[test]
+fn a_venue_model_and_its_files_reach_a_computer_and_load_from_its_store() {
+    use crate::net::media::{Local, local_in};
+    use crate::stage3d::Venue;
+    use crate::stage3d::load::{Found, load_venue_with};
+    let dir = scratch("venue");
+    let show_dir = dir.join("primary").join("Show");
+    let clip = show_dir.join("clip.mp4");
+    put(&clip, &bytes(9, 40_000));
+    let model = show_dir.join("venue").join("room.obj");
+    let mtl = show_dir.join("venue").join("room.mtl");
+    let wall = show_dir.join("venue").join("maps").join("wall.png");
+    put(
+        &model,
+        b"mtllib room.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl wall\nf 1/1 2/2 3/3\n",
+    );
+    put(&mtl, b"newmtl wall\nKd 1 1 1\nmap_Kd maps\\wall.png\n");
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    put(&wall, png.get_ref());
+    // The show names the clip (a cue) and the venue.
+    let mut show = crate::show::Show::default();
+    show.stage3d.venue = Some(Venue::new(model.clone()));
+    assert_eq!(manifest::media_paths(&show), vec![model.clone()]);
+    let main = Main::new(&[clip.clone(), model.clone()], &[], Some(&show_dir));
+    for f in [&clip, &model, &mtl, &wall] {
+        let e = main.manifest.find(&text(f));
+        assert!(
+            e.is_some_and(|e| !e.missing && !e.library),
+            "{}",
+            f.display()
+        );
+    }
+    let s = store(&dir, no_reserve());
+    let p = Puller::start_ordered(
+        s.clone(),
+        vec![main.addr()],
+        Follow::Current,
+        Some(vec![text(&clip)]),
+        quick(),
+    );
+    wait_idle(&p);
+    for f in [&clip, &model, &mtl, &wall] {
+        assert_eq!(
+            p.availability(&text(f)),
+            Availability::Here,
+            "{}",
+            f.display()
+        );
+    }
+    // Read through the store's whole, checked copies only.
+    let locate = |q: &Path| match local_in(&p, q) {
+        Local::Here(x) => {
+            assert!(x.starts_with(s.root().join("objects")), "{}", x.display());
+            Found::Here(x)
+        }
+        Local::Transferring(_) => Found::Arriving,
+        Local::NotFound => Found::Missing,
+    };
+    let v = load_venue_with(&model, &Venue::new(model.clone()), &locate).unwrap();
+    assert!(v.warnings.is_empty(), "{:?}", v.warnings);
+    assert_eq!(v.triangles, 1);
+    assert!(
+        v.parts
+            .iter()
+            .any(|p| matches!(p.paint, crate::stage3d::scene::Paint::Image { .. }))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

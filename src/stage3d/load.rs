@@ -479,7 +479,7 @@ fn split_mesh(mesh: Mesh, most: usize) -> Vec<Mesh> {
     let mut taken: Vec<u32> = Vec::new();
     let mut out = Vec::new();
     let mut cur = Mesh::default();
-    for t in mesh.indices.chunks_exact(3) {
+    for t in mesh.indices.as_chunks::<3>().0 {
         if t.iter().any(|i| *i as usize >= n) {
             continue;
         }

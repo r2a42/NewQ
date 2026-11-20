@@ -443,3 +443,47 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
         h.join().unwrap();
     }
 }
+
+/// On a show network's computer: until the venue's files have come from the
+/// primary, the screens are drawn without the room and the venue is said to
+/// be on its way (never a failure); it is read once they are here.
+#[test]
+fn a_venue_still_arriving_is_read_once_it_has_come() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static COME: AtomicBool = AtomicBool::new(false);
+    fn store(p: &std::path::Path) -> crate::stage3d::load::Found {
+        use crate::stage3d::load::Found;
+        if p.extension().is_some_and(|e| e == "obj") && !COME.load(Ordering::SeqCst) {
+            Found::Arriving
+        } else {
+            Found::Here(p.to_path_buf())
+        }
+    }
+    let dir = temp_dir("arriving");
+    let path = dir.join("room.obj");
+    std::fs::write(&path, "v -5 0 -5\nv 5 0 -5\nv 5 0 5\nf 1 2 3\n").unwrap();
+    let (mut show, _a, _b) = stage_show();
+    show.stage3d.venue = Some(Venue::new(path.clone()));
+    let mut live = StageLive::default();
+    live.locate_with(store);
+    let mut shared = StageShared::default();
+    let mut said = Vec::new();
+    for _ in 0..3 {
+        live.begin(&show, &mut shared, &mut said);
+    }
+    assert!(said.is_empty(), "{}", said.len());
+    assert_eq!(shared.venue, VenueStatus::Arriving("room.obj".into()));
+    assert!(!live.venue_busy());
+    assert!(live.wake_at().is_some(), "looked at again");
+    assert!(shared.scene.parts.iter().all(|p| !p.lit), "screens only");
+    assert_eq!(shared.scene.parts.len(), 1);
+    COME.store(true, Ordering::SeqCst);
+    std::thread::sleep(ARRIVING_LOOK);
+    let words = settle(&mut live, &show, &mut shared);
+    assert!(
+        words.iter().any(|w| w.starts_with("Venue loaded")),
+        "{words:?}"
+    );
+    assert!(shared.scene.parts[0].lit, "the room is in the scene");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -16,7 +16,7 @@ use crate::render3d::{self, Camera, Options, Scene};
 use crate::show::{OutputId, Show};
 use crate::stage_render::{FeedJob, StageJob, StageThread, ViewJob, feed_size};
 use crate::stage3d::Venue;
-use crate::stage3d::load::LoadedVenue;
+use crate::stage3d::load::{Found, LoadedVenue, Unread, load_venue_with};
 use crate::stage3d::samples::SampleVenue;
 use crate::ui::stage_view::{StageShared, VenueStatus};
 use std::collections::{HashMap, HashSet};
@@ -34,6 +34,9 @@ const RESTART_EVERY: Duration = Duration::from_secs(2);
 /// card (the venue's meshes and pictures, the displays' pictures, the
 /// render targets); it starts again when a view is next asked for.
 pub const IDLE_RELEASE: Duration = Duration::from_secs(30);
+/// A venue still arriving from a show network's primary is looked at again
+/// this often.
+const ARRIVING_LOOK: Duration = Duration::from_secs(1);
 /// The largest side of a display's stage picture.
 const MOST_SIDE: u32 = 4096;
 
@@ -74,14 +77,32 @@ pub struct PictureLayers {
     pub canvas: (u32, u32),
 }
 
-#[derive(Default)]
 struct VenueState {
+    /// Where its files are (`locate`; a test's stand-in for a show network).
+    locate: fn(&std::path::Path) -> Found,
     loaded: Option<Arc<LoadedVenue>>,
-    loading: Option<(Venue, Receiver<Result<LoadedVenue, String>>)>,
-    /// What last failed to load, so it isn't tried every pass.
-    failed: Option<Venue>,
+    loading: Option<(Venue, Receiver<Result<LoadedVenue, Unread>>)>,
+    /// What last failed to load, so it isn't tried every pass (until the
+    /// media change: `media_generation`).
+    failed: Option<(Venue, u64)>,
+    /// A venue whose files are on their way from a show network's primary,
+    /// and when to look again.
+    arriving: Option<(Venue, Instant)>,
     /// A wanted venue, and when it may be read (once its settings have rested).
     settling: Option<(Venue, Instant)>,
+}
+
+impl Default for VenueState {
+    fn default() -> Self {
+        VenueState {
+            locate,
+            loaded: None,
+            loading: None,
+            failed: None,
+            arriving: None,
+            settling: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -125,6 +146,22 @@ const PREVIEW_KEPT: Duration = Duration::from_secs(30);
 /// The settings of a venue a load depends on.
 fn reload_key(v: &Venue) -> (std::path::PathBuf, Option<SampleVenue>, u32) {
     (v.path.clone(), v.sample, v.brightness().to_bits())
+}
+
+/// Where a file a venue model reads is on this computer: the file itself, or
+/// on a show network's computer its copy in the store, whole and checked
+/// (never a part still coming: `net::media::local_path`).
+fn locate(p: &std::path::Path) -> Found {
+    match crate::net::media::local_path(p) {
+        crate::net::media::Local::Here(x) => Found::Here(x),
+        crate::net::media::Local::Transferring(_) => Found::Arriving,
+        crate::net::media::Local::NotFound => Found::Missing,
+    }
+}
+
+/// Changes when the files `locate` finds may have (0 with no show network).
+fn media_generation() -> u64 {
+    crate::net::media::finder().map_or(0, |f| f.generation())
 }
 
 /// What the user calls a venue: its file's name, or the sample's.
@@ -209,6 +246,7 @@ impl StageLive {
 
     fn look_after_venue(&mut self, show: &Show, shared: &mut StageShared, say: &mut Vec<Said>) {
         let v = &mut self.venue;
+        let now = Instant::now();
         // A load that has finished.
         if let Some((venue, rx)) = &v.loading {
             match rx.try_recv() {
@@ -223,13 +261,20 @@ impl StageLive {
                     }
                     v.loaded = Some(Arc::new(loaded));
                     v.failed = None;
+                    v.arriving = None;
                     v.loading = None;
                 }
-                Ok(Err(why)) => {
+                Ok(Err(Unread::Failed(why))) => {
                     say.push(Said::Problem(format!("The venue didn't load: {why}")));
-                    v.failed = Some(venue.clone());
+                    v.failed = Some((venue.clone(), media_generation()));
                     v.loading = None;
                     shared.venue = VenueStatus::Failed(why);
+                }
+                // A file it needs is still coming from the primary: looked
+                // at again in a moment (never a failure).
+                Ok(Err(Unread::Arriving)) => {
+                    v.arriving = Some((venue.clone(), now + ARRIVING_LOOK));
+                    v.loading = None;
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => v.loading = None,
@@ -241,6 +286,7 @@ impl StageLive {
                 v.loaded = None;
                 v.settling = None;
                 v.failed = None;
+                v.arriving = None;
                 shared.venue = VenueStatus::None;
             }
             Some(want) => {
@@ -250,18 +296,32 @@ impl StageLive {
                     .loading
                     .as_ref()
                     .is_some_and(|(l, _)| reload_key(l) == reload_key(want));
-                let failed = v
-                    .failed
+                // A failure is tried again when the media change (a show
+                // network's primary sent a file it lacked).
+                let failed = v.failed.as_ref().is_some_and(|(f, generation)| {
+                    reload_key(f) == reload_key(want) && *generation == media_generation()
+                });
+                let arriving = v
+                    .arriving
                     .as_ref()
-                    .is_some_and(|f| reload_key(f) == reload_key(want));
+                    .is_some_and(|(a, _)| reload_key(a) == reload_key(want));
+                let look_again = v.arriving.as_ref().is_none_or(|(_, at)| now >= *at);
                 if current {
                     v.settling = None;
+                    v.arriving = None;
+                } else if arriving && !look_again {
+                    // Still on its way: looked at again at `ARRIVING_LOOK`.
+                } else if want.sample.is_none()
+                    && !busy
+                    && (v.locate)(&want.path) == Found::Arriving
+                {
+                    // The model itself isn't here yet: not read until it is.
+                    v.arriving = Some((want.clone(), now + ARRIVING_LOOK));
                 } else if !busy && !failed {
                     // Wait for the settings to rest, then read it on a thread.
                     let ready_at = match &v.settling {
                         Some((s, at)) if reload_key(s) == reload_key(want) => *at,
                         _ => {
-                            let now = Instant::now();
                             // A new file is read at once; a change of brightness waits.
                             let at = if have
                                 .is_some_and(|h| h.path == want.path && h.sample == want.sample)
@@ -274,25 +334,33 @@ impl StageLive {
                             at
                         }
                     };
-                    if Instant::now() >= ready_at {
+                    if now >= ready_at {
                         v.settling = None;
                         let (tx, rx) = std::sync::mpsc::channel();
                         let venue = want.clone();
                         let path = want.path.clone();
+                        let locate = v.locate;
                         let spawned = std::thread::Builder::new().name("venue-load".into()).spawn(
                             move || {
-                                let _ = tx.send(crate::stage3d::load::load_venue(&path, &venue));
+                                let _ = tx.send(load_venue_with(&path, &venue, &locate));
                             },
                         );
                         match spawned {
-                            Ok(_) => v.loading = Some((want.clone(), rx)),
+                            Ok(_) => {
+                                v.loading = Some((want.clone(), rx));
+                                v.arriving = None;
+                            }
                             Err(e) => {
                                 say.push(Said::Problem(format!("The venue didn't load: {e}")));
-                                v.failed = Some(want.clone());
+                                v.failed = Some((want.clone(), media_generation()));
                             }
                         }
                     }
                 }
+                let arriving = v
+                    .arriving
+                    .as_ref()
+                    .is_some_and(|(a, _)| reload_key(a) == reload_key(want));
                 shared.venue = if v.loading.is_some() || v.settling.is_some() {
                     VenueStatus::Loading(venue_name(want))
                 } else if let Some(l) = v.loaded.as_ref().filter(|_| current) {
@@ -300,6 +368,8 @@ impl StageLive {
                         triangles: l.triangles,
                         warnings: l.warnings.clone(),
                     }
+                } else if arriving {
+                    VenueStatus::Arriving(venue_name(want))
                 } else if failed {
                     match &shared.venue {
                         VenueStatus::Failed(w) => VenueStatus::Failed(w.clone()),
@@ -522,6 +592,10 @@ impl StageLive {
         {
             take(w + IDLE_RELEASE);
         }
+        // A venue on its way from the primary is looked for again.
+        if let Some((_, a)) = &self.venue.arriving {
+            take(*a);
+        }
         at
     }
 
@@ -554,6 +628,13 @@ impl StageLive {
                 Err(e) => log::warn!("could not start drawing the 3D stage: {e}"),
             }
         }
+    }
+
+    /// Find the venue's files with `f` (a test's stand-in for a show
+    /// network's store).
+    #[cfg(test)]
+    pub fn locate_with(&mut self, f: fn(&std::path::Path) -> Found) {
+        self.venue.locate = f;
     }
 
     /// Whether the drawing thread is running (for a test).
