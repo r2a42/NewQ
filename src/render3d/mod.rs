@@ -12,6 +12,10 @@
 //! - An optional floor grid (1 m lines, stronger every 5 m) and the world's
 //!   axes at the origin.
 //!
+//! - With a view's light on (`Options::light`), the projectors of
+//!   `Scene::throws` throw their pictures into the room, with shadows
+//!   (`lit.rs`, optional: a GPU that won't draw it leaves it out).
+//!
 //! `camera.rs` is the pure camera maths (`Orbit`, zoom to fit) and `pick.rs`
 //! the click-to-select ray test.
 // Not wired into the app yet: the integration (the Preview pane's 3D mode,
@@ -19,6 +23,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod camera;
+pub mod lit;
 pub mod maths;
 pub mod pick;
 pub mod scene;
@@ -28,6 +33,8 @@ mod tests;
 pub use camera::{Bounds, Orbit, Ray, scene_bounds};
 pub use pick::{Hit, pick};
 pub use scene::{Camera, Mesh, Paint, Part, Scene};
+
+use crate::stage3d::light::MAX_THROWS;
 
 use crate::gpu::Gpu;
 use crate::show::OutputId;
@@ -102,6 +109,23 @@ impl Quality {
     }
 }
 
+/// What a view shows of the projectors' light (`Scene::throws`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LightView {
+    /// No light: the screens show their pictures, the room is lit by the
+    /// view's own light (0.25's previz).
+    #[default]
+    Off,
+    /// Each projector's picture as it lands, bright as its lumens make it.
+    Picture,
+    /// How bright each place is at full white (nits), in colours.
+    Brightness,
+    /// How many projectors light each place.
+    Overlap,
+    /// How big a pixel is where it lands.
+    PixelSize,
+}
+
 /// How the view looks. Colours are display values (0..1, as the outputs'
 /// pictures are).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -131,6 +155,10 @@ pub struct Options {
     /// Fog's density per metre (0, the default, is none); towards
     /// `background`.
     pub fog: f32,
+    /// What the projectors' light shows (`Scene::throws`).
+    pub light: LightView,
+    /// With the light on as a picture: the nits shown as full white.
+    pub white_nits: f32,
 }
 
 impl Default for Options {
@@ -150,6 +178,8 @@ impl Default for Options {
             lift: 0.2,
             venue_opacity: 1.0,
             fog: 0.0,
+            light: LightView::Off,
+            white_nits: 100.0,
         }
     }
 }
@@ -197,6 +227,13 @@ pub struct FrameStats {
     /// The processor time `render` took (making the frame and submitting it;
     /// the graphics card's own time is not measured).
     pub cpu_time: std::time::Duration,
+    /// Projectors whose light was drawn.
+    pub throws: u32,
+    /// Shadow maps drawn again for it (a projector moved, the room changed).
+    pub shadows_drawn: u32,
+    /// The light was asked for and this GPU won't draw it: the view is
+    /// drawn without.
+    pub light_left_out: bool,
 }
 
 impl FrameStats {
@@ -252,6 +289,8 @@ struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
+    /// Round its corners, in its own frame (whether a projector reaches it).
+    bounds: ([f32; 3], [f32; 3]),
     /// For noticing a key reused for another mesh.
     vertex_count: usize,
     used: Instant,
@@ -330,6 +369,13 @@ pub struct Renderer {
     /// When the caches were last looked over.
     tidied: Instant,
     last: FrameStats,
+    /// The light's pipelines and shadow maps, made at the first view with
+    /// its light on (`lit.rs`).
+    light: Option<lit::LightKit>,
+    /// This GPU won't draw the light (said once): never tried again.
+    light_refused: bool,
+    /// The light's shader (a test's broken one: `refuse_light`).
+    light_source: &'static str,
 }
 
 impl Renderer {
@@ -484,6 +530,9 @@ impl Renderer {
             too_big: std::collections::HashSet::new(),
             tidied: Instant::now(),
             last: FrameStats::default(),
+            light: None,
+            light_refused: false,
+            light_source: lit::SOURCE,
         }
     }
 
@@ -555,6 +604,25 @@ impl Renderer {
         options: &Options,
         lines: &[Line],
     ) -> FrameStats {
+        self.render_lit(gpu, target, scene, camera, outputs, options, lines, None)
+    }
+
+    /// `render_with_lines`, with the projectors' pictures (`throw_pictures`:
+    /// a 2D array view, layer `Throw::layer` each, display values; None:
+    /// they throw white) for a view whose light is on. A GPU that won't draw
+    /// the light draws the view without it (`FrameStats::light_left_out`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_lit<'a>(
+        &mut self,
+        gpu: &Gpu,
+        target: &Target<'_>,
+        scene: &Scene,
+        camera: &Camera,
+        outputs: &dyn Fn(OutputId) -> Option<&'a wgpu::TextureView>,
+        options: &Options,
+        lines: &[Line],
+        throw_pictures: Option<&wgpu::TextureView>,
+    ) -> FrameStats {
         let started = Instant::now();
         if self.tidied.elapsed() >= TIDY_EVERY {
             self.tidy();
@@ -599,6 +667,10 @@ impl Renderer {
         };
         gpu.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+        // The light, if it is asked for and this GPU draws it.
+        let want_light = options.light != LightView::Off && !scene.throws.is_empty();
+        let light_ready = want_light && self.ensure_light(gpu, target.format, samples);
+        let throws = &scene.throws[..scene.throws.len().min(MAX_THROWS)];
 
         // Each part's numbers and what it is drawn with.
         let now = Instant::now();
@@ -650,12 +722,26 @@ impl Renderer {
             };
             let colour = colour.map(|v| num(v, 1.0).clamp(0.0, 1.0));
             let n = maths::normal_matrix(&part.transform);
+            // The light's: a screen's gain, its side, and whether any
+            // projector reaches it (one none reaches keeps its picture).
+            let reached = light_ready
+                && !part.lit
+                && self
+                    .meshes
+                    .get(&part.mesh_key)
+                    .is_some_and(|m| lit::reached(part, m.bounds, throws));
+            let facing = f32::from(u8::from(part.catch.front_only));
             uniforms.push(PartUniform {
                 model: part.transform,
                 n: n.map(|c| [c[0], c[1], c[2], 0.0]),
                 colour,
                 region,
-                flags: [if part.lit { 1.0 } else { 0.0 }, shows, 0.0, 0.0],
+                flags: [
+                    if part.lit { 1.0 } else { 0.0 },
+                    shows,
+                    num(part.catch.gain, 1.0).clamp(0.0, 10.0),
+                    facing + if reached { 2.0 } else { 0.0 },
+                ],
             });
             let blended = (part.lit && see_through) || colour[3] < 1.0;
             draws.push((uniforms.len() as u32 - 1, part.mesh_key, picture, blended));
@@ -691,7 +777,75 @@ impl Renderer {
             samples,
             drawn,
             missing_pictures: missing,
+            light_left_out: want_light && !light_ready,
             ..FrameStats::default()
+        };
+        // The light's numbers, and which shadow maps are to be drawn again.
+        let side = if options.quality.scale() >= 1.0 {
+            lit::SHADOW_SIDE
+        } else {
+            lit::SHADOW_SIDE_LOW
+        };
+        let mut shadows_due: Vec<usize> = Vec::new();
+        if light_ready && let Some(kit) = self.light.as_mut() {
+            let casters = lit::casters_key(scene);
+            let maps = kit.shadows(device, side);
+            for (i, t) in throws.iter().enumerate() {
+                let key = lit::shadow_key(casters, t);
+                if maps.keys[i] != key {
+                    maps.keys[i] = key;
+                    shadows_due.push(i);
+                }
+            }
+            let u = lit::lights_uniform(throws, options, side, throw_pictures.is_some());
+            gpu.queue
+                .write_buffer(&kit.uniform, 0, bytemuck::bytes_of(&u));
+            for &i in &shadows_due {
+                let f = FrameUniform {
+                    view_proj: throws[i].view_proj,
+                    ..frame
+                };
+                gpu.queue.write_buffer(
+                    &kit.shadow_frames,
+                    i as u64 * kit.frame_stride,
+                    bytemuck::bytes_of(&f),
+                );
+            }
+            stats.throws = throws.iter().filter(|t| t.on).count() as u32;
+            stats.shadows_drawn = shadows_due.len() as u32;
+        }
+        let light_group = match (light_ready, self.light.as_ref()) {
+            (true, Some(kit)) => kit.maps(side).map(|maps| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3d light"),
+                    layout: &kit.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: kit.uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                throw_pictures.unwrap_or(&kit.white),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.clamp),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&maps.array),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&kit.compare),
+                        },
+                    ],
+                })
+            }),
+            _ => None,
         };
         // The lines, as a list of ends (only the ones that are numbers).
         let line_ends: Vec<LineVertex> = lines
@@ -714,9 +868,54 @@ impl Renderer {
         });
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3d") });
+        // The shadow maps due, from each projector's lens: depth only.
+        if let (Some(kit), Some(_)) = (self.light.as_ref(), light_group.as_ref())
+            && let Some(maps) = kit.maps(side)
+        {
+            for &i in &shadows_due {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("3d shadow map"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &maps.layers[i],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&kit.shadow_pipeline);
+                pass.set_bind_group(0, &kit.shadow_groups[i], &[]);
+                for (slot, key, _, _) in &draws {
+                    let Some(mesh) = self.meshes.get(key) else {
+                        continue;
+                    };
+                    let offset = (u64::from(*slot) * self.part_stride) as u32;
+                    pass.set_bind_group(1, &self.part_group, &[offset]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                }
+            }
+        }
         {
             let targets = &self.targets[&target_key];
             let pipes = &self.pipelines[&(target.format, samples)];
+            // The parts' pipelines: the light's when it is on.
+            let lit_pipes = light_group.as_ref().and_then(|_| {
+                self.light
+                    .as_ref()
+                    .and_then(|k| k.pipelines_made(target.format, samples))
+            });
+            let (opaque, see_through) = match lit_pipes {
+                Some((o, s)) => (o, s),
+                None => (&pipes.opaque, &pipes.see_through),
+            };
             let into = targets.small.as_ref().map_or(target.view, |(v, _)| v);
             let (view, resolve) = match &targets.msaa {
                 Some(m) => (m, Some(into)),
@@ -760,12 +959,13 @@ impl Renderer {
             });
             let draw_parts =
                 |pass: &mut wgpu::RenderPass, stats: &mut FrameStats, blended: bool| {
-                    pass.set_pipeline(if blended {
-                        &pipes.see_through
-                    } else {
-                        &pipes.opaque
-                    });
+                    pass.set_pipeline(if blended { see_through } else { opaque });
                     pass.set_bind_group(0, &self.frame_group, &[]);
+                    if lit_pipes.is_some()
+                        && let Some(g) = &light_group
+                    {
+                        pass.set_bind_group(3, g, &[]);
+                    }
                     for (slot, key, picture, b) in &draws {
                         if *b != blended {
                             continue;
@@ -904,6 +1104,60 @@ impl Renderer {
         self.meshes.clear();
         self.images.clear();
         self.targets.clear();
+        if let Some(k) = &mut self.light {
+            k.forget();
+        }
+    }
+
+    /// Whether this GPU has refused the light (it is left out of every view).
+    pub fn light_refused(&self) -> bool {
+        self.light_refused
+    }
+
+    /// Make the light with a shader that won't compile, as a GPU that
+    /// refuses it would (a test of what follows).
+    #[cfg(test)]
+    pub fn refuse_light(&mut self) {
+        self.light = None;
+        self.light_source = lit::BROKEN;
+    }
+
+    /// The light's pipelines for a target, made the first time: false when
+    /// this GPU won't make them (then never tried again, said once).
+    fn ensure_light(&mut self, gpu: &Gpu, format: wgpu::TextureFormat, samples: u32) -> bool {
+        if self.light_refused {
+            return false;
+        }
+        if self.light.is_none() {
+            match lit::LightKit::new(
+                &gpu.device,
+                &self.frame_layout,
+                &self.part_layout,
+                &self.tex_layout,
+                &self.shader,
+                size_of::<FrameUniform>() as u64,
+                self.light_source,
+            ) {
+                Some(k) => {
+                    k.fill_white(&gpu.queue);
+                    self.light = Some(k);
+                }
+                None => {
+                    log::warn!("the 3D view's light can't be drawn on this graphics card");
+                    self.light_refused = true;
+                    return false;
+                }
+            }
+        }
+        let made = self
+            .light
+            .as_mut()
+            .is_some_and(|k| k.pipelines(&gpu.device, format, samples).is_some());
+        if !made {
+            log::warn!("the 3D view's light can't be drawn on this graphics card");
+            self.light_refused = true;
+        }
+        made
     }
 
     fn part_buffer(
@@ -1011,12 +1265,22 @@ impl Renderer {
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let bounds = vertices.iter().fold(
+            ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
+            |(lo, hi), v| {
+                (
+                    std::array::from_fn(|i| lo[i].min(v.pos[i])),
+                    std::array::from_fn(|i| hi[i].max(v.pos[i])),
+                )
+            },
+        );
         self.meshes.insert(
             part.mesh_key,
             GpuMesh {
                 vertices: vb,
                 indices: ib,
                 index_count: indices.len() as u32,
+                bounds,
                 vertex_count: mesh.positions.len(),
                 used: Instant::now(),
             },
@@ -1207,17 +1471,7 @@ impl Renderer {
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         // An overlay this GPU won't make is left out (and said once), not
         // allowed to throw away every frame it would be set in.
-        let checked = |label: &str, f: &dyn Fn() -> wgpu::RenderPipeline| {
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let pipeline = f();
-            match pollster::block_on(scope.pop()) {
-                None => Some(pipeline),
-                Some(e) => {
-                    log::warn!("the 3D view leaves out its {label}: this GPU won't draw it ({e})");
-                    None
-                }
-            }
-        };
+        let checked = |label: &str, f: &dyn Fn() -> wgpu::RenderPipeline| checked(device, label, f);
         let pipes = Pipelines {
             opaque: make(
                 "3d parts",
@@ -1316,6 +1570,25 @@ impl Renderer {
             cache: None,
         });
         self.blits.insert(format, p);
+    }
+}
+
+/// Make something the GPU may refuse (a pipeline, a shader module) inside
+/// error scopes: None, said in the log, when it was refused. Both kinds are
+/// caught: a shader the backend won't compile (DirectX 12's compiler, say)
+/// is an internal error, not a validation one.
+pub(crate) fn checked<T>(device: &wgpu::Device, label: &str, f: impl FnOnce() -> T) -> Option<T> {
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let made = f();
+    let inner = pollster::block_on(internal.pop());
+    let outer = pollster::block_on(validation.pop());
+    match inner.or(outer) {
+        None => Some(made),
+        Some(e) => {
+            log::warn!("the 3D view leaves out its {label}: this GPU won't draw it ({e})");
+            None
+        }
     }
 }
 

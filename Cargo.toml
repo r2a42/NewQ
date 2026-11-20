@@ -84,6 +84,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# The 3D view's light shader written as DirectX's HLSL and Metal's MSL in a
+# test (render3d/lit.rs), as a first check of what those systems will take.
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out"] }
+
 [profile.dev]
 opt-level = 1
 

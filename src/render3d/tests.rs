@@ -203,6 +203,7 @@ fn part(mesh: Arc<Mesh>, key: u64, transform: Mat4, paint: Paint, lit: bool) -> 
         transform,
         paint,
         lit,
+        catch: Default::default(),
     }
 }
 
@@ -1235,4 +1236,501 @@ fn looking_through_a_shifted_lens_sees_the_screen_it_fills_letterboxed() {
     for (x, y) in [(80, 5), (80, 114), (5, 12), (150, 109)] {
         assert!(!is_screen(x, y), "{x},{y}: {:?}", px(&pixels, size.0, x, y));
     }
+}
+
+// ----- The light (lit.rs): projectors throwing pictures into the room -----
+
+use crate::stage3d::light as sums;
+use crate::stage3d::scene::{Catch, Throw};
+
+/// A projector `distance` in front of the origin on +Z, looking at it,
+/// throwing a 16:9 picture `width` wide there, `x` to the side.
+fn projector_at(x: f32, distance: f32, width: f32, lumens: f32) -> crate::stage3d::Projector {
+    let mut p = crate::stage3d::Projector::new(crate::stage3d::ProjectorId(1), "P".into());
+    p.placement.position = [x, 0.0, distance];
+    p.lens.throw = distance / width;
+    p.lumens = lumens;
+    p
+}
+
+/// A white wall 8 m square at the origin facing +Z: a front screen.
+fn wall() -> Part {
+    Part {
+        catch: Catch {
+            gain: 1.0,
+            front_only: true,
+        },
+        ..part(
+            square(),
+            40,
+            moved([0.0; 3], 8.0),
+            Paint::Colour([0.2, 0.2, 0.2, 1.0]),
+            false,
+        )
+    }
+}
+
+/// The light on, the room's own light off: only what projectors throw.
+fn lit(view: LightView, white_nits: f32) -> Options {
+    Options {
+        light: view,
+        white_nits,
+        headlight: 0.0,
+        ambient: 0.0,
+        ..plain()
+    }
+}
+
+/// Pictures for the throws: each 16 by 16, one layer each (RGBA rows).
+fn throw_pictures(gpu: &Gpu, layers: &[Vec<u8>]) -> wgpu::TextureView {
+    use wgpu::util::DeviceExt;
+    gpu.device
+        .create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("throws"),
+                size: wgpu::Extent3d {
+                    width: 16,
+                    height: 16,
+                    depth_or_array_layers: layers.len() as u32,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: RGBA,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &layers.concat(),
+        )
+        .create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+}
+
+/// Red top left, green top right, blue bottom left, white bottom right.
+fn four_colour_pixels() -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(16 * 16 * 4);
+    for y in 0..16 {
+        for x in 0..16 {
+            pixels.extend_from_slice(match (x < 8, y < 8) {
+                (true, true) => &[255, 0, 0, 255],
+                (false, true) => &[0, 255, 0, 255],
+                (true, false) => &[0, 0, 255, 255],
+                (false, false) => &[255, 255, 255, 255],
+            });
+        }
+    }
+    pixels
+}
+
+/// Draw `scene` lit, with `pictures` for the throws.
+fn draw_lit(
+    gpu: &Gpu,
+    r: &mut Renderer,
+    scene: &Scene,
+    camera: &Camera,
+    options: &Options,
+    pictures: Option<&wgpu::TextureView>,
+    size: (u32, u32),
+) -> (Vec<u8>, FrameStats) {
+    let tex = target(gpu, size, RGBA);
+    let view = tex.create_view(&Default::default());
+    let stats = r.render_lit(
+        gpu,
+        &Target {
+            view: &view,
+            format: RGBA,
+            size,
+            owner: 9,
+        },
+        scene,
+        camera,
+        &no_outputs,
+        options,
+        &[],
+        pictures,
+    );
+    (read(gpu, &tex), stats)
+}
+
+/// The nits a projector puts on a matt white wall square to it.
+fn nits_of(t: &Throw, at: [f32; 3]) -> f32 {
+    sums::luminance(sums::throw_lux(t, at, [0.0, 0.0, 1.0], true), 1.0)
+}
+
+/// A display value back to light.
+fn light_of(v: u8) -> f32 {
+    (f32::from(v) / 255.0).powf(2.2)
+}
+
+#[test]
+fn a_projector_throws_its_picture_the_right_way_round() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    let p = projector_at(0.0, 6.0, 3.2, 5000.0);
+    let t = sums::throw_of(&p, 16.0 / 9.0, (1920, 1080), 0, true);
+    let scene = Scene {
+        parts: vec![wall()],
+        throws: vec![t],
+    };
+    let pictures = throw_pictures(&gpu, &[four_colour_pixels()]);
+    // Seen from behind the projector: white at full white.
+    let camera = looking_down_z(9.0);
+    let size = (160, 120);
+    let white = nits_of(&t, [0.0; 3]);
+    let options = lit(LightView::Picture, white);
+    let (pixels, stats) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &options,
+        Some(&pictures),
+        size,
+    );
+    assert!(!stats.light_left_out);
+    assert_eq!(stats.throws, 1);
+    assert_eq!(stats.shadows_drawn, 1);
+    let at = |x: f32, y: f32| {
+        let s = camera.project([x, y, 0.0], size).unwrap();
+        px(&pixels, size.0, s[0] as u32, s[1] as u32)
+    };
+    // The picture is 3.2 m by 1.8 m: each quarter where it should be.
+    assert!(
+        near(at(-0.8, 0.45), [255, 0, 0], 12),
+        "{:?}",
+        at(-0.8, 0.45)
+    );
+    assert!(near(at(0.8, 0.45), [0, 255, 0], 12), "{:?}", at(0.8, 0.45));
+    assert!(
+        near(at(-0.8, -0.45), [0, 0, 255], 12),
+        "{:?}",
+        at(-0.8, -0.45)
+    );
+    assert!(
+        near(at(0.8, -0.45), [255, 255, 255], 12),
+        "{:?}",
+        at(0.8, -0.45)
+    );
+    // Outside it the wall is dark (the room's light is off here).
+    assert!(near(at(2.5, 0.0), [0, 0, 0], 4), "{:?}", at(2.5, 0.0));
+    assert!(near(at(0.0, 1.5), [0, 0, 0], 4), "{:?}", at(0.0, 1.5));
+    // Drawn again with nothing moved: the shadow map is kept.
+    let (_, again) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &options,
+        Some(&pictures),
+        size,
+    );
+    assert_eq!(again.shadows_drawn, 0);
+
+    // From behind, a front screen takes no light; a rear one does.
+    let mut back = projector_at(0.0, 6.0, 3.2, 5000.0);
+    back.placement.position[2] = -6.0;
+    back.placement.yaw = 180.0;
+    let behind = Scene {
+        throws: vec![sums::throw_of(&back, 16.0 / 9.0, (1920, 1080), 0, true)],
+        ..scene.clone()
+    };
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &behind,
+        &camera,
+        &options,
+        Some(&pictures),
+        size,
+    );
+    assert!(near(px(&pixels, size.0, 80, 60), [0, 0, 0], 4));
+    let mut rear = behind.clone();
+    rear.parts[0].catch.front_only = false;
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &rear,
+        &camera,
+        &options,
+        Some(&pictures),
+        size,
+    );
+    // Seen from the front, a rear-projected picture is mirrored: its red
+    // (its own top left) is on the viewer's top right.
+    let at = |x: f32, y: f32| {
+        let s = camera.project([x, y, 0.0], size).unwrap();
+        px(&pixels, size.0, s[0] as u32, s[1] as u32)
+    };
+    assert!(near(at(0.8, 0.45), [255, 0, 0], 12), "{:?}", at(0.8, 0.45));
+    assert!(
+        near(at(-0.8, 0.45), [0, 255, 0], 12),
+        "{:?}",
+        at(-0.8, 0.45)
+    );
+}
+
+#[test]
+fn a_box_in_the_beam_casts_a_shadow_where_the_lens_cant_see() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    let p = projector_at(0.0, 8.0, 4.0, 5000.0);
+    let t = sums::throw_of(&p, 16.0 / 9.0, (1920, 1080), 0, false);
+    // A 0.4 m box half way, to the left of the beam's middle.
+    let boxed = part(
+        cube(),
+        41,
+        moved([-0.4, 0.2, 4.0], 0.4),
+        Paint::Colour([0.5; 4]),
+        true,
+    );
+    let scene = Scene {
+        parts: vec![wall(), boxed],
+        throws: vec![t],
+    };
+    // Its shadow: where the lens's ray past the box's middle meets the wall.
+    let shadow = [-0.8, 0.4, 0.0];
+    let lit_spot = [0.8, -0.4, 0.0];
+    // Seen from off to the side, so the box doesn't hide its own shadow.
+    let camera = Camera {
+        eye: [5.0, 1.0, 9.0],
+        target: [0.0, 0.0, 0.0],
+        ..looking_down_z(9.0)
+    };
+    let size = (200, 150);
+    let white = nits_of(&t, [0.0; 3]);
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Picture, white),
+        None,
+        size,
+    );
+    let at = |w: [f32; 3]| {
+        let s = camera.project(w, size).unwrap();
+        px(&pixels, size.0, s[0] as u32, s[1] as u32)
+    };
+    assert!(at(lit_spot)[0] > 220, "lit {:?}", at(lit_spot));
+    assert!(at(shadow)[0] < 20, "shadow {:?}", at(shadow));
+    // Just round the shadow it is lit again (no acne, no spreading).
+    assert!(at([-0.8, 1.0, 0.0])[0] > 200, "{:?}", at([-0.8, 1.0, 0.0]));
+    assert!(
+        at([-1.45, 0.4, 0.0])[0] > 200,
+        "{:?}",
+        at([-1.45, 0.4, 0.0])
+    );
+    // The wall all over the picture, away from the shadow, is lit: no acne.
+    for x in [-1.6f32, -0.2, 0.4, 1.6] {
+        for y in [-0.9f32, -0.3, 0.9] {
+            assert!(at([x, y, 0.0])[0] > 200, "{x},{y}: {:?}", at([x, y, 0.0]));
+        }
+    }
+    // The box moved out of the beam: the shadow map is drawn again, and the
+    // shadow is gone.
+    let mut moved_away = scene.clone();
+    moved_away.parts[1].transform = moved([-6.0, 0.2, 4.0], 0.4);
+    let (pixels, stats) = draw_lit(
+        &gpu,
+        &mut r,
+        &moved_away,
+        &camera,
+        &lit(LightView::Picture, white),
+        None,
+        size,
+    );
+    assert_eq!(stats.shadows_drawn, 1);
+    let s = camera.project(shadow, size).unwrap();
+    assert!(px(&pixels, size.0, s[0] as u32, s[1] as u32)[0] > 220);
+}
+
+#[test]
+fn two_overlapping_throws_add_up_and_the_overlap_view_counts_them() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    // Two 4 m pictures 2 m apart: they overlap over the middle 2 m.
+    let a = projector_at(-1.0, 8.0, 4.0, 4000.0);
+    let b = projector_at(1.0, 8.0, 4.0, 4000.0);
+    let ta = sums::throw_of(&a, 16.0 / 9.0, (1920, 1080), 0, false);
+    let tb = Throw {
+        layer: 1,
+        ..sums::throw_of(&b, 16.0 / 9.0, (1920, 1080), 1, false)
+    };
+    let scene = Scene {
+        parts: vec![wall()],
+        throws: vec![ta, tb],
+    };
+    let camera = looking_down_z(9.0);
+    let size = (200, 150);
+    // One alone is a quarter of white.
+    let one = nits_of(&ta, [-2.0, 0.0, 0.0]);
+    let (pixels, stats) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Picture, one * 4.0),
+        None,
+        size,
+    );
+    assert_eq!(stats.throws, 2);
+    let at = |pixels: &[u8], x: f32| {
+        let s = camera.project([x, 0.0, 0.0], size).unwrap();
+        px(pixels, size.0, s[0] as u32, s[1] as u32)
+    };
+    let alone = light_of(at(&pixels, -2.5)[0]);
+    let both = light_of(at(&pixels, 0.0)[0]);
+    assert!((alone - 0.25).abs() < 0.03, "{alone}");
+    assert!((both - 0.5).abs() < 0.04, "{both}");
+    // The shader's light where it lands is light.rs's (falloff and angles):
+    // at a few places, against the sum on the processor.
+    for x in [-2.6f32, -1.5, -0.4, 0.3, 1.2, 2.7] {
+        for y in [-0.8f32, 0.0, 0.7] {
+            let w = [x, y, 0.0];
+            let s = camera.project(w, size).unwrap();
+            let v = light_of(px(&pixels, size.0, s[0] as u32, s[1] as u32)[1]);
+            let want = (nits_of(&ta, w) + nits_of(&tb, w)) / (one * 4.0);
+            assert!((v - want.min(1.0)).abs() < 0.04, "{x},{y}: {v} {want}");
+        }
+    }
+    // The overlap view: one projector green, two yellow.
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Overlap, 100.0),
+        None,
+        size,
+    );
+    let colour = |c: [f32; 3]| c.map(|v| (v * 255.0).round() as u8);
+    assert!(
+        near(at(&pixels, -2.5), colour(sums::OVERLAP[0]), 12),
+        "{:?}",
+        at(&pixels, -2.5)
+    );
+    assert!(
+        near(at(&pixels, 0.0), colour(sums::OVERLAP[1]), 12),
+        "{:?}",
+        at(&pixels, 0.0)
+    );
+    // The brightness view: the bands of the nits at full white.
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Brightness, 100.0),
+        None,
+        size,
+    );
+    for x in [-2.5f32, 0.0] {
+        let w = [x, 0.0, 0.0];
+        let band = sums::band(nits_of(&ta, w) + nits_of(&tb, w), &sums::BRIGHTNESS_STEPS);
+        assert!(
+            near(at(&pixels, x), colour(sums::SCALE[band]), 12),
+            "{x}: {:?}",
+            at(&pixels, x)
+        );
+    }
+    // The pixel size view: the finest of the two.
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::PixelSize, 100.0),
+        None,
+        size,
+    );
+    let mm = ta.pixel_at_one_metre * 8.0 * 1000.0;
+    let band = sums::band(mm, &sums::PIXEL_STEPS_MM);
+    assert!(
+        near(at(&pixels, 0.0), colour(sums::SCALE[band]), 12),
+        "{:?} {mm}",
+        at(&pixels, 0.0)
+    );
+}
+
+#[test]
+fn a_gpu_that_refuses_the_light_still_draws_the_view() {
+    let Some(gpu) = test_gpu() else { return };
+    let p = projector_at(0.0, 6.0, 3.2, 5000.0);
+    let scene = Scene {
+        parts: vec![wall()],
+        throws: vec![sums::throw_of(&p, 16.0 / 9.0, (1920, 1080), 0, false)],
+    };
+    let camera = looking_down_z(9.0);
+    let size = (80, 60);
+    let mut plain_r = Renderer::new(&gpu);
+    let (unlit, _) = draw_lit(&gpu, &mut plain_r, &scene, &camera, &plain(), None, size);
+    let mut r = Renderer::new(&gpu);
+    r.refuse_light();
+    let (pixels, stats) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Picture, 100.0),
+        None,
+        size,
+    );
+    assert!(stats.light_left_out);
+    assert!(r.light_refused());
+    assert_eq!(stats.throws, 0);
+    // The view as it is without light: the wall in its own grey (not blank).
+    let (lit_off, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Off, 100.0),
+        None,
+        size,
+    );
+    assert_eq!(lit_off, unlit);
+    let wall_px = px(&pixels, size.0, 40, 30);
+    assert_eq!(wall_px, px(&unlit, size.0, 40, 30));
+    assert!(wall_px[0] > 20, "{wall_px:?}");
+    // And it is never tried again.
+    let (_, again) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Picture, 100.0),
+        None,
+        size,
+    );
+    assert!(again.light_left_out);
+}
+
+#[test]
+fn a_screen_no_projector_reaches_keeps_its_own_picture() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    // The projector looks well to the left of the wall: an LED wall.
+    let p = projector_at(-30.0, 6.0, 3.2, 5000.0);
+    let scene = Scene {
+        parts: vec![wall()],
+        throws: vec![sums::throw_of(&p, 16.0 / 9.0, (1920, 1080), 0, false)],
+    };
+    let camera = looking_down_z(9.0);
+    let size = (80, 60);
+    let (pixels, _) = draw_lit(
+        &gpu,
+        &mut r,
+        &scene,
+        &camera,
+        &lit(LightView::Picture, 100.0),
+        None,
+        size,
+    );
+    // Its own colour, 0.2 grey, as without light.
+    let v = px(&pixels, size.0, 40, 30);
+    assert!(near(v, [51, 51, 51], 3), "{v:?}");
 }

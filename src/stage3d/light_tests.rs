@@ -94,6 +94,7 @@ fn wall(z: f32, size: f32) -> Part {
         transform: t,
         paint: Paint::Colour([1.0; 4]),
         lit: true,
+        catch: Default::default(),
     }
 }
 
@@ -156,4 +157,115 @@ fn something_in_the_way_casts_a_shadow() {
         )
         .is_empty()
     );
+}
+
+/// A projector somewhere odd: turned, tilted, shifted, a 16:10 picture.
+fn askew() -> Projector {
+    let mut p = Projector::new(ProjectorId(3), "Askew".into());
+    p.placement.position = [1.5, 3.0, 8.0];
+    p.placement.yaw = 12.0;
+    p.placement.pitch = -9.0;
+    p.placement.roll = 4.0;
+    p.lens.throw = 1.3;
+    p.lens.shift = [0.1, 0.35];
+    p.lumens = 12_000.0;
+    p
+}
+
+/// The point `d` metres along the axis in front of the lens through
+/// picture point `(u, v)`.
+fn along(p: &Projector, u: f32, v: f32, d: f32, aspect: f32) -> [f32; 3] {
+    let ray = p.ray(u, v, aspect);
+    let one = maths::add(ray.origin, ray.dir);
+    let (_, depth_one) = p.in_picture(one, aspect).unwrap();
+    maths::add(ray.origin, maths::scale(ray.dir, d / depth_one))
+}
+
+#[test]
+fn a_throws_matrix_agrees_with_where_the_lens_puts_a_point() {
+    let p = askew();
+    let aspect = 1.6;
+    let t = throw_of(&p, aspect, (1920, 1200), 2, true);
+    assert_eq!(t.layer, 2);
+    assert!(t.picture && t.on);
+    // Points spread over the picture, at several distances.
+    for (u, v, d) in [
+        (0.5, 0.5, 6.0),
+        (0.02, 0.03, 9.0),
+        (0.97, 0.1, 3.0),
+        (0.2, 0.9, 12.0),
+    ] {
+        let at = along(&p, u, v, d, aspect);
+        let (want, depth) = p.in_picture(at, aspect).unwrap();
+        let (got, got_depth) = throw_uv(&t, at).unwrap();
+        assert!((got[0] - want[0]).abs() < 1e-4, "u {got:?} {want:?}");
+        assert!((got[1] - want[1]).abs() < 1e-4, "v {got:?} {want:?}");
+        assert!((got[0] - u).abs() < 1e-4 && (got[1] - v).abs() < 1e-4);
+        assert!((got_depth - depth).abs() < 1e-3, "{got_depth} {depth}");
+        assert!((got_depth - d).abs() < 1e-3, "{got_depth} {d}");
+    }
+    // Behind the lens: nowhere.
+    let behind = geometry::sub(p.position(), p.axis());
+    assert!(throw_uv(&t, behind).is_none());
+    // One pixel one metre out.
+    let (w1, _) = p.at_one_metre(aspect);
+    assert!((t.pixel_at_one_metre - w1 / 1920.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_throws_light_is_the_same_sum_as_illuminance() {
+    let p = askew();
+    let aspect = 1.6;
+    let t = throw_of(&p, aspect, (1920, 1200), 0, false);
+    for (u, v, d, n) in [
+        (0.5, 0.5, 6.0, [0.0, 0.0, 1.0]),
+        (0.1, 0.2, 9.0, [0.3, 0.1, 0.9]),
+        (0.8, 0.7, 4.0, [-0.2, 0.5, 0.8]),
+    ] {
+        let at = along(&p, u, v, d, aspect);
+        let want = illuminance(&p, aspect, at, Some(n), Facing::Both);
+        let got = throw_lux(&t, at, n, false);
+        assert!(want > 0.0);
+        assert!((got / want - 1.0).abs() < 1e-3, "{got} {want}");
+        // A front screen takes light on its front only; either side counts
+        // both ways.
+        let back = [-n[0], -n[1], -n[2]];
+        let facing_lens = geometry::dot(n, geometry::sub(p.position(), at)) > 0.0;
+        let (front, away) = if facing_lens { (n, back) } else { (back, n) };
+        assert!(throw_lux(&t, at, front, true) > 0.0);
+        assert_eq!(throw_lux(&t, at, away, true), 0.0);
+        assert!((throw_lux(&t, at, away, false) - got).abs() < got * 1e-4);
+    }
+    // Outside the picture: none. Switched off: none.
+    let ray = p.ray(1.2, 0.5, aspect);
+    let out = maths::add(ray.origin, maths::scale(ray.dir, 5.0));
+    assert_eq!(throw_lux(&t, out, [0.0, 0.0, 1.0], false), 0.0);
+    let off = Throw { on: false, ..t };
+    let mid = along(&p, 0.5, 0.5, 5.0, aspect);
+    assert_eq!(throw_lux(&off, mid, p.axis(), false), 0.0);
+}
+
+#[test]
+fn the_views_bands_and_colours() {
+    assert_eq!(band(10.0, &BRIGHTNESS_STEPS), 0);
+    assert_eq!(band(50.0, &BRIGHTNESS_STEPS), 1);
+    assert_eq!(band(150.0, &BRIGHTNESS_STEPS), 2);
+    assert_eq!(band(399.0, &BRIGHTNESS_STEPS), 3);
+    assert_eq!(band(1e6, &BRIGHTNESS_STEPS), 4);
+    assert_eq!(band(f32::NAN, &BRIGHTNESS_STEPS), 0);
+    assert_eq!(band(3.0, &PIXEL_STEPS_MM), 2);
+    assert_eq!(SCALE.len(), BRIGHTNESS_STEPS.len() + 1);
+    assert_eq!(SCALE.len(), PIXEL_STEPS_MM.len() + 1);
+    assert_eq!(overlap_colour(0), None);
+    assert_eq!(overlap_colour(1), Some(OVERLAP[0]));
+    assert_eq!(overlap_colour(2), Some(OVERLAP[1]));
+    assert_eq!(overlap_colour(7), Some(OVERLAP[2]));
+}
+
+#[test]
+fn the_white_point_by_itself_is_the_brightest_projector() {
+    assert_eq!(auto_white(&[]), 100.0);
+    assert_eq!(auto_white(&[f32::NAN, 0.0, -3.0]), 100.0);
+    assert_eq!(auto_white(&[120.0, 300.0, 40.0]), 300.0);
+    assert_eq!(auto_white(&[0.2]), 1.0);
 }
