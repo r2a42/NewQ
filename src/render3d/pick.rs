@@ -16,6 +16,21 @@ pub struct Hit {
     /// The face met, one long, turned towards where the ray came from (faces
     /// count from both sides).
     pub normal: Vec3,
+    /// Whether the ray met the triangle's front (its corners counter-clockwise
+    /// as the ray sees them): `normal` is then the face's own front, else
+    /// its back.
+    pub front: bool,
+}
+
+impl Hit {
+    /// The face's own front (counter-clockwise), whichever side was met.
+    pub fn front_normal(&self) -> Vec3 {
+        if self.front {
+            self.normal
+        } else {
+            maths::scale(self.normal, -1.0)
+        }
+    }
 }
 
 /// The nearest part that `ray` meets, among those `wanted` says yes to (the
@@ -55,16 +70,14 @@ pub fn pick(scene: &Scene, ray: &Ray, wanted: &dyn Fn(usize, &Part) -> bool) -> 
             {
                 let n = maths::normalize(maths::cross(maths::sub(*b, *a), maths::sub(*c, *a)))
                     .unwrap_or([0.0, 0.0, 1.0]);
-                let n = if maths::dot(n, ray.dir) > 0.0 {
-                    maths::scale(n, -1.0)
-                } else {
-                    n
-                };
+                let front = maths::dot(n, ray.dir) <= 0.0;
+                let n = if front { n } else { maths::scale(n, -1.0) };
                 best = Some(Hit {
                     part: i,
                     point: maths::add(ray.origin, maths::scale(ray.dir, d)),
                     distance: d,
                     normal: n,
+                    front,
                 });
             }
         }
@@ -182,8 +195,20 @@ mod tests {
         assert_eq!(hit.part, 1);
         assert!((hit.point[2] - 1.0).abs() < 1e-4 && hit.point[0].abs() < 1e-4);
         assert!((hit.distance - 9.0).abs() < 1e-4);
-        // Its face, towards the camera.
+        // Its face, towards the camera. The quad is wound clockwise as the
+        // camera sees it: that is its back, its own front faces away.
         assert!((hit.normal[2] - 1.0).abs() < 1e-5, "{:?}", hit.normal);
+        assert!(!hit.front);
+        assert!(hit.front_normal()[2] < -0.99);
+        // From behind, the one at the back is met on its front.
+        let back = Ray {
+            origin: [0.0, 0.0, -10.0],
+            dir: [0.0, 0.0, 1.0],
+        };
+        let hit = pick(&scene, &back, &all).unwrap();
+        assert_eq!(hit.part, 0);
+        assert!(hit.front && hit.normal[2] < -0.99, "{hit:?}");
+        assert_eq!(hit.front_normal(), hit.normal);
         // Leaving the front one out finds the one behind it.
         let not_1 = |i: usize, _: &Part| i != 1;
         assert_eq!(

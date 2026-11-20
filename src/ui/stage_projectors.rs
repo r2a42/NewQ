@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use super::UiState;
 use super::settings::{hint, section, warning};
+use crate::preview_pace::PreviewId;
 use crate::render3d::{self, Camera, Line, Paint, Part, Ray, Scene};
 use crate::show::{DisplayState, OutputId, Show};
 use crate::stage3d::light::{self, Facing};
@@ -229,20 +230,21 @@ fn work_here(a: Ask) -> Option<Here> {
     let blocks = |i: usize, _: &Part| i < from;
     let hit = render3d::pick(&scene, &ray, &blocks)?;
     let kind = kinds.get(hit.part).cloned().unwrap_or(PartKind::Venue(0.5));
-    let (on, gain, facing) = match kind {
-        PartKind::Venue(r) => ("the venue".to_string(), r, Facing::Both),
-        PartKind::Screen { name, gain, facing } => (name, gain, facing),
+    // A screen's own front (whichever side the pointer looks at), so a front
+    // screen lit from behind is dark from both sides.
+    let (on, gain, facing, normal) = match kind {
+        PartKind::Venue(r) => ("the venue".to_string(), r, Facing::Both, hit.normal),
+        PartKind::Screen { name, gain, facing } => (name, gain, facing, hit.front_normal()),
     };
     let list: Vec<(&Projector, f32)> = projectors.iter().map(|(p, a, _)| (p, *a)).collect();
-    let lit = light::lit_by(&list, &scene, &blocks, hit.point, Some(hit.normal), facing);
+    let lit = light::lit_by(&list, &scene, &blocks, hit.point, Some(normal), facing);
     let lux: f32 = lit.iter().map(|(_, l)| l).sum();
     let brightest = lit
         .iter()
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .and_then(|(id, _)| projectors.iter().find(|(p, ..)| p.id == *id));
-    let pixel = brightest.and_then(|(p, aspect, pixels)| {
-        p.pixel_size_at(hit.point, Some(hit.normal), *pixels, *aspect)
-    });
+    let pixel = brightest
+        .and_then(|(p, aspect, pixels)| p.pixel_size_at(hit.point, Some(normal), *pixels, *aspect));
     let names = lit
         .iter()
         .filter_map(|(id, l)| {
@@ -275,8 +277,10 @@ pub struct ProjectorsUi {
     asked: HashMap<ProjectorId, u64>,
     /// What each scene's parts are, for the light sums (by scene key).
     kinds: Option<(u64, Arc<Vec<PartKind>>)>,
-    /// The light under the pointer, and what was last asked.
+    /// The light under the pointer, the view it is under, and what was
+    /// last asked.
     pub here: Option<Here>,
+    here_for: Option<PreviewId>,
     here_asked: Option<u64>,
     here_waiting: bool,
     /// Each view's lines, with the key they were made for.
@@ -391,6 +395,20 @@ impl ProjectorsUi {
         // An old outline shown while the new one is made would mislead;
         // the cone alone is drawn until then.
         None
+    }
+
+    /// The light under the pointer when it is over view `view`.
+    pub fn here_in(&self, view: PreviewId) -> Option<&Here> {
+        self.here.as_ref().filter(|_| self.here_for == Some(view))
+    }
+
+    /// The pointer has left view `view`: what it said there goes.
+    pub fn forget_here(&mut self, view: PreviewId) {
+        if self.here_for == Some(view) {
+            self.here = None;
+            self.here_for = None;
+            self.here_asked = None;
+        }
     }
 
     /// Whether the worker has answers to come: the views draw again soon
@@ -547,13 +565,20 @@ fn part_kinds(stage: &Stage3d, scene: &Scene) -> Vec<PartKind> {
     out
 }
 
-/// Ask for the light at what `ray` meets (from a view's pointer); the
-/// answer comes in `ProjectorsUi::here`.
-pub fn ask_here(show: &Show, st: &mut UiState, ray: Ray) {
+/// Ask for the light at what `ray` meets (from view `view`'s pointer);
+/// the answer comes in `ProjectorsUi::here`, for that view alone
+/// (`here_in`).
+pub fn ask_here(show: &Show, st: &mut UiState, view: PreviewId, ray: Ray) {
     let stage = &show.stage3d;
     if !stage.projectors.iter().any(|p| p.visible) {
-        st.stage.projectors.here = None;
+        st.stage.projectors.forget_here(view);
         return;
+    }
+    if st.stage.projectors.here_for != Some(view) {
+        // The pointer has gone to another view: what the last one said
+        // isn't about this one.
+        st.stage.projectors.here = None;
+        st.stage.projectors.here_for = Some(view);
     }
     let scene = st.stage.scene.clone();
     let from = stage.projectors_from(&scene);
@@ -563,6 +588,7 @@ pub fn ask_here(show: &Show, st: &mut UiState, ray: Ray) {
         v.to_bits().hash(&mut h);
     }
     format!("{:?}", stage.projectors).hash(&mut h);
+    view.hash(&mut h);
     let key = h.finish();
     if st.stage.projectors.here_asked == Some(key) {
         return;
@@ -1294,7 +1320,10 @@ pub fn readout_words(
             )));
         }
     }
-    let lux = light::illuminance(p, aspect, hit.point, Some(hit.normal), s.facing());
+    // The screen's own front: the ray from the lens meets a front screen
+    // from behind when the projector is behind it.
+    let front = hit.front_normal();
+    let lux = light::illuminance(p, aspect, hit.point, Some(front), s.facing());
     if lux > 0.0 {
         out.push(Said::Fact(format!(
             "About {} lux there, about {} nits to the audience (if nothing is in the way). {} from the lens.",
@@ -1308,7 +1337,7 @@ pub fn readout_words(
             s.name
         )));
     }
-    if let Some(px) = p.pixel_size_at(hit.point, Some(hit.normal), pixels, aspect) {
+    if let Some(px) = p.pixel_size_at(hit.point, Some(front), pixels, aspect) {
         out.push(Said::Fact(format!(
             "One pixel is about {} there.",
             pixel_words(px, unit)

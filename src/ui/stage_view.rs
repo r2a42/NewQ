@@ -288,9 +288,9 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
         && !response.dragged()
         && let Some(at) = response.hover_pos()
     {
-        super::stage_projectors::ask_here(show, st, ray_at(at));
+        super::stage_projectors::ask_here(show, st, id, ray_at(at));
     } else if !response.hovered() {
-        st.stage.projectors.here = None;
+        st.stage.projectors.forget_here(id);
     }
 
     // Ask for a picture when the governor lets it (the last one stays).
@@ -577,7 +577,7 @@ fn overlay(
     if let Some(p) = view.through.and_then(|p| show.projector(p)) {
         corner.push(format!("Through {} · drag or Esc to leave", p.name));
     }
-    if let Some(h) = &st.stage.projectors.here {
+    if let Some(h) = st.stage.projectors.here_in(id) {
         corner.push(super::stage_projectors::here_words(h, show.stage3d.units));
     }
     let n = corner.len();

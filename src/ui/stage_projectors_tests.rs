@@ -326,7 +326,7 @@ fn outlines_and_the_light_under_the_pointer_are_worked_out_off_the_main_thread()
         origin: [mid[0], mid[1], mid[2] + 5.0],
         dir: [0.0, 0.0, -1.0],
     };
-    ask_here(&show, &mut st, ray);
+    ask_here(&show, &mut st, PreviewId::Stage(0), ray);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while st.stage.projectors.here.is_none() && std::time::Instant::now() < deadline {
         st.stage.projectors.take_answers();
@@ -410,6 +410,113 @@ fn a_projector_is_picked_in_the_view_and_looked_through() {
         (0..3).all(|i| (eye[i] - p.position()[i]).abs() < 0.01),
         "{eye:?}"
     );
+}
+
+#[test]
+fn a_projector_behind_a_front_screen_lights_nothing_and_behind_a_rear_one_does() {
+    let (mut show, mut st, a, _) = two_screens();
+    let id = add_aimed_at(&mut show, &st, a);
+    // Stood behind Screen 1 (fitted as for a rear screen), facing it.
+    show.stage3d.surface_mut(a).unwrap().rear = true;
+    let rear = show.stage3d.surface(a).unwrap().clone();
+    let p = show.projector_mut(id).unwrap();
+    p.placement = p.fit_to(&rear, HD).unwrap();
+    let p = p.clone();
+    assert!(p.position()[2] < 0.0, "behind it: {:?}", p.position());
+    refresh(&show, &mut st);
+    let (pixels, aspect) = shape_of(&show, &st, &p);
+    let said = readout_words(&show, &st, &p, pixels, aspect);
+    assert!(
+        said.iter()
+            .any(|s| matches!(s, Said::Fact(f) if f.contains("lux there"))),
+        "a rear screen is lit from behind: {said:?}"
+    );
+    // The same screen as a front screen: dark that way, and said so.
+    show.stage3d.surface_mut(a).unwrap().rear = false;
+    refresh(&show, &mut st);
+    let said = readout_words(&show, &st, &p, pixels, aspect);
+    assert!(
+        said.iter()
+            .any(|s| matches!(s, Said::Warning(w) if w.contains("from behind"))),
+        "{said:?}"
+    );
+    assert!(
+        !said
+            .iter()
+            .any(|s| matches!(s, Said::Fact(f) if f.contains("lux there"))),
+        "{said:?}"
+    );
+}
+
+#[test]
+fn the_light_under_the_pointer_shows_in_the_view_it_is_over_only() {
+    let (mut show, mut st, a, b) = two_screens();
+    // One screen, so each view's middle (where it frames) is on it.
+    show.remove_surface(b);
+    add_aimed_at(&mut show, &st, a);
+    refresh(&show, &mut st);
+    let ctx = egui::Context::default();
+    let mut first = StageViewState::default();
+    let mut second = StageViewState::default();
+    let (one, two) = (PreviewId::Stage(0), PreviewId::Stage(1));
+    let mut t = 1.0;
+    let mut said = Vec::new();
+    // Two views side by side, the pointer over the middle of the left one.
+    let over = Pos2::new(200.0, 250.0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        t += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 500.0))),
+            time: Some(t),
+            events: vec![egui::Event::PointerMoved(over)],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.columns(2, |cols| {
+                    stage_view::draw(&mut cols[0], &show, &mut st, &mut first, one);
+                    stage_view::draw(&mut cols[1], &show, &mut st, &mut second, two);
+                });
+            });
+        });
+        out.textures_delta.clear();
+        said = texts(&out)
+            .into_iter()
+            .map(|(t, _)| t)
+            .filter(|t| t.contains(" lux") || t.contains("lights this spot"))
+            .collect();
+        if !said.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        said.len(),
+        1,
+        "once, in the view under the pointer: {said:?}"
+    );
+    assert!(st.stage.projectors.here_in(one).is_some());
+    assert!(st.stage.projectors.here_in(two).is_none());
+    // A few frames on it is still there (the other view doesn't clear it).
+    for _ in 0..3 {
+        t += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 500.0))),
+            time: Some(t),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.columns(2, |cols| {
+                    stage_view::draw(&mut cols[0], &show, &mut st, &mut first, one);
+                    stage_view::draw(&mut cols[1], &show, &mut st, &mut second, two);
+                });
+            });
+        });
+        out.textures_delta.clear();
+    }
+    assert!(st.stage.projectors.here_in(one).is_some());
 }
 
 /// Writes a show with a sample theatre and two projectors to
