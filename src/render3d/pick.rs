@@ -164,6 +164,7 @@ mod tests {
             transform: m,
             paint: Paint::Colour([1.0; 4]),
             lit: false,
+            catch: Default::default(),
         }
     }
 

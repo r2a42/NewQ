@@ -583,6 +583,7 @@ impl Stage3d {
                 transform,
                 paint: p.paint.clone(),
                 lit: true,
+                catch: Default::default(),
             }));
         }
         // Facets of one size share a mesh.
@@ -619,6 +620,11 @@ impl Stage3d {
                     transform: geometry::mul(&place, &piece.transform),
                     paint,
                     lit: false,
+                    // A front screen takes light on its front only (`light`).
+                    catch: crate::stage3d::scene::Catch {
+                        gain: s.gain,
+                        front_only: !s.rear,
+                    },
                 });
             }
         }
@@ -633,6 +639,7 @@ impl Stage3d {
                     transform: p.placement.matrix(),
                     paint: Paint::Colour(PROJECTOR_GREY),
                     lit: true,
+                    catch: Default::default(),
                 });
             }
         }

@@ -83,6 +83,30 @@ pub struct Part {
     pub paint: Paint,
     /// Shaded by the light (a venue), or drawn at full brightness (a screen).
     pub lit: bool,
+    /// How it takes a projector's light (the Light view).
+    pub catch: Catch,
+}
+
+/// How a part takes a projector's light when a view's light is on: how
+/// much it gives back, and on which side it counts (`stage3d::light`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Catch {
+    /// A screen's gain (1 a matt white screen). A lit part (the venue)
+    /// gives back its own colour instead.
+    pub gain: f32,
+    /// Light counts only on its front (a front-projection screen, whose
+    /// normals are its front); else on either side (a rear-projection
+    /// screen, a venue's walls, wound either way).
+    pub front_only: bool,
+}
+
+impl Default for Catch {
+    fn default() -> Catch {
+        Catch {
+            gain: 1.0,
+            front_only: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,14 +150,14 @@ impl Default for Camera {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     pub parts: Vec<Part>,
-    /// The projectors whose light the view throws on the parts (step P2 of
-    /// the projection plan; empty, and not drawn, until then).
+    /// The projectors whose light a view with its light on throws on the
+    /// parts (at most `light::MAX_THROWS`; `stage_live` adds them to the
+    /// scene those views draw).
     pub throws: Vec<Throw>,
 }
 
-/// One projector's light, as the renderer will want it (step P2): what
-/// `stage3d::light` sums, in numbers a shader can use. Nothing makes or
-/// draws these yet.
+/// One projector's light, as the renderer wants it: what `stage3d::light`
+/// sums, in numbers a shader can use (`light::throw_of` makes one).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Throw {
     /// World to the projector's clip space (its off-axis lens, reversed
@@ -150,6 +174,12 @@ pub struct Throw {
     pub gamma: f32,
     /// Its layer in the throws' picture array.
     pub layer: u32,
+    /// The layer holds its display's picture as the display sends it; else
+    /// it throws plain white (a projector with no display yet).
+    pub picture: bool,
+    /// One pixel's width one metre from the lens (metres): the Pixel size
+    /// view.
+    pub pixel_at_one_metre: f32,
     pub on: bool,
 }
 

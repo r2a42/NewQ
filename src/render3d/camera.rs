@@ -685,6 +685,7 @@ mod tests {
             transform,
             paint: Paint::Colour([1.0; 4]),
             lit: true,
+            catch: Default::default(),
         }
     }
 
