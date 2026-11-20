@@ -185,6 +185,7 @@ fn a_displays_picture_is_on_its_screen_the_right_way_round() {
             lines: Default::default(),
         }],
         serial: 1,
+        ..StageJob::default()
     };
     let mut drawer = StageDrawer::new(&gpu);
     let stats = drawer.draw(&gpu, &job, &mut || {});
@@ -249,6 +250,7 @@ fn a_display_that_shows_the_stage_has_a_picture_without_any_feed() {
             },
         }],
         serial: 1,
+        ..StageJob::default()
     };
     let mut drawer = StageDrawer::new(&gpu);
     drawer.draw(&gpu, &job, &mut || {});
@@ -288,11 +290,13 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
         }],
         views: vec![view(&a, 1)],
         serial: 1,
+        ..StageJob::default()
     };
     let second = StageJob {
         feeds: Vec::new(),
         views: vec![view(&b, 2)],
         serial: 2,
+        ..StageJob::default()
     };
     let both = first.clone().merged(second.clone());
     assert_eq!(both.serial, 2);
@@ -314,6 +318,7 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
         feeds: first.feeds.clone(),
         views: vec![view(&pa, 1), view(&pb, 2)],
         serial: 2,
+        ..StageJob::default()
     }
     .merged(StageJob::default());
     drawer.draw(&gpu, &job, &mut || {
@@ -334,4 +339,198 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
     assert!(a.is_filled() && b.is_filled());
     assert!(thread.stats(2).is_some());
     let _ = thread.quit().join();
+}
+
+/// One layer of an array texture's pixels (RGBA rows).
+fn read_layer(gpu: &Gpu, tex: &wgpu::Texture, layer: u32, size: (u32, u32)) -> Vec<u8> {
+    let row = size.0 * 4;
+    let padded =
+        row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("layer readback"),
+        size: u64::from(padded * size.1),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(size.1),
+            },
+        },
+        wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = slice.get_mapped_range().expect("mapped").to_vec();
+    let mut out = Vec::with_capacity((row * size.1) as usize);
+    for y in 0..size.1 as usize {
+        let from = y * padded as usize;
+        out.extend_from_slice(&data[from..from + row as usize]);
+    }
+    out
+}
+
+#[test]
+fn a_throw_is_drawn_small_and_sixteen_by_nine() {
+    assert_eq!(throw_size(1.0), (960, 540));
+    assert_eq!(throw_size(0.5), (480, 270));
+    assert_eq!(throw_size(0.0), (FEED_SIDE_LEAST, 144));
+    assert_eq!(throw_size(f32::NAN), (960, 540));
+}
+
+/// A projector's picture is drawn as its display sends it, its edge blend
+/// fading its side, into its layer; a view with its light on throws it onto
+/// the screen the right way round.
+#[test]
+fn a_projectors_picture_is_drawn_with_its_blend_and_thrown_the_right_way_round() {
+    let Some(gpu) = gpu() else { return };
+    let (mut show, _output, camera) = screen_show();
+    let s = show.stage3d.surfaces[0].clone();
+    let id = show.add_projector();
+    let p = show.projector_mut(id).unwrap();
+    p.placement = p.fit_to(&s, 16.0 / 9.0).unwrap();
+    let p = p.clone();
+    let throw = crate::stage3d::light::throw_of(&p, 16.0 / 9.0, (1920, 1080), 0, true);
+    let mut scene = show.stage3d.scene(&show, None);
+    scene.throws = vec![throw];
+    let scene = Arc::new(scene);
+    let picture = quarters(&gpu);
+    let blend = EdgeBlend {
+        right: 0.3,
+        ..EdgeBlend::default()
+    };
+    let size = (128, 72);
+    let target = Arc::new(LayerTexture::new_target(&gpu, size.0, size.1));
+    let white = crate::stage3d::light::luminance(
+        crate::stage3d::light::illuminance(
+            &p,
+            16.0 / 9.0,
+            [0.0; 3],
+            None,
+            crate::stage3d::light::Facing::Front,
+        ),
+        1.0,
+    );
+    let job = |blend: EdgeBlend| StageJob {
+        throws: vec![ThrowJob {
+            layer: 0,
+            groups: vec![group(&picture, PICTURE)],
+            blend,
+        }],
+        throw_size: (64, 36),
+        views: vec![ViewJob {
+            key: 5,
+            display: false,
+            target: target.clone(),
+            scene: scene.clone(),
+            camera,
+            lines: Default::default(),
+            options: Options {
+                light: LightView::Picture,
+                white_nits: white,
+                headlight: 0.0,
+                ambient: 0.0,
+                ..Options::default()
+            },
+        }],
+        serial: 1,
+        ..StageJob::default()
+    };
+    let mut drawer = StageDrawer::new(&gpu);
+    let stats = drawer.draw(&gpu, &job(blend), &mut || {});
+    assert_eq!(stats[0].1.throws, 1);
+    let (tex, tsize) = drawer.throws().unwrap();
+    assert_eq!(tsize, (64, 36));
+    let layer = read_layer(&gpu, tex, 0, tsize);
+    // Its picture, red at the top left, green at the top right, fading out
+    // over the right 30% (the blend).
+    assert!(
+        near(pixel(&layer, tsize, 0.2, 0.2), RED),
+        "{:?}",
+        pixel(&layer, tsize, 0.2, 0.2)
+    );
+    let green = pixel(&layer, tsize, 0.75, 0.2);
+    assert!(green[1] > 150 && green[0] < 60, "{green:?}");
+    let edge = pixel(&layer, tsize, 0.97, 0.2);
+    assert!(edge[1] < 120, "the blend fades the right edge: {edge:?}");
+    // On the screen, as the window would show it, the right way round.
+    let img = shown(&gpu, &[group(&target, size)], size);
+    let at = |x: f32, y: f32| {
+        let s = camera.project([x, y, 0.0], size).unwrap();
+        pixel(&img, size, s[0] / size.0 as f32, s[1] / size.1 as f32)
+    };
+    assert!(near(at(-1.0, 0.55), RED), "{:?}", at(-1.0, 0.55));
+    assert!(near(at(1.0, 0.55), GREEN), "{:?}", at(1.0, 0.55));
+    assert!(near(at(-1.0, -0.55), BLUE), "{:?}", at(-1.0, -0.55));
+    assert!(at(1.9, 0.55)[1] < 140, "faded: {:?}", at(1.9, 0.55));
+    // Without the blend, its edge is whole.
+    drawer.draw(&gpu, &job(EdgeBlend::default()), &mut || {});
+    let (tex, tsize) = drawer.throws().unwrap();
+    let layer = read_layer(&gpu, tex, 0, tsize);
+    assert!(near(pixel(&layer, tsize, 0.97, 0.2), GREEN));
+}
+
+#[test]
+fn merging_keeps_the_newer_pictures_of_the_projectors_and_the_older_others() {
+    let t = |layer| ThrowJob {
+        layer,
+        groups: Vec::new(),
+        blend: EdgeBlend {
+            left: layer as f32 / 10.0,
+            ..EdgeBlend::default()
+        },
+    };
+    let old = StageJob {
+        throws: vec![t(0), t(1)],
+        throw_size: (64, 36),
+        serial: 1,
+        ..StageJob::default()
+    };
+    let new = StageJob {
+        throws: vec![ThrowJob {
+            blend: EdgeBlend::default(),
+            ..t(1)
+        }],
+        throw_size: (64, 36),
+        serial: 2,
+        ..StageJob::default()
+    };
+    let both = old.clone().merged(new.clone());
+    assert_eq!(both.throws.len(), 2);
+    assert!(both.throws.iter().any(|j| j.layer == 1 && j.blend.is_off()));
+    // None newer: the older stay.
+    let kept = old.clone().merged(StageJob::default());
+    assert_eq!(kept.throws.len(), 2);
+    assert_eq!(kept.throw_size, (64, 36));
+    // Another size: only the newer (the older were for the other size).
+    let smaller = StageJob {
+        throw_size: (32, 18),
+        ..new
+    };
+    assert_eq!(old.merged(smaller).throws.len(), 1);
 }
