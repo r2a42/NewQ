@@ -248,8 +248,11 @@ struct GpuImage {
 struct Pipelines {
     opaque: wgpu::RenderPipeline,
     see_through: wgpu::RenderPipeline,
-    grid: wgpu::RenderPipeline,
-    axes: wgpu::RenderPipeline,
+    /// The overlays, None where this GPU wouldn't make them: left out, so
+    /// the rest of the view is still drawn (an invalid pipeline set in a
+    /// pass throws away the whole frame).
+    grid: Option<wgpu::RenderPipeline>,
+    axes: Option<wgpu::RenderPipeline>,
 }
 
 /// The textures drawn into for one owner, size, format and sample count.
@@ -733,15 +736,15 @@ impl Renderer {
                     }
                 };
             draw_parts(&mut pass, &mut stats, false);
-            if options.grid {
-                pass.set_pipeline(&pipes.grid);
+            if let (true, Some(grid)) = (options.grid, &pipes.grid) {
+                pass.set_pipeline(grid);
                 pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.draw(0..6, 0..1);
                 stats.draw_calls += 1;
                 stats.triangles += 2;
             }
-            if options.axes {
-                pass.set_pipeline(&pipes.axes);
+            if let (true, Some(axes)) = (options.axes, &pipes.axes) {
+                pass.set_pipeline(axes);
                 pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.draw(0..6, 0..1);
                 stats.draw_calls += 1;
@@ -1138,6 +1141,19 @@ impl Renderer {
         use wgpu::CompareFunction::{Greater, GreaterEqual};
         use wgpu::PrimitiveTopology::{LineList, TriangleList};
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
+        // An overlay this GPU won't make is left out (and said once), not
+        // allowed to throw away every frame it would be set in.
+        let checked = |label: &str, f: &dyn Fn() -> wgpu::RenderPipeline| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let pipeline = f();
+            match pollster::block_on(scope.pop()) {
+                None => Some(pipeline),
+                Some(e) => {
+                    log::warn!("the 3D view leaves out its {label}: this GPU won't draw it ({e})");
+                    None
+                }
+            }
+        };
         let pipes = Pipelines {
             opaque: make(
                 "3d parts",
@@ -1159,26 +1175,30 @@ impl Renderer {
                 alpha,
                 depth(false, Greater),
             ),
-            grid: make(
-                "3d grid",
-                &self.frame_pipeline_layout,
-                "vs_grid",
-                "fs_grid",
-                &[],
-                TriangleList,
-                alpha,
-                depth(false, GreaterEqual),
-            ),
-            axes: make(
-                "3d axes",
-                &self.frame_pipeline_layout,
-                "vs_axes",
-                "fs_axes",
-                &[],
-                LineList,
-                None,
-                depth(true, GreaterEqual),
-            ),
+            grid: checked("3d grid", &|| {
+                make(
+                    "3d grid",
+                    &self.frame_pipeline_layout,
+                    "vs_grid",
+                    "fs_grid",
+                    &[],
+                    TriangleList,
+                    alpha,
+                    depth(false, GreaterEqual),
+                )
+            }),
+            axes: checked("3d axes", &|| {
+                make(
+                    "3d axes",
+                    &self.frame_pipeline_layout,
+                    "vs_axes",
+                    "fs_axes",
+                    &[],
+                    LineList,
+                    None,
+                    depth(true, GreaterEqual),
+                )
+            }),
         };
         self.pipelines.insert((format, samples), pipes);
     }
