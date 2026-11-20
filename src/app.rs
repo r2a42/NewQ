@@ -3108,7 +3108,7 @@ impl App {
         let since: [Shown; crate::preview_pace::WINDOWS] =
             std::array::from_fn(|i| shown[i].since(self.shown_seen[i]));
         let jolts = self.engine.jolts();
-        let jolted = jolts != self.jolts_seen || std::mem::take(&mut self.layers_made);
+        let jolted = jolts != self.jolts_seen || self.layers_made;
         let reading = crate::preview_pace::Reading::of(
             self.forced_pressure,
             playing,
@@ -3118,7 +3118,12 @@ impl App {
         );
         self.stalls_seen = stalls;
         self.shown_seen = shown;
-        self.jolts_seen = jolts;
+        // A start seen while nothing counts as playing yet is kept for the
+        // first pass that does.
+        if playing {
+            self.jolts_seen = jolts;
+            self.layers_made = false;
+        }
         let before = self.ui.preview_governor.governed();
         // (Before: a step starts the window again.)
         let worst = self.ui.preview_governor.worst();
