@@ -188,6 +188,15 @@ pub(super) fn reached(p: &Part, bounds: ([f32; 3], [f32; 3]), throws: &[Throw]) 
         .any(|t| t.on && box_meets(&t.view_proj, &corners))
 }
 
+/// How many layers an array for `count` throws has: a power of two, at
+/// least one, at most `MAX_THROWS`.
+pub fn layers_for(count: usize) -> usize {
+    count
+        .clamp(1, MAX_THROWS)
+        .next_power_of_two()
+        .min(MAX_THROWS)
+}
+
 /// A set of shadow maps, one layer per throw.
 pub(super) struct ShadowMaps {
     _texture: wgpu::Texture,
@@ -506,18 +515,23 @@ impl LightKit {
             .as_ref()
     }
 
-    /// The shadow maps `side` square (made the first time).
-    pub fn shadows(&mut self, device: &wgpu::Device, side: u32) -> &mut ShadowMaps {
+    /// The shadow maps `side` square, at least `count` of them (made the
+    /// first time, and again with more layers when more are wanted: in
+    /// powers of two, so one projector doesn't hold sixteen maps).
+    pub fn shadows(&mut self, device: &wgpu::Device, side: u32, count: usize) -> &mut ShadowMaps {
         let now = Instant::now();
-        self.shadows
-            .retain(|s, m| *s == side || now.saturating_duration_since(m.used) < SHADOWS_KEPT);
+        let count = layers_for(count);
+        self.shadows.retain(|s, m| {
+            (*s == side && m.layers.len() >= count)
+                || (*s != side && now.saturating_duration_since(m.used) < SHADOWS_KEPT)
+        });
         let maps = self.shadows.entry(side).or_insert_with(|| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("3d shadow maps"),
                 size: wgpu::Extent3d {
                     width: side,
                     height: side,
-                    depth_or_array_layers: MAX_THROWS as u32,
+                    depth_or_array_layers: count as u32,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -527,7 +541,7 @@ impl LightKit {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            let layers = (0..MAX_THROWS as u32)
+            let layers = (0..count as u32)
                 .map(|i| {
                     texture.create_view(&wgpu::TextureViewDescriptor {
                         label: Some("3d shadow map"),
@@ -655,6 +669,16 @@ mod tests {
             naga::back::msl::write_string(&module, &info, &Default::default(), &Default::default())
                 .expect("written as MSL");
         assert!(msl.contains("fs_lit"));
+    }
+
+    #[test]
+    fn arrays_hold_a_power_of_two_of_layers() {
+        assert_eq!(layers_for(0), 1);
+        assert_eq!(layers_for(1), 1);
+        assert_eq!(layers_for(2), 2);
+        assert_eq!(layers_for(3), 4);
+        assert_eq!(layers_for(9), 16);
+        assert_eq!(layers_for(40), 16);
     }
 
     #[test]

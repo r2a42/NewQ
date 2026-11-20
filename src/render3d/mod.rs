@@ -789,7 +789,7 @@ impl Renderer {
         let mut shadows_due: Vec<usize> = Vec::new();
         if light_ready && let Some(kit) = self.light.as_mut() {
             let casters = lit::casters_key(scene);
-            let maps = kit.shadows(device, side);
+            let maps = kit.shadows(device, side, throws.len());
             for (i, t) in throws.iter().enumerate() {
                 let key = lit::shadow_key(casters, t);
                 if maps.keys[i] != key {
