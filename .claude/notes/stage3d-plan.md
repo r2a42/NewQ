@@ -26,7 +26,9 @@ resolution, never the outputs (the governor, pure and tested).
      whole picture: the display that its projectors are `part_of`.
    - Orbit, pan and zoom; saved viewpoints.
    - The 3D view can be a display's source, so it can go to a monitor or a stream.
-2. **Projector simulation (later).** Projectors as positioned cones of light that throw their
+2. **Projector simulation (later).** Step P1 of `projection-plan.md` is built: projectors stood in
+   the room, the throw calculator, lines for their cones and outlines, the look through a lens,
+   lux and nits by sums. The light itself (P2) is next. Projectors as positioned cones of light that throw their
    display's picture onto the venue and the surfaces: overlaps, blends, shadows, brightness falloff.
 3. **Mapping (later).** The 3D model drives the real outputs: each projector's picture is computed
    from its position and lens and the surface's UVs, as disguise does. This needs calibration (point

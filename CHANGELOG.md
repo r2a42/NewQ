@@ -17,6 +17,18 @@ release page, and a release is refused if it has none.
   with 60 fps too) and their resolution (Full, Half or Quarter, the 3D view included), and choose
   how soon they give way: *Relaxed* (the default, about 5% of new pictures late), *Strict* (about
   1%) or *Off* (they never give way, so on a busy computer the displays may stutter).
+- **Projectors in the 3D stage.** Stand projectors in the room to plan a rig before hiring
+  anything: *Settings ▸ 3D stage ▸ Projectors*. Add one aimed at a screen and it stands where its
+  picture fills it; choose its lens (short throw to very long zoom, or a typed throw ratio and lens
+  shift), brightness and pixels; move it and point it at a screen. Each one says how big its
+  picture is on the screen, how much of the screen it fills and what spills over, about how many
+  lux and nits, and how big a pixel is. *Fit to a screen* moves it or zooms it to fill one, and
+  *Which lens from here?* names the lens you need. In the 3D views its light shows as lines (its
+  cone and where its picture lands), you can look through its lens, and the pointer reads the
+  light on any spot. Keep the projectors you use in *My projectors*. For one projector on one flat
+  screen, the Displays page's four corners are still the quicker way. Worked out by sums only: not
+  tried with a real projector. A show with projectors still opens in 0.25, which leaves them out
+  (and drops them if it saves the show).
 
 ## 0.25.0
 

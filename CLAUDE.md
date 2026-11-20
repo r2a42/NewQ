@@ -555,6 +555,37 @@ The README describes the features; this file is about working on the code.
   `glb.rs` (pure) writes parts as a .glb (mesh, node and `baseColorFactor` material per part;
   `samples::sample_glb`), read back through `load_venue` part for part in a test (so each sample's
   materials have colours of their own). Not offered in the UI yet.
+  Projectors (step P1 of `.claude/notes/projection-plan.md`; no light drawn yet). `stage3d/projector.rs`:
+  `Stage3d::projectors` (`Projector`: `ProjectorId` from `alloc_id`, in `load`'s next-id guard, and
+  `Show::number_projectors` after it for a missing or doubled id; `Lens { throw, zoom, shift, aspect, gamma }`,
+  `lumens`, `display`, `resolution`, `model`; every field but `id` defaulted and unwritten at it, and
+  `#[serde(flatten)] extra` on both keeps a later NewQ's fields; read through clamping getters, `Lens::zoom`
+  sorted and finite). Conventions in its header: the lens looks down its own -Z, throw = distance / width,
+  shift a share of the picture (0.5 up: the bottom edge on the axis). The throw calculator: `frustum`,
+  `picture_at`, `distance_for`, `ray(u, v)`, `in_picture`, `camera` (the look-through `Camera`), `aim_at`
+  (the picture's middle, not the axis, onto a point; roll kept), `fit_to` (square on, the box round the
+  shape, a `rear` screen from behind), `throw_for`, `on_flat` (corners, `fills` by polygon clipping,
+  `spill`), `pixel_size_at`, `footprint` (rays `FOOTPRINT_INSET` inside the edge) and `cone`;
+  `LensPreset` (plain-word lenses, `for_throw`), `BRIGHTNESS`, `RESOLUTIONS`. `Show::add_projector`,
+  `projector_display_refused` (sub display, shows the stage, taken), `sanitize_projectors` (in
+  `sanitize_stage`), `forget_missing_outputs` clears a gone display. `stage3d/light.rs` (pure): lux by the
+  inverse square law and the two cosines (`illuminance`, `Facing`), `luminance` (lux × gain / π),
+  `lit_by` (shadow test by `pick`). `Surface::gain`/`rear` (unwritten at 1/false). `Stage3d::scene` puts
+  a lit `projector_body` (wholly behind the lens) per shown projector after the screens:
+  `projectors_from`, `part_projector`; `part_surface` stops before them. `scene::Throw`/`Scene::throws`
+  are P2's types, empty. UI: `src/ui/stage_projectors.rs` (`section_ui` on Settings ▸ 3D stage after
+  Screens, `CORNER_PIN_WORDS`; `add_aimed_at`; rows with `readout_words`, *Fit to a screen*, `which_lens`;
+  "My projectors" in `my-projectors.json` in the log folder, `ProjectorsUi::library_dir` for tests);
+  `ProjectorsUi` (`StageShared::projectors`) runs a `projector-sums` worker (latest wins; footprints and
+  the light under the pointer, `ask_here`/`Here`; `waiting` makes a view repaint) so no venue ray test is
+  on the main thread; `view_lines` gives each `ViewRequest` its lines (cached by key). `stage_view`:
+  bodies picked by click, `StageViewState::through` (*Viewpoint ▸ Through …*; drag, wheel, double-click
+  or Esc leave to an orbit from the lens), `letterbox`. Tests: `projector_tests.rs`, `light_tests.rs`,
+  `render3d/tests.rs` (lines, cone and outline, look-through), `ui/stage_projectors_tests.rs` (mouse:
+  add aimed, point at, which lens, keep; the worker; pick and look through); the ignored
+  `write_a_show_with_two_projectors` (`NEWQ_PROJECTOR_SHOW`) makes a show to try by hand. Tried
+  headless under xvfb (lavapipe) with the proscenium sample and two projectors; never a real GPU,
+  projector, light meter or room.
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
@@ -598,6 +629,11 @@ The README describes the features; this file is about working on the code.
   `stage_render`'s thread, `#![allow(dead_code)]` for what isn't used yet). `scene.rs` re-exports `stage3d::scene`'s neutral types (`Mesh`, `Paint`,
   `Part`, `Camera`, `Scene`); conventions: right-handed, Y up, metres, uv (0,0) the picture's
   top-left, `Paint::Output::region` (left, top, width, height) like `PartOf::area`, nothing culled.
+  `Camera::shift`/`aspect` (a projector's lens): `frustum` (off-axis, letterboxed to the target's shape;
+  `maths::frustum_reversed`), `picture_in`, `clip_to_near`; `project` and `ray` use the same frustum.
+  `render_with_lines` draws `Line`s last, over everything (a `LineList` pipeline made through `checked`;
+  `FrameStats::lines`), for a preview's projector cones: `ViewRequest`/`ViewJob::lines`, hashed into
+  `stage_live::signature`; a display's job has none. `pick::Hit::normal` (towards the ray).
   `Renderer` (one per `Gpu`): `render(gpu, &Target{view, format, size}, scene, camera, outputs: &dyn
   Fn(OutputId) -> Option<&TextureView>, &Options) -> FrameStats` (draw calls, triangles, missing pictures)
   submits through `Gpu::submit` itself (its uniforms are written per call, so two renders can't share a
