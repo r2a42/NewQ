@@ -195,7 +195,10 @@ fn new_interface_windows(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
             ui.close();
         }
         if open {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // The buttons in a column after the names.
+            let gap = (ui.min_rect().min.x + 120.0 - ui.cursor().min.x).max(12.0);
+            ui.scope(|ui| {
+                ui.add_space(gap);
                 let (label, tip) = if popped {
                     (
                         "Into the Operator view",
@@ -296,7 +299,10 @@ fn classic_panes(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
                 ui.close();
             }
             if open {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // The buttons in a column after the names.
+                let gap = (ui.min_rect().min.x + 120.0 - ui.cursor().min.x).max(12.0);
+                ui.scope(|ui| {
+                    ui.add_space(gap);
                     let (label, tip, action) = if popped {
                         (
                             "Dock back",
