@@ -947,6 +947,7 @@ fn short_lap(user: &Show) -> crate::testmode::plan::Built {
         notes: Vec::new(),
         used: Vec::new(),
         timeline: None,
+        stage: None,
     }
 }
 

@@ -1176,6 +1176,9 @@ pub struct PreviewGovernor {
     news: Option<News>,
     /// When each preview last had a picture to draw.
     last: RefCell<HashMap<PreviewId, Instant>>,
+    /// Held off by a test (`set_held`): every preview is paused, as with
+    /// `Prefs::previews_off`, whatever the governor's level.
+    held: bool,
     /// Which previews asked (for the tests that every kind does).
     #[cfg(test)]
     pub asked: RefCell<Vec<PreviewId>>,
@@ -1248,6 +1251,30 @@ impl PreviewGovernor {
         self.governor.level()
     }
 
+    /// Start afresh: level Full, nothing learned (a floor, a ceiling, waits
+    /// doubled), the strictness kept. What it did (`tally`) and the
+    /// previews' last times stay. Test Mode's 3D part, at each leg, so what
+    /// one leg taught it doesn't decide the next.
+    pub fn reset(&mut self) {
+        self.governor = Governor {
+            strictness: self.governor.strictness,
+            ..Governor::default()
+        };
+        self.news = None;
+    }
+
+    /// Hold every preview paused (or let them go): set by the app each pass
+    /// from Test Mode (`TestMode::holds_previews`), so it lapses by itself
+    /// however the test ends.
+    pub fn set_held(&mut self, held: bool) {
+        self.held = held;
+    }
+
+    /// Whether a test holds the previews paused.
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
     /// For tests: be at `level`.
     #[cfg(test)]
     pub fn force(&mut self, level: Level) {
@@ -1272,7 +1299,11 @@ impl PreviewGovernor {
     pub fn ask(&self, id: PreviewId, now: Instant, limits: Limits) -> PreviewBudget {
         #[cfg(test)]
         self.asked.borrow_mut().push(id);
-        let level = effective(self.governed(), limits.rate);
+        let level = if self.held {
+            Level::Paused
+        } else {
+            effective(self.governed(), limits.rate)
+        };
         let scale = effective_scale(level, limits.size);
         if level == Level::Full && scale >= 1.0 {
             return PreviewBudget::FULL;
@@ -2324,5 +2355,28 @@ mod tally_tests {
         assert_eq!(p.take_news(), tally.news.back().map(|(_, n)| *n));
         assert!(p.take_news().is_none(), "taken once");
         assert_eq!(*p.tally(), tally, "taking it changes nothing");
+    }
+
+    #[test]
+    fn a_reset_starts_afresh_and_a_hold_pauses_every_preview_until_let_go() {
+        let mut p = PreviewGovernor::default();
+        let mut t = Instant::now();
+        let forced = Reading::of(Some(1000), true, [Shown::default(); WINDOWS], 0, false);
+        run(&mut p, &mut t, 30, 50, Strictness::Strict, |_| forced);
+        assert_eq!(p.governed(), Level::Paused);
+        let tally = p.tally().clone();
+        p.reset();
+        assert_eq!(p.governed(), Level::Full, "nothing learned is kept");
+        assert_eq!(*p.tally(), tally, "what it did is kept");
+        assert_eq!(p.governor.strictness, Strictness::Strict);
+        // Held: paused, whatever the level; let go: as before.
+        let id = PreviewId::Other("test", 0);
+        let auto = Limits::default();
+        assert!(p.ask(id, t, auto).draw);
+        p.set_held(true);
+        let b = p.ask(id, t + Duration::from_secs(1), auto);
+        assert!(b.paused && !b.draw && p.held());
+        p.set_held(false);
+        assert!(p.ask(id, t + Duration::from_secs(2), auto).draw);
     }
 }

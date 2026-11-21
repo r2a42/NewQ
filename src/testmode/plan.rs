@@ -32,6 +32,8 @@ pub struct Built {
     pub used: Vec<&'static str>,
     /// A timeline test: what the session's driver does in a lap.
     pub timeline: Option<super::timeline::Script>,
+    /// The 3D stage part: what it plays on (`build_stage`).
+    pub stage: Option<super::stage::Setup>,
 }
 
 struct Builder<'a> {
@@ -542,6 +544,7 @@ pub fn build_decode(
         notes: b.notes,
         used: b.used,
         timeline: None,
+        stage: None,
     }
 }
 
@@ -1024,7 +1027,192 @@ pub fn build_with_as(
         notes: b.notes,
         used: b.used,
         timeline: None,
+        stage: None,
     }
+}
+
+// ----- The 3D stage part --------------------------------------------------------------
+
+/// The 3D stage part's show (`testmode::stage`): the Short cue list's lap
+/// going round, on the ticked monitors (`mirror` as `build_with_as`), with
+/// the 3D stage made ready on this copy only: the user's own if it has
+/// screens, else the Proscenium sample with its usual screens showing the
+/// test's first display and a projector for each test display (as far as
+/// two... or the light's limit) aimed at the main screen. The display that
+/// shows the stage in the last leg: with two or more monitors ticked here
+/// (and `mirror`), the last one's; else a display of its own with no
+/// window, off until that leg.
+pub fn build_stage(
+    original: &Show,
+    res: &HashMap<&'static str, Resolved>,
+    displays: &[DisplayChoice],
+    sound: &SoundChoice,
+    mirror: bool,
+) -> Built {
+    let mut built = build_with_as(original, Level::Short, res, displays, sound, false, mirror);
+    round_again(&mut built);
+    built.show.name = "Test Mode: 3D stage".into();
+    let (setup, notes) = stage_setup(&mut built.show, displays, mirror);
+    built.notes.extend(notes);
+    built.stage = Some(setup);
+    built
+}
+
+/// Make a single lap go round: the last cue hands over to one that starts
+/// the first again.
+fn round_again(built: &mut Built) {
+    if built.repeats {
+        return;
+    }
+    if let Some(last) = built.show.cues.last_mut() {
+        last.continue_mode = ContinueMode::AutoFollow;
+    }
+    let mut c = built
+        .show
+        .make_cue(CueType::Control, None, built.show.cues.len());
+    c.name = "Round again".into();
+    if let CueKind::Control(ct) = &mut c.kind {
+        ct.action = ControlAction::Start;
+        ct.target = Some(built.first);
+    }
+    built.show.cues.push(c);
+    built.cues = built.show.cues.len();
+    built.repeats = true;
+}
+
+/// Most projectors the sample is given (one a test display).
+const SAMPLE_PROJECTORS: usize = 4;
+
+/// The 3D stage of the part's show, made ready (see `build_stage`), and
+/// what to say of it.
+pub(super) fn stage_setup(
+    show: &mut Show,
+    displays: &[DisplayChoice],
+    mirror: bool,
+) -> (super::stage::Setup, Vec<String>) {
+    use super::stage::{Leg, Setup, StageDisplay};
+    use crate::stage3d::projector::LensPreset;
+    let mut notes = Vec::new();
+    let sample = show.stage3d.surfaces.is_empty();
+    // The test's pictures, on the displays that show their own.
+    let shown: Vec<OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| o.enabled && !o.is_sub_display())
+        .map(|o| o.id)
+        .collect();
+    if sample {
+        let kind = crate::stage3d::samples::SampleVenue::Proscenium;
+        let ids = crate::ui::stage_edit::use_sample(show, kind, true);
+        if show.stage3d.projectors.is_empty()
+            && let Some(main) = ids.first().and_then(|s| show.stage3d.surface(*s).cloned())
+        {
+            let n = shown.len().min(SAMPLE_PROJECTORS);
+            for (i, d) in shown.iter().take(n).enumerate() {
+                let id = show.add_projector();
+                let Some(p) = show.projector_mut(id) else {
+                    continue;
+                };
+                p.lens = LensPreset::StandardZoom.lens(None);
+                p.lumens = 10_000.0;
+                p.display = Some(*d);
+                let aspect = 16.0 / 9.0;
+                if let Some(mut place) = p.fit_to(&main, aspect) {
+                    // Side by side, each aimed at the screen's middle: an
+                    // overlapping pair.
+                    place.position[0] += (i as f32 - (n as f32 - 1.0) / 2.0) * 0.8;
+                    p.placement = place;
+                    p.aim_at(main.placement.position, aspect);
+                }
+            }
+        }
+    }
+    let projectors = show
+        .stage3d
+        .projectors
+        .iter()
+        .filter(|p| p.visible && p.display.is_some())
+        .count();
+    let viewpoint = show.stage3d.viewpoints.first().map(|v| v.name.clone());
+    let source = Some(crate::stage3d::StageSource { viewpoint });
+    // Here, with two or more ticked: the last one shows the stage.
+    let local: Vec<OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| o.computer.is_none() && o.monitor.is_some() && !o.is_sub_display())
+        .map(|o| o.id)
+        .collect();
+    let stage_display = if mirror && displays.len() >= 2 && local.len() >= 2 {
+        let id = *local.last().expect("two or more");
+        let before = show.output(id).cloned().expect("a display of the show");
+        let mut during = before.clone();
+        during.part_of = None;
+        during.source = source;
+        let monitor = displays
+            .iter()
+            .rev()
+            .find(|d| d.computer.is_none())
+            .map(|d| d.reference.index);
+        if show
+            .stage3d
+            .projectors
+            .iter()
+            .any(|p| p.display == Some(id))
+        {
+            notes.push(format!(
+                "In the 3D stage part's last leg {} shows the stage, so the projector on it throws no picture then",
+                before.name
+            ));
+        }
+        Some(StageDisplay {
+            id,
+            windowed: true,
+            monitor,
+            during,
+            before,
+        })
+    } else {
+        let id = show.add_display();
+        show.outputs.iter_mut().find(|o| o.id == id).map(|o| {
+            o.name = "3D stage (test)".into();
+            o.monitor = None;
+            o.enabled = false;
+            let before = o.clone();
+            let mut during = o.clone();
+            during.enabled = true;
+            during.source = source;
+            StageDisplay {
+                id,
+                windowed: false,
+                monitor: None,
+                during,
+                before,
+            }
+        })
+    };
+    let mut legs = vec![Leg::Baseline, Leg::View];
+    if projectors > 0 {
+        legs.push(Leg::Light);
+    }
+    legs.push(Leg::Display);
+    if sample {
+        notes.push(format!(
+            "Your show has no 3D stage, so the 3D stage part used the Proscenium sample venue, with {} projector{} (on the test's copy of your show only)",
+            projectors,
+            if projectors == 1 { "" } else { "s" }
+        ));
+    }
+    let screens = show.stage3d.surfaces.len();
+    (
+        Setup {
+            sample,
+            screens,
+            projectors,
+            stage_display,
+            legs,
+        },
+        notes,
+    )
 }
 
 // ----- The timeline tests --------------------------------------------------------------
@@ -1721,6 +1909,7 @@ pub fn build_timeline(
         notes: b.notes,
         used: b.used,
         timeline: Some(script),
+        stage: None,
     }
 }
 
@@ -2673,7 +2862,11 @@ mod tests {
         );
         // One alone is said as one.
         let mut one = show.clone();
-        one.outputs.iter_mut().find(|o| o.id == other).unwrap().source = None;
+        one.outputs
+            .iter_mut()
+            .find(|o| o.id == other)
+            .unwrap()
+            .source = None;
         let notes = use_displays_as(&mut one, &[], true);
         assert!(
             notes[0].starts_with("Wide picture shows your 3D stage; in the test it shows"),
@@ -2684,5 +2877,104 @@ mod tests {
         let before = serde_json::to_string(&plain).unwrap();
         assert!(use_displays_as(&mut plain, &[], true).is_empty());
         assert_eq!(serde_json::to_string(&plain).unwrap(), before);
+    }
+
+    #[test]
+    fn the_3d_stage_part_builds_a_sample_on_the_copy_and_keeps_a_users_stage() {
+        use crate::testmode::stage::Leg;
+        let picks = [choice("A", 1), choice("B", 2)];
+        let original = Show::default();
+        let before = serde_json::to_string(&original).unwrap();
+        // No stage: the Proscenium sample with its screens, a projector a
+        // display (an overlapping pair), the last monitor showing the stage
+        // in the last leg.
+        let b = build_stage(
+            &original,
+            &HashMap::new(),
+            &picks,
+            &SoundChoice::default(),
+            true,
+        );
+        assert_eq!(
+            serde_json::to_string(&original).unwrap(),
+            before,
+            "the user's show"
+        );
+        let setup = b.stage.as_ref().expect("a stage part");
+        assert!(setup.sample && setup.screens > 0);
+        assert!(
+            b.show
+                .stage3d
+                .venue
+                .as_ref()
+                .is_some_and(|v| v.sample.is_some())
+        );
+        assert_eq!(setup.projectors, 2);
+        let throws: Vec<Option<OutputId>> = b
+            .show
+            .stage3d
+            .projectors
+            .iter()
+            .map(|p| p.display)
+            .collect();
+        let ids: Vec<OutputId> = b.show.outputs.iter().map(|o| o.id).collect();
+        assert_eq!(throws, vec![Some(ids[0]), Some(ids[1])]);
+        let first = b.show.stage3d.surfaces[0].feed.output();
+        assert_eq!(first, Some(ids[0]), "the screens show the test's picture");
+        assert_eq!(
+            setup.legs,
+            [Leg::Baseline, Leg::View, Leg::Light, Leg::Display]
+        );
+        let d = setup.stage_display.as_ref().expect("a stage display");
+        assert!(d.windowed && d.id == ids[1] && d.monitor == Some(2));
+        let mut show = b.show.clone();
+        assert!(!show.shows_stage(d.id));
+        assert!(setup.apply(&mut show, Leg::Display));
+        assert!(show.shows_stage(d.id) && !show.shows_stage(ids[0]));
+        assert!(show.stage_source_refused(d.id).is_none());
+        assert!(setup.apply(&mut show, Leg::View) && !show.shows_stage(d.id));
+        assert!(b.repeats, "the lap goes round");
+        assert!(
+            b.notes.iter().any(|n| n.contains("Proscenium sample")),
+            "{:?}",
+            b.notes
+        );
+        // One monitor: a display of its own, off but in its leg, no window.
+        let b = build_stage(
+            &original,
+            &HashMap::new(),
+            &picks[..1],
+            &SoundChoice::default(),
+            true,
+        );
+        let setup = b.stage.unwrap();
+        assert_eq!(setup.projectors, 1);
+        let d = setup.stage_display.as_ref().unwrap();
+        assert!(!d.windowed && d.before.monitor.is_none() && !d.before.enabled);
+        assert!(d.during.enabled && d.during.source.is_some());
+        let mut show = b.show.clone();
+        setup.apply(&mut show, Leg::Display);
+        assert!(show.shows_stage(d.id));
+        // The user's own stage is kept (and pointed at the test's displays):
+        // no sample, its projector, no light leg without one throwing.
+        let mut users = Show::default();
+        let s = users.add_surface(None);
+        let o = users.outputs[0].id;
+        users.stage3d.surface_mut(s).unwrap().feed = crate::stage3d::Feed::whole_picture(&users, o);
+        let b = build_stage(
+            &users,
+            &HashMap::new(),
+            &picks[..1],
+            &SoundChoice::default(),
+            true,
+        );
+        let setup = b.stage.unwrap();
+        assert!(!setup.sample && setup.screens == 1 && setup.projectors == 0);
+        assert!(b.show.stage3d.venue.is_none());
+        assert_eq!(setup.legs, [Leg::Baseline, Leg::View, Leg::Display]);
+        assert_eq!(
+            b.show.stage3d.surfaces[0].feed.output(),
+            Some(b.show.outputs[0].id)
+        );
     }
 }

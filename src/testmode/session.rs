@@ -45,6 +45,14 @@ pub struct TestMode {
     pub load: crate::net::load::LoadLevel,
     /// What the window has ticked to test (`choice`).
     pub parts: super::choice::Parts,
+    /// The 3D stage part is ticked (not kept by this computer: the window
+    /// ticks it by itself on opening when `stage_wanted`).
+    pub stage3d: bool,
+    /// The show has a projector or a display that shows the stage
+    /// (`choice::stage_wanted`), and none of a 3D stage's screens; looked at
+    /// each pass while no test runs.
+    pub stage_wanted: bool,
+    pub stage_unscreened: bool,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
     // ---- The network test (`network`) ----
@@ -89,6 +97,9 @@ impl Default for TestMode {
             heavy: false,
             load: crate::net::load::LoadLevel::Off,
             parts: super::choice::Parts::default(),
+            stage3d: false,
+            stage_wanted: false,
+            stage_unscreened: true,
             notice: None,
             net_in: Vec::new(),
             net_out: Vec::new(),
@@ -236,6 +247,10 @@ pub struct Run {
     previews: super::previews::Recorder,
     /// Their account, once the test has ended (for the report).
     previews_account: Option<super::previews::Account>,
+    /// The 3D stage part's legs (`testmode::stage`).
+    pub stage: Option<Box<super::stage::StageRun>>,
+    /// Its findings and report part, once it has ended.
+    stage_part: Option<Vec<String>>,
 }
 
 /// A timeline test's part of a run (see `testmode::timeline`).
@@ -678,6 +693,12 @@ impl Flavour {
             (Flavour::Timeline, Level::Medium) => {
                 "About an hour. A longer timeline and a timeline group, round and round: a third track with speed and opacity keyframes, a picture also on a second display, a pause that freezes a film, a loop left after three passes, a jump to a marker."
             }
+            (Flavour::Stage, Level::Short) => {
+                "About three minutes. The cue list's lap, round and round, in four legs: previews off, a turning 3D view of the stage, its projectors' light on, and a display showing the stage."
+            }
+            (Flavour::Stage, _) => {
+                "The cue list's lap, round and round, its four legs over and over: previews off, a turning 3D view of the stage, its projectors' light on, and a display showing the stage."
+            }
             (Flavour::Timeline, Level::Long) => {
                 "Overnight. The medium timeline with H.265 and a 25 Mbit/s film, a mosaic of five films with effects, very large pictures, and seeks to a marker and back while it runs."
             }
@@ -759,7 +780,19 @@ impl TestMode {
             timeline: flavour == Flavour::Timeline,
             network: false,
         };
+        self.stage3d = flavour == Flavour::Stage;
         self.set_level(level);
+    }
+
+    /// Whether every preview is to be held off now: the 3D stage part's
+    /// baseline leg is playing. The app asks each pass
+    /// (`PreviewGovernor::set_held`), so the hold ends with the leg however
+    /// the test does (stopped, failed, a panic, NewQ closing).
+    pub fn holds_previews(&self) -> bool {
+        match &self.phase {
+            Phase::Running(r) => r.stage.as_ref().is_some_and(|s| s.holds_previews()),
+            _ => false,
+        }
     }
 
     /// The test chosen, as this computer keeps it (`Prefs::test_pick`).
@@ -914,7 +947,11 @@ impl TestMode {
         if self.busy() {
             return;
         }
-        let wanted = assets::wanted_for(self.level, self.flavour);
+        let wanted = match self.flavour {
+            // The Short cue list's lap, round and round.
+            Flavour::Stage => assets::wanted_for(Level::Short, Flavour::Cues),
+            f => assets::wanted_for(self.level, f),
+        };
         let fetch = assets::start(
             ff,
             assets::cache_dir(log_dir),
@@ -1133,6 +1170,10 @@ impl TestMode {
         // that more follow keeps it when it ends, and makes no zip of its own.
         st.test_carry.keep = self.seq.as_ref().is_some_and(|s| s.more_follow());
         st.test_carry.parts_run = self.seq.is_some();
+        if !self.busy() {
+            self.stage_wanted = super::choice::stage_wanted(show);
+            self.stage_unscreened = show.stage3d.surfaces.is_empty();
+        }
         let mut inbox = std::mem::take(&mut self.net_in);
         self.end_again(&inbox, now);
         // A test across the show network: what the computers sent, and
@@ -1155,6 +1196,14 @@ impl TestMode {
                         &mut r.software,
                         crate::gpu::drawing_in_software(),
                     );
+                }
+                // The 3D stage part's legs: begun and ended as their time comes.
+                let lines = match &mut r.stage {
+                    Some(s) => s.tick(show, st, t),
+                    None => Vec::new(),
+                };
+                for line in lines {
+                    r.log_at(t, &line);
                 }
                 // What the previews' governor did since the last look.
                 for line in r.previews.tick(st, engine.jolts(), t) {
@@ -1800,11 +1849,14 @@ fn build(prep: &Prep, show: &Show, spread: bool) -> plan::Built {
         Flavour::Timeline => {
             plan::build_timeline(show, prep.level, &resolved, &prep.displays, &prep.sound)
         }
+        Flavour::Stage => plan::build_stage(show, &resolved, &prep.displays, &prep.sound, !spread),
     };
     if spread {
         plan::spread_pictures(&mut built.show);
         // Owner's decision 9: the venue model goes only with the 3D part.
-        built.notes.extend(plan::leave_venue_out(&mut built.show));
+        if prep.flavour != Flavour::Stage {
+            built.notes.extend(plan::leave_venue_out(&mut built.show));
+        }
     }
     built
 }
@@ -1995,8 +2047,21 @@ fn launch(
         let _ = writeln!(f, "lap,started_s,took_s,should_take_s");
     }
     let events = open("events.log");
-    let planned = (built.repeats && prep.minutes > 0)
-        .then(|| Duration::from_secs(u64::from(prep.minutes) * 60));
+    let stage = built.stage.clone().map(|setup| {
+        Box::new(super::stage::StageRun::new(
+            setup,
+            &built.show,
+            prep.minutes,
+            st.prefs.previews_off,
+            Some(&folder),
+        ))
+    });
+    let planned = match &stage {
+        // Its legs end it; a little over, so the last is never cut short.
+        Some(s) => Some(Duration::from_secs_f64(s.total + 10.0)),
+        None => (built.repeats && prep.minutes > 0)
+            .then(|| Duration::from_secs(u64::from(prep.minutes) * 60)),
+    };
     let _ = std::fs::write(
         folder.join("system.txt"),
         system_report(
@@ -2090,6 +2155,8 @@ fn launch(
         software: None,
         previews,
         previews_account: None,
+        stage,
+        stage_part: None,
     })
 }
 
@@ -2287,6 +2354,9 @@ impl Run {
         if self.stop {
             return Some(End::Stopped);
         }
+        if self.stage.as_ref().is_some_and(|s| s.finished) {
+            return Some(End::Finished);
+        }
         if let Some(why) = stuck {
             return Some(End::Failed(why));
         }
@@ -2353,6 +2423,11 @@ fn finish(
 ) -> Done {
     let elapsed = run.elapsed();
     engine.stop_all(0.0);
+    // The 3D stage part lets go of the previews and puts its display back,
+    // on the test's show, before the user's comes back.
+    if let Some(s) = &mut run.stage {
+        s.finish(show, st);
+    }
     // The user's show comes back before anything else is done.
     if let Some(stash) = run.stash.take() {
         st.end_test(show, engine, stash);
@@ -2399,7 +2474,23 @@ fn finish(
     let hours = elapsed.as_secs_f64() / 3600.0;
     let clean = run.clean_laps();
     let mut findings = run.judge(hours);
-    findings.extend(super::analysis::analyse_previews(&previews));
+    match &run.stage {
+        // The 3D stage part judges the previews leg against leg: the whole
+        // part's account (a leg held off, the governor started afresh at
+        // each) would say it twice, and less well.
+        Some(s) => {
+            let cx = super::stage::Context {
+                setup: &s.setup,
+                settings: previews.settings,
+                previews_off: s.previews_off,
+                venue: s.venue(),
+            };
+            let found = super::stage::judge(&s.results, &cx);
+            run.stage_part = Some(super::stage::report_part(&s.results, &cx, &found));
+            findings.extend(found);
+        }
+        None => findings.extend(super::analysis::analyse_previews(&previews)),
+    }
     run.previews_account = Some(previews);
     if !run.sleeps.is_empty() {
         let total: f64 = run.sleeps.iter().map(|(_, g)| g).sum();
@@ -2657,10 +2748,24 @@ fn compose(
     ) {
         line(&mut out, &format!("  ok       {t}"));
     }
+    if let Some(part) = &run.stage_part {
+        line(&mut out, "");
+        line(&mut out, "3D stage");
+        line(&mut out, "--------");
+        for l in part {
+            line(&mut out, &format!("  {l}"));
+        }
+    }
     if let Some(a) = &run.previews_account {
         line(&mut out, "");
         line(&mut out, "Previews");
         line(&mut out, "--------");
+        if run.stage.is_some() {
+            line(
+                &mut out,
+                "  (Over the whole part, its legs together: the 3D stage part above compares them.)",
+            );
+        }
         for l in super::previews::report_part(a) {
             line(&mut out, &format!("  {l}"));
         }

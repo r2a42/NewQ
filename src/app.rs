@@ -2538,7 +2538,7 @@ impl App {
             let preview_only = target.is_none()
                 && !self.streams.contains_key(&id)
                 && !self.stage.feeds_a_display(id);
-            let level = if self.ui.prefs.previews_off {
+            let level = if self.ui.prefs.previews_off || self.ui.preview_governor.held() {
                 crate::preview_pace::Level::Paused
             } else {
                 crate::preview_pace::effective(
@@ -3124,6 +3124,10 @@ impl App {
     /// limit included (Paused while its previews are off).
     fn pace_previews(&mut self, now: Instant, playing: bool) -> crate::preview_pace::Level {
         use crate::preview_pace::{Level, Shown};
+        // Test Mode's 3D part holds every preview off for its baseline leg:
+        // asked each pass, so however the test ends the hold goes with it.
+        let held = self.ui.test.holds_previews();
+        self.ui.preview_governor.set_held(held);
         let stalls = crate::crumbs::stall_count();
         let shown = crate::render::shown_totals();
         let since: [Shown; crate::preview_pace::WINDOWS] =
@@ -3184,7 +3188,7 @@ impl App {
                 ctl.window.request_redraw();
             }
         }
-        let drawn = if self.ui.prefs.previews_off {
+        let drawn = if self.ui.prefs.previews_off || self.ui.preview_governor.held() {
             Level::Paused
         } else {
             crate::preview_pace::effective(level, self.ui.prefs.preview_cap)
