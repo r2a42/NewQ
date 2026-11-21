@@ -44,6 +44,11 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
         if !test.busy() && !offered.iter().any(|s| selected.contains(&s.choice.key)) {
             selected.extend(offered.iter().map(|s| s.choice.key.clone()));
         }
+        // The 3D stage part: ticked by itself for a show with a projector or
+        // a display that shows the stage (owner's decision 8).
+        if !test.busy() {
+            test.stage3d = test.stage_wanted;
+        }
     }
     let mut sound = (st.prefs.test_sound.clone(), st.prefs.test_muted);
     test.heavy = st.prefs.test_heavy;
@@ -64,6 +69,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
                     body(
                         ui,
                         engine,
+                        st,
                         &mut test,
                         &facts,
                         &live,
@@ -286,6 +292,7 @@ fn net_facts(st: &UiState) -> super::choice::NetFacts {
 fn body(
     ui: &mut egui::Ui,
     engine: &Engine,
+    st: &mut UiState,
     test: &mut super::TestMode,
     facts: &Facts,
     live: &[(String, bool)],
@@ -444,6 +451,10 @@ fn body(
         }
         View::Running(r) => {
             running(ui, r);
+            if let Some(s) = &r.stage {
+                ui.separator();
+                stage_running(ui, st, s, r.elapsed().as_secs_f64());
+            }
             if !live.is_empty() {
                 ui.separator();
                 live_section(ui, live);
@@ -722,20 +733,25 @@ fn idle(
     ui.add_space(4.0);
 
     // 1. How long.
-    let plan = choice::plan(test.level, test.parts, net_ok);
+    let plan = choice::plan_with(test.level, test.parts, test.stage3d, net_ok);
     egui::Grid::new("test-choices")
         .num_columns(2)
         .spacing([10.0, 6.0])
         .show(ui, |ui| {
             ui.label(RichText::new("Length").strong());
             let r = egui::ComboBox::from_id_salt("test-length")
-                .selected_text(choice::level_item(test.level, test.parts, net_ok))
+                .selected_text(choice::level_item_with(
+                    test.level,
+                    test.parts,
+                    test.stage3d,
+                    net_ok,
+                ))
                 .width(220.0)
                 .show_ui(ui, |ui| {
                     for level in Level::ALL {
                         let r = ui.selectable_label(
                             test.level == level,
-                            choice::level_item(level, test.parts, net_ok),
+                            choice::level_item_with(level, test.parts, test.stage3d, net_ok),
                         );
                         #[cfg(test)]
                         note_choice(ui, format!("level:{}", level.label()), &r);
@@ -754,6 +770,9 @@ fn idle(
             ui.horizontal(|ui| {
                 let a = ui.checkbox(&mut test.parts.cue_list, "Cue list");
                 let b = ui.checkbox(&mut test.parts.timeline, "Timeline");
+                let d = ui.checkbox(&mut test.stage3d, "3D stage").on_hover_text(
+                    "Whether the 3D stage makes the displays miss pictures on this computer: the same lap with previews off, with a turning 3D view, with its light on, and with a display showing the stage.",
+                );
                 let c = ui
                     .add_enabled_ui(net_ok, |ui| {
                         ui.checkbox(&mut test.parts.network, "Network")
@@ -769,9 +788,10 @@ fn idle(
                 {
                     note_choice(ui, "Cue list".into(), &a);
                     note_choice(ui, "Timeline".into(), &b);
+                    note_choice(ui, "3D stage".into(), &d);
                     note_choice(ui, "Network".into(), &c);
                 }
-                let _ = (a, b, c);
+                let _ = (a, b, c, d);
             });
             ui.end_row();
         });
@@ -792,6 +812,16 @@ fn idle(
                 "The cue list and timeline play on {} too, and each measures itself.",
                 choice::and_list(&names)
             ))
+            .weak()
+            .small(),
+        );
+    }
+    if test.stage3d && test.stage_unscreened {
+        net_label(
+            ui,
+            RichText::new(
+                "Your show has no 3D stage: the 3D stage part uses a sample venue with projectors, on the test's copy of your show only.",
+            )
             .weak()
             .small(),
         );
@@ -1418,6 +1448,54 @@ fn running(ui: &mut egui::Ui, r: &Run) {
             ui.ctx().copy_text(r.folder.display().to_string());
         }
     });
+}
+
+/// The 3D stage part under way: which leg, and the view it turns.
+fn stage_running(ui: &mut egui::Ui, st: &mut UiState, s: &super::stage::StageRun, t: f64) {
+    use super::stage::Leg;
+    let Some(now) = s.now(t) else {
+        ui.label(RichText::new("3D stage: done; the report is being written.").weak());
+        return;
+    };
+    let line = format!(
+        "3D stage, leg {} of {}{}: {} · {:.0} s left",
+        now.number,
+        now.of,
+        if now.round > 1 {
+            format!(", round {}", now.round)
+        } else {
+            String::new()
+        },
+        now.leg.name(),
+        now.left
+    );
+    net_label(ui, RichText::new(line).strong());
+    ui.label(
+        RichText::new(match now.leg {
+            Leg::Baseline => {
+                "Every preview is held off for this leg, the 3D view's too: what the displays do without them is the baseline."
+            }
+            Leg::View => "The 3D view turns; the previews give way to the displays as they always do.",
+            Leg::Light => "The projectors' light is on in the 3D view.",
+            Leg::Display => match &s.setup.stage_display {
+                Some(d) if d.windowed => {
+                    "A display shows the stage in place of the test's pictures."
+                }
+                _ => "A display with no window shows the stage, drawn for the previews only, at their pace.",
+            },
+        })
+        .weak()
+        .small(),
+    );
+    // The view itself: drawn as any 3D preview is, through the one governor.
+    let mut view = s.view_state(t);
+    let size = egui::vec2(ui.available_width().clamp(200.0, 480.0), 0.0);
+    let size = egui::vec2(size.x, size.x * 9.0 / 16.0);
+    ui.allocate_ui(size, |ui| {
+        ui.set_min_size(size);
+        crate::ui::stage_view::draw(ui, &s.show, st, &mut view, super::stage::VIEW);
+    });
+    ui.ctx().request_repaint();
 }
 
 /// How each kind of cue came out, as a small table.

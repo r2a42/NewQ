@@ -1,12 +1,18 @@
 //! What the Test Mode window asks: a length and what to test. Pure: the ticks
-//! and the length give the plan of parts (`plan`), how long it takes
-//! (`total_secs`, `length_words`, `summary`) and why it can't start
-//! (`start_refusal`, `network_reason`).
+//! and the length give the plan of parts (`plan`, `plan_with` for the 3D
+//! stage tick), how long it takes (`total_secs`, `length_words`, `summary`)
+//! and why it can't start (`start_refusal`, `network_reason`).
+//!
+//! The 3D stage tick is not one of the `Parts` this computer keeps: it is off
+//! by default and on by itself when the show has a projector or a display
+//! that shows the stage (`stage_wanted`, owner's decision 8), each time the
+//! window opens.
 
 use super::Level;
 use serde::{Deserialize, Serialize};
 
-/// The three things a test can try, ticked in the window.
+/// The three things a test can try that this computer remembers (the 3D
+/// stage's tick follows the show: `stage_wanted`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Parts {
     #[serde(default)]
@@ -33,6 +39,7 @@ impl Default for Parts {
 pub enum Part {
     CueList,
     Timeline,
+    Stage3d,
     Network,
 }
 
@@ -42,6 +49,7 @@ impl Part {
         match self {
             Part::CueList => "Cue list",
             Part::Timeline => "Timeline",
+            Part::Stage3d => "3D stage",
             Part::Network => "Network",
         }
     }
@@ -51,6 +59,7 @@ impl Part {
         match self {
             Part::CueList => "cue-list",
             Part::Timeline => "timeline",
+            Part::Stage3d => "stage3d",
             Part::Network => "network",
         }
     }
@@ -60,6 +69,7 @@ impl Part {
         match self {
             Part::CueList => Some(super::Flavour::Cues),
             Part::Timeline => Some(super::Flavour::Timeline),
+            Part::Stage3d => Some(super::Flavour::Stage),
             Part::Network => None,
         }
     }
@@ -82,6 +92,7 @@ impl PartPlan {
         match self.part {
             Part::Network => f64::from(self.laps) * super::network::LAP_SECS,
             _ if self.minutes > 0 => f64::from(self.minutes) * 60.0,
+            Part::Stage3d => STAGE_SHORT_SECS,
             _ => SHORT_SECS,
         }
     }
@@ -89,6 +100,14 @@ impl PartPlan {
 
 /// About how long a Short cue or timeline lap takes, with its getting ready.
 const SHORT_SECS: f64 = 60.0;
+/// The 3D stage part's four Short legs, with its getting ready.
+const STAGE_SHORT_SECS: f64 = 4.0 * super::stage::SHORT_LEG_SECS + 20.0;
+
+/// Whether the 3D stage part is ticked by itself for `show`: it has a
+/// projector, or a display that shows the stage (owner's decision 8).
+pub fn stage_wanted(show: &crate::show::Show) -> bool {
+    !show.stage3d.projectors.is_empty() || show.outputs.iter().any(|o| show.shows_stage(o.id))
+}
 
 /// The network part's laps at each length: one, a few, and the soak's ten.
 pub fn network_laps(level: Level) -> u32 {
@@ -109,8 +128,16 @@ fn whole_minutes(level: Level) -> u32 {
     }
 }
 
-/// The parts to run, in order: those ticked that can run (`network_ok`).
+/// The parts to run, in order: those ticked that can run (`network_ok`),
+/// the 3D stage not among them.
+#[cfg(test)]
 pub fn plan(level: Level, parts: Parts, network_ok: bool) -> Vec<PartPlan> {
+    plan_with(level, parts, false, network_ok)
+}
+
+/// `plan`, with the 3D stage part if `stage` (after the timeline, before
+/// the network).
+pub fn plan_with(level: Level, parts: Parts, stage: bool, network_ok: bool) -> Vec<PartPlan> {
     let mut v = Vec::new();
     let net = (parts.network && network_ok).then(|| PartPlan {
         part: Part::Network,
@@ -121,6 +148,7 @@ pub fn plan(level: Level, parts: Parts, network_ok: bool) -> Vec<PartPlan> {
     let played: Vec<Part> = [
         (parts.cue_list, Part::CueList),
         (parts.timeline, Part::Timeline),
+        (stage, Part::Stage3d),
     ]
     .into_iter()
     .filter_map(|(on, p)| on.then_some(p))
@@ -167,8 +195,14 @@ pub fn length_words(secs: f64) -> String {
 }
 
 /// The drop-down's words for a length with these ticks: "Short · about 4 minutes".
+#[cfg(test)]
 pub fn level_item(level: Level, parts: Parts, network_ok: bool) -> String {
-    let p = plan(level, parts, network_ok);
+    level_item_with(level, parts, false, network_ok)
+}
+
+/// `level_item`, with the 3D stage part if `stage`.
+pub fn level_item_with(level: Level, parts: Parts, stage: bool, network_ok: bool) -> String {
+    let p = plan_with(level, parts, stage, network_ok);
     if p.is_empty() {
         return level.label().to_string();
     }
@@ -184,9 +218,11 @@ pub fn summary(plan: &[PartPlan]) -> String {
         .map(|(i, p)| match (i, p.part) {
             (0, Part::CueList) => "Cue list",
             (0, Part::Timeline) => "Timeline",
+            (0, Part::Stage3d) => "The 3D stage",
             (0, Part::Network) => "The network check",
             (_, Part::CueList) => "cue list",
             (_, Part::Timeline) => "timeline",
+            (_, Part::Stage3d) => "the 3D stage",
             (_, Part::Network) => "the network check",
         })
         .collect();
@@ -207,8 +243,18 @@ pub fn summary(plan: &[PartPlan]) -> String {
 
 /// The parts named in `NEWQ_TEST_PARTS` ("cue,timeline,network", any order,
 /// any case); nothing named: the network alone (what the developers' start
-/// always did).
+/// always did). The 3D stage ("stage", "3d") is `parse_stage`.
 pub fn parse_parts(text: &str) -> Parts {
+    parse_ticks(text).0
+}
+
+/// Whether `NEWQ_TEST_PARTS` names the 3D stage part.
+pub fn parse_stage(text: &str) -> bool {
+    parse_ticks(text).1
+}
+
+fn parse_ticks(text: &str) -> (Parts, bool) {
+    let mut stage = false;
     let mut p = Parts {
         cue_list: false,
         timeline: false,
@@ -219,26 +265,28 @@ pub fn parse_parts(text: &str) -> Parts {
             "cue" | "cues" | "cue-list" | "cuelist" => p.cue_list = true,
             "timeline" => p.timeline = true,
             "network" | "net" => p.network = true,
+            "stage" | "3d" | "stage3d" | "3d-stage" => stage = true,
             _ => {}
         }
     }
-    if !(p.cue_list || p.timeline || p.network) {
+    if !(p.cue_list || p.timeline || p.network || stage) {
         p.network = true;
     }
-    p
+    (p, stage)
 }
 
 /// What a part plays, for the window's "What does this do?": the test's own
 /// words without their first sentence (its length, which the run decides).
 pub fn what_it_does(p: &PartPlan) -> String {
     let text = match p.part.flavour() {
+        Some(super::Flavour::Stage) => super::stage::WHAT_IT_DOES,
         Some(f) => f.summary(p.level),
         None => {
             "Plays a short show of its own on every screen of every computer and measures how closely each keeps to this one: the clock, each GO, the pictures, corrections and stalls. It opens with a Sync flash you can film in slow motion across two screens. Its media is sent to every computer first."
         }
     };
     let text = match p.part {
-        Part::Network => text,
+        Part::Network | Part::Stage3d => text,
         _ => text.split_once(". ").map_or(text, |(_, rest)| rest),
     };
     format!("{}: {text}", p.part.name())
@@ -425,6 +473,50 @@ mod tests {
         assert_eq!(parse_parts("cue,network"), ticks(true, false, true));
         assert_eq!(parse_parts("Timeline + CUE"), ticks(true, true, false));
         assert_eq!(parse_parts("nonsense"), ticks(false, false, true));
+    }
+
+    #[test]
+    fn the_3d_stage_part_comes_after_the_timeline_and_follows_the_show() {
+        let p = plan_with(Level::Short, ticks(true, true, true), true, true);
+        let order: Vec<Part> = p.iter().map(|p| p.part).collect();
+        assert_eq!(
+            order,
+            [Part::CueList, Part::Timeline, Part::Stage3d, Part::Network]
+        );
+        assert_eq!(
+            plan(Level::Short, ticks(true, false, false), false).len(),
+            1
+        );
+        let alone = plan_with(Level::Short, ticks(false, false, false), true, false);
+        assert_eq!(alone.len(), 1);
+        assert_eq!(summary(&alone), "The 3D stage: about 3 minutes");
+        assert_eq!(alone[0].part.slug(), "stage3d");
+        assert_eq!(
+            alone[0].part.flavour(),
+            Some(crate::testmode::Flavour::Stage)
+        );
+        // Medium shares the hour.
+        let two = plan_with(Level::Medium, ticks(true, false, false), true, false);
+        assert_eq!((two[0].minutes, two[1].minutes), (30, 30));
+        assert!(what_it_does(&alone[0]).starts_with("3D stage: Plays the cue list's lap"));
+        // The developers' start.
+        assert!(parse_stage("cue,stage") && !parse_stage("cue"));
+        assert_eq!(parse_parts("3d"), ticks(false, false, false));
+        // On by itself for a show with a projector or a display showing the stage.
+        let mut show = crate::show::Show::default();
+        assert!(!stage_wanted(&show));
+        show.add_surface(None);
+        assert!(!stage_wanted(&show), "a screen alone isn't enough");
+        show.outputs[0].source = Some(crate::stage3d::StageSource::default());
+        assert!(stage_wanted(&show));
+        show.outputs[0].source = None;
+        show.add_projector();
+        assert!(stage_wanted(&show));
+        // What this computer keeps reads as before: no 3D tick in it.
+        let old: Parts =
+            serde_json::from_str("{\"cue_list\":true,\"timeline\":false,\"network\":true}")
+                .unwrap();
+        assert_eq!(old, ticks(true, false, true));
     }
 
     #[test]

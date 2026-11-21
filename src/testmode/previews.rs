@@ -95,7 +95,7 @@ impl Settings {
 /// The level the previews are drawn at now, as `App::pace_previews` works it
 /// out: the governor's, under this computer's cap, paused while they are off.
 pub fn drawn_level(st: &UiState) -> Level {
-    if st.prefs.previews_off {
+    if st.prefs.previews_off || st.preview_governor.held() {
         Level::Paused
     } else {
         crate::preview_pace::effective(st.preview_governor.governed(), st.prefs.preview_cap)

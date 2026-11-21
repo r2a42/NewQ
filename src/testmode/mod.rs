@@ -7,7 +7,8 @@
 //! tests (`plan::build_timeline`, a timeline list and group that `timeline`
 //! drives, pressing GO where a pause waits for it). The window asks for a
 //! length and what to test (`choice`); several parts ticked run one after
-//! another as one test (`sequence`).
+//! another as one test (`sequence`). The 3D stage part (`stage`) plays the
+//! cue list's lap with and without the 3D stage and compares the displays.
 
 pub mod analysis;
 pub mod assets;
@@ -28,6 +29,7 @@ pub mod previews;
 pub mod selftest;
 pub mod sequence;
 pub mod session;
+pub mod stage;
 pub mod syncflash;
 pub mod timeline;
 
@@ -67,6 +69,9 @@ pub enum Flavour {
     #[default]
     Cues,
     Timeline,
+    /// The 3D stage part (`stage`): the cue list's lap round and round,
+    /// with and without the 3D stage.
+    Stage,
 }
 
 impl Flavour {
@@ -75,6 +80,7 @@ impl Flavour {
         match self {
             Flavour::Cues => level.label().to_string(),
             Flavour::Timeline => format!("Timeline {}", level.label().to_lowercase()),
+            Flavour::Stage => format!("3D stage {}", level.label().to_lowercase()),
         }
     }
 }
