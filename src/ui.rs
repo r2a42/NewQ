@@ -5794,6 +5794,7 @@ fn displays_panel(
         .iter()
         .map(|o| (o.id, o.name.clone()))
         .collect();
+    let stage = stage_edit::StageItems::of(show);
     for (di, d) in show
         .outputs
         .iter_mut()
@@ -5954,6 +5955,7 @@ fn displays_panel(
                 ui,
                 d,
                 &sources,
+                &stage,
                 shared.contains(&d.id),
                 &picture_sizes,
                 actions,
@@ -5976,53 +5978,78 @@ fn displays_panel(
     }
 }
 
-/// Which picture a display shows: its own, or a part of another display's,
-/// which several projectors can share between them. Also, for a picture
-/// that is shared, how big it is.
+/// The words of a display's *Shows* row.
+pub(crate) const SHOWS_ROW: &str = "Shows";
+
+/// What a display shows: its own cues, a part of another display's picture
+/// (which several projectors can share between them), or the 3D stage. Also,
+/// for a picture that is shared, how big it is.
+#[allow(clippy::too_many_arguments)]
 fn shared_picture_editor(
     ui: &mut Ui,
     d: &mut OutputConfig,
     sources: &[(OutputId, String)],
+    stage: &stage_edit::StageItems,
     is_shared: bool,
     picture_sizes: &HashMap<OutputId, (u32, u32)>,
     actions: &mut Vec<Action>,
 ) {
     let current = d.part_of.map(|p| p.display);
-    // A display that others show part of can't itself show part of another.
-    if !is_shared {
-        ui.horizontal(|ui| {
-            ui.label("Shows");
-            let shown = current
-                .and_then(|id| sources.iter().find(|(s, _)| *s == id))
-                .map_or("its own picture".to_string(), |(_, n)| {
-                    format!("part of {n}")
-                });
-            egui::ComboBox::from_id_salt(("display_part", d.id.0))
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(current.is_none(), "Its own picture")
-                        .clicked()
-                    {
+    let menu = format!("Displays ▸ {} ▸ {SHOWS_ROW}", d.name);
+    ui.horizontal(|ui| {
+        ui.label(SHOWS_ROW);
+        // A part of another's picture comes first: such a display shows
+        // that one's, the stage too, whatever a hand-written file says.
+        let shown = match (&d.source, current) {
+            (_, Some(id)) => sources
+                .iter()
+                .find(|(s, _)| *s == id)
+                .map_or("Its own cues".to_string(), |(_, n)| format!("Part of {n}")),
+            (Some(s), None) => stage_edit::stage_source_words(s),
+            (None, None) => "Its own cues".to_string(),
+        };
+        let r = egui::ComboBox::from_id_salt(("display_part", d.id.0))
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                let own = current.is_none() && d.source.is_none();
+                let r = ui.selectable_label(own, "Its own cues");
+                note_page_add(ui, &format!("{menu} ▸ Its own cues"), &r);
+                if r.clicked() && !own {
+                    d.source = None;
+                    if current.is_some() {
                         actions.push(Action::ShowPartOf(d.id, None));
                     }
+                }
+                // A display that others show part of can't itself show part
+                // of another.
+                if !is_shared {
                     for (id, name) in sources.iter().filter(|(id, _)| *id != d.id) {
-                        if ui
-                            .selectable_label(current == Some(*id), format!("Part of {name}"))
-                            .clicked()
-                            && current != Some(*id)
-                        {
+                        let r =
+                            ui.selectable_label(current == Some(*id), format!("Part of {name}"));
+                        note_page_add(ui, &format!("{menu} ▸ Part of {name}"), &r);
+                        if r.clicked() && current != Some(*id) {
                             actions.push(Action::ShowPartOf(d.id, Some(*id)));
                         }
                     }
-                })
-                .response
-                .on_hover_text(
-                    "Several projectors can show one wide picture between them: make one \
-                     display the whole picture and the others parts of it. Send cues to \
-                     the whole picture.",
-                );
-        });
+                }
+                ui.separator();
+                stage.items(ui, &menu, d.id, &mut d.source);
+            })
+            .response
+            .on_hover_text(
+                "What this display shows. Several projectors can show one wide picture \
+                 between them: make one display the whole picture and the others parts of \
+                 it, and send cues to the whole picture. A display can show the 3D stage \
+                 instead of its cues.",
+            );
+        note_page_add(ui, &menu, &r);
+    });
+    if d.source.is_some() && current.is_none() && stage.on_a_screen(d.id) {
+        settings::warning(
+            ui,
+            "This display is on a screen of the 3D stage: that screen is left blank (it \
+             can't show itself).",
+        );
     }
     if let Some(p) = &mut d.part_of {
         let (pw, ph) = picture_sizes
@@ -12323,6 +12350,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                         display: source,
                         area: [0.0, 0.0, 0.5, 1.0],
                     });
+                    // It shows the other's picture now, the stage too if
+                    // that one shows it: a source of its own would only come
+                    // back later, unasked.
+                    o.source = None;
                 }
             }
         },

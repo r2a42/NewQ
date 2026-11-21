@@ -364,7 +364,7 @@ pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut
     surfaces_section(ui, show, st);
     super::stage_projectors::section_ui(ui, show, st);
     viewpoints_section(ui, show);
-    sources_section(ui, show);
+    sources_section(ui, show, st, actions);
 }
 
 fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -926,81 +926,182 @@ fn viewpoints_section(ui: &mut Ui, show: &mut Show) {
     });
 }
 
-/// What a display shows: its cues, or the stage from a viewpoint.
-fn sources_section(ui: &mut Ui, show: &mut Show) {
-    section(ui, "Displays that show the stage", |ui| {
+/// The words for a display that shows the 3D stage from `s`.
+pub(super) fn stage_source_words(s: &StageSource) -> String {
+    match &s.viewpoint {
+        None => "The 3D stage, all of it".to_string(),
+        Some(n) => format!("The 3D stage, from {n}"),
+    }
+}
+
+/// What a display may show of the stage, in its *Shows* choice on
+/// Settings ▸ Displays: all of it (from in front), then each saved viewpoint.
+pub(super) fn stage_choices(show: &Show) -> Vec<StageSource> {
+    std::iter::once(StageSource::default())
+        .chain(show.stage3d.viewpoints.iter().map(|v| StageSource {
+            viewpoint: Some(v.name.clone()),
+        }))
+        .collect()
+}
+
+/// What the stage's items in a display's *Shows* choice need to know of the
+/// show, worked out before the displays are borrowed to be edited.
+pub(super) struct StageItems {
+    choices: Vec<StageSource>,
+    /// Why a display can't show the stage (`Show::stage_source_refused`).
+    refused: Vec<(OutputId, &'static str)>,
+    /// Displays whose picture is on one of the stage's screens.
+    on_a_screen: Vec<OutputId>,
+    /// Displays a projector of the stage throws (itself, or a part of its
+    /// picture), with the projector's name.
+    thrown: Vec<(OutputId, String)>,
+}
+
+impl StageItems {
+    pub(super) fn of(show: &Show) -> StageItems {
+        StageItems {
+            choices: stage_choices(show),
+            refused: show
+                .outputs
+                .iter()
+                .filter_map(|o| Some((o.id, show.stage_source_refused(o.id)?)))
+                .collect(),
+            on_a_screen: show
+                .stage3d
+                .surfaces
+                .iter()
+                .filter_map(|s| s.feed.output())
+                .map(|o| show.whole_picture(o))
+                .collect(),
+            thrown: show
+                .stage3d
+                .projectors
+                .iter()
+                .filter_map(|p| Some((show.whole_picture(p.display?), p.name.clone())))
+                .collect(),
+        }
+    }
+
+    pub(super) fn refused(&self, output: OutputId) -> Option<&'static str> {
+        self.refused
+            .iter()
+            .find(|(o, _)| *o == output)
+            .map(|(_, why)| *why)
+    }
+
+    /// Whether display `output`'s picture is on a screen of the stage.
+    pub(super) fn on_a_screen(&self, output: OutputId) -> bool {
+        self.on_a_screen.contains(&output)
+    }
+
+    /// The stage's items of display `output`'s *Shows* menu (`menu` names it
+    /// for the tests): picking one writes its `source`. A display that can't
+    /// show the stage has them greyed, and the reason under them. True when
+    /// one was picked.
+    pub(super) fn items(
+        &self,
+        ui: &mut Ui,
+        menu: &str,
+        output: OutputId,
+        source: &mut Option<StageSource>,
+    ) -> bool {
+        let refused = self.refused(output);
+        let mut picked = false;
+        for c in &self.choices {
+            let words = stage_source_words(c);
+            let r = ui.add_enabled(
+                refused.is_none(),
+                egui::Button::selectable(source.as_ref() == Some(c), &words),
+            );
+            super::note_page_add(ui, &format!("{menu} ▸ {words}"), &r);
+            let r = match self.thrown.iter().find(|(o, _)| *o == output) {
+                Some((_, p)) => r.on_hover_text(format!(
+                    "{p}, a projector of the 3D stage, throws this display's picture: a \
+                     display that shows the stage can't be a projector in it, so {p} is \
+                     left without one when the show is next opened."
+                )),
+                None if self.on_a_screen(output) => r.on_hover_text(
+                    "This display is on a screen of the 3D stage: showing the stage here \
+                     leaves that screen blank (it can't show itself).",
+                ),
+                None => r.on_hover_text("Show the 3D stage instead of this display's cues"),
+            };
+            if r.clicked() && source.as_ref() != Some(c) {
+                *source = Some(c.clone());
+                picked = true;
+            }
+        }
+        if let Some(why) = refused {
+            ui.label(RichText::new(why).weak().small());
+        }
+        picked
+    }
+}
+
+/// The heading of the 3D stage page's list of the displays that show it.
+pub const STAGE_DISPLAYS: &str = "Displays that show the stage";
+
+/// The displays that show the stage, each with the way to it on the
+/// Displays page, where a display's *Shows* is chosen.
+fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    let displays = super::settings::path(super::SettingsPage::Displays, None);
+    section(ui, STAGE_DISPLAYS, |ui| {
         hint(
             ui,
-            "A display can show the 3D stage instead of its cues, on its monitor and in any \
-             stream it sends: for a previz screen in the room, or to send the view out.",
+            &format!(
+                "A display can show the 3D stage instead of its cues, on its monitor and in any \
+                 stream it sends: for a previz screen in the room, or to send the view out. \
+                 Choose it with the display's Shows on {displays}."
+            ),
         );
-        let names: Vec<String> = show
-            .stage3d
-            .viewpoints
-            .iter()
-            .map(|v| v.name.clone())
-            .collect();
-        let shown_on: Vec<OutputId> = show
-            .stage3d
-            .surfaces
-            .iter()
-            .filter_map(|s| s.feed.output())
-            .map(|o| show.whole_picture(o))
-            .collect();
-        // A display that shows part of another's picture shows that one's.
-        let refused: Vec<(OutputId, &'static str)> = show
-            .outputs
-            .iter()
-            .filter_map(|o| Some((o.id, show.stage_source_refused(o.id)?)))
-            .collect();
+        let items = StageItems::of(show);
+        let mut any = false;
         egui::Grid::new("stage_sources")
-            .num_columns(2)
+            .num_columns(3)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                for o in show.outputs.iter_mut().filter(|o| !o.is_sub_display()) {
-                    ui.label(&o.name);
-                    if let Some((_, why)) = refused.iter().find(|(r, _)| *r == o.id) {
-                        ui.label(RichText::new("Its part of the other picture").weak())
-                            .on_hover_text(*why);
-                        ui.end_row();
+                for o in show.outputs.iter().filter(|o| !o.is_sub_display()) {
+                    let Some(s) = show.stage_source(o.id) else {
                         continue;
-                    }
-                    let text = match &o.source {
-                        None => "Its cues".to_string(),
-                        Some(StageSource { viewpoint: None }) => "The stage: all of it".into(),
-                        Some(StageSource { viewpoint: Some(n) }) => format!("The stage from {n}"),
                     };
-                    let on_stage = shown_on.contains(&o.id);
-                    egui::ComboBox::from_id_salt(("source", o.id.0))
-                        .selected_text(text)
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut o.source, None, "Its cues");
-                            ui.selectable_value(
-                                &mut o.source,
-                                Some(StageSource::default()),
-                                "The stage: all of it",
+                    any = true;
+                    ui.label(&o.name);
+                    let whole = show.whole_picture(o.id);
+                    if whole == o.id {
+                        let words = stage_source_words(s);
+                        if items.on_a_screen(o.id) {
+                            ui.label(&words).on_hover_text(
+                                "It is on a screen of the stage: that screen is left blank \
+                                 (it can't show itself).",
                             );
-                            for n in &names {
-                                ui.selectable_value(
-                                    &mut o.source,
-                                    Some(StageSource {
-                                        viewpoint: Some(n.clone()),
-                                    }),
-                                    format!("The stage from {n}"),
-                                );
-                            }
-                        })
-                        .response
-                        .on_hover_text(if on_stage {
-                            "It is on a screen of the stage: showing the stage here leaves \
-                             that screen blank (it can't show itself)"
                         } else {
-                            "What this display shows"
-                        });
+                            ui.label(&words);
+                        }
+                    } else {
+                        let of = show.output(whole).map_or("", |w| w.name.as_str());
+                        ui.label(RichText::new(format!("Its part of {of}'s")).weak());
+                    }
+                    let r = ui
+                        .button("Open on the Displays page")
+                        .on_hover_text(format!("{displays}: {}", o.name));
+                    super::note_page_add(ui, &format!("3D stage ▸ {} ▸ Open", o.name), &r);
+                    if r.clicked() {
+                        st.reveal_display.set(Some(o.id));
+                        actions.push(Action::OpenSettings(super::SettingsPage::Displays));
+                    }
                     ui.end_row();
                 }
             });
+        if !any {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("No display shows the stage.").weak());
+                let r = ui.button(format!("Go to {displays}"));
+                super::note_page_add(ui, "3D stage ▸ Go to Displays", &r);
+                if r.clicked() {
+                    actions.push(Action::OpenSettings(super::SettingsPage::Displays));
+                }
+            });
+        }
     });
 }
 
