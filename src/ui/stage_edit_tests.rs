@@ -799,3 +799,29 @@ fn a_screen_and_a_projector_are_added_through_their_tabs() {
         );
     }
 }
+
+#[test]
+fn the_page_is_laid_out_by_the_room_it_has() {
+    use Arrangement::*;
+    // Tall enough: the view on top.
+    assert_eq!(arrangement(vec2(1000.0, 600.0)), Stacked);
+    assert_eq!(arrangement(vec2(300.0, STACKED_FROM)), Stacked);
+    // Short and wide (the classic window): beside the tabs.
+    assert_eq!(arrangement(vec2(600.0, 245.0)), SideBySide);
+    assert_eq!(arrangement(vec2(SIDE_BY_SIDE_FROM, VIEW_LEAST)), SideBySide);
+    // Short and narrow: stacked while it fits, else all of it scrolls.
+    assert_eq!(arrangement(vec2(400.0, SHORT_PAGE)), Stacked);
+    assert_eq!(arrangement(vec2(400.0, SHORT_PAGE - 1.0)), Cramped);
+    assert_eq!(arrangement(vec2(1000.0, VIEW_LEAST - 1.0)), Cramped);
+    // The view never leaves the content less than its least.
+    assert_eq!(
+        view_height(600.0, Some(10_000.0)),
+        600.0 - CHROME - CONTENT_LEAST
+    );
+    assert_eq!(view_height(600.0, Some(0.0)), VIEW_LEAST);
+    assert_eq!(
+        view_width(602.0, Some(10_000.0)),
+        602.0 - SIDE_CONTENT_LEAST
+    );
+    assert_eq!(view_width(602.0, Some(0.0)), SIDE_VIEW_LEAST);
+}

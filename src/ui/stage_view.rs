@@ -579,7 +579,7 @@ fn overlay(
     // its controls onto more rows and never draws them outside itself.
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
     let ui = &mut child;
-    egui::Frame::new()
+    let bar_bottom = egui::Frame::new()
         .fill(Color32::from_black_alpha(170))
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 2))
@@ -640,6 +640,11 @@ fn overlay(
                     );
                 }
                 if show.stage3d.venue.is_some() {
+                    // On a row of its own in a narrow view, so the
+                    // slider isn't cut off at the edge.
+                    if rect.width() < 420.0 {
+                        ui.end_row();
+                    }
                     ui.label("X-ray");
                     ui.add(
                         egui::Slider::new(&mut view.xray, 0.1..=1.0)
@@ -663,9 +668,13 @@ fn overlay(
                         .push(Action::OpenSettings(super::settings::SettingsPage::Stage3d));
                 }
             });
-        });
+        })
+        .response
+        .rect
+        .bottom();
     if view.light && !show.stage3d.projectors.is_empty() {
-        light_bar(ui, rect, view);
+        // Under the controls, however many rows they took.
+        light_bar(ui, rect, bar_bottom + 4.0, view);
     }
     if let Some(name) = &mut view.saving {
         let mut done = None;
@@ -776,8 +785,11 @@ pub fn light_notices(show: &Show, stats: Option<&FrameStats>) -> Vec<String> {
 
 /// The light's own controls, under the bar: what it shows, and for the
 /// picture its exposure.
-fn light_bar(ui: &mut Ui, rect: Rect, view: &mut StageViewState) {
-    let bar = Rect::from_min_size(rect.min + vec2(6.0, 36.0), vec2(rect.width() - 12.0, 26.0));
+fn light_bar(ui: &mut Ui, rect: Rect, top: f32, view: &mut StageViewState) {
+    let bar = Rect::from_min_size(
+        egui::pos2(rect.min.x + 6.0, top),
+        vec2(rect.width() - 12.0, 26.0),
+    );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(bar)
@@ -788,7 +800,7 @@ fn light_bar(ui: &mut Ui, rect: Rect, view: &mut StageViewState) {
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(&mut child, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Show");
                 let now = LIGHT_VIEWS
                     .iter()

@@ -913,7 +913,7 @@ fn row(ui: &mut Ui, show: &mut Show, st: &mut UiState, id: ProjectorId) -> bool 
         ui.checkbox(&mut p.visible, "Shown");
         if ui
             .selectable_label(through, "Look through")
-            .on_hover_text("See the room as this projector's lens sees it, in the view above")
+            .on_hover_text("See the room as this projector's lens sees it, in the page's 3D view")
             .clicked()
         {
             look = Some(!through);
