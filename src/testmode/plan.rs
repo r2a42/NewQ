@@ -1142,7 +1142,15 @@ pub(super) fn stage_setup(
         .filter(|o| o.computer.is_none() && o.monitor.is_some() && !o.is_sub_display())
         .map(|o| o.id)
         .collect();
-    let stage_display = if mirror && displays.len() >= 2 && local.len() >= 2 {
+    let stage_display = if !mirror {
+        // Across a show network: a display changed in the middle would send
+        // the show to every computer again, mid-test. Left out, and said.
+        notes.push(
+            "Across a show network the 3D stage part has no leg with a display showing the stage: changing a display during the test would send the show to every computer again"
+                .into(),
+        );
+        None
+    } else if displays.len() >= 2 && local.len() >= 2 {
         let id = *local.last().expect("two or more");
         let before = show.output(id).cloned().expect("a display of the show");
         let mut during = before.clone();
@@ -1194,7 +1202,9 @@ pub(super) fn stage_setup(
     if projectors > 0 {
         legs.push(Leg::Light);
     }
-    legs.push(Leg::Display);
+    if stage_display.is_some() {
+        legs.push(Leg::Display);
+    }
     if sample {
         notes.push(format!(
             "Your show has no 3D stage, so the 3D stage part used the Proscenium sample venue, with {} projector{} (on the test's copy of your show only)",
@@ -2976,5 +2986,16 @@ mod tests {
             b.show.stage3d.surfaces[0].feed.output(),
             Some(b.show.outputs[0].id)
         );
+        // Across a show network: no display is changed mid-test.
+        let b = build_stage(
+            &original,
+            &HashMap::new(),
+            &picks,
+            &SoundChoice::default(),
+            false,
+        );
+        let setup = b.stage.unwrap();
+        assert!(setup.stage_display.is_none());
+        assert_eq!(setup.legs, [Leg::Baseline, Leg::View, Leg::Light]);
     }
 }

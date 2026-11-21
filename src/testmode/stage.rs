@@ -395,6 +395,13 @@ impl StageRun {
         }
     }
 
+    /// Shorter legs (the tests of the test).
+    #[cfg(test)]
+    pub fn shorten(&mut self, leg_secs: f64) {
+        self.leg_secs = leg_secs;
+        self.total = leg_secs * self.setup.legs.len() as f64;
+    }
+
     /// The leg playing.
     pub fn leg(&self) -> Option<Leg> {
         let (i, _, _) = self.current?;
