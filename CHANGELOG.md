@@ -38,6 +38,10 @@ release page, and a release is refused if it has none.
   size*, each with a colour key. Up to 16 projectors per view; it gives way to the displays like
   every preview. Worked out by sums and drawn on a software graphics card only: not tried with real
   projectors or on a real graphics card.
+- **A venue model saved again is shown again.** Export the venue's model over itself (or change
+  a texture or materials file beside it) and the 3D stage reads it again a few seconds after the
+  file is finished, keeping the old room on screen until the new one is in. Before, it took a
+  restart. A file that can't be read is said once and tried again when it changes.
 - **A still 3D view no longer has to start over.** With a 3D preview open but nothing moving,
   NewQ let go of the 3D stage after half a minute, so the next change paid the start-up again. It
   now keeps it while any 3D view is on screen or a display shows the stage.

@@ -155,6 +155,112 @@ fn the_venue_loads_on_a_thread_and_again_only_when_it_must() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Passes (each looking at the venue's files at once, not `WATCH_EVERY`
+/// later) until `done`, at most `most`; what was said.
+fn passes_until(
+    live: &mut StageLive,
+    show: &Show,
+    shared: &mut StageShared,
+    most: Duration,
+    done: impl Fn(&StageLive, &StageShared) -> bool,
+) -> Vec<String> {
+    let mut words = Vec::new();
+    let end = Instant::now() + most;
+    while !done(live, shared) && Instant::now() < end {
+        live.look_now();
+        let mut said = Vec::new();
+        live.begin(show, shared, &mut said);
+        words.extend(said.into_iter().map(|s| match s {
+            Said::Note(m) | Said::Problem(m) => m,
+        }));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    words
+}
+
+/// Long enough for several looks; long enough for anything to happen.
+const QUIET: Duration = Duration::from_millis(1500);
+const LONG: Duration = Duration::from_secs(10);
+
+fn triangles(shared: &StageShared) -> Option<usize> {
+    match shared.venue {
+        VenueStatus::Loaded { triangles, .. } => Some(triangles),
+        _ => None,
+    }
+}
+
+/// A venue model written again at the same path (exported over itself), or
+/// a file it reads beside it, is read again once it has rested: the old
+/// model stays in the scene until the new one is in. One that then fails
+/// says so once and isn't tried again until the file changes again.
+#[test]
+fn a_venue_changed_on_disk_is_read_again() {
+    let dir = temp_dir("changed");
+    let path = dir.join("room.obj");
+    let one = "mtllib room.mtl\nusemtl m\nv -5 0 -5\nv 5 0 -5\nv 5 0 5\nv -5 0 5\nf 1 2 3\n";
+    std::fs::write(&path, one).unwrap();
+    std::fs::write(dir.join("room.mtl"), "newmtl m\nKd 0.5 0.5 0.5\n").unwrap();
+    let mut show = Show::default();
+    show.add_surface(None);
+    show.stage3d.venue = Some(Venue::new(path.clone()));
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    settle(&mut live, &show, &mut shared);
+    assert_eq!(triangles(&shared), Some(1));
+    // Nothing changed: looked at, never read again.
+    let first = live.venue.loaded.clone().unwrap();
+    let words = passes_until(&mut live, &show, &mut shared, QUIET, |_, _| false);
+    assert!(words.is_empty(), "{words:?}");
+    assert!(Arc::ptr_eq(&first, live.venue.loaded.as_ref().unwrap()));
+    // Written again, bigger: read again; the old one shown meanwhile.
+    std::fs::write(&path, format!("{one}f 1 3 4\n")).unwrap();
+    let words = passes_until(&mut live, &show, &mut shared, LONG, |live, shared| {
+        // Every pass meanwhile draws the old room (or, at the end, the new).
+        assert!(shared.scene.parts[0].lit, "never a pass without the room");
+        let l = live.venue.loaded.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&first, l) || l.triangles == 2);
+        triangles(shared) == Some(2) && !live.venue_busy()
+    });
+    assert_eq!(triangles(&shared), Some(2), "{words:?}");
+    assert_eq!(
+        words
+            .iter()
+            .filter(|w| w.starts_with("Venue loaded"))
+            .count(),
+        1,
+        "{words:?}"
+    );
+    assert!(shared.scene.parts[0].lit, "the room is in the scene");
+    // A file it reads beside it (its materials) changes: read again too.
+    let second = live.venue.loaded.clone().unwrap();
+    std::fs::write(dir.join("room.mtl"), "newmtl m\nKd 0.9 0.1 0.1\n\n").unwrap();
+    passes_until(&mut live, &show, &mut shared, LONG, |live, _| {
+        !Arc::ptr_eq(&second, live.venue.loaded.as_ref().unwrap()) && !live.venue_busy()
+    });
+    assert!(!Arc::ptr_eq(&second, live.venue.loaded.as_ref().unwrap()));
+    // Broken: said once; the old model stays drawn; not tried every pass.
+    std::fs::write(&path, "v 0 0 0\n").unwrap();
+    let words = passes_until(&mut live, &show, &mut shared, LONG, |_, shared| {
+        matches!(shared.venue, VenueStatus::Failed(_))
+    });
+    assert_eq!(
+        words.iter().filter(|w| w.contains("didn't load")).count(),
+        1,
+        "{words:?}"
+    );
+    let again = passes_until(&mut live, &show, &mut shared, QUIET, |_, _| false);
+    assert!(again.is_empty(), "{again:?}");
+    assert!(!live.venue_busy());
+    assert!(shared.scene.parts[0].lit, "the last good room stays");
+    // Mended: read again.
+    std::fs::write(&path, one).unwrap();
+    passes_until(&mut live, &show, &mut shared, LONG, |live, shared| {
+        triangles(shared) == Some(1) && !live.venue_busy()
+    });
+    assert_eq!(triangles(&shared), Some(1), "{:?}", shared.venue);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A display that shows the stage gets a picture drawn into its layer, at
 /// its size, with no preview open; drawn again only when something changed.
 #[test]
