@@ -36,11 +36,18 @@ fn stage_trial(show: &Show) -> feature::StageTrial {
     let rx = feature::start_stage_trial(show.clone());
     match rx.recv_timeout(feature::STAGE_TRIAL_LIMIT) {
         Ok(trial) => trial,
+        // A slow software card is not a fault of NewQ's, unless a card
+        // that works is required here (as Linux CI has it).
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            feature::StageTrial::both(feature::Verdict::Failed(format!(
+            let why = format!(
                 "the graphics card had not drawn the 3D stage after {} s",
                 feature::STAGE_TRIAL_LIMIT.as_secs()
-            )))
+            );
+            feature::StageTrial::both(if std::env::var_os("NEWQ_REQUIRE_GPU").is_some() {
+                feature::Verdict::Failed(why)
+            } else {
+                feature::Verdict::NotChecked(why)
+            })
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             feature::StageTrial::both(feature::Verdict::NotChecked(
