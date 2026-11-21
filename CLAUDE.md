@@ -873,7 +873,14 @@ The README describes the features; this file is about working on the code.
   `TestMode::choose_pick`; its "Show the test on" ticks are `Prefs::test_displays`;
   `plan::use_displays` replaces the show's outputs with them before the cues are made, the first
   display shows the picture and the others mirror it with a whole-area `part_of`; the
-  main window's own monitor is never offered). Timeline tests: `Flavour::Timeline` beside each `Level`
+  main window's own monitor is never offered). The 3D stage is kept: `plan::carry_stage` points
+  screens' feeds and projectors at the test's displays (the user's in order, extras to the first, a
+  sub display its display's, regions kept, a display one projector at most) and, with nothing
+  ticked, `unshow_stage` clears the first display's `source`; `use_displays_as` returns the report
+  lines for `Builder::notes` (`full.rs` drops them). The Network part (`network::build`) leaves a
+  venue model out (decision 9 of `organise-and-test3d-plan.md`; a sample stays; the cue-list and
+  timeline parts across a network still send it); `begin_test` ends corner, area and
+  multiview-layout edits. Timeline tests: `Flavour::Timeline` beside each `Level`
   (`Flavour::name`, "Timeline medium"; `assets::wanted_for` drops the 5.1 trailer); `plan::build_timeline` (same
   `Builder`, `list` set for a timeline list's cues; `use_displays_as(.., false)`, no mirror; `own_layers` on) makes a
   list "Programme" and from Medium a group "Interval" and a `timeline::Script` (legs, `TIMELINE_HOLD`, loop passes,

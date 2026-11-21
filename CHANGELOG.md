@@ -6,6 +6,12 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **A test keeps your 3D stage.** Test Mode used to leave every screen in the 3D stage grey and
+  the projectors with no picture, and with no monitor ticked a display that showed the stage hid
+  the test's pictures. Now the screens and projectors show the test's displays, so an open 3D view
+  shows the test as it plays, and the report says what the stage was pointed at. The network test
+  (Network ticked in Test Mode) leaves your venue model out, so the other computers don't fetch it
+  first.
 - **The same words everywhere, and hints that lead to the right place.** A cue's picture goes to a
   *Display* (the inspector said "Output"), the Preview pane's modes are *One display*, *Multiview*
   and *3D stage*, the previews say they give way "to keep the displays smooth", *File ▸ Media

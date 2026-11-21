@@ -251,23 +251,29 @@ pub(super) fn use_sound(show: &mut Show, sound: &SoundChoice) {
 /// shows the picture, the others show the whole of the first's picture too
 /// (a display that is "part of" another with the whole area is a mirror of it).
 /// With none chosen the show keeps the displays it has. Done before the cues
-/// are made, since a new cue is sent to the show's first display.
-pub(super) fn use_displays(show: &mut Show, displays: &[DisplayChoice]) {
-    use_displays_as(show, displays, true);
+/// are made, since a new cue is sent to the show's first display. The 3D
+/// stage is kept, pointed at the test's displays (`carry_stage`); what was
+/// done to it is said in the notes returned, for the report.
+pub(super) fn use_displays(show: &mut Show, displays: &[DisplayChoice]) -> Vec<String> {
+    use_displays_as(show, displays, true)
 }
 
 /// `use_displays`; with `mirror` false each display after the first has a
 /// picture of its own (the timeline tests show clips "also on" it).
-pub(super) fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirror: bool) {
+pub(super) fn use_displays_as(
+    show: &mut Show,
+    displays: &[DisplayChoice],
+    mirror: bool,
+) -> Vec<String> {
     let Some(first) = displays.first() else {
-        return;
+        return unshow_stage(show).notes();
     };
+    let old: Vec<(OutputId, Option<OutputId>)> =
+        show.outputs.iter().map(|o| (o.id, o.within)).collect();
     show.outputs.clear();
     // The user's multiview names displays that are gone: the test's are shown in turn.
     show.multiview = None;
     let main = show.add_display();
-    // The 3D stage's screens showed the displays that have gone.
-    show.forget_missing_feeds();
     let assign = |show: &mut Show, id: crate::show::OutputId, d: &DisplayChoice| {
         if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
             o.monitor = Some(d.reference.clone());
@@ -279,8 +285,10 @@ pub(super) fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirro
         }
     };
     assign(show, main, first);
+    let mut new = vec![main];
     for d in &displays[1..] {
         let id = show.add_display();
+        new.push(id);
         assign(show, id, d);
         if !mirror {
             continue;
@@ -292,6 +300,128 @@ pub(super) fn use_displays_as(show: &mut Show, displays: &[DisplayChoice], mirro
             });
         }
     }
+    let carried = carry_stage(show, &old, &new);
+    // Anything still naming a display that has gone shows nothing.
+    show.forget_missing_feeds();
+    carried.notes()
+}
+
+/// What the 3D stage was pointed at for a test, said in its report.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Carried {
+    /// Screens that showed one of the user's displays and show a test display now.
+    screens: usize,
+    /// Projectors that were one of the user's displays and are a test display now.
+    projectors: usize,
+    /// Projectors left with none: another came to the same test display first.
+    left_out: usize,
+    /// With no monitor ticked: the display that showed the stage and shows
+    /// the test's pictures now.
+    unstaged: Option<String>,
+}
+
+impl Carried {
+    fn notes(&self) -> Vec<String> {
+        let count = |n: usize, one: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {one}s"),
+        };
+        let mut v = Vec::new();
+        if self.screens + self.projectors > 0 {
+            v.push(format!(
+                "Your 3D stage is kept: {} and {} show the test's displays in place of yours, \
+                 in order. A screen that showed part of a picture shows the same part, which \
+                 can look cropped on a monitor of another shape",
+                count(self.screens, "screen"),
+                count(self.projectors, "projector"),
+            ));
+        }
+        if self.left_out > 0 {
+            v.push(format!(
+                "{} of your 3D stage throw no picture in the test: fewer displays are tested \
+                 than your show has, and a display is one projector at most",
+                count(self.left_out, "projector"),
+            ));
+        }
+        if let Some(name) = &self.unstaged {
+            v.push(format!(
+                "{name} shows your 3D stage; in the test it shows the test's pictures \
+                 instead, and so do the screens in the 3D stage that show it"
+            ));
+        }
+        v
+    }
+}
+
+/// Point the 3D stage's screens and projectors at the test's displays `new`
+/// (in order) in place of the user's `old` (each display's id and, for a sub
+/// display, the display it is in; in the show's order): the user's displays
+/// in order take the test's in order, any past the last the first, and a sub
+/// display its display's. A screen keeps the region of the picture it
+/// showed. A display is one projector at most: the first projector to come
+/// to one keeps it, a later one is left with none. Pure.
+pub(super) fn carry_stage(
+    show: &mut Show,
+    old: &[(OutputId, Option<OutputId>)],
+    new: &[OutputId],
+) -> Carried {
+    let tops: Vec<OutputId> = old
+        .iter()
+        .filter(|(_, within)| within.is_none())
+        .map(|(id, _)| *id)
+        .collect();
+    let target = |id: OutputId| -> Option<OutputId> {
+        let top = match old.iter().find(|(o, _)| *o == id)? {
+            (_, Some(display)) => *display,
+            (o, None) => *o,
+        };
+        let i = tops.iter().position(|t| *t == top)?;
+        new.get(i).or(new.first()).copied()
+    };
+    let mut carried = Carried::default();
+    for s in &mut show.stage3d.surfaces {
+        if let crate::stage3d::Feed::Display { output, .. } = &mut s.feed {
+            match target(*output) {
+                Some(t) => {
+                    *output = t;
+                    carried.screens += 1;
+                }
+                None => s.feed = crate::stage3d::Feed::None,
+            }
+        }
+    }
+    let mut taken = Vec::new();
+    for p in &mut show.stage3d.projectors {
+        let Some(o) = p.display else { continue };
+        p.display = target(o).filter(|t| !taken.contains(t));
+        match p.display {
+            Some(t) => {
+                taken.push(t);
+                carried.projectors += 1;
+            }
+            None => carried.left_out += 1,
+        }
+    }
+    carried
+}
+
+/// With no monitor ticked the test's pictures go to the show's first
+/// display: one that shows the 3D stage would show only the stage (and the
+/// screens it feeds would be grey), so for the test it doesn't.
+fn unshow_stage(show: &mut Show) -> Carried {
+    let mut carried = Carried::default();
+    let Some(first) = show.outputs.first().map(|o| o.id) else {
+        return carried;
+    };
+    if !show.shows_stage(first) {
+        return carried;
+    }
+    let whole = show.whole_picture(first);
+    if let Some(o) = show.outputs.iter_mut().find(|o| o.id == whole) {
+        o.source = None;
+        carried.unstaged = Some(o.name.clone());
+    }
+    carried
 }
 
 /// Across a show network: every picture shown on the test's first display
@@ -332,14 +462,14 @@ pub fn build_decode(
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
-    use_displays(&mut show, displays);
+    let notes = use_displays(&mut show, displays);
     show.name = "Test Mode: decoding".into();
     let res = HashMap::new();
     let mut b = Builder {
         show,
         res: &res,
         audio: None,
-        notes: Vec::new(),
+        notes,
         used: Vec::new(),
         list: 0,
     };
@@ -434,7 +564,7 @@ pub fn build_with_as(
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
-    use_displays_as(&mut show, displays, mirror);
+    let notes = use_displays_as(&mut show, displays, mirror);
     use_sound(&mut show, sound);
     show.name = format!("Test Mode: {}", level.label());
     let audio = show.audio_outputs.first().map(|a| a.id);
@@ -442,7 +572,7 @@ pub fn build_with_as(
         show,
         res,
         audio,
-        notes: Vec::new(),
+        notes,
         used: Vec::new(),
         list: 0,
     };
@@ -1083,7 +1213,7 @@ pub fn build_timeline(
     show.cues.clear();
     show.lists.clear();
     show.main_list_name = None;
-    use_displays_as(&mut show, displays, false);
+    let notes = use_displays_as(&mut show, displays, false);
     use_sound(&mut show, sound);
     // Tracks are layers: each replaces only its own (an old show's setting
     // would make every clip replace the whole display).
@@ -1101,7 +1231,7 @@ pub fn build_timeline(
         show,
         res,
         audio,
-        notes: Vec::new(),
+        notes,
         used: Vec::new(),
         list: 0,
     };
@@ -2243,5 +2373,276 @@ mod tests {
         assert!(none.show.cues.iter().any(
             |c| matches!(&c.kind, CueKind::Control(k) if k.action == ControlAction::TimelineStop)
         ));
+    }
+
+    // ----- The 3D stage ---------------------------------------------------------
+
+    use crate::stage3d::scene::Paint;
+    use crate::stage3d::{Feed, StageSource};
+
+    /// The displays the 3D view paints its screens with, in order (an unfed
+    /// screen is grey: not in the list). The test shows have no venue.
+    fn painted(show: &Show) -> Vec<OutputId> {
+        let scene = show.stage3d.scene(show, None);
+        scene
+            .parts
+            .iter()
+            .filter_map(|p| match &p.paint {
+                Paint::Output { output, .. } => Some(*output),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn with_no_monitor_ticked_a_first_display_that_showed_the_stage_shows_the_test() {
+        let mut original = Show::default();
+        let first = original.outputs[0].id;
+        original.outputs[0].source = Some(StageSource::default());
+        let screen = original.add_surface(None);
+        original.stage3d.surface_mut(screen).unwrap().feed = Feed::whole_picture(&original, first);
+        assert!(original.shows_stage(first));
+        for built in [
+            build(&original, Level::Short, &HashMap::new(), &[]),
+            build_timeline(
+                &original,
+                Level::Short,
+                &HashMap::new(),
+                &[],
+                &SoundChoice::default(),
+            ),
+        ] {
+            let show = &built.show;
+            // The test's pictures go to the first display...
+            let sent = show
+                .cues
+                .iter()
+                .filter_map(|c| c.kind.media())
+                .find_map(|m| m.output)
+                .unwrap();
+            assert_eq!(sent, first);
+            // ...which shows them, not the stage, and the screen it fed shows them too.
+            assert!(
+                !show.shows_stage(sent),
+                "the test's pictures are never seen"
+            );
+            assert_eq!(painted(show), vec![first], "the screen is grey");
+            assert!(
+                built.notes.iter().any(|n| n.contains("3D stage")),
+                "{:?}",
+                built.notes
+            );
+        }
+        // The user's show still shows the stage.
+        assert!(original.shows_stage(first));
+    }
+
+    /// A user's show with `n` displays, a screen fed by each (the whole
+    /// picture, but the last a region of it) and a projector on each.
+    fn staged(n: usize) -> (Show, Vec<OutputId>) {
+        let mut show = Show::default();
+        while show.outputs.len() < n {
+            show.add_display();
+        }
+        let ids: Vec<OutputId> = show.outputs.iter().map(|o| o.id).collect();
+        for (i, id) in ids.iter().enumerate() {
+            let s = show.add_surface(None);
+            let region = if i + 1 == n {
+                [0.5, 0.0, 0.5, 1.0]
+            } else {
+                [0.0, 0.0, 1.0, 1.0]
+            };
+            show.stage3d.surface_mut(s).unwrap().feed = Feed::Display {
+                output: *id,
+                region,
+            };
+            let p = show.add_projector();
+            show.projector_mut(p).unwrap().display = Some(*id);
+        }
+        (show, ids)
+    }
+
+    fn feeds(show: &Show) -> Vec<Option<OutputId>> {
+        show.stage3d
+            .surfaces
+            .iter()
+            .map(|s| s.feed.output())
+            .collect()
+    }
+
+    fn throws(show: &Show) -> Vec<Option<OutputId>> {
+        show.stage3d.projectors.iter().map(|p| p.display).collect()
+    }
+
+    /// A test show sanitised as a show sent to other computers is: nothing changes.
+    fn stays_sane(show: &Show) {
+        let mut again = show.clone();
+        again.sanitize_stage();
+        let json = |s: &Show| serde_json::to_string(s).unwrap();
+        assert_eq!(
+            json(&again),
+            json(show),
+            "sanitize_stage changed the test show"
+        );
+    }
+
+    #[test]
+    fn the_stage_follows_the_ticked_monitors_whether_there_are_more_fewer_or_as_many() {
+        let picks = [choice("A", 1), choice("B", 2), choice("C", 3)];
+        // As many displays as monitors: each to its own, the region kept.
+        let (show, _) = staged(2);
+        for mirror in [true, false] {
+            let mut test = show.clone();
+            let notes = use_displays_as(&mut test, &picks[..2], mirror);
+            let new: Vec<OutputId> = test.outputs.iter().map(|o| o.id).collect();
+            assert_eq!(feeds(&test), vec![Some(new[0]), Some(new[1])]);
+            assert_eq!(throws(&test), vec![Some(new[0]), Some(new[1])]);
+            assert!(matches!(
+                test.stage3d.surfaces[1].feed,
+                Feed::Display {
+                    region: [0.5, 0.0, 0.5, 1.0],
+                    ..
+                }
+            ));
+            assert_eq!(painted(&test), new, "mirror {mirror}");
+            stays_sane(&test);
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains("2 screens and 2 projectors"), "{notes:?}");
+        }
+        // More monitors than displays: the extra shows nothing of the stage.
+        let mut test = show.clone();
+        use_displays_as(&mut test, &picks, false);
+        let new: Vec<OutputId> = test.outputs.iter().map(|o| o.id).collect();
+        assert_eq!(feeds(&test), vec![Some(new[0]), Some(new[1])]);
+        assert_eq!(throws(&test), vec![Some(new[0]), Some(new[1])]);
+        // More displays than monitors: the rest go to the first; a second
+        // projector there throws nothing, said.
+        let (show, _) = staged(3);
+        let mut test = show.clone();
+        let notes = use_displays_as(&mut test, &picks[..1], true);
+        let only = test.outputs[0].id;
+        assert_eq!(feeds(&test), vec![Some(only); 3]);
+        assert_eq!(throws(&test), vec![Some(only), None, None]);
+        stays_sane(&test);
+        assert!(notes[0].contains("3 screens and 1 projector "), "{notes:?}");
+        assert!(notes[1].starts_with("2 projectors"), "{notes:?}");
+        // The user's show is as it was.
+        let own: Vec<Option<OutputId>> = show.outputs.iter().map(|o| Some(o.id)).collect();
+        assert_eq!(throws(&show), own);
+    }
+
+    #[test]
+    fn a_sub_display_and_a_blended_pair_carry_over_to_the_test_displays() {
+        let mut show = Show::default();
+        let first = show.outputs[0].id;
+        let sub = show.add_sub_display(first);
+        let (wide, left, right) = show.add_blended_pair(1920, 1080, 0.1);
+        // A screen showing the sub display, one showing the wide picture,
+        // projectors on the pair's sides; a screen showing nothing stays so.
+        for o in [sub, wide] {
+            let s = show.add_surface(None);
+            show.stage3d.surface_mut(s).unwrap().feed = Feed::whole_picture(&show, o);
+        }
+        show.add_surface(None);
+        for o in [left, right] {
+            let p = show.add_projector();
+            show.projector_mut(p).unwrap().display = Some(o);
+        }
+        // The user's displays in order: first, wide, left, right (the sub
+        // display is in the first).
+        let picks: Vec<DisplayChoice> = (0..4).map(|i| choice(&format!("M{i}"), i)).collect();
+        let mut test = show.clone();
+        use_displays_as(&mut test, &picks, false);
+        let new: Vec<OutputId> = test.outputs.iter().map(|o| o.id).collect();
+        assert_eq!(feeds(&test), vec![Some(new[0]), Some(new[1]), None]);
+        assert_eq!(throws(&test), vec![Some(new[2]), Some(new[3])]);
+        stays_sane(&test);
+        // Two monitors: the pair's sides both come to the first, which is the
+        // first projector's only.
+        let mut test = show.clone();
+        let notes = use_displays_as(&mut test, &picks[..2], true);
+        let new: Vec<OutputId> = test.outputs.iter().map(|o| o.id).collect();
+        assert_eq!(feeds(&test), vec![Some(new[0]), Some(new[1]), None]);
+        assert_eq!(throws(&test), vec![Some(new[0]), None]);
+        stays_sane(&test);
+        assert!(
+            notes.iter().any(|n| n.starts_with("1 projector of")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn carry_stage_maps_in_order_and_leaves_a_display_to_one_projector() {
+        let (mut show, old_ids) = staged(2);
+        let old: Vec<(OutputId, Option<OutputId>)> = old_ids.iter().map(|id| (*id, None)).collect();
+        // Two projectors on one display of the user's (a hand-edited file):
+        // the first keeps it.
+        show.stage3d.projectors[1].display = Some(old_ids[0]);
+        let (a, b) = (OutputId(900), OutputId(901));
+        let carried = carry_stage(&mut show, &old, &[a, b]);
+        assert_eq!(
+            carried,
+            Carried {
+                screens: 2,
+                projectors: 1,
+                left_out: 1,
+                unstaged: None
+            }
+        );
+        assert_eq!(feeds(&show), vec![Some(a), Some(b)]);
+        assert_eq!(throws(&show), vec![Some(a), None]);
+        // A feed naming a display that wasn't the user's shows nothing.
+        show.stage3d.surfaces[0].feed = Feed::Display {
+            output: OutputId(777),
+            region: [0.0, 0.0, 1.0, 1.0],
+        };
+        carry_stage(&mut show, &old, &[a]);
+        assert_eq!(feeds(&show)[0], None);
+        // A show with no stage has nothing to say.
+        let mut plain = Show::default();
+        let id = plain.outputs[0].id;
+        assert_eq!(
+            carry_stage(&mut plain, &[(id, None)], &[a]),
+            Carried::default()
+        );
+        assert!(Carried::default().notes().is_empty());
+    }
+
+    #[test]
+    fn with_no_monitor_ticked_only_a_first_display_showing_the_stage_is_changed() {
+        // The first display is a side of a blended pair whose picture shows
+        // the stage: that picture's source goes.
+        let mut show = Show::default();
+        show.outputs.clear();
+        let (wide, left, _) = show.add_blended_pair(1920, 1080, 0.1);
+        let pos = show.outputs.iter().position(|o| o.id == left).unwrap();
+        let l = show.outputs.remove(pos);
+        show.outputs.insert(0, l);
+        show.outputs
+            .iter_mut()
+            .find(|o| o.id == wide)
+            .unwrap()
+            .source = Some(StageSource::default());
+        let other = show.add_display();
+        show.outputs
+            .iter_mut()
+            .find(|o| o.id == other)
+            .unwrap()
+            .source = Some(StageSource::default());
+        assert!(show.shows_stage(left));
+        let mut test = show.clone();
+        let notes = use_displays_as(&mut test, &[], true);
+        assert!(!test.shows_stage(left) && !test.shows_stage(wide));
+        assert!(test.shows_stage(other), "another display keeps its stage");
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].starts_with("Wide picture shows your 3D stage"),
+            "{notes:?}"
+        );
+        // A first display that doesn't show the stage: nothing changes.
+        let mut plain = Show::default();
+        let before = serde_json::to_string(&plain).unwrap();
+        assert!(use_displays_as(&mut plain, &[], true).is_empty());
+        assert_eq!(serde_json::to_string(&plain).unwrap(), before);
     }
 }

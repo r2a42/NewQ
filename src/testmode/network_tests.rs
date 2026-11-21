@@ -574,6 +574,44 @@ fn the_test_show_keeps_the_displays_adds_one_per_bare_monitor_and_keeps_the_user
 }
 
 #[test]
+fn a_test_across_the_network_leaves_the_venue_model_out_and_keeps_a_sample() {
+    use crate::net::store::manifest::media_paths;
+    use crate::stage3d::{Venue, samples::SampleVenue};
+    let mut show = user_show();
+    let model = media_dir().join("hall.glb");
+    show.stage3d.venue = Some(Venue::new(model.clone()));
+    let screen = show.add_surface(None);
+    assert!(media_paths(&show).contains(&model));
+    let flash = PathBuf::from("/m/flash.mp4");
+    let b = build(&show, &res(), Some(&flash), &[], &[]);
+    // Nobody fetches the model (or its files) before the test can start...
+    assert_eq!(b.show.stage3d.venue, None);
+    assert!(!media_paths(&b.show).contains(&model));
+    // ...the screens stay, and the report says so.
+    assert!(b.show.stage3d.surface(screen).is_some());
+    assert!(
+        b.notes
+            .iter()
+            .any(|n| n.contains("venue model is left out")),
+        "{:?}",
+        b.notes
+    );
+    // A sample venue is no file: kept, nothing said.
+    show.stage3d.venue = Some(Venue::sample(SampleVenue::Arena));
+    let b = build(&show, &res(), Some(&flash), &[], &[]);
+    assert_eq!(b.show.stage3d.venue, show.stage3d.venue);
+    assert!(
+        !b.notes.iter().any(|n| n.contains("venue")),
+        "{:?}",
+        b.notes
+    );
+    // The user's show keeps its model.
+    show.stage3d.venue = Some(Venue::new(model.clone()));
+    build(&show, &res(), Some(&flash), &[], &[]);
+    assert!(media_paths(&show).contains(&model));
+}
+
+#[test]
 fn a_lap_is_about_two_minutes_and_the_long_test_about_twenty() {
     let one = script(1);
     assert_eq!(script(0), one, "at least one lap");
