@@ -1,9 +1,8 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
+mod keys;
 mod menus;
 use menus::menu_bar;
-#[cfg(test)]
-use menus::window_menu;
 mod modern;
 mod preview;
 pub(crate) use preview::part_shape;
@@ -35,8 +34,7 @@ use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, pos2};
 pub use settings::SettingsPage;
 pub(crate) use settings::{
-    MEDIA_MANAGER_ITEM, PROGRAMS, RECOVERY_AND_LOGS, STREAMING_SERVER, TEST_MODE_ITEM,
-    path as settings_path,
+    PROGRAMS, RECOVERY_AND_LOGS, STREAMING_SERVER, TEST_MODE_ITEM, path as settings_path,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -319,7 +317,7 @@ pub struct UiState {
     pub keeping_awake: bool,
     /// Outputs are open and the computer is on its battery (set by the app).
     pub on_battery: bool,
-    /// The statistics window (Window menu) is showing, and what it has measured.
+    /// The statistics window (Tools menu) is showing, and what it has measured.
     pub stats_open: bool,
     pub live_stats: Vec<crate::stats::Sample>,
     /// Also write what it measures to `newq-stats.csv` in the log folder.
@@ -414,6 +412,11 @@ pub struct UiState {
     /// The clip being made for lining sound up with picture.
     /// Whether the About window is open, and its logo (made when first needed).
     pub show_about: bool,
+    /// Whether the keyboard shortcuts window (Help menu) is open.
+    pub show_keys: bool,
+    /// A display just added on the Displays page, scrolled into sight on its
+    /// next drawing (and then let go).
+    reveal_display: Cell<Option<OutputId>>,
     about_logo: Option<egui::TextureHandle>,
     sync_clip: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// Videos being converted to Hap, by the cue they are for.
@@ -553,6 +556,7 @@ impl UiState {
         self.confirm_edit_mode = false;
         self.show_media = false;
         self.show_about = false;
+        self.show_keys = false;
         self.stats_open = false;
         self.slide_dialog = None;
         self.deck_dialog = None;
@@ -889,6 +893,10 @@ enum Action {
     /// Switch between the panes and the new interface (kept for this computer).
     SetNewLayout(bool),
     ToggleAbout,
+    /// Open or close the keyboard shortcuts window.
+    ToggleKeys,
+    /// Show the log folder in the system's file browser.
+    OpenLogFolder,
     ToggleTestMode,
     ToggleStats,
     /// Make the clip for checking the sync (about a second of work).
@@ -1178,6 +1186,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     }
     media_window(ui.ctx(), show, st, &mut actions);
     about_window(ui.ctx(), st);
+    keys::window(ui.ctx(), st);
     crate::testmode::gui::window(ui.ctx(), engine, st);
     crate::testmode::gui::stats_window(ui.ctx(), st);
     if st.confirm_edit_mode {
@@ -5719,23 +5728,24 @@ fn displays_panel(
 ) {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.menu_button("+ Add", |ui| {
-                if ui.button("Display").clicked() {
+            let r = ui.menu_button("+ Add", |ui| {
+                let r = ui.button("Display");
+                note_page_add(ui, "Displays ▸ + Add ▸ Display", &r);
+                if r.clicked() {
                     actions.push(Action::AddDisplay);
                     ui.close();
                 }
-                if ui
-                    .button("Blended projectors")
-                    .on_hover_text(
-                        "Two projectors that overlap and share one wide picture, with the \
-                         overlap faded so it doesn't show",
-                    )
-                    .clicked()
-                {
+                let r = ui.button("Blended projectors").on_hover_text(
+                    "Two projectors that overlap and share one wide picture, with the \
+                     overlap faded so it doesn't show",
+                );
+                note_page_add(ui, "Displays ▸ + Add ▸ Blended projectors", &r);
+                if r.clicked() {
                     actions.push(Action::AddBlendedPair);
                     ui.close();
                 }
             });
+            note_page_add(ui, "Displays ▸ + Add", &r.response);
         });
     });
     ui.label(
@@ -5784,7 +5794,7 @@ fn displays_panel(
         .enumerate()
     {
         let state = st.display_states.get(&d.id).copied();
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{}", di + 1)).strong().size(18.0));
@@ -5944,6 +5954,17 @@ fn displays_panel(
             corner_pin_editor(ui, d, st, actions);
             edge_blend_editor(ui, d, state_size.unwrap_or((1920, 1080)));
             stream_editor(ui, d, engine, st, &audio_names);
+        });
+        // One just added (at the bottom) is brought into sight, its top at
+        // the top of the page.
+        if st.reveal_display.get() == Some(d.id) {
+            st.reveal_display.set(None);
+            framed.response.scroll_to_me(Some(Align::Min));
+        }
+        #[cfg(test)]
+        ui.data_mut(|m| {
+            m.get_temp_mut_or_default::<Vec<(u64, egui::Rect)>>(egui::Id::new("display_frames"))
+                .push((d.id.0, framed.response.rect))
         });
     }
 }
@@ -6990,9 +7011,22 @@ fn pattern_picker(
         .on_disabled_hover_text("This pattern has no room for the display's number");
 }
 
+/// For the tests: where a page's "+ Add" and its items are (`page_adds`).
+fn note_page_add(ui: &Ui, path: &str, r: &egui::Response) {
+    #[cfg(test)]
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(String, egui::Rect)>>(egui::Id::new("page_adds"))
+            .push((path.to_string(), r.rect))
+    });
+    #[cfg(not(test))]
+    let _ = (ui, path, r);
+}
+
 fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
     for d in show.outputs.iter().filter(|o| !o.is_sub_display()) {
-        if ui.button(&d.name).clicked() {
+        let r = ui.button(&d.name);
+        note_page_add(ui, &format!("Sub displays ▸ + Add ▸ {}", d.name), &r);
+        if r.clicked() {
             actions.push(Action::AddSubDisplay(d.id));
             ui.close();
         }
@@ -7002,9 +7036,11 @@ fn add_sub_display_menu(ui: &mut Ui, show: &Show, actions: &mut Vec<Action>) {
 fn sub_displays_panel(ui: &mut Ui, show: &mut Show, st: &UiState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.menu_button("+ Add", |ui| add_sub_display_menu(ui, show, actions))
+            let r = ui
+                .menu_button("+ Add", |ui| add_sub_display_menu(ui, show, actions))
                 .response
                 .on_hover_text("Add an area of a display that cues can be sent to");
+            note_page_add(ui, "Sub displays ▸ + Add", &r);
         });
     });
     if !show.outputs.iter().any(|o| o.is_sub_display()) {
@@ -8151,8 +8187,10 @@ fn inspector_one(
                 });
                 ui.end_row();
                 ui.label("On cart");
-                ui.checkbox(&mut cue.cart, "")
-                    .on_hover_text("Show this cue as a button on the cart (Cue ▸ Show cart).");
+                ui.checkbox(&mut cue.cart, "").on_hover_text(format!(
+                    "Show this cue as a button on the cart ({}).",
+                    settings::CART_ITEM.path()
+                ));
                 ui.end_row();
                 ui.label("Timecode");
                 ui.horizontal(|ui| {
@@ -11894,6 +11932,12 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::ToggleAbout => st.show_about = !st.show_about,
+        Action::ToggleKeys => st.show_keys = !st.show_keys,
+        Action::OpenLogFolder => {
+            if let Err(e) = crate::testmode::session::open_folder(&crate::crash::log_dir()) {
+                engine.problem(format!("Couldn't open the log folder: {e}"));
+            }
+        }
         Action::ToggleTestMode => {
             st.test.open = !st.test.open;
             // Opened: the test last chosen on this computer is chosen again.
@@ -12235,10 +12279,12 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::AddDisplay => {
-            show.add_display();
+            let id = show.add_display();
+            st.reveal_display.set(Some(id));
         }
         Action::AddBlendedPair => {
-            show.add_blended_pair(1920, 1080, 0.15);
+            let (picture, _, _) = show.add_blended_pair(1920, 1080, 0.15);
+            st.reveal_display.set(Some(picture));
         }
         Action::ShowPartOf(id, source) => match source {
             None => {
@@ -13351,56 +13397,6 @@ mod tests {
         st.capture_hotkey = Some(d);
         assert!(!output_key(Key::Q, M::NONE, &mut show, &mut e, &mut st));
         assert!(!is_playing(&e, d));
-    }
-
-    #[test]
-    fn the_window_menu_has_the_timelines_follow_choice_in_both_interfaces() {
-        use timeline::TimelineFollow as F;
-        for modern in [false, true] {
-            let ctx = egui::Context::default();
-            let mut st = UiState::default();
-            st.prefs.new_layout = modern;
-            let mut actions = Vec::new();
-            let frame = |events: Vec<Event>, n: f64, st: &UiState, actions: &mut Vec<Action>| {
-                ctx.data_mut(|d| {
-                    d.remove::<Vec<(bool, egui::Rect)>>(egui::Id::new("window_timeline_follow"))
-                });
-                let input = RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 700.0))),
-                    time: Some(1.0 + n * 0.05),
-                    events,
-                    ..Default::default()
-                };
-                let mut out = ctx.run_ui(input, |ui| {
-                    egui::CentralPanel::default().show(ui, |ui| window_menu(ui, st, actions));
-                });
-                out.textures_delta.clear();
-                ctx.data(|d| {
-                    d.get_temp::<Vec<(bool, egui::Rect)>>(egui::Id::new("window_timeline_follow"))
-                })
-                .unwrap_or_default()
-            };
-            let radios = frame(vec![], 0.0, &st, &mut actions);
-            assert_eq!(radios.len(), 2, "modern {modern}");
-            let at = radios.iter().find(|r| r.0).unwrap().1.center();
-            let click = |pressed| Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
-            };
-            frame(vec![Event::PointerMoved(at)], 1.0, &st, &mut actions);
-            frame(vec![click(true)], 2.0, &st, &mut actions);
-            frame(vec![click(false)], 3.0, &st, &mut actions);
-            assert!(
-                actions.iter().any(|a| matches!(
-                    a,
-                    Action::Timeline(timeline::TimelineAction::SetFollow(F::Centre))
-                )),
-                "modern {modern}: {} actions",
-                actions.len()
-            );
-        }
     }
 
     #[test]
@@ -14629,8 +14625,17 @@ mod tests {
             settings_path(SettingsPage::Network, None),
             "Settings ▸ Show network"
         );
-        assert_eq!(TEST_MODE_ITEM.path(), "Help ▸ Test Mode");
+        assert_eq!(TEST_MODE_ITEM.path(), "Tools ▸ Test Mode");
+        assert_eq!(settings::MEDIA_MANAGER_ITEM.path(), "Tools ▸ Media manager");
+        assert_eq!(settings::STATISTICS_ITEM.path(), "Tools ▸ Statistics");
         assert_eq!(settings::TIMELINE_ITEM.path(), "Window ▸ Timeline");
+        assert_eq!(
+            settings::TIMELINE_OPENS_ITEM.path(),
+            "Window ▸ Timeline opens"
+        );
+        assert_eq!(settings::CART_ITEM.path(), "Window ▸ Cart");
+        assert_eq!(settings::CART_ITEM.label, Pane::Cart.title());
+        assert_eq!(settings::KEYS_ITEM.path(), "Help ▸ Keyboard shortcuts");
     }
 
     #[test]

@@ -40,6 +40,23 @@ release page, and a release is refused if it has none.
   previews are not the cause. Each change of rate is in a new `previews.csv` and in `events.log`,
   and `stats.csv` has three more columns (the previews' rate, the displays' late pictures and
   the slowest 3D view).
+- **Menus with fewer surprises.** A new *Tools* menu holds what you run before and during a
+  show; the *Displays* menu is gone (its adds made a display you couldn't see); *Cue ▸ Add*
+  groups the cue kinds; *Help* has a window of every keyboard shortcut and a way to the log
+  folder. No shortcut changed and both interfaces have the same menus. Where things went:
+  - *File ▸ Media manager…* → *Tools ▸ Media manager…*
+  - *Help ▸ Test Mode…* → *Tools ▸ Test Mode…*
+  - *Window ▸ Statistics* → *Tools ▸ Statistics*
+  - *File ▸ Sync…* → *Settings ▸ Sync* (as it already was in the Settings menu)
+  - *Cue ▸ Show cart* → *Window ▸ Cart*
+  - *Cue ▸ Add … cue* → *Cue ▸ Add ▸* (From a file, Live, On screen, Control and timing, Group);
+    *Add Slide show from PowerPoint…* is now *Slides from a presentation…*
+  - *Displays ▸ Add display*, *Add blended projectors* → *Settings ▸ Displays ▸ + Add*, which now
+    scrolls to the new display; *Add sub display on* → *Settings ▸ Sub displays ▸ + Add*
+  - *Window ▸ New interface* tick → *Window ▸ Interface: Classic / New*
+  - *Window ▸ Timeline*'s *as a pane / as a workspace* → *Window ▸ Timeline opens ▸*; how its view
+    follows the playhead is only in *Settings ▸ Interface ▸ Timeline editor*
+  - *Help*'s list of nine keys and the cue count → *Help ▸ Keyboard shortcuts…* (every key)
 
 ## 0.26.0
 

@@ -262,7 +262,7 @@ pub const SECTIONS: [Section; 12] = [
     RECOVERY_AND_LOGS,
 ];
 
-/// An item of the menu bar that a pointer names: "Help ▸ Test Mode". The
+/// An item of the menu bar that a pointer names: "Tools ▸ Test Mode". The
 /// menu draws `label`, so the two can't drift apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MenuItem {
@@ -276,18 +276,46 @@ impl MenuItem {
     }
 }
 
+/// The menus of the menu bar, left to right: `menus::menu_bar` draws these
+/// names and the `MenuItem`s below point into them.
+pub const FILE_MENU: &str = "File";
+pub const EDIT_MENU: &str = "Edit";
+pub const CUE_MENU: &str = "Cue";
+pub const WINDOW_MENU: &str = "Window";
+pub const TOOLS_MENU: &str = "Tools";
+pub const SETTINGS_MENU: &str = "Settings";
+pub const HELP_MENU: &str = "Help";
+
+pub const MEDIA_MANAGER_ITEM: MenuItem = MenuItem {
+    menu: TOOLS_MENU,
+    label: "Media manager…",
+};
 pub const TEST_MODE_ITEM: MenuItem = MenuItem {
-    menu: "Help",
+    menu: TOOLS_MENU,
     label: "Test Mode…",
 };
-pub const MEDIA_MANAGER_ITEM: MenuItem = MenuItem {
-    menu: "File",
-    label: "Media manager…",
+pub const STATISTICS_ITEM: MenuItem = MenuItem {
+    menu: TOOLS_MENU,
+    label: "Statistics",
 };
 /// The Window menu's Timeline tick (the pane's own name).
 pub const TIMELINE_ITEM: MenuItem = MenuItem {
-    menu: "Window",
+    menu: WINDOW_MENU,
     label: "Timeline",
+};
+/// The Window menu's submenu of where the timeline editor opens.
+pub const TIMELINE_OPENS_ITEM: MenuItem = MenuItem {
+    menu: WINDOW_MENU,
+    label: "Timeline opens",
+};
+/// The Window menu's Cart tick (the pane's own name).
+pub const CART_ITEM: MenuItem = MenuItem {
+    menu: WINDOW_MENU,
+    label: "Cart",
+};
+pub const KEYS_ITEM: MenuItem = MenuItem {
+    menu: HELP_MENU,
+    label: "Keyboard shortcuts…",
 };
 
 /// What the sidebar shows beside a page: a count, a state, or a warning.
@@ -636,8 +664,8 @@ fn interface_page(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
         hint(
             ui,
             &format!(
-                "Also in {}. Hover a choice for what it does.",
-                TIMELINE_ITEM.path()
+                "Where it opens is also in {}. Hover a choice for what it does.",
+                TIMELINE_OPENS_ITEM.path()
             ),
         );
     });
@@ -697,8 +725,10 @@ fn interface_choice(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     });
     hint(
         ui,
-        "Also the Window menu's New interface tick, and the Classic interface button on the new \
-         interface's strip.",
+        &format!(
+            "Also {} ▸ Interface, and the Classic interface button on the new interface's strip.",
+            WINDOW_MENU
+        ),
     );
 }
 
