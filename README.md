@@ -440,7 +440,11 @@ stays on the computer until you send it yourself.
   a name you choose such as *Stage TV*) or to a **sub display**, an area of
   one. Each display is assigned by hand to a monitor on the *Displays* page of the settings,
   so moving a show to another venue means reassigning each display once. *+ Add ▸
-  Display* at the top of that page makes one and scrolls to it.
+  Display* at the top of that page makes one and scrolls to it. A display's
+  *Shows* says what it shows: *Its own cues*, *Part of* another display's
+  picture (blended projectors, below), or *The 3D stage, from* a saved
+  viewpoint (or *all of it*; see The 3D stage). A display that shows part of
+  another's picture can't be given the stage: the menu greys it and says why.
   **Nothing is ever reassigned automatically.** If the monitor a display is
   assigned to is unplugged, what was sent to it **keeps playing, to no
   destination**: nothing is drawn on any other monitor, the status bar, the
@@ -1239,9 +1243,9 @@ the 3D model does not drive the outputs.
   *Viewpoint ▸ Save this view…* keeps where you are looking from, with a name;
   *Viewpoint* goes back to it. *Grid* shows a floor grid in metres; *X-ray*
   makes the venue's walls see-through, so the screens show through them.
-- **A display can show the stage.** Under *Displays that show the stage*, a
-  display can show the stage from a saved viewpoint (or all of it) instead of
-  its cues: on its monitor, in any stream or recording it sends, and on the
+- **A display can show the stage.** On *Settings ▸ Displays*, a display's
+  *Shows* can be *The 3D stage, from* a saved viewpoint (or *all of it*)
+  instead of its cues: on its monitor, in any stream or recording it sends, and on the
   projectors that share its picture. It is drawn at the display's size every
   time something changes (a picture on one of the screens too, a test pattern
   or a still, though nothing plays), before any preview, never held back as a
@@ -1249,7 +1253,9 @@ the 3D model does not drive the outputs.
   the stage's screens (it would show itself): that screen is left blank. A
   projector that shows part of another display's picture shows that display's
   stage, and a sub display can't show the stage. Renaming a viewpoint keeps the
-  displays that show the stage from it.
+  displays that show the stage from it. At the bottom of the 3D stage page,
+  *Displays that show the stage* lists them, each with *Open on the Displays
+  page*, which goes to that display there.
 - **The previews still give way.** The 3D views are previews: while a display
   misses pictures they are drawn less often, smaller, then held, as every
   preview is, and never above the *Resolution* set for the previews. A display that shows the stage is not (unless only the previews

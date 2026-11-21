@@ -560,7 +560,11 @@ The README describes the features; this file is about working on the code.
   `src/ui/stage_edit.rs`: Settings ▸ 3D stage (`SettingsPage::Stage3d`; a view at the top,
   `SETTINGS_VIEW`), editing the show directly as other pages do; `StageEdit` (`Action::Stage`, an edit
   of the show) for what a view asks; `Preset` (Flat, Curved, Jumbotron, AngledWall), `add_surface`
-  (fed by `first_feed`), `feed_choices` (no display that shows the stage). Samples: *Use a sample
+  (fed by `first_feed`), `feed_choices` (no display that shows the stage). A display is set to show
+  the stage on Settings ▸ Displays: its *Shows* (`ui.rs::shared_picture_editor`) draws
+  `stage_edit::StageItems::items` (`stage_choices`, `stage_source_words`; greyed with
+  `Show::stage_source_refused`'s reason); `ShowPartOf` clears a `source`; the page's `sources_section`
+  (`STAGE_DISPLAYS`) lists them, each a button to it there (`UiState::reveal_display`). Samples: *Use a sample
   venue* (`StageEdit::UseSample`, with the usual screens and viewpoints), *Export as .glb…*. Tests: `stage_render_tests.rs` (GPU: a four-colour picture
   the right way round on a screen and on a display showing the stage; the thread), `stage_live_tests.rs`
   (venue loading with a made OBJ; a display's picture drawn and not again while still),
