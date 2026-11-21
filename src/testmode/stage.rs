@@ -249,15 +249,11 @@ impl LegResult {
     }
 
     /// The stage display's pictures a second in its leg.
+    /// (Only one in a window or a stream: one drawn for the previews only
+    /// is counted with the window's view, which can't be told apart.)
     pub fn display_fps(&self) -> Option<f64> {
-        (self.leg == Some(Leg::Display) && self.secs > 0.0).then(|| {
-            let n = if self.stage.displays > 0 {
-                self.stage.displays
-            } else {
-                self.stage.views
-            };
-            n as f64 / self.secs
-        })
+        (self.leg == Some(Leg::Display) && self.secs > 0.0 && self.stage.displays > 0)
+            .then(|| self.stage.displays as f64 / self.secs)
     }
 
     /// Two legs of a kind as one (the rounds of a Medium or Long test).
@@ -432,11 +428,19 @@ impl StageRun {
 
     /// The window's view now: the stage turning, its light as the leg has it.
     pub fn view_state(&self, t: f64) -> crate::ui::stage_view::StageViewState {
-        let mut v = crate::ui::stage_view::StageViewState::default();
+        // From the first seat (a sample's audience), swinging a little each
+        // way; with no viewpoint, all of the stage from in front.
+        let mut v = match self.show.stage3d.viewpoints.first() {
+            Some(p) => crate::ui::stage_view::StageViewState::from_viewpoint(p),
+            None => {
+                let mut v = crate::ui::stage_view::StageViewState::default();
+                v.orbit.pitch = 12f32.to_radians();
+                v
+            }
+        };
         v.grid = false;
         v.light = self.leg().is_some_and(Leg::light) && self.setup.projectors > 0;
-        v.orbit.yaw = (t as f32 * TURN_DEG_PER_SEC).to_radians().sin() * 0.6;
-        v.orbit.pitch = 12f32.to_radians();
+        v.orbit.yaw += (t as f32 * TURN_DEG_PER_SEC).to_radians().sin() * 0.35;
         v
     }
 
@@ -743,7 +747,9 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
     let down: u32 = threed.iter().map(|r| r.down).sum();
     let below: f64 = threed.iter().map(|r| r.below_full).sum();
     let lowest = threed.iter().map(|r| r.lowest).max().unwrap_or(Level::Full);
-    let smooth = !out.iter().any(|f| f.severity == Severity::Problem);
+    // Smooth only where it was measured.
+    let measured = base_share.is_some() && threed.iter().all(|r| r.share().is_some());
+    let smooth = measured && !out.iter().any(|f| f.severity == Severity::Problem);
     if allowed && (down > 0 || below >= 1.0) {
         out.push(note(format!(
             "With the 3D stage the previews gave way {}, as far as {}, for {:.0} s{}",
@@ -752,6 +758,8 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
             below,
             if smooth {
                 ", and the displays stayed smooth. This computer can't draw the 3D view at full rate while a show plays; the show itself is not affected."
+            } else if !measured {
+                " (the displays themselves couldn't be measured)."
             } else {
                 "."
             }
@@ -900,8 +908,8 @@ pub fn report_part(results: &[LegResult], cx: &Context, findings: &[Finding]) ->
     for r in by_leg(results, &s.legs) {
         let leg = r.leg.expect("a leg");
         let mut line = format!(
-            "  {} ({}): {}",
-            capital(leg.name()),
+            "  {}, {}: {}",
+            capital(leg.name()).replace(" (the baseline)", ", the baseline"),
             if r.round > 1 {
                 format!("{} rounds, {:.0} s measured", r.round, r.secs)
             } else {
@@ -929,8 +937,12 @@ pub fn report_part(results: &[LegResult], cx: &Context, findings: &[Finding]) ->
     }
     if let Some((ms, parts, tris)) = cx.venue {
         out.push(format!(
-            "The venue was read in {:.1} s: {parts} parts, {tris} triangles.",
-            ms as f64 / 1000.0
+            "The venue was read in {}: {parts} parts, {tris} triangles.",
+            if ms < 1000 {
+                format!("{ms} ms")
+            } else {
+                format!("{:.1} s", ms as f64 / 1000.0)
+            }
         ));
     }
     out.push("The graphics card's own time can't be measured here; the processor time is NewQ's work for each picture.".into());
