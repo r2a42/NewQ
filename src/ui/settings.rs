@@ -243,11 +243,18 @@ pub const PRESENTER_REMOTE: Section =
     section_of(SettingsPage::ThisComputer, "Presenter remote", true);
 pub const RECOVERY_AND_LOGS: Section =
     section_of(SettingsPage::ThisComputer, "Logs and recovery", true);
+/// The 3D stage page's tabs, under its view (`stage_edit::StageTab`).
+pub const STAGE_VENUE: Section = section_of(SettingsPage::Stage3d, "Venue", false);
+pub const STAGE_SCREENS: Section = section_of(SettingsPage::Stage3d, "Screens", false);
+pub const STAGE_PROJECTORS: Section = section_of(SettingsPage::Stage3d, "Projectors", false);
+pub const STAGE_VIEWPOINTS: Section = section_of(SettingsPage::Stage3d, "Viewpoints", false);
+/// The displays that show the stage, each with the way to it on Displays.
+pub const STAGE_DISPLAYS: Section = section_of(SettingsPage::Stage3d, "Displays", false);
 
 /// Every section the pages draw, each page's in its order (the tests' list;
 /// the presenter remote's is left out while it is switched off).
 #[cfg(test)]
-pub const SECTIONS: [Section; 12] = [
+pub const SECTIONS: [Section; 17] = [
     NAME_AND_FILE,
     STOP_ALL,
     LAYERS,
@@ -260,6 +267,11 @@ pub const SECTIONS: [Section; 12] = [
     DECODING,
     ALLOWED_HERE,
     RECOVERY_AND_LOGS,
+    STAGE_VENUE,
+    STAGE_SCREENS,
+    STAGE_PROJECTORS,
+    STAGE_VIEWPOINTS,
+    STAGE_DISPLAYS,
 ];
 
 /// An item of the menu bar that a pointer names: "Tools ▸ Test Mode". The
@@ -460,9 +472,14 @@ pub fn settings_view(
             });
         });
         ui.separator();
+        // The 3D stage lays itself out: its view pinned at the top, as wide
+        // as the window, and only the chosen tab's content scrolls.
+        if page == SettingsPage::Stage3d {
+            super::stage_edit::page(ui, show, st, actions);
+            return;
+        }
         // Each page keeps its own place: one opened from far down another
-        // (the 3D stage page's list of displays) starts at its own top, not
-        // part-way down at the other's place.
+        // starts at its own top, not part-way down at the other's place.
         egui::ScrollArea::vertical()
             .id_salt(("settings_page", page))
             .auto_shrink([false, false])
@@ -476,7 +493,8 @@ pub fn settings_view(
                     SettingsPage::Network => super::network::page(ui, show, st, actions),
                     SettingsPage::Displays => displays_panel(ui, show, engine, st, actions),
                     SettingsPage::SubDisplays => sub_displays_panel(ui, show, st, actions),
-                    SettingsPage::Stage3d => super::stage_edit::page(ui, show, st, actions),
+                    // Drawn above, without this scroll area.
+                    SettingsPage::Stage3d => {}
                     SettingsPage::Audio => audio_panel(ui, show, engine, st, actions),
                     SettingsPage::Sync => sync_page(ui, show, st, actions),
                     SettingsPage::Osc => osc_page(ui, show, st),
@@ -577,14 +595,32 @@ fn nav_row(ui: &mut Ui, label: &str, selected: bool, badge: Option<&Badge>) -> b
 /// A titled block of a page.
 pub(super) fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
     // For the tests: every heading drawn, so a pointer's section can be found.
+    note_heading(ui, title);
+    ui.add_space(6.0);
+    ui.label(RichText::new(title).strong());
+    ui.add_space(2.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        body(ui);
+    });
+}
+
+/// Notes a heading for the tests, so a pointer's section can be found (a
+/// tab's label, which is in sight whichever tab is chosen, counts).
+pub(super) fn note_heading(ui: &Ui, title: &str) {
     #[cfg(test)]
     ui.data_mut(|d| {
         d.get_temp_mut_or_default::<Vec<String>>(egui::Id::new("settings_sections"))
             .push(title.to_string())
     });
-    ui.add_space(6.0);
-    ui.label(RichText::new(title).strong());
-    ui.add_space(2.0);
+    #[cfg(not(test))]
+    let _ = (ui, title);
+}
+
+/// A block of a page with no title of its own: a tab's content, which its
+/// tab names.
+pub(super) fn untitled(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
+    ui.add_space(4.0);
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         body(ui);

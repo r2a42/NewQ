@@ -1,7 +1,8 @@
 //! Settings ▸ 3D stage: the venue model, the screens in it and what each
-//! shows, the saved viewpoints, and the displays that show the stage. A 3D
-//! view at the top shows every change as it is made; a screen picked there
-//! opens here.
+//! shows, the projectors, the saved viewpoints, and the displays that show
+//! the stage, each on a tab (`StageTab`). A 3D view pinned at the top shows
+//! every change as it is made; a screen or projector picked there opens on
+//! its tab. Only the chosen tab's content scrolls.
 //!
 //! The page edits the show directly, as the other settings pages do (undo
 //! sees it; show mode greys the page; a follower's edits are put back). What
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 
 use egui::{RichText, Ui};
 
-use super::settings::{hint, section, warning};
+use super::settings::{Section, hint, untitled, warning};
 use super::stage_view::{self, VenueStatus};
 use super::{Action, UiState};
 use crate::show::{OutputId, Show};
@@ -344,31 +345,169 @@ pub fn feed_choices(show: &Show) -> Vec<(OutputId, String)> {
         .collect()
 }
 
-/// The page.
+/// The tabs of Settings ▸ 3D stage, under its view. The one chosen is kept
+/// for the run (`StageShared::tab`), not in the show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum StageTab {
+    #[default]
+    Venue,
+    Screens,
+    Projectors,
+    Viewpoints,
+    Displays,
+}
+
+impl StageTab {
+    pub const ALL: [StageTab; 5] = [
+        StageTab::Venue,
+        StageTab::Screens,
+        StageTab::Projectors,
+        StageTab::Viewpoints,
+        StageTab::Displays,
+    ];
+
+    /// The section of the page it is: its label is the section's name, so
+    /// a pointer ("Settings ▸ 3D stage ▸ Projectors") names a tab.
+    pub fn section(self) -> Section {
+        use super::settings::*;
+        match self {
+            StageTab::Venue => STAGE_VENUE,
+            StageTab::Screens => STAGE_SCREENS,
+            StageTab::Projectors => STAGE_PROJECTORS,
+            StageTab::Viewpoints => STAGE_VIEWPOINTS,
+            StageTab::Displays => STAGE_DISPLAYS,
+        }
+    }
+
+    /// How many of what it holds there are, shown beside its label.
+    fn count(self, show: &Show) -> usize {
+        let s = &show.stage3d;
+        match self {
+            StageTab::Venue => 0,
+            StageTab::Screens => s.surfaces.len(),
+            StageTab::Projectors => s.projectors.len(),
+            StageTab::Viewpoints => s.viewpoints.len(),
+            StageTab::Displays => show
+                .outputs
+                .iter()
+                .filter(|o| !o.is_sub_display() && show.stage_source(o.id).is_some())
+                .count(),
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            StageTab::Venue => "The room's model, or a sample venue",
+            StageTab::Screens => "The screens in the stage and the display each shows",
+            StageTab::Projectors => "Projectors: where they stand, their lenses and their light",
+            StageTab::Viewpoints => "Saved places to look from",
+            StageTab::Displays => "The displays that show the 3D stage instead of their cues",
+        }
+    }
+}
+
+/// The least height of the pinned view, and of the tab's content under it.
+const VIEW_LEAST: f32 = 120.0;
+const CONTENT_LEAST: f32 = 160.0;
+
+/// The view's height when it hasn't been dragged: a share of the page.
+fn view_height(page: f32, dragged: Option<f32>) -> f32 {
+    let most = (page - CONTENT_LEAST).max(VIEW_LEAST);
+    dragged
+        .unwrap_or((page * 0.45).min(460.0))
+        .max(VIEW_LEAST)
+        .min(most)
+}
+
+/// The page: the view pinned at the top (its height can be dragged), the
+/// tabs under it, and the chosen tab's content in a scroll area of its own.
 pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     // The view first: every change below shows in it.
-    section(ui, "View", |ui| {
-        let mut view = std::mem::take(&mut st.stage.settings_view);
-        let h = 300.0f32.min(ui.available_width() * 0.6).max(160.0);
-        ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
-            stage_view::draw(ui, show, st, &mut view, stage_view::SETTINGS_VIEW);
-        });
-        st.stage.settings_view = view;
-        hint(
-            ui,
-            "Drag to turn, right-drag or Shift-drag to slide, the wheel to come closer; \
-             double-click to see it all. Click a screen to pick it.",
-        );
+    let h = view_height(ui.available_height(), st.stage.view_height);
+    let mut view = std::mem::take(&mut st.stage.settings_view);
+    let r = ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
+        ui.set_min_size(egui::vec2(ui.available_width(), h));
+        stage_view::draw(ui, show, st, &mut view, stage_view::SETTINGS_VIEW);
     });
-    venue_section(ui, show, st, actions);
-    surfaces_section(ui, show, st);
-    super::stage_projectors::section_ui(ui, show, st);
-    viewpoints_section(ui, show);
-    sources_section(ui, show, st, actions);
+    st.stage.settings_view = view;
+    note(ui, "3D stage ▸ view", &r.response);
+    // A handle to make the view taller or shorter.
+    let (grip, drag) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 8.0),
+        egui::Sense::drag(),
+    );
+    note(ui, "3D stage ▸ view height", &drag);
+    let drag = drag.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let colour = if drag.hovered() || drag.dragged() {
+        ui.visuals().widgets.hovered.fg_stroke.color
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
+    ui.painter().line_segment(
+        [
+            grip.center() - egui::vec2(24.0, 0.0),
+            grip.center() + egui::vec2(24.0, 0.0),
+        ],
+        egui::Stroke::new(2.0, colour),
+    );
+    if drag.dragged() {
+        st.stage.view_height = Some(h + drag.drag_delta().y);
+    }
+    hint(
+        ui,
+        "Drag to turn, right-drag or Shift-drag to slide, the wheel to come closer; \
+         double-click to see it all. Click a screen or a projector to pick it.",
+    );
+    // What is picked in the view opens on its tab.
+    if st.stage.picked.is_some() && st.stage.picked != st.stage.opened_for {
+        st.stage.tab = StageTab::Screens;
+    }
+    if st.stage.projectors.picked.is_some()
+        && st.stage.projectors.picked != st.stage.projectors.opened_for
+    {
+        st.stage.tab = StageTab::Projectors;
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        for tab in StageTab::ALL {
+            let label = tab.section().name;
+            super::settings::note_heading(ui, label);
+            let n = tab.count(show);
+            let text = if n > 0 {
+                format!("{label} ({n})")
+            } else {
+                label.to_string()
+            };
+            let r = ui
+                .selectable_label(st.stage.tab == tab, RichText::new(text).size(14.0))
+                .on_hover_text(tab.hint());
+            note(ui, &format!("3D stage ▸ tab ▸ {label}"), &r);
+            if r.clicked() {
+                st.stage.tab = tab;
+            }
+        }
+    });
+    ui.separator();
+    let tab = st.stage.tab;
+    egui::ScrollArea::vertical()
+        .id_salt(("stage_tab", tab))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Room for the frame's edges and the scroll bar.
+            ui.set_max_width((ui.available_width() - 16.0).max(120.0));
+            match tab {
+                StageTab::Venue => venue_section(ui, show, st, actions),
+                StageTab::Screens => surfaces_section(ui, show, st),
+                StageTab::Projectors => super::stage_projectors::section_ui(ui, show, st),
+                StageTab::Viewpoints => viewpoints_section(ui, show),
+                StageTab::Displays => sources_section(ui, show, st, actions),
+            }
+            ui.add_space(8.0);
+        });
 }
 
 fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
-    section(ui, "Venue", |ui| {
+    untitled(ui, |ui| {
         let unit = show.stage3d.units;
         match &mut show.stage3d.venue {
             None => {
@@ -578,7 +717,7 @@ pub(super) fn placement_rows(ui: &mut Ui, salt: &str, p: &mut Placement, unit: L
 }
 
 fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
-    section(ui, "Screens", |ui| {
+    untitled(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label("Units shown");
             egui::ComboBox::from_id_salt("stage_units")
@@ -861,7 +1000,7 @@ fn rebuild(ui: &mut Ui, id: SurfaceId, facets: &mut Vec<Facet>, unit: LengthUnit
 }
 
 fn viewpoints_section(ui: &mut Ui, show: &mut Show) {
-    section(ui, "Viewpoints", |ui| {
+    untitled(ui, |ui| {
         if show.stage3d.viewpoints.is_empty() {
             hint(
                 ui,
@@ -1062,14 +1201,11 @@ pub(super) fn note(ui: &Ui, name: &str, r: &egui::Response) {
     let _ = (ui, name, r);
 }
 
-/// The heading of the 3D stage page's list of the displays that show it.
-pub const STAGE_DISPLAYS: &str = "Displays that show the stage";
-
 /// The displays that show the stage, each with the way to it on the
 /// Displays page, where a display's *Shows* is chosen.
 fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let displays = super::settings::path(super::SettingsPage::Displays, None);
-    section(ui, STAGE_DISPLAYS, |ui| {
+    untitled(ui, |ui| {
         hint(
             ui,
             &format!(
