@@ -15,7 +15,7 @@ use crate::render::{OutputGroup, OutputLayer};
 use crate::render3d::{self, Camera, Options, Scene};
 use crate::show::{OutputId, Show};
 use crate::stage_render::{
-    FeedJob, StageJob, StageThread, ThrowJob, ViewJob, feed_size, throw_size,
+    CountTo, FeedJob, StageJob, StageThread, ThrowJob, ViewJob, feed_size, throw_size,
 };
 use crate::stage3d::ProjectorId;
 use crate::stage3d::Venue;
@@ -269,6 +269,11 @@ pub struct StageLive {
     /// light on, and its key (made again only when that changes).
     lit_scene: Arc<Scene>,
     lit_key: u64,
+    /// Where what the stage did is counted (`stage_render::totals`).
+    count: CountTo,
+    /// The thread was found stopped and hasn't been started again (the
+    /// next start is a restart).
+    died: bool,
 }
 
 /// A preview's target is kept this long after it last asked for a picture.
@@ -521,6 +526,7 @@ impl StageLive {
                         let venue = want.clone();
                         let path = want.path.clone();
                         let locate = v.locate;
+                        let count = self.count;
                         let spawned = std::thread::Builder::new().name("venue-load".into()).spawn(
                             move || {
                                 // How its files stand just before they are
@@ -531,7 +537,18 @@ impl StageLive {
                                     venue_file_list(&path, &locate)
                                 };
                                 let stamp = stamp_of(&files, &locate);
+                                let began = Instant::now();
                                 let loaded = load_venue_with(&path, &venue, &locate);
+                                match &loaded {
+                                    Ok(l) => count.venue_read(
+                                        began.elapsed(),
+                                        Some((l.parts.len(), l.triangles)),
+                                    ),
+                                    Err(Unread::Failed(_)) => {
+                                        count.venue_read(began.elapsed(), None)
+                                    }
+                                    Err(Unread::Arriving) => {}
+                                }
                                 let _ = tx.send((Arc::new(files), stamp, loaded));
                             },
                         );
@@ -640,6 +657,8 @@ impl StageLive {
         // to be drawn again by the next one.
         if self.thread.as_ref().is_some_and(StageThread::is_finished) {
             log::warn!("the 3D stage's drawing thread stopped; starting another");
+            self.count.thread_stopped();
+            self.died = true;
             self.thread = None;
             self.drawn_with.clear();
         }
@@ -811,6 +830,7 @@ impl StageLive {
             if let Some(t) = self.thread.take() {
                 drop(t.quit());
             }
+            self.count.idle_release();
             self.drawn_with.clear();
             self.started = None;
             self.restart_wanted = false;
@@ -826,13 +846,15 @@ impl StageLive {
         let mut throws = Vec::new();
         let mut jobs = Vec::new();
         let mut h = crate::stage3d::scene::Fnv::new();
+        let mut left_out = 0;
         for pt in projectors {
-            if throws.len() >= MAX_THROWS {
-                break;
-            }
             let Some(p) = show.projector(pt.id).filter(|p| p.visible) else {
                 continue;
             };
+            if throws.len() >= MAX_THROWS {
+                left_out += 1;
+                continue;
+            }
             let layer = throws.len() as u32;
             throws.push(light::throw_of(
                 p,
@@ -854,6 +876,7 @@ impl StageLive {
                 });
             }
         }
+        self.count.throws_left_out(left_out);
         let mut k = crate::stage3d::scene::Fnv::new();
         k.bytes(&self.scene_key.to_le_bytes());
         k.bytes(format!("{throws:?}").as_bytes());
@@ -927,8 +950,10 @@ impl StageLive {
     fn keep_thread(&mut self, gpu: &Gpu) {
         if self.thread.is_none() && self.started.is_none_or(|t| t.elapsed() >= RESTART_EVERY) {
             self.started = Some(Instant::now());
-            match StageThread::spawn(gpu.clone()) {
+            match StageThread::spawn(gpu.clone(), self.count) {
                 Ok(t) => {
+                    self.count.thread_started(self.died);
+                    self.died = false;
                     self.seen_done = 0;
                     self.seen_displays = 0;
                     self.serial = 0;
@@ -951,6 +976,12 @@ impl StageLive {
     #[cfg(test)]
     pub fn look_now(&mut self) {
         self.venue.next_look = None;
+    }
+
+    /// Count what the stage does into `count` (for a test).
+    #[cfg(test)]
+    pub fn count_into(&mut self, count: CountTo) {
+        self.count = count;
     }
 
     /// Behave as if the thread were behind with the displays (for a test).

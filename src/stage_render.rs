@@ -37,6 +37,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[path = "stage_counts.rs"]
+mod counts;
+#[allow(unused_imports)]
+pub use counts::{CountTo, Counters, FRAME_MS_BANDS, StageTotals, TOTALS, totals};
+
 /// The format the feeds and the views' targets are drawn in: display values,
 /// as the outputs' pictures are.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -196,7 +201,9 @@ pub struct StageThread {
 }
 
 impl StageThread {
-    pub fn spawn(gpu: Gpu) -> std::io::Result<StageThread> {
+    /// The thread, counting what it draws into `count` (`TOTALS` by
+    /// default).
+    pub fn spawn(gpu: Gpu, count: CountTo) -> std::io::Result<StageThread> {
         let mailbox: Arc<Mailbox<Work>> = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let done = Arc::new(AtomicU64::new(0));
@@ -211,7 +218,7 @@ impl StageThread {
                 let _said = crate::crash::OnPanic(|| {
                     log::warn!("the 3D stage's drawing thread stopped unexpectedly");
                 });
-                stage_loop(gpu, mb, d, dd, s)
+                stage_loop(gpu, mb, d, dd, s, count)
             })?;
         Ok(StageThread {
             mailbox,
@@ -338,10 +345,19 @@ pub struct StageDrawer {
     /// The scenes the last job drew (when they change, the renderer lets
     /// go of what only the old ones had: `Renderer::keep_only`).
     scenes: Vec<Arc<Scene>>,
+    /// Where what it draws is counted.
+    count: CountTo,
 }
 
 impl StageDrawer {
+    /// (Counting into `TOTALS`; for a test.)
+    #[cfg(test)]
     pub fn new(gpu: &Gpu) -> StageDrawer {
+        StageDrawer::counting(gpu, CountTo::default())
+    }
+
+    /// One counting what it draws into `count`.
+    pub fn counting(gpu: &Gpu, count: CountTo) -> StageDrawer {
         StageDrawer {
             renderer: Renderer::new(gpu),
             compositor: gpu.compositor.pipeline(&gpu.device, FORMAT),
@@ -349,7 +365,15 @@ impl StageDrawer {
             feeds: HashMap::new(),
             throws: None,
             scenes: Vec::new(),
+            count,
         }
+    }
+
+    /// Have the renderer refuse the light, as a card that won't build its
+    /// pipelines does (for a test).
+    #[cfg(test)]
+    pub fn refuse_light(&mut self) {
+        self.renderer.refuse_light();
     }
 
     /// What is kept: the renderer's meshes, pictures and render targets, and
@@ -435,13 +459,14 @@ impl StageDrawer {
             .retain(|_, f| now.saturating_duration_since(f.used) < FEED_KEPT);
         let mut stats = Vec::new();
         let mut displays = true;
+        let mut thrown = 0;
         for v in &job.views {
             if displays && !v.display {
                 displays = false;
                 after_displays();
                 // Only the previews have light: their projectors' pictures
                 // are drawn after the displays' views, never ahead of them.
-                self.draw_throws(gpu, job, now);
+                thrown = self.draw_throws(gpu, job, now);
             }
             let Some(view) = v.target.render_view() else {
                 continue;
@@ -468,18 +493,21 @@ impl StageDrawer {
                 pictures,
             );
             v.target.mark_drawn();
+            self.count.view(v.display, &s);
             stats.push((v.key, s));
         }
         if displays {
             after_displays();
         }
+        self.count.job(job.feeds.len(), thrown);
         stats
     }
 
     /// The projectors' pictures, each as its window would send it, into
     /// their layers of the throws' array (and the array let go once unused
-    /// for a while).
-    fn draw_throws(&mut self, gpu: &Gpu, job: &StageJob, now: Instant) {
+    /// for a while); how many were drawn.
+    fn draw_throws(&mut self, gpu: &Gpu, job: &StageJob, now: Instant) -> usize {
+        let mut drawn = 0;
         if !job.throws.is_empty() {
             let size = (job.throw_size.0.max(1), job.throw_size.1.max(1));
             // As many layers as the highest one asked for (in powers of two).
@@ -511,6 +539,7 @@ impl StageDrawer {
                     let cmd = gpu.composite(&self.compositor, Slot::Stage, layer, &draw, blend);
                     // Before the next one's uniforms and blend are written.
                     gpu.submit([cmd]);
+                    drawn += 1;
                 }
             }
         }
@@ -521,6 +550,7 @@ impl StageDrawer {
         {
             self.throws = None;
         }
+        drawn
     }
 }
 
@@ -530,6 +560,7 @@ fn stage_loop(
     done: Arc<AtomicU64>,
     displays_done: Arc<AtomicU64>,
     stats: Arc<parking_lot::Mutex<HashMap<u64, FrameStats>>>,
+    count: CountTo,
 ) {
     // Made at the first job: a show with no stage never builds the pipelines.
     let mut drawer: Option<StageDrawer> = None;
@@ -540,7 +571,7 @@ fn stage_loop(
             #[cfg(test)]
             Work::Panic => panic!("a test stops the 3D stage's drawing thread"),
         };
-        let d = drawer.get_or_insert_with(|| StageDrawer::new(&gpu));
+        let d = drawer.get_or_insert_with(|| StageDrawer::counting(&gpu, count));
         let drawn = d.draw(&gpu, &job, &mut || {
             displays_done.store(job.serial, Ordering::Release);
         });

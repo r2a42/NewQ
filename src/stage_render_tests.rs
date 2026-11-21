@@ -311,7 +311,8 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
         Arc::new(LayerTexture::new_target(&gpu, 32, 18)),
         Arc::new(LayerTexture::new_target(&gpu, 48, 27)),
     );
-    let mut drawer = StageDrawer::new(&gpu);
+    let count = Counters::for_test();
+    let mut drawer = StageDrawer::counting(&gpu, count);
     let mut at_displays = None;
     // (In the order asked; merging puts the display's first.)
     let job = StageJob {
@@ -328,7 +329,16 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
     assert!(pa.is_filled());
     // Each view keeps its own render targets.
     assert_eq!(drawer.kept().2, 2);
-    let thread = StageThread::spawn(gpu.clone()).unwrap();
+    // Counted: one job, its feed, a display's view and a preview's.
+    let t = count.0.totals();
+    assert_eq!(
+        (t.jobs, t.feeds, t.displays, t.views),
+        (1, 1, 1, 1),
+        "{t:?}"
+    );
+    assert_eq!((t.missing_pictures, t.light_left_out), (0, 0), "{t:?}");
+    let count = Counters::for_test();
+    let thread = StageThread::spawn(gpu.clone(), count).unwrap();
     thread.submit(first);
     thread.submit(second);
     let end = Instant::now() + Duration::from_secs(20);
@@ -339,6 +349,128 @@ fn the_thread_draws_what_it_is_given_and_says_so() {
     assert!(a.is_filled() && b.is_filled());
     assert!(thread.stats(2).is_some());
     let _ = thread.quit().join();
+    // The thread counts what it drew: two jobs, or one if merged, with the
+    // same two views either way.
+    let t = count.0.totals();
+    assert!((1..=2).contains(&t.jobs), "{t:?}");
+    assert_eq!((t.displays, t.views), (1, 1), "{t:?}");
+}
+
+/// Each view drawn is counted, with its processor time and the pictures its
+/// screens lacked; the program's totals count it too.
+#[test]
+fn every_view_drawn_is_counted() {
+    let Some(gpu) = gpu() else { return };
+    let (show, output, camera) = screen_show();
+    let scene = Arc::new(show.stage3d.scene(&show, None));
+    let target = Arc::new(LayerTexture::new_target(&gpu, 64, 36));
+    let job = |feeds: Vec<FeedJob>| StageJob {
+        feeds,
+        views: vec![ViewJob {
+            key: 9,
+            display: true,
+            target: target.clone(),
+            scene: scene.clone(),
+            camera,
+            options: Options::default(),
+            lines: Default::default(),
+        }],
+        serial: 1,
+        ..StageJob::default()
+    };
+    let picture = quarters(&gpu);
+    let fed = job(vec![FeedJob {
+        output,
+        groups: vec![group(&picture, PICTURE)],
+        size: PICTURE,
+    }]);
+    let count = Counters::for_test();
+    let everyone = totals();
+    let mut drawer = StageDrawer::counting(&gpu, count);
+    drawer.draw(&gpu, &fed, &mut || {});
+    let once = count.0.totals();
+    drawer.draw(&gpu, &fed, &mut || {});
+    let t = count.0.totals();
+    let twice = t.since(&once);
+    assert_eq!(
+        (t.jobs, t.displays, t.views, t.feeds),
+        (2, 2, 0, 2),
+        "{t:?}"
+    );
+    assert_eq!((twice.jobs, twice.displays), (1, 1));
+    assert!(t.cpu_us_displays > 0 && t.cpu_us_worst > 0, "{t:?}");
+    assert!(t.cpu_us_worst <= t.cpu_us_displays);
+    assert_eq!(t.frames_by_ms.iter().sum::<u64>(), 2);
+    assert!(t.worst_band_ms().is_some());
+    assert_eq!(t.display_missing_pictures, 0);
+    // Without its display's picture the screen is counted as missing (a
+    // drawer of its own: this one keeps the feed for a while).
+    StageDrawer::counting(&gpu, count).draw(&gpu, &job(Vec::new()), &mut || {});
+    let t = count.0.totals();
+    assert_eq!((t.missing_pictures, t.display_missing_pictures), (1, 1));
+    // The program's totals saw all three (and maybe others' beside them).
+    let all = totals().since(&everyone);
+    assert!(all.displays >= 3 && all.jobs >= 3, "{all:?}");
+}
+
+/// A card that won't draw the light: the lit view is drawn without it, and
+/// that is counted.
+#[test]
+fn a_view_drawn_without_its_light_is_counted() {
+    let Some(gpu) = gpu() else { return };
+    let (mut show, _output, camera) = screen_show();
+    let s = show.stage3d.surfaces[0].clone();
+    let id = show.add_projector();
+    let p = show.projector_mut(id).unwrap();
+    p.placement = p.fit_to(&s, 16.0 / 9.0).unwrap();
+    let p = p.clone();
+    let mut scene = show.stage3d.scene(&show, None);
+    scene.throws = vec![crate::stage3d::light::throw_of(
+        &p,
+        16.0 / 9.0,
+        (1920, 1080),
+        0,
+        true,
+    )];
+    let scene = Arc::new(scene);
+    let picture = quarters(&gpu);
+    let target = Arc::new(LayerTexture::new_target(&gpu, 64, 36));
+    let job = StageJob {
+        throws: vec![ThrowJob {
+            layer: 0,
+            groups: vec![group(&picture, PICTURE)],
+            blend: EdgeBlend::default(),
+        }],
+        throw_size: (64, 36),
+        views: vec![ViewJob {
+            key: 6,
+            display: false,
+            target: target.clone(),
+            scene,
+            camera,
+            lines: Default::default(),
+            options: Options {
+                light: LightView::Picture,
+                ..Options::default()
+            },
+        }],
+        serial: 1,
+        ..StageJob::default()
+    };
+    let count = Counters::for_test();
+    let mut drawer = StageDrawer::counting(&gpu, count);
+    drawer.refuse_light();
+    let stats = drawer.draw(&gpu, &job, &mut || {});
+    assert!(stats[0].1.light_left_out);
+    assert!(target.is_filled(), "the frame lands all the same");
+    let t = count.0.totals();
+    assert_eq!((t.views, t.light_left_out, t.throws), (1, 1, 1), "{t:?}");
+    // A card that draws it: nothing left out.
+    let count = Counters::for_test();
+    let mut drawer = StageDrawer::counting(&gpu, count);
+    drawer.draw(&gpu, &job, &mut || {});
+    let t = count.0.totals();
+    assert_eq!((t.views, t.light_left_out, t.throws), (1, 0, 1), "{t:?}");
 }
 
 /// One layer of an array texture's pixels (RGBA rows).
