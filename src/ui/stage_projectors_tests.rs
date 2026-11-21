@@ -60,7 +60,7 @@ fn click_events(at: Pos2) -> Vec<egui::Event> {
     vec![egui::Event::PointerMoved(at), b(true), b(false)]
 }
 
-/// Draws the Projectors section a frame at a time, clicking where asked.
+/// Draws the Projectors tab's content a frame at a time, clicking where asked.
 struct Page {
     ctx: egui::Context,
     t: f64,
