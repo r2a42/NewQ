@@ -6015,6 +6015,7 @@ fn shared_picture_editor(
         };
         let r = egui::ComboBox::from_id_salt(("display_part", d.id.0))
             .selected_text(shown)
+            .height(480.0)
             .show_ui(ui, |ui| {
                 let own = current.is_none() && d.source.is_none();
                 let r = ui.selectable_label(own, "Its own cues");
