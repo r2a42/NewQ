@@ -749,7 +749,7 @@ The README describes the features; this file is about working on the code.
 - `src/power.rs`: on battery or not (pmset, GetSystemPowerStatus, /sys/class/power_supply) on a thread of
   its own; `app.rs::keep_awake_for_outputs` holds `KeepAwake` while an output window is open
   (`Prefs::let_computer_sleep` turns it off), logs sleeps (`SleepWatch`) and the power source, and sets
-  `UiState::keeping_awake/on_battery` for the status bar and the General page's badge.
+  `UiState::keeping_awake/on_battery` for the status bar and the This computer page's badge.
 - Panics are lived through, not fatal (`crash.rs`): `survive(what, f)` is a `catch_unwind` that the main
   loop wraps each pass in (`about_to_wait` -> `App::pass`, with the parts the rest can do without, the
   engine tick and the outputs each in their own `App::part`) and each window event (`after_window_panic`
