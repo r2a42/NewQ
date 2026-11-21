@@ -406,17 +406,46 @@ impl StageTab {
     }
 }
 
-/// The least height of the pinned view, and of the tab's content under it.
+/// The least height of the view on top, and of the tab's content under it.
 const VIEW_LEAST: f32 = 90.0;
 const CONTENT_LEAST: f32 = 80.0;
-/// What the page has under the view besides the content: its handle, the
-/// tabs (one row) and the line under them.
-const CHROME: f32 = 46.0;
-/// Below this the page has no room to pin anything: the view, the tabs and
-/// the content scroll as one (a classic window with little room for the
-/// settings). The view's hint shows only from `ROOM_FOR_HINT`.
+/// What the page has under the view besides the content: its handle, its
+/// hint, the tabs (one row) and the line under them.
+const CHROME: f32 = 80.0;
+/// A page this high has the view on top, pinned, and the tabs under it.
+const STACKED_FROM: f32 = 420.0;
+/// A page less high but this wide has the view pinned on the left and the
+/// tabs beside it (the classic window, whose settings have little height
+/// under the transport). The least widths of the two.
+const SIDE_BY_SIDE_FROM: f32 = 560.0;
+const SIDE_VIEW_LEAST: f32 = 200.0;
+const SIDE_CONTENT_LEAST: f32 = 360.0;
+/// Below this the page, short and narrow, has no room to pin anything: the
+/// view, the tabs and the content scroll as one.
 const SHORT_PAGE: f32 = VIEW_LEAST + CHROME + CONTENT_LEAST;
-const ROOM_FOR_HINT: f32 = 420.0;
+
+/// How the page is laid out, by the room it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrangement {
+    /// The view on top, the tabs under it.
+    Stacked,
+    /// The view on the left, the tabs on the right.
+    SideBySide,
+    /// Everything in one scroll area.
+    Cramped,
+}
+
+fn arrangement(size: egui::Vec2) -> Arrangement {
+    if size.y >= STACKED_FROM {
+        Arrangement::Stacked
+    } else if size.x >= SIDE_BY_SIDE_FROM && size.y >= VIEW_LEAST {
+        Arrangement::SideBySide
+    } else if size.y >= SHORT_PAGE {
+        Arrangement::Stacked
+    } else {
+        Arrangement::Cramped
+    }
+}
 
 /// The view's height on a page `page` high: a share of it until the handle
 /// is dragged, never so tall that the content has less than its least.
@@ -428,59 +457,111 @@ fn view_height(page: f32, dragged: Option<f32>) -> f32 {
         .min(most)
 }
 
+/// The view's width beside the tabs on a page `page` wide.
+fn view_width(page: f32, dragged: Option<f32>) -> f32 {
+    let most = (page - SIDE_CONTENT_LEAST).max(SIDE_VIEW_LEAST);
+    dragged
+        .unwrap_or((page * 0.35).min(640.0))
+        .max(SIDE_VIEW_LEAST)
+        .min(most)
+}
+
 const VIEW_HINT: &str = "Drag to turn, right-drag or Shift-drag to slide, the wheel to come \
                          closer; double-click to see it all. Click a screen or a projector to \
                          pick it.";
 
-/// The page: the view pinned at the top (its height can be dragged), the
-/// tabs under it, and the chosen tab's content in a scroll area of its own.
+/// The page: the view pinned (its size can be dragged), the tabs beside or
+/// under it, and the chosen tab's content in a scroll area of its own.
 pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
-    let page_h = ui.available_height();
-    if page_h < SHORT_PAGE {
-        // Cramped: all of it scrolls, the view at its least.
-        let out = egui::ScrollArea::vertical()
-            .id_salt("stage_short")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_max_width((ui.available_width() - 16.0).max(120.0));
-                the_view(ui, show, st, VIEW_LEAST);
-                tabs(ui, show, st);
-                tab_content(ui, show, st, actions);
-            });
-        note_rect(ui, "3D stage ▸ tab content", out.inner_rect);
-        return;
+    let room = ui.available_size();
+    match arrangement(room) {
+        Arrangement::Stacked => {
+            // The view first: every change below shows in it.
+            let h = view_height(room.y, st.stage.view_height);
+            the_view(ui, show, st, h);
+            if let Some(d) = grip(ui, egui::vec2(ui.available_width(), 8.0), false) {
+                st.stage.view_height = Some(view_height(room.y, Some(h + d)));
+            }
+            if room.y >= STACKED_FROM {
+                hint(ui, VIEW_HINT);
+            }
+            tabs(ui, show, st);
+            tab_scroll(ui, show, st, actions);
+        }
+        Arrangement::SideBySide => {
+            let rect = ui.available_rect_before_wrap();
+            let w = view_width(rect.width(), st.stage.view_width);
+            let left = egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height()));
+            let mut l = ui.new_child(egui::UiBuilder::new().max_rect(left));
+            the_view(&mut l, show, st, rect.height());
+            let mut g = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
+                egui::pos2(left.max.x, rect.min.y),
+                rect.max,
+            )));
+            if let Some(d) = grip(&mut g, egui::vec2(8.0, rect.height()), true) {
+                st.stage.view_width = Some(view_width(rect.width(), Some(w + d)));
+            }
+            let right =
+                egui::Rect::from_min_max(egui::pos2(left.max.x + 12.0, rect.min.y), rect.max);
+            let mut r = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(right)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            tabs(&mut r, show, st);
+            tab_scroll(&mut r, show, st, actions);
+            ui.advance_cursor_after_rect(rect);
+        }
+        Arrangement::Cramped => {
+            let out = egui::ScrollArea::both()
+                .id_salt("stage_cramped")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_max_width((ui.available_width() - 16.0).max(120.0));
+                    the_view(ui, show, st, VIEW_LEAST);
+                    tabs(ui, show, st);
+                    tab_content(ui, show, st, actions);
+                });
+            note_rect(ui, "3D stage ▸ tab content", out.inner_rect);
+        }
     }
-    // The view first: every change below shows in it.
-    let h = view_height(page_h, st.stage.view_height);
-    the_view(ui, show, st, h);
-    // A handle to make the view taller or shorter.
-    let (grip, drag) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::drag());
-    note(ui, "3D stage ▸ view height", &drag);
-    let drag = drag
-        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text("Drag to make the view taller or shorter");
+}
+
+/// A handle to drag the view's size by, `size` big (a line across it, or
+/// down it when `across`). How far it was dragged this frame.
+fn grip(ui: &mut Ui, size: egui::Vec2, across: bool) -> Option<f32> {
+    let (rect, drag) = ui.allocate_exact_size(size, egui::Sense::drag());
+    note(ui, "3D stage ▸ view size", &drag);
+    let drag = if across {
+        drag.on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+            .on_hover_text("Drag to make the view wider or narrower")
+    } else {
+        drag.on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .on_hover_text("Drag to make the view taller or shorter")
+    };
     let colour = if drag.hovered() || drag.dragged() {
         ui.visuals().widgets.hovered.fg_stroke.color
     } else {
         ui.visuals().widgets.noninteractive.bg_stroke.color
     };
+    let half = if across {
+        egui::vec2(0.0, 24.0)
+    } else {
+        egui::vec2(24.0, 0.0)
+    };
     ui.painter().line_segment(
-        [
-            grip.center() - egui::vec2(24.0, 0.0),
-            grip.center() + egui::vec2(24.0, 0.0),
-        ],
+        [rect.center() - half, rect.center() + half],
         egui::Stroke::new(2.0, colour),
     );
-    if drag.dragged() {
-        st.stage.view_height = Some(view_height(page_h, Some(h + drag.drag_delta().y)));
-    }
-    if page_h >= ROOM_FOR_HINT {
-        hint(ui, VIEW_HINT);
-    }
-    tabs(ui, show, st);
+    let d = drag.drag_delta();
+    drag.dragged().then_some(if across { d.x } else { d.y })
+}
+
+/// The chosen tab's content in its own scroll area (each tab keeps its
+/// place; rows wider than a cramped page scroll sideways).
+fn tab_scroll(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let tab = st.stage.tab;
-    let out = egui::ScrollArea::vertical()
+    let out = egui::ScrollArea::both()
         .id_salt(("stage_tab", tab))
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -504,14 +585,20 @@ fn the_view(ui: &mut Ui, show: &Show, st: &mut UiState, h: f32) {
 
 /// The row of tabs, each with how many it holds.
 fn tabs(ui: &mut Ui, show: &Show, st: &mut UiState) {
-    // What is picked in the view opens on its tab.
-    if st.stage.picked.is_some() && st.stage.picked != st.stage.opened_for {
-        st.stage.tab = StageTab::Screens;
+    // What is newly picked (in a view, or by adding it) opens on its tab,
+    // once: then any tab can be chosen.
+    let s = &mut st.stage;
+    if s.picked != s.tab_saw.0 {
+        s.tab_saw.0 = s.picked;
+        if s.picked.is_some() {
+            s.tab = StageTab::Screens;
+        }
     }
-    if st.stage.projectors.picked.is_some()
-        && st.stage.projectors.picked != st.stage.projectors.opened_for
-    {
-        st.stage.tab = StageTab::Projectors;
+    if s.projectors.picked != s.tab_saw.1 {
+        s.tab_saw.1 = s.projectors.picked;
+        if s.projectors.picked.is_some() {
+            s.tab = StageTab::Projectors;
+        }
     }
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
