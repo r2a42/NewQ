@@ -4,7 +4,7 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
-## Unreleased
+## 0.26.0
 
 - **Previews only give way when the displays really suffer.** They used to slow down at every
   single late frame, even one nobody could see (a 25 fps film on a 100 Hz display shows each
