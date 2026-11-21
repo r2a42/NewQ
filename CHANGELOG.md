@@ -73,6 +73,11 @@ release page, and a release is refused if it has none.
   lists the views (*Editor*, *Operator*, *Patch*, *Timeline*), the timeline editor, the cart, *New
   preview window* and any windows that are open, instead of the panes' ticks, which did nothing
   there.
+- **A display is set to show the 3D stage on the Displays page.** Its *Shows* now offers *The 3D
+  stage, from* each saved viewpoint (or *all of it*) beside *Its own cues* and *Part of …*; a
+  display that shows part of another's picture has them greyed, with the reason. The 3D stage
+  page's *Displays that show the stage* lists those displays, each with a button to it on the
+  Displays page.
 
 ## 0.26.0
 

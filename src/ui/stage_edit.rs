@@ -1013,7 +1013,7 @@ impl StageItems {
                 refused.is_none(),
                 egui::Button::selectable(source.as_ref() == Some(c), &words),
             );
-            super::note_page_add(ui, &format!("{menu} ▸ {words}"), &r);
+            note(ui, &format!("{menu} ▸ {words}"), &r);
             let r = match self.thrown.iter().find(|(o, _)| *o == output) {
                 Some((_, p)) => r.on_hover_text(format!(
                     "{p}, a projector of the 3D stage, throws this display's picture: a \
@@ -1036,6 +1036,24 @@ impl StageItems {
         }
         picked
     }
+}
+
+/// For the tests: where a control of a display's *Shows* or of the page's
+/// list of displays is, by name, and whether it is in sight (not scrolled
+/// out of it).
+pub(super) fn note(ui: &Ui, name: &str, r: &egui::Response) {
+    #[cfg(test)]
+    {
+        let seen = ui.clip_rect().contains_rect(r.rect);
+        ui.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<(String, egui::Rect, bool)>>(egui::Id::new(
+                "stage_sources",
+            ))
+            .push((name.to_string(), r.rect, seen))
+        });
+    }
+    #[cfg(not(test))]
+    let _ = (ui, name, r);
 }
 
 /// The heading of the 3D stage page's list of the displays that show it.
@@ -1084,7 +1102,7 @@ fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec
                     let r = ui
                         .button("Open on the Displays page")
                         .on_hover_text(format!("{displays}: {}", o.name));
-                    super::note_page_add(ui, &format!("3D stage ▸ {} ▸ Open", o.name), &r);
+                    note(ui, &format!("3D stage ▸ {} ▸ Open", o.name), &r);
                     if r.clicked() {
                         st.reveal_display.set(Some(o.id));
                         actions.push(Action::OpenSettings(super::SettingsPage::Displays));
@@ -1096,7 +1114,7 @@ fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec
             ui.horizontal(|ui| {
                 ui.label(RichText::new("No display shows the stage.").weak());
                 let r = ui.button(format!("Go to {displays}"));
-                super::note_page_add(ui, "3D stage ▸ Go to Displays", &r);
+                note(ui, "3D stage ▸ Go to Displays", &r);
                 if r.clicked() {
                     actions.push(Action::OpenSettings(super::SettingsPage::Displays));
                 }

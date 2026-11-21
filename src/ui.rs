@@ -5964,11 +5964,16 @@ fn displays_panel(
             edge_blend_editor(ui, d, state_size.unwrap_or((1920, 1080)));
             stream_editor(ui, d, engine, st, &audio_names);
         });
-        // One just added (at the bottom) is brought into sight, its top at
-        // the top of the page.
+        // One just added (at the bottom), or asked for from another page, is
+        // brought into sight, its top at the top of the page. It is asked for
+        // until its top is in sight: a pass that egui throws away (a page
+        // just opened has one) takes the scroll with it.
         if st.reveal_display.get() == Some(d.id) {
-            st.reveal_display.set(None);
-            framed.response.scroll_to_me(Some(Align::Min));
+            if ui.clip_rect().contains(framed.response.rect.left_top()) {
+                st.reveal_display.set(None);
+            } else {
+                framed.response.scroll_to_me(Some(Align::Min));
+            }
         }
         #[cfg(test)]
         ui.data_mut(|m| {
@@ -6013,7 +6018,7 @@ fn shared_picture_editor(
             .show_ui(ui, |ui| {
                 let own = current.is_none() && d.source.is_none();
                 let r = ui.selectable_label(own, "Its own cues");
-                note_page_add(ui, &format!("{menu} ▸ Its own cues"), &r);
+                stage_edit::note(ui, &format!("{menu} ▸ Its own cues"), &r);
                 if r.clicked() && !own {
                     d.source = None;
                     if current.is_some() {
@@ -6026,7 +6031,7 @@ fn shared_picture_editor(
                     for (id, name) in sources.iter().filter(|(id, _)| *id != d.id) {
                         let r =
                             ui.selectable_label(current == Some(*id), format!("Part of {name}"));
-                        note_page_add(ui, &format!("{menu} ▸ Part of {name}"), &r);
+                        stage_edit::note(ui, &format!("{menu} ▸ Part of {name}"), &r);
                         if r.clicked() && current != Some(*id) {
                             actions.push(Action::ShowPartOf(d.id, Some(*id)));
                         }
@@ -6042,7 +6047,7 @@ fn shared_picture_editor(
                  it, and send cues to the whole picture. A display can show the 3D stage \
                  instead of its cues.",
             );
-        note_page_add(ui, &menu, &r);
+        stage_edit::note(ui, &menu, &r);
     });
     if d.source.is_some() && current.is_none() && stage.on_a_screen(d.id) {
         settings::warning(
