@@ -217,7 +217,8 @@ fn run_script(command: &str, args: &[String]) -> Result<(), String> {
     if !SCRIPTS_ALLOWED.load(Ordering::Relaxed) {
         return Err(format!(
             "Script “{command}” not run: this computer doesn't allow send cues to run programs \
-             (Settings → General)"
+             ({})",
+            crate::ui::PROGRAMS.path()
         ));
     }
     let mut child = Command::new(command)

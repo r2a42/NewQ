@@ -30,7 +30,8 @@ pub struct Prefs {
     /// open (NewQ holds it awake by default; see `awake.rs`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub let_computer_sleep: bool,
-    /// Draw the output's frame rate on its picture (the Preview pane's checkbox).
+    /// Draw the display's frame rate on its picture (Settings ▸ Interface ▸
+    /// Previews).
     #[serde(default, skip_serializing_if = "is_false")]
     pub fps_on_output: bool,
     /// A presenter-style remote's buttons are acted on (see `clicker`), and the

@@ -335,17 +335,17 @@ fn centred_a_run_creeps_under_the_playhead_and_a_drag_held_waits() {
     assert!((share(&m).unwrap() - 0.5).abs() < 0.01);
 }
 
-/// The General page's radio for following centred (`true`) or by pages.
+/// The Interface page's radio for following centred (`true`) or by pages.
 fn follow_radio(m: &Mouse, centre: bool) -> Rect {
     let all: Vec<(bool, Rect)> = m
         .ctx
         .data(|d| d.get_temp(egui::Id::new("settings_timeline_follow")))
-        .expect("the General page has the choice");
+        .expect("the Interface page has the choice");
     all.iter().find(|r| r.0 == centre).unwrap().1
 }
 
 #[test]
-fn the_setting_on_the_general_page_changes_an_open_editor_at_once_in_both_interfaces() {
+fn the_setting_on_the_interface_page_changes_an_open_editor_at_once_in_both_interfaces() {
     for modern in [true, false] {
         let dir =
             std::env::temp_dir().join(format!("newq_follow_prefs_{}_{modern}", std::process::id()));
@@ -366,7 +366,7 @@ fn the_setting_on_the_general_page_changes_an_open_editor_at_once_in_both_interf
         ui(Action::Timeline(TimelineAction::Open(None)), &mut f, &mut m);
         for page in [false, true] {
             ui(
-                Action::OpenSettings(super::super::super::SettingsPage::General),
+                Action::OpenSettings(super::super::super::SettingsPage::Interface),
                 &mut f,
                 &mut m,
             );

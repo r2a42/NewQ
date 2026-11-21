@@ -31,7 +31,8 @@ use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, pos2};
 pub use settings::SettingsPage;
 pub(crate) use settings::{
-    MEDIA_MANAGER_ITEM, RECOVERY_AND_LOGS, STREAMING_SERVER, TEST_MODE_ITEM, path as settings_path,
+    MEDIA_MANAGER_ITEM, PROGRAMS, RECOVERY_AND_LOGS, STREAMING_SERVER, TEST_MODE_ITEM,
+    path as settings_path,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1837,7 +1838,7 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
 }
 
 /// Under the Window menu's Timeline: where the timeline editor opens on this
-/// computer (as Settings ▸ General ▸ Timeline editor).
+/// computer (as `settings::TIMELINE_EDITOR`).
 fn timeline_layout_choice(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     use timeline::TimelineLayout as L;
     let pane = if st.prefs.new_layout {
@@ -1871,7 +1872,7 @@ fn timeline_layout_choice(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) 
             ui.close();
         }
     }
-    // And how its view follows a running playhead (as Settings ▸ General).
+    // And how its view follows a running playhead (as the same section).
     use timeline::TimelineFollow as F;
     ui.indent("timeline_follow_label", |ui| {
         ui.label(RichText::new("While it runs, the view").weak())
@@ -1939,6 +1940,8 @@ fn settings_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
                 ui.close();
             }
         }
+        // As the sidebar: what is saved in the show, what stays here.
+        settings::group_caption(ui, group);
     }
 }
 
@@ -4849,7 +4852,7 @@ impl UiState {
     }
 }
 
-/// While this computer's previews are off (Settings ▸ General ▸ Previews): one
+/// While this computer's previews are off (`settings::PREVIEWS`): one
 /// line saying so in place of the picture, with a button that turns them back
 /// on. True while they are off (the caller draws nothing more).
 pub(crate) fn previews_off_line(ui: &mut Ui, st: &mut UiState) -> bool {
@@ -5438,20 +5441,10 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
                     .monospace()
                     .strong(),
             )
-            .on_hover_text(
-                "How many pictures a second are being drawn: on the display's own window while it has one, otherwise in this window.",
-            );
-        }
-        if ui
-            .checkbox(&mut st.prefs.fps_on_output, "Show on the display")
-            .on_hover_text(
-                "Writes the rate in the top left corner of the picture on the display, while something is playing. Off by default: don't leave it on in a show.",
-            )
-            .changed()
-            && let Some(dir) = &st.layout_dir
-            && let Err(e) = st.prefs.save(dir)
-        {
-            log::warn!("could not save the settings of this computer: {e}");
+            .on_hover_text(format!(
+                "How many pictures a second are being drawn: on the display's own window while it has one, otherwise in this window. {} can write it on the display's picture too.",
+                settings::PREVIEWS.path()
+            ));
         }
         ui.separator();
         if mode == PreviewMode::Multiview {
@@ -10170,12 +10163,13 @@ fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
                     ui.end_row();
                 });
             ui.label(
-                RichText::new(
+                RichText::new(format!(
                     "Runs the program when the cue fires, without a shell (no pipes or \
                      wildcards: name a script to do those). Quotes keep words together. It is \
                      stopped after 60 seconds, and a failure is shown in the log. It runs only \
-                     if this computer allows it (Settings → General → Programs).",
-                )
+                     if this computer allows it ({}).",
+                    settings::PROGRAMS.path()
+                ))
                 .weak(),
             );
         }
@@ -14942,11 +14936,11 @@ mod tests {
     #[test]
     fn the_settings_pages_are_grouped_once_each_with_names_and_blurbs() {
         let all = SettingsPage::ALL;
-        assert_eq!(all.len(), 11);
+        assert_eq!(all.len(), 13);
         let mut labels: Vec<&str> = all.iter().map(|p| p.label()).collect();
         labels.sort();
         labels.dedup();
-        assert_eq!(labels.len(), 11, "names are different");
+        assert_eq!(labels.len(), 13, "names are different");
         assert!(all.iter().all(|p| !p.blurb().is_empty()));
         // Each page is in exactly one group, and every group has pages, in
         // the order the sidebar lists them.
@@ -14961,7 +14955,27 @@ mod tests {
                 seen.push(g);
             }
         }
-        assert_eq!(SettingsPage::default(), SettingsPage::General);
+        assert_eq!(SettingsPage::default(), SettingsPage::Show);
+        // The show's pages first, this computer's last, and the captions say
+        // which is which.
+        let first_here = all.iter().position(|p| !p.group().in_show()).unwrap();
+        assert!(all[first_here..].iter().all(|p| !p.group().in_show()));
+        assert_eq!(
+            &all[first_here..],
+            &[SettingsPage::Interface, SettingsPage::ThisComputer]
+        );
+        assert!(
+            settings::SettingsGroup::Control
+                .caption()
+                .unwrap()
+                .contains("saved in the show")
+        );
+        assert!(
+            settings::SettingsGroup::Computer
+                .caption()
+                .unwrap()
+                .contains("this computer")
+        );
     }
 
     #[test]
@@ -14971,12 +14985,21 @@ mod tests {
         let mut st = UiState::default();
         // A new show: nothing needs attention.
         for page in [
-            SettingsPage::General,
+            SettingsPage::Show,
             SettingsPage::Media,
             SettingsPage::Sync,
+            SettingsPage::Interface,
+            SettingsPage::ThisComputer,
         ] {
             assert!(page_badge(page, &show, &st).is_none(), "{page:?}");
         }
+        // On battery: beside Power, on This computer, and nowhere else.
+        st.on_battery = true;
+        for page in SettingsPage::ALL {
+            let b = page_badge(page, &show, &st).filter(|b| b.text.contains("battery"));
+            assert_eq!(b.is_some(), page == SettingsPage::ThisComputer, "{page:?}");
+        }
+        st.on_battery = false;
         let d = show.outputs[0].id;
         assert_eq!(
             page_badge(SettingsPage::Displays, &show, &st).map(|b| b.text),
@@ -15102,9 +15125,16 @@ mod tests {
             }
         }
         // The words a pointer says.
-        assert_eq!(settings::POWER.path(), "Settings ▸ Media ▸ Power");
-        assert_eq!(settings::LAYERS.path(), "Settings ▸ General ▸ Layers");
-        assert_eq!(settings::POWER.heading(), "Power (this computer)");
+        assert_eq!(settings::POWER.path(), "Settings ▸ This computer ▸ Power");
+        assert_eq!(settings::LAYERS.path(), "Settings ▸ Show ▸ Layers");
+        assert_eq!(settings::PREVIEWS.path(), "Settings ▸ Interface ▸ Previews");
+        // This computer's pages say once that they are; their sections don't.
+        assert_eq!(settings::POWER.heading(), "Power");
+        // Every section kept on this computer is on one of its pages, and
+        // every section of those pages is kept on this computer.
+        for s in settings::SECTIONS {
+            assert_eq!(s.this_computer, !s.page.group().in_show(), "{s:?}");
+        }
         assert_eq!(
             settings_path(SettingsPage::Network, None),
             "Settings ▸ Show network"
@@ -15114,10 +15144,10 @@ mod tests {
     }
 
     #[test]
-    fn the_general_page_edits_the_name_and_the_stop_all_fade() {
+    fn the_show_page_edits_the_name_and_the_stop_all_fade() {
         let (mut show, mut e, mut st) = running();
         st.layout.open(Pane::Settings);
-        st.settings_page = SettingsPage::General;
+        st.settings_page = SettingsPage::Show;
         show.panic_fade = 2.5;
         show.name = "Before".into();
         let ctx = egui::Context::default();
