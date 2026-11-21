@@ -160,12 +160,10 @@ impl SettingsPage {
             SettingsPage::Midi => "Run NewQ from a MIDI controller, or follow MIDI Time Code.",
             SettingsPage::Web => "Run the show from a phone or tablet.",
             SettingsPage::Interface => {
-                "How NewQ looks on this computer: where timelines open, the interface and the \
-                 previews. Not saved in the show."
+                "Where timelines open, which interface, the previews. Kept on this computer."
             }
             SettingsPage::ThisComputer => {
-                "What this computer may do while a show runs, and where its logs are. Not saved \
-                 in the show: set it on each computer."
+                "Power, decoding, what a show may start here, the logs. Kept on this computer."
             }
         }
     }
