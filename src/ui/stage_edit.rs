@@ -407,37 +407,59 @@ impl StageTab {
 }
 
 /// The least height of the pinned view, and of the tab's content under it.
-const VIEW_LEAST: f32 = 120.0;
-const CONTENT_LEAST: f32 = 160.0;
+const VIEW_LEAST: f32 = 90.0;
+const CONTENT_LEAST: f32 = 80.0;
+/// What the page has under the view besides the content: its handle, the
+/// tabs (one row) and the line under them.
+const CHROME: f32 = 46.0;
+/// Below this the page has no room to pin anything: the view, the tabs and
+/// the content scroll as one (a classic window with little room for the
+/// settings). The view's hint shows only from `ROOM_FOR_HINT`.
+const SHORT_PAGE: f32 = VIEW_LEAST + CHROME + CONTENT_LEAST;
+const ROOM_FOR_HINT: f32 = 420.0;
 
-/// The view's height when it hasn't been dragged: a share of the page.
+/// The view's height on a page `page` high: a share of it until the handle
+/// is dragged, never so tall that the content has less than its least.
 fn view_height(page: f32, dragged: Option<f32>) -> f32 {
-    let most = (page - CONTENT_LEAST).max(VIEW_LEAST);
+    let most = (page - CHROME - CONTENT_LEAST).max(VIEW_LEAST);
     dragged
         .unwrap_or((page * 0.45).min(460.0))
         .max(VIEW_LEAST)
         .min(most)
 }
 
+const VIEW_HINT: &str = "Drag to turn, right-drag or Shift-drag to slide, the wheel to come \
+                         closer; double-click to see it all. Click a screen or a projector to \
+                         pick it.";
+
 /// The page: the view pinned at the top (its height can be dragged), the
 /// tabs under it, and the chosen tab's content in a scroll area of its own.
 pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    let page_h = ui.available_height();
+    if page_h < SHORT_PAGE {
+        // Cramped: all of it scrolls, the view at its least.
+        let out = egui::ScrollArea::vertical()
+            .id_salt("stage_short")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_max_width((ui.available_width() - 16.0).max(120.0));
+                the_view(ui, show, st, VIEW_LEAST);
+                tabs(ui, show, st);
+                tab_content(ui, show, st, actions);
+            });
+        note_rect(ui, "3D stage ▸ tab content", out.inner_rect);
+        return;
+    }
     // The view first: every change below shows in it.
-    let h = view_height(ui.available_height(), st.stage.view_height);
-    let mut view = std::mem::take(&mut st.stage.settings_view);
-    let r = ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
-        ui.set_min_size(egui::vec2(ui.available_width(), h));
-        stage_view::draw(ui, show, st, &mut view, stage_view::SETTINGS_VIEW);
-    });
-    st.stage.settings_view = view;
-    note(ui, "3D stage ▸ view", &r.response);
+    let h = view_height(page_h, st.stage.view_height);
+    the_view(ui, show, st, h);
     // A handle to make the view taller or shorter.
-    let (grip, drag) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 8.0),
-        egui::Sense::drag(),
-    );
+    let (grip, drag) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::drag());
     note(ui, "3D stage ▸ view height", &drag);
-    let drag = drag.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let drag = drag
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text("Drag to make the view taller or shorter");
     let colour = if drag.hovered() || drag.dragged() {
         ui.visuals().widgets.hovered.fg_stroke.color
     } else {
@@ -451,13 +473,37 @@ pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut
         egui::Stroke::new(2.0, colour),
     );
     if drag.dragged() {
-        st.stage.view_height = Some(h + drag.drag_delta().y);
+        st.stage.view_height = Some(view_height(page_h, Some(h + drag.drag_delta().y)));
     }
-    hint(
-        ui,
-        "Drag to turn, right-drag or Shift-drag to slide, the wheel to come closer; \
-         double-click to see it all. Click a screen or a projector to pick it.",
-    );
+    if page_h >= ROOM_FOR_HINT {
+        hint(ui, VIEW_HINT);
+    }
+    tabs(ui, show, st);
+    let tab = st.stage.tab;
+    let out = egui::ScrollArea::vertical()
+        .id_salt(("stage_tab", tab))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Room for the frame's edges and the scroll bar.
+            ui.set_max_width((ui.available_width() - 16.0).max(120.0));
+            tab_content(ui, show, st, actions);
+        });
+    note_rect(ui, "3D stage ▸ tab content", out.inner_rect);
+}
+
+/// The 3D view, `h` high and as wide as the page.
+fn the_view(ui: &mut Ui, show: &Show, st: &mut UiState, h: f32) {
+    let mut view = std::mem::take(&mut st.stage.settings_view);
+    let r = ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| {
+        ui.set_min_size(egui::vec2(ui.available_width(), h));
+        stage_view::draw(ui, show, st, &mut view, stage_view::SETTINGS_VIEW);
+    });
+    st.stage.settings_view = view;
+    note(ui, "3D stage ▸ view", &r.response);
+}
+
+/// The row of tabs, each with how many it holds.
+fn tabs(ui: &mut Ui, show: &Show, st: &mut UiState) {
     // What is picked in the view opens on its tab.
     if st.stage.picked.is_some() && st.stage.picked != st.stage.opened_for {
         st.stage.tab = StageTab::Screens;
@@ -488,22 +534,18 @@ pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut
         }
     });
     ui.separator();
-    let tab = st.stage.tab;
-    egui::ScrollArea::vertical()
-        .id_salt(("stage_tab", tab))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Room for the frame's edges and the scroll bar.
-            ui.set_max_width((ui.available_width() - 16.0).max(120.0));
-            match tab {
-                StageTab::Venue => venue_section(ui, show, st, actions),
-                StageTab::Screens => surfaces_section(ui, show, st),
-                StageTab::Projectors => super::stage_projectors::section_ui(ui, show, st),
-                StageTab::Viewpoints => viewpoints_section(ui, show),
-                StageTab::Displays => sources_section(ui, show, st, actions),
-            }
-            ui.add_space(8.0);
-        });
+}
+
+/// What the chosen tab holds.
+fn tab_content(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    match st.stage.tab {
+        StageTab::Venue => venue_section(ui, show, st, actions),
+        StageTab::Screens => surfaces_section(ui, show, st),
+        StageTab::Projectors => super::stage_projectors::section_ui(ui, show, st),
+        StageTab::Viewpoints => viewpoints_section(ui, show),
+        StageTab::Displays => sources_section(ui, show, st, actions),
+    }
+    ui.add_space(8.0);
 }
 
 fn venue_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -1187,18 +1229,23 @@ impl StageItems {
 /// list of displays is, by name, and whether it is in sight (not scrolled
 /// out of it).
 pub(super) fn note(ui: &Ui, name: &str, r: &egui::Response) {
+    note_rect(ui, name, r.rect);
+}
+
+/// The same for a rectangle.
+fn note_rect(ui: &Ui, name: &str, rect: egui::Rect) {
     #[cfg(test)]
     {
-        let seen = ui.clip_rect().contains_rect(r.rect);
+        let seen = ui.clip_rect().contains_rect(rect);
         ui.data_mut(|d| {
             d.get_temp_mut_or_default::<Vec<(String, egui::Rect, bool)>>(egui::Id::new(
                 "stage_sources",
             ))
-            .push((name.to_string(), r.rect, seen))
+            .push((name.to_string(), rect, seen))
         });
     }
     #[cfg(not(test))]
-    let _ = (ui, name, r);
+    let _ = (ui, name, rect);
 }
 
 /// The displays that show the stage, each with the way to it on the

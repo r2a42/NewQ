@@ -181,11 +181,22 @@ struct Win {
     e: crate::engine::Engine,
     t: f64,
     texts: Vec<String>,
+    size: egui::Vec2,
 }
 
 impl Win {
     /// The window with the settings open at `page`.
     fn new(modern: bool, page: SettingsPage, show: &mut Show) -> (Win, UiState) {
+        Win::sized(modern, page, show, SIZE)
+    }
+
+    /// The same in a window of `size`.
+    fn sized(
+        modern: bool,
+        page: SettingsPage,
+        show: &mut Show,
+        size: egui::Vec2,
+    ) -> (Win, UiState) {
         let mut st = UiState::default();
         st.prefs.new_layout = modern;
         st.layout.open(Pane::Settings);
@@ -195,6 +206,7 @@ impl Win {
             e: crate::engine::Engine::for_tests(),
             t: 1.0,
             texts: Vec::new(),
+            size,
         };
         w.settle(show, &mut st);
         (w, st)
@@ -207,7 +219,7 @@ impl Win {
             d.remove::<Vec<(u64, Rect)>>(egui::Id::new("display_frames"));
         });
         let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
             time: Some(self.t),
             events,
             ..Default::default()
@@ -278,24 +290,12 @@ impl Win {
                 Some((_, true)) | None => break,
                 Some((r, false)) => {
                     // Down to one below, up to one above.
-                    let down = if r.center().y > SIZE.y * 0.5 {
+                    let down = if r.center().y > self.size.y * 0.5 {
                         -80.0
                     } else {
                         80.0
                     };
-                    let at = Pos2::new(SIZE.x * 0.6, SIZE.y * 0.5);
-                    self.frame(show, st, vec![Event::PointerMoved(at)]);
-                    self.frame(
-                        show,
-                        st,
-                        vec![Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: vec2(0.0, down),
-                            phase: egui::TouchPhase::Move,
-                            modifiers: Default::default(),
-                        }],
-                    );
-                    self.settle(show, st);
+                    self.wheel(show, st, down);
                 }
             }
         }
@@ -305,10 +305,36 @@ impl Win {
             .map(|(r, _)| r)
             .unwrap_or_else(|| panic!("{name} isn't in sight; drawn: {:?}", self.rects()));
         assert!(
-            Rect::from_min_size(Pos2::ZERO, SIZE).contains_rect(r),
+            Rect::from_min_size(Pos2::ZERO, self.size).contains_rect(r),
             "{name} is in the window: {r:?}"
         );
         self.click_at(show, st, r);
+    }
+
+    /// Turns the wheel over the page: on the 3D stage page, over its tab's
+    /// content (over the pinned view the wheel moves the camera).
+    fn wheel(&mut self, show: &mut Show, st: &mut UiState, down: f32) {
+        let at = match self.find("3D stage ▸ tab content") {
+            Some((r, _)) => r.center(),
+            None => Pos2::new(self.size.x * 0.6, self.size.y * 0.5),
+        };
+        self.frame(show, st, vec![Event::PointerMoved(at)]);
+        self.frame(
+            show,
+            st,
+            vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, down),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            }],
+        );
+        self.settle(show, st);
+    }
+
+    /// Clicks the 3D stage page's tab `label`.
+    fn tab(&mut self, show: &mut Show, st: &mut UiState, label: &str) {
+        self.press(show, st, &format!("3D stage ▸ tab ▸ {label}"));
     }
 }
 
@@ -441,6 +467,8 @@ fn the_stage_page_lists_the_displays_that_show_it_and_goes_to_each() {
             viewpoint: Some("FOH".into()),
         });
         w.settle(&mut show, &mut st);
+        w.tab(&mut show, &mut st, "Displays");
+        assert_eq!(st.stage.tab, StageTab::Displays);
         w.press(&mut show, &mut st, &format!("3D stage ▸ {name} ▸ Open"));
         assert_eq!(st.settings_page, SettingsPage::Displays, "modern {modern}");
         // It scrolls there smoothly, in a fraction of a second.
@@ -465,6 +493,7 @@ fn with_no_display_on_the_stage_the_page_points_to_the_displays_page() {
     for modern in [false, true] {
         let mut show = Show::default();
         let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        w.tab(&mut show, &mut st, "Displays");
         w.press(&mut show, &mut st, "3D stage ▸ Go to Displays");
         assert!(
             w.find("3D stage ▸ Go to Displays").is_none(),
@@ -472,4 +501,205 @@ fn with_no_display_on_the_stage_the_page_points_to_the_displays_page() {
         );
         assert_eq!(st.settings_page, SettingsPage::Displays, "modern {modern}");
     }
+}
+
+/// A show whose Screens tab is longer than the page: six screens, each open.
+fn many_screens() -> Show {
+    let mut show = Show::default();
+    show.stage3d.viewpoints.push(foh());
+    for _ in 0..6 {
+        add_surface(&mut show, Preset::Flat);
+    }
+    show
+}
+
+#[test]
+fn the_tabs_switch_by_mouse_and_each_shows_its_own_part() {
+    for modern in [false, true] {
+        let mut show = many_screens();
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        assert_eq!(st.stage.tab, StageTab::Venue, "the first tab to start with");
+        // What only each tab has on it.
+        let only = [
+            ("Venue", "Load a venue model…"),
+            ("Screens", "+ Add a screen"),
+            ("Projectors", "+ Add a projector"),
+            ("Viewpoints", "FOH"),
+            ("Displays", "No display shows the stage."),
+        ];
+        for (tab, _) in only {
+            w.tab(&mut show, &mut st, tab);
+            assert_eq!(st.stage.tab.section().name, tab, "modern {modern}");
+            for (other, theirs) in only {
+                let has = w.texts.iter().any(|t| t == theirs);
+                assert_eq!(
+                    has,
+                    other == tab,
+                    "modern {modern}: on {tab}, {theirs:?} {}",
+                    if has { "is drawn" } else { "is missing" }
+                );
+            }
+        }
+        // The view stays on every tab.
+        assert!(w.find("3D stage ▸ view").is_some_and(|(_, seen)| seen));
+    }
+}
+
+#[test]
+fn the_view_stays_put_while_the_tab_scrolls() {
+    for modern in [false, true] {
+        // Forty viewpoints: the tab is longer than the page.
+        let mut show = many_screens();
+        let names: Vec<String> = (1..=40).map(|i| format!("Seat {i}")).collect();
+        for n in &names {
+            show.stage3d.viewpoints.push(Viewpoint {
+                name: n.clone(),
+                ..foh()
+            });
+        }
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        w.tab(&mut show, &mut st, "Viewpoints");
+        let (view, seen) = w.find("3D stage ▸ view").expect("the view is drawn");
+        assert!(seen && view.height() >= 90.0, "modern {modern}: {view:?}");
+        let tabs = w.find("3D stage ▸ tab ▸ Viewpoints").unwrap().0;
+        let before = w.texts.clone();
+        for _ in 0..6 {
+            w.wheel(&mut show, &mut st, -200.0);
+        }
+        let (after, seen) = w.find("3D stage ▸ view").unwrap();
+        assert!(seen, "modern {modern}");
+        assert_eq!(view, after, "modern {modern}: the view didn't move");
+        assert_eq!(
+            tabs,
+            w.find("3D stage ▸ tab ▸ Viewpoints").unwrap().0,
+            "modern {modern}: nor the tabs"
+        );
+        // The content did: the first seat has gone out of sight and the
+        // last has come into it.
+        let last = names.last().unwrap();
+        assert!(
+            before.contains(&names[0]) && !before.contains(last),
+            "modern {modern}: {before:?}"
+        );
+        assert!(
+            !w.texts.contains(&names[0]) && w.texts.contains(last),
+            "modern {modern}: the tab's content scrolled: {:?}",
+            w.texts
+        );
+        // The wheel over the view turns nothing on the page.
+        let at = view.center();
+        w.frame(&mut show, &mut st, vec![Event::PointerMoved(at)]);
+        w.frame(
+            &mut show,
+            &mut st,
+            vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, 200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            }],
+        );
+        w.settle(&mut show, &mut st);
+        assert_eq!(
+            view,
+            w.find("3D stage ▸ view").unwrap().0,
+            "modern {modern}"
+        );
+    }
+}
+
+#[test]
+fn the_view_is_made_taller_by_its_handle_and_never_hides_the_tabs() {
+    for modern in [false, true] {
+        let mut show = many_screens();
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        let before = w.find("3D stage ▸ view").unwrap().0;
+        let grip = w.find("3D stage ▸ view height").unwrap().0.center();
+        let b = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        w.frame(&mut show, &mut st, vec![Event::PointerMoved(grip)]);
+        w.frame(&mut show, &mut st, vec![b(grip, true)]);
+        for i in 1..=10 {
+            let at = grip + vec2(0.0, 1000.0 * i as f32 / 10.0);
+            w.frame(&mut show, &mut st, vec![Event::PointerMoved(at)]);
+        }
+        let end = grip + vec2(0.0, 1000.0);
+        w.frame(&mut show, &mut st, vec![b(end, false)]);
+        w.settle(&mut show, &mut st);
+        let after = w.find("3D stage ▸ view").unwrap().0;
+        // The classic window's settings have little height under the
+        // transport: there the view is as tall as it can be already.
+        if modern {
+            assert!(
+                after.height() > before.height() + 50.0,
+                "{before:?} to {after:?}"
+            );
+        } else {
+            assert!(after.height() >= before.height(), "{before:?} to {after:?}");
+        }
+        // The tabs and some of the content stay in the window.
+        let (tabs, seen) = w.find("3D stage ▸ tab ▸ Displays").unwrap();
+        assert!(
+            seen && tabs.max.y < SIZE.y - 100.0,
+            "modern {modern}: {tabs:?}"
+        );
+    }
+}
+
+#[test]
+fn a_screen_or_projector_picked_in_the_view_opens_its_tab() {
+    let mut show = many_screens();
+    let id = show.stage3d.surfaces[2].id;
+    let p = show.add_projector();
+    let (mut w, mut st) = Win::new(false, SettingsPage::Stage3d, &mut show);
+    w.tab(&mut show, &mut st, "Viewpoints");
+    // As a click in the view does.
+    st.stage.picked = Some(id);
+    w.settle(&mut show, &mut st);
+    assert_eq!(st.stage.tab, StageTab::Screens);
+    // It stays where it is taken to afterwards.
+    w.tab(&mut show, &mut st, "Venue");
+    assert_eq!(st.stage.tab, StageTab::Venue);
+    st.stage.picked = None;
+    st.stage.projectors.picked = Some(p);
+    w.settle(&mut show, &mut st);
+    assert_eq!(st.stage.tab, StageTab::Projectors);
+    w.tab(&mut show, &mut st, "Viewpoints");
+    assert_eq!(st.stage.tab, StageTab::Viewpoints);
+}
+
+#[test]
+fn a_narrow_classic_settings_pane_keeps_every_tab() {
+    // The classic window, small: the settings have little room beside the
+    // sidebar, cramped but whole.
+    let mut show = many_screens();
+    show.add_projector();
+    let size = vec2(720.0, 480.0);
+    let (mut w, mut st) = Win::sized(false, SettingsPage::Stage3d, &mut show, size);
+    for tab in StageTab::ALL {
+        let label = tab.section().name;
+        w.tab(&mut show, &mut st, label);
+        assert_eq!(st.stage.tab, tab);
+        // Cramped: the view scrolls with the rest, at its least.
+        let view = w.find("3D stage ▸ view").unwrap().0;
+        assert!(view.height() >= 90.0, "{label}: {view:?}");
+        for _ in 0..3 {
+            w.wheel(&mut show, &mut st, -300.0);
+        }
+    }
+    // The Screens tab's add button can still be reached: scrolled to.
+    w.tab(&mut show, &mut st, "Screens");
+    let mut seen = false;
+    for _ in 0..20 {
+        seen = w.texts.iter().any(|t| t == "+ Add a screen");
+        if seen {
+            break;
+        }
+        w.wheel(&mut show, &mut st, -40.0);
+    }
+    assert!(seen, "{:?}", w.texts);
 }
