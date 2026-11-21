@@ -35,7 +35,7 @@ use crate::stage_render::StageTotals;
 use std::io::Write;
 
 /// What the window's "What does this do?" says of the part.
-pub const WHAT_IT_DOES: &str = "Plays the cue list's lap round and round, first with every preview off, then with a 3D view of the stage turning in this window, then with its projectors' light on, then with a display showing the stage, and says whether the 3D stage makes the displays miss pictures on this computer. With no 3D stage in your show it uses a sample venue with two projectors.";
+pub const WHAT_IT_DOES: &str = "Plays the cue list's lap round and round, first with every preview off, then with a 3D view of the stage turning in this window, then with its projectors' light on, then with a display showing the stage, and says whether the 3D stage makes the displays miss pictures on this computer. With no 3D stage in your show it uses a sample venue with a projector for each of the test's displays.";
 
 /// The Test Mode window's 3D view, as the governor knows it.
 pub const VIEW: PreviewId = PreviewId::Other("test-mode-3d", 0);
@@ -236,11 +236,27 @@ impl LegResult {
         })
     }
 
-    /// The share of the windows' new pictures that were late, when enough
-    /// were shown to say (`Governor::LEAST_PICTURES`).
+    /// The share of the worst display window's new pictures that were
+    /// late, when one showed enough to say (`Governor::LEAST_PICTURES`): the
+    /// governor judges window by window too, so one weak monitor among
+    /// several mirrors isn't lost in their sum.
     pub fn share(&self) -> Option<f64> {
-        let a = self.all();
-        (a.pictures >= Governor::LEAST_PICTURES).then(|| f64::from(a.late) / f64::from(a.pictures))
+        self.worst().map(|(_, _, share)| share)
+    }
+
+    /// The worst window's late pictures (none: no window showed enough).
+    fn worst_late(&self) -> u32 {
+        self.worst().map_or(0, |(_, s, _)| s.late)
+    }
+
+    /// Whether the 3D stage was drawn in this leg (in the display leg, for
+    /// the display or the view).
+    pub fn drew(&self) -> bool {
+        match self.leg {
+            Some(Leg::Baseline) | None => true,
+            Some(Leg::Display) => self.stage.displays + self.stage.views > 0,
+            Some(_) => self.stage.views > 0,
+        }
     }
 
     /// The worst window (from 1), its counts and share.
@@ -698,7 +714,7 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
             Governor::LEAST_PICTURES
         )));
     }
-    if let Some(s) = base_share.filter(|s| *s > line && base.all().late >= Governor::MIN_SEEN) {
+    if let Some(s) = base_share.filter(|s| *s > line && base.worst_late() >= Governor::MIN_SEEN) {
         out.push(note(format!(
             "With every preview off the displays already missed {} of their new pictures: that much is this computer's, not the 3D stage's.",
             percent(s)
@@ -706,12 +722,7 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
     }
     for r in &threed {
         let leg = r.leg.expect("a leg");
-        let drawn = if leg == Leg::Display {
-            r.stage.displays + r.stage.views
-        } else {
-            r.stage.views
-        };
-        if drawn == 0 {
+        if !r.drew() {
             out.push(note(if cx.previews_off && leg != Leg::Display {
                 format!(
                     "The previews are off on this computer, so the 3D view wasn't drawn in the leg with {}: turn them on in {SETTINGS_WORDS} to measure it.",
@@ -728,7 +739,7 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
         let (Some(b), Some(s)) = (base_share, r.share()) else {
             continue;
         };
-        if s - b >= line && r.all().late >= Governor::MIN_SEEN {
+        if s - b >= line && r.worst_late() >= Governor::MIN_SEEN {
             out.push(problem(format!(
                 "{} the displays missed {} of their pictures; with previews off, {}. On this computer the 3D stage costs the show{}. Set the previews to Strict, or turn them off, for the performance ({SETTINGS_WORDS}).",
                 capital(leg.with()),
@@ -830,9 +841,10 @@ pub fn in_short(results: &[LegResult], cx: &Context, findings: &[Finding]) -> St
         .iter()
         .find(|r| r.leg == Some(Leg::Baseline))
         .and_then(LegResult::share);
+    // Only legs in which the stage was drawn say anything of it.
     let worst = legs
         .iter()
-        .filter(|r| r.leg != Some(Leg::Baseline))
+        .filter(|r| r.leg != Some(Leg::Baseline) && r.drew())
         .filter_map(|r| r.share().map(|s| (s, r.leg)))
         .max_by(|a, b| a.0.total_cmp(&b.0));
     let gave_way = legs
@@ -851,6 +863,7 @@ pub fn in_short(results: &[LegResult], cx: &Context, findings: &[Finding]) -> St
                 "The previews drew at full rate throughout."
             }
         ),
+        (Some(_), None) => "Not measured: the 3D stage was never drawn in its legs.".into(),
         _ => "Not measured: no display window showed enough pictures to compare.".into(),
     }
 }
@@ -1108,10 +1121,12 @@ mod tests {
             previews_off: true,
             ..c
         };
-        assert!(
-            judge(&legs, &off)[0]
-                .text
-                .contains("previews are off on this computer")
+        let f = judge(&legs, &off);
+        assert!(f[0].text.contains("previews are off on this computer"));
+        // ...and its short sentence takes no comfort from it.
+        assert_eq!(
+            in_short(&legs, &off, &f),
+            "Not measured: the 3D stage was never drawn in its legs."
         );
         // Nothing but the baseline.
         assert!(judge(&legs[..1], &c)[0].text.contains("ended before"));
@@ -1156,6 +1171,29 @@ mod tests {
             "{part}"
         );
         let _ = &mut d;
+    }
+
+    #[test]
+    fn the_worst_window_is_compared_not_the_sum_of_the_windows() {
+        use crate::preview_pace::Strictness;
+        let s = setup();
+        let mut base = leg(Leg::Baseline, 2400, 2, 0, 0);
+        let mut view = leg(Leg::View, 2400, 2, 900, 0);
+        // Three windows: two smooth, one missing 8% with the view open.
+        for (i, late) in [(1, 2), (2, 2)] {
+            base.shown[i] = Shown {
+                pictures: 2400,
+                late,
+            };
+            view.shown[i] = Shown {
+                pictures: 2400,
+                late,
+            };
+        }
+        view.shown[2].late = 192;
+        let f = judge(&[base, view], &cx(&s, Strictness::Relaxed));
+        assert_eq!(problems(&f).len(), 1, "{f:?}");
+        assert!(problems(&f)[0].contains("missed 8.0%"), "{f:?}");
     }
 
     #[test]

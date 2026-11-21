@@ -351,7 +351,7 @@ The README describes the features; this file is about working on the code.
   so the hold ends however the test does. The window's view is `gui::stage_running` calling
   `ui::stage_view::draw` with `StageRun::show` (a copy of the live test show: the window gets no
   show) as `stage::VIEW`. Decision 9: `plan::leave_venue_out` in `network::build`, `session::build`
-  across (not the 3D part) and after `full::plan_for`. With no monitor ticked `unshow_stage` clears
+  across and after `full::plan_for`, unless the run has the 3D part (`Prep::keep_venue`). With no monitor ticked `unshow_stage` clears
   every display's source. Tests: `stage.rs` (judge sentences, legs driven), `choice.rs`, `plan.rs`,
   `session.rs::a_3d_stage_part_…`; run headless under xvfb only (lavapipe).
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later

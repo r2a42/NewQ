@@ -53,6 +53,9 @@ pub struct TestMode {
     /// each pass while no test runs.
     pub stage_wanted: bool,
     pub stage_unscreened: bool,
+    /// The run under way has the 3D stage part: across a show network every
+    /// part takes the venue model (owner's decision 9).
+    keep_venue: bool,
     /// Why the last Start did nothing, for the window.
     pub notice: Option<String>,
     // ---- The network test (`network`) ----
@@ -100,6 +103,7 @@ impl Default for TestMode {
             stage3d: false,
             stage_wanted: false,
             stage_unscreened: true,
+            keep_venue: false,
             notice: None,
             net_in: Vec::new(),
             net_out: Vec::new(),
@@ -184,6 +188,9 @@ pub struct Prep {
     pub minutes: u32,
     pub wanted: Vec<&'static Asset>,
     log_dir: PathBuf,
+    /// Across a show network the venue model goes too (a run with the 3D
+    /// stage part: owner's decision 9).
+    keep_venue: bool,
 }
 
 /// A test under way.
@@ -839,6 +846,7 @@ impl TestMode {
             sound,
             heavy: self.heavy,
         };
+        self.keep_venue = plan.iter().any(|p| p.part == super::choice::Part::Stage3d);
         self.test_id = if plan.len() > 1 {
             crate::net::node::random_u64()
         } else {
@@ -970,6 +978,7 @@ impl TestMode {
             minutes: self.minutes,
             wanted,
             log_dir: log_dir.to_path_buf(),
+            keep_venue: self.keep_venue,
         }));
     }
 
@@ -1017,6 +1026,7 @@ impl TestMode {
             minutes: 0,
             wanted,
             log_dir: log_dir.to_path_buf(),
+            keep_venue: false,
         }));
     }
 
@@ -1552,8 +1562,11 @@ impl TestMode {
                     && let Ok(media) = made.clone()
                 {
                     let mut plan = super::full::plan_for(&p, &media, show, st, true);
-                    // Owner's decision 9: the venue model stays here.
-                    if let Some(note) = plan::leave_venue_out(&mut plan.show) {
+                    // Owner's decision 9: the venue model stays here (unless
+                    // the run has the 3D stage part).
+                    if !self.keep_venue
+                        && let Some(note) = plan::leave_venue_out(&mut plan.show)
+                    {
                         log::info!("test mode: {note}");
                     }
                     let test_show = plan.show.clone();
@@ -1816,6 +1829,7 @@ impl TestMode {
             minutes: 0,
             wanted: Vec::new(),
             log_dir: log_dir.to_path_buf(),
+            keep_venue: false,
         };
         let files = super::fleet::files_of(&built.show, None);
         let test_show = built.show.clone();
@@ -1863,7 +1877,7 @@ fn build(prep: &Prep, show: &Show, spread: bool) -> plan::Built {
     if spread {
         plan::spread_pictures(&mut built.show);
         // Owner's decision 9: the venue model goes only with the 3D part.
-        if prep.flavour != Flavour::Stage {
+        if prep.flavour != Flavour::Stage && !prep.keep_venue {
             built.notes.extend(plan::leave_venue_out(&mut built.show));
         }
     }
