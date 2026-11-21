@@ -4,6 +4,16 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
+## Unreleased
+
+- **The same words everywhere, and hints that lead to the right place.** A cue's picture goes to a
+  *Display* (the inspector said "Output"), the Preview pane's modes are *One display*, *Multiview*
+  and *3D stage*, the previews say they give way "to keep the displays smooth", *File ▸ Media
+  manager…* and *Help ▸ Test Mode…* are named as their windows are, and the new interface's
+  *Lock editing* button is *Show mode*. Two hints sent people to the wrong place: the "awake"
+  mark in the status bar now says *Settings ▸ Media ▸ Power*, and the timeline's layers hint
+  *Settings ▸ General ▸ Layers*.
+
 ## 0.26.0
 
 - **Previews only give way when the displays really suffer.** They used to slow down at every

@@ -30,6 +30,9 @@ use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::show::*;
 use egui::{Align, Color32, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, pos2};
 pub use settings::SettingsPage;
+pub(crate) use settings::{
+    MEDIA_MANAGER_ITEM, RECOVERY_AND_LOGS, STREAMING_SERVER, TEST_MODE_ITEM, path as settings_path,
+};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -670,7 +673,8 @@ impl UiState {
                 .collect();
             if !waiting.is_empty() {
                 return Some(format!(
-                    "Wait until every computer of the show network is in step (Settings ▸ Show network): {} not yet. The test plays on all of them.",
+                    "Wait until every computer of the show network is in step ({}): {} not yet. The test plays on all of them.",
+                    settings_path(SettingsPage::Network, None),
                     waiting.join(", ")
                 ));
             }
@@ -685,7 +689,10 @@ impl UiState {
             return Some(why.to_string());
         }
         (self.net.me.on && (self.net.is_primary() || self.net.me.adopted())).then(|| {
-            "The hardware decoding comparison is about one computer's own decoding, so it runs on a computer alone: switch the show network off for a moment (Settings ▸ Show network) on the computer you want to compare, and back on afterwards.".to_string()
+            format!(
+                "The hardware decoding comparison is about one computer's own decoding, so it runs on a computer alone: switch the show network off for a moment ({}) on the computer you want to compare, and back on afterwards.",
+                settings_path(SettingsPage::Network, None)
+            )
         })
     }
 
@@ -1807,7 +1814,7 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     if ui
         .button("New preview")
         .on_hover_text(
-            "One more Preview, with its own mode (one output, the multiview or 3D) and output",
+            "One more Preview, with its own mode (one display, the multiview or the 3D stage) and display",
         )
         .clicked()
     {
@@ -1963,7 +1970,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 actions.push(Action::SaveAs);
             }
             ui.separator();
-            if ui.button("Media…").clicked() {
+            if ui.button(MEDIA_MANAGER_ITEM.label).clicked() {
                 actions.push(Action::ToggleMedia);
             }
             if ui
@@ -2229,7 +2236,7 @@ fn menu_bar(ui: &mut Ui, show: &Show, st: &UiState, actions: &mut Vec<Action>) {
                 actions.push(Action::ToggleAbout);
                 ui.close();
             }
-            if ui.button("Test mode…").clicked() {
+            if ui.button(TEST_MODE_ITEM.label).clicked() {
                 actions.push(Action::ToggleTestMode);
                 ui.close();
             }
@@ -2421,10 +2428,12 @@ fn status_bar(ui: &mut Ui, show: &Show, engine: &Engine, st: &UiState) {
         network::status(ui, st);
         net_media::status(ui, st);
         if st.keeping_awake {
-            ui.label(RichText::new("☀ awake").weak()).on_hover_text(
-                "NewQ is keeping this computer and its displays awake while a display is \
-                 showing. Settings ▸ General ▸ Power turns this off.",
-            );
+            ui.label(RichText::new("☀ awake").weak())
+                .on_hover_text(format!(
+                    "NewQ is keeping this computer and its displays awake while a display is \
+                 showing. {} turns this off.",
+                    settings::POWER.path()
+                ));
         }
         match engine.audio.summary() {
             Ok(text) => ui.label(format!("🔊 {text}")),
@@ -3937,7 +3946,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
         return;
     }
     let mut open = true;
-    egui::Window::new("Media")
+    egui::Window::new("Media manager")
         .open(&mut open)
         .default_width(620.0)
         .default_height(360.0)
@@ -4791,14 +4800,14 @@ fn multiview_columns(n: usize, width: f32, gap: f32) -> usize {
     square.clamp(1, fit)
 }
 
-/// The multiview's header: how many outputs, and which are shown when there are more
+/// The multiview's header: how many displays, and which are shown when there are more
 /// than it has tiles for.
 fn multiview_count(n: usize) -> String {
     let most = crate::gpu::MULTI_SLOTS;
     if n > most {
-        format!("the first {most} of {n} outputs")
+        format!("the first {most} of {n} displays")
     } else {
-        format!("{n} outputs")
+        format!("{n} displays")
     }
 }
 
@@ -4851,9 +4860,10 @@ pub(crate) fn previews_off_line(ui: &mut Ui, st: &mut UiState) -> bool {
         ui.label(RichText::new(crate::preview_pace::OFF_WORDS).weak());
         if ui
             .button("Turn previews on")
-            .on_hover_text(
-                "Also in Settings ▸ General ▸ Previews. The displays are not affected either way.",
-            )
+            .on_hover_text(format!(
+                "Also in {}. The displays are not affected either way.",
+                settings::PREVIEWS.path()
+            ))
             .clicked()
         {
             st.prefs.previews_off = false;
@@ -5241,7 +5251,7 @@ fn multiview_editor(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .selectable_label(show.multiview.is_none(), "Automatic")
-                        .on_hover_text("Every output, in a grid that fits the pane")
+                        .on_hover_text("Every display, in a grid that fits the pane")
                         .clicked()
                     {
                         show.multiview = None;
@@ -5260,7 +5270,7 @@ fn multiview_editor(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
                     None => {
                         settings::hint(
                             ui,
-                            "Automatic shows every output in turn. Choose an arrangement to pick what each tile shows.",
+                            "Automatic shows every display in turn. Choose an arrangement to pick what each tile shows.",
                         );
                     }
                     Some(layout) => {
@@ -5362,9 +5372,9 @@ fn preview_mode_switch(
                 )
                 .on_hover_text(m.hint())
                 .on_disabled_hover_text(if editing {
-                    "Showing the output whose corners are being edited"
+                    "Showing the display whose corners are being edited"
                 } else {
-                    "There is one output: a multiview shows several (or the show's layout)"
+                    "There is one display: a multiview shows several (or the show's layout)"
                 });
             rects.push(r.rect);
             if r.clicked() {
@@ -5404,7 +5414,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
         let _switch = preview_mode_switch(ui, &mut setting, mode, can_multi, editing);
         let plus = ui
             .small_button("+")
-            .on_hover_text("Open another preview, with its own mode and output");
+            .on_hover_text("Open another preview, with its own mode and display");
         if plus.clicked() {
             st.want_new_preview = true;
         }
@@ -5469,9 +5479,9 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
                             }
                         })
                         .response
-                        .on_hover_text("Which output to preview here")
+                        .on_hover_text("Which display to preview here")
                         .on_disabled_hover_text(
-                            "Showing the output whose corners are being edited",
+                            "Showing the display whose corners are being edited",
                         );
                 });
             } else {
@@ -5495,7 +5505,7 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
         .flatten();
     if let Some(text) = &notice {
         ui.label(RichText::new(text).weak().small()).on_hover_text(
-            "The previews in this window are drawn less often and smaller while the displays need the room, and back up once they have been smooth for a while. The displays themselves are not affected. Settings ▸ General ▸ Previews.",
+            format!("The previews in this window are drawn less often and smaller while the displays need the room, and back up once they have been smooth for a while. The displays themselves are not affected. {}.", settings::PREVIEWS.path()),
         );
     }
     #[cfg(test)]
@@ -9301,7 +9311,7 @@ fn media_inspector(
             }
 
             if visual {
-                ui.label("Output");
+                ui.label("Display");
                 let sel = m
                     .output
                     .and_then(|o| outputs.iter().find(|x| x.0 == o))
@@ -10050,7 +10060,7 @@ fn timecode_out_inspector(ui: &mut Ui, t: &mut TimecodeCue, midi_outputs: &[Stri
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label("Output");
+            ui.label("MIDI output");
             egui::ComboBox::from_id_salt("tc_out")
                 .selected_text(t.port.clone().unwrap_or_else(|| "Choose…".into()))
                 .width(220.0)
@@ -10253,7 +10263,7 @@ fn send_inspector(ui: &mut Ui, s: &mut SendCue, midi_outputs: &[String]) {
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Output");
+                    ui.label("MIDI output");
                     egui::ComboBox::from_id_salt("midi_out")
                         .selected_text(m.port.clone().unwrap_or_else(|| "Choose…".into()))
                         .width(220.0)
@@ -11826,7 +11836,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     | Action::AskFile(..)
             ))
     {
-        engine.log("A test is running: stop it (Help ▸ Test mode) to work on your show");
+        engine.log(format!(
+            "A test is running: stop it ({}) to work on your show",
+            TEST_MODE_ITEM.path()
+        ));
         return;
     }
     if st.show_mode && action.edits_the_show() {
@@ -15049,6 +15062,57 @@ mod tests {
     }
 
     #[test]
+    fn every_pointer_names_a_section_that_is_on_its_page() {
+        let (mut show, mut e, mut st) = running();
+        let ctx = egui::Context::default();
+        let mut drawn: HashMap<SettingsPage, Vec<String>> = HashMap::new();
+        for page in SettingsPage::ALL {
+            st.layout.open(Pane::Settings);
+            st.settings_page = page;
+            ctx.data_mut(|d| d.remove::<Vec<String>>(egui::Id::new("settings_sections")));
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1100.0, 800.0))),
+                time: Some(1.0),
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut out = ctx.run_ui(input, |ui| {
+                settings::settings_view(ui, &mut show, &mut e, &mut st, &mut actions)
+            });
+            out.textures_delta.clear();
+            let seen = ctx
+                .data(|d| d.get_temp::<Vec<String>>(egui::Id::new("settings_sections")))
+                .unwrap_or_default();
+            drawn.insert(page, seen);
+        }
+        for s in settings::SECTIONS {
+            let heading = s.heading();
+            assert!(
+                drawn[&s.page].contains(&heading),
+                "{heading:?} is not on {:?}: {:?}",
+                s.page,
+                drawn[&s.page]
+            );
+            for (page, seen) in &drawn {
+                assert!(
+                    *page == s.page || !seen.contains(&heading),
+                    "{heading:?} is on {page:?} too"
+                );
+            }
+        }
+        // The words a pointer says.
+        assert_eq!(settings::POWER.path(), "Settings ▸ Media ▸ Power");
+        assert_eq!(settings::LAYERS.path(), "Settings ▸ General ▸ Layers");
+        assert_eq!(settings::POWER.heading(), "Power (this computer)");
+        assert_eq!(
+            settings_path(SettingsPage::Network, None),
+            "Settings ▸ Show network"
+        );
+        assert_eq!(TEST_MODE_ITEM.path(), "Help ▸ Test Mode");
+        assert_eq!(settings::TIMELINE_ITEM.path(), "Window ▸ Timeline");
+    }
+
+    #[test]
     fn the_general_page_edits_the_name_and_the_stop_all_fade() {
         let (mut show, mut e, mut st) = running();
         st.layout.open(Pane::Settings);
@@ -15937,10 +16001,10 @@ mod tests {
     }
 
     #[test]
-    fn the_multiview_says_which_outputs_it_shows_past_its_tiles() {
-        assert_eq!(multiview_count(3), "3 outputs");
-        assert_eq!(multiview_count(16), "16 outputs");
-        assert_eq!(multiview_count(20), "the first 16 of 20 outputs");
+    fn the_multiview_says_which_displays_it_shows_past_its_tiles() {
+        assert_eq!(multiview_count(3), "3 displays");
+        assert_eq!(multiview_count(16), "16 displays");
+        assert_eq!(multiview_count(20), "the first 16 of 20 displays");
     }
 
     #[test]
@@ -16269,7 +16333,7 @@ mod tests {
             let (said, _, pace) = draw(Level::Half, Cap::Automatic, multiview);
             assert_eq!(
                 said.as_deref(),
-                Some("Preview at 5 fps, half size, to keep the outputs smooth")
+                Some("Preview at 5 fps, half size, to keep the displays smooth")
             );
             let pace = pace.unwrap();
             assert_eq!(pace.scale, 0.5);
@@ -16278,7 +16342,7 @@ mod tests {
             let (said, _, pace) = draw(Level::Paused, Cap::Automatic, multiview);
             assert_eq!(
                 said.as_deref(),
-                Some("Previews paused to protect the outputs")
+                Some("Previews paused to protect the displays")
             );
             assert!(pace.unwrap().hold);
             let (said, _, pace) = draw(Level::Full, Cap::Fps30, multiview);

@@ -298,7 +298,8 @@ impl Computer {
             format!("{name}'s own log is in this zip: {path} (all of it since the test began)")
         } else {
             format!(
-                "{name}'s own log did not come back: it is newq.log in NewQ's log folder on {name} (Settings ▸ General ▸ Recovery and logs shows where)"
+                "{name}'s own log did not come back: it is newq.log in NewQ's log folder on {name} ({} shows where)",
+                crate::ui::RECOVERY_AND_LOGS.path()
             )
         }
     }

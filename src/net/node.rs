@@ -430,11 +430,11 @@ pub struct Applied {
 /// leaves its old network and waits as a display.
 pub fn display_startup(me: &Identity) -> Result<Identity, String> {
     match me.role {
-        Role::Primary if me.on => Err(
+        Role::Primary if me.on => Err(format!(
             "--display: this computer runs a show network, so it stays the primary. To make it \
-             a display, switch its show network off first (Settings ▸ Show network)"
-                .into(),
-        ),
+             a display, switch its show network off first ({})",
+            crate::ui::settings_path(crate::ui::SettingsPage::Network, None)
+        )),
         Role::Primary => Ok(Identity {
             on: true,
             ..release(me)

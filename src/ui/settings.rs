@@ -120,6 +120,107 @@ impl SettingsPage {
     }
 }
 
+/// The words that lead someone to a settings page, or to a section of it:
+/// "Settings ▸ Media ▸ Power". Every pointer the program writes comes from
+/// here (or from `Section::path`), so moving a page or a section changes them
+/// all in one place.
+pub fn path(page: SettingsPage, section: Option<&str>) -> String {
+    match section {
+        Some(s) => format!("Settings ▸ {} ▸ {s}", page.label()),
+        None => format!("Settings ▸ {}", page.label()),
+    }
+}
+
+/// A titled block of a settings page that something elsewhere points to. Its
+/// page is part of it, so a pointer can't name the wrong one; a test draws
+/// every page and finds each section's heading on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Section {
+    pub page: SettingsPage,
+    pub name: &'static str,
+    /// Kept on this computer rather than in the show: the heading says so.
+    pub this_computer: bool,
+}
+
+impl Section {
+    /// The heading the page draws.
+    pub fn heading(self) -> String {
+        if self.this_computer {
+            format!("{} (this computer)", self.name)
+        } else {
+            self.name.to_string()
+        }
+    }
+
+    /// "Settings ▸ General ▸ Layers".
+    pub fn path(self) -> String {
+        path(self.page, Some(self.name))
+    }
+}
+
+const fn section_of(page: SettingsPage, name: &'static str, this_computer: bool) -> Section {
+    Section {
+        page,
+        name,
+        this_computer,
+    }
+}
+
+pub const TIMELINE_EDITOR: Section = section_of(SettingsPage::General, "Timeline editor", true);
+pub const PREVIEWS: Section = section_of(SettingsPage::General, "Previews", true);
+pub const LAYERS: Section = section_of(SettingsPage::General, "Layers", false);
+pub const RECOVERY_AND_LOGS: Section =
+    section_of(SettingsPage::General, "Recovery and logs", false);
+pub const FILES: Section = section_of(SettingsPage::Media, "Files", false);
+pub const LIBRARY: Section = section_of(
+    SettingsPage::Media,
+    "Folders to keep on every computer",
+    false,
+);
+pub const STREAMING_SERVER: Section = section_of(SettingsPage::Media, "Streaming server", true);
+pub const POWER: Section = section_of(SettingsPage::Media, "Power", true);
+
+/// Every section a pointer names (the test's list).
+#[cfg(test)]
+pub const SECTIONS: [Section; 8] = [
+    TIMELINE_EDITOR,
+    PREVIEWS,
+    LAYERS,
+    RECOVERY_AND_LOGS,
+    FILES,
+    LIBRARY,
+    STREAMING_SERVER,
+    POWER,
+];
+
+/// An item of the menu bar that a pointer names: "Help ▸ Test Mode". The
+/// menu draws `label`, so the two can't drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuItem {
+    pub menu: &'static str,
+    pub label: &'static str,
+}
+
+impl MenuItem {
+    pub fn path(self) -> String {
+        format!("{} ▸ {}", self.menu, self.label.trim_end_matches('…'))
+    }
+}
+
+pub const TEST_MODE_ITEM: MenuItem = MenuItem {
+    menu: "Help",
+    label: "Test Mode…",
+};
+pub const MEDIA_MANAGER_ITEM: MenuItem = MenuItem {
+    menu: "File",
+    label: "Media manager…",
+};
+/// The Window menu's Timeline tick (the pane's own name).
+pub const TIMELINE_ITEM: MenuItem = MenuItem {
+    menu: "Window",
+    label: "Timeline",
+};
+
 /// What the sidebar shows beside a page: a count, a state, or a warning.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Badge {
@@ -348,6 +449,12 @@ fn nav_row(ui: &mut Ui, label: &str, selected: bool, badge: Option<&Badge>) -> b
 
 /// A titled block of a page.
 pub(super) fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+    // For the tests: every heading drawn, so a pointer's section can be found.
+    #[cfg(test)]
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<String>>(egui::Id::new("settings_sections"))
+            .push(title.to_string())
+    });
     ui.add_space(6.0);
     ui.label(RichText::new(title).strong());
     ui.add_space(2.0);
@@ -368,15 +475,18 @@ pub(super) fn warning(ui: &mut Ui, text: &str) {
 fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     // First, and two rows: with a Timeline pane open, the classic window's
     // settings have only a little height, and this is the section wanted then.
-    section(ui, "Timeline editor (this computer)", |ui| {
+    section(ui, &TIMELINE_EDITOR.heading(), |ui| {
         timeline_layout(ui, st, actions);
         timeline_follow(ui, st, actions);
         hint(
             ui,
-            "Also in the Window menu, under Timeline. Hover a choice for what it does.",
+            &format!(
+                "Also in {}. Hover a choice for what it does.",
+                TIMELINE_ITEM.path()
+            ),
         );
     });
-    section(ui, "Previews (this computer)", |ui| {
+    section(ui, &PREVIEWS.heading(), |ui| {
         preview_settings(ui, st);
         hint(
             ui,
@@ -419,7 +529,7 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
              twice stops everything at once.",
         );
     });
-    section(ui, "Layers", |ui| {
+    section(ui, &LAYERS.heading(), |ui| {
         ui.checkbox(
             &mut show.own_layers,
             "A picture replaces only what is on its own layer",
@@ -433,7 +543,7 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
              have it on; a show opened from an older NewQ has it off until you turn it on.",
         );
     });
-    section(ui, "Recovery and logs", |ui| {
+    section(ui, &RECOVERY_AND_LOGS.heading(), |ui| {
         ui.label(format!(
             "Unsaved changes are copied to a recovery file every {} seconds, and offered \
              back if NewQ didn't close properly.",
@@ -590,10 +700,14 @@ fn timeline_follow(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
 /// either interface. Kept for this computer; an editor open moves.
 fn timeline_layout(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     use super::timeline::TimelineLayout as L;
-    const WHERE: &str = "Where a timeline opens when you double-click a timeline group, tick \
-         Timeline in the Window menu or go to a timeline list's tab. The workspace takes the cue \
-         list's place until Back to cue list; in the new interface it is the Timeline view. The \
-         Window menu and the Workspace button of the tracks' toolbar switch it too.";
+    let where_ = format!(
+        "Where a timeline opens when you double-click a timeline group, tick {} or go to a \
+         timeline list's tab. The workspace takes the cue list's place until Back to cue list; \
+         in the new interface it is the Timeline view. The {} menu and the Workspace button of \
+         the tracks' toolbar switch it too.",
+        TIMELINE_ITEM.path(),
+        TIMELINE_ITEM.menu
+    );
     let pane = if st.prefs.new_layout {
         ("a panel", "A panel under the cue list (Editor view)")
     } else {
@@ -611,7 +725,7 @@ fn timeline_layout(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         ] {
             let r = ui
                 .radio(st.prefs.timeline_layout == layout, words)
-                .on_hover_text(format!("{tip}. {WHERE}"));
+                .on_hover_text(format!("{tip}. {where_}"));
             #[cfg(test)]
             let seen = if ui.clip_rect().contains_rect(r.rect) {
                 r.rect
@@ -685,7 +799,7 @@ fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<
         .count()
         + relink::venue_files(show, &st.venue_side).len();
     let missing = st.missing_count(show);
-    section(ui, "Files", |ui| {
+    section(ui, &FILES.heading(), |ui| {
         ui.horizontal(|ui| {
             if files == 0 {
                 ui.label(RichText::new("No cue plays a file yet.").weak());
@@ -700,7 +814,7 @@ fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<
         });
         ui.add_space(4.0);
         if ui
-            .button("Open the media manager…")
+            .button("Open the Media manager…")
             .on_hover_text("Find moved files, or gather every file into one folder.")
             .clicked()
         {
@@ -713,7 +827,7 @@ fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<
         );
     });
     super::net_media::library(ui, show, st, actions);
-    section(ui, "Streaming server (this computer)", |ui| {
+    section(ui, &STREAMING_SERVER.heading(), |ui| {
         let mut on = st.prefs.allow_hosting;
         if ui
             .checkbox(
@@ -757,7 +871,7 @@ fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<
              unless you have read the send cues of the show.",
         );
     });
-    section(ui, "Power (this computer)", |ui| {
+    section(ui, &POWER.heading(), |ui| {
         let mut keep = !st.prefs.let_computer_sleep;
         if ui
             .checkbox(

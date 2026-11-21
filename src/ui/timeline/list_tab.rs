@@ -61,10 +61,11 @@ pub fn draw(
                 st.timeline.list_rows = false;
             }
         }
-        let r = ui.selectable_label(rows, "Cue rows").on_hover_text(
+        let r = ui.selectable_label(rows, "Cue rows").on_hover_text(format!(
             "The same cues as rows, to number, name and arm them (the Timeline pane, \
-                 Window menu, shows the tracks under them)",
-        );
+             {}, shows the tracks under them)",
+            crate::ui::settings::TIMELINE_ITEM.path()
+        ));
         note_button(ui, "rows", &r);
         if r.clicked() {
             st.timeline.list_rows = true;
@@ -84,10 +85,11 @@ pub fn draw(
                     can_edit(st),
                     egui::Button::new("Replace only on its own layer").small(),
                 )
-                .on_hover_text(
-                    "Turn on Settings ▸ Show ▸ Layers for this show: a picture then replaces only \
-                     what is on its own layer of its display",
-                );
+                .on_hover_text(format!(
+                    "Turn on {} for this show: a picture then replaces only what is on its own \
+                     layer of its display",
+                    crate::ui::settings::LAYERS.path()
+                ));
             note_button(ui, "own_layers", &r);
             if r.clicked() {
                 actions.push(Action::Timeline(TimelineAction::UseOwnLayers));

@@ -134,7 +134,7 @@ stays on the computer until you send it yourself.
   for 4K and for many layers; each picture is still copied back to be composited,
   so it is not the zero-copy decoding of a native player. A file or card it can't
   do falls back to the processor. It is off by default and only the machine you
-  will run on can say whether it helps: *Help ▸ Test mode ▸ Compare hardware decoding*
+  will run on can say whether it helps: *Help ▸ Test Mode ▸ Compare hardware decoding*
   measures it on that machine.
 - **Cue lists.** *Cue ▸ New cue list* (or the **+** by the tabs) adds a list of
   cues with a playhead of its own; the lists are tabs above the cue list. GO, the
@@ -271,7 +271,7 @@ stays on the computer until you send it yourself.
   it builds reputation, unless it is an EV certificate.
 - **New interface (optional):** *Window ▸ New interface* swaps the panes for three
   views under one strip (the strip has GO and what it will fire, Stop all,
-  Pause and *Lock editing*, which is show mode; *Classic interface* switches back).
+  Pause and *Show mode*; *Classic interface* switches back).
   The same show and settings, kept per computer, and nothing in the show file
   changes. *Editor* is the cue list with the inspector under it and what is
   playing beside it. *Operator* is for running a show: the next cue large, a big
@@ -324,7 +324,7 @@ stays on the computer until you send it yourself.
   is the system's).
 - **Awake while showing:** while any output window is open NewQ holds the computer and its displays
   awake (screen saver, dimming and sleep can't interrupt a long black hold), shown as "☀ awake" in
-  the status bar and turned off in *Settings ▸ General ▸ Power (this computer)*. Editing a show with
+  the status bar and turned off in *Settings ▸ Media ▸ Power (this computer)*. Editing a show with
   only the preview doesn't hold it. If the computer sleeps anyway, `newq.log` says so.
 - **On battery:** a laptop with its lid closed keeps showing on an external display only while
   plugged in; on battery it sleeps, and nothing can prevent that. While outputs are open on battery
@@ -434,10 +434,10 @@ stays on the computer until you send it yourself.
   The preview keeps the display's own shape at any size of its pane (a sub display
   that shows part of another's picture: that part's shape), as large as fits, with
   black bars beside it or above and below. The pane's header has three modes:
-  *Single* (one display, chosen in the menu), *Multiview* and *3D* (the show's
+  *One display* (chosen in the menu), *Multiview* and *3D stage* (the show's
   3D stage). *Multiview* shows every display at once in a grid, each under its
   name and in its own shape, as many columns as the pane's width allows (up to
-  sixteen displays); *Single* goes back to the one chosen. While a display's
+  sixteen displays); *One display* goes back to the one chosen. While a display's
   corners are being edited the first Preview pane shows only that display, and
   goes back to its mode afterwards.
   There can be several Preview panes: *+* in a pane's header, or Window ▸ *New
@@ -477,13 +477,13 @@ stays on the computer until you send it yourself.
   keeps showing its last picture in between, so none goes black, and a display
   that only the previews show has its pictures copied to the graphics card no
   more often than that. The Preview pane says so ("Preview at 15 fps to keep the
-  outputs smooth", "Previews paused to protect the outputs"). Two smooth seconds
+  displays smooth", "Previews paused to protect the displays"). Two smooth seconds
   later they step back up a level, waiting longer (up to 20 seconds) each time
   the trouble comes straight back. Some displays miss pictures whatever the
   previews do (a system hiccup, a laptop lid, a screen without its graphics
   driver): when the misses go on at the same rate with the previews paused for a
   few seconds, the previews weren't the cause, so they come straight back
-  ("Previews back: the outputs' missed pictures aren't theirs") and that rate is
+  ("Previews back: the displays' missed pictures aren't theirs") and that rate is
   let be; clearly more trouble steps them down again, and if it rises as soon as
   they are back they were the cause after all.
   Settings ▸ General ▸ *Previews* (this computer's own):
@@ -1114,7 +1114,7 @@ stays on the computer until you send it yourself.
   left empty, since on a timeline it is the start); pauses and loops say what they
   do in the *Target* column, and the timeline's markers follow its last clip as
   rows of their own ("Marker", the name, its time).
-- **Media manager:** *File ▸ Media…* lists every file the show uses and
+- **Media manager:** *File ▸ Media manager…* lists every file the show uses and
   which can't be found, and it opens by itself when a show is opened with
   files missing. *Search a folder for missing files…* looks in a folder (and
   everything inside it) for files with the same names, preferring the one in
@@ -1686,7 +1686,7 @@ never copy media by hand, and nothing waits for it.
 
 ### Every test on every computer
 
-On a primary with computers in step, every test of *Help ▸ Test mode* (the *Cue
+On a primary with computers in step, every test of *Help ▸ Test Mode* (the *Cue
 list* and *Timeline* parts and *More ▸ Check every feature*) runs across the
 show network: the test show and its media go to every computer first (the window
 shows each one's progress), then the primary plays it and every computer plays
@@ -1727,7 +1727,7 @@ returning).
 
 ### The network test
 
-Before a show, run the network test from the primary: *Help ▸ Test mode*, tick
+Before a show, run the network test from the primary: *Help ▸ Test Mode*, tick
 *Network* and press *Start*. It plays one lap at *Short* (about 2 minutes), three
 at *Medium* and ten at *Long* (about 20 minutes; this was the *Network soak*).
 The tick is offered on a primary with at least one computer *In step*; elsewhere
@@ -2076,7 +2076,7 @@ while the clip's content plays on. Its speed keyframes follow its content.
 
 **A picture on several displays.** *Also on* in the inspector of a picture, video,
 text, shape or camera cue (with more than one display) ticks the other displays it
-is shown on too, besides its own *Output*: the same picture, effects, position and
+is shown on too, besides its own *Display*: the same picture, effects, position and
 keyframes, on the same layer. The cue list shows it as "Display 1 +2". Picking
 several cues and ticking a display gives them all the same choice (a cue's own
 display is left out of it). Each display is its own: a cue that comes in on one of
@@ -2166,7 +2166,7 @@ displays from the *Displays* page of the settings.
 
 ## Test mode: try this computer before the show
 
-*Help ▸ Test mode…* plays a show of its own to find out how this computer copes, then puts
+*Help ▸ Test Mode…* plays a show of its own to find out how this computer copes, then puts
 your show back exactly as it was. Nothing to type. The window asks, top to bottom:
 
 - **Length**: *Short* (a few minutes), *Medium* (about an hour) or *Long* (about 8 hours,

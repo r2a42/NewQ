@@ -229,14 +229,9 @@ fn strip(
             {
                 actions.push(Action::TogglePause);
             }
-            let lock = if st.show_mode {
-                "Unlock editing"
-            } else {
-                "Lock editing"
-            };
             if ui
-                .selectable_label(st.show_mode, lock)
-                .on_hover_text("Show mode: nothing can be edited by accident")
+                .selectable_label(st.show_mode, "Show mode")
+                .on_hover_text("Show mode: nothing can be edited by accident. Click again for edit mode.")
                 .clicked()
             {
                 actions.push(Action::ToggleShowMode);
@@ -286,9 +281,10 @@ fn editor(
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                     if ui
                         .small_button("Close timeline")
-                        .on_hover_text(
-                            "Put the timeline editor away (Window ▸ Timeline brings it back)",
-                        )
+                        .on_hover_text(format!(
+                            "Put the timeline editor away ({} brings it back)",
+                            settings::TIMELINE_ITEM.path()
+                        ))
                         .clicked()
                     {
                         actions.push(Action::Timeline(timeline::TimelineAction::Close));

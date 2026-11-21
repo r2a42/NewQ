@@ -621,9 +621,12 @@ fn computers(ui: &mut Ui, show: &Show, v: &NetView, st: &mut UiState, actions: &
         if ours.is_empty() {
             hint(
                 ui,
-                "No other computer is in the show yet. On each computer that is to take part, \
-                 open NewQ Display (beside NewQ), or open Settings ▸ Show network and switch it \
-                 on: it appears below, ready to add.",
+                &format!(
+                    "No other computer is in the show yet. On each computer that is to take \
+                     part, open NewQ Display (beside NewQ), or open {} and switch it on: it \
+                     appears below, ready to add.",
+                    super::settings::path(SettingsPage::Network, None)
+                ),
             );
         }
     });
@@ -1106,7 +1109,10 @@ pub fn status(ui: &mut Ui, st: &UiState) {
         (
             format!("Show network: primary · {online}/{ours} computers"),
             if online == ours { GO_GREEN } else { STOP_RED },
-            "This computer runs the show network. Settings ▸ Show network.".to_string(),
+            format!(
+                "This computer runs the show network. {}.",
+                super::settings::path(SettingsPage::Network, None)
+            ),
         )
     } else if let Some(f) = &v.following {
         (

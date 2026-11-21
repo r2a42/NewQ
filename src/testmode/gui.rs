@@ -49,7 +49,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     test.heavy = st.prefs.test_heavy;
     test.load = st.prefs.test_load;
     let devices = st.audio_devices.clone();
-    egui::Window::new("Test mode")
+    egui::Window::new("Test Mode")
         .open(&mut open)
         .collapsible(false)
         .default_width(520.0)
@@ -212,7 +212,7 @@ pub fn stats_window(ctx: &egui::Context, st: &mut UiState) {
                 .on_hover_text("Appends a row every few seconds to newq-stats.csv in the log folder (the same file the NEWQ_STATS setting makes).");
             ui.label(
                 RichText::new(
-                    "Measured every 2 seconds while this window is open, and not at all when it is closed. Test mode has its own, fuller log.",
+                    "Measured every 2 seconds while this window is open, and not at all when it is closed. Test Mode has its own, fuller log.",
                 )
                 .weak()
                 .small(),

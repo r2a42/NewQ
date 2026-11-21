@@ -85,9 +85,10 @@ pub fn refusal(st: &UiState) -> Option<String> {
     }
     let v = &st.net;
     if !(v.me.on && v.is_primary()) {
-        return Some(
-            "The network test runs on the computer that runs the show network, with at least one other computer joined. Switch on \"Run the show network from this computer\" in Settings ▸ Show network, join the other computers to it, and come back here. (On a computer alone, use the tests above.)".into(),
-        );
+        return Some(format!(
+            "The network test runs on the computer that runs the show network, with at least one other computer joined. Switch on \"Run the show network from this computer\" in {}, join the other computers to it, and come back here. (On a computer alone, use the tests above.)",
+            crate::ui::settings_path(crate::ui::SettingsPage::Network, None)
+        ));
     }
     if in_step(v).is_empty() {
         return Some(
