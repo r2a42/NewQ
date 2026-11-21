@@ -144,7 +144,7 @@ pub fn page_badge(page: SettingsPage, show: &Show, st: &UiState) -> Option<Badge
             color: STOP_RED,
         }),
         SettingsPage::Media => {
-            let missing = relink::missing_among(show, &st.missing).len();
+            let missing = st.missing_count(show);
             (missing > 0).then(|| Badge {
                 text: format!("⚠ {missing}"),
                 color: STOP_RED,
@@ -682,8 +682,9 @@ fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<
         .iter()
         .filter_map(|c| c.kind.file_media())
         .filter(|m| !m.file.as_os_str().is_empty())
-        .count();
-    let missing = relink::missing_among(show, &st.missing).len();
+        .count()
+        + relink::venue_files(show, &st.venue_side).len();
+    let missing = st.missing_count(show);
     section(ui, "Files", |ui| {
         ui.horizontal(|ui| {
             if files == 0 {
