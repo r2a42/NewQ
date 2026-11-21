@@ -510,7 +510,8 @@ The README describes the features; this file is about working on the code.
   (`venue_file_list`: itself and `venue_files`) and `stamp_of` them (located path, length, mtime) before
   reading (`Read`); `VenueState::watch` stats that list on a "venue-watch" thread every `WATCH_EVERY`
   (2 s; `wake_at` only while the thread runs) and two looks in a row that agree and differ from the read
-  make it `stale`, read again as a brightness change is (the old model kept until the new lands), a venue on its way is `VenueStatus::Arriving`, looked at
+  make it `stale`, read again as a brightness change is (the old model kept until the new lands; a new
+  `scene_key` makes `update_outputs` redraw the control window and pop-outs), a venue on its way is `VenueStatus::Arriving`, looked at
   every `ARRIVING_LOOK`; `stage_seen` compared each pass, `shape_key` (hashed through a writer) only
   on a change; the scene made again only when its key changes, into `UiState::stage` with
   `stage_bounds`: the venue's box and the screens), `output_layer` (a display showing the

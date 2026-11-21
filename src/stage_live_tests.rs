@@ -258,6 +258,15 @@ fn a_venue_changed_on_disk_is_read_again() {
         triangles(shared) == Some(1) && !live.venue_busy()
     });
     assert_eq!(triangles(&shared), Some(1), "{:?}", shared.venue);
+    // A sample in its place: nothing is looked at, and no look is due (the
+    // main loop is never asked to come round for one).
+    std::thread::sleep(WATCH_EVERY / 4);
+    show.stage3d.venue = Some(Venue::sample(SampleVenue::BlackBox));
+    passes_until(&mut live, &show, &mut shared, LONG, |live, shared| {
+        matches!(shared.venue, VenueStatus::Loaded { .. }) && !live.venue_busy()
+    });
+    passes_until(&mut live, &show, &mut shared, QUIET, |_, _| false);
+    assert!(live.venue.next_look.is_none() && live.venue.look.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

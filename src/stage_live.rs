@@ -186,15 +186,15 @@ impl VenueState {
                 Err(TryRecvError::Disconnected) => self.look = None,
             }
         }
-        let Some(r) = watched else {
+        // Nothing to look at, or it is being read: no look is due (and
+        // `wake_at` asks for none).
+        let Some(r) =
+            watched.filter(|_| !self.stale && self.loading.is_none() && self.settling.is_none())
+        else {
+            self.next_look = None;
             return;
         };
-        if self.look.is_some()
-            || self.stale
-            || self.loading.is_some()
-            || self.settling.is_some()
-            || self.next_look.is_some_and(|t| now < t)
-        {
+        if self.look.is_some() || self.next_look.is_some_and(|t| now < t) {
             return;
         }
         self.next_look = Some(now + WATCH_EVERY);
@@ -546,6 +546,7 @@ impl StageLive {
                             Err(e) => {
                                 say.push(Said::Problem(format!("The venue didn't load: {e}")));
                                 v.failed = Some((want.clone(), media_generation()));
+                                v.stale = false;
                             }
                         }
                     }
@@ -806,9 +807,7 @@ impl StageLive {
                 .wanted_at
                 .is_none_or(|t| now.saturating_duration_since(t) >= IDLE_RELEASE)
         {
-            log::info!(
-                "3D stage: no 3D view or display has shown it for a while; its pictures are let go"
-            );
+            log::info!("3D stage: nothing to draw for a while; its pictures are let go");
             if let Some(t) = self.thread.take() {
                 drop(t.quit());
             }

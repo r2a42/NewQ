@@ -2396,7 +2396,18 @@ impl App {
             .retain(|id, _| outputs.iter().any(|o| o.id == *id));
         // The 3D stage: its venue and scene, and whether a picture of it came in.
         let mut said = Vec::new();
+        let scene_was = self.ui.stage.scene_key;
         self.stage.begin(&self.show, &mut self.ui.stage, &mut said);
+        // A new scene (a venue read again while nothing else happens): the
+        // 3D views are to ask for a picture of it.
+        if self.ui.stage.scene_key != scene_was {
+            if let Some(ctl) = &self.control {
+                ctl.window.request_redraw();
+            }
+            for p in &self.popouts {
+                p.window.request_redraw();
+            }
+        }
         for s in said {
             match s {
                 crate::stage_live::Said::Note(m) => self.engine.log(m),
