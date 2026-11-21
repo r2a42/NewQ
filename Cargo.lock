@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "newq"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
