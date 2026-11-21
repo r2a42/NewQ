@@ -202,7 +202,19 @@ pub fn build(
     let mut notes = Vec::new();
     // The monitors ticked in the window, else every monitor: the user's
     // displays and one for each monitor of a computer that has none on it.
-    super::plan::use_displays_as(&mut show, chosen, false);
+    notes.extend(super::plan::use_displays_as(&mut show, chosen, false));
+    // The venue model is left out (owner's decision 9: it goes only with a
+    // test of the 3D stage), so the other computers don't fetch it, and its
+    // files, before the test can start. A sample venue is no file: kept.
+    if crate::relink::venue_model(&show).is_some() {
+        show.stage3d.venue = None;
+        notes.push(
+            "Your 3D stage's venue model is left out of a test across the show network, so the \
+             other computers don't have to fetch it first: the 3D views show the screens without \
+             the room"
+                .into(),
+        );
+    }
     for p in peers.iter().filter(|p| p.ours && chosen.is_empty()) {
         let Some(s) = &p.status else { continue };
         for (i, m) in s.monitors.iter().enumerate() {

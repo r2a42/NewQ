@@ -601,6 +601,11 @@ impl UiState {
         self.show_mode = true;
         self.confirm_edit_mode = false;
         self.capture_hotkey = None;
+        // Corners, an area or the multiview's layout being edited name the
+        // user's displays, which the test's take the place of.
+        self.geometry_edit = None;
+        self.area_edit = None;
+        self.multiview_editor = None;
         self.test_locked = true;
         // (The stash just made holds the last part's test show: let it go.)
         held.unwrap_or(stash)
@@ -13362,6 +13367,20 @@ mod tests {
     #[test]
     fn a_test_show_takes_the_place_of_the_show_and_gives_it_back_untouched() {
         let (mut show, mut e, mut st) = running();
+        // A 3D stage: a display showing it, another feeding a screen and a
+        // projector; its corners being lined up, a preview pane showing it.
+        let (shown, fed) = (show.outputs[0].id, show.add_display());
+        show.outputs[0].source = Some(Default::default());
+        let screen = show.add_surface(None);
+        show.stage3d.surface_mut(screen).unwrap().feed =
+            crate::stage3d::Feed::whole_picture(&show, fed);
+        let p = show.add_projector();
+        show.projector_mut(p).unwrap().display = Some(fed);
+        st.geometry_edit = Some(fed);
+        st.area_edit = Some(fed);
+        st.multiview_editor = Some(0);
+        st.layout.preview_mut(0).output = Some(fed);
+        let layout_before = serde_json::to_string(&st.layout.previews).unwrap();
         let before = serde_json::to_string(&show).unwrap();
         // A show with a file, a history, a selection, a search and a place in a list.
         let dir = std::env::temp_dir().join(format!("newq_test_stash_{}", std::process::id()));
@@ -13391,6 +13410,18 @@ mod tests {
         assert!(st.test_locked && st.show_mode && !st.dirty && st.show_path.is_none());
         assert_eq!(e.playhead, Some(first));
         assert!(!e.paused);
+        // No edit is left naming the user's displays.
+        assert_eq!((st.geometry_edit, st.area_edit), (None, None));
+        assert_eq!(st.multiview_editor, None);
+        // A preview drawn during the test shows the test's display, and its
+        // pane keeps the user's choice for afterwards.
+        st.previews = show.outputs.iter().map(|o| preview(o.id.0)).collect();
+        let (_, modes) = two_panes(&mut st, &mut show, &[0], 2);
+        assert_eq!(modes.len(), 1);
+        assert_eq!(
+            serde_json::to_string(&st.layout.previews).unwrap(),
+            layout_before
+        );
         // Nothing can edit it, save it over the real one, or open another.
         for a in [
             Action::Delete,
@@ -13418,6 +13449,11 @@ mod tests {
 
         st.end_test(&mut show, &mut e, stash);
         assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        assert!(
+            show.shows_stage(shown),
+            "the stage, its feeds and source are back"
+        );
+        assert_eq!(st.layout.preview(0).output, Some(fed));
         assert!(!st.test_locked && !st.show_mode && !st.dirty);
         assert_eq!(st.show_path.as_deref(), Some(path.as_path()));
         assert_eq!((st.selected, e.playhead), (sel, head));
