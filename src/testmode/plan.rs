@@ -439,7 +439,7 @@ fn unshow_stage(show: &mut Show) -> Carried {
 }
 
 /// Owner's decision 9: across a show network a test leaves the venue model
-/// file out (only the 3D stage part takes it), so the other computers don't
+/// file out (unless the run has the 3D stage part), so the other computers don't
 /// fetch it, and its files, before the test can start. A sample venue is no
 /// file: kept. The note for the report, when it was left out.
 pub fn leave_venue_out(show: &mut Show) -> Option<String> {
@@ -448,7 +448,7 @@ pub fn leave_venue_out(show: &mut Show) -> Option<String> {
     Some(
         "Your 3D stage's venue model is left out of a test across the show network, so the \
          other computers don't have to fetch it first: the 3D views show the screens without \
-         the room (only the 3D stage part takes the model with it)"
+         the room (a test with the 3D stage part ticked takes the model)"
             .into(),
     )
 }

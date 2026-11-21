@@ -2394,8 +2394,8 @@ the decode comparison have the three columns in their `stats` files but not yet 
 yours, so an open 3D view shows the test as it plays (with fewer monitors ticked than your show
 has displays, the extra projectors throw no picture), and the report says what the stage was
 pointed at. With no monitor ticked, no display shows the stage during the test, so the test's
-pictures are seen. Across a show network a test leaves your venue model file out (only the 3D
-stage part takes it), so the other computers don't fetch it first.
+pictures are seen. Across a show network a test leaves your venue model file out (unless *3D
+stage* is ticked), so the other computers don't fetch it first.
 
 ### The 3D stage part: does 3D cost the displays here?
 

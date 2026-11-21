@@ -1495,7 +1495,12 @@ fn stage_running(ui: &mut egui::Ui, st: &mut UiState, s: &super::stage::StageRun
         ui.set_min_size(size);
         crate::ui::stage_view::draw(ui, &s.show, st, &mut view, super::stage::VIEW);
     });
-    ui.ctx().request_repaint();
+    // The view turns: the window comes round for it (the governor says
+    // whether it is drawn); held off, it needn't.
+    if now.leg != Leg::Baseline {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
 }
 
 /// How each kind of cue came out, as a small table.
@@ -1928,6 +1933,69 @@ mod tests {
         );
         let text = std::fs::read_to_string(dir.join("prefs.json")).unwrap();
         assert!(!text.contains("test_pick"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 3D stage tick: ticked by itself on opening for a show that wants
+    /// it, untickable by the mouse, never kept by this computer, and its
+    /// part in the plan's line.
+    #[test]
+    fn the_3d_stage_tick_follows_the_show_and_the_mouse() {
+        let dir = std::env::temp_dir().join(format!("newq_test_stage_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = egui::Context::default();
+        let engine = Engine::for_tests();
+        let mut st = UiState::default();
+        st.layout_dir = Some(dir.clone());
+        st.test.stage_wanted = true;
+        st.test.stage_unscreened = true;
+        st.test.open = true;
+        let mut t = 1.0;
+        let mut frame = |events: Vec<egui::Event>, st: &mut UiState| {
+            ctx.data_mut(|d| d.remove::<Vec<(String, egui::Rect)>>(egui::Id::new("test_choices")));
+            t += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 760.0),
+                )),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| window(ui.ctx(), &engine, st));
+            out.textures_delta.clear();
+            ctx.data(|d| d.get_temp::<Vec<(String, egui::Rect)>>(egui::Id::new("test_choices")))
+                .unwrap_or_default()
+        };
+        let shown = frame(vec![], &mut st);
+        assert!(st.test.stage3d, "ticked by itself");
+        let at = shown
+            .iter()
+            .find(|c| c.0 == "3D stage")
+            .expect("the tick is drawn")
+            .1;
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 760.0))
+                .contains_rect(at)
+        );
+        let at = at.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at)], &mut st);
+        frame(vec![button(true)], &mut st);
+        frame(vec![button(false)], &mut st);
+        assert!(!st.test.stage3d, "unticked by the mouse");
+        // Not kept by this computer.
+        assert!(
+            !std::fs::read_to_string(dir.join("prefs.json"))
+                .unwrap_or_default()
+                .contains("stage")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
