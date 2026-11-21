@@ -37,7 +37,7 @@ impl View {
         }
     }
 
-    fn hint(self) -> &'static str {
+    pub(super) fn hint(self) -> &'static str {
         match self {
             View::Editor => "Build the show: cue list, inspector and what is playing",
             View::Operator => "Run the show: the next cue, a big GO and what is running",
@@ -107,6 +107,43 @@ pub fn draw(
         }
     });
 }
+
+/// Goes to view `v` (the strip's tabs and the Window menu): the settings
+/// give way to it, and the Timeline view is the timeline editor opened as a
+/// workspace, so going there opens it and leaving puts it away.
+pub(super) fn show_view(v: View, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
+    if v == View::Timeline {
+        // Opening it is opening the editor (on what it showed last).
+        apply(
+            Action::Timeline(timeline::TimelineAction::Open(None)),
+            show,
+            engine,
+            st,
+        );
+    } else if st.modern_view == View::Timeline {
+        // Leaving it puts the editor away; the tab brings it back.
+        apply(
+            Action::Timeline(timeline::TimelineAction::Close),
+            show,
+            engine,
+            st,
+        );
+    }
+    st.modern_view = v;
+    if st.settings_open() {
+        apply(Action::CloseSettings, show, engine, st);
+    }
+}
+
+/// Whether the Operator view has the cart along its foot: the Cart is open
+/// (Window ▸ Cart, the same pane the classic interface docks) and not in a
+/// window of its own.
+pub(super) fn cart_in_operator(st: &UiState) -> bool {
+    st.layout.is_open(Pane::Cart) && !st.layout.is_popped_out(Pane::Cart)
+}
+
+/// How tall the Operator view's cart is at first: two rows of buttons.
+const CART_HEIGHT: f32 = 190.0;
 
 /// The strip across the top: the views, GO and what it will fire, Stop all.
 fn strip(
@@ -186,17 +223,7 @@ fn strip(
                     .push((v, r.rect))
             });
             if r.clicked() {
-                if v == View::Timeline {
-                    // Opening it is opening the editor (on what it showed last).
-                    actions.push(Action::Timeline(timeline::TimelineAction::Open(None)));
-                } else if st.modern_view == View::Timeline {
-                    // Leaving it puts the editor away; the tab brings it back.
-                    actions.push(Action::Timeline(timeline::TimelineAction::Close));
-                }
-                st.modern_view = v;
-                if st.settings_open() {
-                    actions.push(Action::CloseSettings);
-                }
+                actions.push(Action::ShowView(v));
             }
         }
         let settings = st.settings_open();
@@ -328,6 +355,23 @@ fn operator(
                     gear(ui, show, engine, st);
                 });
         });
+    // The cart along the foot, for spot effects beside the GO.
+    if cart_in_operator(st) {
+        egui::Panel::bottom("modern_cart")
+            .resizable(true)
+            .default_size(CART_HEIGHT)
+            .min_size(90.0)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new("CART").small().weak()).on_hover_text(format!(
+                    "Click a button to fire its cue, right-click to stop it. {} puts the cart away.",
+                    settings::CART_ITEM.path()
+                ));
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| cart(ui, show, engine, actions));
+            });
+    }
     egui::CentralPanel::default().show(ui, |ui| {
         let next = next_cue(show, engine);
         ui.label(
