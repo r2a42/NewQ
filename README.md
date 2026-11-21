@@ -2256,6 +2256,10 @@ that NewQ didn't fall over.
 Each part's clock starts when its first cue has its first picture or sound, so a slow
 start of FFmpeg does not spoil the checks; the first cue not playing within five seconds
 is itself a failure. Anything NewQ reports as a problem during a part fails that part.
+It also checks the 3D stage: a sample venue saved as .glb and read back, the screens showing
+their displays' pictures, a display showing the stage while a clip plays, and the projectors'
+light (a card that refuses the light passes, and says so). Without a graphics card the last two
+say "not checked".
 *Live audio* is listed as not run (it would open a microphone). The sound parts are not
 run on a computer with no sound device, and say so. The server part is not run unless
 MediaMTX is with this copy of NewQ and this computer has been allowed to run a server

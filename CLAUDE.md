@@ -931,7 +931,17 @@ The README describes the features; this file is about working on the code.
   device), exit 0/1/2; CI runs it on all three systems and uploads the zip. Engine-level only: "reached the
   screen" means the cue's layer with a frame was in `Engine::layers`, not that pixels were looked at. The
   window's run was tried under xvfb (recording and a real MediaMTX passed); the sound parts never met a
-  real device. Cross-target clippy for Windows and Mac runs from Linux with
+  real device. The full check has three "3D stage" parts (`feature.rs`): `venue_round_trip` (the Proscenium
+  sample written as `media/stage.glb` and read back, done in `make_media`, `Check::VenueLoads`), `screens_fed`
+  (`Check::ScreensFed`, pure), `Check::StageDrawn` and `Check::LightBuilt`, answered by the driver like the
+  recording (`Context::waits_for`, `Runner::set_stage_drawn`/`set_light`). `build` gives the check's show a stage
+  (`stage_for_check`: the user's if it has screens, else the sample; a fed screen and a projector on the first
+  display either way) and `Plan::notes` (with `use_displays_as`'s) goes into the report. In the window's run
+  `Ask::StageOn/Off` (`full.rs::show_the_stage`/`put_back`: the last display, or one added with no monitor) is
+  judged by `stage_drawn_verdict` over `stage_render::totals().since`; the light, and in `--self-test` both, are
+  drawn by `stage_trial` on a `Gpu::headless()` of its own (`start_stage_trial`, `STAGE_TRIAL_LIMIT`; no card or
+  too slow is "not checked" unless `NEWQ_REQUIRE_GPU`); its views count into `stage_render::totals()`. Skipped
+  across a show network: the display part. Cross-target clippy for Windows and Mac runs from Linux with
   `scripts/cross_clippy.sh` (a stand-in C compiler for `ring`, since nothing is linked); CI still builds and
   tests them.
 - `src/clicker.rs`: presenter remote. `decide` is the pure GO/Back logic (Back pauses, Back again
@@ -1171,6 +1181,8 @@ writes gigabytes in seconds.
   that only touch `*.md` or `LICENSE-*` skip CI; `scripts/check_main_ci.sh` (used by
   `Cut release`) accepts such commits on top of a commit CI passed on. Occasionally the macOS runner never starts and the job is cancelled
   after 15 minutes with no steps run; that's not a failure of the change. Re-run it.
+- Linux CI installs `mesa-vulkan-drivers` and sets `WGPU_BACKEND=vulkan` and `NEWQ_REQUIRE_GPU=1` (via
+  `$GITHUB_ENV`, Linux only) for the tests and the self-test.
 - **Releasing:** follow `.claude/skills/release/SKILL.md` (the whole sequence, the traps,
   and how to keep going without being poked). In short: bump `version` in `Cargo.toml` (and `Cargo.lock`) in a PR, merge,
   and wait for CI to pass on `main`. Then, as the repository owner, comment
