@@ -486,7 +486,7 @@ The README describes the features; this file is about working on the code.
   adds the venue, `manifest::build` adds `venue_files` on the hashing thread, `Puller` ranking puts
   used files the order doesn't name after it, `add_facts` skips `is_model_part`. Tests make their
   models in the test (`load_tests.rs`; `net/store/tests.rs::a_venue_model_and_its_files_reach_…`).
-  Not in `relink.rs` (its list is by cue). Lenient reading: `SurfaceShape::Unknown`/`Feed::Unknown`
+  In the Media window (`relink.rs`, below). Lenient reading: `SurfaceShape::Unknown`/`Feed::Unknown`
   (`#[serde(untagged)]` variants keep a later NewQ's value and write it back; drawn as nothing),
   `lenient`/`lenient_option` for `LengthUnit`, `UpAxis`, `OutputConfig::source`.
   `OutputConfig::source: Option<StageSource { viewpoint }>` (unwritten when None): a display that
@@ -1043,7 +1043,13 @@ The README describes the features; this file is about working on the code.
   draws as no number.
   `src/live_text.rs`: clock and speaker timer text (the engine redraws the
   picture as the shown time changes; the renderer re-uploads on `version`).
-  `src/relink.rs`: finding moved media and copying it into one folder.
+  `src/relink.rs`: finding moved media and copying it into one folder. The venue model
+  (`venue_model`: a file, never a sample) is one of the show's files: `missing_files` (cues' and the
+  model; for `check_media`, the searches), `apply_venue`, `Action::RelinkVenue`/`DialogFor::LocateVenue`,
+  `linked_words`; the files it reads beside it (`VenueSide`, `load::venue_files` listed again by
+  `refresh_missing`'s thread only when the model changes, `UiState::venue_side`) are listed
+  (`venue_missing_among`, `UiState::missing_count` for the badges) but can't be relinked;
+  `collect_with_venue` copies them to their places under the model's copy, never renamed.
   `src/gpu.rs` also notices a lost graphics device (`DeviceLost`) and
   `app.rs::watch_gpu` rebuilds every window's device, surface and render thread;
   `NEWQ_LOSE_GPU_AFTER=<seconds>` destroys the device on purpose to test it.

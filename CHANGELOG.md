@@ -38,6 +38,11 @@ release page, and a release is refused if it has none.
   size*, each with a colour key. Up to 16 projectors per view; it gives way to the displays like
   every preview. Worked out by sums and drawn on a software graphics card only: not tried with real
   projectors or on a real graphics card.
+- **The venue model is in the Media window.** A show moved to another computer without its 3D
+  stage venue model now opens the Media window like a missing video does, and the model can be
+  found again with *Search a folder*, *Find on this computer* or *Locate…*. Files the model needs
+  beside it (its textures, its materials) are listed too, with where to put them back. *Copy all
+  media into a folder* takes the model and those files along.
 - **A venue model saved again is shown again.** Export the venue's model over itself (or change
   a texture or materials file beside it) and the 3D stage reads it again a few seconds after the
   file is finished, keeping the old room on screen until the new one is in. Before, it took a

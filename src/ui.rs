@@ -131,6 +131,8 @@ pub enum DialogFor {
     BrowseFile(CueId, CueType),
     /// Where this cue's missing file is now.
     LocateFile(CueId, CueType),
+    /// Where the 3D stage's missing venue model is now.
+    LocateVenue,
     ExportCueSheet,
     /// A folder to search for missing files.
     RelinkFolder,
@@ -154,6 +156,7 @@ impl DialogFor {
             DialogFor::AddCue(ty) => Action::AddCueFile(ty, path),
             DialogFor::BrowseFile(id, _) => Action::SetCueFile(id, path),
             DialogFor::LocateFile(id, _) => Action::RelinkCue(id, path),
+            DialogFor::LocateVenue => Action::RelinkVenue(path),
             DialogFor::ExportCueSheet => Action::ExportCueSheet(path),
             DialogFor::RelinkFolder => Action::RelinkFolder(path),
             DialogFor::CollectMedia => Action::CollectMedia(path),
@@ -440,7 +443,10 @@ pub struct UiState {
     /// asked, and the check being made.
     missing: HashSet<PathBuf>,
     missing_asked: Option<f64>,
-    missing_check: Option<std::sync::mpsc::Receiver<HashSet<PathBuf>>>,
+    missing_check: Option<std::sync::mpsc::Receiver<(HashSet<PathBuf>, relink::VenueSide)>>,
+    /// The files the venue model reads beside it, as the check last listed
+    /// them (listed again only when the model changes).
+    venue_side: relink::VenueSide,
     /// The cue waiting for the next key press to become its hotkey.
     pub capture_hotkey: Option<CueId>,
     /// Serialized show at last save/load, for unsaved-change detection.
@@ -711,9 +717,16 @@ impl UiState {
 
     /// Open the media window if the show has files that can't be found.
     pub fn check_media(&mut self, show: &Show) {
-        if !relink::missing(show).is_empty() {
+        if !relink::missing_files(show).is_empty() {
             self.show_media = true;
         }
+    }
+
+    /// How many of the show's files can't be found (the cues', the venue
+    /// model and the files it reads), from the last check.
+    pub(crate) fn missing_count(&self, show: &Show) -> usize {
+        relink::missing_among(show, &self.missing).len()
+            + relink::venue_missing_among(show, &self.venue_side, &self.missing).len()
     }
 
     /// Treat `show` as the one on disk, for the unsaved-changes mark (used
@@ -871,6 +884,8 @@ enum Action {
     RelinkFolder(PathBuf),
     /// Point the cues that used this cue's file at another file.
     RelinkCue(CueId, PathBuf),
+    /// Point the 3D stage's venue at its model's new place.
+    RelinkVenue(PathBuf),
     /// Copy all the media into this folder.
     CollectMedia(PathBuf),
     /// Search this computer for the missing files by name.
@@ -986,6 +1001,7 @@ impl Action {
                 | Action::RelinkFolder(_)
                 | Action::AddLibraryFolder(_)
                 | Action::RelinkCue(..)
+                | Action::RelinkVenue(_)
                 | Action::CollectMedia(_)
                 | Action::RelinkMany(_)
                 | Action::SetHotkey(..)
@@ -3418,6 +3434,11 @@ fn start_dialog(st: &mut UiState, show: &Show, purpose: DialogFor) {
             .add_filter("glTF binary", &["glb"])
             .save_file()
             .map(|p| p.with_extension("glb")),
+        DialogFor::LocateVenue => rfd::FileDialog::new()
+            .set_title("Where is the venue model now?")
+            .add_filter("3D models", &["glb", "gltf", "obj"])
+            .add_filter("All files", &["*"])
+            .pick_file(),
         DialogFor::Venue => rfd::FileDialog::new()
             .set_title("A model of the venue")
             .add_filter("3D models", &["glb", "gltf", "obj", "fbx"])
@@ -3445,8 +3466,9 @@ fn refresh_missing(ctx: &egui::Context, show: &Show, st: &mut UiState) {
     let now = ctx.input(|i| i.time);
     if let Some(check) = &st.missing_check {
         match check.try_recv() {
-            Ok(missing) => {
+            Ok((missing, side)) => {
                 st.missing = missing;
+                st.venue_side = side;
                 st.missing_check = None;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -3460,18 +3482,31 @@ fn refresh_missing(ctx: &egui::Context, show: &Show, st: &mut UiState) {
         return;
     }
     st.missing_asked = Some(now);
-    let files: HashSet<PathBuf> = show
+    let mut files: HashSet<PathBuf> = show
         .cues
         .iter()
         .filter_map(|c| c.kind.media())
         .map(|m| m.file.clone())
         .filter(|f| !f.as_os_str().is_empty())
         .collect();
+    // The venue model, and (listed there, from the model) what it reads.
+    let model = relink::venue_model(show).map(Path::to_path_buf);
+    let side = st.venue_side.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("missing-check".into())
         .spawn(move || {
-            let _ = tx.send(files.into_iter().filter(|f| !f.is_file()).collect());
+            let side = match &model {
+                Some(m) => {
+                    files.insert(m.clone());
+                    let side = relink::VenueSide::for_model(side, m);
+                    files.extend(side.files.iter().cloned());
+                    side
+                }
+                None => side,
+            };
+            let gone = files.into_iter().filter(|f| !f.is_file()).collect();
+            let _ = tx.send((gone, side));
         });
     if spawned.is_ok() {
         st.missing_check = Some(rx);
@@ -3782,6 +3817,7 @@ fn poll_folder_search(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
     // Its own step in the undo history, apart from any edit in progress.
     st.history.end_burst();
     relink::apply(show, &result.found);
+    relink::apply_venue(show, &result.found);
     st.history.observe(
         &serde_json::to_string(show).unwrap_or_default(),
         ctx.input(|i| i.time),
@@ -3809,6 +3845,7 @@ fn poll_collect(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
             // Its own step in the undo history, apart from any edit in progress.
             st.history.end_burst();
             let n = relink::apply(show, &result.moved);
+            let venue = relink::apply_venue(show, &result.moved);
             st.history.observe(
                 &serde_json::to_string(show).unwrap_or_default(),
                 ctx.input(|i| i.time),
@@ -3824,8 +3861,9 @@ fn poll_collect(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
                 note.push_str(&format!(" ({} were already there)", result.already_there));
             }
             note.push_str(&format!(
-                "; {n} cue{} now use the copies.",
-                if n == 1 { "" } else { "s" }
+                "; {} now {} the copies.",
+                relink::linked_words(n, venue),
+                if n == 1 && !venue { "uses" } else { "use" }
             ));
             if let Some((file, why)) = result.failed.first() {
                 note.push_str(&format!(
@@ -3911,40 +3949,46 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                 .filter(|(_, m)| !m.file.as_os_str().is_empty())
                 .collect();
             let missing = relink::missing_among(show, &st.missing);
+            // The 3D stage's venue model and the files it reads beside it.
+            let venue_files = relink::venue_files(show, &st.venue_side);
+            let venue_gone = relink::venue_missing_among(show, &st.venue_side, &st.missing);
+            let model_gone = relink::venue_model(show).filter(|m| st.missing.contains(*m));
             // What the search of the computer has found so far, best match first.
             let found = st.search.as_ref().map(|s| s.state());
+            // What can be looked for: the cues' files and the venue model.
             let wanted: Vec<PathBuf> = {
                 let mut v: Vec<PathBuf> = missing.iter().map(|m| m.1.clone()).collect();
+                v.extend(model_gone.map(Path::to_path_buf));
                 v.sort();
                 v.dedup();
                 v
             };
+            let all_files = files.len() + venue_files.len();
+            let all_missing = missing.len() + venue_gone.len();
             let suggested = found
                 .as_ref()
                 .map(|f| relink::suggestions(&f.hits, &wanted))
                 .unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
-                if missing.is_empty() {
+                if all_missing == 0 {
                     ui.label(
-                        RichText::new(format!("All {} files are in place.", files.len()))
+                        RichText::new(format!("All {all_files} files are in place."))
                             .color(GO_GREEN),
                     );
                 } else {
                     ui.label(
                         RichText::new(format!(
-                            "{} of {} files can't be found.",
-                            missing.len(),
-                            files.len()
+                            "{all_missing} of {all_files} files can't be found."
                         ))
                         .color(STOP_RED),
                     );
                 }
             });
-            net_media::missing_note(ui, st, missing.len());
+            net_media::missing_note(ui, st, all_missing);
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
-                        !missing.is_empty() && st.folder_search.is_none(),
+                        !wanted.is_empty() && st.folder_search.is_none(),
                         egui::Button::new("Search a folder for missing files…"),
                     )
                     .on_hover_text(
@@ -3958,7 +4002,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                 let searching = found.as_ref().is_some_and(|f| !f.done);
                 if ui
                     .add_enabled(
-                        !missing.is_empty() && !searching,
+                        !wanted.is_empty() && !searching,
                         egui::Button::new("Find on this computer"),
                     )
                     .on_hover_text(
@@ -3972,7 +4016,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                 }
                 if ui
                     .add_enabled(
-                        !files.is_empty() && st.collect_job.is_none(),
+                        all_files > 0 && st.collect_job.is_none(),
                         egui::Button::new("Copy all media into a folder…"),
                     )
                     .on_hover_text(
@@ -4141,6 +4185,7 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
                             });
                             ui.end_row();
                         }
+                        venue_rows(ui, &venue_files, st, &suggested, actions);
                     });
             });
         });
@@ -4149,6 +4194,88 @@ fn media_window(ctx: &egui::Context, show: &Show, st: &mut UiState, actions: &mu
         st.search = None;
     }
     st.show_media = open;
+}
+
+/// The media window's rows for the 3D stage's venue: its model (found
+/// again like a cue's file), then the files it reads beside it (`files`,
+/// the model first), which can only be put back beside it.
+fn venue_rows(
+    ui: &mut Ui,
+    files: &[PathBuf],
+    st: &UiState,
+    suggested: &HashMap<PathBuf, Vec<PathBuf>>,
+    actions: &mut Vec<Action>,
+) {
+    let Some(model) = files.first() else {
+        return;
+    };
+    for (i, f) in files.iter().enumerate() {
+        let gone = st.missing.contains(f);
+        ui.label(if gone {
+            RichText::new("⚠").color(STOP_RED)
+        } else {
+            RichText::new("✔").color(GO_GREEN)
+        });
+        ui.vertical(|ui| {
+            ui.set_min_width(420.0);
+            ui.label(if i == 0 {
+                "3D stage: the venue model"
+            } else {
+                "3D stage: a file the venue model uses"
+            });
+            let color = if gone {
+                STOP_RED
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            ui.add(
+                egui::Label::new(RichText::new(f.display().to_string()).small().color(color))
+                    .truncate(),
+            );
+            if gone && i == 0 {
+                if let Some(best) = suggested.get(f).and_then(|o| o.first()) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("Suggested: {}", best.display()))
+                                .small()
+                                .color(GO_GREEN),
+                        )
+                        .truncate(),
+                    );
+                }
+            } else if gone {
+                let folder = model.parent().unwrap_or(model);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "The model looks for it here. Put it back in {} (or find the model \
+                             again, if it moved with its files).",
+                            folder.display()
+                        ))
+                        .small()
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            if gone && i == 0 {
+                if let Some(best) = suggested.get(f).and_then(|o| o.first())
+                    && ui
+                        .button("Use suggestion")
+                        .on_hover_text(best.display().to_string())
+                        .clicked()
+                {
+                    actions.push(Action::RelinkVenue(best.clone()));
+                }
+                if ui.button("Locate…").clicked() {
+                    actions.push(Action::AskFile(DialogFor::LocateVenue));
+                }
+            }
+        });
+        ui.end_row();
+    }
 }
 
 fn secs_short(t: f64) -> String {
@@ -12353,13 +12480,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             // On its own thread: a big folder takes a while to read, and the
             // show must not freeze meanwhile. One search at a time.
             if st.folder_search.is_none() {
-                let wanted: Vec<PathBuf> = {
-                    let mut v: Vec<PathBuf> =
-                        relink::missing(show).into_iter().map(|m| m.1).collect();
-                    v.sort();
-                    v.dedup();
-                    v
-                };
+                let wanted = relink::missing_files(show);
                 st.media_note = String::new();
                 st.folder_search = Some(relink::FolderSearch::start(
                     root,
@@ -12369,9 +12490,9 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::FindOnComputer => {
-            let names: std::collections::HashSet<std::ffi::OsString> = relink::missing(show)
+            let names: std::collections::HashSet<std::ffi::OsString> = relink::missing_files(show)
                 .iter()
-                .filter_map(|(_, p)| p.file_name().map(|n| n.to_os_string()))
+                .filter_map(|p| p.file_name().map(|n| n.to_os_string()))
                 .collect();
             if !names.is_empty() {
                 let show_dir = st.show_path.as_deref().and_then(|p| p.parent());
@@ -12381,11 +12502,20 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::RelinkMany(pairs) => {
-            let n = relink::apply(show, &pairs.into_iter().collect());
+            let moved: HashMap<PathBuf, PathBuf> = pairs.into_iter().collect();
+            let n = relink::apply(show, &moved);
+            let venue = relink::apply_venue(show, &moved);
             st.media_note = format!(
-                "Linked {n} cue{} to the suggested files.",
-                if n == 1 { "" } else { "s" }
+                "Linked {} to the suggested files.",
+                relink::linked_words(n, venue)
             );
+        }
+        Action::RelinkVenue(new) => {
+            if let Some(old) = relink::venue_model(show).map(Path::to_path_buf)
+                && relink::apply_venue(show, &HashMap::from([(old, new.clone())]))
+            {
+                st.media_note = format!("Linked the venue model to {}.", new.display());
+            }
         }
         Action::RelinkCue(id, new) => {
             let old = show
@@ -12413,13 +12543,21 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                     .collect();
                 files.sort();
                 files.dedup();
+                // The venue model goes too, with what it reads beside it.
+                let venue = relink::venue_model(show).map(Path::to_path_buf);
+                let side: Vec<PathBuf> = relink::venue_files(show, &st.venue_side)
+                    .into_iter()
+                    .skip(1)
+                    .collect();
                 let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let (tx, done) = std::sync::mpsc::channel();
-                let (p, d, total) = (progress.clone(), dest.clone(), files.len());
+                let total = files.len() + venue.iter().count() + side.len();
+                let (p, d) = (progress.clone(), dest.clone());
                 let _ = std::thread::Builder::new()
                     .name("collect-media".into())
                     .spawn(move || {
-                        let _ = tx.send(relink::collect(&d, &files, &p));
+                        let venue = venue.as_deref().map(|m| (m, side.as_slice()));
+                        let _ = tx.send(relink::collect_with_venue(&d, &files, venue, &p));
                     });
                 st.collect_job = Some(CollectJob {
                     done,
@@ -15027,6 +15165,164 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
             poll_folder_search(&ctx, show, st);
         }
+    }
+
+    /// Draw the media window once (a click at `at`, if given): the words it
+    /// shows, and the actions it asked for.
+    fn media_frame(
+        show: &Show,
+        st: &mut UiState,
+        ctx: &egui::Context,
+        at: Option<Pos2>,
+    ) -> (String, Vec<Action>) {
+        let mut input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 760.0))),
+            ..Default::default()
+        };
+        if let Some(at) = at {
+            input.events.push(egui::Event::PointerMoved(at));
+            for pressed in [true, false] {
+                input.events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+        }
+        let mut actions = Vec::new();
+        let mut o = ctx.run_ui(input, |ui| media_window(ui.ctx(), show, st, &mut actions));
+        o.textures_delta.clear();
+        let words = o
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (words, actions)
+    }
+
+    fn where_words(
+        show: &Show,
+        st: &mut UiState,
+        ctx: &egui::Context,
+        words: &str,
+    ) -> Option<Pos2> {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 760.0))),
+            ..Default::default()
+        };
+        let mut o = ctx.run_ui(input, |ui| {
+            media_window(ui.ctx(), show, st, &mut Vec::new())
+        });
+        o.textures_delta.clear();
+        o.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == words => {
+                Some(t.visual_bounding_rect().center())
+            }
+            _ => None,
+        })
+    }
+
+    /// A show moved without its venue model: the media window opens by
+    /// itself, lists the model (and the file beside it it reads), and the
+    /// model is found again by a folder search or by hand.
+    #[test]
+    fn a_missing_venue_model_is_in_the_media_window_and_found_again() {
+        let d = media_dir("venue");
+        let mut show = Show::default();
+        video_cue(&mut show, d.join("new/a.mp4"));
+        show.stage3d.venue = Some(crate::stage3d::Venue::new(PathBuf::from(
+            "/old/place/venue/room.obj",
+        )));
+        let room = d.join("new/venue/room.obj");
+        std::fs::create_dir_all(room.parent().unwrap()).unwrap();
+        std::fs::write(
+            &room,
+            "mtllib room.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+        )
+        .unwrap();
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        st.check_media(&show);
+        assert!(st.show_media, "only the venue is missing: the window opens");
+        let ctx = egui::Context::default();
+        let check = |show: &Show, st: &mut UiState| {
+            st.missing_asked = None;
+            refresh_missing(&ctx, show, st);
+            let t0 = std::time::Instant::now();
+            while st.missing_check.is_some() {
+                assert!(t0.elapsed().as_secs() < 10, "the check never finished");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                refresh_missing(&ctx, show, st);
+            }
+        };
+        check(&show, &mut st);
+        assert_eq!(st.missing_count(&show), 1);
+        let mut words = String::new();
+        for _ in 0..3 {
+            words = media_frame(&show, &mut st, &ctx, None).0;
+        }
+        assert!(words.contains("1 of 2 files can't be found."), "{words}");
+        assert!(words.contains("3D stage: the venue model"), "{words}");
+        // By hand: Locate… asks where it is now.
+        let at = where_words(&show, &mut st, &ctx, "Locate…").expect("a Locate button");
+        let (_, actions) = media_frame(&show, &mut st, &ctx, Some(at));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::AskFile(DialogFor::LocateVenue))),
+            "{}",
+            actions.len()
+        );
+        let answer = DialogFor::LocateVenue.answer(room.clone(), false);
+        assert!(matches!(answer, Action::RelinkVenue(p) if p == room));
+        // A folder search finds it too.
+        apply(
+            Action::RelinkFolder(d.join("new")),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        wait_for_folder_search(&mut show, &mut st);
+        assert_eq!(show.stage3d.venue.as_ref().unwrap().path, room);
+        assert!(
+            st.media_note.starts_with("Found 1 of 1"),
+            "{}",
+            st.media_note
+        );
+        // Here now, it reads a materials file that isn't: listed, with
+        // where to put it, and nothing to look for.
+        check(&show, &mut st);
+        assert_eq!(st.missing_count(&show), 1);
+        for _ in 0..2 {
+            words = media_frame(&show, &mut st, &ctx, None).0;
+        }
+        assert!(words.contains("1 of 3 files can't be found."), "{words}");
+        assert!(
+            words.contains("3D stage: a file the venue model uses"),
+            "{words}"
+        );
+        assert!(words.contains("Put it back in"), "{words}");
+        assert!(relink::missing_files(&show).is_empty());
+        // And by hand, to another copy.
+        let other = d.join("new/elsewhere/room.obj");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::copy(&room, &other).unwrap();
+        apply(
+            Action::RelinkVenue(other.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert_eq!(show.stage3d.venue.as_ref().unwrap().path, other);
+        assert!(st.media_note.contains("venue model"), "{}", st.media_note);
+        // Not in show mode.
+        assert!(Action::RelinkVenue(other).edits_the_show());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

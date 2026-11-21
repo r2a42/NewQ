@@ -4,6 +4,13 @@
 //! with the media in a different folder, those places are gone. These
 //! functions list what is missing, find it again by name in a folder you point
 //! at, and copy a show's media into one folder so the show can travel.
+//!
+//! The 3D stage's venue model (`Show::stage3d.venue`, a file of its own, not a
+//! sample) is one of the show's files too: found and relinked like a cue's.
+//! The files it reads beside it (`load::venue_files`: a glTF's buffers and
+//! pictures, an OBJ's materials and textures) are listed as missing but can't
+//! be pointed elsewhere: the model names them, so they belong beside it, and
+//! copying the media together takes them along in their own folders.
 
 use crate::show::{CueId, Show};
 use parking_lot::Mutex;
@@ -38,6 +45,111 @@ pub fn missing_among(show: &Show, gone: &HashSet<PathBuf>) -> Vec<(CueId, PathBu
             gone.contains(file).then(|| (c.id, file.clone()))
         })
         .collect()
+}
+
+/// The 3D stage's venue model, if the show has one that is a file (not a
+/// sample).
+pub fn venue_model(show: &Show) -> Option<&Path> {
+    show.stage3d
+        .venue
+        .as_ref()
+        .filter(|v| v.sample.is_none() && !v.path.as_os_str().is_empty())
+        .map(|v| v.path.as_path())
+}
+
+/// The files the venue model reads beside it, as last listed (on a thread:
+/// listing reads the model), with how the model stood then, so they are
+/// listed again only when it changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VenueSide {
+    model: PathBuf,
+    stood: Option<(u64, Option<std::time::SystemTime>)>,
+    pub files: Vec<PathBuf>,
+}
+
+impl VenueSide {
+    /// For the model at `model`: `old` while the model is as it was, else
+    /// listed again (reads the model: never on the main thread).
+    pub fn for_model(old: VenueSide, model: &Path) -> VenueSide {
+        let stood = std::fs::metadata(model)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| (m.len(), m.modified().ok()));
+        if old.model == model && old.stood == stood {
+            return old;
+        }
+        VenueSide {
+            model: model.to_path_buf(),
+            stood,
+            files: if stood.is_some() {
+                crate::stage3d::load::venue_files(model)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
+/// The venue's files the show uses: its model first, then (if `side` was
+/// listed for this model) the files it reads beside it. Empty with no venue
+/// model.
+pub fn venue_files(show: &Show, side: &VenueSide) -> Vec<PathBuf> {
+    let Some(model) = venue_model(show) else {
+        return Vec::new();
+    };
+    let mut v = vec![model.to_path_buf()];
+    if side.model == model {
+        v.extend(side.files.iter().filter(|f| *f != model).cloned());
+    }
+    v
+}
+
+/// Of `venue_files`, those in `gone` (the control window's check).
+pub fn venue_missing_among(show: &Show, side: &VenueSide, gone: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    venue_files(show, side)
+        .into_iter()
+        .filter(|f| gone.contains(f))
+        .collect()
+}
+
+/// Every file that can be found again and isn't there: the cues' and the
+/// venue model (not the files beside it: they can't be pointed elsewhere).
+/// Each once.
+pub fn missing_files(show: &Show) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = missing(show).into_iter().map(|m| m.1).collect();
+    if let Some(model) = venue_model(show)
+        && !model.is_file()
+    {
+        v.push(model.to_path_buf());
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Point the venue at its model's new place, if it moved. Whether it did.
+pub fn apply_venue(show: &mut Show, moved: &HashMap<PathBuf, PathBuf>) -> bool {
+    match &mut show.stage3d.venue {
+        Some(v) if v.sample.is_none() => match moved.get(&v.path) {
+            Some(new) => {
+                v.path = new.clone();
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// What a relink changed, in words: "2 cues", "the venue model", "1 cue and
+/// the venue model".
+pub fn linked_words(cues: usize, venue: bool) -> String {
+    let cues_words = format!("{cues} cue{}", if cues == 1 { "" } else { "s" });
+    match (cues, venue) {
+        (0, true) => "the venue model".into(),
+        (_, true) => format!("{cues_words} and the venue model"),
+        _ => cues_words,
+    }
 }
 
 /// How many trailing path components two paths share (the file name counts).
@@ -536,10 +648,204 @@ pub fn collect(dest: &Path, files: &[PathBuf], progress: &Arc<AtomicUsize>) -> C
     out
 }
 
+/// `collect`, and the venue's model (`venue`: it and the files it reads
+/// beside it) with it: the model is placed as a cue's file is (and is in
+/// `moved`), the files beside it go where the copy of the model will look
+/// for them, in their own folders under it, never renamed.
+pub fn collect_with_venue(
+    dest: &Path,
+    files: &[PathBuf],
+    venue: Option<(&Path, &[PathBuf])>,
+    progress: &Arc<AtomicUsize>,
+) -> Collected {
+    let mut all = files.to_vec();
+    if let Some((model, _)) = venue {
+        all.push(model.to_path_buf());
+    }
+    let mut out = collect(dest, &all, progress);
+    let Some((model, side)) = venue else {
+        return out;
+    };
+    // Where the model is now: its copy, or where it was (already in the
+    // folder, or missing: then its files can't be placed either).
+    let new_model = out.moved.get(model).cloned().unwrap_or(model.to_path_buf());
+    let (Some(from), Some(to)) = (model.parent(), new_model.parent()) else {
+        return out;
+    };
+    for f in side {
+        let target = f.strip_prefix(from).ok().map(|rel| to.join(rel));
+        match target {
+            _ if !f.is_file() => out.failed.push((f.clone(), "the file is missing".into())),
+            None => out
+                .failed
+                .push((f.clone(), "it isn't in the venue model's folder".into())),
+            Some(t) if t == *f || same_file(&t, f) => out.already_there += 1,
+            Some(t) if t.exists() => out.failed.push((
+                f.clone(),
+                format!("a different file is already at {}", t.display()),
+            )),
+            Some(t) => {
+                let made = t
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| std::fs::copy(f, &t));
+                match made {
+                    Ok(_) => out.copied += 1,
+                    Err(e) => out.failed.push((f.clone(), e.to_string())),
+                }
+            }
+        }
+        progress.fetch_add(1, Ordering::Relaxed);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::show::{CueKind, CueType};
+
+    /// A show whose venue is an OBJ with materials and a texture in a
+    /// subfolder beside it.
+    fn venue_show(d: &Path) -> (Show, PathBuf) {
+        let model = d.join("venue/room.obj");
+        touch(
+            &model,
+            "mtllib room.mtl\nusemtl m\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+        );
+        touch(&d.join("venue/room.mtl"), "newmtl m\nmap_Kd tex/wood.png\n");
+        touch(&d.join("venue/tex/wood.png"), "not really a picture");
+        let mut show = show_with(&[d.join("clip.mp4")]);
+        show.stage3d.venue = Some(crate::stage3d::Venue::new(model.clone()));
+        (show, model)
+    }
+
+    #[test]
+    fn the_venue_model_is_listed_found_and_relinked_like_a_cues_file() {
+        let d = dir("venue");
+        let (mut show, model) = venue_show(&d.join("old"));
+        let side = VenueSide::for_model(VenueSide::default(), &model);
+        assert_eq!(
+            side.files,
+            vec![
+                d.join("old/venue/room.mtl"),
+                d.join("old/venue/tex/wood.png")
+            ]
+        );
+        // Listed again only when the model changes.
+        assert_eq!(VenueSide::for_model(side.clone(), &model), side);
+        let all = venue_files(&show, &side);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], model);
+        assert_eq!(missing_files(&show), vec![d.join("old/clip.mp4")]);
+        // A missing texture is listed (it is one of the show's files), but
+        // isn't something to look for: the model names it.
+        std::fs::remove_file(d.join("old/venue/tex/wood.png")).unwrap();
+        let gone: HashSet<PathBuf> = all.iter().filter(|f| !f.is_file()).cloned().collect();
+        assert_eq!(
+            venue_missing_among(&show, &side, &gone),
+            vec![d.join("old/venue/tex/wood.png")]
+        );
+        assert_eq!(missing_files(&show).len(), 1);
+        // The show moved: the model is missing and found again by name.
+        std::fs::rename(d.join("old"), d.join("new")).unwrap();
+        assert_eq!(
+            missing_files(&show),
+            vec![d.join("old/clip.mp4"), model.clone()]
+        );
+        let found = search_all(&d.join("new"), &missing_files(&show));
+        assert_eq!(found[&model], d.join("new/venue/room.obj"));
+        assert_eq!(apply(&mut show, &found), 0, "no cue's file is there");
+        assert!(apply_venue(&mut show, &found));
+        assert_eq!(
+            show.stage3d.venue.as_ref().unwrap().path,
+            d.join("new/venue/room.obj")
+        );
+        assert!(missing_files(&show).iter().all(|f| f.ends_with("clip.mp4")));
+        assert_eq!(linked_words(0, true), "the venue model");
+        assert_eq!(linked_words(1, true), "1 cue and the venue model");
+        assert_eq!(linked_words(2, false), "2 cues");
+        // Saved, its path is kept beside the show's, as a cue's is.
+        let saved = d.join("new/show.newq");
+        show.save(&saved).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        let written = raw["stage3d"]["venue"]["path"].as_str().unwrap();
+        assert!(Path::new(written).is_relative(), "{written}");
+        let back = Show::load(&saved).unwrap();
+        assert_eq!(
+            back.stage3d.venue.unwrap().path,
+            d.join("new/venue/room.obj")
+        );
+        // A sample venue is never a file to find.
+        show.stage3d.venue.as_mut().unwrap().sample =
+            Some(crate::stage3d::samples::SampleVenue::Arena);
+        show.stage3d.venue.as_mut().unwrap().path = PathBuf::from("/gone/room.obj");
+        assert!(venue_model(&show).is_none());
+        assert!(venue_files(&show, &side).is_empty());
+        assert!(missing_files(&show).iter().all(|f| f.ends_with("clip.mp4")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn copying_the_media_together_takes_the_venue_and_its_files_along() {
+        let d = dir("venue_collect");
+        let (mut show, model) = venue_show(&d.join("src"));
+        touch(&d.join("src/clip.mp4"), "x");
+        // A cue's file of the same name as the model's texture, elsewhere.
+        touch(&d.join("src/other/wood.png"), "another picture");
+        let c = show.make_cue(CueType::Image, Some(d.join("src/other/wood.png")), 0);
+        show.cues.push(c);
+        let side = VenueSide::for_model(VenueSide::default(), &model);
+        let files: Vec<PathBuf> = show
+            .cues
+            .iter()
+            .filter_map(|c| c.kind.file_media())
+            .map(|m| m.file.clone())
+            .filter(|f| !f.as_os_str().is_empty())
+            .collect();
+        let dest = d.join("together");
+        let progress = Arc::new(AtomicUsize::new(0));
+        let got = collect_with_venue(&dest, &files, Some((&model, &side.files)), &progress);
+        assert!(got.failed.is_empty(), "{:?}", got.failed);
+        assert_eq!(got.copied, 5);
+        assert_eq!(progress.load(Ordering::Relaxed), 5);
+        assert_eq!(got.moved[&model], dest.join("room.obj"));
+        assert_eq!(
+            std::fs::read_to_string(dest.join("tex/wood.png")).unwrap(),
+            "not really a picture",
+            "in its own folder, beside the model"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("wood.png")).unwrap(),
+            "another picture"
+        );
+        apply(&mut show, &got.moved);
+        assert!(apply_venue(&mut show, &got.moved));
+        // The copy reads: the model finds its materials and texture.
+        let copied = dest.join("room.obj");
+        assert_eq!(
+            crate::stage3d::load::venue_files(&copied),
+            vec![dest.join("room.mtl"), dest.join("tex/wood.png")]
+        );
+        let venue = show.stage3d.venue.clone().unwrap();
+        let loaded = crate::stage3d::load::load_venue(&copied, &venue);
+        assert!(loaded.is_ok(), "{:?}", loaded.err());
+        // Again into the same folder: everything is already there.
+        let side = VenueSide::for_model(VenueSide::default(), &copied);
+        let files: Vec<PathBuf> = show
+            .cues
+            .iter()
+            .filter_map(|c| c.kind.file_media())
+            .map(|m| m.file.clone())
+            .filter(|f| !f.as_os_str().is_empty())
+            .collect();
+        let again = collect_with_venue(&dest, &files, Some((&copied, &side.files)), &progress);
+        assert!(again.failed.is_empty(), "{:?}", again.failed);
+        assert_eq!(again.copied, 0);
+        assert_eq!(again.already_there, 5);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[cfg(unix)]
     #[test]
