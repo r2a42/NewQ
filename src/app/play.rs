@@ -1310,6 +1310,7 @@ impl App {
                     .device_status(None)
                     .map_or(0, |d| d.load_permille),
                 audio_errors: crate::media::audio::stream_errors(),
+                previews: crate::stats::Previews::now(),
             })
         {
             self.play.local.sample(now, &row);

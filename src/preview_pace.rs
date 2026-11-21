@@ -1100,8 +1100,6 @@ impl Tally {
     }
 
     /// Seconds at `level`.
-    // Read by Test Mode's report (step B3 of organise-and-test3d-plan.md).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn secs_at(&self, level: Level) -> f64 {
         self.secs_at[level as usize]
     }
@@ -1110,7 +1108,6 @@ impl Tally {
     /// seconds and counts between the two, and the steps and news since, their
     /// `at` seconds into the stretch. Any let go (`KEPT`) before this snapshot
     /// was taken are missing: then `steps.len() < steps_total`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn since(&self, earlier: &Tally) -> Tally {
         fn after<T: Clone>(all: &VecDeque<T>, total: u64, from: u64) -> VecDeque<T> {
             let first = total.saturating_sub(all.len() as u64);
@@ -1237,7 +1234,6 @@ impl PreviewGovernor {
     /// What it did since the app started: clone one at the start of a
     /// stretch and `Tally::since` it at the end (or look at `steps_total` each
     /// pass and take the new steps as they come).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn tally(&self) -> &Tally {
         &self.tally
     }

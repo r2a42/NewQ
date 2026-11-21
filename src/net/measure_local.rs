@@ -84,10 +84,12 @@ impl LocalSample {
                 late_permille: self.late_permille,
                 audio_permille: self.audio_permille,
                 audio_errors: self.audio_errors,
+                previews: crate::stats::Previews::default(),
             },
             stall_ms: self.stall_ms,
             gpu_mb: self.gpu_mb,
             commit_mb: self.commit_mb,
+            previews: crate::stats::PreviewCells::default(),
         }
     }
 }

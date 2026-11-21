@@ -232,6 +232,10 @@ pub struct Run {
     drawing_looked: Option<f64>,
     /// This computer drew in software (`gpu::drawing_in_software`).
     pub software: Option<crate::adapters::SoftwareDrawing>,
+    /// What the previews and the 3D stage do meanwhile (`previews.csv`).
+    previews: super::previews::Recorder,
+    /// Their account, once the test has ended (for the report).
+    previews_account: Option<super::previews::Account>,
 }
 
 /// A timeline test's part of a run (see `testmode::timeline`).
@@ -1152,6 +1156,10 @@ impl TestMode {
                         crate::gpu::drawing_in_software(),
                     );
                 }
+                // What the previews' governor did since the last look.
+                for line in r.previews.tick(st, engine.jolts(), t) {
+                    r.log_at(t, &line);
+                }
             }
             Phase::Full(r) => r.note_drawing(&st.drawing),
             _ => {}
@@ -1997,6 +2005,7 @@ fn launch(
         ),
     );
     let media_notes = built.notes.clone();
+    let previews = super::previews::Recorder::start(Some(&folder), st, engine.jolts());
     let awake = KeepAwake::new("NewQ is running a test");
     // The point of no return: the user's show is put aside.
     let stash = match stash {
@@ -2073,6 +2082,8 @@ fn launch(
         drawing: Vec::new(),
         drawing_looked: None,
         software: None,
+        previews,
+        previews_account: None,
     })
 }
 
@@ -2227,6 +2238,7 @@ impl Run {
                 .device_status(None)
                 .map_or(0, |d| d.load_permille),
             audio_errors: crate::media::audio::stream_errors(),
+            previews: crate::stats::Previews::now(),
         }) {
             self.last = Some(sample);
             self.history.push(sample);
@@ -2372,9 +2384,17 @@ fn finish(
     for (t, line) in run.hitches.tick(Instant::now()) {
         run.log_at(t, &line);
     }
+    // The previews' last look, and their account.
+    let t_end = elapsed.as_secs_f64();
+    for line in run.previews.tick(st, engine.jolts(), t_end) {
+        run.log_at(t_end, &line);
+    }
+    let previews = run.previews.finish(st, t_end);
     let hours = elapsed.as_secs_f64() / 3600.0;
     let clean = run.clean_laps();
     let mut findings = run.judge(hours);
+    findings.extend(super::analysis::analyse_previews(&previews));
+    run.previews_account = Some(previews);
     if !run.sleeps.is_empty() {
         let total: f64 = run.sleeps.iter().map(|(_, g)| g).sum();
         findings.insert(
@@ -2469,7 +2489,6 @@ fn finish(
     }
     // What the window showed along the way and is not in the final account:
     // kept in the log and the report, since someone watching saw it.
-    let t_end = elapsed.as_secs_f64();
     for line in run.finding_log.close(t_end, &findings) {
         run.log_at(t_end, &line);
     }
@@ -2632,6 +2651,14 @@ fn compose(
     ) {
         line(&mut out, &format!("  ok       {t}"));
     }
+    if let Some(a) = &run.previews_account {
+        line(&mut out, "");
+        line(&mut out, "Previews");
+        line(&mut out, "--------");
+        for l in super::previews::report_part(a) {
+            line(&mut out, &format!("  {l}"));
+        }
+    }
     line(&mut out, "");
     line(&mut out, "Laps");
     line(&mut out, "----");
@@ -2708,6 +2735,10 @@ fn compose(
         ("report.txt", "this report"),
         ("stats.csv", "one row of measurements every few seconds"),
         ("laps.csv", "how long each lap took"),
+        (
+            super::previews::CSV,
+            "each time the previews gave way to the displays or came back",
+        ),
         ("events.log", "what the show engine said, with times"),
         (
             "system.txt",
@@ -3259,10 +3290,22 @@ mod tests {
             "laps.csv",
             "events.log",
             "system.txt",
+            "previews.csv",
         ] {
             assert!(d.folder.join(f).exists(), "{f} missing");
         }
         assert!(d.report.contains("back, unchanged"));
+        // The previews' part, with no window and no pane: said, not judged.
+        assert!(d.report.contains("\nPreviews\n--------\n"), "{}", d.report);
+        assert!(
+            d.report
+                .contains("Open when the test began: no Preview pane.")
+                && d.report.contains("not paced during the test")
+                && d.report.contains("In short:"),
+            "{}",
+            d.report
+        );
+        assert!(d.report.contains("previews.csv"), "the file is listed");
         assert!(!crate::media::audio::is_muted(), "the mute was left on");
         let system = std::fs::read_to_string(d.folder.join("system.txt")).unwrap();
         assert!(
