@@ -1493,7 +1493,11 @@ impl TestMode {
                 if across(st)
                     && let Ok(media) = made.clone()
                 {
-                    let plan = super::full::plan_for(&p, &media, show, st, true);
+                    let mut plan = super::full::plan_for(&p, &media, show, st, true);
+                    // Owner's decision 9: the venue model stays here.
+                    if let Some(note) = plan::leave_venue_out(&mut plan.show) {
+                        log::info!("test mode: {note}");
+                    }
                     let test_show = plan.show.clone();
                     let files = super::fleet::files_of(&plan.show, None);
                     let muted = super::full::muted(&p);
@@ -1799,6 +1803,8 @@ fn build(prep: &Prep, show: &Show, spread: bool) -> plan::Built {
     };
     if spread {
         plan::spread_pictures(&mut built.show);
+        // Owner's decision 9: the venue model goes only with the 3D part.
+        built.notes.extend(plan::leave_venue_out(&mut built.show));
     }
     built
 }
