@@ -32,8 +32,6 @@ release page, and a release is refused if it has none.
   - *General ▸ Recovery and logs* → *This computer ▸ Logs and recovery*.
   - *Media ▸ Power* (and the battery warning in the sidebar), *Decoding* → *This computer*.
   - *Media ▸ Streaming server* and *Programs* → *This computer ▸ Allowed here*.
-  mark in the status bar now says *Settings ▸ Media ▸ Power*, and the timeline's layers hint
-  *Settings ▸ General ▸ Layers*.
 - **Test Mode's report says what the previews and the 3D stage did.** A new *Previews* part:
   this computer's preview settings, the previews open, how long they spent at each rate, how
   often they gave way to the displays and came back, each display window's late pictures, what
