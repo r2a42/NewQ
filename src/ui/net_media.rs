@@ -87,11 +87,12 @@ pub fn primary_summary(ui: &mut Ui, v: &NetView, st: &UiState) {
                 ui,
                 &format!(
                     "⚠ {} file{} the show uses {} missing on this computer, so no computer \
-                     can have {}: Settings ▸ Media ▸ media manager.",
+                     can have {}: the Media manager finds moved files ({}).",
                     m.missing_here,
                     if m.missing_here == 1 { "" } else { "s" },
                     if m.missing_here == 1 { "is" } else { "are" },
                     if m.missing_here == 1 { "it" } else { "them" },
+                    super::settings::FILES.path(),
                 ),
             );
         }
@@ -131,9 +132,12 @@ pub fn primary_summary(ui: &mut Ui, v: &NetView, st: &UiState) {
         }
         hint(
             ui,
-            "Every computer gets every file of the show, the ones nearest the playhead first, \
-             then the library folders (Settings ▸ Media). A computer plays what it has: where a \
-             file hasn't arrived, its display shows a card in the cue's place until it has.",
+            &format!(
+                "Every computer gets every file of the show, the ones nearest the playhead \
+                 first, then the library folders ({}). A computer plays what it has: where a \
+                 file hasn't arrived, its display shows a card in the cue's place until it has.",
+                super::settings::LIBRARY.path()
+            ),
         );
     });
 }
@@ -311,12 +315,13 @@ pub fn status(ui: &mut Ui, st: &UiState) {
             if let Some(text) = m.notice() {
                 let r = ui
                     .label(RichText::new(format!("⏳ {text}")).color(PREWAIT))
-                    .on_hover_text(
+                    .on_hover_text(format!(
                         "The other computers are being sent the show's media. Each plays what it \
                          has; a display whose file hasn't arrived shows a card in the cue's place. \
                          Copying uses the disks and the network, so playback may be less smooth \
-                         until it is done. Settings ▸ Show network has each computer's progress.",
-                    );
+                         until it is done. {} has each computer's progress.",
+                        super::settings::path(SettingsPage::Network, None)
+                    ));
                 note(ui, "media_notice", r.rect);
             }
         }

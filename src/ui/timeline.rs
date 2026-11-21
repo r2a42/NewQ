@@ -458,7 +458,10 @@ pub fn pane(
             if !st.prefs.new_layout
                 && ui
                     .button("Close this pane")
-                    .on_hover_text("Window ▸ Timeline brings it back")
+                    .on_hover_text(format!(
+                        "{} brings it back",
+                        crate::ui::settings::TIMELINE_ITEM.path()
+                    ))
                     .clicked()
             {
                 actions.push(Action::Timeline(TimelineAction::Close));

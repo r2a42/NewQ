@@ -640,9 +640,10 @@ fn overlay(
                 if id != SETTINGS_VIEW
                     && ui
                         .button("Edit…")
-                        .on_hover_text(
-                            "The venue, the screens and the viewpoints: Settings ▸ 3D stage",
-                        )
+                        .on_hover_text(format!(
+                            "The venue, the screens and the viewpoints: {}",
+                            crate::ui::settings::path(crate::ui::SettingsPage::Stage3d, None)
+                        ))
                         .clicked()
                 {
                     st.stage

@@ -289,7 +289,7 @@ pub fn start_refusal(plan: &[PartPlan], screens: usize, ticked: usize) -> Option
     if plan.is_empty() {
         Some("Tick at least one thing to test.")
     } else if screens > 0 && ticked == 0 {
-        Some("Tick at least one screen to show the test on.")
+        Some("Tick at least one monitor to show the test on.")
     } else {
         None
     }
@@ -436,7 +436,7 @@ mod tests {
         );
         assert_eq!(
             start_refusal(&p, 2, 0),
-            Some("Tick at least one screen to show the test on.")
+            Some("Tick at least one monitor to show the test on.")
         );
         assert_eq!(start_refusal(&p, 2, 1), None);
         // No screen but the main window's: the Preview pane shows it.

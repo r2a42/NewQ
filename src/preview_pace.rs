@@ -1157,7 +1157,7 @@ pub fn notice(governed: Level, limits: Limits, not_theirs: bool) -> Option<Strin
     // The governor holds them lower than the computer's own limits would.
     let governor = governed > limits.rate.level() || governed.scale() < limits.size.scale();
     let why = if governor {
-        "to keep the outputs smooth"
+        "to keep the displays smooth"
     } else {
         "(this computer's setting)"
     };
@@ -1170,9 +1170,9 @@ pub fn notice(governed: Level, limits: Limits, not_theirs: bool) -> Option<Strin
     };
     match level {
         _ if not_theirs && !governor => {
-            Some("Previews back: the outputs' missed pictures aren't theirs".to_string())
+            Some("Previews back: the displays' missed pictures aren't theirs".to_string())
         }
-        Level::Paused => Some("Previews paused to protect the outputs".to_string()),
+        Level::Paused => Some("Previews paused to protect the displays".to_string()),
         Level::Full if size.is_empty() => None,
         Level::Full => Some(format!("Preview at {size} size {why}")),
         _ if size.is_empty() => Some(format!("Preview at {} fps {why}", level.fps()?)),
@@ -1712,12 +1712,12 @@ mod tests {
         let auto = Limits::default();
         assert_eq!(
             notice(Level::Full, auto, true).as_deref(),
-            Some("Previews back: the outputs' missed pictures aren't theirs")
+            Some("Previews back: the displays' missed pictures aren't theirs")
         );
         // Not while they still give way.
         assert_eq!(
             notice(Level::Fps15, auto, true).as_deref(),
-            Some("Preview at 15 fps to keep the outputs smooth")
+            Some("Preview at 15 fps to keep the displays smooth")
         );
         let mut g = PreviewGovernor::default();
         let mut t = Instant::now();
@@ -1803,15 +1803,15 @@ mod tests {
         assert_eq!(notice(Level::Full, auto, false), None);
         assert_eq!(
             notice(Level::Fps60, auto, false).as_deref(),
-            Some("Preview at 60 fps to keep the outputs smooth")
+            Some("Preview at 60 fps to keep the displays smooth")
         );
         assert_eq!(
             notice(Level::Half, auto, false).as_deref(),
-            Some("Preview at 5 fps, half size, to keep the outputs smooth")
+            Some("Preview at 5 fps, half size, to keep the displays smooth")
         );
         assert_eq!(
             notice(Level::Paused, auto, false).as_deref(),
-            Some("Previews paused to protect the outputs")
+            Some("Previews paused to protect the displays")
         );
         assert_eq!(
             notice(Level::Full, rate(Cap::Fps30), false).as_deref(),
@@ -1827,7 +1827,7 @@ mod tests {
         );
         assert_eq!(
             notice(Level::Quarter, half, false).as_deref(),
-            Some("Preview at 5 fps, quarter size, to keep the outputs smooth")
+            Some("Preview at 5 fps, quarter size, to keep the displays smooth")
         );
         // The main window: never under what its own controls need.
         assert_eq!(window_fps(Level::Full, 60.0, 20.0), 60.0);

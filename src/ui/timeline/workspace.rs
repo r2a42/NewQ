@@ -198,15 +198,15 @@ fn bar(
             ui.label(RichText::new("· show mode: nothing can be edited").weak());
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let r = ui
-                .button("Show as a pane")
-                .on_hover_text(if st.prefs.new_layout {
-                    "Open the timeline editor as a panel of the Editor view instead, from now on \
-                 (Settings ▸ General ▸ Timeline editor)"
+            let r = ui.button("Show as a pane").on_hover_text(format!(
+                "Open the timeline editor as {} instead, from now on ({})",
+                if st.prefs.new_layout {
+                    "a panel of the Editor view"
                 } else {
-                    "Open the timeline editor as a pane under the cue list instead, from now on \
-                 (Settings ▸ General ▸ Timeline editor)"
-                });
+                    "a pane under the cue list"
+                },
+                crate::ui::settings::TIMELINE_EDITOR.path()
+            ));
             note(ui, "as_pane", &r);
             if r.clicked() {
                 actions.push(Action::Timeline(TimelineAction::SetLayout(

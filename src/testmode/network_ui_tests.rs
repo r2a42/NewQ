@@ -642,7 +642,7 @@ fn every_computers_screens_are_offered_grouped_and_ticked_all_at_once() {
         assert!(st.prefs.test_displays.is_empty(), "modern {modern}");
         let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);
         assert!(
-            has(&notes, "Tick at least one screen to show the test on."),
+            has(&notes, "Tick at least one monitor to show the test on."),
             "{notes:?}"
         );
         let notes = choices(&ctx, modern, &mut show, &mut e, &mut st, vec![]);

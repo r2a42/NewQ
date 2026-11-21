@@ -158,16 +158,16 @@ impl PreviewMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            PreviewMode::Single => "Single",
+            PreviewMode::Single => "One display",
             PreviewMode::Multiview => "Multiview",
-            PreviewMode::Stage => "3D",
+            PreviewMode::Stage => "3D stage",
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            PreviewMode::Single => "One output, chosen in the menu beside",
-            PreviewMode::Multiview => "Every output at once, or the show's multiview layout",
+            PreviewMode::Single => "One display, chosen in the menu beside",
+            PreviewMode::Multiview => "Every display at once, or the show's multiview layout",
             PreviewMode::Stage => {
                 "The show's 3D stage, with each display's picture on its surfaces"
             }

@@ -225,10 +225,10 @@ fn hosting_possible(st: &UiState) -> Result<(), String> {
         );
     }
     if !st.prefs.allow_hosting {
-        return Err(
-            "not run: this computer has not been allowed to run a streaming server (Settings ▸ Media), and a test changes no settings"
-                .into(),
-        );
+        return Err(format!(
+            "not run: this computer has not been allowed to run a streaming server ({}), and a test changes no settings",
+            crate::ui::STREAMING_SERVER.path()
+        ));
     }
     Ok(())
 }

@@ -228,11 +228,11 @@ fn tools(ui: &mut Ui, ctx: &Ctx, st: &mut UiState, actions: &mut Vec<Action>) {
     // The other layout (the workspace's own bar has the way back).
     if host != Host::Workspace {
         ui.separator();
-        let r = ui.button("Workspace").on_hover_text(
+        let r = ui.button("Workspace").on_hover_text(format!(
             "Open the timeline in a workspace of its own: a bin, the picture, the inspector \
-             and the tracks across the whole window. It opens there from now on (Settings ▸ \
-             General ▸ Timeline editor)",
-        );
+             and the tracks across the whole window. It opens there from now on ({})",
+            crate::ui::settings::TIMELINE_EDITOR.path()
+        ));
         note(ui, host, "layout", &r);
         if r.clicked() {
             push(
