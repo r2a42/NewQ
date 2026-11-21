@@ -181,6 +181,8 @@ struct Win {
     e: crate::engine::Engine,
     t: f64,
     texts: Vec<String>,
+    /// Where each text was drawn, the last frame.
+    spots: Vec<(String, Pos2)>,
     size: egui::Vec2,
 }
 
@@ -206,6 +208,7 @@ impl Win {
             e: crate::engine::Engine::for_tests(),
             t: 1.0,
             texts: Vec::new(),
+            spots: Vec::new(),
             size,
         };
         w.settle(show, &mut st);
@@ -229,14 +232,18 @@ impl Win {
             .ctx
             .run_ui(input, |ui| crate::ui::draw(ui, show, e, st));
         out.textures_delta.clear();
-        self.texts = out
+        self.spots = out
             .shapes
             .iter()
             .filter_map(|c| match &c.shape {
-                egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                egui::epaint::Shape::Text(t) => Some((
+                    t.galley.text().to_string(),
+                    t.pos + t.galley.rect.center().to_vec2(),
+                )),
                 _ => None,
             })
             .collect();
+        self.texts = self.spots.iter().map(|(t, _)| t.clone()).collect();
     }
 
     fn settle(&mut self, show: &mut Show, st: &mut UiState) {
@@ -289,13 +296,22 @@ impl Win {
             match self.find(name) {
                 Some((_, true)) | None => break,
                 Some((r, false)) => {
-                    // Down to one below, up to one above.
-                    let down = if r.center().y > self.size.y * 0.5 {
-                        -80.0
-                    } else {
-                        80.0
-                    };
-                    self.wheel(show, st, down);
+                    // Sideways to one off the side of the 3D stage's tab
+                    // (a cramped page), else down to one below, up to one
+                    // above.
+                    let side = self.find("3D stage ▸ tab content").map(|(c, _)| c);
+                    match side {
+                        Some(c) if r.max.x > c.max.x => self.wheel_by(show, st, vec2(-80.0, 0.0)),
+                        Some(c) if r.min.x < c.min.x => self.wheel_by(show, st, vec2(80.0, 0.0)),
+                        _ => {
+                            let down = if r.center().y > self.size.y * 0.5 {
+                                -80.0
+                            } else {
+                                80.0
+                            };
+                            self.wheel(show, st, down);
+                        }
+                    }
                 }
             }
         }
@@ -314,6 +330,10 @@ impl Win {
     /// Turns the wheel over the page: on the 3D stage page, over its tab's
     /// content (over the pinned view the wheel moves the camera).
     fn wheel(&mut self, show: &mut Show, st: &mut UiState, down: f32) {
+        self.wheel_by(show, st, vec2(0.0, down));
+    }
+
+    fn wheel_by(&mut self, show: &mut Show, st: &mut UiState, delta: egui::Vec2) {
         let at = match self.find("3D stage ▸ tab content") {
             Some((r, _)) => r.center(),
             None => Pos2::new(self.size.x * 0.6, self.size.y * 0.5),
@@ -324,12 +344,25 @@ impl Win {
             st,
             vec![Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
-                delta: vec2(0.0, down),
+                delta,
                 phase: egui::TouchPhase::Move,
                 modifiers: Default::default(),
             }],
         );
         self.settle(show, st);
+    }
+
+    /// Clicks the text `words` where it was last drawn (the last of them:
+    /// a menu's is over the page's).
+    fn click_text(&mut self, show: &mut Show, st: &mut UiState, words: &str) {
+        let at = self
+            .spots
+            .iter()
+            .rev()
+            .find(|(t, _)| t == words)
+            .map(|(_, p)| *p)
+            .unwrap_or_else(|| panic!("no {words:?} in {:?}", self.texts));
+        self.click_at(show, st, Rect::from_center_size(at, vec2(1.0, 1.0)));
     }
 
     /// Clicks the 3D stage page's tab `label`.
@@ -609,12 +642,25 @@ fn the_view_stays_put_while_the_tab_scrolls() {
 }
 
 #[test]
-fn the_view_is_made_taller_by_its_handle_and_never_hides_the_tabs() {
+fn the_view_is_made_bigger_by_its_handle_and_never_hides_the_tabs() {
     for modern in [false, true] {
         let mut show = many_screens();
         let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
         let before = w.find("3D stage ▸ view").unwrap().0;
-        let grip = w.find("3D stage ▸ view height").unwrap().0.center();
+        let tabs_before = w.find("3D stage ▸ tab ▸ Venue").unwrap().0;
+        // The new interface has the view on top of the tabs; the classic
+        // window's settings, short under the transport, have it beside them.
+        assert_eq!(
+            tabs_before.min.y > before.max.y,
+            modern,
+            "modern {modern}: {before:?} and the tabs at {tabs_before:?}"
+        );
+        let grip = w.find("3D stage ▸ view size").unwrap().0.center();
+        let way = if modern {
+            vec2(0.0, 1.0)
+        } else {
+            vec2(1.0, 0.0)
+        };
         let b = |pos, pressed| Event::PointerButton {
             pos,
             button: PointerButton::Primary,
@@ -624,28 +670,28 @@ fn the_view_is_made_taller_by_its_handle_and_never_hides_the_tabs() {
         w.frame(&mut show, &mut st, vec![Event::PointerMoved(grip)]);
         w.frame(&mut show, &mut st, vec![b(grip, true)]);
         for i in 1..=10 {
-            let at = grip + vec2(0.0, 1000.0 * i as f32 / 10.0);
+            let at = grip + way * (1000.0 * i as f32 / 10.0);
             w.frame(&mut show, &mut st, vec![Event::PointerMoved(at)]);
         }
-        let end = grip + vec2(0.0, 1000.0);
+        let end = grip + way * 1000.0;
         w.frame(&mut show, &mut st, vec![b(end, false)]);
         w.settle(&mut show, &mut st);
         let after = w.find("3D stage ▸ view").unwrap().0;
-        // The classic window's settings have little height under the
-        // transport: there the view is as tall as it can be already.
-        if modern {
-            assert!(
-                after.height() > before.height() + 50.0,
-                "{before:?} to {after:?}"
-            );
+        let grown = if modern {
+            after.height() - before.height()
         } else {
-            assert!(after.height() >= before.height(), "{before:?} to {after:?}");
-        }
-        // The tabs and some of the content stay in the window.
+            after.width() - before.width()
+        };
+        // (The classic page is narrow: the view can't take much from the tab.)
+        let least = if modern { 50.0 } else { 20.0 };
+        assert!(grown > least, "modern {modern}: {before:?} to {after:?}");
+        // As far as it goes, the tabs and some of the content stay in sight.
         let (tabs, seen) = w.find("3D stage ▸ tab ▸ Displays").unwrap();
+        assert!(seen, "modern {modern}: {tabs:?}");
+        let (content, _) = w.find("3D stage ▸ tab content").unwrap();
         assert!(
-            seen && tabs.max.y < SIZE.y - 100.0,
-            "modern {modern}: {tabs:?}"
+            content.height() >= 80.0 && content.width() >= 300.0,
+            "modern {modern}: {content:?}"
         );
     }
 }
@@ -702,4 +748,54 @@ fn a_narrow_classic_settings_pane_keeps_every_tab() {
         w.wheel(&mut show, &mut st, -40.0);
     }
     assert!(seen, "{:?}", w.texts);
+}
+
+#[test]
+fn a_pick_opens_its_tab_once_even_with_nothing_on_it() {
+    // A screen picked in a Preview pane's view, then gone (undone): the page
+    // opens on Screens once and lets another tab be chosen.
+    let mut show = Show::default();
+    let (mut w, mut st) = Win::new(false, SettingsPage::Stage3d, &mut show);
+    st.stage.picked = Some(SurfaceId(999));
+    w.settle(&mut show, &mut st);
+    assert_eq!(st.stage.tab, StageTab::Screens);
+    w.tab(&mut show, &mut st, "Venue");
+    w.settle(&mut show, &mut st);
+    assert_eq!(st.stage.tab, StageTab::Venue, "it stays");
+    // Likewise a projector.
+    st.stage.projectors.picked = Some(crate::stage3d::ProjectorId(998));
+    w.settle(&mut show, &mut st);
+    assert_eq!(st.stage.tab, StageTab::Projectors);
+    w.tab(&mut show, &mut st, "Viewpoints");
+    w.settle(&mut show, &mut st);
+    assert_eq!(st.stage.tab, StageTab::Viewpoints, "it stays");
+}
+
+#[test]
+fn a_screen_and_a_projector_are_added_through_their_tabs() {
+    for modern in [false, true] {
+        let mut show = Show::default();
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        w.tab(&mut show, &mut st, "Screens");
+        w.click_text(&mut show, &mut st, "+ Add a screen");
+        w.click_text(&mut show, &mut st, Preset::Flat.label());
+        assert_eq!(show.stage3d.surfaces.len(), 1, "modern {modern}");
+        assert_eq!(st.stage.tab, StageTab::Screens, "modern {modern}");
+        // Its rows opened by themselves: its name is there to be changed.
+        assert!(
+            w.texts.iter().any(|t| t == "Name"),
+            "modern {modern}: {:?}",
+            w.texts
+        );
+        w.tab(&mut show, &mut st, "Projectors");
+        w.click_text(&mut show, &mut st, "+ Add a projector");
+        w.click_text(&mut show, &mut st, "Aimed at Screen 1");
+        assert_eq!(show.stage3d.projectors.len(), 1, "modern {modern}");
+        assert_eq!(st.stage.tab, StageTab::Projectors, "modern {modern}");
+        assert!(
+            w.texts.iter().any(|t| t == "Projector 1"),
+            "modern {modern}: {:?}",
+            w.texts
+        );
+    }
 }

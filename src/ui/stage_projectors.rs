@@ -269,7 +269,7 @@ fn work_here(a: Ask) -> Option<Here> {
 pub struct ProjectorsUi {
     /// The projector picked (in a view or on the page).
     pub picked: Option<ProjectorId>,
-    pub(super) opened_for: Option<ProjectorId>,
+    opened_for: Option<ProjectorId>,
     worker: Option<Worker>,
     /// Each projector's footprint, with the key it was made for.
     footprints: HashMap<ProjectorId, (u64, Arc<Footprint>)>,
