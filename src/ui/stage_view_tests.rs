@@ -71,6 +71,10 @@ fn a_view_asks_the_governor_and_only_then_for_a_picture() {
     run(&show, &mut st, &mut view);
     assert_eq!(st.stage.requests.len(), 1);
     assert_eq!(st.stage.requests[0].options.quality.scale, 0.5);
+    // Each frame it is drawn it is in sight, whatever the governor says (the
+    // stage's thread keeps what it has for it), and its window is to come
+    // round again though nothing changes.
+    assert_eq!(st.stage.in_sight, vec![id, id]);
 }
 
 #[test]
