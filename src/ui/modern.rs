@@ -1415,5 +1415,26 @@ mod tests {
             assert!(words.iter().any(|w| w == want), "{want} not in {words:?}");
         }
         assert!(!words.iter().any(|w| w.contains("Lock editing")));
+        // In show mode, and while a test runs, the tabs still change the view.
+        for (show_mode, test_locked) in [(true, false), (false, true)] {
+            st.show_mode = show_mode;
+            st.test_locked = test_locked;
+            for v in [View::Operator, View::Patch, View::Editor] {
+                ctx.data_mut(|d| d.remove::<Vec<(View, Rect)>>(egui::Id::new("modern_views")));
+                whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![]);
+                let at = ctx
+                    .data(|d| d.get_temp::<Vec<(View, Rect)>>(egui::Id::new("modern_views")))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|(w, _)| *w == v)
+                    .unwrap()
+                    .1
+                    .center();
+                for ev in [Event::PointerMoved(at), click(at, true), click(at, false)] {
+                    whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![ev]);
+                }
+                assert_eq!(st.modern_view, v, "show {show_mode} test {test_locked}");
+            }
+        }
     }
 }
