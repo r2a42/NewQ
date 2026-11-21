@@ -213,7 +213,8 @@ The README describes the features; this file is about working on the code.
   `started_total() > 0`, serde default, or cues/runs in it) or the engine started a cue here; after that a
   screen with nothing playing is black (AlsoUnused keeps it on unused screens; not adopted always shows
   it). Identify (`identify_text`: name, "Screen N", `card_address_of` the best adapter) replaces the
-  screen's layers, on black. Output windows start hidden on Windows (`OUTPUTS_START_HIDDEN`: winit shows a
+  screen's layers, on black (`app.rs::put_card`: the card goes last, over a display showing the 3D stage
+  too). Output windows start hidden on Windows (`OUTPUTS_START_HIDDEN`: winit shows a
   window before making it full screen, with no background brush, so it was a white box) and are shown by
   `show_drawn_outputs` once `OutputThread::presented_size` is the display's (`output_ready_to_show`, or
   after `FIRST_FRAME_WAIT`); Mac and X11 as before. Set on the Show network page beside

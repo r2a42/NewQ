@@ -2827,12 +2827,7 @@ impl App {
                     }
                     if let Some((card, tex)) = self.play.cards.get(m) {
                         if tex.is_filled() {
-                            // Identify is on black: what plays is hidden for
-                            // its few seconds, then comes back.
-                            if card.big {
-                                list.clear();
-                            }
-                            list.push(card_group(tex.clone(), screen.size));
+                            put_card(&mut list, card_group(tex.clone(), screen.size), card.big);
                         } else {
                             self.uploads_waiting = true;
                         }
@@ -4568,6 +4563,17 @@ fn renew_rgba(
     }
 }
 
+/// A monitor's card over what its displays show (`list`, a display showing
+/// the 3D stage as any other: its group holds the stage's picture), drawn
+/// last so it is on top. Identify (`big`) is on black: what plays is hidden
+/// for its few seconds, then comes back.
+fn put_card(list: &mut Vec<OutputGroup>, card: OutputGroup, big: bool) {
+    if big {
+        list.clear();
+    }
+    list.push(card);
+}
+
 /// The card over the whole of a monitor.
 fn card_group(texture: Arc<LayerTexture>, size: (u32, u32)) -> OutputGroup {
     OutputGroup {
@@ -4725,6 +4731,62 @@ mod tests {
         // be on screen to cover their display; X11 makes a window full
         // screen only once it is mapped).
         assert_eq!(OUTPUTS_START_HIDDEN, cfg!(windows));
+    }
+
+    /// On a display that shows the 3D stage (its only layer the stage's
+    /// picture), a display computer's card and Identify still win: the card
+    /// is drawn over the stage, Identify in place of it; as on any display.
+    #[test]
+    fn cards_and_identify_win_over_a_display_showing_the_stage() {
+        let Some(gpu) = crate::gpu::Gpu::headless() else {
+            assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+            return;
+        };
+        let mut show = Show::default();
+        let a = show.outputs[0].id;
+        show.add_surface(None);
+        show.outputs[0].source = Some(crate::stage3d::StageSource::default());
+        assert!(show.stage_source(a).is_some());
+        let mut stage = crate::stage_live::StageLive::default();
+        let stage_layer = stage.output_layer(&gpu, a, (320, 180));
+        let stage_tex = stage_layer.texture.clone();
+        let size = (320, 180);
+        let shown = || {
+            vec![OutputGroup {
+                layers: vec![stage_layer.clone()],
+                geometry: Geometry {
+                    canvas: size,
+                    warp: gpu::IDENTITY,
+                    pin: gpu::IDENTITY,
+                    mesh: None,
+                    slice: Geometry::WHOLE,
+                },
+            }]
+        };
+        let card_tex = Arc::new(LayerTexture::new_rgba(&gpu, 64, 36));
+        let is = |g: &OutputGroup, t: &Arc<LayerTexture>| Arc::ptr_eq(&g.layers[0].texture, t);
+        // The wait card: over the stage.
+        let mut list = shown();
+        put_card(&mut list, card_group(card_tex.clone(), size), false);
+        assert_eq!(list.len(), 2);
+        assert!(is(&list[0], &stage_tex), "the stage underneath");
+        assert!(is(&list[1], &card_tex), "the card on top");
+        // Identify: on black, the stage hidden.
+        let mut list = shown();
+        put_card(&mut list, card_group(card_tex.clone(), size), true);
+        assert_eq!(list.len(), 1);
+        assert!(is(&list[0], &card_tex));
+        // And a display computer's card is offered for a monitor with a
+        // display, whatever that display shows.
+        assert!(play::card_shows(
+            crate::show::WaitCards::UntilReady,
+            true,
+            false,
+            true
+        ));
+        if let Some(h) = stage.forget_device(&mut crate::ui::stage_view::StageShared::default()) {
+            h.join().unwrap();
+        }
     }
 
     fn keys(names: &[&str]) -> Vec<MonitorKey> {
