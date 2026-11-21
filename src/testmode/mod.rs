@@ -1,5 +1,5 @@
 //! Test Mode: a self-running test of this computer's playback, started from the
-//! Help menu with no command line. `assets` makes the media ready (free
+//! Tools menu with no command line. `assets` makes the media ready (free
 //! downloads, or generated), `plan` builds the three test shows, `session`
 //! runs one while logging and puts the user's show back, `analysis` judges
 //! the numbers, and `gui` is the window. Each level comes in two flavours:

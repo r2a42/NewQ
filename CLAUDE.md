@@ -60,7 +60,7 @@ The README describes the features; this file is about working on the code.
   computers opens no device). Show (D5): `OutputConfig::computer` (`is_on(me)`; another computer's
   display opens no window here, `route_outputs`), `AudioOutputConfig::computers`/`devices_on`
   (`set_plays_on`), unwritten when unused. UI: `src/ui/network.rs` (Settings ▸ Show network, `badge`,
-  the status bar, the Identify overlay), the Displays menu's other computers' monitors
+  the status bar, the Identify overlay), the Displays page's monitor menu with other computers' monitors
   (`remote_display_status`), the audio output's "Plays on"; tests in `ui/network_tests.rs`. Only
   loopback and xvfb have been tried.
   `src/net/media/` is the media manager (stage 2b media; rulings R4, R13-R20). `mod.rs`:
@@ -435,7 +435,7 @@ The README describes the features; this file is about working on the code.
   (`SetListTimeline`, which then `sync_lists`). Layout B, `workspace.rs` (`Host::Workspace`): chosen by
   `Prefs::timeline_layout` (`workspace::chosen`; `TimelineAction::SetLayout` saves it and moves an open
   editor; reached from Settings ▸ Interface (its first section, two rows: the classic window's settings are
-  short while a Timeline pane is open), the Window menu under Timeline (with the follow mode too) and
+  short while a Timeline pane is open), Window ▸ Timeline opens (the follow mode only on the Interface page) and
   the toolbar's `Workspace`); classic `ui::draw` draws it in `dock_area`'s place while `st.timeline.open` and no
   docked Settings (`replaces_panes`); the new interface's `View::Timeline` (in the strip only for B;
   leaving it is `Close`); `Open` goes to it (and `SelectList` into a timeline list does), the tab then
@@ -784,6 +784,18 @@ The README describes the features; this file is about working on the code.
   show in the status bar; debug is each cue's start/playing/out/end (`Engine::log_cue_changes`) and each
   FFmpeg's command line; trace is preloads and FFmpeg exits. The panic hook flushes the log.
 - `src/app.rs`: windows and wiring. `src/ui.rs`: the control UI.
+  Menus: `src/ui/menus.rs` draws the menu bar, the same in both interfaces (File, Edit, Cue with
+  its `Add ▸` submenu, Window, Tools, Settings, Help); the menus' names are `settings::*_MENU` and
+  every item a hint names is a `settings::MenuItem` (`TEST_MODE_ITEM`, `MEDIA_MANAGER_ITEM`,
+  `STATISTICS_ITEM`, `TIMELINE_ITEM`, `TIMELINE_OPENS_ITEM`, `CART_ITEM`, `KEYS_ITEM`; `path()`
+  makes the pointer), so a pointer follows a move. Each item goes through `menus::noted`
+  (cfg(test): "Menu ▸ Item" and its rect in `menu_items`); `menus_tests.rs` clicks every item the
+  0.26 menus had at its new place (`moved()`, both interfaces). The Window menu still lists the
+  classic panes in the new interface too (A5 of `.claude/notes/organise-and-test3d-plan.md`).
+  `src/ui/keys.rs`: `KEYS`, the keyboard table, which must equal README's Keyboard table (a test
+  reads it, and checks every shortcut a menu prints is in it), and its window
+  (`UiState::show_keys`, `Action::ToggleKeys`, Help ▸ Keyboard shortcuts). `Action::OpenLogFolder`
+  (Help). The Displays page's *+ Add* scrolls to the new display (`UiState::reveal_display`).
   Group crossfade: in a "play in order" group a child whose next sibling crossfades in (`crossfade_into_next`) is not faded out by itself, and `advance_groups` starts the next one that long before it ends; a held next cue (`holds`: picture, text, shape, camera) gets the overlap added to its hold (`Engine::started_early` -> `ActiveCue::extra_hold`, which the per-tick hold update adds back), so the group keeps its timing; a video can't, so `cue_duration` subtracts a crossfade into a video, and a next child with a pre-wait doesn't overlap. Shape cues: `show::ShapeCue` (`ShapeKind`), drawn by `shape::render` at the display's size on a thread (`Engine::prepare_shape`, which hands the picture over as `PreparedKind::Text`, like a text cue). Editing several cues: `inspector` wraps `inspector_one` and `spread_edit` makes in the other picked cues what changed (`bulk_edit::spread` compares the cue as JSON before and after, skipping the fields that are a cue's own, `target` and `device` included). A list missing from the file is empty, so a list that appears or empties is a length change and isn't spread; an item with a `kind` (an effect) is addressed as `<index>#<kind>` and changes only the same kind; `start`/`end` reach only the same cue type (`SAME_KIND_ONLY`); `inspector` spreads only on a frame with user input. `Engine::tick` copies the show's layer, geometry, colour, effects, fit, output and hold time into the cues playing (the block under `if let Some(m) = media`), and a shape or typed text is drawn again when `drawing_key` changes (`ImageState::redraw`); what is fixed at start (file, in/out, loop, speed, audio routing, fade-in) is not.
   Selection state: `multi` only counts while `selected == multi_for` (`sync_selection` at the start of `draw` and `apply`, and `forget_multi` in `load_into`, `restore` and the test stash), so an old selection never returns when ids repeat in another show. The clipboard remembers the show it came from (`show_epoch`) and whether it was cut: `paste_cues` remaps a fade/stop/control cue's target to the copy, clears targets from another show, and gives a cut its old ids back. The right-click menu's Fire/Fade out/Stop name the clicked cue (`FireCue` etc.), not `selected`. Copying also writes a short text to the system clipboard, since egui-winit sends Paste only when it holds some text. In a group, `crossfade_into_next` applies only to pictures on the same display and layer, and the automatic fade-out waits for the crossfade only while it is coming or running (`running` set in `tick`).
   Layers: `MediaCue::layer` (higher on top; `Engine::layers` sorts by it); with `Show::own_layers` (new shows; a file without it, from 0.18.0 and before, has it off and replaces everything on the display as it did) `apply_entry` replaces or fades only the cues on the entering cue's own layer and display (`layer_no`, `ActiveCue::own_layer`), a dip's matte replaces all. The children a "start all together" group fires share the display (`together`): the group records them in `Engine::together_for`, read at each start attempt (a start can wait for its file and come back) and removed when the start ends, so a child fired on its own later replaces as usual. Copy and paste: `UiState::clipboard`, `Show::copy_cues` and `Show::paste_cues` (new ids, display/audio output mapped to the pasting show's); Ctrl+C/X/V are `Event::Copy/Cut/Paste`, handled in `keyboard` after the typing check.
@@ -853,7 +865,7 @@ The README describes the features; this file is about working on the code.
 - `timecode::Generator` makes MTC messages; `output::MtcRunner` is its paced thread
   (`ActiveKind::Timecode`, dropped to stop). Send cues' `Program` target runs only
   when `Prefs::allow_scripts` (per computer; `output::set_scripts_allowed`).
-- `src/testmode/`: Test Mode (Help menu), no command line. `assets.rs` is the pinned
+- `src/testmode/`: Test Mode (Tools menu), no command line. `assets.rs` is the pinned
   catalog of free media (hashes, `.part` resume downloads with `ureq`, checks by
   decoding, generated fallbacks named `generated_*`; tested against a loopback HTTP
   server, and an ignored live test `real_downloads_match_the_catalog`), `plan.rs` builds

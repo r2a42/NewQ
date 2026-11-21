@@ -99,7 +99,7 @@ stays on the computer until you send it yourself.
   pause, the cart, hotkeys, OSC, MIDI and the web remote work as always. Leaving
   show mode asks first. The mode is remembered for this computer, so a restart
   in the middle of a show comes back in show mode; it isn't saved in the show.
-- **Control cues:** *Cue ▸ Add Control cue* makes a cue that acts on another
+- **Control cues:** *Cue ▸ Add ▸ Control* makes a cue that acts on another
   cue (or the list) and takes no time: **Start** (fire it as if by hand),
   **Pause** and **Resume** (hold just that cue, picture and sound, while the
   rest play on; a group's children too), **Load** (get it ready ahead of time so it
@@ -134,7 +134,7 @@ stays on the computer until you send it yourself.
   for 4K and for many layers; each picture is still copied back to be composited,
   so it is not the zero-copy decoding of a native player. A file or card it can't
   do falls back to the processor. It is off by default and only the machine you
-  will run on can say whether it helps: *Help ▸ Test Mode ▸ Compare hardware decoding*
+  will run on can say whether it helps: *Tools ▸ Test Mode ▸ Compare hardware decoding*
   measures it on that machine.
 - **Cue lists.** *Cue ▸ New cue list* (or the **+** by the tabs) adds a list of
   cues with a playhead of its own; the lists are tabs above the cue list. GO, the
@@ -213,7 +213,7 @@ stays on the computer until you send it yourself.
   the time it has (above about 90% it breaks up; measured over a few buffers, so a moment
   the system held the sound up doesn't count as NewQ's mixing). Adding or removing a *sound*
   effect applies the next time the cue plays; everything else is live.
-- **Live audio:** *Cue ▸ Add Live audio cue* plays an audio input (a Dante Virtual
+- **Live audio:** *Cue ▸ Add ▸ Live audio* plays an audio input (a Dante Virtual
   Soundcard or Dante interface, a mixer's USB output, a line input) on one of the
   audio outputs, from the input channel you choose (and the next). It has the
   volume, fades, output and channels of any audio cue and runs until stopped
@@ -222,7 +222,7 @@ stays on the computer until you send it yourself.
   so the delay doesn't grow; on one Dante device they stay together. Tested without
   hardware (the channel and sample-rate conversion and the cue's lifecycle), not
   against a real input.
-- **Slide shows:** *Cue ▸ Add Slide show…* takes any number of images (chosen
+- **Slide shows:** *Cue ▸ Add ▸ Slide show…* takes any number of images (chosen
   together, put in name order) and makes one cue that crossfades through them.
   Set one *Fade* (how long each slide takes to fade in over the last) and one
   *Duration* (how long each is shown in full before the next starts) for the
@@ -242,8 +242,8 @@ stays on the computer until you send it yourself.
   and the durations aren't used. While such a slide show is on, GO and the
   remote step through its slides instead of firing the next cue; Esc, as ever,
   fades everything out.
-- **Slides from a PowerPoint (or Keynote, OpenDocument, PDF) file:** *Cue ▸ Add
-  Slide show from PowerPoint…* (or *From PowerPoint…* in a slide show's
+- **Slides from a PowerPoint (or Keynote, OpenDocument, PDF) file:** *Cue ▸ Add ▸
+  Slides from a presentation…* (or *From PowerPoint…* in a slide show's
   inspector) turns the file's slides into pictures. **A PDF needs nothing
   else:** NewQ draws its pages itself, so on a computer with no office program
   save the presentation as a PDF (every presentation program can) and choose
@@ -269,7 +269,7 @@ stays on the computer until you send it yourself.
   repository has the secrets `WINDOWS_CERT_PFX` (the certificate as base64) and
   `WINDOWS_CERT_PASSWORD`; a new certificate still shows the warning until
   it builds reputation, unless it is an EV certificate.
-- **New interface (optional):** *Window ▸ New interface* (or *Settings ▸ Interface ▸ Classic
+- **New interface (optional):** *Window ▸ Interface ▸ New* (or *Settings ▸ Interface ▸ Classic
   or new*) swaps the panes for three
   views under one strip (the strip has GO and what it will fire, Stop all,
   Pause and *Show mode*; *Classic interface* switches back).
@@ -302,7 +302,7 @@ stays on the computer until you send it yourself.
   Interface ▸ Previews ▸ Frame rate on the display* writes the same figure in the top left
   corner of each display's picture, only while something is playing and never on an idle
   display; it is off by default and kept per computer, so don't leave it on in a show.
-- **Statistics window:** *Window ▸ Statistics* opens the live figures Test Mode shows while
+- **Statistics window:** *Tools ▸ Statistics* opens the live figures Test Mode shows while
   it runs, for an ordinary show: memory, processor, FFmpeg's processes and processor, the slowest
   frame, late frames, audio load, sound dropouts, cues and layers playing, and the frame rate of each display.
   It measures every 2 seconds while it is open and not at all when it is closed, and can also
@@ -366,7 +366,15 @@ stays on the computer until you send it yourself.
   when a display's monitor is missing, an output has a problem, files can't be
   found, a listener failed to start or the computer is on battery, a green *on*
   for a listener that is working, and counts of displays and audio outputs. The
-  *Settings* menu lists the same pages and jumps straight to one.
+  *Settings* menu lists the same pages, in the same groups with the same two lines
+  under them, and jumps straight to one.
+- **The menus.** *File* (new, open, save, export the cue sheet), *Edit* (undo, copy and
+  paste, find, renumber, show mode), *Cue* (*Add ▸* every kind of cue, grouped by what it
+  plays; new lists and timelines; arming, grouping and moving the selected cue), *Window*
+  (classic or new interface, the panes, new preview, where a timeline opens, reset),
+  *Tools* (*Media manager…*, *Test Mode…*, *Statistics*), *Settings* (every page) and
+  *Help* (*About NewQ…*, *Keyboard shortcuts…*, which is the table under Keyboard below,
+  and *Open the log folder*). Both interfaces have the same menus.
 - **Cue list with a GO button.** Space (or 0) fires the cue at the playhead and the
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
@@ -420,7 +428,8 @@ stays on the computer until you send it yourself.
 - **Displays and sub displays:** cues are sent to a **display** (*Display 1*,
   a name you choose such as *Stage TV*) or to a **sub display**, an area of
   one. Each display is assigned by hand to a monitor on the *Displays* page of the settings,
-  so moving a show to another venue means reassigning each display once.
+  so moving a show to another venue means reassigning each display once. *+ Add ▸
+  Display* at the top of that page makes one and scrolls to it.
   **Nothing is ever reassigned automatically.** If the monitor a display is
   assigned to is unplugged, what was sent to it **keeps playing, to no
   destination**: nothing is drawn on any other monitor, the status bar, the
@@ -579,7 +588,7 @@ stays on the computer until you send it yourself.
   have checked this; the real test is a surface and a test pattern.
 - **Edge blending (several projectors, one picture):** for a picture wider
   than one projector, overlap two or more projectors and let each show a part
-  of it. *Displays → Add blended projectors* sets up a pair: a *Wide picture*
+  of it. *Settings ▸ Displays ▸ + Add ▸ Blended projectors* sets up a pair: a *Wide picture*
   display (send your cues to this one) and a *Left* and *Right projector*, each
   showing part of it, overlapping by 15%, with their overlapping edges faded.
   Give each projector its monitor as usual. To build your own, choose *Shows →
@@ -798,7 +807,7 @@ stays on the computer until you send it yourself.
   group where the first one is, or *Move N cues into group* to put them in a group
   that exists. A group among them is left out, and one that was inside another
   group comes out of it.
-- **Shapes:** *Cue ▸ Add Shape cue* draws a solid **square, rectangle, circle,
+- **Shapes:** *Cue ▸ Add ▸ Shape* draws a solid **square, rectangle, circle,
   oval or star** in the middle of a display, in a colour you pick (the colour's
   opacity makes it see-through). A square, circle or star has one size and a
   rectangle or oval a width and a height, all as a share of the display's
@@ -824,7 +833,7 @@ stays on the computer until you send it yourself.
   or Stop cue can target it. There's one built-in font (a light weight, so
   *Shadow* and *Bold* help over video), and editing a text cue takes effect
   the next time it's fired.
-- **Clock and speaker timer cues:** *Cue ▸ Add Clock cue* and *Add Timer cue*
+- **Clock and speaker timer cues:** *Cue ▸ Add ▸ Clock* and *Timer*
   make a text cue that shows the time instead of typed words (or pick *Shows*
   in any text cue). A clock shows this computer's time, 24-hour or AM/PM, with
   or without seconds. A timer counts down from a length you set (or up, with an
@@ -939,7 +948,7 @@ stays on the computer until you send it yourself.
   giving it to another cue moves it. A *MIDI note* does the same from a
   note-on (with MIDI control on); a note with no cue bound to it still fires
   the cue whose number is the note, as before. Tick *On cart* for the cues you
-  want as buttons, then *Cue ▸ Show cart* (or *Window ▸ Cart*) for a grid of them: click to fire,
+  want as buttons, then *Window ▸ Cart* for a grid of them: click to fire,
   right-click to stop or fade out. Buttons show the hotkey, fill as the cue
   plays, and have a green dot when preloaded. Hotkeys work in the output windows
   too, and don't fire while you're typing in a text box. Copies of a cue don't inherit its hotkey or note.
@@ -1102,7 +1111,7 @@ stays on the computer until you send it yourself.
   the background and kept, so even long files only wait the first time. A file
   with no sound (or an image) shows no waveform. The In / Out boxes still take
   typed times, and both stay in step.
-- **Lining sound up with picture:** *Settings ▸ Sync* (or *File ▸ Sync…*) sets how long to hold
+- **Lining sound up with picture:** *Settings ▸ Sync* sets how long to hold
   back the sound and the picture, in milliseconds, for the whole show, and
   again for each audio output (a Bluetooth speaker, a long cable run) and each
   video output (a projector that processes its picture). Whichever arrives
@@ -1124,7 +1133,7 @@ stays on the computer until you send it yourself.
   left empty, since on a timeline it is the start); pauses and loops say what they
   do in the *Target* column, and the timeline's markers follow its last clip as
   rows of their own ("Marker", the name, its time).
-- **Media manager:** *File ▸ Media manager…* lists every file the show uses and
+- **Media manager:** *Tools ▸ Media manager…* lists every file the show uses and
   which can't be found, and it opens by itself when a show is opened with
   files missing. *Search a folder for missing files…* looks in a folder (and
   everything inside it) for files with the same names, preferring the one in
@@ -1360,7 +1369,7 @@ Open it on a computer with projectors or screens and that is all you do there:
 - It asks nothing. There is no control window and no start-up picture: every
   monitor goes full screen at once with a quiet grey card saying the
   computer's name and which of its screens it is (*Assistant · Screen 1*,
-  *Screen 2*…, numbered as the primary's Displays menu and Test Mode number that
+  *Screen 2*…, numbered as the primary's Displays page and Test Mode number that
   computer's monitors, even when there is only one), its address and *Waiting
   for a NewQ primary on this network*. A monitor plugged in later gets a card
   too. The card is for start-up, so you can see every projector and screen is
@@ -1696,7 +1705,7 @@ never copy media by hand, and nothing waits for it.
 
 ### Every test on every computer
 
-On a primary with computers in step, every test of *Help ▸ Test Mode* (the *Cue
+On a primary with computers in step, every test of *Tools ▸ Test Mode* (the *Cue
 list* and *Timeline* parts and *More ▸ Check every feature*) runs across the
 show network: the test show and its media go to every computer first (the window
 shows each one's progress), then the primary plays it and every computer plays
@@ -1737,7 +1746,7 @@ returning).
 
 ### The network test
 
-Before a show, run the network test from the primary: *Help ▸ Test Mode*, tick
+Before a show, run the network test from the primary: *Tools ▸ Test Mode*, tick
 *Network* and press *Start*. It plays one lap at *Short* (about 2 minutes), three
 at *Medium* and ten at *Long* (about 20 minutes; this was the *Network soak*).
 The tick is offered on a primary with at least one computer *In step*; elsewhere
@@ -1866,7 +1875,7 @@ drawn as a crossfade (an X, "crossfades in 2 s").
 
 **Pane or workspace.** The tracks can open in a **workspace** of their own
 instead: *Settings ▸ Interface ▸ Timeline editor*, the *Workspace* button at the end
-of the tracks' toolbar, or *as a pane / as a workspace* under *Window ▸ Timeline*
+of the tracks' toolbar, or *Window ▸ Timeline opens ▸ as a pane / as a workspace*
 (a choice of this computer, in both interfaces). The workspace takes the place of
 the cue list and the panes (in the new interface it is the *Timeline* view, next to
 Editor, Operator and Patch) with the tracks across the whole width, the picture of
@@ -1954,8 +1963,8 @@ are open in the classic interface they take its place.
   a tenth in from the left. You can still scroll and zoom while it runs; nothing is
   moved while you hold a drag (a clip, an edge, a key, a marker or the scroll bar),
   and it catches up when you let go. Stopped, paused or parked, the view stays where
-  you put it. Settings ▸ Interface ▸ *Timeline editor* (at the top of the page) or
-  *Window ▸ Timeline* can instead keep the playhead in the middle while it runs, the tracks creeping under it (near the start and the end
+  you put it. Settings ▸ Interface ▸ *Timeline editor* (at the top of the page)
+  can instead keep the playhead in the middle while it runs, the tracks creeping under it (near the start and the end
   the view stops and the playhead moves off the middle; a scroll of yours while it
   runs is undone, a zoom works around the playhead). The choice is kept for this
   computer. A thin bar at the right shows there are more tracks
@@ -2176,7 +2185,7 @@ displays from the *Displays* page of the settings.
 
 ## Test mode: try this computer before the show
 
-*Help ▸ Test Mode…* plays a show of its own to find out how this computer copes, then puts
+*Tools ▸ Test Mode…* plays a show of its own to find out how this computer copes, then puts
 your show back exactly as it was. Nothing to type. The window asks, top to bottom:
 
 - **Length**: *Short* (a few minutes), *Medium* (about an hour) or *Long* (about 8 hours,
@@ -2489,6 +2498,8 @@ night is about 3,000 rows.
 
 ## Keyboard
 
+*Help ▸ Keyboard shortcuts…* shows this table in a window.
+
 | Key                   | Action                                          |
 |-----------------------|-------------------------------------------------|
 | Space                 | GO on a cue list; on a timeline you are working on (a timeline list's tab, or the tracks editor you last clicked in or are pointing at): play / pause it — running, it pauses; paused, parked, at a pause cue or in a loop it does what GO does there; stopped, it runs |
@@ -2515,6 +2526,9 @@ night is about 3,000 rows.
 | Ctrl+C / Ctrl+X / Ctrl+V (tracks editor) | Copy / cut the picked clips / paste at the playhead on their tracks |
 | Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
+| Ctrl+F                | Find cues                                       |
+| Ctrl+,                | Open / close the settings                       |
+| Ctrl+Shift+L          | Show mode / edit mode (leaving show mode asks first) |
 | F (pointing at a 3D view) | See all of the 3D stage (double-click does too) |
 | Esc (in a 3D view looking through a projector) | Leave the look through its lens |
 

@@ -121,7 +121,7 @@ pub fn window(ctx: &egui::Context, engine: &Engine, st: &mut UiState) {
     }
 }
 
-/// The statistics window (Window ▸ Statistics): the figures Test Mode shows
+/// The statistics window (Tools ▸ Statistics): the figures Test Mode shows
 /// while it runs, for an ordinary show. The app samples while it is open.
 pub fn stats_window(ctx: &egui::Context, st: &mut UiState) {
     if !st.stats_open {
