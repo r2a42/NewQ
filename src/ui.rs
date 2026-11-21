@@ -2773,6 +2773,11 @@ fn cart(ui: &mut Ui, show: &Show, engine: &Engine, actions: &mut Vec<Action>) {
         ui.spacing_mut().item_spacing = Vec2::splat(8.0);
         for c in on_cart {
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(132.0, 66.0), Sense::click());
+            #[cfg(test)]
+            ui.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(CueId, egui::Rect)>>(egui::Id::new("cart_buttons"))
+                    .push((c.id, rect))
+            });
             let idx = show.cue_index(c.id).unwrap_or(0);
             let live = show.is_armed(idx);
             let status = engine.status(c.id);

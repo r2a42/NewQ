@@ -362,6 +362,8 @@ fn operator(
             .default_size(CART_HEIGHT)
             .min_size(90.0)
             .show(ui, |ui| {
+                #[cfg(test)]
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("operator_cart"), ui.max_rect()));
                 ui.add_space(4.0);
                 ui.label(RichText::new("CART").small().weak()).on_hover_text(format!(
                     "Click a button to fire its cue, right-click to stop it. {} puts the cart away.",
@@ -412,8 +414,10 @@ fn operator(
         )
         .fill(GO_GREEN)
         .corner_radius(CornerRadius::same(14));
-        if ui
-            .add_sized([ui.available_width(), 130.0], go)
+        let go = ui.add_sized([ui.available_width(), 130.0], go);
+        #[cfg(test)]
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("operator_go"), go.rect));
+        if go
             .on_hover_text(if timeline::list_tab::active(show, engine).is_some() {
                 "GO (0): run the timeline, or carry it on from a pause; Space plays and pauses it"
             } else {
@@ -434,7 +438,9 @@ fn operator(
             if !later.is_empty() {
                 ui.label(RichText::new("THEN").small().weak());
                 for c in later {
-                    ui.label(RichText::new(cue_label(c)).size(18.0));
+                    let _r = ui.label(RichText::new(cue_label(c)).size(18.0));
+                    #[cfg(test)]
+                    ui.data_mut(|d| d.insert_temp(egui::Id::new("operator_then_last"), _r.rect));
                 }
             }
         }
@@ -1241,5 +1247,173 @@ mod tests {
         assert!(st.prefs.new_layout);
         apply(Action::SetNewLayout(false), &mut show, &mut e, &mut st);
         assert!(!st.prefs.new_layout);
+    }
+
+    /// A frame of the whole window at 1280×760 (menu bar, strip, status bar).
+    fn whole(
+        ctx: &egui::Context,
+        t: &mut f64,
+        show: &mut Show,
+        e: &mut Engine,
+        st: &mut UiState,
+        events: Vec<Event>,
+    ) -> egui::FullOutput {
+        *t += 0.05;
+        ctx.data_mut(|d| d.remove::<Vec<(CueId, Rect)>>(egui::Id::new("cart_buttons")));
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 760.0))),
+            time: Some(*t),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| super::super::draw(ui, show, e, st));
+        out.textures_delta.clear();
+        out
+    }
+
+    #[test]
+    fn the_cart_fires_and_stops_cues_from_the_operator_view_and_fits_at_1280x760() {
+        // Twelve buttons (two rows) and a full THEN list under the GO.
+        let mut show = Show::default();
+        for n in 0..20 {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.name = format!("Effect {n}");
+            c.cart = n >= 8;
+            show.cues.push(c);
+        }
+        let mut e = Engine::for_tests();
+        e.playhead = Some(show.cues[0].id);
+        let mut st = UiState::default();
+        st.prefs.new_layout = true;
+        st.modern_view = View::Operator;
+        // Window ▸ Cart: the same Cart the classic interface docks.
+        apply(Action::TogglePane(Pane::Cart), &mut show, &mut e, &mut st);
+        assert!(cart_in_operator(&st));
+        let ctx = egui::Context::default();
+        let mut t = 1.0;
+        for _ in 0..3 {
+            whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![]);
+        }
+        let get = |name: &str| {
+            ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(name)))
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let buttons = ctx
+            .data(|d| d.get_temp::<Vec<(CueId, Rect)>>(egui::Id::new("cart_buttons")))
+            .unwrap_or_default();
+        assert_eq!(buttons.len(), 12);
+        // Everything in sight: the GO and the whole THEN list above the cart,
+        // every button inside the cart and the window.
+        let (go, then, cart) = (
+            get("operator_go"),
+            get("operator_then_last"),
+            get("operator_cart"),
+        );
+        assert!(
+            go.max.y < cart.min.y && then.max.y <= cart.min.y,
+            "{go:?} {then:?} {cart:?}"
+        );
+        assert!(go.height() >= 129.0, "{go:?}");
+        for (id, b) in &buttons {
+            assert!(
+                cart.contains_rect(*b) && b.max.y < 760.0 && b.max.x < 1280.0,
+                "{id:?} at {b:?}, the cart {cart:?}"
+            );
+        }
+        let press = |at: Pos2, button, pressed| Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // A click fires the cue.
+        let (cue, at) = (buttons[3].0, buttons[3].1.center());
+        assert!(!matches!(e.status(cue), CueStatus::Playing { .. }));
+        for ev in [
+            Event::PointerMoved(at),
+            press(at, PointerButton::Primary, true),
+            press(at, PointerButton::Primary, false),
+        ] {
+            whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![ev]);
+        }
+        assert!(matches!(e.status(cue), CueStatus::Playing { .. }));
+        // A right click opens its menu, whose Stop stops it (RUNNING has a
+        // Stop of its own: the menu's is the one by the pointer).
+        whole(
+            &ctx,
+            &mut t,
+            &mut show,
+            &mut e,
+            &mut st,
+            vec![press(at, PointerButton::Secondary, true)],
+        );
+        whole(
+            &ctx,
+            &mut t,
+            &mut show,
+            &mut e,
+            &mut st,
+            vec![press(at, PointerButton::Secondary, false)],
+        );
+        let out = whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![]);
+        let stop = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::epaint::Shape::Text(s) if s.galley.text() == "Stop" => {
+                    Some(s.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)))
+            .expect("the cart's menu");
+        assert!(stop.distance(at) < 60.0, "{stop:?} from {at:?}");
+        for ev in [
+            Event::PointerMoved(stop),
+            press(stop, PointerButton::Primary, true),
+            press(stop, PointerButton::Primary, false),
+        ] {
+            whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![ev]);
+        }
+        assert!(!matches!(e.status(cue), CueStatus::Playing { .. }));
+        // Window ▸ Cart again puts it away; popped out, the view has none.
+        apply(Action::TogglePane(Pane::Cart), &mut show, &mut e, &mut st);
+        whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![]);
+        let none = ctx
+            .data(|d| d.get_temp::<Vec<(CueId, Rect)>>(egui::Id::new("cart_buttons")))
+            .unwrap_or_default();
+        assert!(none.is_empty());
+        apply(Action::PopOut(Pane::Cart), &mut show, &mut e, &mut st);
+        assert!(st.layout.is_popped_out(Pane::Cart) && !cart_in_operator(&st));
+    }
+
+    #[test]
+    fn the_strip_says_show_mode_and_keeps_the_way_back_to_the_classic_interface() {
+        let mut show = Show::default();
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        st.prefs.new_layout = true;
+        let ctx = egui::Context::default();
+        let mut t = 1.0;
+        whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![]);
+        let out = whole(&ctx, &mut t, &mut show, &mut e, &mut st, vec![]);
+        let words: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::epaint::Shape::Text(s) => Some(s.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "Show mode",
+            "Classic interface",
+            "Editor",
+            "Operator",
+            "Patch",
+        ] {
+            assert!(words.iter().any(|w| w == want), "{want} not in {words:?}");
+        }
+        assert!(!words.iter().any(|w| w.contains("Lock editing")));
     }
 }

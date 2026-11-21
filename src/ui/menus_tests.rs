@@ -380,6 +380,20 @@ fn moved() -> Vec<(&'static str, Option<&'static str>, Wanted)> {
     ]
 }
 
+/// Where an item of the classic Window menu is in the new interface's: the
+/// panes have no dock to go in there, so their ticks, Pop out and Reset
+/// layout are the classic interface's alone (the Editor view has the cue
+/// list, inspector and what is playing), and a new preview is a window.
+fn in_new_interface(path: &'static str) -> Option<&'static str> {
+    match path {
+        "Window ▸ Inspector" | "Window ▸ Cue list ▸ Pop out" | "Window ▸ Reset layout" => {
+            None
+        }
+        "Window ▸ New preview" => Some("Window ▸ New preview window"),
+        p => Some(p),
+    }
+}
+
 #[test]
 fn every_old_menu_item_is_still_reached_with_the_mouse() {
     for modern in [false, true] {
@@ -387,10 +401,15 @@ fn every_old_menu_item_is_still_reached_with_the_mouse() {
         for (old, new, wanted) in moved() {
             let Some(new) = new else { continue };
             // The interface switch offers the other one.
-            let new = if modern && new == "Window ▸ Interface ▸ New" {
+            if modern && new == "Window ▸ Interface ▸ New" {
                 continue;
+            }
+            let Some(new) = (if modern {
+                in_new_interface(new)
             } else {
-                new
+                Some(new)
+            }) else {
+                continue;
             };
             let got = bar.reach(new);
             assert!(
@@ -486,7 +505,7 @@ fn the_menu_bar_is_the_same_seven_menus_in_both_interfaces() {
         for (top, there) in [
             ("File", "Quit"),
             ("Cue", "Add"),
-            ("Window", "Reset layout"),
+            ("Window", if modern { "Patch" } else { "Reset layout" }),
             ("Help", "About NewQ…"),
         ] {
             bar.close_all();
@@ -512,6 +531,56 @@ fn the_menu_bar_is_the_same_seven_menus_in_both_interfaces() {
                     "modern {modern}: {gone} still in {top}"
                 );
             }
+        }
+        // The Window menu has what the interface in use can show: the panes,
+        // or the views.
+        bar.close_all();
+        let r = bar.find("Window");
+        bar.click(r);
+        let words = texts(&bar.run(vec![]));
+        let (here, not_here): (&[&str], &[&str]) = if modern {
+            (
+                &[
+                    "Editor",
+                    "Operator",
+                    "Patch",
+                    "Timeline",
+                    "Cart",
+                    "New preview window",
+                ],
+                &[
+                    "Cue list",
+                    "Inspector",
+                    "Active",
+                    "Preview",
+                    "Reset layout",
+                    "Pop out",
+                ],
+            )
+        } else {
+            (
+                &[
+                    "Cue list",
+                    "Inspector",
+                    "Cart",
+                    "Preview",
+                    "Timeline",
+                    "Reset layout",
+                ],
+                &["Editor", "Operator", "Patch", "New preview window"],
+            )
+        };
+        for w in here {
+            assert!(
+                words.iter().any(|t| t == w),
+                "modern {modern}: no {w} in {words:?}"
+            );
+        }
+        for w in not_here {
+            assert!(
+                !words.iter().any(|t| t == w),
+                "modern {modern}: {w} in {words:?}"
+            );
         }
         // The interface switch: the one in use is chosen.
         let other = if modern { "Classic" } else { "New" };
@@ -748,4 +817,208 @@ fn a_display_added_on_its_page_is_brought_into_sight() {
         );
         assert!(st.reveal_display.get().is_none());
     }
+}
+
+/// The whole window at 1280×760 driven with the mouse, for what a menu item
+/// changes in it.
+struct Win {
+    ctx: egui::Context,
+    t: f64,
+    show: Show,
+    e: Engine,
+    st: UiState,
+}
+
+impl Win {
+    /// The new interface on a show with two cues on the cart; `set` puts it
+    /// in the state to start from.
+    fn new(set: fn(&mut Win)) -> Win {
+        let mut show = Show::default();
+        for (n, on_cart) in [("Thunder", true), ("Doorbell", true), ("Wait", false)] {
+            let mut c = show.make_cue(CueType::Wait, None, show.cues.len());
+            c.name = n.into();
+            c.cart = on_cart;
+            show.cues.push(c);
+        }
+        let mut st = UiState::default();
+        st.prefs.new_layout = true;
+        let mut w = Win {
+            ctx: egui::Context::default(),
+            t: 1.0,
+            show,
+            e: Engine::for_tests(),
+            st,
+        };
+        set(&mut w);
+        for _ in 0..3 {
+            w.frame(vec![Event::PointerGone]);
+        }
+        w
+    }
+
+    fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
+        self.t += 0.05;
+        self.ctx
+            .data_mut(|d| d.remove::<Vec<(String, Rect)>>(egui::Id::new("menu_items")));
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            time: Some(self.t),
+            events,
+            ..Default::default()
+        };
+        let (show, e, st) = (&mut self.show, &mut self.e, &mut self.st);
+        let mut out = self
+            .ctx
+            .run_ui(input, |ui| super::super::draw(ui, show, e, st));
+        out.textures_delta.clear();
+        out
+    }
+
+    fn items(&mut self) -> Vec<(String, Rect)> {
+        self.frame(vec![]);
+        self.ctx
+            .data(|d| d.get_temp::<Vec<(String, Rect)>>(egui::Id::new("menu_items")))
+            .unwrap_or_default()
+    }
+
+    fn at(&mut self, path: &str) -> Rect {
+        let items = self.items();
+        items
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("no {path} among {items:?}"))
+    }
+
+    fn click(&mut self, at: Rect) {
+        let p = at.center();
+        let b = |pressed| Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        self.frame(vec![Event::PointerMoved(p)]);
+        self.frame(vec![b(true)]);
+        self.frame(vec![b(false)]);
+        self.frame(vec![]);
+    }
+
+    /// The Window menu opened: every item in it, its submenu's too.
+    fn window_items(&mut self) -> Vec<String> {
+        let r = self.at("Window");
+        self.click(r);
+        let r = self.at("Window ▸ Timeline opens");
+        self.frame(vec![Event::PointerMoved(r.center())]);
+        let items = self.items();
+        self.frame(vec![Event::PointerGone]);
+        let mut paths: Vec<String> = items
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| p.starts_with("Window ▸ "))
+            .collect();
+        paths.dedup();
+        paths
+    }
+
+    /// What the main window shows with the pointer away, and the windows of
+    /// their own it has.
+    fn drawn(&mut self) -> (Vec<String>, Vec<Pane>) {
+        self.frame(vec![Event::PointerGone]);
+        let words = texts(&self.frame(vec![]));
+        (
+            words,
+            self.st.layout.popouts.iter().map(|p| p.pane).collect(),
+        )
+    }
+
+    /// Clicks `path` in the Window menu (through its submenu).
+    fn choose(&mut self, path: &str) {
+        let r = self.at("Window");
+        self.click(r);
+        if path.starts_with("Window ▸ Timeline opens ▸ ") {
+            let r = self.at("Window ▸ Timeline opens");
+            self.frame(vec![Event::PointerMoved(r.center())]);
+            self.frame(vec![]);
+        }
+        let r = self.at(path);
+        self.click(r);
+    }
+}
+
+/// In the new interface the Window menu has no item that does nothing:
+/// from each of a few starting points, every item but the ones already
+/// chosen (the interface in use, the view showing) changes the window or
+/// opens or closes a window of its own.
+#[test]
+fn every_window_item_in_the_new_interface_changes_what_is_drawn() {
+    type Set = fn(&mut Win);
+    let starts: [(&str, Set); 4] = [
+        ("as it starts", |_| {}),
+        ("in Operator with the cart and a preview window", |w| {
+            w.st.modern_view = modern::View::Operator;
+            w.st.layout.open(Pane::Cart);
+            w.st.layout.new_preview_window();
+        }),
+        ("with the cart in a window and the timeline open", |w| {
+            w.st.layout.open(Pane::Cart);
+            w.st.layout.pop_out(Pane::Cart);
+            let (show, e, st) = (&mut w.show, &mut w.e, &mut w.st);
+            apply(
+                Action::Timeline(timeline::TimelineAction::Open(None)),
+                show,
+                e,
+                st,
+            );
+        }),
+        ("with the workspace chosen, in Patch", |w| {
+            w.st.prefs.timeline_layout = timeline::TimelineLayout::Workspace;
+            w.st.modern_view = modern::View::Patch;
+        }),
+    ];
+    let mut tried = std::collections::BTreeSet::new();
+    for (start, set) in starts {
+        let paths = Win::new(set).window_items();
+        for path in paths {
+            let mut w = Win::new(set);
+            // The ones that show what is chosen, and the submenu's button.
+            let layout = w.st.prefs.timeline_layout;
+            let chosen = path == "Window ▸ Interface ▸ New"
+                || path == "Window ▸ Timeline opens"
+                || path == format!("Window ▸ {}", w.st.modern_view.label())
+                || (path.ends_with("as a panel under the cue list")
+                    && layout == timeline::TimelineLayout::Pane)
+                || (path.ends_with("as a workspace")
+                    && layout == timeline::TimelineLayout::Workspace);
+            if chosen {
+                continue;
+            }
+            let before = w.drawn();
+            assert_eq!(before, w.drawn(), "{start}: not still before {path}");
+            w.choose(&path);
+            let after = w.drawn();
+            assert!(before != after, "{start}: {path} changed nothing");
+            tried.insert(path);
+        }
+    }
+    for want in [
+        "Window ▸ Interface ▸ Classic",
+        "Window ▸ Editor",
+        "Window ▸ Operator",
+        "Window ▸ Patch",
+        "Window ▸ Timeline",
+        "Window ▸ Cart",
+        "Window ▸ Cart ▸ Pop out",
+        "Window ▸ Cart ▸ Into the Operator view",
+        "Window ▸ New preview window",
+        "Window ▸ Timeline opens ▸ as a workspace",
+        "Window ▸ Timeline opens ▸ as a panel under the cue list",
+    ] {
+        assert!(tried.contains(want), "{want} not tried: {tried:?}");
+    }
+    // A preview in a window of its own is listed, and unticked it closes.
+    assert!(
+        tried.iter().any(|p| p.starts_with("Window ▸ Preview")),
+        "{tried:?}"
+    );
 }
