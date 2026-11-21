@@ -892,6 +892,8 @@ enum Action {
     ToggleSettings,
     /// Switch between the panes and the new interface (kept for this computer).
     SetNewLayout(bool),
+    /// The new interface's view (the strip's tabs, the Window menu).
+    ShowView(modern::View),
     ToggleAbout,
     /// Open or close the keyboard shortcuts window.
     ToggleKeys,
@@ -11924,6 +11926,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 log::warn!("could not save the settings of this computer: {e}");
             }
         }
+        Action::ShowView(v) => modern::show_view(v, show, engine, st),
         Action::ToggleSettings => {
             if st.settings_open() {
                 close_settings(st);

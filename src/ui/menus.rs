@@ -74,8 +74,9 @@ pub(super) const SHORTCUTS: [&str; 17] = [
     "Del",
 ];
 
-/// The Window menu: which interface, which panes are showing and which are
-/// in a window of their own, and where the timeline editor opens.
+/// The Window menu: which interface, then what that interface can show (the
+/// classic one's panes, or the new one's views, timeline, cart and preview
+/// windows), and where the timeline editor opens.
 fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     const W: &str = WINDOW_MENU;
     heading(ui, "Interface");
@@ -103,6 +104,160 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
         }
     }
     ui.separator();
+    if st.prefs.new_layout {
+        new_interface_windows(ui, st, actions);
+    } else {
+        classic_panes(ui, st, actions);
+    }
+    ui.separator();
+    let r = ui.menu_button(TIMELINE_OPENS_ITEM.label, |ui| {
+        timeline_layout_choice(ui, st, actions)
+    });
+    noted(ui, &TIMELINE_OPENS_ITEM.path(), r.response);
+    if !st.prefs.new_layout {
+        ui.separator();
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Drag a tab to move it; drag the line between panes to resize them. \
+                     Double-click a tab to pop it out.",
+                )
+                .weak()
+                .small(),
+            )
+            .wrap(),
+        );
+        if item(ui, W, "Reset layout", None).clicked() {
+            actions.push(Action::ResetLayout);
+            ui.close();
+        }
+    }
+}
+
+/// The new interface's part of the Window menu: its views (as the strip's
+/// tabs), the timeline editor, the cart, and the windows of their own it can
+/// have. No pane ticks: there is no dock to put a pane in.
+fn new_interface_windows(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    const W: &str = WINDOW_MENU;
+    let workspace = timeline::workspace::chosen(st);
+    heading(ui, "Views");
+    for v in modern::View::ALL {
+        // As the strip: the Timeline view is there while the editor opens as
+        // a workspace.
+        if v == modern::View::Timeline && !workspace {
+            continue;
+        }
+        let here = st.modern_view == v && !st.settings_open();
+        let r = ui.radio(here, v.label()).on_hover_text(v.hint());
+        if noted(ui, &format!("{W} ▸ {}", v.label()), r).clicked() {
+            if !here {
+                actions.push(Action::ShowView(v));
+            }
+            ui.close();
+        }
+    }
+    ui.separator();
+    // The timeline editor as a panel of the Editor view (with the workspace
+    // it is the Timeline view, above).
+    if !workspace {
+        let title = Pane::Timeline.title();
+        let mut shown = st.timeline.open;
+        let r = ui
+            .checkbox(&mut shown, &title)
+            .on_hover_text("The timeline editor, under the cue list in the Editor view");
+        if noted(ui, &format!("{W} ▸ {title}"), r).changed() {
+            if shown {
+                // The panel is in the Editor view: go there to see it.
+                if st.modern_view != modern::View::Editor || st.settings_open() {
+                    actions.push(Action::ShowView(modern::View::Editor));
+                }
+                actions.push(Action::Timeline(timeline::TimelineAction::Open(None)));
+            } else {
+                actions.push(Action::Timeline(timeline::TimelineAction::Close));
+            }
+            ui.close();
+        }
+    }
+    // The cart: along the foot of the Operator view, or a window of its own.
+    let title = Pane::Cart.title();
+    let open = st.layout.is_open(Pane::Cart);
+    let popped = st.layout.is_popped_out(Pane::Cart);
+    ui.horizontal(|ui| {
+        let mut shown = open;
+        let r = ui.checkbox(&mut shown, &title).on_hover_text(
+            "A button for each cue put on the cart, along the foot of the Operator view",
+        );
+        if noted(ui, &format!("{W} ▸ {title}"), r).changed() {
+            if shown && (st.modern_view != modern::View::Operator || st.settings_open()) {
+                actions.push(Action::ShowView(modern::View::Operator));
+            }
+            actions.push(Action::TogglePane(Pane::Cart));
+            ui.close();
+        }
+        if open {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (label, tip) = if popped {
+                    (
+                        "Into the Operator view",
+                        "Put it back along the foot of the Operator view",
+                    )
+                } else {
+                    ("Pop out", "Move it to a window of its own")
+                };
+                let r = ui.small_button(label).on_hover_text(tip);
+                if noted(ui, &format!("{W} ▸ {title} ▸ {label}"), r).clicked() {
+                    if popped {
+                        actions.push(Action::DockBack(Pane::Cart));
+                        actions.push(Action::ShowView(modern::View::Operator));
+                    } else {
+                        actions.push(Action::PopOut(Pane::Cart));
+                    }
+                    ui.close();
+                }
+            });
+        }
+    });
+    let r = item(ui, W, NEW_PREVIEW_WINDOW, None).on_hover_text(
+        "A Preview in a window of its own, with its own mode (one display, the multiview or \
+         the 3D stage) and display",
+    );
+    if r.clicked() {
+        actions.push(Action::NewPreview);
+        ui.close();
+    }
+    // What is in a window of its own now (a pane popped out in the classic
+    // interface stays out here too): unticked, its window closes.
+    let windows: Vec<Pane> = st
+        .layout
+        .popouts
+        .iter()
+        .map(|p| p.pane)
+        .filter(|p| *p != Pane::Cart)
+        .collect();
+    if !windows.is_empty() {
+        ui.separator();
+        heading(ui, "In windows of their own");
+        for pane in windows {
+            let title = pane.title();
+            let mut shown = true;
+            let r = ui
+                .checkbox(&mut shown, &title)
+                .on_hover_text("Untick to close its window");
+            if noted(ui, &format!("{W} ▸ {title}"), r).changed() {
+                actions.push(Action::TogglePane(pane));
+                ui.close();
+            }
+        }
+    }
+}
+
+/// The new interface's Window ▸ New preview window.
+pub(super) const NEW_PREVIEW_WINDOW: &str = "New preview window";
+
+/// The classic interface's part of the Window menu: the panes, which are
+/// showing and which are in windows of their own.
+fn classic_panes(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    const W: &str = WINDOW_MENU;
     // Every kind, with the other Preview panes after the first.
     let mut panes: Vec<Pane> = Vec::new();
     for p in Pane::ALL {
@@ -115,17 +270,12 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     let workspace = timeline::workspace::chosen(st);
     for pane in panes {
         let title = pane.title();
-        // The new interface has the timeline editor as a panel of its Editor
-        // view, not as a pane, and the workspace is no pane either.
-        if pane == Pane::Timeline && (st.prefs.new_layout || workspace) {
+        // The workspace is no pane.
+        if pane == Pane::Timeline && workspace {
             let mut shown = st.timeline.open;
-            let r = ui.checkbox(&mut shown, &title).on_hover_text(
-                match (workspace, st.prefs.new_layout) {
-                    (true, true) => "The timeline workspace, as the Timeline view",
-                    (true, false) => "The timeline workspace, in the panes' place",
-                    _ => "The timeline editor, under the cue list in the Editor view",
-                },
-            );
+            let r = ui
+                .checkbox(&mut shown, &title)
+                .on_hover_text("The timeline workspace, in the panes' place");
             if noted(ui, &format!("{W} ▸ {title}"), r).changed() {
                 actions.push(Action::Timeline(if shown {
                     timeline::TimelineAction::Open(None)
@@ -174,27 +324,6 @@ fn window_menu(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
     );
     if r.clicked() {
         actions.push(Action::NewPreview);
-        ui.close();
-    }
-    ui.separator();
-    let r = ui.menu_button(TIMELINE_OPENS_ITEM.label, |ui| {
-        timeline_layout_choice(ui, st, actions)
-    });
-    noted(ui, &TIMELINE_OPENS_ITEM.path(), r.response);
-    ui.separator();
-    ui.add(
-        egui::Label::new(
-            RichText::new(
-                "Drag a tab to move it; drag the line between panes to resize them. \
-                 Double-click a tab to pop it out.",
-            )
-            .weak()
-            .small(),
-        )
-        .wrap(),
-    );
-    if item(ui, W, "Reset layout", None).clicked() {
-        actions.push(Action::ResetLayout);
         ui.close();
     }
 }
