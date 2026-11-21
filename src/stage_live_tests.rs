@@ -95,6 +95,8 @@ fn the_venue_loads_on_a_thread_and_again_only_when_it_must() {
     show.add_surface(None);
     show.stage3d.venue = Some(Venue::new(path.clone()));
     let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
     let mut shared = StageShared::default();
     let mut said = Vec::new();
     live.begin(&show, &mut shared, &mut said);
@@ -112,6 +114,18 @@ fn the_venue_loads_on_a_thread_and_again_only_when_it_must() {
         matches!(shared.venue, VenueStatus::Loaded { triangles: 2, .. }),
         "{:?}",
         shared.venue
+    );
+    // Counted: one read, its parts and triangles.
+    let t = count.0.totals();
+    assert_eq!(
+        (
+            t.venue_loads,
+            t.venue_failures,
+            t.venue_parts,
+            t.venue_triangles
+        ),
+        (1, 0, 1, 2),
+        "{t:?}"
     );
     // The floor is in the scene, lit, before the screen.
     assert!(shared.scene.parts[0].lit);
@@ -145,6 +159,9 @@ fn the_venue_loads_on_a_thread_and_again_only_when_it_must() {
         shared.venue
     );
     assert_eq!(words.len(), 1, "{words:?}");
+    let t = count.0.totals();
+    assert_eq!((t.venue_loads, t.venue_failures), (2, 1), "{t:?}");
+    assert_eq!(t.venue_triangles, 2, "the last that loaded");
     let mut again = Vec::new();
     live.begin(&show, &mut shared, &mut again);
     assert!(again.is_empty() && !live.venue_busy());
@@ -480,6 +497,8 @@ fn after_the_drawing_thread_stops_a_still_stage_is_drawn_again() {
     };
     let (show, _a, b) = stage_show();
     let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
     let mut shared = StageShared::default();
     live.begin(&show, &mut shared, &mut Vec::new());
     let layer = live.output_layer(&gpu, b, (160, 90));
@@ -504,6 +523,15 @@ fn after_the_drawing_thread_stops_a_still_stage_is_drawn_again() {
     assert!(live.has_thread());
     assert_eq!(live.serial, 1, "drawn by the new thread (was {serial})");
     wait(&mut live);
+    // Counted: two starts, one stop, one restart; the display's picture
+    // drawn by each thread.
+    let t = count.0.totals();
+    assert_eq!(
+        (t.thread_starts, t.thread_stops, t.restarts, t.idle_releases),
+        (2, 1, 1, 0),
+        "{t:?}"
+    );
+    assert_eq!((t.displays, t.views), (2, 0), "{t:?}");
     assert!(
         live.wake_at()
             .is_some_and(|t| t > Instant::now() + RESTART_EVERY)
@@ -525,6 +553,8 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
     };
     let (show, _a, b) = stage_show();
     let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
     let mut shared = StageShared::default();
     live.begin(&show, &mut shared, &mut Vec::new());
     live.output_layer(&gpu, b, (160, 90));
@@ -563,6 +593,15 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
     );
     assert!(live.has_thread());
     wait(&mut live);
+    // Counted: B drawn for the previews, then for its window; the idle
+    // release, and the start after it is no restart.
+    let t = count.0.totals();
+    assert_eq!(
+        (t.thread_starts, t.idle_releases, t.restarts, t.thread_stops),
+        (2, 1, 0, 0),
+        "{t:?}"
+    );
+    assert_eq!((t.views, t.displays), (1, 1), "{t:?}");
     if let Some(h) = live.forget_device(&mut shared) {
         h.join().unwrap();
     }
@@ -880,6 +919,8 @@ fn a_projector_throws_what_its_window_sends_with_its_blend_not_where_it_sits() {
 fn the_light_puts_the_projectors_in_the_scene_and_their_pictures_in_jobs() {
     let (mut show, [left, right]) = blended_pair_show();
     let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
     let mut shared = StageShared::default();
     live.begin(&show, &mut shared, &mut Vec::new());
     let groups = groups_of(&show);
@@ -925,11 +966,14 @@ fn the_light_puts_the_projectors_in_the_scene_and_their_pictures_in_jobs() {
     for _ in 0..20 {
         show.add_projector();
     }
+    assert_eq!(count.0.totals().throws_left_out, 0);
     live.light_up(&show, &projector_throws(&show, &groups));
     assert_eq!(
         live.lit_scene.throws.len(),
         crate::stage3d::light::MAX_THROWS
     );
+    // The visible ones past sixteen are counted (left is hidden: 21 shown).
+    assert_eq!(count.0.totals().throws_left_out, 5);
 }
 
 /// A view with its light on draws the projectors' light, and the one beside
