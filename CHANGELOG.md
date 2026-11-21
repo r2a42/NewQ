@@ -13,6 +13,9 @@ release page, and a release is refused if it has none.
   projectors' light (a graphics card that refuses the light is a pass that says so). With no
   graphics card the last two say "not checked". Its report also says what the test's displays and
   3D stage were pointed at.
+- **Test Mode has a 3D stage part**: it plays the same lap with previews off, with a turning 3D
+  view, with the projectors' light on and with a display showing the stage, and says whether the
+  3D stage makes this computer's displays miss pictures.
 - **A test keeps your 3D stage.** Test Mode used to leave every screen in the 3D stage grey and
   the projectors with no picture, and with no monitor ticked a display that showed the stage hid
   the test's pictures. Now the screens and projectors show the test's displays, so an open 3D view

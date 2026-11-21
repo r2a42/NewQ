@@ -334,6 +334,26 @@ The README describes the features; this file is about working on the code.
   `DisplayChoice.computer`, `gui::remote_key`, `Fleet::live_lines`. The decode comparison is refused in a
   network; a follower can't start a test (`UiState::following_test` banner). Tests: `network_tests.rs`
   (`Rig` with `paced`, `launch_across`). Run headless with three NewQs on one machine (Short only).
+  The 3D stage part (B5 of `.claude/notes/organise-and-test3d-plan.md`): `choice::Part::Stage3d`
+  (`plan_with`/`level_item_with` take its tick, `TestMode::stage3d`, not in `Parts`/`Prefs`: the
+  window ticks it on opening from `TestMode::stage_wanted` = `choice::stage_wanted`, set in
+  `update_at` while idle; `parse_stage` for `NEWQ_TEST_PARTS`), `Flavour::Stage`, `plan::build_stage`
+  (the Short cue lap made to go round, `round_again`; `stage_setup`: the user's screens kept, else
+  `ui::stage_edit::use_sample` Proscenium plus a projector a test display; `stage::StageDisplay`
+  swapped in by `Setup::apply`: the last ticked monitor's mirror, else a disabled windowless
+  display; none across a network). `testmode/stage.rs`: `Leg` Baseline/View/Light/Display,
+  `StageRun` (driven from `update_at`; each leg `PreviewGovernor::reset`; `SETTLE`; `LegResult` from
+  `shown_totals`, `Tally::since`, `stage_render::totals`), `judge` (Problem only when a 3D leg's
+  share exceeds the baseline's by `previews::Settings::line`, decision 11; and a stopped stage
+  thread), `in_short`, `report_part`, `stage.csv`; replaces `analyse_previews` for that part.
+  `TestMode::holds_previews` -> `App::pace_previews` -> `PreviewGovernor::set_held` each pass
+  (`ask` returns paused; `previews::drawn_level` and `update_outputs` treat it as previews off),
+  so the hold ends however the test does. The window's view is `gui::stage_running` calling
+  `ui::stage_view::draw` with `StageRun::show` (a copy of the live test show: the window gets no
+  show) as `stage::VIEW`. Decision 9: `plan::leave_venue_out` in `network::build`, `session::build`
+  across (not the 3D part) and after `full::plan_for`. With no monitor ticked `unshow_stage` clears
+  every display's source. Tests: `stage.rs` (judge sentences, legs driven), `choice.rs`, `plan.rs`,
+  `session.rs::a_3d_stage_part_…`; run headless under xvfb only (lavapipe).
 - Timelines (plan and rulings: `.claude/notes/timeline-plan.md` and `timeline-plan-delta-1.md`, later
   sections win; section U is I2's). A timeline is a "start all together" group that is not a slide show
   (`TimelineKey::Group`), or a list with `CueList::timeline` (`List(n)`, never list 0). `src/timeline/`:

@@ -2192,8 +2192,10 @@ your show back exactly as it was. Nothing to type. The window asks, top to botto
   overnight). Each item says how long it takes with what is ticked, and the line under the
   ticks says what will run (*Cue list, then timeline, then the network check: about 4
   minutes*). *What does this do?* opens a few words on each part.
-- **Test**: *Cue list*, *Timeline*, *Network*, any of them. Ticked together they run one
-  after another (in that order) as one test. *Network* can be ticked only on the computer
+- **Test**: *Cue list*, *Timeline*, *3D stage*, *Network*, any of them. Ticked together they
+  run one after another (in that order) as one test. *3D stage* (below) is ticked by itself
+  when your show has a projector or a display that shows the stage, and not otherwise; it isn't
+  remembered. *Network* can be ticked only on the computer
   that runs a show network, with another computer in step; otherwise it is greyed and the
   line under it says why. In a show network the cue list and timeline play on every
   computer too, and the window says so.
@@ -2387,6 +2389,54 @@ slower than that; blank when none was drawn). What it finds:
 The previews at full rate throughout with smooth displays says nothing. The debug test and
 the decode comparison have the three columns in their `stats` files but not yet the
 *Previews* part; the network test has neither yet.
+
+**A test keeps your 3D stage.** Its screens and projectors show the test's displays in place of
+yours, so an open 3D view shows the test as it plays (with fewer monitors ticked than your show
+has displays, the extra projectors throw no picture), and the report says what the stage was
+pointed at. With no monitor ticked, no display shows the stage during the test, so the test's
+pictures are seen. Across a show network a test leaves your venue model file out (only the 3D
+stage part takes it), so the other computers don't fetch it first.
+
+### The 3D stage part: does 3D cost the displays here?
+
+Tick *3D stage*. It plays the cue list's Short lap round and round in legs of the same length
+(45 s each at *Short*, about three minutes in all; at *Medium* and *Long* the legs go round
+for the part's share of the time), and compares them:
+
+1. **Previews off**: every preview held off, the baseline.
+2. **The 3D view**: a view of the stage in the Test Mode window, turning slowly, drawn as any
+   preview is (it gives way to the displays too).
+3. **Its light on**: the projectors' light in that view (no such leg when no projector throws
+   a picture).
+4. **A display showing the stage**: with two or more monitors ticked, the last one shows the
+   stage in place of the test's pictures (a projector on it throws nothing then); with one,
+   a display with no window does, drawn for the previews only, at their pace. Across a show
+   network there is no such leg: changing a display mid-test would send the show to every
+   computer again.
+
+With no 3D stage in your show it uses the *Proscenium* sample with its usual screens and a
+projector for each ticked monitor (two make an overlapping pair), on the test's copy of your
+show only. The previews' governor starts each leg afresh, and the first 4 s of each leg aren't
+measured. The report's *3D stage* part says, leg by leg, how many of the displays' new
+pictures came late, how often the 3D stage was drawn and the processor time it took, how far
+the previews gave way and, for a display showing the stage, how many pictures a second it
+drew; `stage.csv` has a row a leg. Then one sentence (*With the 3D view open and its light on
+the displays missed no more pictures than without it (0.1% against 0.1%). The previews drew at
+full rate throughout.*). The holding off ends with the leg however the test ends.
+
+| Finding | Problem when | Worth knowing when |
+|---|---|---|
+| A 3D leg's displays missed more than the baseline's | by this computer's own line or more (1% Strict, 5% Relaxed, 5% when the previews never give way) | |
+| The previews gave way in the 3D legs | never | once or more, or below full rate for a second |
+| The displays already missed pictures with every preview off | | over the line: that much is the computer's, not 3D's |
+| The light was refused by the graphics card, projectors past the 16 the light shows | | any |
+| The display showing the stage drew under half its monitor's refresh | | any |
+| The 3D drawing stopped and was started again | any | |
+| The venue took 10 s or more to load | | any |
+| Nothing to compare (no display window showed 30 pictures a leg), or a leg in which the stage was never drawn (the previews off on this computer) | | said, so a pass is never taken for a measurement |
+
+Never run on a real graphics card, a Mac or Windows, or with real monitors: only headless under
+Xvfb with a software card, where every figure is the software card's.
 
 **The media.** The first time, Test mode downloads free films and pictures (the
 Blender Foundation's *Big Buck Bunny* and *Sintel* and the *Jellyfish* clip, under

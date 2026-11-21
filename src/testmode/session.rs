@@ -1136,6 +1136,15 @@ impl TestMode {
         Ok(())
     }
 
+    /// The 3D stage part under way, if it is.
+    #[cfg(test)]
+    pub fn stage_run_mut(&mut self) -> Option<&mut super::stage::StageRun> {
+        match &mut self.phase {
+            Phase::Running(r) => r.stage.as_deref_mut(),
+            _ => None,
+        }
+    }
+
     /// The network test under way, if it is.
     #[cfg(test)]
     pub fn network_run(&self) -> Option<&super::network::NetRun> {
@@ -3432,6 +3441,81 @@ mod tests {
             "{}",
             d.report
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 3D stage part, offline and with short legs: it goes through its
+    /// legs holding the previews off only for the first, writes its part of
+    /// the report and stage.csv, says what it couldn't measure (no window
+    /// here), and gives the show back with the hold let go.
+    #[test]
+    fn a_3d_stage_part_goes_through_its_legs_and_gives_everything_back() {
+        let _heavy = crate::testmode::heavy();
+        let Some(ff) = Ffmpeg::locate() else {
+            assert!(std::env::var("NEWQ_REQUIRE_MEDIA").is_err(), "no ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("newq_tm_stage_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut show = Show::default();
+        let before = serde_json::to_string(&show).unwrap();
+        let mut engine = Engine::for_tests();
+        engine.ff = Some(ff.clone());
+        let mut st = UiState::default();
+        let mut test = TestMode {
+            download: false,
+            ..Default::default()
+        };
+        test.choose(Level::Short, Flavour::Stage);
+        let sound = SoundChoice {
+            device: None,
+            muted: true,
+        };
+        test.start(ff, &dir, Vec::new(), sound, false);
+        let mut last = Instant::now();
+        let (mut held, mut free, mut staged) = (false, false, false);
+        let ok = wait_for(
+            || {
+                let now = Instant::now();
+                engine.tick(&show, now.duration_since(last).as_secs_f64());
+                last = now;
+                if let Some(s) = test.stage_run_mut()
+                    && s.leg_secs > 3.0
+                {
+                    s.shorten(3.0);
+                }
+                test.update(&mut show, &mut engine, &mut st);
+                if matches!(test.view(), View::Running(_)) {
+                    let h = test.holds_previews();
+                    assert_eq!(h, st.preview_governor.held());
+                    held |= h;
+                    free |= held && !h;
+                    staged |= show.stage3d.venue.is_some();
+                }
+                matches!(test.view(), View::Done(_))
+            },
+            240,
+        );
+        let View::Done(d) = test.view() else {
+            panic!("the test did not finish (ok={ok})");
+        };
+        assert!(held && free && staged, "{held} {free} {staged}");
+        assert!(!test.holds_previews() && !st.preview_governor.held());
+        assert_eq!(serde_json::to_string(&show).unwrap(), before);
+        assert!(d.report.contains("\n3D stage\n--------\n"), "{}", d.report);
+        assert!(d.report.contains("Proscenium sample"), "{}", d.report);
+        assert!(d.report.contains("In short: Not measured"), "{}", d.report);
+        assert!(
+            d.findings
+                .iter()
+                .any(|f| f.text.contains("couldn't compare")),
+            "{}",
+            d.report
+        );
+        let csv = std::fs::read_to_string(d.folder.join(super::super::stage::CSV)).unwrap();
+        assert_eq!(csv.lines().count(), 5, "{csv}");
+        let events = std::fs::read_to_string(d.folder.join("events.log")).unwrap();
+        assert!(events.contains("3D stage: leg 4 of 4"), "{events}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
