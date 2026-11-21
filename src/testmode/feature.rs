@@ -41,6 +41,9 @@ pub struct Media {
     pub stills: Vec<PathBuf>,
     /// What could not be made, and why.
     pub notes: Vec<String>,
+    /// The sample venue made in code, written as a .glb file and read back
+    /// (`venue_round_trip`): what was seen, or what went wrong.
+    pub venue: Result<String, String>,
 }
 
 /// How long one file may take to make before FFmpeg is given up on.
@@ -223,13 +226,598 @@ pub fn make_media(
     } else {
         None
     };
+    let venue = venue_round_trip(dir);
     Ok(Media {
         clip,
         hap,
         tone,
         stills,
         notes,
+        venue,
     })
+}
+
+// ----- The 3D stage ------------------------------------------------------------------
+
+/// The sample venue the check makes, writes and reads back, and plays with
+/// when the show has no stage of its own.
+pub const STAGE_SAMPLE: crate::stage3d::samples::SampleVenue =
+    crate::stage3d::samples::SampleVenue::Proscenium;
+
+/// How long the stage is given to be drawn on a card of its own before it
+/// is given up on (lavapipe on a slow build server takes a few seconds).
+pub const STAGE_TRIAL_LIMIT: Duration = Duration::from_secs(90);
+
+/// The sample venue made in code, written as `stage.glb` in `dir` and read
+/// back as a model file is (`load_venue`): it must come back with the same
+/// parts and triangles. What was seen, or what went wrong (a sentence).
+pub fn venue_round_trip(dir: &Path) -> Result<String, String> {
+    use crate::stage3d::{Venue, load, samples};
+    let kind = STAGE_SAMPLE;
+    let name = kind.label();
+    let made = samples::sample_venue(kind, &Venue::sample(kind))
+        .map_err(|e| format!("the {name} sample venue could not be made: {e}"))?;
+    let bytes = samples::sample_glb(kind);
+    let path = dir.join("stage.glb");
+    std::fs::write(&path, &bytes).map_err(|e| {
+        format!(
+            "the {name} sample could not be written as {}: {e}",
+            path.display()
+        )
+    })?;
+    let read = load::load_venue(&path, &Venue::new(path.clone())).map_err(|e| {
+        format!("the {name} sample, written as media/stage.glb, could not be read back: {e}")
+    })?;
+    if read.parts.len() != made.parts.len() || read.triangles != made.triangles {
+        return Err(format!(
+            "the {name} sample, written as media/stage.glb, came back as {} parts and {} triangles; it was made as {} and {}",
+            read.parts.len(),
+            read.triangles,
+            made.parts.len(),
+            made.triangles
+        ));
+    }
+    Ok(format!(
+        "the {name} sample venue ({} parts, {} triangles) was made, written as media/stage.glb ({} kB) and read back the same",
+        made.parts.len(),
+        made.triangles,
+        bytes.len() / 1024
+    ))
+}
+
+/// The display the check's pictures play on: the first that has a picture
+/// of its own.
+fn first_picture(show: &Show) -> Option<OutputId> {
+    show.outputs
+        .iter()
+        .find(|o| o.enabled && !o.is_sub_display() && o.part_of.is_none())
+        .map(|o| o.id)
+}
+
+/// Give the check's show a 3D stage to draw and light: the show's own when it
+/// has screens (`use_displays_as` has pointed them at the test's displays),
+/// else the `STAGE_SAMPLE` venue with its screens and viewpoints. Either way
+/// a screen shows the first display and a projector is that display, so the
+/// screens have a picture and the light has one to throw. What was done, for
+/// the report.
+fn stage_for_check(show: &mut Show) -> Vec<String> {
+    use crate::stage3d::{Feed, SurfaceShape, Venue, WHOLE};
+    let mut notes = Vec::new();
+    let Some(first) = first_picture(show) else {
+        return notes;
+    };
+    let first_name = show
+        .output(first)
+        .map_or_else(|| "the first display".to_string(), |o| o.name.clone());
+    let feed = Feed::Display {
+        output: first,
+        region: WHOLE,
+    };
+    // The check's pictures are on it: it shows them, not the stage.
+    if let Some(o) = show.outputs.iter_mut().find(|o| o.id == first) {
+        o.source = None;
+    }
+    let mut lit_screen = None;
+    if show.stage3d.surfaces.is_empty() {
+        show.stage3d.venue = Some(Venue::sample(STAGE_SAMPLE));
+        let ids = show.add_sample_screens(STAGE_SAMPLE);
+        show.stage3d.add_sample_viewpoints(STAGE_SAMPLE);
+        // The projection screen is lit by the projector below; the cyc
+        // shows the display as an LED wall would.
+        if let Some(s) = ids.get(1).and_then(|id| show.stage3d.surface_mut(*id)) {
+            s.feed = feed.clone();
+        }
+        lit_screen = ids.first().copied();
+        notes.push(format!(
+            "The 3D stage: the {} sample venue, as the show has no stage of its own. Its cyc shows {first_name} and a projector throws {first_name} onto its projection screen.",
+            STAGE_SAMPLE.label()
+        ));
+    } else {
+        let fed = show
+            .stage3d
+            .surfaces
+            .iter()
+            .any(|s| s.visible && s.feed.output().is_some_and(|o| show.output(o).is_some()));
+        if !fed && let Some(s) = show.stage3d.surfaces.iter_mut().find(|s| s.visible) {
+            s.feed = feed.clone();
+            notes.push(format!(
+                "The 3D stage: the show's own. No screen of it showed a display, so \u{201c}{}\u{201d} shows {first_name} for the check.",
+                s.name
+            ));
+        }
+    }
+    let has_projector = show
+        .stage3d
+        .projectors
+        .iter()
+        .any(|p| p.visible && p.display.is_some_and(|d| show.output(d).is_some()));
+    let taken = show
+        .stage3d
+        .projectors
+        .iter()
+        .any(|p| p.display == Some(first));
+    if !has_projector && !taken {
+        let aim = lit_screen
+            .and_then(|id| show.stage3d.surface(id).cloned())
+            .or_else(|| {
+                let visible = || show.stage3d.surfaces.iter().filter(|s| s.visible);
+                visible()
+                    .find(|s| matches!(s.shape, SurfaceShape::Flat { .. }))
+                    .or_else(|| visible().next())
+                    .cloned()
+            });
+        let id = show.add_projector();
+        if let Some(p) = show.projector_mut(id) {
+            p.display = Some(first);
+            if let Some(place) = aim.as_ref().and_then(|s| p.fit_to(s, 16.0 / 9.0)) {
+                p.placement = place;
+            }
+        }
+        if lit_screen.is_none() {
+            notes.push(format!(
+                "The 3D stage: a projector was added for the check, throwing {first_name}{}.",
+                aim.map_or_else(String::new, |s| format!(" onto \u{201c}{}\u{201d}", s.name))
+            ));
+        }
+    }
+    notes
+}
+
+/// Whether the stage's screens show the displays' pictures: every visible
+/// screen given a display is painted with that display's picture in the
+/// scene the 3D view draws, and each projector that is a display throws a
+/// picture that fills the flat screen it reaches best.
+pub fn screens_fed(show: &Show) -> Verdict {
+    use crate::stage3d::SurfaceShape;
+    let scene = show.stage3d.scene(show, None);
+    let painted = crate::stage3d::outputs_in(&scene);
+    let fed: Vec<(&str, OutputId)> = show
+        .stage3d
+        .surfaces
+        .iter()
+        .filter(|s| s.visible)
+        .filter_map(|s| {
+            s.feed
+                .output()
+                .filter(|o| show.output(*o).is_some())
+                .map(|o| (s.name.as_str(), o))
+        })
+        .collect();
+    if fed.is_empty() {
+        return Verdict::Failed("no screen of the 3D stage shows a display".into());
+    }
+    let unpainted: Vec<&str> = fed
+        .iter()
+        .filter(|(_, o)| !show.shows_stage(*o) && !painted.contains(o))
+        .map(|(n, _)| *n)
+        .collect();
+    if !unpainted.is_empty() {
+        return Verdict::Failed(format!(
+            "{} of the stage's screens show a display but are drawn without its picture: {}",
+            unpainted.len(),
+            unpainted.join(", ")
+        ));
+    }
+    let one = fed.len() == 1;
+    let mut said = format!(
+        "{} screen{} of the 3D stage show{} {} picture",
+        fed.len(),
+        if one { "" } else { "s" },
+        if one { "s" } else { "" },
+        if one {
+            "its display's"
+        } else {
+            "their displays'"
+        }
+    );
+    // The projectors' pictures, on the flat screens they reach.
+    for p in show
+        .stage3d
+        .projectors
+        .iter()
+        .filter(|p| p.visible && p.display.is_some())
+    {
+        let pixels = p.pixels(None);
+        let aspect = p.aspect(pixels);
+        let best = show
+            .stage3d
+            .surfaces
+            .iter()
+            .filter(|s| s.visible && matches!(s.shape, SurfaceShape::Flat { .. }))
+            .filter_map(|s| p.on_flat(s, aspect).map(|on| (s, on)))
+            .filter(|(_, on)| on.fills > 0.0)
+            .max_by(|a, b| a.1.fills.total_cmp(&b.1.fills));
+        match best {
+            Some((s, on)) if on.fills >= 0.9 => said.push_str(&format!(
+                "; {} fills {:.0} % of \u{201c}{}\u{201d}",
+                p.name,
+                on.fills * 100.0,
+                s.name
+            )),
+            Some((s, on)) => {
+                return Verdict::Failed(format!(
+                    "{said}, but {}'s picture fills only {:.0} % of \u{201c}{}\u{201d}, the screen it reaches best",
+                    p.name,
+                    on.fills * 100.0,
+                    s.name
+                ));
+            }
+            None => said.push_str(&format!(
+                "; {} reaches no flat screen (not measured)",
+                p.name
+            )),
+        }
+    }
+    Verdict::Ok(said)
+}
+
+/// What a display that showed the stage came to in the app, from the stage's
+/// counters over the time it showed it (`stage_render::totals`, `since`).
+pub fn stage_drawn_verdict(
+    d: &crate::stage_render::StageTotals,
+    display: &str,
+    secs: f64,
+) -> Verdict {
+    let times = |n: u64| {
+        if n == 1 {
+            "once".to_string()
+        } else {
+            format!("{n} times")
+        }
+    };
+    if d.thread_stops > 0 {
+        return Verdict::Failed(format!(
+            "the 3D drawing stopped {} while {display} showed the stage, and had to be started again",
+            times(d.thread_stops)
+        ));
+    }
+    let (drawn, missing, how) = if d.displays > 0 {
+        (d.displays, d.display_missing_pictures, "for its window")
+    } else {
+        (
+            d.views,
+            d.missing_pictures,
+            "in views of the stage only, at the previews' pace (it had no window here)",
+        )
+    };
+    if drawn == 0 {
+        return Verdict::Failed(format!(
+            "{display} was set to show the 3D stage and the stage was not drawn once in {secs:.1} s"
+        ));
+    }
+    if missing > 0 {
+        return Verdict::Failed(format!(
+            "{display} showed the 3D stage, drawn {} in {secs:.1} s {how}, but {} a screen on it had no picture from its display",
+            times(drawn),
+            times(missing)
+        ));
+    }
+    Verdict::Ok(format!(
+        "{display} showed the 3D stage while a clip played on its screens: drawn {} in {secs:.1} s {how}, every screen with its display's picture",
+        times(drawn)
+    ))
+}
+
+/// What drawing the stage on a graphics card of its own came to
+/// (`stage_trial`): for `newq --self-test`, which has no window, both; for
+/// the window's run, the light.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StageTrial {
+    /// The stage drawn as a display that shows it draws it, its screens fed.
+    pub drawn: Verdict,
+    /// A view with the projectors' light on.
+    pub light: Verdict,
+    /// The graphics card it drew on (empty with none).
+    pub adapter: String,
+}
+
+impl StageTrial {
+    /// No graphics card could be had: not checked, unless one is required
+    /// here (`NEWQ_REQUIRE_GPU`, as the tests have it).
+    pub fn no_card() -> StageTrial {
+        let why = "there is no graphics card here to draw the 3D stage with";
+        StageTrial::both(if std::env::var_os("NEWQ_REQUIRE_GPU").is_some() {
+            Verdict::Failed(format!("{why}, and NEWQ_REQUIRE_GPU says there must be"))
+        } else {
+            Verdict::NotChecked(why.into())
+        })
+    }
+
+    /// The same verdict for both (it went wrong before either was drawn).
+    pub fn both(v: Verdict) -> StageTrial {
+        StageTrial {
+            drawn: v.clone(),
+            light: v,
+            adapter: String::new(),
+        }
+    }
+}
+
+/// The verdict on the stage drawn for a display, from its stats (None: it
+/// was not drawn), whether its picture landed and how many displays its
+/// screens show.
+fn trial_drawn(
+    stats: Option<&crate::render3d::FrameStats>,
+    filled: bool,
+    screens: usize,
+    adapter: &str,
+) -> Verdict {
+    let Some(s) = stats else {
+        return Verdict::Failed(format!("the 3D stage was not drawn on {adapter}"));
+    };
+    if !filled {
+        return Verdict::Failed(format!(
+            "the 3D stage was drawn on {adapter} but its picture never landed"
+        ));
+    }
+    if screens == 0 {
+        return Verdict::NotChecked(format!(
+            "the 3D stage was drawn on {adapter}, but no screen on it shows a display"
+        ));
+    }
+    if s.missing_pictures > 0 {
+        return Verdict::Failed(format!(
+            "the 3D stage was drawn on {adapter}, but {} of its screens had no picture from its display",
+            s.missing_pictures
+        ));
+    }
+    Verdict::Ok(format!(
+        "the 3D stage was drawn on {adapter} as a display that shows it draws it ({} parts, {} triangles), its screens with their displays' pictures",
+        s.parts, s.triangles
+    ))
+}
+
+/// The verdict on a view with the projectors' light on: built and thrown,
+/// or refused by the card and drawn without it (a pass: the view is still
+/// drawn, as it should be).
+fn trial_light(
+    stats: Option<&crate::render3d::FrameStats>,
+    filled: bool,
+    projectors: usize,
+    adapter: &str,
+) -> Verdict {
+    if projectors == 0 {
+        return Verdict::NotChecked("the 3D stage has no projector that is a display".into());
+    }
+    let Some(s) = stats else {
+        return Verdict::Failed(format!(
+            "the view with the projectors' light was not drawn on {adapter}"
+        ));
+    };
+    if !filled {
+        return Verdict::Failed(format!(
+            "the view with the projectors' light was drawn on {adapter} but its picture never landed"
+        ));
+    }
+    if s.light_left_out {
+        return Verdict::Ok(format!(
+            "this graphics card ({adapter}) refused the projectors' light; the view was drawn without it, as it should be"
+        ));
+    }
+    if (s.throws as usize) < projectors {
+        return Verdict::Failed(format!(
+            "the projectors' light was built on {adapter} but only {} of {projectors} projectors threw their picture",
+            s.throws
+        ));
+    }
+    Verdict::Ok(format!(
+        "the projectors' light was built on {adapter} and {} projector{} threw {} picture into the room",
+        s.throws,
+        if s.throws == 1 { "" } else { "s" },
+        if s.throws == 1 { "its" } else { "their" }
+    ))
+}
+
+/// Draw `show`'s stage on `gpu` as the app would: once as a display that
+/// shows it draws it, its screens fed a picture, then a view with the
+/// projectors' light on. Correctness only: on a software card any time is
+/// meaningless, and none is judged.
+pub fn stage_trial(
+    gpu: &crate::gpu::Gpu,
+    show: &Show,
+    venue: Option<&crate::stage3d::load::LoadedVenue>,
+) -> StageTrial {
+    use crate::gpu::{Geometry, LayerTexture};
+    use crate::render::{OutputGroup, OutputLayer};
+    use crate::render3d::{LightView, Options, Scene};
+    use crate::stage_render::{CountTo, FeedJob, StageDrawer, StageJob, ThrowJob, ViewJob};
+    use std::sync::Arc;
+    const FEED: (u32, u32) = (64, 36);
+    const VIEW: (u32, u32) = (320, 180);
+    let adapter = gpu.adapter.get_info().name;
+    let scene = show.stage3d.scene(show, venue);
+    let outputs = crate::stage3d::outputs_in(&scene);
+    // Every display's picture is four colours, as a display's would be.
+    let picture = Arc::new(LayerTexture::new_rgba(gpu, 2, 2));
+    let quarters: Vec<u8> = [
+        [255u8, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+    ]
+    .concat();
+    picture.upload_rgba(&gpu.queue, &quarters);
+    let group = || OutputGroup {
+        layers: vec![OutputLayer {
+            texture: picture.clone(),
+            opacity: 1.0,
+            fit: Fit::Stretch,
+            transform: LayerTransform::default(),
+            color: ColorAdjust::default(),
+            fx: crate::fx::VideoFx::default(),
+        }],
+        geometry: Geometry {
+            canvas: FEED,
+            warp: crate::gpu::IDENTITY,
+            pin: crate::gpu::IDENTITY,
+            mesh: None,
+            slice: Geometry::WHOLE,
+        },
+    };
+    let feeds: Vec<FeedJob> = outputs
+        .iter()
+        .map(|o| FeedJob {
+            output: *o,
+            groups: vec![group()],
+            size: FEED,
+        })
+        .collect();
+    let source = crate::stage3d::StageSource {
+        viewpoint: show.stage3d.viewpoints.first().map(|v| v.name.clone()),
+    };
+    let bounds = venue
+        .and_then(|v| show.stage3d.venue_bounds(v))
+        .map(|b| (b.min, b.max));
+    let camera = show.stage_camera(&source, bounds, VIEW.0 as f32 / VIEW.1 as f32);
+    let mut drawer = StageDrawer::counting(gpu, CountTo::default());
+    let view = |key, display, scene: Arc<Scene>, options| {
+        let target = Arc::new(LayerTexture::new_target(gpu, VIEW.0, VIEW.1));
+        let job = ViewJob {
+            key,
+            display,
+            target: target.clone(),
+            scene,
+            camera,
+            options,
+            lines: Default::default(),
+        };
+        (target, job)
+    };
+    let (shown, job) = view(1, true, Arc::new(scene.clone()), Options::default());
+    let stats = drawer.draw(
+        gpu,
+        &StageJob {
+            feeds: feeds.clone(),
+            views: vec![job],
+            serial: 1,
+            ..StageJob::default()
+        },
+        &mut || {},
+    );
+    let drawn = trial_drawn(
+        stats.first().map(|s| &s.1),
+        shown.is_filled(),
+        outputs.len(),
+        &adapter,
+    );
+    // The light: each projector that is a display throws its picture.
+    let throwing: Vec<&crate::stage3d::projector::Projector> = show
+        .stage3d
+        .projectors
+        .iter()
+        .filter(|p| p.visible && p.display.is_some_and(|d| show.output(d).is_some()))
+        .take(crate::stage3d::light::MAX_THROWS)
+        .collect();
+    let light = if throwing.is_empty() {
+        trial_light(None, false, 0, &adapter)
+    } else {
+        let mut lit = scene;
+        lit.throws = throwing
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let pixels = p.pixels(None);
+                crate::stage3d::light::throw_of(p, p.aspect(pixels), pixels, i as u32, true)
+            })
+            .collect();
+        let throws: Vec<ThrowJob> = (0..throwing.len())
+            .map(|i| ThrowJob {
+                layer: i as u32,
+                groups: vec![group()],
+                blend: EdgeBlend::default(),
+            })
+            .collect();
+        let (target, job) = view(
+            2,
+            false,
+            Arc::new(lit),
+            Options {
+                light: LightView::Picture,
+                ..Options::default()
+            },
+        );
+        let stats = drawer.draw(
+            gpu,
+            &StageJob {
+                feeds,
+                throws,
+                throw_size: (160, 90),
+                views: vec![job],
+                serial: 2,
+            },
+            &mut || {},
+        );
+        trial_light(
+            stats.first().map(|s| &s.1),
+            target.is_filled(),
+            throwing.len(),
+            &adapter,
+        )
+    };
+    // Whatever was drawn, a device that went meanwhile is the finding.
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    if let Some(why) = gpu.lost.why() {
+        let mut lost = StageTrial::both(Verdict::Failed(format!(
+            "the graphics device ({adapter}) was lost while the 3D stage was drawn: {why}"
+        )));
+        lost.adapter = adapter;
+        return lost;
+    }
+    StageTrial {
+        drawn,
+        light,
+        adapter,
+    }
+}
+
+/// `stage_trial` on a thread of its own, with a graphics card of its own
+/// (`Gpu::headless`; none: `StageTrial::no_card`) and `show`'s venue read
+/// there. A panic while drawing is a failure, not the end of the check.
+pub fn start_stage_trial(show: Show) -> std::sync::mpsc::Receiver<StageTrial> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("test-stage".into())
+        .spawn(move || {
+            let trial = crate::crash::survive("The 3D stage check", || {
+                let Some(gpu) = crate::gpu::Gpu::headless() else {
+                    return StageTrial::no_card();
+                };
+                let venue = show
+                    .stage3d
+                    .venue
+                    .as_ref()
+                    .and_then(|v| crate::stage3d::load::load_venue(&v.path, v).ok());
+                stage_trial(&gpu, &show, venue.as_ref())
+            })
+            .unwrap_or_else(|| {
+                StageTrial::both(Verdict::Failed(
+                    "NewQ met an error it did not expect while drawing the 3D stage (see newq-crash.log)"
+                        .into(),
+                ))
+            });
+            let _ = tx.send(trial);
+        });
+    rx
 }
 
 // ----- The parts of the check ------------------------------------------------------
@@ -250,6 +838,13 @@ pub enum Act {
     /// Start a stream to a server NewQ runs itself, on this computer only.
     ServeOn,
     ServeOff,
+    /// Have a display show the 3D stage (the window's run: the app draws it).
+    StageOn,
+    /// Put that display back as it was.
+    StageOff,
+    /// Draw the stage with the projectors' light, on a graphics card of its
+    /// own (`start_stage_trial`; the window's run).
+    LightTrial,
 }
 
 /// Something that must be so in a part. Times are seconds into the part.
@@ -317,6 +912,18 @@ pub enum Check {
     Never { cue: CueId },
     /// `b` started at least `secs` after `a` did.
     Later { a: CueId, b: CueId, secs: f64 },
+    /// The sample venue was made, written as .glb and read back the same
+    /// (`venue_round_trip`, done with the media: what it came to).
+    VenueLoads { made: Result<String, String> },
+    /// The stage's screens show their displays' pictures and the projectors'
+    /// pictures fill their screens (`screens_fed`, from the show).
+    ScreensFed,
+    /// A display that shows the stage had it drawn, its screens fed
+    /// (looked at by the driver: `Runner::set_stage_drawn`).
+    StageDrawn,
+    /// The projectors' light was built, or refused cleanly
+    /// (`Runner::set_light`).
+    LightBuilt,
 }
 
 /// One part of the check: what it tries, what it does and what must be so.
@@ -372,6 +979,9 @@ pub struct Plan {
     pub osc: Option<std::net::UdpSocket>,
     /// How long it should take, in seconds.
     pub secs: f64,
+    /// What was done to the show to make it (its displays, its 3D stage),
+    /// for the report.
+    pub notes: Vec<String>,
 }
 
 struct Builder {
@@ -447,6 +1057,7 @@ pub fn build(original: &Show, media_files: &Media, hosting: Result<(), String>) 
     if show.outputs.is_empty() {
         show.add_display();
     }
+    let notes = stage_for_check(&mut show);
     let audio = show.audio_outputs.first().map(|a| a.id);
     let mut b = Builder { show, audio };
     let mut parts: Vec<Part> = Vec::new();
@@ -1550,6 +2161,58 @@ pub fn build(original: &Show, media_files: &Media, hosting: Result<(), String>) 
         parts.push(p);
     }
 
+    // ----- The 3D stage -----
+    {
+        let mut p = Part::new(
+            "3D stage",
+            "makes a sample venue, writes it as .glb and reads it back; its screens show the displays' pictures",
+            1.0,
+        );
+        p.checks = vec![
+            Check::VenueLoads {
+                made: m.venue.clone(),
+            },
+            Check::ScreensFed,
+        ];
+        parts.push(p);
+    }
+    {
+        let v = b.cue(
+            CueType::Video,
+            Some(clip),
+            "3D stage: the clip on the screens",
+            None,
+            |c| {
+                let m = media!(c);
+                m.loop_media = true;
+                m.loop_count = 0;
+            },
+        );
+        let mut p = Part::new(
+            "3D stage",
+            "draws a display that shows the stage while a clip plays on its screens",
+            6.5,
+        );
+        p.lead = Some(v);
+        p.acts = vec![
+            (0.0, Act::Fire(v)),
+            (0.5, Act::StageOn),
+            (5.5, Act::StageOff),
+        ];
+        p.checks = vec![Check::StageDrawn];
+        parts.push(p);
+    }
+    {
+        let mut p = Part::new(
+            "3D stage",
+            "builds the projectors' light, or is refused it cleanly",
+            1.0,
+        );
+        p.acts = vec![(0.0, Act::LightTrial)];
+        p.checks = vec![Check::LightBuilt];
+        parts.push(p);
+    }
+
     // ----- Everything at once -----
     {
         let g = b.cue(
@@ -1623,6 +2286,7 @@ pub fn build(original: &Show, media_files: &Media, hosting: Result<(), String>) 
         parts,
         osc,
         secs,
+        notes,
     }
 }
 
@@ -2086,6 +2750,23 @@ pub struct Context {
     pub recorded: Option<Verdict>,
     /// What the server and its stream came to.
     pub served: Option<Verdict>,
+    /// What a display showing the 3D stage came to.
+    pub stage_drawn: Option<Verdict>,
+    /// What the projectors' light came to.
+    pub light: Option<Verdict>,
+}
+
+impl Context {
+    /// Whether `check` waits for the driver to say what it came to.
+    fn waits_for(&self, check: &Check) -> bool {
+        match check {
+            Check::Recorded => self.recorded.is_none(),
+            Check::Served => self.served.is_none(),
+            Check::StageDrawn => self.stage_drawn.is_none(),
+            Check::LightBuilt => self.light.is_none(),
+            _ => false,
+        }
+    }
 }
 
 fn of(obs: &Obs, cue: CueId) -> Option<&CueObs> {
@@ -2459,6 +3140,19 @@ pub fn judge(check: &Check, obs: &[Obs], ctx: &Context, show: &Show) -> Verdict 
             .served
             .clone()
             .unwrap_or_else(|| NotChecked(NOT_LOOKED_AT.into())),
+        Check::StageDrawn => ctx
+            .stage_drawn
+            .clone()
+            .unwrap_or_else(|| NotChecked(NOT_LOOKED_AT.into())),
+        Check::LightBuilt => ctx
+            .light
+            .clone()
+            .unwrap_or_else(|| NotChecked(NOT_LOOKED_AT.into())),
+        Check::VenueLoads { made } => match made {
+            Result::Ok(what) => Ok(what.clone()),
+            Err(why) => Failed(why.clone()),
+        },
+        Check::ScreensFed => screens_fed(show),
         Check::ClockStill { key, from, to } => {
             let clock = |t: f64| {
                 near(obs, t).and_then(|o| o.clocks.iter().find(|c| c.0 == *key).map(|c| c.1))
@@ -2620,6 +3314,9 @@ pub enum Ask {
     RecordOff,
     ServeOn,
     ServeOff,
+    StageOn,
+    StageOff,
+    LightTrial,
 }
 
 /// The part under way.
@@ -2697,6 +3394,19 @@ impl Runner {
         self.rejudge(show);
     }
 
+    /// What a display showing the 3D stage came to (the window's run: when
+    /// it is put back; `--self-test`: from `stage_trial`, before it plays).
+    pub fn set_stage_drawn(&mut self, result: Verdict, show: &Show) {
+        self.ctx.stage_drawn = Some(result);
+        self.rejudge(show);
+    }
+
+    /// What the projectors' light came to.
+    pub fn set_light(&mut self, result: Verdict, show: &Show) {
+        self.ctx.light = Some(result);
+        self.rejudge(show);
+    }
+
     /// Whether a recording or a stream is still to be looked at by the driver.
     pub fn awaits(&self, check: &Check) -> bool {
         self.results.iter().any(|r| r.pending.contains(check))
@@ -2710,11 +3420,7 @@ impl Runner {
             }
             let mut still = Vec::new();
             for check in std::mem::take(&mut r.pending) {
-                let looked = match check {
-                    Check::Recorded => self.ctx.recorded.is_some(),
-                    Check::Served => self.ctx.served.is_some(),
-                    _ => true,
-                };
+                let looked = !self.ctx.waits_for(&check);
                 if !looked {
                     still.push(check);
                     continue;
@@ -2770,12 +3476,7 @@ impl Runner {
         let mut checks: Vec<Verdict> = playing.lead.into_iter().collect();
         checks.extend(part.checks.iter().map(|c| {
             let v = judge(c, &self.obs, &self.ctx, show);
-            let waits = match c {
-                Check::Recorded => self.ctx.recorded.is_none(),
-                Check::Served => self.ctx.served.is_none(),
-                _ => false,
-            };
-            if waits {
+            if self.ctx.waits_for(c) {
                 pending.push(c.clone());
             }
             v
@@ -2821,6 +3522,9 @@ impl Runner {
             Act::RecordOff => self.asks.push(Ask::RecordOff),
             Act::ServeOn => self.asks.push(Ask::ServeOn),
             Act::ServeOff => self.asks.push(Ask::ServeOff),
+            Act::StageOn => self.asks.push(Ask::StageOn),
+            Act::StageOff => self.asks.push(Ask::StageOff),
+            Act::LightTrial => self.asks.push(Ask::LightTrial),
         }
     }
 
@@ -3422,6 +4126,7 @@ mod tests {
             sound: true,
             recorded: Some(Verdict::Failed("no file was written".into())),
             served: None,
+            ..Default::default()
         };
         assert!(ok(
             &Check::PlayheadAt {
@@ -3514,6 +4219,7 @@ mod tests {
             tone: "tone.wav".into(),
             stills: vec!["a.png".into(), "b.png".into(), "c.png".into()],
             notes: Vec::new(),
+            venue: Ok("made".into()),
         }
     }
 
@@ -3645,6 +4351,266 @@ mod tests {
         let json = serde_json::to_string(&plan.show).unwrap();
         let again: Show = serde_json::from_str(&json).unwrap();
         assert_eq!(again.cues.len(), plan.show.cues.len());
+    }
+
+    // ----- The 3D stage -----
+
+    fn stats(missing: u32, throws: u32, left_out: bool) -> crate::render3d::FrameStats {
+        crate::render3d::FrameStats {
+            parts: 12,
+            triangles: 4000,
+            missing_pictures: missing,
+            throws,
+            light_left_out: left_out,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_venue_check_says_what_the_round_trip_came_to() {
+        let made = |r: Result<&str, &str>| Check::VenueLoads {
+            made: r.map(str::to_string).map_err(str::to_string),
+        };
+        let ctx = Context::default();
+        assert!(ok(&made(Ok("read back the same")), &[], &ctx));
+        assert!(failed(&made(Err("came back as 3 parts")), &[], &ctx));
+        // And for real: the sample, written and read back, is the same.
+        let dir = std::env::temp_dir().join(format!("newq_venue_trip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let said = venue_round_trip(&dir).expect("the sample comes back");
+        assert!(
+            said.contains("Proscenium") && said.contains("stage.glb"),
+            "{said}"
+        );
+        assert!(dir.join("stage.glb").is_file());
+        // A folder that can't be written to is said in words.
+        let why = venue_round_trip(&dir.join("not").join("there")).unwrap_err();
+        assert!(why.contains("could not be written"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_check_plays_with_a_sample_stage_or_the_shows_own() {
+        // No stage: the sample, its screens fed and lit by the first display.
+        let plan = build(&Show::default(), &media_for_plan(), Err("no".into()));
+        let first = plan.show.outputs[0].id;
+        let stage = &plan.show.stage3d;
+        assert_eq!(
+            stage.venue.as_ref().and_then(|v| v.sample),
+            Some(STAGE_SAMPLE)
+        );
+        assert_eq!(stage.surfaces.len(), 2);
+        assert!(
+            stage
+                .surfaces
+                .iter()
+                .any(|s| s.feed.output() == Some(first))
+        );
+        assert_eq!(stage.projectors.len(), 1);
+        assert_eq!(stage.projectors[0].display, Some(first));
+        assert!(!stage.viewpoints.is_empty());
+        assert!(
+            plan.notes.iter().any(|n| n.contains("sample venue")),
+            "{:?}",
+            plan.notes
+        );
+        assert!(matches!(screens_fed(&plan.show), Verdict::Ok(w) if w.contains("fills")));
+        // Its three parts, none needing the app's windows (the pure checks
+        // must run without them).
+        let parts: Vec<&Part> = plan.parts.iter().filter(|p| p.kind == "3D stage").collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|p| !p.needs_app && p.skip.is_none()));
+        let checks: Vec<&Check> = parts.iter().flat_map(|p| &p.checks).collect();
+        assert!(checks.iter().any(|c| matches!(c, Check::VenueLoads { .. })));
+        for c in [Check::ScreensFed, Check::StageDrawn, Check::LightBuilt] {
+            assert!(checks.contains(&&c), "{c:?}");
+        }
+        let acts: Vec<&Act> = parts
+            .iter()
+            .flat_map(|p| p.acts.iter().map(|a| &a.1))
+            .collect();
+        for a in [Act::StageOn, Act::StageOff, Act::LightTrial] {
+            assert!(acts.contains(&&a), "{a:?}");
+        }
+        // The show's own stage is kept, a screen given the first display
+        // when none shows one, and a projector added.
+        let mut own = Show::default();
+        let s = own.add_surface(None);
+        let plan = build(&own, &media_for_plan(), Err("no".into()));
+        let stage = &plan.show.stage3d;
+        assert!(stage.venue.is_none(), "no sample put in its place");
+        assert_eq!(stage.surfaces.len(), 1);
+        assert_eq!(
+            stage.surface(s).unwrap().feed.output(),
+            Some(plan.show.outputs[0].id)
+        );
+        assert_eq!(stage.projectors.len(), 1);
+        assert!(matches!(screens_fed(&plan.show), Verdict::Ok(_)));
+        assert_eq!(plan.notes.len(), 2, "{:?}", plan.notes);
+        // A show whose stage already has a fed screen and a projector is
+        // left as it is, and says nothing.
+        let again = build(&plan.show, &media_for_plan(), Err("no".into()));
+        assert_eq!(again.show.stage3d, plan.show.stage3d);
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+    }
+
+    #[test]
+    fn screens_that_lose_their_picture_or_a_projector_that_misses_fail() {
+        let plan = build(&Show::default(), &media_for_plan(), Err("no".into()));
+        let mut show = plan.show.clone();
+        // No screen shows a display.
+        for s in &mut show.stage3d.surfaces {
+            s.feed = crate::stage3d::Feed::None;
+        }
+        assert!(
+            matches!(screens_fed(&show), Verdict::Failed(w) if w.contains("no screen")),
+            "{:?}",
+            screens_fed(&show)
+        );
+        // A projector turned half away fills little of its screen.
+        let mut show = plan.show.clone();
+        show.stage3d.projectors[0].placement.yaw += 12.0;
+        let v = screens_fed(&show);
+        assert!(
+            matches!(&v, Verdict::Failed(w) if w.contains("fills only")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_showing_the_stage_is_judged_by_what_the_stage_drew() {
+        use crate::stage_render::StageTotals;
+        let d = |displays, views, missing, stops| StageTotals {
+            displays,
+            views,
+            display_missing_pictures: missing,
+            missing_pictures: missing,
+            thread_stops: stops,
+            ..Default::default()
+        };
+        let v = stage_drawn_verdict(&d(150, 0, 0, 0), "Display 2", 5.0);
+        assert!(
+            matches!(&v, Verdict::Ok(w) if w.contains("150 times") && w.contains("its window")),
+            "{v:?}"
+        );
+        let v = stage_drawn_verdict(&d(0, 4, 0, 0), "Display 3", 5.0);
+        assert!(
+            matches!(&v, Verdict::Ok(w) if w.contains("previews' pace")),
+            "{v:?}"
+        );
+        assert!(matches!(
+            stage_drawn_verdict(&d(0, 0, 0, 0), "Display 2", 5.0),
+            Verdict::Failed(w) if w.contains("not drawn once")
+        ));
+        assert!(matches!(
+            stage_drawn_verdict(&d(150, 0, 3, 0), "Display 2", 5.0),
+            Verdict::Failed(w) if w.contains("3 times a screen")
+        ));
+        assert!(matches!(
+            stage_drawn_verdict(&d(150, 0, 0, 1), "Display 2", 5.0),
+            Verdict::Failed(w) if w.contains("stopped once")
+        ));
+    }
+
+    #[test]
+    fn the_stage_drawn_on_a_card_of_its_own_is_judged_and_a_refused_light_passes() {
+        let card = "llvmpipe";
+        assert!(matches!(
+            trial_drawn(Some(&stats(0, 0, false)), true, 1, card),
+            Verdict::Ok(_)
+        ));
+        assert!(matches!(
+            trial_drawn(None, false, 1, card),
+            Verdict::Failed(_)
+        ));
+        assert!(matches!(
+            trial_drawn(Some(&stats(0, 0, false)), false, 1, card),
+            Verdict::Failed(w) if w.contains("never landed")
+        ));
+        assert!(matches!(
+            trial_drawn(Some(&stats(1, 0, false)), true, 2, card),
+            Verdict::Failed(w) if w.contains("no picture")
+        ));
+        assert!(matches!(
+            trial_drawn(Some(&stats(0, 0, false)), true, 0, card),
+            Verdict::NotChecked(_)
+        ));
+        let v = trial_light(Some(&stats(0, 1, false)), true, 1, card);
+        assert!(matches!(&v, Verdict::Ok(w) if w.contains("built")), "{v:?}");
+        // Refused by the card, drawn without it: a pass that says so.
+        let v = trial_light(Some(&stats(0, 0, true)), true, 1, card);
+        assert!(
+            matches!(&v, Verdict::Ok(w) if w.contains("refused")),
+            "{v:?}"
+        );
+        assert!(matches!(
+            trial_light(Some(&stats(0, 1, false)), true, 2, card),
+            Verdict::Failed(w) if w.contains("only 1 of 2")
+        ));
+        assert!(matches!(
+            trial_light(None, false, 1, card),
+            Verdict::Failed(_)
+        ));
+        assert!(matches!(
+            trial_light(None, false, 0, card),
+            Verdict::NotChecked(_)
+        ));
+        // No card at all: not checked, unless one is required.
+        let none = StageTrial::no_card();
+        if std::env::var_os("NEWQ_REQUIRE_GPU").is_some() {
+            assert!(matches!(none.drawn, Verdict::Failed(_)));
+        } else {
+            assert!(matches!(none.light, Verdict::NotChecked(_)));
+        }
+    }
+
+    /// The check's own stage drawn on a card of its own, as `--self-test`
+    /// draws it (lavapipe here): drawn with every screen fed, and the light
+    /// built.
+    #[test]
+    fn the_checks_stage_draws_on_a_graphics_card_of_its_own() {
+        let plan = build(&Show::default(), &media_for_plan(), Err("no".into()));
+        let rx = start_stage_trial(plan.show);
+        let trial = rx.recv_timeout(STAGE_TRIAL_LIMIT).expect("it said");
+        if trial.adapter.is_empty() {
+            assert!(
+                std::env::var_os("NEWQ_REQUIRE_GPU").is_none(),
+                "no GPU: {trial:?}"
+            );
+            assert!(matches!(trial.drawn, Verdict::NotChecked(_)));
+            return;
+        }
+        assert!(matches!(&trial.drawn, Verdict::Ok(_)), "{trial:?}");
+        assert!(matches!(&trial.light, Verdict::Ok(_)), "{trial:?}");
+    }
+
+    /// A check the driver answers waits for it: not seen at the part's end,
+    /// judged again when the answer comes.
+    #[test]
+    fn the_light_is_judged_when_its_thread_says_not_before() {
+        let mut p = Part::new("3D stage", "builds the light", 1.0);
+        p.acts = vec![(0.0, Act::LightTrial)];
+        p.checks = vec![Check::LightBuilt];
+        let show = Show::default();
+        let mut engine = Engine::for_tests();
+        let mut runner = Runner::new(vec![p], None, true);
+        let began = Instant::now();
+        let mut asked = Vec::new();
+        while !runner.tick(&show, &mut engine, Instant::now(), Vec::new()) {
+            asked.append(&mut runner.asks);
+            assert!(began.elapsed() < Duration::from_secs(10), "never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(asked, vec![Ask::LightTrial]);
+        assert!(runner.awaits(&Check::LightBuilt));
+        assert!(matches!(
+            runner.results[0].checks[0],
+            Verdict::NotChecked(_)
+        ));
+        runner.set_light(Verdict::Ok("built".into()), &show);
+        assert!(!runner.awaits(&Check::LightBuilt));
+        assert_eq!(runner.results[0].checks, vec![Verdict::Ok("built".into())]);
+        assert_eq!(runner.results[0].outcome, Outcome::Passed);
     }
 
     #[test]
@@ -4066,7 +5032,7 @@ mod tests {
             own_layers: false,
             ..Show::default()
         };
-        let (results, _) = super::super::selftest::play(&ff, &original, &media, None);
+        let results = super::super::selftest::play(&ff, &original, &media, None).results;
         let text = account(&results);
         let failed: Vec<&PartResult> = results
             .iter()

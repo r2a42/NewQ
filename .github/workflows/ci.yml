@@ -97,7 +97,15 @@ jobs:
             timeout 15 getent ahostsv4 azure.archive.ubuntu.com || echo "::warning::still not resolving"
           fi
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg
+          # mesa's Vulkan software driver (lavapipe), so the GPU tests and the
+          # self-test's 3D stage draw here instead of skipping for want of a card.
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg mesa-vulkan-drivers libvulkan1
+          # For the rest of the job (the tests and the self-test): draw with
+          # it, and fail rather than skip when there is no adapter. Linux only:
+          # the checks read whether NEWQ_REQUIRE_GPU is set at all, so an empty
+          # value on the other systems would count.
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          echo "NEWQ_REQUIRE_GPU=1" >> "$GITHUB_ENV"
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: brew install ffmpeg
