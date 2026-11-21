@@ -167,6 +167,19 @@ enum Rec {
     Done,
 }
 
+/// A display showing the 3D stage, while that part runs: what it was before,
+/// and the stage's counters when it began.
+struct StageShown {
+    id: crate::show::OutputId,
+    name: String,
+    /// Added for the part (no monitor of the test's was spare): removed after.
+    added: bool,
+    part_of: Option<crate::show::PartOf>,
+    source: Option<crate::stage3d::StageSource>,
+    before: crate::stage_render::StageTotals,
+    since: Instant,
+}
+
 /// The server and the stream to it, while that part runs.
 struct Serve {
     since: Instant,
@@ -203,6 +216,10 @@ pub struct FullRun {
     pub planned: f64,
     rec: Rec,
     serve: Option<Serve>,
+    /// The display showing the 3D stage, while it does.
+    stage: Option<StageShown>,
+    /// The projectors' light being drawn on a card of its own, since when.
+    light: Option<(Receiver<feature::StageTrial>, Instant)>,
     /// What the engine said of streams, for the recording's and the server's verdicts.
     stream_said: Vec<String>,
     /// When the last part ended, while a recording is still being looked at.
@@ -336,11 +353,22 @@ pub fn plan_for(
     spread: bool,
 ) -> feature::Plan {
     let mut base = show.clone();
-    super::plan::use_displays_as(&mut base, &prep.displays, !spread);
+    // What the displays and the 3D stage were pointed at goes in the report.
+    let notes = super::plan::use_displays_as(&mut base, &prep.displays, !spread);
     super::plan::use_sound(&mut base, &prep.sound);
     let mut plan = feature::build(&base, media, hosting_possible(st));
+    plan.notes.splice(0..0, notes);
     if spread {
         super::plan::spread_pictures(&mut plan.show);
+        // A display set to show the stage part way would be a new show for
+        // every computer, mid-test.
+        for p in &mut plan.parts {
+            if p.acts.iter().any(|(_, a)| *a == feature::Act::StageOn) {
+                p.skip = Some(
+                    "not run across a show network: the display that shows the stage would change the show on every computer part way through".into(),
+                );
+            }
+        }
     }
     plan
 }
@@ -412,6 +440,8 @@ pub fn launch(
     }
     let awake = KeepAwake::new("NewQ is running a test");
     let planned = plan.secs;
+    let mut notes = media.notes;
+    notes.extend(plan.notes.iter().cloned());
     let parts = plan.parts.len();
     // The point of no return: the user's show is put aside.
     let stash = match stash {
@@ -443,10 +473,12 @@ pub fn launch(
         memory: MemoryWatch::new(),
         sleep_watch: SleepWatch::new(),
         sleeps: Vec::new(),
-        media_notes: media.notes,
+        media_notes: notes,
         planned,
         rec: Rec::Idle,
         serve: None,
+        stage: None,
+        light: None,
         stream_said: Vec::new(),
         settling: None,
         panics_before: crate::crash::panic_count(),
@@ -585,7 +617,44 @@ impl FullRun {
                     self.runner.set_served(verdict, show);
                 }
             }
+            Ask::StageOn => self.stage = Some(show_the_stage(show, now)),
+            Ask::StageOff => {
+                if let Some(shown) = self.stage.take() {
+                    let d = crate::stage_render::totals().since(&shown.before);
+                    let secs = now.duration_since(shown.since).as_secs_f64();
+                    let verdict = feature::stage_drawn_verdict(&d, &shown.name, secs);
+                    put_back(show, shown);
+                    self.runner.set_stage_drawn(verdict, show);
+                }
+            }
+            Ask::LightTrial => {
+                self.light = Some((feature::start_stage_trial(show.clone()), now));
+            }
         }
+    }
+
+    /// What the projectors' light came to, once its thread says.
+    fn watch_light(&mut self, show: &Show, now: Instant) {
+        let Some((rx, since)) = &self.light else {
+            return;
+        };
+        let verdict = match rx.try_recv() {
+            Ok(trial) => trial.light,
+            Err(std::sync::mpsc::TryRecvError::Empty)
+                if now.duration_since(*since) < feature::STAGE_TRIAL_LIMIT =>
+            {
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => feature::Verdict::NotChecked(format!(
+                "the graphics card had not drawn the projectors' light after {} s",
+                feature::STAGE_TRIAL_LIMIT.as_secs()
+            )),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => feature::Verdict::NotChecked(
+                "the projectors' light could not be drawn: its thread could not be started".into(),
+            ),
+        };
+        self.light = None;
+        self.runner.set_light(verdict, show);
     }
 
     /// Follow the recording to its end and the server while it runs.
@@ -735,6 +804,7 @@ impl FullRun {
             self.obey(ask, show, now);
         }
         self.watch_send_out(show, st, now);
+        self.watch_light(show, now);
         // Each part's result, as it comes, in the events file.
         let said: Vec<String> = self.runner.results[before.min(self.runner.results.len())..]
             .iter()
@@ -760,8 +830,9 @@ impl FullRun {
         // Every part has been played. A recording still being closed and
         // looked at is waited for, but not for ever.
         let since = *self.settling.get_or_insert(now);
-        let waiting = self.runner.awaits(&Check::Recorded)
-            && matches!(self.rec, Rec::Closing { .. } | Rec::Looking(_));
+        let waiting = (self.runner.awaits(&Check::Recorded)
+            && matches!(self.rec, Rec::Closing { .. } | Rec::Looking(_)))
+            || (self.runner.awaits(&Check::LightBuilt) && self.light.is_some());
         if waiting && now.duration_since(since) < Duration::from_secs(25) {
             return None;
         }
@@ -772,6 +843,9 @@ impl FullRun {
     pub fn status(&self) -> (usize, usize, &'static str, &'static str) {
         if self.settling.is_some() {
             let (_, n, _, _) = self.runner.progress();
+            if self.light.is_some() {
+                return (n, n, "3D stage", "waiting for the projectors' light");
+            }
             return (
                 n,
                 n,
@@ -822,6 +896,51 @@ pub fn could_not_start(folder: &Path, log_dir: &Path, why: &str) -> Done {
             false,
             super::bundle::TIDY,
         ),
+    }
+}
+
+/// Have a display of the check's show the 3D stage: the last of the test's
+/// displays when there are two or more (it has a window, and the first's
+/// pictures are on the stage's screens), else one added for the part with
+/// no monitor (drawn for the previews only, at their pace).
+fn show_the_stage(show: &mut Show, now: Instant) -> StageShown {
+    let before = crate::stage_render::totals();
+    let source = crate::stage3d::StageSource {
+        viewpoint: show.stage3d.viewpoints.first().map(|v| v.name.clone()),
+    };
+    let tops: Vec<crate::show::OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| o.enabled && !o.is_sub_display())
+        .map(|o| o.id)
+        .collect();
+    let (id, added) = match tops.as_slice() {
+        [_, .., last] => (*last, false),
+        _ => (show.add_display(), true),
+    };
+    let o = show
+        .outputs
+        .iter_mut()
+        .find(|o| o.id == id)
+        .expect("the display is in the show");
+    StageShown {
+        id,
+        name: o.name.clone(),
+        added,
+        part_of: o.part_of.take(),
+        source: o.source.replace(source),
+        before,
+        since: now,
+    }
+}
+
+/// The display that showed the stage, as it was.
+fn put_back(show: &mut Show, shown: StageShown) {
+    if shown.added {
+        show.remove_output(shown.id);
+    } else if let Some(o) = show.outputs.iter_mut().find(|o| o.id == shown.id) {
+        o.part_of = shown.part_of;
+        o.source = shown.source;
     }
 }
 
@@ -1139,6 +1258,67 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The display that shows the stage for its part: the last of two (a
+    /// mirror lets go of its part of the first), or one added when there is
+    /// only one; either way the show is as it was afterwards.
+    #[test]
+    fn a_display_shows_the_stage_for_its_part_and_is_put_back() {
+        let media = feature::Media {
+            clip: "clip.mp4".into(),
+            hap: None,
+            tone: "tone.wav".into(),
+            stills: vec!["a.png".into()],
+            notes: Vec::new(),
+            venue: Ok("made".into()),
+        };
+        // One display: one is added with no monitor, and goes again.
+        let one = feature::build(&Show::default(), &media, Err("no".into())).show;
+        let mut show = one.clone();
+        let shown = show_the_stage(&mut show, Instant::now());
+        assert!(shown.added);
+        assert_eq!(show.outputs.len(), 2);
+        assert!(show.shows_stage(shown.id));
+        assert!(show.output(shown.id).unwrap().monitor.is_none());
+        // The screens keep the first display's picture.
+        assert!(matches!(
+            feature::screens_fed(&show),
+            feature::Verdict::Ok(_)
+        ));
+        put_back(&mut show, shown);
+        assert_eq!(
+            serde_json::to_string(&show.outputs).unwrap(),
+            serde_json::to_string(&one.outputs).unwrap()
+        );
+        assert_eq!(show.stage3d, one.stage3d);
+        // Two, the second a mirror of the first: the second shows the stage.
+        let mut two = Show::default();
+        let main = two.outputs[0].id;
+        let mirror = two.add_display();
+        two.outputs[1].part_of = Some(crate::show::PartOf {
+            display: main,
+            area: [0.0, 0.0, 1.0, 1.0],
+        });
+        let two = feature::build(&two, &media, Err("no".into())).show;
+        let mut show = two.clone();
+        let shown = show_the_stage(&mut show, Instant::now());
+        assert!(!shown.added);
+        assert_eq!(shown.id, mirror);
+        assert!(show.shows_stage(mirror) && !show.shows_stage(main));
+        assert_eq!(
+            show.output(mirror)
+                .unwrap()
+                .source
+                .as_ref()
+                .and_then(|s| s.viewpoint.clone()),
+            show.stage3d.viewpoints.first().map(|v| v.name.clone())
+        );
+        put_back(&mut show, shown);
+        assert_eq!(
+            serde_json::to_string(&show).unwrap(),
+            serde_json::to_string(&two).unwrap()
+        );
+    }
 
     #[test]
     fn an_rtsp_answer_is_read_for_whether_the_stream_is_there() {

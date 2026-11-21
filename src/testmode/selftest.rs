@@ -4,9 +4,12 @@
 //! zip Test Mode's window makes. For a build server (the Windows and Mac
 //! runners), and for a computer whose windows are what is in doubt.
 //!
-//! What needs the app's windows and graphics card (the recording, the stream
-//! to a server) is listed as not run; the window's own "Run the full check"
-//! does those.
+//! What needs the app's windows (the recording, the stream to a server) is
+//! listed as not run; the window's own "Run the full check" does those. The
+//! 3D stage is drawn on a graphics card of its own (`Gpu::headless`, as the
+//! GPU tests do: lavapipe on Linux CI, WARP or the card elsewhere) as a
+//! display that shows it and with the projectors' light; with no card those
+//! two checks say "not checked" (failed, with `NEWQ_REQUIRE_GPU` set).
 
 use super::bundle;
 use super::feature::{self, Media, Outcome, PartResult, Runner};
@@ -18,27 +21,61 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-/// Play the check through an engine of its own. Returns each part's result
-/// and what the engine said, with times. `limit` ends it early (the parts
-/// left are listed as not run).
-pub fn play(
-    ff: &Ffmpeg,
-    original: &Show,
-    media: &Media,
-    limit: Option<Duration>,
-) -> (Vec<PartResult>, Vec<String>) {
+/// What a headless run came to: each part's result, what the engine said
+/// (with times), and notes for the report (how the show was made, where the
+/// 3D stage was drawn).
+pub struct Played {
+    pub results: Vec<PartResult>,
+    pub said: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// The 3D stage of `show` drawn on a graphics card of its own, waited for
+/// at most `feature::STAGE_TRIAL_LIMIT`.
+fn stage_trial(show: &Show) -> feature::StageTrial {
+    let rx = feature::start_stage_trial(show.clone());
+    match rx.recv_timeout(feature::STAGE_TRIAL_LIMIT) {
+        Ok(trial) => trial,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            feature::StageTrial::both(feature::Verdict::Failed(format!(
+                "the graphics card had not drawn the 3D stage after {} s",
+                feature::STAGE_TRIAL_LIMIT.as_secs()
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            feature::StageTrial::both(feature::Verdict::NotChecked(
+                "the 3D stage could not be drawn: its thread could not be started".into(),
+            ))
+        }
+    }
+}
+
+/// Play the check through an engine of its own. `limit` ends it early (the
+/// parts left are listed as not run).
+pub fn play(ff: &Ffmpeg, original: &Show, media: &Media, limit: Option<Duration>) -> Played {
     let plan = feature::build(
         original,
         media,
         Err("not run without the app's windows".into()),
     );
     let mut show = plan.show;
+    let mut notes = plan.notes;
+    // The 3D stage first, on a card of its own: what the window's run sees
+    // in its own display and light parts.
+    let trial = stage_trial(&show);
+    notes.push(if trial.adapter.is_empty() {
+        "The 3D stage was drawn on no graphics card (none could be had).".to_string()
+    } else {
+        format!("The 3D stage was drawn on {}.", trial.adapter)
+    });
     let mut engine = Engine::new();
     engine.ff = Some(ff.clone());
     // Sound is decoded, put through its effects and mixed, and goes nowhere.
     engine.audio = AudioOut::silent();
     engine.set_log_tap(true);
     let mut runner = Runner::new(plan.parts, plan.osc, false);
+    runner.set_stage_drawn(trial.drawn, &show);
+    runner.set_light(trial.light, &show);
     let began = Instant::now();
     let mut last = began;
     let mut was_active = false;
@@ -70,7 +107,11 @@ pub fn play(
             ));
         }
         let problems = engine.take_problems();
-        if runner.tick(&show, &mut engine, now, problems) {
+        let done = runner.tick(&show, &mut engine, now, problems);
+        // What it asks of the app is not there (the recording, the server,
+        // the display showing the stage: drawn above instead).
+        runner.asks.clear();
+        if done {
             break;
         }
         if limit.is_some_and(|l| now.duration_since(began) > l) {
@@ -80,7 +121,11 @@ pub fn play(
         std::thread::sleep(Duration::from_millis(4));
     }
     engine.stop_all(0.0);
-    (runner.results, said)
+    Played {
+        results: runner.results,
+        said,
+        notes,
+    }
 }
 
 /// The report of a headless run.
@@ -118,7 +163,9 @@ pub fn report(results: &[PartResult], media_notes: &[String], took: Duration) ->
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
-    line("Run with no window: the show engine, FFmpeg and a mixer that plays to nothing.");
+    line(
+        "Run with no window: the show engine, FFmpeg, a mixer that plays to nothing, and a graphics card of its own for the 3D stage.",
+    );
     line("");
     for n in media_notes {
         line(&format!("note: {n}"));
@@ -150,7 +197,7 @@ fn system_text(ff: &Ffmpeg) -> String {
             .unwrap_or_else(|| "(it did not say)".into())
     };
     let mut out = format!(
-        "NewQ {}\nSystem: {} {}, kernel {}\nArchitecture: {}\nProcessor: {} ({} threads)\nMemory: {} MB\nGraphics: not used (no window)\n",
+        "NewQ {}\nSystem: {} {}, kernel {}\nArchitecture: {}\nProcessor: {} ({} threads)\nMemory: {} MB\nGraphics: only for the 3D stage, on a card of its own (see the report)\n",
         env!("CARGO_PKG_VERSION"),
         System::name().unwrap_or_default(),
         System::os_version().unwrap_or_default(),
@@ -233,11 +280,17 @@ pub fn run(folder: &Path) -> i32 {
     let played = crate::crash::survive("The self-test", || {
         play(&ff, &show, &media, Some(Duration::from_secs(600)))
     });
-    let Some((results, said)) = played else {
+    let Some(Played {
+        results,
+        said,
+        notes,
+    }) = played
+    else {
         return fail("NewQ panicked while playing the check (see newq-crash.log)".into());
     };
     let _ = std::fs::write(folder.join("events.log"), said.join("\n") + "\n");
-    let text = report(&results, &media.notes, began.elapsed());
+    let notes: Vec<String> = media.notes.iter().cloned().chain(notes).collect();
+    let text = report(&results, &notes, began.elapsed());
     let _ = std::fs::write(folder.join("report.txt"), &text);
     println!("{text}");
     let failed = results.iter().any(|r| r.outcome == Outcome::Failed);
