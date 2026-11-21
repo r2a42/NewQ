@@ -490,7 +490,7 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
         preview_settings(ui, st);
         hint(
             ui,
-            "The previews in this window (the Preview pane, single, multiview or 3D, and the \
+            "The previews in this window (the Preview pane, one display, multiview or 3D stage, and the \
              timeline workspace's monitor) come second to the displays: while a display \
              misses pictures people would see, they are drawn less often, then smaller, \
              then paused, and back up a couple of seconds after the displays are smooth. \
