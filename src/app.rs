@@ -1467,7 +1467,7 @@ impl App {
         // (its fonts); asking for the fonts again sends the lot.
         // (Setting the very same fonts does nothing, so each restart adds an
         // empty font family of its own to make them different.)
-        let mut fonts = egui::FontDefinitions::default();
+        let mut fonts = ui::fonts();
         self.gpu_restarts += 1;
         fonts.families.insert(
             egui::FontFamily::Name(format!("restart-{}", self.gpu_restarts).into()),
@@ -3508,7 +3508,7 @@ impl App {
                     ctl.next_repaint = Some(Instant::now());
                     // The new renderer has none of the textures egui sent the
                     // old one: have the fonts sent again (see `watch_gpu`).
-                    let mut fonts = egui::FontDefinitions::default();
+                    let mut fonts = ui::fonts();
                     self.gpu_restarts += 1;
                     fonts.families.insert(
                         egui::FontFamily::Name(format!("restart-{}", self.gpu_restarts).into()),

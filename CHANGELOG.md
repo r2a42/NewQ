@@ -78,6 +78,8 @@ release page, and a release is refused if it has none.
   display that shows part of another's picture has them greyed, with the reason. The 3D stage
   page's *Displays that show the stage* lists those displays, each with a button to it on the
   Displays page.
+- **Arrows and "▸" are drawn as characters, not boxes.** The pointers such as "Settings ▸ Displays"
+  and shortcuts such as Ctrl+↑ showed an empty box where the arrow should be.
 
 ## 0.26.0
 
