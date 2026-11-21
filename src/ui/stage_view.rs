@@ -53,6 +53,10 @@ pub struct StageShared {
     pub venue: VenueStatus,
     /// Pictures asked for this frame (the app takes them each pass).
     pub requests: Vec<ViewRequest>,
+    /// The views drawn (on screen) since the app last looked, whether or not
+    /// the governor let them ask for a picture: the drawing thread and their
+    /// targets are kept while any is (`stage_live::IDLE_RELEASE`).
+    pub in_sight: Vec<PreviewId>,
     /// Each view's picture, as the app last made it.
     pub targets: HashMap<PreviewId, Arc<LayerTexture>>,
     pub stats: HashMap<PreviewId, FrameStats>,
@@ -287,6 +291,12 @@ pub fn draw(ui: &mut Ui, show: &Show, st: &mut UiState, view: &mut StageViewStat
     if super::previews_off_line(ui, st) {
         return;
     }
+    // On screen: the thread keeps what it has on the card for it, and the
+    // window comes round now and then though nothing changes, so a still view
+    // stays counted as in sight.
+    st.stage.in_sight.push(id);
+    ui.ctx()
+        .request_repaint_after(crate::stage_live::IN_SIGHT_EVERY);
     let size = ui.available_size().max(vec2(80.0, 60.0));
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let ppp = ui.ctx().pixels_per_point();

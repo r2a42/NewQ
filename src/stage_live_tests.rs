@@ -453,6 +453,67 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
     }
 }
 
+/// A 3D view on screen keeps the thread and its picture however still it
+/// is (it asks for nothing: no request, or the governor holds it back); so
+/// does a display showing the stage. Only with neither for `IDLE_RELEASE`
+/// does the thread go.
+#[test]
+fn a_view_in_sight_keeps_the_stage_on_the_card_however_still() {
+    let Some(gpu) = crate::gpu::Gpu::headless() else {
+        assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+        return;
+    };
+    let (show, _a, b) = stage_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    let pictures = HashMap::new();
+    let preview = PreviewId::Stage(0);
+    shared.requests.push(crate::ui::stage_view::ViewRequest {
+        id: preview,
+        size: (64, 36),
+        camera: Camera::default(),
+        options: Options::default(),
+        lines: Default::default(),
+    });
+    shared.in_sight.push(preview);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    assert!(live.has_thread());
+    wait(&mut live);
+    let target = live.target_of(ViewKey::Preview(preview)).unwrap();
+    // Still: on screen, asking for nothing, long past IDLE_RELEASE and
+    // PREVIEW_KEPT.
+    for _ in 0..3 {
+        live.as_if_idle();
+        shared.in_sight.push(preview);
+        live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+        assert!(live.has_thread(), "kept while the view is in sight");
+        let kept = live.target_of(ViewKey::Preview(preview)).unwrap();
+        assert!(Arc::ptr_eq(&target, &kept), "and its picture");
+        assert!(shared.targets.contains_key(&preview));
+    }
+    assert!(shared.in_sight.is_empty(), "taken each pass");
+    // A display showing the stage keeps it too, with no view.
+    live.as_if_idle();
+    live.output_layer(&gpu, b, (160, 90));
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[seen(b, Camera::default())],
+        &pictures,
+        &[],
+        false,
+    );
+    assert!(live.has_thread(), "kept while a display shows the stage");
+    wait(&mut live);
+    // Neither for IDLE_RELEASE: let go, the view's picture too.
+    live.as_if_idle();
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    assert!(!live.has_thread());
+    assert!(live.target_of(ViewKey::Preview(preview)).is_none());
+}
+
 /// On a show network's computer: until the venue's files have come from the
 /// primary, the screens are drawn without the room and the venue is said to
 /// be on its way (never a failure); it is read once they are here.

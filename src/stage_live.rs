@@ -33,11 +33,15 @@ use std::time::{Duration, Instant};
 pub const RELOAD_SETTLE: Duration = Duration::from_millis(400);
 /// The drawing thread, if it stops, is started again at most this often.
 const RESTART_EVERY: Duration = Duration::from_secs(2);
-/// With no 3D view and no display showing the stage for this long, the
-/// drawing thread goes, and with it everything it kept on the graphics
+/// With no 3D view in sight and no display showing the stage for this long,
+/// the drawing thread goes, and with it everything it kept on the graphics
 /// card (the venue's meshes and pictures, the displays' pictures, the
-/// render targets); it starts again when a view is next asked for.
+/// render targets); it starts again when a view is next asked for. A view
+/// on screen keeps it however still it is (`StageShared::in_sight`).
 pub const IDLE_RELEASE: Duration = Duration::from_secs(30);
+/// A 3D view on screen has its window drawn at least this often, though
+/// nothing changes, so it is still counted as in sight (`IDLE_RELEASE`).
+pub const IN_SIGHT_EVERY: Duration = Duration::from_secs(10);
 /// A venue still arriving from a show network's primary is looked at again
 /// this often.
 const ARRIVING_LOOK: Duration = Duration::from_secs(1);
@@ -496,6 +500,12 @@ impl StageLive {
         let displays_behind = behind && outputs.iter().any(|o| o.seen);
         self.governed_only = !outputs.is_empty() && outputs.iter().all(|o| !o.seen);
         let asked: Vec<_> = std::mem::take(&mut shared.requests);
+        // The views on screen, asking or not (a still pane, a paused one):
+        // they keep the thread and their targets.
+        let in_sight: Vec<PreviewId> = std::mem::take(&mut shared.in_sight);
+        for id in &in_sight {
+            self.asked_at.insert(*id, now);
+        }
         let pictures_key = if outputs.is_empty() && asked.is_empty() {
             0
         } else {
@@ -605,7 +615,7 @@ impl StageLive {
             ViewKey::Preview(p) => asked_at.contains_key(p),
         });
         shared.targets.retain(|p, _| asked_at.contains_key(p));
-        if !outputs.is_empty() || !shown.is_empty() {
+        if !outputs.is_empty() || !shown.is_empty() || !in_sight.is_empty() {
             self.wanted_at = Some(now);
         }
         if !views.is_empty() {
@@ -637,14 +647,16 @@ impl StageLive {
                 None => self.restart_wanted = true,
             }
         }
-        // Nothing has wanted a picture for a while: everything the thread
-        // keeps on the graphics card goes with it.
+        // No view in sight and no display showing the stage for a while:
+        // everything the thread keeps on the graphics card goes with it.
         if self.thread.is_some()
             && self
                 .wanted_at
                 .is_none_or(|t| now.saturating_duration_since(t) >= IDLE_RELEASE)
         {
-            log::info!("3D stage: nothing to draw for a while; its pictures are let go");
+            log::info!(
+                "3D stage: no 3D view or display has shown it for a while; its pictures are let go"
+            );
             if let Some(t) = self.thread.take() {
                 drop(t.quit());
             }
@@ -806,6 +818,12 @@ impl StageLive {
     #[cfg(test)]
     pub fn as_if_idle(&mut self) {
         self.wanted_at = Instant::now().checked_sub(IDLE_RELEASE);
+        let long_ago = Instant::now().checked_sub(PREVIEW_KEPT);
+        for at in self.asked_at.values_mut() {
+            if let Some(t) = long_ago {
+                *at = t;
+            }
+        }
     }
 
     /// The device is gone: let go of everything made on it. The thread's

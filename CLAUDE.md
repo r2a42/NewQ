@@ -515,8 +515,10 @@ The README describes the features; this file is about working on the code.
   when its signature (with `feeds_key`, the stage's pictures' layers) changed or something plays;
   displays first (`ViewJob::display`, `StageJob::merged` sorts them, `displays_done`), previews wait
   while a job waits behind one whose displays are being drawn (`set_behind` in tests); a thread that stopped is noticed every pass, never busy, and
-  restarted by `wake_at` after `RESTART_EVERY`; idle `IDLE_RELEASE` (30 s) quits the thread and with
-  it all it kept on the card; feeds by
+  restarted by `wake_at` after `RESTART_EVERY`; `IDLE_RELEASE` (30 s) with no 3D view in sight and no
+  display showing the stage quits the thread and with it all it kept on the card (`stage_view::draw` pushes
+  `StageShared::in_sight` every frame it is drawn, asking or not, and asks a repaint every `IN_SIGHT_EVERY`,
+  10 s, so a still pane keeps it and its target); feeds by
   `feed_groups`: the whole picture's layers on its canvas with no keystone, mesh or blend, sub
   displays in their `area`), `landed` (the screens showing it and the control window redraw),
   `forget_device` (in `watch_gpu`'s `stopping`). `feeds_a_display` keeps those displays' uploads off
