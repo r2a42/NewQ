@@ -1075,7 +1075,8 @@ fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec
             &format!(
                 "A display can show the 3D stage instead of its cues, on its monitor and in any \
                  stream it sends: for a previz screen in the room, or to send the view out. \
-                 Choose it with the display's Shows on {displays}."
+                 Choose it with the display's {} on {displays}.",
+                super::SHOWS_ROW
             ),
         );
         let items = StageItems::of(show);
