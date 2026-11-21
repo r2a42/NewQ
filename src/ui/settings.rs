@@ -460,9 +460,9 @@ pub fn settings_view(
             });
         });
         ui.separator();
-        // Each page scrolls by itself: one opened from far down another (the
-        // 3D stage page's list of displays) isn't left at that one's place,
-        // which would also put a display it was asked to show out of sight.
+        // Each page keeps its own place: one opened from far down another
+        // (the 3D stage page's list of displays) starts at its own top, not
+        // part-way down at the other's place.
         egui::ScrollArea::vertical()
             .id_salt(("settings_page", page))
             .auto_shrink([false, false])
