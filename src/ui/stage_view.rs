@@ -575,13 +575,16 @@ fn overlay(
             .max_rect(bar)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
+    // A narrow view (beside the 3D stage page's tabs, a narrow pane) wraps
+    // its controls onto more rows and never draws them outside itself.
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
     let ui = &mut child;
     egui::Frame::new()
         .fill(Color32::from_black_alpha(170))
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.menu_button("Viewpoint ⏷", |ui| {
                     if show.stage3d.viewpoints.is_empty() {
                         ui.label(RichText::new("No saved viewpoints yet").weak());
