@@ -1,4 +1,4 @@
-//! Projectors in the 3D stage: the Projectors section of Settings ▸ 3D
+//! Projectors in the 3D stage: the Projectors tab of Settings ▸ 3D
 //! stage (add one aimed at a screen, choose its lens and brightness, stand
 //! it and point it, read how big, sharp and bright its picture is, fit it to
 //! a screen, ask which lens to hire), and what the 3D views show of them:
@@ -30,7 +30,7 @@ use egui::{Color32, RichText, Ui};
 use serde::{Deserialize, Serialize};
 
 use super::UiState;
-use super::settings::{hint, section, warning};
+use super::settings::{hint, untitled, warning};
 use crate::preview_pace::PreviewId;
 use crate::render3d::{self, Camera, Line, Paint, Part, Ray, Scene};
 use crate::show::{DisplayState, OutputId, Show};
@@ -269,7 +269,7 @@ fn work_here(a: Ask) -> Option<Here> {
 pub struct ProjectorsUi {
     /// The projector picked (in a view or on the page).
     pub picked: Option<ProjectorId>,
-    opened_for: Option<ProjectorId>,
+    pub(super) opened_for: Option<ProjectorId>,
     worker: Option<Worker>,
     /// Each projector's footprint, with the key it was made for.
     footprints: HashMap<ProjectorId, (u64, Arc<Footprint>)>,
@@ -774,9 +774,9 @@ fn add_saved(show: &mut Show, st: &UiState, saved: &Saved) -> ProjectorId {
     id
 }
 
-/// The Projectors section of Settings ▸ 3D stage.
+/// The Projectors tab of Settings ▸ 3D stage.
 pub(super) fn section_ui(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
-    section(ui, "Projectors", |ui| {
+    untitled(ui, |ui| {
         st.stage.projectors.take_answers();
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

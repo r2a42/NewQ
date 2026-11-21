@@ -71,6 +71,10 @@ pub struct StageShared {
     pub opened_for: Option<SurfaceId>,
     /// The 3D view at the top of Settings ▸ 3D stage.
     pub settings_view: StageViewState,
+    /// Its height, once dragged (else a share of the page).
+    pub view_height: Option<f32>,
+    /// The page's tab chosen (for the run, not in the show).
+    pub tab: super::stage_edit::StageTab,
     /// The projectors: the one picked, their outlines, the light under the
     /// pointer (`stage_projectors`).
     pub projectors: super::stage_projectors::ProjectorsUi,
