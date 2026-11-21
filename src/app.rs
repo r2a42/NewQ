@@ -3145,8 +3145,6 @@ impl App {
             self.layers_made = false;
         }
         let before = self.ui.preview_governor.governed();
-        // (Before: a step starts the window again.)
-        let worst = self.ui.preview_governor.worst();
         let level =
             self.ui
                 .preview_governor
@@ -3156,6 +3154,13 @@ impl App {
         }
         if level != before {
             let total = reading.total();
+            // The tally kept the window as it was just before the step (which
+            // starts it again).
+            let worst = self
+                .ui
+                .preview_governor
+                .last_step()
+                .map_or_else(Shown::default, |s| s.worst);
             log::info!(
                 "previews: {level:?} ({}{} fps, {}x size; {:?}); the worst output's seen misses over the last {} s: {} of {} new pictures ({:.1}%); since the last look {} of {}, stalls {}",
                 if level == Level::Paused {

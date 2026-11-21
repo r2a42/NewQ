@@ -454,6 +454,9 @@ pub struct Governor {
     /// When a reading was last trouble (over the line, or a stall): a level is
     /// judged only while the trouble goes on there.
     troubled_at: Option<Instant>,
+    /// The worst window (`worst`) as the level was left in this reading, for
+    /// the tally (nothing decides by it): the step starts the window again.
+    left: Option<Shown>,
 }
 
 /// The outputs' own trouble, learned: the previews gave way and it went on.
@@ -647,6 +650,7 @@ impl Governor {
 
     /// Take a reading made at `now`; the level the previews are to draw at.
     pub fn observe(&mut self, now: Instant, r: Reading) -> Level {
+        self.left = None;
         let share = match (self.strictness.share(), r.forced) {
             (Some(s), _) => s,
             // Forced pressure works whatever the setting (for trying the steps).
@@ -936,6 +940,9 @@ impl Governor {
         self.level = level;
         self.changed = Some(now);
         self.here = 0;
+        if self.left.is_none() {
+            self.left = Some(self.worst());
+        }
         self.samples.clear();
         if level == Level::Full {
             self.ceiling = Level::Full;
@@ -1026,10 +1033,150 @@ impl PreviewBudget {
 /// a hair (`render::Pace` allows the same).
 const EARLY: Duration = Duration::from_millis(2);
 
+/// One change of the governed level, as the tally keeps it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Step {
+    /// Seconds into the tally (`Tally::secs` when it happened).
+    pub at: f64,
+    pub from: Level,
+    pub to: Level,
+    /// The worst output window's seen misses and new pictures over the last
+    /// `Governor::WINDOW` as the level was left, the reading that made the
+    /// step included (`Governor::worst`; none when a change of strictness,
+    /// or Off, put the level back).
+    pub worst: Shown,
+    /// Main-loop stalls in the reading that made it.
+    pub stalls: u32,
+    /// Made under forced pressure (`NEWQ_PREVIEW_PRESSURE`), not measured.
+    pub forced: bool,
+    /// What the governor said with it, if anything.
+    pub news: Option<News>,
+}
+
+impl Step {
+    /// To fewer or smaller pictures than before.
+    pub fn is_down(&self) -> bool {
+        self.to > self.from
+    }
+}
+
+/// What the governor did since the app started, for Test Mode (or anything
+/// else that wants an account): a snapshot (`PreviewGovernor::tally`) is
+/// subtracted from a later one (`since`). Counted in
+/// `PreviewGovernor::observe` and never read there: the time between two
+/// readings goes to the level held over it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tally {
+    /// Seconds at each governed level (`Level as usize`, `Level::ALL`'s
+    /// order), before this computer's cap and its previews-off setting,
+    /// which the caller knows.
+    pub secs_at: [f64; 8],
+    /// Of those, seconds under `Strictness::Off` with nothing forced: the
+    /// previews weren't allowed to give way.
+    pub secs_off: f64,
+    /// Of those, seconds under forced pressure (`NEWQ_PREVIEW_PRESSURE`).
+    pub secs_forced: f64,
+    /// Changes of level to fewer or smaller pictures, and back (a jump of
+    /// several levels is one).
+    pub down: u32,
+    pub up: u32,
+    /// The last `Tally::KEPT` changes, and how many there were in all (so
+    /// `since` stays right once the oldest are let go).
+    pub steps: VecDeque<Step>,
+    pub steps_total: u64,
+    /// What the governor said (`News`), by seconds into the tally, the same way.
+    pub news: VecDeque<(f64, News)>,
+    pub news_total: u64,
+}
+
+impl Tally {
+    /// How many steps and news are kept (the app may run for days; steps come
+    /// at most about once a second, and only while the outputs are in trouble).
+    pub const KEPT: usize = 4096;
+
+    /// Seconds counted in all.
+    pub fn secs(&self) -> f64 {
+        self.secs_at.iter().sum()
+    }
+
+    /// Seconds at `level`.
+    // Read by Test Mode's report (step B3 of organise-and-test3d-plan.md).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn secs_at(&self, level: Level) -> f64 {
+        self.secs_at[level as usize]
+    }
+
+    /// What happened after `earlier` (a snapshot of the same tally): the
+    /// seconds and counts between the two, and the steps and news since, their
+    /// `at` seconds into the stretch. Any let go (`KEPT`) before this snapshot
+    /// was taken are missing: then `steps.len() < steps_total`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn since(&self, earlier: &Tally) -> Tally {
+        fn after<T: Clone>(all: &VecDeque<T>, total: u64, from: u64) -> VecDeque<T> {
+            let first = total.saturating_sub(all.len() as u64);
+            let skip = from.saturating_sub(first).min(all.len() as u64) as usize;
+            all.iter().skip(skip).cloned().collect()
+        }
+        let from = earlier.secs();
+        let mut steps = after(&self.steps, self.steps_total, earlier.steps_total);
+        for s in &mut steps {
+            s.at = (s.at - from).max(0.0);
+        }
+        let mut news = after(&self.news, self.news_total, earlier.news_total);
+        for (at, _) in &mut news {
+            *at = (*at - from).max(0.0);
+        }
+        Tally {
+            secs_at: std::array::from_fn(|i| (self.secs_at[i] - earlier.secs_at[i]).max(0.0)),
+            secs_off: (self.secs_off - earlier.secs_off).max(0.0),
+            secs_forced: (self.secs_forced - earlier.secs_forced).max(0.0),
+            down: self.down.saturating_sub(earlier.down),
+            up: self.up.saturating_sub(earlier.up),
+            steps,
+            steps_total: self.steps_total.saturating_sub(earlier.steps_total),
+            news,
+            news_total: self.news_total.saturating_sub(earlier.news_total),
+        }
+    }
+
+    fn keep<T>(list: &mut VecDeque<T>, total: &mut u64, item: T) {
+        list.push_back(item);
+        *total += 1;
+        while list.len() > Self::KEPT {
+            list.pop_front();
+        }
+    }
+
+    /// The time from the last reading to `now`, spent at `level`.
+    fn count(
+        &mut self,
+        last: Option<Instant>,
+        now: Instant,
+        level: Level,
+        off: bool,
+        forced: bool,
+    ) {
+        let Some(last) = last else { return };
+        let secs = now.saturating_duration_since(last).as_secs_f64();
+        self.secs_at[level as usize] += secs;
+        if forced {
+            self.secs_forced += secs;
+        } else if off {
+            self.secs_off += secs;
+        }
+    }
+}
+
 /// The one governor of every preview in the app.
 #[derive(Default)]
 pub struct PreviewGovernor {
     governor: Governor,
+    /// What it did (`tally`).
+    tally: Tally,
+    /// When it last took a reading (the tally's clock).
+    observed: Option<Instant>,
+    /// What the governor last said, until the app takes it (`take_news`).
+    news: Option<News>,
     /// When each preview last had a picture to draw.
     last: RefCell<HashMap<PreviewId, Instant>>,
     /// Which previews asked (for the tests that every kind does).
@@ -1041,24 +1188,68 @@ impl PreviewGovernor {
     /// Take a reading (the app, each pass), under this computer's
     /// `strictness`; the governed level.
     pub fn observe(&mut self, now: Instant, r: Reading, strictness: Strictness) -> Level {
+        // The time since the last reading was spent as things were until now.
+        let before = self.governor.level();
+        let off = self.governor.strictness == Strictness::Off;
+        self.tally
+            .count(self.observed, now, before, off, r.forced.is_some());
+        if self.observed.is_none_or(|t| now > t) {
+            self.observed = Some(now);
+        }
         self.governor.set_strictness(strictness);
-        self.governor.observe(now, r)
+        let level = self.governor.observe(now, r);
+        // The window as the level was left (none when a change of strictness
+        // or Off put it back: nothing was judged).
+        let worst = self.governor.left.unwrap_or_default();
+        let news = self.governor.take_news();
+        let at = self.tally.secs();
+        if let Some(n) = news {
+            let t = &mut self.tally;
+            Tally::keep(&mut t.news, &mut t.news_total, (at, n));
+            self.news = Some(n);
+        }
+        if level != before {
+            let step = Step {
+                at,
+                from: before,
+                to: level,
+                worst,
+                stalls: r.stalls,
+                forced: r.forced.is_some(),
+                news,
+            };
+            let t = &mut self.tally;
+            if step.is_down() {
+                t.down += 1;
+            } else {
+                t.up += 1;
+            }
+            Tally::keep(&mut t.steps, &mut t.steps_total, step);
+        }
+        level
     }
 
     /// What the governor last decided beyond a step, once (for the log).
     pub fn take_news(&mut self) -> Option<News> {
-        self.governor.take_news()
+        self.news.take()
+    }
+
+    /// What it did since the app started: clone one at the start of a
+    /// stretch and `Tally::since` it at the end (or look at `steps_total` each
+    /// pass and take the new steps as they come).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tally(&self) -> &Tally {
+        &self.tally
+    }
+
+    /// The last change of level, if any (for the log).
+    pub fn last_step(&self) -> Option<&Step> {
+        self.tally.steps.back()
     }
 
     /// The level the governor has set (before the computer's cap).
     pub fn governed(&self) -> Level {
         self.governor.level()
-    }
-
-    /// The worst output window's seen misses over the last `Governor::WINDOW`
-    /// (for the log).
-    pub fn worst(&self) -> Shown {
-        self.governor.worst()
     }
 
     /// For tests: be at `level`.
@@ -1889,5 +2080,253 @@ mod tests {
         assert_eq!(forced_pressure(Some("30")), Some(30));
         assert_eq!(forced_pressure(Some("on")), Some(1000));
         assert_eq!(forced_pressure(Some("5000")), Some(1000));
+    }
+}
+
+#[cfg(test)]
+mod tally_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn one(pictures: u32, late: u32) -> Reading {
+        let mut r = Reading::default();
+        r.shown[0] = Shown { pictures, late };
+        r
+    }
+
+    /// One new picture a reading, every `n`th late (counted per world).
+    fn every_nth(n: u32) -> impl FnMut(Level) -> Reading {
+        let mut i = 0;
+        move |_| {
+            i += 1;
+            one(1, u32::from(i % n == 0))
+        }
+    }
+
+    /// Readings every `step` ms for `secs` under `strictness`; the level the
+    /// previews were at over each interval (before its reading).
+    fn run(
+        p: &mut PreviewGovernor,
+        t: &mut Instant,
+        secs: u64,
+        step: u64,
+        strictness: Strictness,
+        mut world: impl FnMut(Level) -> Reading,
+    ) -> Vec<Level> {
+        (0..secs * 1000 / step)
+            .map(|_| {
+                *t += Duration::from_millis(step);
+                let held = p.governed();
+                let r = world(held);
+                p.observe(*t, r, strictness);
+                held
+            })
+            .collect()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn the_seconds_at_each_level_add_up_to_the_time_run() {
+        let mut p = PreviewGovernor::default();
+        let start = Instant::now();
+        let mut t = start;
+        p.observe(t, Reading::default(), Strictness::Relaxed);
+        let mut held = Vec::new();
+        // A tenth late: down through the levels; then smooth: back up.
+        let r = Strictness::Relaxed;
+        held.extend(run(&mut p, &mut t, 20, 16, r, every_nth(10)));
+        held.extend(run(&mut p, &mut t, 40, 16, r, |_| one(1, 0)));
+        // Strict, a tenth late again; then Off part way down: back to Full.
+        held.extend(run(
+            &mut p,
+            &mut t,
+            10,
+            16,
+            Strictness::Strict,
+            every_nth(10),
+        ));
+        assert_ne!(p.governed(), Level::Full);
+        held.extend(run(&mut p, &mut t, 10, 16, Strictness::Off, |_| one(1, 1)));
+        let tally = p.tally().clone();
+        let ran = t.duration_since(start).as_secs_f64();
+        assert!(close(tally.secs(), ran), "{} of {ran}", tally.secs());
+        for level in Level::ALL {
+            let expected = held.iter().filter(|l| **l == level).count() as f64 * 0.016;
+            assert!(
+                close(tally.secs_at(level), expected),
+                "{level:?}: {} against {expected}",
+                tally.secs_at(level)
+            );
+        }
+        assert!(tally.secs_at(Level::Fps60) > 0.0 && tally.secs_at(Level::Fps30) > 0.0);
+        // The reading that switched it Off ends a stretch spent under Strict.
+        assert!(close(tally.secs_off, 10.0 - 0.016), "{}", tally.secs_off);
+        assert_eq!(tally.secs_forced, 0.0);
+        // Every change is one step, counted once.
+        let changes = held.windows(2).filter(|w| w[0] != w[1]).count()
+            + usize::from(held.last() != Some(&p.governed()));
+        assert_eq!(tally.steps.len(), changes);
+        assert_eq!(tally.steps_total, changes as u64);
+        assert_eq!((tally.down + tally.up) as usize, changes);
+        assert!(
+            tally
+                .steps
+                .iter()
+                .all(|s| s.at <= tally.secs() && s.from != s.to)
+        );
+        let steps: Vec<Step> = tally.steps.iter().copied().collect();
+        assert!(
+            steps
+                .windows(2)
+                .all(|w| w[0].to == w[1].from && w[0].at <= w[1].at)
+        );
+        // Off's own step back to Full judged nothing.
+        let last = tally.steps.back().unwrap();
+        assert_eq!((last.to, last.worst), (Level::Full, Shown::default()));
+    }
+
+    #[test]
+    fn a_step_down_and_back_is_one_of_each() {
+        let mut p = PreviewGovernor::default();
+        let mut t = Instant::now();
+        // Every picture late at full rate, until the previews first give way.
+        let gave_way = Cell::new(false);
+        run(&mut p, &mut t, 30, 16, Strictness::Relaxed, |level| {
+            gave_way.set(gave_way.get() || level != Level::Full);
+            one(1, u32::from(!gave_way.get()))
+        });
+        assert_eq!(p.governed(), Level::Full);
+        let tally = p.tally().clone();
+        assert_eq!((tally.down, tally.up), (1, 1));
+        let (down, up) = (tally.steps[0], tally.steps[1]);
+        assert_eq!((down.from, down.to), (Level::Full, Level::Fps60));
+        assert!(down.is_down() && !down.forced && down.news.is_none());
+        // The window it was judged on: the two late pictures that made it.
+        assert_eq!(
+            down.worst,
+            Shown {
+                pictures: 2,
+                late: 2
+            }
+        );
+        assert_eq!((up.from, up.to), (Level::Fps60, Level::Full));
+        assert!(!up.is_down() && up.worst.late == 0 && up.worst.pictures > 0);
+        assert!(up.at - down.at >= Governor::PATIENCE.as_secs_f64());
+        assert!(close(tally.secs_at(Level::Fps60), up.at - down.at));
+        assert!(close(tally.secs(), 30.0 - 0.016));
+        // The app's log line takes its window from here.
+        assert_eq!(p.last_step(), Some(&up));
+    }
+
+    #[test]
+    fn off_and_forced_pressure_are_told_apart() {
+        let mut p = PreviewGovernor::default();
+        let mut t = Instant::now();
+        p.observe(t, Reading::default(), Strictness::Off);
+        // Off, the outputs in real trouble: never gives way, all of it Off.
+        run(&mut p, &mut t, 30, 50, Strictness::Off, |_| Reading {
+            stalls: 1,
+            ..one(3, 3)
+        });
+        let off = p.tally().clone();
+        assert!(close(off.secs_off, 30.0) && close(off.secs_at(Level::Full), 30.0));
+        assert_eq!((off.secs_forced, off.down, off.up), (0.0, 0, 0));
+        // Forced pressure under Off: it gives way, and the time and the steps
+        // say it was forced.
+        let forced = Reading::of(Some(1000), true, [Shown::default(); WINDOWS], 0, false);
+        run(&mut p, &mut t, 30, 50, Strictness::Off, |_| forced);
+        assert_eq!(p.governed(), Level::Paused);
+        let f = p.tally().clone().since(&off);
+        assert!(close(f.secs_forced, 30.0) && f.secs_off == 0.0, "{f:?}");
+        assert_eq!(f.down as usize, Level::ALL.len() - 1);
+        assert!(f.steps.iter().all(|s| s.forced && s.is_down()));
+        // Once it goes, Off puts them back at once: one step up, not forced.
+        let mid = p.tally().clone();
+        run(&mut p, &mut t, 5, 50, Strictness::Off, |_| one(3, 0));
+        let back = p.tally().clone().since(&mid);
+        assert_eq!((back.down, back.up), (0, 1));
+        assert!(!back.steps[0].forced && back.steps[0].to == Level::Full);
+        // (A reading tells of the time since the last: none of it forced.)
+        assert!(
+            close(back.secs_off, 5.0) && back.secs_forced == 0.0,
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn a_stretch_is_the_later_snapshot_less_the_earlier() {
+        let mut p = PreviewGovernor::default();
+        let mut t = Instant::now();
+        run(&mut p, &mut t, 20, 16, Strictness::Relaxed, every_nth(10));
+        let mid = p.tally().clone();
+        assert!(mid.steps_total > 0);
+        run(&mut p, &mut t, 30, 16, Strictness::Relaxed, |_| one(1, 0));
+        let end = p.tally().clone();
+        let stretch = end.since(&mid);
+        assert!(close(stretch.secs(), 30.0), "{}", stretch.secs());
+        assert!(stretch.steps_total > 0);
+        assert_eq!(stretch.steps_total, end.steps_total - mid.steps_total);
+        assert_eq!(stretch.steps.len() as u64, stretch.steps_total);
+        assert!(
+            stretch
+                .steps
+                .iter()
+                .all(|s| (0.0..=stretch.secs()).contains(&s.at) && !s.is_down())
+        );
+        assert_eq!((stretch.down, stretch.up), (0, end.up - mid.up));
+        // The same steps, timed from the stretch's start.
+        let (last, whole) = (stretch.steps.back().unwrap(), end.steps.back().unwrap());
+        assert!(close(last.at, whole.at - mid.secs()));
+        assert_eq!((last.from, last.to), (whole.from, whole.to));
+        // Only the last `KEPT` are kept, and `since` still finds its place.
+        let mut long = Tally::default();
+        let step = |at| Step {
+            at,
+            from: Level::Full,
+            to: Level::Fps60,
+            worst: Shown::default(),
+            stalls: 0,
+            forced: false,
+            news: None,
+        };
+        for i in 0..Tally::KEPT + 10 {
+            Tally::keep(&mut long.steps, &mut long.steps_total, step(i as f64));
+        }
+        let earlier = long.clone();
+        for i in 0..5 {
+            let at = (Tally::KEPT + 10 + i) as f64;
+            Tally::keep(&mut long.steps, &mut long.steps_total, step(at));
+        }
+        assert_eq!(long.steps.len(), Tally::KEPT);
+        let later = long.since(&earlier);
+        assert_eq!(later.steps.len(), 5);
+        assert_eq!(later.steps[0].at, (Tally::KEPT + 10) as f64);
+        // From a snapshot older than anything kept: what is kept.
+        let all = long.since(&Tally::default());
+        assert_eq!(all.steps.len(), Tally::KEPT);
+        assert_eq!(all.steps_total, (Tally::KEPT + 15) as u64);
+    }
+
+    #[test]
+    fn what_the_governor_says_is_kept_and_still_taken_once() {
+        let mut p = PreviewGovernor::default();
+        let mut t = Instant::now();
+        // The outputs' own trouble (a third late whatever the previews do):
+        // found not to be theirs.
+        run(&mut p, &mut t, 64, 16, Strictness::Relaxed, every_nth(3));
+        let tally = p.tally().clone();
+        assert!(tally.news_total >= 1);
+        let (at, first) = tally.news[0];
+        assert!(matches!(first, News::NotTheirs { .. }), "{first:?}");
+        let with = tally.steps.iter().find(|s| s.news.is_some()).copied();
+        let with = with.expect("a step carries it");
+        assert_eq!((with.at, with.news), (at, Some(first)));
+        assert!(!with.is_down(), "back up: not the previews' doing");
+        assert_eq!(p.take_news(), tally.news.back().map(|(_, n)| *n));
+        assert!(p.take_news().is_none(), "taken once");
+        assert_eq!(*p.tally(), tally, "taking it changes nothing");
     }
 }
