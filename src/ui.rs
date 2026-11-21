@@ -1069,7 +1069,29 @@ impl Action {
     }
 }
 
+/// egui's fonts with its monospace font (Hack) added last to the proportional family, so the
+/// characters the default text font lacks are drawn rather than boxes: the "▸" of every
+/// `settings::path` pointer and the arrows of shortcuts such as "Ctrl+↑".
+pub fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let mono = fonts
+        .families
+        .get(&egui::FontFamily::Monospace)
+        .and_then(|f| f.first().cloned());
+    if let Some(mono) = mono {
+        let prop = fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default();
+        if !prop.contains(&mono) {
+            prop.push(mono);
+        }
+    }
+    fonts
+}
+
 pub fn setup_style(ctx: &egui::Context) {
+    ctx.set_fonts(fonts());
     ctx.set_theme(egui::Theme::Dark);
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = Vec2::new(8.0, 6.0);
@@ -12382,6 +12404,28 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pointers_and_shortcuts_are_drawn_with_real_characters_not_boxes() {
+        let ctx = egui::Context::default();
+        super::setup_style(&ctx);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        let mut texts: Vec<String> = super::settings::SECTIONS.iter().map(|s| s.path()).collect();
+        for (keys, what) in super::keys::KEYS {
+            texts.push(keys.into());
+            texts.push(what.into());
+        }
+        texts.push("Ctrl+↑ / Ctrl+↓ → ▸".into());
+        let font = egui::FontId::proportional(14.0);
+        for text in texts {
+            let ok = ctx.fonts_mut(|f| f.has_glyphs(&font, &text));
+            assert!(
+                ok,
+                "a character of {text:?} has no glyph in the proportional font"
+            );
+        }
+    }
+
     #[test]
     fn every_import_of_a_deck_gets_a_folder_of_its_own_and_touches_nothing_there() {
         let dir = std::env::temp_dir().join(format!("newq_deck_{}", std::process::id()));
