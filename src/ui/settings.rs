@@ -1,15 +1,18 @@
-//! The settings page: every setting of the show in one place, in a sidebar of
-//! pages grouped by what they are for. It takes the place of the cue list
-//! while it is open, so the transport (GO, Stop All) and the live preview stay
-//! where they are and a setting can be tried while the show runs.
+//! The settings page: every setting in one place, in a sidebar of pages
+//! grouped by what they are for. The groups above the line are saved in the
+//! show; THIS COMPUTER's pages stay on the computer whatever show is open. It
+//! takes the place of the cue list while it is open, so the transport (GO,
+//! Stop All) and the live preview stay where they are and a setting can be
+//! tried while the show runs.
 
 use super::*;
 
-/// A page of the settings.
+/// A page of the settings. Not saved anywhere (which page is open is not
+/// kept), so pages can move and be renamed without touching a file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SettingsPage {
     #[default]
-    General,
+    Show,
     Media,
     Network,
     Displays,
@@ -20,6 +23,8 @@ pub enum SettingsPage {
     Osc,
     Midi,
     Web,
+    Interface,
+    ThisComputer,
 }
 
 /// What the pages are grouped under in the sidebar.
@@ -28,13 +33,15 @@ pub enum SettingsGroup {
     Show,
     Output,
     Control,
+    Computer,
 }
 
 impl SettingsGroup {
-    pub const ALL: [SettingsGroup; 3] = [
+    pub const ALL: [SettingsGroup; 4] = [
         SettingsGroup::Show,
         SettingsGroup::Output,
         SettingsGroup::Control,
+        SettingsGroup::Computer,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,14 +49,47 @@ impl SettingsGroup {
             SettingsGroup::Show => "SHOW",
             SettingsGroup::Output => "PICTURE AND SOUND",
             SettingsGroup::Control => "REMOTE CONTROL",
+            SettingsGroup::Computer => "THIS COMPUTER",
         }
+    }
+
+    /// Saved in the show file (the groups above the line), or kept on this
+    /// computer.
+    pub fn in_show(self) -> bool {
+        self != SettingsGroup::Computer
+    }
+
+    /// The line under the group's pages, in the sidebar and the Settings
+    /// menu: where what is set on them is kept.
+    pub fn caption(self) -> Option<&'static str> {
+        match self {
+            SettingsGroup::Control => Some("Everything above is saved in the show file."),
+            SettingsGroup::Computer => Some("Stays on this computer, whatever show is open."),
+            SettingsGroup::Show | SettingsGroup::Output => None,
+        }
+    }
+}
+
+/// The caption under a group, small and grey (the sidebar and the menu).
+pub(super) fn group_caption(ui: &mut Ui, group: SettingsGroup) {
+    if let Some(words) = group.caption() {
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(words)
+                    .small()
+                    .italics()
+                    .color(Color32::from_gray(130)),
+            )
+            .wrap(),
+        );
     }
 }
 
 impl SettingsPage {
     /// In the order the sidebar lists them.
-    pub const ALL: [SettingsPage; 11] = [
-        SettingsPage::General,
+    pub const ALL: [SettingsPage; 13] = [
+        SettingsPage::Show,
         SettingsPage::Media,
         SettingsPage::Network,
         SettingsPage::Displays,
@@ -60,11 +100,13 @@ impl SettingsPage {
         SettingsPage::Osc,
         SettingsPage::Midi,
         SettingsPage::Web,
+        SettingsPage::Interface,
+        SettingsPage::ThisComputer,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            SettingsPage::General => "General",
+            SettingsPage::Show => "Show",
             SettingsPage::Media => "Media",
             SettingsPage::Network => "Show network",
             SettingsPage::Displays => "Displays",
@@ -75,28 +117,29 @@ impl SettingsPage {
             SettingsPage::Osc => "OSC",
             SettingsPage::Midi => "MIDI",
             SettingsPage::Web => "Web remote",
+            SettingsPage::Interface => "Interface",
+            SettingsPage::ThisComputer => "This computer",
         }
     }
 
     pub fn group(self) -> SettingsGroup {
         match self {
-            SettingsPage::General | SettingsPage::Media | SettingsPage::Network => {
-                SettingsGroup::Show
-            }
+            SettingsPage::Show | SettingsPage::Media | SettingsPage::Network => SettingsGroup::Show,
             SettingsPage::Displays
             | SettingsPage::SubDisplays
             | SettingsPage::Stage3d
             | SettingsPage::Audio
             | SettingsPage::Sync => SettingsGroup::Output,
             SettingsPage::Osc | SettingsPage::Midi | SettingsPage::Web => SettingsGroup::Control,
+            SettingsPage::Interface | SettingsPage::ThisComputer => SettingsGroup::Computer,
         }
     }
 
     /// One line under the page's title.
     pub fn blurb(self) -> &'static str {
         match self {
-            SettingsPage::General => {
-                "The show's name, how Stop All behaves and where timelines open."
+            SettingsPage::Show => {
+                "The show's name, how Stop All behaves and how pictures share a display."
             }
             SettingsPage::Media => "The files the cues play, and whether they can all be found.",
             SettingsPage::Network => {
@@ -116,14 +159,22 @@ impl SettingsPage {
             SettingsPage::Osc => "Run NewQ from a lighting desk, Companion or other software.",
             SettingsPage::Midi => "Run NewQ from a MIDI controller, or follow MIDI Time Code.",
             SettingsPage::Web => "Run the show from a phone or tablet.",
+            SettingsPage::Interface => {
+                "How NewQ looks on this computer: where timelines open, the interface and the \
+                 previews. Not saved in the show."
+            }
+            SettingsPage::ThisComputer => {
+                "What this computer may do while a show runs, and where its logs are. Not saved \
+                 in the show: set it on each computer."
+            }
         }
     }
 }
 
 /// The words that lead someone to a settings page, or to a section of it:
-/// "Settings ▸ Media ▸ Power". Every pointer the program writes comes from
-/// here (or from `Section::path`), so moving a page or a section changes them
-/// all in one place.
+/// "Settings ▸ This computer ▸ Power". Every pointer the program writes comes
+/// from here (or from `Section::path`), so moving a page or a section changes
+/// them all in one place.
 pub fn path(page: SettingsPage, section: Option<&str>) -> String {
     match section {
         Some(s) => format!("Settings ▸ {} ▸ {s}", page.label()),
@@ -138,21 +189,22 @@ pub fn path(page: SettingsPage, section: Option<&str>) -> String {
 pub struct Section {
     pub page: SettingsPage,
     pub name: &'static str,
-    /// Kept on this computer rather than in the show: the heading says so.
+    /// Kept on this computer rather than in the show. On a page of the show
+    /// the heading says so; THIS COMPUTER's pages say it once for all.
     pub this_computer: bool,
 }
 
 impl Section {
     /// The heading the page draws.
     pub fn heading(self) -> String {
-        if self.this_computer {
+        if self.this_computer && self.page.group().in_show() {
             format!("{} (this computer)", self.name)
         } else {
             self.name.to_string()
         }
     }
 
-    /// "Settings ▸ General ▸ Layers".
+    /// "Settings ▸ Show ▸ Layers".
     pub fn path(self) -> String {
         path(self.page, Some(self.name))
     }
@@ -166,31 +218,50 @@ const fn section_of(page: SettingsPage, name: &'static str, this_computer: bool)
     }
 }
 
-pub const TIMELINE_EDITOR: Section = section_of(SettingsPage::General, "Timeline editor", true);
-pub const PREVIEWS: Section = section_of(SettingsPage::General, "Previews", true);
-pub const LAYERS: Section = section_of(SettingsPage::General, "Layers", false);
-pub const RECOVERY_AND_LOGS: Section =
-    section_of(SettingsPage::General, "Recovery and logs", false);
+pub const NAME_AND_FILE: Section = section_of(SettingsPage::Show, "Name and file", false);
+pub const STOP_ALL: Section = section_of(SettingsPage::Show, "Stop All", false);
+pub const LAYERS: Section = section_of(SettingsPage::Show, "Layers", false);
 pub const FILES: Section = section_of(SettingsPage::Media, "Files", false);
 pub const LIBRARY: Section = section_of(
     SettingsPage::Media,
     "Folders to keep on every computer",
     false,
 );
-pub const STREAMING_SERVER: Section = section_of(SettingsPage::Media, "Streaming server", true);
-pub const POWER: Section = section_of(SettingsPage::Media, "Power", true);
+/// First on its page: with a Timeline pane open, the classic window's
+/// settings have only a little height, and this is the section wanted then.
+pub const TIMELINE_EDITOR: Section = section_of(SettingsPage::Interface, "Timeline editor", true);
+pub const INTERFACE: Section = section_of(SettingsPage::Interface, "Classic or new", true);
+pub const PREVIEWS: Section = section_of(SettingsPage::Interface, "Previews", true);
+pub const POWER: Section = section_of(SettingsPage::ThisComputer, "Power", true);
+pub const DECODING: Section = section_of(SettingsPage::ThisComputer, "Decoding", true);
+/// What a show may start on this computer: a streaming server, programs.
+pub const ALLOWED_HERE: Section = section_of(SettingsPage::ThisComputer, "Allowed here", true);
+/// Where running a streaming server is allowed (`ALLOWED_HERE`).
+pub const STREAMING_SERVER: Section = ALLOWED_HERE;
+/// Where letting send cues run programs is allowed (`ALLOWED_HERE`).
+pub const PROGRAMS: Section = ALLOWED_HERE;
+/// Drawn only while the presenter remote is available (`clicker::AVAILABLE`).
+pub const PRESENTER_REMOTE: Section =
+    section_of(SettingsPage::ThisComputer, "Presenter remote", true);
+pub const RECOVERY_AND_LOGS: Section =
+    section_of(SettingsPage::ThisComputer, "Logs and recovery", true);
 
-/// Every section a pointer names (the test's list).
+/// Every section the pages draw, each page's in its order (the tests' list;
+/// the presenter remote's is left out while it is switched off).
 #[cfg(test)]
-pub const SECTIONS: [Section; 8] = [
-    TIMELINE_EDITOR,
-    PREVIEWS,
+pub const SECTIONS: [Section; 12] = [
+    NAME_AND_FILE,
+    STOP_ALL,
     LAYERS,
-    RECOVERY_AND_LOGS,
     FILES,
     LIBRARY,
-    STREAMING_SERVER,
+    TIMELINE_EDITOR,
+    INTERFACE,
+    PREVIEWS,
     POWER,
+    DECODING,
+    ALLOWED_HERE,
+    RECOVERY_AND_LOGS,
 ];
 
 /// An item of the menu bar that a pointer names: "Help ▸ Test Mode". The
@@ -240,7 +311,9 @@ pub(super) fn badge(text: impl Into<String>, color: Color32) -> Option<Badge> {
 pub fn page_badge(page: SettingsPage, show: &Show, st: &UiState) -> Option<Badge> {
     let weak = Color32::from_gray(140);
     match page {
-        SettingsPage::General => st.on_battery.then(|| Badge {
+        SettingsPage::Show | SettingsPage::Interface => None,
+        // Beside Power, which it is about.
+        SettingsPage::ThisComputer => st.on_battery.then(|| Badge {
             text: "⚠ battery".into(),
             color: STOP_RED,
         }),
@@ -368,7 +441,7 @@ pub fn settings_view(
                 // edges and the scroll bar so nothing is clipped.
                 ui.set_max_width((ui.available_width() - 20.0).clamp(300.0, 640.0));
                 match page {
-                    SettingsPage::General => general_page(ui, show, st, actions),
+                    SettingsPage::Show => show_page(ui, show, st),
                     SettingsPage::Media => media_page(ui, show, st, actions),
                     SettingsPage::Network => super::network::page(ui, show, st, actions),
                     SettingsPage::Displays => displays_panel(ui, show, engine, st, actions),
@@ -379,8 +452,25 @@ pub fn settings_view(
                     SettingsPage::Osc => osc_page(ui, show, st),
                     SettingsPage::Midi => midi_page(ui, show, st, engine),
                     SettingsPage::Web => web_page(ui, show, st),
+                    SettingsPage::Interface => interface_page(ui, st, actions),
+                    SettingsPage::ThisComputer => computer_page(ui, st),
                 }
             });
+    });
+}
+
+/// For the tests: where a control of a page is, by name, if it is drawn.
+#[cfg(test)]
+pub(super) fn note_rect(ui: &Ui, name: impl Into<String>, rect: egui::Rect) {
+    // Only what is in sight counts (not scrolled out of the page).
+    let rect = if ui.clip_rect().contains_rect(rect) {
+        rect
+    } else {
+        egui::Rect::NOTHING
+    };
+    ui.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(String, egui::Rect)>>(egui::Id::new("settings_rects"))
+            .push((name.into(), rect))
     });
 }
 
@@ -391,6 +481,10 @@ fn sidebar(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for group in SettingsGroup::ALL {
+                if !group.in_show() {
+                    ui.add_space(6.0);
+                    ui.separator();
+                }
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(group.label())
@@ -405,6 +499,7 @@ fn sidebar(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>
                         actions.push(Action::OpenSettings(page));
                     }
                 }
+                group_caption(ui, group);
             }
         });
 }
@@ -413,6 +508,8 @@ fn sidebar(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>
 fn nav_row(ui: &mut Ui, label: &str, selected: bool, badge: Option<&Badge>) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
+    #[cfg(test)]
+    note_rect(ui, format!("page:{label}"), rect);
     if ui.is_rect_visible(rect) {
         let visuals = ui.style().visuals.clone();
         if selected {
@@ -472,33 +569,18 @@ pub(super) fn warning(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).small().color(PREWAIT));
 }
 
-fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
-    // First, and two rows: with a Timeline pane open, the classic window's
-    // settings have only a little height, and this is the section wanted then.
-    section(ui, &TIMELINE_EDITOR.heading(), |ui| {
-        timeline_layout(ui, st, actions);
-        timeline_follow(ui, st, actions);
-        hint(
-            ui,
-            &format!(
-                "Also in {}. Hover a choice for what it does.",
-                TIMELINE_ITEM.path()
-            ),
-        );
-    });
-    section(ui, &PREVIEWS.heading(), |ui| {
-        preview_settings(ui, st);
-        hint(
-            ui,
-            "The previews in this window (the Preview pane, one display, multiview or 3D stage, and the \
-             timeline workspace's monitor) come second to the displays: while a display \
-             misses pictures people would see, they are drawn less often, then smaller, \
-             then paused, and back up a couple of seconds after the displays are smooth. \
-             The Preview pane says so while it happens. The limits here hold them at or \
-             below that all the time.",
-        );
-    });
-    section(ui, "Show", |ui| {
+/// Saves this computer's settings (`prefs.json` in the log folder).
+fn save_prefs(st: &UiState) {
+    if let Some(dir) = &st.layout_dir
+        && let Err(e) = st.prefs.save(dir)
+    {
+        log::warn!("could not save the settings of this computer: {e}");
+    }
+}
+
+/// The show's own: its name and file, Stop All, layers.
+fn show_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
+    section(ui, &NAME_AND_FILE.heading(), |ui| {
         egui::Grid::new("settings_show")
             .num_columns(2)
             .spacing([12.0, 6.0])
@@ -518,7 +600,7 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
             "The name is the one the file is offered under when saving.",
         );
     });
-    section(ui, "Stop All", |ui| {
+    section(ui, &STOP_ALL.heading(), |ui| {
         ui.horizontal(|ui| {
             ui.label("Fade out over");
             secs(ui, &mut show.panic_fade);
@@ -543,6 +625,179 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
              have it on; a show opened from an older NewQ has it off until you turn it on.",
         );
     });
+}
+
+/// How NewQ looks on this computer: where timelines open, which interface,
+/// the previews.
+fn interface_page(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+    // First, and two rows: with a Timeline pane open, the classic window's
+    // settings have only a little height, and this is the section wanted then.
+    section(ui, &TIMELINE_EDITOR.heading(), |ui| {
+        timeline_layout(ui, st, actions);
+        timeline_follow(ui, st, actions);
+        hint(
+            ui,
+            &format!(
+                "Also in {}. Hover a choice for what it does.",
+                TIMELINE_ITEM.path()
+            ),
+        );
+    });
+    section(ui, &INTERFACE.heading(), |ui| {
+        interface_choice(ui, st, actions);
+    });
+    section(ui, &PREVIEWS.heading(), |ui| {
+        preview_settings(ui, st);
+        hint(
+            ui,
+            "The previews in this window (the Preview pane, one display, multiview or 3D stage, and the \
+             timeline workspace's monitor) come second to the displays: while a display \
+             misses pictures people would see, they are drawn less often, then smaller, \
+             then paused, and back up a couple of seconds after the displays are smooth. \
+             The Preview pane says so while it happens. The limits here hold them at or \
+             below that all the time.",
+        );
+    });
+}
+
+/// The classic window of panes, or the new interface's views.
+fn interface_choice(ui: &mut Ui, st: &UiState, actions: &mut Vec<Action>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Use");
+        for (modern, words, tip) in [
+            (
+                false,
+                "the classic interface",
+                "The cue list, inspector, previews and the other panes, side by side; any pane \
+                 can be popped out to a window of its own",
+            ),
+            (
+                true,
+                "the new interface",
+                "Editor, Operator and Patch views, one at a time, in place of the panes",
+            ),
+        ] {
+            let r = ui
+                .radio(st.prefs.new_layout == modern, words)
+                .on_hover_text(format!(
+                    "{tip}. The same show either way; switch back any time."
+                ));
+            #[cfg(test)]
+            note_rect(
+                ui,
+                if modern {
+                    "interface:new"
+                } else {
+                    "interface:classic"
+                },
+                r.rect,
+            );
+            if r.clicked() && st.prefs.new_layout != modern {
+                actions.push(Action::SetNewLayout(modern));
+            }
+        }
+    });
+    hint(
+        ui,
+        "Also the Window menu's New interface tick, and the Classic interface button on the new \
+         interface's strip.",
+    );
+}
+
+/// What this computer may do while a show runs, and its logs.
+fn computer_page(ui: &mut Ui, st: &mut UiState) {
+    section(ui, &POWER.heading(), |ui| {
+        let mut keep = !st.prefs.let_computer_sleep;
+        let r = ui.checkbox(
+            &mut keep,
+            "Keep this computer and its displays awake while a display is showing",
+        );
+        #[cfg(test)]
+        note_rect(ui, "keep_awake", r.rect);
+        if r.changed() {
+            st.prefs.let_computer_sleep = !keep;
+            save_prefs(st);
+        }
+        hint(
+            ui,
+            "Stops the screen saver, dimming and sleep from interrupting a show during a long \
+             hold. Only while a display's window is open: editing a show doesn't hold it. A \
+             laptop whose lid is closed keeps showing on an external display only when it is \
+             plugged in; on battery it sleeps, and nothing can prevent that.",
+        );
+        if st.on_battery {
+            warning(
+                ui,
+                "This computer is on battery. Closing the lid would put it to sleep and stop the show.",
+            );
+        }
+    });
+    section(ui, &DECODING.heading(), |ui| {
+        let mut on = st.prefs.hw_decode;
+        let r = ui.checkbox(
+            &mut on,
+            "Decode video on the graphics hardware where possible",
+        );
+        #[cfg(test)]
+        note_rect(ui, "hw_decode", r.rect);
+        if r.changed() {
+            st.prefs.hw_decode = on;
+            crate::media::video::set_hw_decode(on);
+            save_prefs(st);
+        }
+        hint(
+            ui,
+            "Takes decoding of 4K and many-layer shows off the processor, at the cost of \
+             copying each picture back from the card. Takes effect for cues that start after \
+             the change. Try it on this computer with the show you mean to run; a file or card \
+             it can't do is decoded by the processor as before.",
+        );
+    });
+    section(ui, &ALLOWED_HERE.heading(), |ui| {
+        hint(
+            ui,
+            "What a show may start on this computer. A show can come from anywhere, so these \
+             are kept here, not in the show: each computer says yes for itself.",
+        );
+        let mut on = st.prefs.allow_hosting;
+        let r = ui.checkbox(
+            &mut on,
+            "Let a show run a streaming server on this computer",
+        );
+        #[cfg(test)]
+        note_rect(ui, "allow_hosting", r.rect);
+        if r.changed() {
+            st.prefs.allow_hosting = on;
+            save_prefs(st);
+        }
+        hint(
+            ui,
+            "A display's Send out can run the MediaMTX that comes with NewQ so phones and other \
+             computers can watch it. It opens network ports while the stream is on. A show that \
+             asks for it starts nothing here until this is on; ticking \"Run the server in NewQ\" \
+             turns it on.",
+        );
+        ui.add_space(4.0);
+        let mut on = st.prefs.allow_scripts;
+        let r = ui.checkbox(&mut on, "Let send cues run programs on this computer");
+        #[cfg(test)]
+        note_rect(ui, "allow_scripts", r.rect);
+        if r.changed() {
+            st.prefs.allow_scripts = on;
+            crate::output::set_scripts_allowed(on);
+            save_prefs(st);
+        }
+        warning(
+            ui,
+            "A program can do anything you can. Leave this off unless you have read the send \
+             cues of the show.",
+        );
+    });
+    if crate::clicker::AVAILABLE {
+        section(ui, &PRESENTER_REMOTE.heading(), |ui| {
+            presenter_remote(ui, st)
+        });
+    }
     section(ui, &RECOVERY_AND_LOGS.heading(), |ui| {
         ui.label(format!(
             "Unsaved changes are copied to a recovery file every {} seconds, and offered \
@@ -570,6 +825,74 @@ fn general_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Ve
     });
 }
 
+/// A presenter remote's two buttons, learned (switched off for now:
+/// `clicker::AVAILABLE`).
+fn presenter_remote(ui: &mut Ui, st: &mut UiState) {
+    let mut changed = false;
+    let mut on = st.prefs.clicker_on;
+    if ui
+        .checkbox(
+            &mut on,
+            "Use a presenter remote (a PerfectCue, a slide clicker) as GO and Back",
+        )
+        .changed()
+    {
+        st.prefs.clicker_on = on;
+        changed = true;
+    }
+    let rows = [
+        (crate::clicker::Button::Go, "GO button", st.prefs.clicker_go),
+        (
+            crate::clicker::Button::Back,
+            "Back button",
+            st.prefs.clicker_back,
+        ),
+    ];
+    for (button, label, code) in rows {
+        ui.horizontal(|ui| {
+            ui.label(format!("{label}:"));
+            if st.clicker_learning == Some(button) {
+                ui.label(RichText::new("press the button on the remote now…").color(PLAYHEAD));
+                if ui.button("Cancel").clicked() {
+                    st.clicker_cancel_learning = true;
+                }
+            } else {
+                ui.label(crate::clicker::describe(code));
+                if ui.button("Learn").clicked() {
+                    st.clicker_learn_request = Some(button);
+                }
+                if code.is_some() && ui.button("Clear").clicked() {
+                    match button {
+                        crate::clicker::Button::Go => st.prefs.clicker_go = None,
+                        crate::clicker::Button::Back => st.prefs.clicker_back = None,
+                    }
+                    changed = true;
+                }
+            }
+        });
+    }
+    if changed {
+        save_prefs(st);
+    }
+    if st.prefs.clicker_on && !st.clicker_status.is_empty() {
+        if st.clicker_global {
+            ui.label(RichText::new(&st.clicker_status).color(GO_GREEN));
+        } else {
+            warning(ui, &st.clicker_status);
+        }
+    }
+    hint(
+        ui,
+        "GO fires the next cue; while everything is paused it resumes instead. Back pauses \
+         everything; Back again fades everything out and stops (a second press within a \
+         second is ignored, so a double tap can't end the show). The remote is a keyboard to \
+         the computer: press Learn, then its button. Only the two learned keys are looked at; \
+         nothing typed is kept, and the keys still reach other programs. Learned keys work \
+         when NewQ isn't in front on Windows and on a Mac (which asks for the Input \
+         Monitoring permission); elsewhere only while a NewQ window has the focus.",
+    );
+}
+
 /// The previews' settings on this computer: on or off, their most pictures a
 /// second and size, and how much the displays may miss before they give way.
 fn preview_settings(ui: &mut Ui, st: &mut UiState) {
@@ -579,6 +902,7 @@ fn preview_settings(ui: &mut Ui, st: &mut UiState) {
         st.prefs.preview_cap,
         st.prefs.preview_size,
         st.prefs.preview_strictness,
+        st.prefs.fps_on_output,
     );
     egui::Grid::new("settings_previews")
         .num_columns(2)
@@ -586,12 +910,19 @@ fn preview_settings(ui: &mut Ui, st: &mut UiState) {
         .show(ui, |ui| {
             ui.label("Previews");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut st.prefs.previews_off, false, "On")
+                let _on = ui
+                    .selectable_value(&mut st.prefs.previews_off, false, "On")
                     .on_hover_text("Previews are drawn, as well as the displays leave room for.");
-                ui.selectable_value(&mut st.prefs.previews_off, true, "Off")
+                let _off = ui
+                    .selectable_value(&mut st.prefs.previews_off, true, "Off")
                     .on_hover_text(
                         "No preview pictures at all; each preview says so, with a button to turn them back on. The displays are not affected.",
                     );
+                #[cfg(test)]
+                {
+                    note_rect(ui, "previews:on", _on.rect);
+                    note_rect(ui, "previews:off", _off.rect);
+                }
             });
             ui.end_row();
             ui.label("Frame rate");
@@ -622,6 +953,18 @@ fn preview_settings(ui: &mut Ui, st: &mut UiState) {
                 }
             });
             ui.end_row();
+            ui.label("Frame rate on the display");
+            let _fps = ui
+                .checkbox(
+                    &mut st.prefs.fps_on_output,
+                    "Write it in the picture's top left corner",
+                )
+                .on_hover_text(
+                    "Writes how many pictures a second each display draws in the top left corner of its picture, while something is playing. Off by default: don't leave it on in a show.",
+                );
+            #[cfg(test)]
+            note_rect(ui, "fps_on_output", _fps.rect);
+            ui.end_row();
         });
     // What the choices made mean, one sentence each.
     let off = st.prefs.previews_off;
@@ -641,12 +984,10 @@ fn preview_settings(ui: &mut Ui, st: &mut UiState) {
         st.prefs.preview_cap,
         st.prefs.preview_size,
         st.prefs.preview_strictness,
+        st.prefs.fps_on_output,
     );
-    if after != before
-        && let Some(dir) = &st.layout_dir
-        && let Err(e) = st.prefs.save(dir)
-    {
-        log::warn!("could not save the settings of this computer: {e}");
+    if after != before {
+        save_prefs(st);
     }
 }
 
@@ -754,7 +1095,7 @@ fn log_detail(ui: &mut Ui, st: &mut UiState) {
     let forced = crate::logging::forced();
     let mut level = forced.unwrap_or(st.prefs.log_level);
     ui.horizontal(|ui| {
-        ui.label("Log detail (this computer)");
+        ui.label("Log detail");
         ui.add_enabled_ui(forced.is_none(), |ui| {
             egui::ComboBox::from_id_salt("log-detail")
                 .selected_text(level.label())
@@ -790,6 +1131,8 @@ fn log_detail(ui: &mut Ui, st: &mut UiState) {
     }
 }
 
+/// The show's files: whether they are all here, and the folders every
+/// computer of a show network keeps.
 fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     let files = show
         .cues
@@ -827,177 +1170,6 @@ fn media_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<
         );
     });
     super::net_media::library(ui, show, st, actions);
-    section(ui, &STREAMING_SERVER.heading(), |ui| {
-        let mut on = st.prefs.allow_hosting;
-        if ui
-            .checkbox(
-                &mut on,
-                "Let a show run a streaming server on this computer",
-            )
-            .changed()
-        {
-            st.prefs.allow_hosting = on;
-            if let Some(dir) = &st.layout_dir
-                && let Err(e) = st.prefs.save(dir)
-            {
-                log::warn!("could not save the settings of this computer: {e}");
-            }
-        }
-        hint(
-            ui,
-            "A display's Send out can run the MediaMTX that comes with NewQ so phones and other \
-             computers can watch it. It opens network ports while the stream is on. A show that \
-             asks for it starts nothing here until this is on; ticking \"Run the server in NewQ\" \
-             turns it on.",
-        );
-    });
-    section(ui, "Programs (this computer)", |ui| {
-        let mut on = st.prefs.allow_scripts;
-        if ui
-            .checkbox(&mut on, "Let send cues run programs on this computer")
-            .changed()
-        {
-            st.prefs.allow_scripts = on;
-            crate::output::set_scripts_allowed(on);
-            if let Some(dir) = &st.layout_dir
-                && let Err(e) = st.prefs.save(dir)
-            {
-                log::warn!("could not save the settings of this computer: {e}");
-            }
-        }
-        warning(
-            ui,
-            "A show can come from anywhere and a program can do anything you can. Leave this off \
-             unless you have read the send cues of the show.",
-        );
-    });
-    section(ui, &POWER.heading(), |ui| {
-        let mut keep = !st.prefs.let_computer_sleep;
-        if ui
-            .checkbox(
-                &mut keep,
-                "Keep this computer and its displays awake while a display is showing",
-            )
-            .changed()
-        {
-            st.prefs.let_computer_sleep = !keep;
-            if let Some(dir) = &st.layout_dir
-                && let Err(e) = st.prefs.save(dir)
-            {
-                log::warn!("could not save the settings of this computer: {e}");
-            }
-        }
-        hint(
-            ui,
-            "Stops the screen saver, dimming and sleep from interrupting a show during a long \
-             hold. Only while an output window is open: editing a show doesn't hold it. A \
-             laptop whose lid is closed keeps showing on an external display only when it is \
-             plugged in; on battery it sleeps, and nothing can prevent that.",
-        );
-        if st.on_battery {
-            warning(
-                ui,
-                "This computer is on battery. Closing the lid would put it to sleep and stop the show.",
-            );
-        }
-    });
-    if crate::clicker::AVAILABLE {
-        section(ui, "Presenter remote (this computer)", |ui| {
-            let mut changed = false;
-            let mut on = st.prefs.clicker_on;
-            if ui
-                .checkbox(
-                    &mut on,
-                    "Use a presenter remote (a PerfectCue, a slide clicker) as GO and Back",
-                )
-                .changed()
-            {
-                st.prefs.clicker_on = on;
-                changed = true;
-            }
-            let rows = [
-                (crate::clicker::Button::Go, "GO button", st.prefs.clicker_go),
-                (
-                    crate::clicker::Button::Back,
-                    "Back button",
-                    st.prefs.clicker_back,
-                ),
-            ];
-            for (button, label, code) in rows {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{label}:"));
-                    if st.clicker_learning == Some(button) {
-                        ui.label(
-                            RichText::new("press the button on the remote now…").color(PLAYHEAD),
-                        );
-                        if ui.button("Cancel").clicked() {
-                            st.clicker_cancel_learning = true;
-                        }
-                    } else {
-                        ui.label(crate::clicker::describe(code));
-                        if ui.button("Learn").clicked() {
-                            st.clicker_learn_request = Some(button);
-                        }
-                        if code.is_some() && ui.button("Clear").clicked() {
-                            match button {
-                                crate::clicker::Button::Go => st.prefs.clicker_go = None,
-                                crate::clicker::Button::Back => st.prefs.clicker_back = None,
-                            }
-                            changed = true;
-                        }
-                    }
-                });
-            }
-            if changed
-                && let Some(dir) = &st.layout_dir
-                && let Err(e) = st.prefs.save(dir)
-            {
-                log::warn!("could not save the settings of this computer: {e}");
-            }
-            if st.prefs.clicker_on && !st.clicker_status.is_empty() {
-                if st.clicker_global {
-                    ui.label(RichText::new(&st.clicker_status).color(GO_GREEN));
-                } else {
-                    warning(ui, &st.clicker_status);
-                }
-            }
-            hint(
-                ui,
-                "GO fires the next cue; while everything is paused it resumes instead. Back pauses \
-             everything; Back again fades everything out and stops (a second press within a \
-             second is ignored, so a double tap can't end the show). The remote is a keyboard to \
-             the computer: press Learn, then its button. Only the two learned keys are looked at; \
-             nothing typed is kept, and the keys still reach other programs. Learned keys work \
-             when NewQ isn't in front on Windows and on a Mac (which asks for the Input \
-             Monitoring permission); elsewhere only while a NewQ window has the focus.",
-            );
-        });
-    }
-    section(ui, "Decoding (this computer)", |ui| {
-        let mut on = st.prefs.hw_decode;
-        if ui
-            .checkbox(
-                &mut on,
-                "Decode video on the graphics hardware where possible",
-            )
-            .changed()
-        {
-            st.prefs.hw_decode = on;
-            crate::media::video::set_hw_decode(on);
-            if let Some(dir) = &st.layout_dir
-                && let Err(e) = st.prefs.save(dir)
-            {
-                log::warn!("could not save the settings of this computer: {e}");
-            }
-        }
-        hint(
-            ui,
-            "Takes decoding of 4K and many-layer shows off the processor, at the cost of \
-             copying each picture back from the card. Takes effect for cues that start after \
-             the change. Try it on this computer with the show you mean to run; a file or card \
-             it can't do is decoded by the processor as before.",
-        );
-    });
 }
 
 fn sync_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -1329,3 +1501,7 @@ fn web_page(ui: &mut Ui, show: &mut Show, st: &UiState) {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;

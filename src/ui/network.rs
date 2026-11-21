@@ -366,6 +366,10 @@ fn display_cards(ui: &mut Ui, show: &mut Show) {
 
 fn this_computer(ui: &mut Ui, v: &NetView, st: &mut UiState, actions: &mut Vec<Action>) {
     section(ui, "This computer", |ui| {
+        hint(
+            ui,
+            "Which computer does what is kept on each computer, not in the show.",
+        );
         let mut on = v.me.on;
         let r = ui.checkbox(&mut on, "This computer is part of a show network");
         note(ui, "switch", r.rect);

@@ -128,7 +128,7 @@ stays on the computer until you send it yourself.
   costs more to play than an ordinary clip (the picture is sent to the
   graphics card as four bytes a pixel, not one and a half), so a 4K alpha clip
   is a bigger ask of a modest machine than a plain one.
-- **Hardware video decoding.** Settings → Media has a switch (saved for this
+- **Hardware video decoding.** *Settings ▸ This computer ▸ Decoding* has a switch (saved for this
   computer, not in the show) that has FFmpeg decode video on the graphics card
   (NVDEC, VideoToolbox, D3D11/DXVA, VAAPI) where it can. It frees the processor
   for 4K and for many layers; each picture is still copied back to be composited,
@@ -269,7 +269,8 @@ stays on the computer until you send it yourself.
   repository has the secrets `WINDOWS_CERT_PFX` (the certificate as base64) and
   `WINDOWS_CERT_PASSWORD`; a new certificate still shows the warning until
   it builds reputation, unless it is an EV certificate.
-- **New interface (optional):** *Window ▸ New interface* swaps the panes for three
+- **New interface (optional):** *Window ▸ New interface* (or *Settings ▸ Interface ▸ Classic
+  or new*) swaps the panes for three
   views under one strip (the strip has GO and what it will fire, Stop all,
   Pause and *Show mode*; *Classic interface* switches back).
   The same show and settings, kept per computer, and nothing in the show file
@@ -297,10 +298,10 @@ stays on the computer until you send it yourself.
   computer (not in the show file).
 - **Frame rate readout:** the top of the *Preview* pane says how many pictures a second
   are being drawn, on the output's own display window if it has one (the number to
-  trust for what the audience sees) and otherwise in the main window. *Show on the
-  display* writes the same figure in the top left corner of the output's picture, only
-  while something is playing and never on an idle output; it is off by default and kept
-  per computer, so don't leave it on in a show.
+  trust for what the audience sees) and otherwise in the main window. *Settings ▸
+  Interface ▸ Previews ▸ Frame rate on the display* writes the same figure in the top left
+  corner of each display's picture, only while something is playing and never on an idle
+  display; it is off by default and kept per computer, so don't leave it on in a show.
 - **Statistics window:** *Window ▸ Statistics* opens the live figures Test Mode shows while
   it runs, for an ordinary show: memory, processor, FFmpeg's processes and processor, the slowest
   frame, late frames, audio load, sound dropouts, cues and layers playing, and the frame rate of each display.
@@ -324,11 +325,11 @@ stays on the computer until you send it yourself.
   is the system's).
 - **Awake while showing:** while any output window is open NewQ holds the computer and its displays
   awake (screen saver, dimming and sleep can't interrupt a long black hold), shown as "☀ awake" in
-  the status bar and turned off in *Settings ▸ Media ▸ Power (this computer)*. Editing a show with
+  the status bar and turned off in *Settings ▸ This computer ▸ Power*. Editing a show with
   only the preview doesn't hold it. If the computer sleeps anyway, `newq.log` says so.
 - **On battery:** a laptop with its lid closed keeps showing on an external display only while
   plugged in; on battery it sleeps, and nothing can prevent that. While outputs are open on battery
-  the status bar and the Settings sidebar warn, and the log says when the power source changes.
+  the status bar and the Settings sidebar (beside *This computer*) warn, and the log says when the power source changes.
 - **A frozen program is looked at (Mac):** if the main loop is silent for 1.5 seconds while a display
   is showing, NewQ runs macOS's `sample` on itself and saves what every thread was doing as
   `newq-freeze-<time>.txt` in the log folder (at most five a run); Test Mode copies the ones made
@@ -344,20 +345,28 @@ stays on the computer until you send it yourself.
   and the slowest picture made; a cue that takes more than 100 ms to start says so. A sound
   device's dropout is logged with its buffer size and whether NewQ's mixing was slow or the
   system called for sound late.
-- **Settings:** every setting of the show is in one place, *Settings ▸ Open
-  settings…* (**Ctrl+,** to open and close it). It takes the place of the cue
-  list, so GO, Stop All and the live preview stay where they are and a setting
-  can be tried while the show runs; *Close settings* returns. A sidebar groups
-  the pages: **Show** (*General*: the show's name, how long Stop All takes to
-  fade, where the recovery copies and logs go; *Media*: whether every file can
-  be found), **Picture and sound** (*Displays*, *Sub displays*, *Audio
-  outputs* and *Sync*) and **Remote control** (*OSC*, *MIDI* with MIDI Time
-  Code, and the *Web remote*). Beside a page the sidebar shows what needs
-  attention or is on: a red warning when a display's monitor is missing, an
-  output has a problem, files can't be found or a listener failed to start, a
-  green *on* for a listener that is working, and counts of displays and audio
-  outputs. The *Settings* menu lists the same pages and jumps straight to one.
-  Settings are saved in the show, as before.
+- **Settings:** every setting is in one place, *Settings ▸ Open settings…*
+  (**Ctrl+,** to open and close it). It takes the place of the cue list, so GO,
+  Stop All and the live preview stay where they are and a setting can be tried
+  while the show runs; *Close settings* returns. A sidebar groups the pages, and
+  says which are kept where:
+  - Saved in the show file: **Show** (*Show*: its name, how long Stop All takes
+    to fade, layers; *Media*: whether every file can be found, and the folders
+    every computer keeps; *Show network*), **Picture and sound** (*Displays*,
+    *Sub displays*, *3D stage*, *Audio outputs* and *Sync*) and **Remote
+    control** (*OSC*, *MIDI* with MIDI Time Code, and the *Web remote*).
+  - Kept on this computer, whatever show is open: **This computer**
+    (*Interface*: where a timeline opens and how its view follows, the classic or
+    the new interface, the previews; *This computer*: keeping it awake, hardware
+    decoding, whether a show may run a streaming server or programs here, the
+    log folder and how much the log says). A show opened on another computer
+    finds these as that computer has them.
+
+  Beside a page the sidebar shows what needs attention or is on: a red warning
+  when a display's monitor is missing, an output has a problem, files can't be
+  found, a listener failed to start or the computer is on battery, a green *on*
+  for a listener that is working, and counts of displays and audio outputs. The
+  *Settings* menu lists the same pages and jumps straight to one.
 - **Cue list with a GO button.** Space (or 0) fires the cue at the playhead and the
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
@@ -387,8 +396,9 @@ stays on the computer until you send it yourself.
 - **Program (script) cues.** A Send cue's *Program* tab runs a program with arguments
   when it fires (no shell, so name a script for pipes; quotes keep words together),
   stopped after 60 seconds, with failures in the log. Because a show can come from
-  anywhere, it does nothing until *Settings → General → Programs* is ticked on this
-  computer (a per-computer setting, not stored in the show).
+  anywhere, it does nothing until *Settings ▸ This computer ▸ Allowed here ▸ Let send
+  cues run programs* is ticked on this computer (a per-computer setting, not stored in
+  the show).
 - **OSC feedback.** *Settings → OSC → Feedback*: give a `host:port` and NewQ sends
   the show's state there as OSC: `/newq/playhead <number> <name>`, `/newq/paused`,
   `/newq/running`, `/newq/cue/<number>/status` (idle, prewait, playing) and
@@ -486,7 +496,7 @@ stays on the computer until you send it yourself.
   ("Previews back: the displays' missed pictures aren't theirs") and that rate is
   let be; clearly more trouble steps them down again, and if it rises as soon as
   they are back they were the cause after all.
-  Settings ▸ General ▸ *Previews* (this computer's own):
+  Settings ▸ Interface ▸ *Previews* (this computer's own):
   - *Previews* On or Off. Off draws no preview pictures at all; each preview
     says so, with a button that turns them back on. The displays don't change.
   - *Frame rate*: Automatic, or at most 60, 30, 15 or 5 a second.
@@ -645,7 +655,7 @@ stays on the computer until you send it yourself.
     Linux) or, failing that, at the next start of NewQ. It opens network ports,
     so a show can't start one on a computer that hasn't been allowed: ticking
     *Run the server in NewQ* allows it (so does *Allow this computer to run a
-    server* on that section, and *Settings → Streaming server (this computer)*
+    server* on that section, and *Settings ▸ This computer ▸ Allowed here*
     turns it off again). What the server said is added to `mediamtx.log` in a
     `mediamtx` folder inside NewQ's log folder.
 
@@ -1027,7 +1037,7 @@ stays on the computer until you send it yourself.
   still covers, and clears, the whole display). On the same layer the newest is on
   top. A show made before this (opened from an older NewQ) keeps its old way:
   a cut or crossfade there replaces everything on the display, as it did, until
-  *Settings ▸ General ▸ Layers* is turned on. New shows have it on.
+  *Settings ▸ Show ▸ Layers* is turned on. New shows have it on.
 - **Changes apply while a cue plays:** edit a cue in the inspector while it is
   on screen and it follows, with nothing to stop and fire again: layer, position,
   scale, rotation and crop, colour correction, effects, opacity, volume, fit, the
@@ -1855,7 +1865,7 @@ waveform. Where a clip comes in over an earlier one on its track, the overlap is
 drawn as a crossfade (an X, "crossfades in 2 s").
 
 **Pane or workspace.** The tracks can open in a **workspace** of their own
-instead: *Settings ▸ General ▸ Timeline editor*, the *Workspace* button at the end
+instead: *Settings ▸ Interface ▸ Timeline editor*, the *Workspace* button at the end
 of the tracks' toolbar, or *as a pane / as a workspace* under *Window ▸ Timeline*
 (a choice of this computer, in both interfaces). The workspace takes the place of
 the cue list and the panes (in the new interface it is the *Timeline* view, next to
@@ -1944,7 +1954,7 @@ are open in the classic interface they take its place.
   a tenth in from the left. You can still scroll and zoom while it runs; nothing is
   moved while you hold a drag (a clip, an edge, a key, a marker or the scroll bar),
   and it catches up when you let go. Stopped, paused or parked, the view stays where
-  you put it. Settings ▸ General ▸ *Timeline editor* (at the top of the page) or
+  you put it. Settings ▸ Interface ▸ *Timeline editor* (at the top of the page) or
   *Window ▸ Timeline* can instead keep the playhead in the middle while it runs, the tracks creeping under it (near the start and the end
   the view stops and the playhead moves off the middle; a scroll of yours while it
   runs is undone, a zoom works around the playhead). The choice is kept for this
@@ -2104,7 +2114,7 @@ NewQ crashes it writes what went wrong, where, and a backtrace to
 `newq-crash.log` in the same folder, and on Windows shows a message with that
 path. Please send that file (and `newq.log`) when you report a crash.
 
-**How much the log says.** *Settings ▸ General ▸ Recovery and logs ▸ Log detail* chooses
+**How much the log says.** *Settings ▸ This computer ▸ Logs and recovery ▸ Log detail* chooses
 it for this computer (it is not part of the show), and the change is used at once, with
 no restart:
 

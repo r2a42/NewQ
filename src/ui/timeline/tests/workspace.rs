@@ -219,14 +219,14 @@ fn the_setting_moves_an_open_editor_and_is_kept_for_this_computer() {
     settle(&mut m, &mut f);
     assert_eq!(editors(&m), vec![Host::Pane], "the Editor view's panel");
     super::super::super::apply(
-        Action::OpenSettings(super::super::super::SettingsPage::General),
+        Action::OpenSettings(super::super::super::SettingsPage::Interface),
         &mut f.show,
         &mut m.e,
         &mut f.st,
     );
     m.frame(&mut f.show, &mut f.st, vec![]);
     let radios: Vec<(bool, Rect)> =
-        noted(&m, "settings_timeline_layout").expect("the General page has the choice");
+        noted(&m, "settings_timeline_layout").expect("the Interface page has the choice");
     let ws = radios.iter().find(|r| r.0).unwrap().1;
     press(&mut m, &mut f, ws.center());
     assert_eq!(f.st.prefs.timeline_layout, TimelineLayout::Workspace);

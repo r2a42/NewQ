@@ -11,8 +11,21 @@ release page, and a release is refused if it has none.
   and *3D stage*, the previews say they give way "to keep the displays smooth", *File ▸ Media
   manager…* and *Help ▸ Test Mode…* are named as their windows are, and the new interface's
   *Lock editing* button is *Show mode*. Two hints sent people to the wrong place: the "awake"
-  mark in the status bar now says *Settings ▸ Media ▸ Power*, and the timeline's layers hint
-  *Settings ▸ General ▸ Layers*.
+  mark in the status bar and the timeline's layers hint now name the page and section they mean.
+- **Settings say what travels with the show.** The pages above the line in the sidebar are saved
+  in the show file; a new group at the bottom, *This computer*, holds what stays on the computer
+  whatever show is open, so a show opened at the venue no longer hides why decoding or power
+  are back as that computer has them. *General* is now *Show*, the *Media* page is only the
+  show's files, and the frame-rate tick has left every Preview pane's header. Nothing in any file
+  changes. Where things went:
+  - *General ▸ Show, Stop All, Layers* → *Show* (the first section is now *Name and file*).
+  - *General ▸ Timeline editor* and *Previews* → *Interface* (the timeline still first), with
+    *Classic or new* (also *Window ▸ New interface*).
+  - The Preview pane's *Show on the display* tick → *Interface ▸ Previews ▸ Frame rate on the
+    display*.
+  - *General ▸ Recovery and logs* → *This computer ▸ Logs and recovery*.
+  - *Media ▸ Power* (and the battery warning in the sidebar), *Decoding* → *This computer*.
+  - *Media ▸ Streaming server* and *Programs* → *This computer ▸ Allowed here*.
 
 ## 0.26.0
 
