@@ -6246,7 +6246,7 @@ fn display_status(d: &OutputConfig, st: &UiState) -> (String, Option<Color32>) {
             Some(STOP_RED),
         ),
         Some(DisplayState::OnMainWindowDisplay(_)) => (
-            "⚠ NewQ's main window is on this monitor, so outputs don't cover it".to_string(),
+            "⚠ NewQ's main window is on this monitor, so displays don't cover it".to_string(),
             Some(STOP_RED),
         ),
         _ => (
@@ -11228,8 +11228,9 @@ fn geometry_inspector(ui: &mut Ui, t: &mut LayerTransform) {
             ui.label("Position");
             ui.horizontal(|ui| {
                 percent(ui, &mut t.x, 0.2)
-                    .on_hover_text("Across, as a share of the output's width");
-                percent(ui, &mut t.y, 0.2).on_hover_text("Down, as a share of the output's height");
+                    .on_hover_text("Across, as a share of the display's width");
+                percent(ui, &mut t.y, 0.2)
+                    .on_hover_text("Down, as a share of the display's height");
             });
             ui.end_row();
             ui.label("Scale");

@@ -1287,7 +1287,7 @@ pub fn locked_banner(ui: &mut Ui, st: &mut UiState, actions: &mut Vec<Action>) {
             ));
             note(ui, "paired_display", r.rect);
             let r = ui.button("Open as a display computer").on_hover_text(
-                "Every screen of this computer becomes an output and this window hides, as \
+                "Every monitor of this computer becomes a display and this window hides, as \
                      when NewQ Display opens it. Ctrl+Q (Command-Q on a Mac) quits.",
             );
             note(ui, "open_as_display", r.rect);
