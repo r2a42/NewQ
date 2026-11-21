@@ -170,6 +170,9 @@ pub fn report(results: &[PartResult], media_notes: &[String], took: Duration) ->
     for n in media_notes {
         line(&format!("note: {n}"));
     }
+    if !media_notes.is_empty() {
+        line("");
+    }
     out.push_str(&feature::account(results));
     out
 }
