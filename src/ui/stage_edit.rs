@@ -944,6 +944,9 @@ pub(super) fn stage_choices(show: &Show) -> Vec<StageSource> {
         .collect()
 }
 
+/// How wide the reason a display can't show the stage is let be.
+const ITEMS_WIDTH: f32 = 280.0;
+
 /// What the stage's items in a display's *Shows* choice need to know of the
 /// show, worked out before the displays are borrowed to be edited.
 pub(super) struct StageItems {
@@ -1006,6 +1009,12 @@ impl StageItems {
         source: &mut Option<StageSource>,
     ) -> bool {
         let refused = self.refused(output);
+        // Why not, first (the menu may be cut short), and kept narrow so
+        // the menu doesn't spread across the page.
+        if let Some(why) = refused {
+            ui.set_max_width(ITEMS_WIDTH);
+            ui.add(egui::Label::new(RichText::new(why).weak().small()).wrap());
+        }
         let mut picked = false;
         for c in &self.choices {
             let words = stage_source_words(c);
@@ -1030,9 +1039,6 @@ impl StageItems {
                 *source = Some(c.clone());
                 picked = true;
             }
-        }
-        if let Some(why) = refused {
-            ui.label(RichText::new(why).weak().small());
         }
         picked
     }
