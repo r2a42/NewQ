@@ -42,6 +42,10 @@ pub const IDLE_RELEASE: Duration = Duration::from_secs(30);
 /// A 3D view on screen has its window drawn at least this often, though
 /// nothing changes, so it is still counted as in sight (`IDLE_RELEASE`).
 pub const IN_SIGHT_EVERY: Duration = Duration::from_secs(10);
+/// The venue model's files (the model and those it reads beside it) are
+/// looked at this often for a change on disk (a model exported again over
+/// itself), on a thread; read again once two looks in a row agree.
+pub const WATCH_EVERY: Duration = Duration::from_secs(2);
 /// A venue still arriving from a show network's primary is looked at again
 /// this often.
 const ARRIVING_LOOK: Duration = Duration::from_secs(1);
@@ -107,11 +111,41 @@ pub struct PictureLayers {
     pub canvas: (u32, u32),
 }
 
+/// How each of a venue model's files stood when looked at: where `locate`
+/// found it, its length and when it was last written (None: not here).
+type Stamp = Vec<Option<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>>;
+
+/// What a venue load reads, and how its files stood just before.
+struct Read {
+    key: (std::path::PathBuf, Option<SampleVenue>, u32),
+    files: Arc<Vec<std::path::PathBuf>>,
+    stamp: Stamp,
+}
+
+/// What a load thread hands back: its files, how they stood, the venue.
+type LoadDone = (
+    Arc<Vec<std::path::PathBuf>>,
+    Stamp,
+    Result<LoadedVenue, Unread>,
+);
+
 struct VenueState {
     /// Where its files are (`locate`; a test's stand-in for a show network).
     locate: fn(&std::path::Path) -> Found,
     loaded: Option<Arc<LoadedVenue>>,
-    loading: Option<(Venue, Receiver<Result<LoadedVenue, Unread>>)>,
+    loading: Option<(Venue, Receiver<LoadDone>)>,
+    /// The files of the venue last read (loaded or failed) and how they
+    /// stood: looked at every `WATCH_EVERY` for a change on disk.
+    read: Option<Read>,
+    /// A look at them under way, and when the next may start.
+    look: Option<Receiver<Stamp>>,
+    next_look: Option<Instant>,
+    /// What the last look found, when not as read: read again once the next
+    /// look finds the same (a file still being written keeps changing).
+    changed: Option<Stamp>,
+    /// The files changed on disk and have rested: read again (as a change of
+    /// brightness is; the old model stays until the new one is in).
+    stale: bool,
     /// What last failed to load, so it isn't tried every pass (until the
     /// media change: `media_generation`).
     failed: Option<(Venue, u64)>,
@@ -122,12 +156,73 @@ struct VenueState {
     settling: Option<(Venue, Instant)>,
 }
 
+impl VenueState {
+    /// Look after the watch on `want`'s files: take a look's answer (two in
+    /// a row the same and not as read: `stale`), and start the next every
+    /// `WATCH_EVERY` while nothing is being read.
+    fn watch(&mut self, want: &Venue, now: Instant) {
+        let key = reload_key(want);
+        let watched = self
+            .read
+            .as_ref()
+            .filter(|r| r.key == key && want.sample.is_none());
+        if let Some(rx) = &self.look {
+            match rx.try_recv() {
+                Ok(stamp) => {
+                    self.look = None;
+                    match watched {
+                        Some(r) if r.stamp != stamp => {
+                            if self.changed.as_ref() == Some(&stamp) {
+                                self.stale = true;
+                                self.changed = None;
+                            } else {
+                                self.changed = Some(stamp);
+                            }
+                        }
+                        _ => self.changed = None,
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.look = None,
+            }
+        }
+        let Some(r) = watched else {
+            return;
+        };
+        if self.look.is_some()
+            || self.stale
+            || self.loading.is_some()
+            || self.settling.is_some()
+            || self.next_look.is_some_and(|t| now < t)
+        {
+            return;
+        }
+        self.next_look = Some(now + WATCH_EVERY);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let files = r.files.clone();
+        let locate = self.locate;
+        let spawned = std::thread::Builder::new()
+            .name("venue-watch".into())
+            .spawn(move || {
+                let _ = tx.send(stamp_of(&files, &locate));
+            });
+        if spawned.is_ok() {
+            self.look = Some(rx);
+        }
+    }
+}
+
 impl Default for VenueState {
     fn default() -> Self {
         VenueState {
             locate,
             loaded: None,
             loading: None,
+            read: None,
+            look: None,
+            next_look: None,
+            changed: None,
+            stale: false,
             failed: None,
             arriving: None,
             settling: None,
@@ -193,6 +288,34 @@ fn locate(p: &std::path::Path) -> Found {
         crate::net::media::Local::Transferring(_) => Found::Arriving,
         crate::net::media::Local::NotFound => Found::Missing,
     }
+}
+
+/// The files the venue model at `path` reads: itself first, then those
+/// beside it (`load::venue_files`; only for a model here at that path: on a
+/// show network's computer a new version comes as a new store object).
+fn venue_file_list(
+    path: &std::path::Path,
+    locate: &dyn Fn(&std::path::Path) -> Found,
+) -> Vec<std::path::PathBuf> {
+    let mut files = vec![path.to_path_buf()];
+    if matches!(locate(path), Found::Here(p) if p == path) {
+        files.extend(crate::stage3d::load::venue_files(path));
+    }
+    files
+}
+
+/// How `files` stand now (a few `stat`s; on a thread).
+fn stamp_of(files: &[std::path::PathBuf], locate: &dyn Fn(&std::path::Path) -> Found) -> Stamp {
+    files
+        .iter()
+        .map(|f| match locate(f) {
+            Found::Here(p) => {
+                let m = std::fs::metadata(&p).ok().filter(|m| m.is_file())?;
+                Some((p, m.len(), m.modified().ok()))
+            }
+            Found::Arriving | Found::Missing => None,
+        })
+        .collect()
 }
 
 /// Changes when the files `locate` finds may have (0 with no show network).
@@ -285,7 +408,16 @@ impl StageLive {
         let now = Instant::now();
         // A load that has finished.
         if let Some((venue, rx)) = &v.loading {
-            match rx.try_recv() {
+            let done = rx.try_recv().map(|(files, stamp, result)| {
+                v.read = Some(Read {
+                    key: reload_key(venue),
+                    files,
+                    stamp,
+                });
+                v.changed = None;
+                result
+            });
+            match done {
                 Ok(Ok(loaded)) => {
                     say.push(Said::Note(format!(
                         "Venue loaded: {} ({} triangles)",
@@ -311,6 +443,7 @@ impl StageLive {
                 Ok(Err(Unread::Arriving)) => {
                     v.arriving = Some((venue.clone(), now + ARRIVING_LOOK));
                     v.loading = None;
+                    v.read = None;
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => v.loading = None,
@@ -323,20 +456,27 @@ impl StageLive {
                 v.settling = None;
                 v.failed = None;
                 v.arriving = None;
+                v.read = None;
+                v.look = None;
+                v.changed = None;
+                v.stale = false;
                 shared.venue = VenueStatus::None;
             }
             Some(want) => {
+                v.watch(want, now);
                 let have = v.loaded.as_ref().map(|l| &l.loaded_for);
-                let current = have.is_some_and(|h| !want.needs_reload(h));
+                let current = have.is_some_and(|h| !want.needs_reload(h)) && !v.stale;
                 let busy = v
                     .loading
                     .as_ref()
                     .is_some_and(|(l, _)| reload_key(l) == reload_key(want));
                 // A failure is tried again when the media change (a show
                 // network's primary sent a file it lacked).
-                let failed = v.failed.as_ref().is_some_and(|(f, generation)| {
-                    reload_key(f) == reload_key(want) && *generation == media_generation()
-                });
+                // And when its files change on disk (`stale`).
+                let failed = !v.stale
+                    && v.failed.as_ref().is_some_and(|(f, generation)| {
+                        reload_key(f) == reload_key(want) && *generation == media_generation()
+                    });
                 // (One for a venue no longer wanted is forgotten, so it
                 // brings the loop round for nothing.)
                 if v.arriving
@@ -383,13 +523,25 @@ impl StageLive {
                         let locate = v.locate;
                         let spawned = std::thread::Builder::new().name("venue-load".into()).spawn(
                             move || {
-                                let _ = tx.send(load_venue_with(&path, &venue, &locate));
+                                // How its files stand just before they are
+                                // read: a change while reading is seen later.
+                                let files = if venue.sample.is_some() {
+                                    Vec::new()
+                                } else {
+                                    venue_file_list(&path, &locate)
+                                };
+                                let stamp = stamp_of(&files, &locate);
+                                let loaded = load_venue_with(&path, &venue, &locate);
+                                let _ = tx.send((Arc::new(files), stamp, loaded));
                             },
                         );
                         match spawned {
                             Ok(_) => {
                                 v.loading = Some((want.clone(), rx));
                                 v.arriving = None;
+                                v.stale = false;
+                                v.look = None;
+                                v.changed = None;
                             }
                             Err(e) => {
                                 say.push(Said::Problem(format!("The venue didn't load: {e}")));
@@ -745,6 +897,15 @@ impl StageLive {
         if let Some((_, a)) = &self.venue.arriving {
             take(*a);
         }
+        // While something shows the stage, its venue's files are looked at
+        // for a change (and a look's answer taken soon after).
+        if self.thread.is_some() && self.venue.read.is_some() {
+            if self.venue.look.is_some() {
+                take(Instant::now() + Duration::from_millis(50));
+            } else if let Some(t) = self.venue.next_look {
+                take(t);
+            }
+        }
         at
     }
 
@@ -784,6 +945,13 @@ impl StageLive {
     #[cfg(test)]
     pub fn locate_with(&mut self, f: fn(&std::path::Path) -> Found) {
         self.venue.locate = f;
+    }
+
+    /// Look at the venue's files at the next pass, not `WATCH_EVERY` after the
+    /// last look (for a test).
+    #[cfg(test)]
+    pub fn look_now(&mut self) {
+        self.venue.next_look = None;
     }
 
     /// Behave as if the thread were behind with the displays (for a test).
