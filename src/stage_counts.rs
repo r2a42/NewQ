@@ -1,14 +1,12 @@
 //! What the 3D stage did, counted as it goes (`stage_render::totals()`), for
-//! Test Mode's reports: none reads them yet (B3 and B6 of
-//! `.claude/notes/organise-and-test3d-plan.md`), hence the `dead_code`
-//! allowance. Relaxed atomics only: counting never waits, is never on the
-//! main thread's way, and never changes what is drawn.
+//! Test Mode's reports (`testmode::previews`, and the statistics' `stage_ms`).
+//! Relaxed atomics only: counting never waits, is never on the main thread's
+//! way, and never changes what is drawn.
 //!
 //! `TOTALS` is the whole program's. A part of the stage counts through a
 //! `CountTo`, which is `TOTALS` unless a test gave it counters of its own;
 //! those count into `TOTALS` as well, so a test can check its own exactly
 //! while others draw beside it.
-#![allow(dead_code)]
 
 use crate::render3d::FrameStats;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -2354,6 +2354,7 @@ impl App {
                     .device_status(None)
                     .map_or(0, |d| d.load_permille),
                 audio_errors: crate::media::audio::stream_errors(),
+                previews: crate::stats::Previews::now(),
             })
         {
             let h = &mut self.ui.live_stats;
@@ -3183,10 +3184,14 @@ impl App {
                 ctl.window.request_redraw();
             }
         }
-        if self.ui.prefs.previews_off {
-            return Level::Paused;
-        }
-        crate::preview_pace::effective(level, self.ui.prefs.preview_cap)
+        let drawn = if self.ui.prefs.previews_off {
+            Level::Paused
+        } else {
+            crate::preview_pace::effective(level, self.ui.prefs.preview_cap)
+        };
+        // For the statistics' rows (`stats::Previews::now`).
+        crate::stats::set_preview_level(drawn);
+        drawn
     }
 
     fn render_control(&mut self, event_loop: &ActiveEventLoop) {
@@ -3974,6 +3979,7 @@ impl App {
                         .device_status(None)
                         .map_or(0, |d| d.load_permille),
                     audio_errors: crate::media::audio::stream_errors(),
+                    previews: crate::stats::Previews::now(),
                 });
             }
             app.sample_for_window(now);

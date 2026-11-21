@@ -481,6 +481,7 @@ impl Compare {
                         late_permille: crate::render::late_frames_permille(),
                         audio_permille: 0,
                         audio_errors: crate::media::audio::stream_errors(),
+                        previews: crate::stats::Previews::now(),
                     })
                 }) {
                     self.live = Some(sample);

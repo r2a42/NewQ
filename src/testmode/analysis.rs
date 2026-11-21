@@ -813,6 +813,156 @@ pub fn timeline_summary(n: &TimelineNotes) -> Vec<String> {
     out
 }
 
+// ----- The previews ----------------------------------------------------------------------
+
+/// What makes displays miss pictures when the previews giving way doesn't help.
+const NOT_THE_PREVIEWS: &str = "Often it is a laptop's lid closing, the system's own drawing of its windows (its compositor), or a monitor on the basic display driver.";
+
+/// What the previews' account says (`testmode::previews`). Full rate
+/// throughout with smooth displays says nothing. Giving way is worth knowing,
+/// never a problem; a problem is the displays missing pictures over the
+/// line with the previews already paused (or off), which says the previews
+/// aren't the cause (and then the governor's own "not theirs" is part of it,
+/// not a note of its own). The line is the computer's own
+/// (`Strictness::share`), 5% when its previews never give way. Judged by
+/// the windows' seen misses over the whole test, the misses just after a cue
+/// starts included, except while paused, where `Governor::GRACE` after a cue
+/// starts or a jump is left out, as the governor leaves it out of its own.
+pub fn analyse_previews(a: &super::previews::Account) -> Vec<Finding> {
+    use super::previews::percent;
+    use crate::stats::preview_level_words as words;
+    let mut out = Vec::new();
+    let (line, allowed) = a.settings.line();
+    let worst = a.worst();
+    let smooth = worst.is_none_or(|(_, _, share)| share <= line);
+    let theirs_not = a.not_theirs();
+    if a.tally.secs_forced > 0.0 {
+        out.push(note(format!(
+            "The previews were under made-up pressure (NEWQ_PREVIEW_PRESSURE) for {:.0} s of the test: how far they gave way says nothing about this computer.",
+            a.tally.secs_forced
+        )));
+    }
+    if let Some((n, s, share)) = a.worst_paused().filter(|w| w.2 > line) {
+        out.push(problem(format!(
+            "With the previews {} the displays still missed pictures: window {n} showed {} of its {} new pictures late ({}, over the {} line). The previews are not the cause, so turning them down will not help.{} {NOT_THE_PREVIEWS}",
+            if a.settings.off { "off" } else { "paused" },
+            s.late,
+            s.pictures,
+            percent(share),
+            percent(line),
+            if theirs_not > 0 {
+                " The governor saw it too and let the previews come back."
+            } else {
+                ""
+            }
+        )));
+        return out;
+    }
+    if a.settings.off {
+        return out;
+    }
+    if theirs_not > 0 {
+        out.push(note(format!(
+            "The previews gave way and the displays went on missing pictures all the same ({}), so the previews came back: what the displays missed wasn't the previews' doing. {NOT_THE_PREVIEWS}",
+            if theirs_not == 1 {
+                "once".to_string()
+            } else {
+                format!("{theirs_not} times")
+            }
+        )));
+    }
+    let below = a.secs_below_full();
+    // Under made-up pressure where they went says nothing (the note above).
+    if a.tally.secs_forced <= 0.0 && (a.tally.down > 0 || below >= 1.0) {
+        let gave = match a.tally.down {
+            // Already down when the test began.
+            0 => format!(
+                "The previews were below full rate, as far as {}, for {:.0} s of the {:.0} s measured",
+                words(a.lowest()),
+                below,
+                a.tally.secs()
+            ),
+            n => format!(
+                "The previews gave way {}, as far as {}, and were below full rate for {:.0} s of the {:.0} s measured",
+                if n == 1 {
+                    "once".to_string()
+                } else {
+                    format!("{n} times")
+                },
+                words(a.lowest()),
+                below,
+                a.tally.secs()
+            ),
+        };
+        out.push(note(match worst {
+            Some((_, _, share)) if smooth => format!(
+                "{gave}; the displays stayed smooth ({} of their new pictures late at worst). This computer can't draw every preview at full rate while the show plays; the show itself was not affected.",
+                percent(share)
+            ),
+            Some((n, _, share)) => format!(
+                "{gave}, and the displays still missed pictures (window {n}: {} of its new pictures late).",
+                percent(share)
+            ),
+            None => format!("{gave}."),
+        }));
+    }
+    if !allowed && let Some((n, _, share)) = worst.filter(|w| w.2 > line) {
+        out.push(note(format!(
+            "The displays missed pictures (window {n}: {} of its new pictures late) and this computer's previews are set never to give way: let them give way (Relaxed or Strict, in the previews' settings for this computer) and run the test again to see whether they were the cause.",
+            percent(share)
+        )));
+    }
+    out
+}
+
+/// The account's judgement in one sentence, for the report's Previews part.
+pub fn previews_sentence(a: &super::previews::Account) -> String {
+    use super::previews::percent;
+    use crate::stats::preview_level_words as words;
+    let (line, allowed) = a.settings.line();
+    let Some((_, _, share)) = a.worst() else {
+        return "In short: no display window drew enough pictures to judge the previews by.".into();
+    };
+    let w = percent(share);
+    if a.worst_paused().is_some_and(|p| p.2 > line) {
+        return format!(
+            "In short: the displays missed pictures even with the previews {}, so the previews are not the cause ({w} late at worst).",
+            if a.settings.off { "off" } else { "paused" }
+        );
+    }
+    if a.settings.off {
+        return format!(
+            "In short: the previews were off throughout; the displays had {w} of their new pictures late at worst."
+        );
+    }
+    let gave_way = a.tally.down > 0 || a.secs_below_full() >= 1.0;
+    let smooth = share <= line;
+    match (gave_way, smooth) {
+        (false, true) if a.tally.secs() > 0.0 => format!(
+            "In short: the previews drew at full rate throughout and the displays stayed smooth ({w} of their new pictures late at worst)."
+        ),
+        (false, true) => format!(
+            "In short: the displays stayed smooth ({w} of their new pictures late at worst)."
+        ),
+        (true, true) => format!(
+            "In short: the previews gave way, as far as {}, and the displays stayed smooth ({w} late at worst).",
+            words(a.lowest())
+        ),
+        (false, false) => format!(
+            "In short: the displays had {w} of their new pictures late at worst while the previews drew at full rate{}.",
+            if allowed {
+                ""
+            } else {
+                " (they were not allowed to give way)"
+            }
+        ),
+        (true, false) => format!(
+            "In short: the previews gave way as far as {} and the displays still had {w} of their new pictures late at worst.",
+            words(a.lowest())
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1405,5 +1555,182 @@ mod tests {
                     .starts_with("NewQ's mixing of the sound took up to 70% of the time it has")),
             "{f:?}"
         );
+    }
+
+    mod previews {
+        use super::super::{Severity, analyse_previews, previews_sentence};
+        use crate::preview_pace::{Level, News, Shown, Strictness};
+        use crate::testmode::previews::Account;
+
+        /// A test of `secs` at full rate, one display window showing
+        /// `pictures` with `late` of them late.
+        fn account(secs: f64, pictures: u32, late: u32) -> Account {
+            let mut a = Account {
+                secs,
+                ..Account::default()
+            };
+            a.tally.secs_at[Level::Full as usize] = secs;
+            a.shown[0] = Shown { pictures, late };
+            a
+        }
+
+        fn gave_way(a: &mut Account, to: Level, secs: f64) {
+            a.tally.secs_at[Level::Full as usize] -= secs;
+            a.tally.secs_at[to as usize] += secs;
+            a.tally.down += 1;
+            a.tally.up += 1;
+        }
+
+        #[test]
+        fn smooth_at_full_rate_says_nothing() {
+            let a = account(60.0, 3600, 2);
+            assert!(analyse_previews(&a).is_empty());
+            let s = previews_sentence(&a);
+            assert!(
+                s.contains("full rate throughout") && s.contains("0.1%"),
+                "{s}"
+            );
+        }
+
+        #[test]
+        fn giving_way_with_the_displays_smooth_is_worth_knowing() {
+            let mut a = account(60.0, 3600, 20);
+            gave_way(&mut a, Level::Fps30, 12.0);
+            gave_way(&mut a, Level::Fps15, 3.0);
+            let f = analyse_previews(&a);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert_eq!(f[0].severity, Severity::Note);
+            assert!(
+                f[0].text.starts_with(
+                    "The previews gave way 2 times, as far as 15 a second, and were below full rate for 15 s of the 60 s measured; the displays stayed smooth (0.6%"
+                ),
+                "{}",
+                f[0].text
+            );
+            assert!(f[0].text.contains("the show itself was not affected"));
+            let s = previews_sentence(&a);
+            assert!(s.contains("gave way, as far as 15 a second"), "{s}");
+            // The same with the displays over the line: said, not smoothed over.
+            let mut rough = a.clone();
+            rough.shown[0].late = 400;
+            let f = analyse_previews(&rough);
+            assert!(
+                f[0].text
+                    .contains("and the displays still missed pictures (window 1: 11.1%")
+            );
+            assert!(previews_sentence(&rough).contains("still had 11.1%"));
+        }
+
+        #[test]
+        fn missing_with_the_previews_paused_is_a_problem_that_isnt_theirs() {
+            let mut a = account(60.0, 3600, 300);
+            gave_way(&mut a, Level::Paused, 30.0);
+            a.while_paused[0] = Shown {
+                pictures: 1800,
+                late: 150,
+            };
+            let f = analyse_previews(&a);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert_eq!(f[0].severity, Severity::Problem);
+            assert!(
+                f[0].text.starts_with("With the previews paused the displays still missed pictures: window 1 showed 150 of its 1800 new pictures late (8.3%, over the 5.0% line). The previews are not the cause"),
+                "{}",
+                f[0].text
+            );
+            assert!(!f[0].text.contains("governor saw it too"));
+            assert!(previews_sentence(&a).contains("not the cause"));
+            // Under Strict the line is 1%: a 2% share while paused is over it.
+            let mut strict = account(60.0, 3600, 40);
+            strict.settings.strictness = Strictness::Strict;
+            strict.while_paused[0] = Shown {
+                pictures: 1000,
+                late: 20,
+            };
+            assert_eq!(analyse_previews(&strict)[0].severity, Severity::Problem);
+            // Too few pictures while paused to judge: no problem.
+            strict.while_paused[0] = Shown {
+                pictures: 100,
+                late: 20,
+            };
+            assert!(
+                analyse_previews(&strict)
+                    .iter()
+                    .all(|f| f.severity != Severity::Problem)
+            );
+        }
+
+        #[test]
+        fn not_theirs_is_a_note_and_part_of_the_problem_when_both_are_seen() {
+            let mut a = account(60.0, 3600, 30);
+            gave_way(&mut a, Level::Paused, 8.0);
+            a.tally.news.push_back((
+                20.0,
+                News::NotTheirs {
+                    at: Level::Paused,
+                    per_minute: 12.0,
+                    before: 14.0,
+                    back_to: Level::Full,
+                },
+            ));
+            a.tally.news_total = 1;
+            let f = analyse_previews(&a);
+            assert_eq!(f[0].severity, Severity::Note);
+            assert!(
+                f[0].text.contains("wasn't the previews' doing")
+                    && f[0].text.contains("basic display driver"),
+                "{}",
+                f[0].text
+            );
+            // Its account of giving way follows; nothing is a problem.
+            assert_eq!(f.len(), 2, "{f:?}");
+            assert!(f.iter().all(|f| f.severity == Severity::Note));
+            // Missing over the line while paused as well: one problem, which
+            // says the governor saw it.
+            a.while_paused[0] = Shown {
+                pictures: 400,
+                late: 30,
+            };
+            let f = analyse_previews(&a);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert_eq!(f[0].severity, Severity::Problem);
+            assert!(f[0].text.contains("The governor saw it too"));
+        }
+
+        #[test]
+        fn previews_never_allowed_to_give_way_are_judged_by_the_relaxed_line() {
+            let mut a = account(60.0, 3600, 300);
+            a.settings.strictness = Strictness::Off;
+            a.tally.secs_off = 60.0;
+            let f = analyse_previews(&a);
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].text.contains("set never to give way"), "{}", f[0].text);
+            assert!(previews_sentence(&a).contains("not allowed to give way"));
+            // Under the 5% line: nothing.
+            a.shown[0].late = 100;
+            assert!(analyse_previews(&a).is_empty());
+        }
+
+        #[test]
+        fn with_no_display_window_there_is_nothing_to_judge_by() {
+            let mut a = account(60.0, 0, 0);
+            assert!(analyse_previews(&a).is_empty());
+            assert!(previews_sentence(&a).contains("no display window"));
+            // Previews off by the computer's setting, the displays smooth.
+            a.shown[0] = Shown {
+                pictures: 3000,
+                late: 3,
+            };
+            a.settings.off = true;
+            assert!(analyse_previews(&a).is_empty());
+            assert!(previews_sentence(&a).contains("off throughout"));
+            // Made-up pressure is said.
+            a.settings.off = false;
+            a.tally.secs_forced = 30.0;
+            assert!(
+                analyse_previews(&a)[0]
+                    .text
+                    .contains("NEWQ_PREVIEW_PRESSURE")
+            );
+        }
     }
 }

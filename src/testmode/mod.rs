@@ -24,6 +24,7 @@ pub mod net_demo;
 pub mod net_judge;
 pub mod network;
 pub mod plan;
+pub mod previews;
 pub mod selftest;
 pub mod sequence;
 pub mod session;

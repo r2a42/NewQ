@@ -10,12 +10,123 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 pub const HEADER: &str = "time_utc,uptime_s,rss_mb,cpu_pct,ffmpeg,ffmpeg_rss_mb,ffmpeg_cpu_pct,\
                           fds,threads,playing,started_total,layers,late_permille,audio_permille,\
-                          stall_max_ms,log_kb,gpu_mb,commit_mb,audio_errors";
+                          stall_max_ms,log_kb,gpu_mb,commit_mb,audio_errors,preview_level,\
+                          seen_missed_permille,stage_ms";
+
+/// `stage_ms` for a 3D view slower than the last of
+/// `stage_render::FRAME_MS_BANDS` (133 ms): "over 133".
+pub const STAGE_MS_OVER: u64 = 134;
+
+/// The level the previews were last drawn at (`preview_pace::Level as u8`;
+/// `u8::MAX` until the app has paced them once), set by
+/// `App::pace_previews` each pass.
+static PREVIEW_LEVEL: AtomicU8 = AtomicU8::new(u8::MAX);
+
+/// What the previews were drawn at this pass: the governor's level under this
+/// computer's cap, `Paused` while its previews are off.
+pub fn set_preview_level(level: crate::preview_pace::Level) {
+    PREVIEW_LEVEL.store(level as u8, Ordering::Relaxed);
+}
+
+/// A preview level in a few words ("30 a second").
+pub fn preview_level_words(level: crate::preview_pace::Level) -> &'static str {
+    use crate::preview_pace::Level;
+    match level {
+        Level::Full => "full rate",
+        Level::Fps60 => "60 a second",
+        Level::Fps30 => "30 a second",
+        Level::Fps15 => "15 a second",
+        Level::Fps5 => "5 a second",
+        Level::Half => "5 a second at half size",
+        Level::Quarter => "5 a second at a quarter of the size",
+        Level::Paused => "paused",
+    }
+}
+
+/// The level the previews were last drawn at (None: not paced yet, as in a
+/// `cargo test` or the self-test, which have no window).
+pub fn preview_level() -> Option<crate::preview_pace::Level> {
+    crate::preview_pace::Level::ALL
+        .get(usize::from(PREVIEW_LEVEL.load(Ordering::Relaxed)))
+        .copied()
+}
+
+/// The previews and the 3D stage as the main loop sees them at a row: the
+/// level, and running counts that each log subtracts from its own last row's
+/// (several logs can run at once, each at its own pace).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Previews {
+    /// False: not measured (a stand-in's rows); the counts' cells stay blank.
+    pub measured: bool,
+    pub level: Option<crate::preview_pace::Level>,
+    /// Each display window's new pictures and seen misses this run.
+    pub shown: [crate::preview_pace::Shown; crate::preview_pace::WINDOWS],
+    /// What the 3D stage has drawn this run.
+    pub stage: crate::stage_render::StageTotals,
+}
+
+impl Previews {
+    /// As they stand now.
+    pub fn now() -> Previews {
+        Previews {
+            measured: true,
+            level: preview_level(),
+            shown: crate::render::shown_totals(),
+            stage: crate::stage_render::totals(),
+        }
+    }
+
+    /// The row's cells: the level now and, since `before`, the worst display
+    /// window's seen misses and the slowest 3D view.
+    pub fn row_since(&self, before: &Previews) -> PreviewCells {
+        let level = self.level.map(|l| l as u8);
+        if !self.measured || !before.measured {
+            return PreviewCells {
+                level,
+                ..PreviewCells::default()
+            };
+        }
+        let seen_missed_permille = self
+            .shown
+            .iter()
+            .zip(&before.shown)
+            .map(|(now, was)| now.since(*was))
+            .filter(|s| s.pictures >= crate::preview_pace::Governor::LEAST_PICTURES)
+            .map(|s| (u64::from(s.late.min(s.pictures)) * 1000 / u64::from(s.pictures)) as u32)
+            .max();
+        let stage_ms = self
+            .stage
+            .since(&before.stage)
+            .worst_band_ms()
+            .map(|ms| ms.min(STAGE_MS_OVER));
+        PreviewCells {
+            level,
+            seen_missed_permille,
+            stage_ms,
+        }
+    }
+}
+
+/// The three cells a row has for the previews and the stage (None: blank).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreviewCells {
+    /// 0 full rate … 7 paused (`preview_pace::Level`).
+    pub level: Option<u8>,
+    /// The worst display window's seen misses since the last row, in
+    /// thousandths of its new pictures (blank: no window showed
+    /// `Governor::LEAST_PICTURES` new ones: a still with one late is chance).
+    pub seen_missed_permille: Option<u32>,
+    /// The slowest 3D view since the last row, to its band's upper bound
+    /// (ms: 1, 2, 4, 8, 16, 33, 66, 133, and `STAGE_MS_OVER` for over 133;
+    /// blank: none drawn).
+    pub stage_ms: Option<u64>,
+}
 
 /// What the app tells the log at each sample.
 #[derive(Clone, Copy, Debug, Default)]
@@ -27,6 +138,8 @@ pub struct Inputs {
     pub audio_permille: u32,
     /// The sound devices' stream errors (dropouts) since NewQ started.
     pub audio_errors: u64,
+    /// The previews and the 3D stage (`Previews::now()`).
+    pub previews: Previews,
 }
 
 /// One row of the log, as numbers (the Test Mode window shows the latest).
@@ -47,6 +160,9 @@ pub struct Sample {
     /// Windows: the memory NewQ has committed (private bytes), which a leak in
     /// the graphics driver can raise without the working set moving.
     pub commit_mb: Option<u64>,
+    /// The previews' level, the displays' worst seen misses and the slowest
+    /// 3D view since the last row.
+    pub previews: PreviewCells,
 }
 
 pub struct StatsLog {
@@ -63,6 +179,9 @@ pub struct StatsLog {
     last_row: Instant,
     last_frame: Instant,
     stall: Duration,
+    /// The previews' counts at the last row (before the first: when the log
+    /// began).
+    previews_seen: Previews,
 }
 
 /// What the main loop knew when it asked for a row.
@@ -71,6 +190,7 @@ struct Job {
     uptime: u64,
     inputs: Inputs,
     stall: u64,
+    previews: PreviewCells,
 }
 
 /// What looking at the processes found: the slow part of a row, done on the
@@ -167,7 +287,11 @@ impl StatsLog {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        let new = !path.exists() || std::fs::metadata(path).is_ok_and(|m| m.len() == 0);
+        // A file begun by another version, with other columns, gets this
+        // version's header before its rows (the reader takes each header up).
+        let new = std::fs::read_to_string(path).map_or(true, |text| {
+            text.lines().rev().find(|l| l.starts_with("time_utc")) != Some(HEADER)
+        });
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -209,6 +333,7 @@ impl StatsLog {
                         stall_ms: job.stall,
                         gpu_mb: crate::gpu::gpu_allocated_mb(),
                         commit_mb: l.commit.map(|c| c >> 20),
+                        previews: job.previews,
                     };
                     if let Some(f) = &mut file {
                         let _ = writeln!(f, "{}", row_of(job.when, &sample, &l));
@@ -231,6 +356,7 @@ impl StatsLog {
             last_row: now,
             last_frame: now,
             stall: Duration::ZERO,
+            previews_seen: Previews::now(),
         }
     }
 
@@ -245,11 +371,17 @@ impl StatsLog {
             && let Some(jobs) = &self.jobs
         {
             self.last_row = now;
+            let inputs = inputs();
+            let previews = inputs.previews.row_since(&self.previews_seen);
+            if inputs.previews.measured {
+                self.previews_seen = inputs.previews;
+            }
             let job = Job {
                 when: unix_now(),
                 uptime: now.duration_since(self.started).as_secs(),
-                inputs: inputs(),
+                inputs,
                 stall: self.stall.as_millis() as u64,
+                previews,
             };
             self.stall = Duration::ZERO;
             self.asked = jobs.send(job).is_ok();
@@ -289,6 +421,7 @@ fn row_of(when: i64, s: &Sample, l: &Looked) -> String {
         s.stall_ms,
         l.log_kb,
         [s.gpu_mb, s.commit_mb],
+        s.previews,
     )
 }
 
@@ -350,10 +483,11 @@ fn row(
     stall_ms: u64,
     log_kb: u64,
     extra: [Option<u64>; 2],
+    p: PreviewCells,
 ) -> String {
     let cell = |v: Option<u64>| v.map_or(String::new(), |v| v.to_string());
     format!(
-        "{},{uptime},{},{:.1},{ffmpeg},{},{:.1},{},{},{},{},{},{},{},{stall_ms},{log_kb},{},{},{}",
+        "{},{uptime},{},{:.1},{ffmpeg},{},{:.1},{},{},{},{},{},{},{},{stall_ms},{log_kb},{},{},{},{},{},{}",
         utc(when),
         rss[0] >> 20,
         cpu[0],
@@ -369,6 +503,9 @@ fn row(
         cell(extra[0]),
         cell(extra[1]),
         i.audio_errors,
+        cell(p.level.map(u64::from)),
+        cell(p.seen_missed_permille.map(u64::from)),
+        cell(p.stage_ms),
     )
 }
 
@@ -381,7 +518,7 @@ struct Rows {
 
 fn read_rows(text: &str) -> Result<Rows, String> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let header: Vec<&str> = lines
+    let mut header: Vec<&str> = lines
         .next()
         .ok_or("the file is empty")?
         .split(',')
@@ -392,17 +529,23 @@ fn read_rows(text: &str) -> Result<Rows, String> {
     let names: Vec<&'static str> = HEADER.split(',').map(str::trim).collect();
     // Where each column is in this file: a file from an earlier version has
     // fewer, and its missing columns read as blanks.
-    let at: Vec<Option<usize>> = names
-        .iter()
-        .map(|n| header.iter().position(|h| h.trim() == *n))
-        .collect();
+    let place = |header: &[&str]| -> Vec<Option<usize>> {
+        names
+            .iter()
+            .map(|n| header.iter().position(|h| h.trim() == *n))
+            .collect()
+    };
+    let mut at = place(&header);
     let mut rows = Rows {
         uptime: Vec::new(),
         col: names.iter().map(|n| (*n, Vec::new())).collect(),
     };
     for line in lines {
-        // A header from an earlier run appended to the same file starts afresh.
+        // A header from a later run appended to the same file (perhaps by
+        // another version, with other columns) says where its rows' cells are.
         if line.starts_with("time_utc") {
+            header = line.split(',').collect();
+            at = place(&header);
             continue;
         }
         let cells: Vec<&str> = line.split(',').collect();
@@ -532,6 +675,39 @@ pub fn report(text: &str) -> Result<String, String> {
             flags.push(format!("the sound device reported {n} dropouts"));
         }
     }
+    // The previews' level and the displays' seen misses (no flags: Test
+    // Mode's own account judges them, `testmode::previews`).
+    let levels = finite(&r.col["preview_level"]);
+    if !levels.is_empty() {
+        let below = levels.iter().filter(|l| **l > 0.0).count();
+        let lowest = crate::preview_pace::Level::ALL
+            .get(max(&levels) as usize)
+            .map_or("unknown", |l| preview_level_words(*l));
+        out += &if below == 0 {
+            format!("Previews: at full rate in all {} samples\n", levels.len())
+        } else {
+            format!(
+                "Previews: below full rate in {below} of {} samples, at the lowest {lowest}\n",
+                levels.len()
+            )
+        };
+    }
+    let seen = finite(&r.col["seen_missed_permille"]);
+    if !seen.is_empty() {
+        out += &format!(
+            "Displays' seen misses: up to {}% of a window's new pictures between two samples\n",
+            max(&seen) / 10.0
+        );
+    }
+    let stage = finite(&r.col["stage_ms"]);
+    if !stage.is_empty() {
+        let worst = max(&stage) as u64;
+        out += &if worst >= STAGE_MS_OVER {
+            "3D stage: the slowest view took over 133 ms of the processor\n".to_string()
+        } else {
+            format!("3D stage: the slowest view took up to {worst} ms of the processor\n")
+        };
+    }
     if stall > 1000.0 {
         flags.push(format!("the main loop stalled for {stall} ms"));
     }
@@ -608,6 +784,7 @@ mod tests {
                 late_permille: late as u32,
                 audio_permille: 100,
                 audio_errors: 0,
+                previews: Previews::default(),
             };
             text += &row(
                 1_700_000_000 + n as i64 * 10,
@@ -620,17 +797,18 @@ mod tests {
                 stall,
                 100,
                 [None, None],
+                PreviewCells::default(),
             );
             text.push('\n');
         }
         text
     }
 
-    /// A file from before the graphics, commit and audio error columns
-    /// existed: those three columns cut off its header and rows.
+    /// A file from before the graphics, commit, audio error, preview and
+    /// stage columns existed: those six columns cut off its header and rows.
     fn without_the_last_two_columns(text: &str) -> String {
         text.lines()
-            .map(|l| l.rsplitn(4, ',').last().unwrap().to_string())
+            .map(|l| l.rsplitn(7, ',').last().unwrap().to_string())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -658,6 +836,7 @@ mod tests {
                 late_permille: 0,
                 audio_permille: 0,
                 audio_errors: 0,
+                previews: Previews::default(),
             };
             // Working set flat; the card's side grows 100 MB an hour (a sample
             // every 10 s over two hours).
@@ -672,6 +851,7 @@ mod tests {
                 10,
                 1,
                 [Some(500 + n * 100 / 360), Some(400)],
+                PreviewCells::default(),
             );
             text.push('\n');
         }
@@ -708,6 +888,7 @@ mod tests {
                 10,
                 1,
                 [None; 2],
+                PreviewCells::default(),
             );
             text.push('\n');
         }
@@ -720,7 +901,7 @@ mod tests {
         // A file from before the column: no line about it.
         let old: String = text
             .lines()
-            .map(|l| l.rsplit_once(',').unwrap().0.to_string() + "\n")
+            .map(|l| l.rsplitn(5, ',').last().unwrap().to_string() + "\n")
             .collect();
         assert!(!report(&old).unwrap().contains("dropouts"));
     }
@@ -873,6 +1054,7 @@ mod tests {
                     late_permille: 1000,
                     audio_permille: 5,
                     audio_errors: 0,
+                    previews: Previews::default(),
                 };
                 text += &row(
                     1_700_000_000 + n as i64 * 10,
@@ -885,6 +1067,7 @@ mod tests {
                     10,
                     1,
                     [None, None],
+                    PreviewCells::default(),
                 );
                 text.push('\n');
             }
@@ -894,5 +1077,149 @@ mod tests {
         assert!(r.contains("Nothing looks wrong"), "{r}");
         let r = report(&make(2)).unwrap();
         assert!(r.contains("100% of frames were late"), "{r}");
+    }
+
+    fn previews(shown: &[(u32, u32)], bands: [u64; 9]) -> Previews {
+        let mut p = Previews {
+            measured: true,
+            level: Some(crate::preview_pace::Level::Fps30),
+            stage: crate::stage_render::StageTotals {
+                frames_by_ms: bands,
+                ..Default::default()
+            },
+            ..Previews::default()
+        };
+        for (i, (pictures, late)) in shown.iter().enumerate() {
+            p.shown[i] = crate::preview_pace::Shown {
+                pictures: *pictures,
+                late: *late,
+            };
+        }
+        p
+    }
+
+    #[test]
+    fn a_rows_preview_cells_are_the_worst_window_and_view_since_the_last_row() {
+        let before = previews(&[(100, 1), (50, 0), (0, 0)], [5, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // Window 1: 200 new pictures, 3 late (15 per thousand); window 2: 100,
+        // 10 late (100 per thousand); window 3 only 10, half late (a still:
+        // too few to count); a view of up to 33 ms.
+        let now = previews(&[(300, 4), (150, 10), (10, 5)], [9, 0, 0, 0, 0, 1, 0, 0, 0]);
+        let c = now.row_since(&before);
+        assert_eq!(c.level, Some(2));
+        assert_eq!(c.seen_missed_permille, Some(100));
+        assert_eq!(c.stage_ms, Some(33));
+        // Over the last band: written as over 133.
+        let slow = previews(&[(300, 4)], [9, 0, 0, 0, 0, 0, 0, 0, 2]);
+        assert_eq!(slow.row_since(&before).stage_ms, Some(STAGE_MS_OVER));
+        // Nothing new: blank cells, the level kept.
+        let still = before.row_since(&before);
+        assert_eq!((still.seen_missed_permille, still.stage_ms), (None, None));
+        assert_eq!(still.level, Some(2));
+        // A stand-in's (not measured) rows have no counts at all.
+        let c = Previews::default().row_since(&before);
+        assert_eq!(c, PreviewCells::default());
+        // And a row says them in its last three cells.
+        let line = row(
+            0,
+            0,
+            [0; 2],
+            [0.0; 2],
+            0,
+            [None; 2],
+            Inputs::default(),
+            0,
+            0,
+            [None; 2],
+            now.row_since(&before),
+        );
+        assert!(line.ends_with(",0,2,100,33"), "{line}");
+        let blank = row(
+            0,
+            0,
+            [0; 2],
+            [0.0; 2],
+            0,
+            [None; 2],
+            Inputs::default(),
+            0,
+            0,
+            [None; 2],
+            PreviewCells::default(),
+        );
+        assert!(blank.ends_with(",0,,,"), "{blank}");
+    }
+
+    #[test]
+    fn the_report_says_the_previews_and_the_stage_when_the_file_has_them() {
+        let mut text = format!("{HEADER}\n");
+        for n in 0..30u64 {
+            let cells = PreviewCells {
+                level: Some(if n == 10 { 3 } else { 0 }),
+                seen_missed_permille: Some(if n == 12 { 25 } else { 0 }),
+                stage_ms: (n == 5).then_some(STAGE_MS_OVER).or(Some(8)),
+            };
+            text += &row(
+                1_700_000_000 + n as i64 * 10,
+                n * 10,
+                [1 << 20, 0],
+                [0.0; 2],
+                0,
+                [None; 2],
+                Inputs::default(),
+                10,
+                1,
+                [None; 2],
+                cells,
+            );
+            text.push('\n');
+        }
+        let r = report(&text).unwrap();
+        assert!(
+            r.contains("Previews: below full rate in 1 of 30 samples, at the lowest 15 a second"),
+            "{r}"
+        );
+        assert!(r.contains("up to 2.5% of a window's new pictures"), "{r}");
+        assert!(r.contains("slowest view took over 133 ms"), "{r}");
+        // Not judged here: Test Mode's own account does.
+        assert!(r.contains("Nothing looks wrong"), "{r}");
+        let old = without_the_last_two_columns(&text);
+        let r = report(&old).unwrap();
+        assert!(!r.contains("Previews") && !r.contains("3D stage"), "{r}");
+    }
+
+    #[test]
+    fn rows_appended_to_a_file_an_earlier_version_began_are_all_read() {
+        let dir = std::env::temp_dir().join(format!("newq_stats_old_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.csv");
+        // 0.26's file: no preview or stage columns.
+        let old = without_the_last_two_columns(&sample_file(3, 0, |_| (20, 0)));
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+        let mut log =
+            StatsLog::create_with(&path, Duration::from_millis(1), Looked::default).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        log.frame(Instant::now(), Inputs::default);
+        drop(log);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("time_utc").count(), 2, "{text}");
+        let r = report(&text).unwrap();
+        assert!(r.contains("4 samples"), "{r}");
+        // A second run of this version appends no third header.
+        let mut again =
+            StatsLog::create_with(&path, Duration::from_millis(1), Looked::default).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        again.frame(Instant::now(), Inputs::default);
+        drop(again);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("time_utc").count(), 2, "{text}");
+        assert!(report(&text).unwrap().contains("5 samples"));
+        // And rows of an earlier version appended after this one's still read.
+        let more = without_the_last_two_columns(&sample_file(2, 0, |_| (20, 0)));
+        std::fs::write(&path, format!("{text}{more}\n")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(report(&text).unwrap().contains("7 samples"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

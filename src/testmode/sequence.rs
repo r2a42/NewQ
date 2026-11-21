@@ -659,6 +659,33 @@ mod tests {
     }
 
     #[test]
+    fn two_parts_previews_files_are_both_gathered_under_their_names() {
+        let root = std::env::temp_dir().join(format!("newq_seq_previews_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = root.join("a");
+        let b = root.join("b");
+        for (dir, row) in [(&a, "1.0,down,full,30"), (&b, "2.0,up,30,full")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(crate::testmode::previews::CSV),
+                format!("{}\n{row}\n", crate::testmode::previews::CSV_HEADER),
+            )
+            .unwrap();
+        }
+        let into = root.join("run");
+        gather(
+            &into,
+            &[("cue-list", a.clone()), ("timeline", b.clone())],
+            "WHOLE",
+        );
+        let cue = std::fs::read_to_string(into.join("cue-list-previews.csv")).unwrap();
+        let tl = std::fs::read_to_string(into.join("timeline-previews.csv")).unwrap();
+        assert!(cue.contains("down,full,30") && tl.contains("up,30,full"));
+        assert!(!into.join("previews.csv").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_overall_verdict_is_the_worst_part_and_says_which() {
         let parts = vec![
             part(

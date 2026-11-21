@@ -2344,6 +2344,37 @@ minute by the clock, says that something done once a minute is behind them, not 
 The test measures memory and processor use on threads of its own, so it doesn't hold the
 show up itself.
 
+**The previews and the 3D stage, in every cue list and timeline test.** The previews in the
+main window give way when the displays start missing pictures, and the report has a
+*Previews* part that says how far they had to: this computer's preview settings, the Preview
+panes open when the test began (and their mode; a 3D view says whether its light was on), the
+seconds the previews spent at each level (full rate, 60, 30, 15 or 5 a second, half or a
+quarter of the size, paused), how often they gave way and came back, anything the previews
+said on the way (*not the previews' doing, so they went back to full rate*), each display
+window's new pictures and how many came late, and what the 3D stage drew (views for the
+previews and for displays that show the stage, the processor time a view took on average and
+at the slowest, screens drawn without their picture, views drawn without the light, restarts,
+the venue read). It ends with one sentence (*the previews drew at full rate throughout and the
+displays stayed smooth*). `previews.csv` has a row each time the previews changed level (when,
+from and to, the worst display window's late and new pictures over the last 3 s, stalls,
+what was said), and each change is a line in `events.log`. `stats.csv` ends with three
+columns: `preview_level` (0 full rate … 7 paused, as they were drawn: under this computer's
+own limit, paused while its previews are off), `seen_missed_permille` (the worst display
+window's late pictures since the row before, in thousandths of its new ones; blank when none showed 30) and `stage_ms`
+(the slowest 3D view since the row before, to 1, 2, 4, 8, 16, 33, 66 or 133 ms, and 134 for
+slower than that; blank when none was drawn). What it finds:
+
+| Finding | Problem when | Worth knowing when |
+|---|---|---|
+| The previews gave way | | below full rate for a second or more (the displays smooth or not, said which) |
+| Giving way didn't help the displays (the previews came back) | | the previews said so |
+| The displays missed pictures with the previews paused or off | more than this computer's line (5% Relaxed, 1% Strict) of a window's new pictures: the previews are not the cause | |
+| The displays missed pictures and the previews may never give way | | over 5% |
+
+The previews at full rate throughout with smooth displays says nothing. The debug test and
+the decode comparison have the three columns in their `stats` files but not yet the
+*Previews* part; the network test has neither yet.
+
 **The media.** The first time, Test mode downloads free films and pictures (the
 Blender Foundation's *Big Buck Bunny* and *Sintel* and the *Jellyfish* clip, under
 CC-BY, from test-videos.co.uk and download.blender.org, and NASA pictures, which are
