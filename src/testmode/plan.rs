@@ -315,9 +315,9 @@ pub(super) struct Carried {
     projectors: usize,
     /// Projectors left with none: another came to the same test display first.
     left_out: usize,
-    /// With no monitor ticked: the display that showed the stage and shows
+    /// With no monitor ticked: the displays that showed the stage and show
     /// the test's pictures now.
-    unstaged: Option<String>,
+    unstaged: Vec<String>,
 }
 
 impl Carried {
@@ -343,10 +343,16 @@ impl Carried {
                 count(self.left_out, "projector"),
             ));
         }
-        if let Some(name) = &self.unstaged {
+        if !self.unstaged.is_empty() {
+            let names: Vec<&str> = self.unstaged.iter().map(String::as_str).collect();
+            let one = names.len() == 1;
             v.push(format!(
-                "{name} shows your 3D stage; in the test it shows the test's pictures \
-                 instead, and so do the screens in the 3D stage that show it"
+                "{} {} your 3D stage; in the test {} the test's pictures instead, and so do \
+                 the screens in the 3D stage that show {}",
+                super::choice::and_list(&names),
+                if one { "shows" } else { "show" },
+                if one { "it shows" } else { "they show" },
+                if one { "it" } else { "them" },
             ));
         }
         v
@@ -405,23 +411,44 @@ pub(super) fn carry_stage(
     carried
 }
 
-/// With no monitor ticked the test's pictures go to the show's first
-/// display: one that shows the 3D stage would show only the stage (and the
-/// screens it feeds would be grey), so for the test it doesn't.
+/// With no monitor ticked the test's pictures go to the show's own displays
+/// (the first, and those a timeline's clips are also on): one that shows the
+/// 3D stage would show only the stage (and the screens it feeds would be
+/// grey), so for the test none does.
 fn unshow_stage(show: &mut Show) -> Carried {
     let mut carried = Carried::default();
-    let Some(first) = show.outputs.first().map(|o| o.id) else {
-        return carried;
-    };
-    if !show.shows_stage(first) {
-        return carried;
-    }
-    let whole = show.whole_picture(first);
-    if let Some(o) = show.outputs.iter_mut().find(|o| o.id == whole) {
-        o.source = None;
-        carried.unstaged = Some(o.name.clone());
+    let staged: Vec<OutputId> = show
+        .outputs
+        .iter()
+        .filter(|o| o.source.is_some())
+        .map(|o| o.id)
+        .collect();
+    for id in staged {
+        // Named only where it took effect (a sub display's never does).
+        let shown = show.shows_stage(id) && show.whole_picture(id) == id;
+        if let Some(o) = show.outputs.iter_mut().find(|o| o.id == id) {
+            o.source = None;
+            if shown {
+                carried.unstaged.push(o.name.clone());
+            }
+        }
     }
     carried
+}
+
+/// Owner's decision 9: across a show network a test leaves the venue model
+/// file out (only the 3D stage part takes it), so the other computers don't
+/// fetch it, and its files, before the test can start. A sample venue is no
+/// file: kept. The note for the report, when it was left out.
+pub fn leave_venue_out(show: &mut Show) -> Option<String> {
+    crate::relink::venue_model(show)?;
+    show.stage3d.venue = None;
+    Some(
+        "Your 3D stage's venue model is left out of a test across the show network, so the \
+         other computers don't have to fetch it first: the 3D views show the screens without \
+         the room (only the 3D stage part takes the model with it)"
+            .into(),
+    )
 }
 
 /// Across a show network: every picture shown on the test's first display
@@ -2586,7 +2613,7 @@ mod tests {
                 screens: 2,
                 projectors: 1,
                 left_out: 1,
-                unstaged: None
+                unstaged: Vec::new()
             }
         );
         assert_eq!(feeds(&show), vec![Some(a), Some(b)]);
@@ -2609,9 +2636,10 @@ mod tests {
     }
 
     #[test]
-    fn with_no_monitor_ticked_only_a_first_display_showing_the_stage_is_changed() {
+    fn with_no_monitor_ticked_no_display_shows_the_stage() {
         // The first display is a side of a blended pair whose picture shows
-        // the stage: that picture's source goes.
+        // the stage: that picture's source goes, and so does another
+        // display's (a timeline's clips are also on it).
         let mut show = Show::default();
         show.outputs.clear();
         let (wide, left, _) = show.add_blended_pair(1920, 1080, 0.1);
@@ -2633,10 +2661,22 @@ mod tests {
         let mut test = show.clone();
         let notes = use_displays_as(&mut test, &[], true);
         assert!(!test.shows_stage(left) && !test.shows_stage(wide));
-        assert!(test.shows_stage(other), "another display keeps its stage");
+        assert!(!test.shows_stage(other), "every display shows the test");
         assert_eq!(notes.len(), 1);
+        let other_name = show.output(other).unwrap().name.clone();
+        assert_eq!(
+            notes[0],
+            format!(
+                "Wide picture and {other_name} show your 3D stage; in the test they show the \
+                 test's pictures instead, and so do the screens in the 3D stage that show them"
+            ),
+        );
+        // One alone is said as one.
+        let mut one = show.clone();
+        one.outputs.iter_mut().find(|o| o.id == other).unwrap().source = None;
+        let notes = use_displays_as(&mut one, &[], true);
         assert!(
-            notes[0].starts_with("Wide picture shows your 3D stage"),
+            notes[0].starts_with("Wide picture shows your 3D stage; in the test it shows"),
             "{notes:?}"
         );
         // A first display that doesn't show the stage: nothing changes.
