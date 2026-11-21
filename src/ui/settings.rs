@@ -252,7 +252,8 @@ pub const STAGE_VIEWPOINTS: Section = section_of(SettingsPage::Stage3d, "Viewpoi
 pub const STAGE_DISPLAYS: Section = section_of(SettingsPage::Stage3d, "Displays", false);
 
 /// Every section the pages draw, each page's in its order (the tests' list;
-/// the presenter remote's is left out while it is switched off).
+/// the presenter remote's is left out while it is switched off). A tab of
+/// the 3D stage page counts as drawn by its label, whichever tab is chosen.
 #[cfg(test)]
 pub const SECTIONS: [Section; 17] = [
     NAME_AND_FILE,

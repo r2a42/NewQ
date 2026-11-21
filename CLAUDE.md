@@ -557,14 +557,24 @@ The README describes the features; this file is about working on the code.
   picture), the governor's scale through `Quality::scaled_by`; shows its target through the compositor
   (`preview::callback`, pace None). Hosted by a Preview pane in 3D mode (`PreviewId::Stage(host)`,
   state in `UiState::preview_stage`) and by Settings ▸ 3D stage.
-  `src/ui/stage_edit.rs`: Settings ▸ 3D stage (`SettingsPage::Stage3d`; a view at the top,
-  `SETTINGS_VIEW`), editing the show directly as other pages do; `StageEdit` (`Action::Stage`, an edit
+  `src/ui/stage_edit.rs`: Settings ▸ 3D stage (`SettingsPage::Stage3d`), which lays itself out
+  (`settings_view` hands it the page without the 640 pt scroll column): `page` picks an
+  `Arrangement` by the room (Stacked: the view, `SETTINGS_VIEW`, pinned on top at `view_height`,
+  the `grip` under it dragging `StageShared::view_height`, then the tabs; SideBySide on a page
+  under `STACKED_FROM` high and `SIDE_BY_SIDE_FROM` wide, the classic window's: the view on the
+  left at `view_width`; Cramped: all in one scroll area), then `StageTab` tabs (Venue, Screens,
+  Projectors, Viewpoints, Displays; `StageShared::tab`, for the run; each a `settings::STAGE_*`
+  `Section`, its label noted by `settings::note_heading`) and only the chosen tab's content in a
+  `ScrollArea::both` salted by tab (`tab_scroll`; sections drawn in `settings::untitled` frames).
+  A new pick (`StageShared::tab_saw`, screens and projectors) opens its tab once. Test notes
+  "3D stage ▸ view", "▸ view size", "▸ tab ▸ <label>", "▸ tab content". It edits the show directly
+  as other pages do; `StageEdit` (`Action::Stage`, an edit
   of the show) for what a view asks; `Preset` (Flat, Curved, Jumbotron, AngledWall), `add_surface`
   (fed by `first_feed`), `feed_choices` (no display that shows the stage). A display is set to show
   the stage on Settings ▸ Displays: its *Shows* (`ui.rs::shared_picture_editor`) draws
   `stage_edit::StageItems::items` (`stage_choices`, `stage_source_words`; greyed with
   `Show::stage_source_refused`'s reason); `ShowPartOf` clears a `source`; the page's `sources_section`
-  (`STAGE_DISPLAYS`) lists them, each a button to it there (`UiState::reveal_display`). Samples: *Use a sample
+  (the Displays tab, `settings::STAGE_DISPLAYS`) lists them, each a button to it there (`UiState::reveal_display`). Samples: *Use a sample
   venue* (`StageEdit::UseSample`, with the usual screens and viewpoints), *Export as .glb…*. Tests: `stage_render_tests.rs` (GPU: a four-colour picture
   the right way round on a screen and on a display showing the stage; the thread), `stage_live_tests.rs`
   (venue loading with a made OBJ; a display's picture drawn and not again while still),
@@ -846,8 +856,8 @@ The README describes the features; this file is about working on the code.
   functions in `ui.rs` that the pages call. **Pointers** ("Settings ▸ This computer ▸ Power") are
   never typed by hand: `settings::path(page, section)`, a `Section` (page, name, `this_computer`;
   `heading()` is what the page draws ("(this computer)" only on a show page), `path()` the pointer; `SECTIONS`, checked by ui.rs
-  `every_pointer_names_a_section_that_is_on_its_page` through headings `section` notes under
-  cfg(test)), and `MenuItem` (`TEST_MODE_ITEM`, `MEDIA_MANAGER_ITEM`, `TIMELINE_ITEM`: the menu
+  `every_pointer_names_a_section_that_is_on_its_page` through headings `section` (and a tab's
+  label, `note_heading`) notes under cfg(test)), and `MenuItem` (`TEST_MODE_ITEM`, `MEDIA_MANAGER_ITEM`, `TIMELINE_ITEM`: the menu
   draws its `label`); re-exported from `ui` as `settings_path` etc. for `net/` and `testmode/`.
   Words: *display* (never "output" for one), *monitor* (the thing plugged in), *screen* (a 3D
   stage surface; display computers' cards keep "Screen N"), *audio output*, *3D stage*,
