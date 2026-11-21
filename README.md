@@ -1205,9 +1205,17 @@ test patterns and cues alike. It is for planning (previz): projectors can be
 stood in the room to plan a rig (below), but their light isn't drawn yet, and
 the 3D model does not drive the outputs.
 
-- **Where it is.** *Settings ▸ 3D stage* has a 3D view at the top and
-  everything about the stage below it; a Preview pane in its *3D* mode shows
-  the stage too (several panes can, each from its own angle).
+- **Where it is.** *Settings ▸ 3D stage* has a 3D view that stays at the top
+  while you work, and under it a tab for each part of the stage: *Venue*,
+  *Screens*, *Projectors*, *Viewpoints* and *Displays* (the displays that show
+  the stage). Only the tab scrolls, so the view keeps showing each change as you
+  make it; drag the line under the view to make it taller or shorter. The page
+  uses the whole width of the window. Where the settings have little height
+  (the classic window, under the transport) the view stands to the left of the
+  tabs instead, and its handle makes it wider; in a very small pane all of it
+  scrolls. Picking a screen or a projector in a view opens its tab. A Preview
+  pane in its *3D* mode shows the stage too (several panes can, each from its
+  own angle).
 - **Start.** *Load a venue model…*, *Use a sample venue* (an arena, a
   proscenium theatre, a thrust stage, a black box, a club, a festival main stage
   or a ballroom, with its usual screens and viewpoints if you like), or *Add a
@@ -1239,7 +1247,8 @@ the 3D model does not drive the outputs.
   display.
 - **Looking round.** Drag to turn round the stage; right-drag, middle-drag or
   Shift-drag to slide; the wheel to come closer; double-click (or **F**) to see
-  all of it. Click a screen to pick it: its settings open on the page.
+  all of it. Click a screen or a projector to pick it: its settings open on
+  its tab.
   *Viewpoint ▸ Save this view…* keeps where you are looking from, with a name;
   *Viewpoint* goes back to it. *Grid* shows a floor grid in metres; *X-ray*
   makes the venue's walls see-through, so the screens show through them.
@@ -1253,9 +1262,9 @@ the 3D model does not drive the outputs.
   the stage's screens (it would show itself): that screen is left blank. A
   projector that shows part of another display's picture shows that display's
   stage, and a sub display can't show the stage. Renaming a viewpoint keeps the
-  displays that show the stage from it. At the bottom of the 3D stage page,
-  *Displays that show the stage* lists them, each with *Open on the Displays
-  page*, which goes to that display there.
+  displays that show the stage from it. The 3D stage page's *Displays* tab
+  lists them, each with *Open on the Displays page*, which goes to that display
+  there.
 - **The previews still give way.** The 3D views are previews: while a display
   misses pictures they are drawn less often, smaller, then held, as every
   preview is, and never above the *Resolution* set for the previews. A display that shows the stage is not (unless only the previews

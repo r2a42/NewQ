@@ -80,6 +80,11 @@ release page, and a release is refused if it has none.
   Displays page.
 - **Arrows and "▸" are drawn as characters, not boxes.** The pointers such as "Settings ▸ Displays"
   and shortcuts such as Ctrl+↑ showed an empty box where the arrow should be.
+- **The 3D stage page keeps its view in sight.** *Settings ▸ 3D stage* uses the whole width of
+  the window, keeps its 3D view at the top while you work, and has a tab for each part of the
+  stage under it: *Venue*, *Screens*, *Projectors*, *Viewpoints* and *Displays*. Only the tab
+  scrolls, so the view shows each change as you make it. Drag the line under the view to make it
+  bigger; picking a screen or a projector in a view opens its tab.
 
 ## 0.26.0
 
