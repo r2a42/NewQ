@@ -67,6 +67,12 @@ release page, and a release is refused if it has none.
   - *Window ▸ Timeline*'s *as a pane / as a workspace* → *Window ▸ Timeline opens ▸*; how its view
     follows the playhead is only in *Settings ▸ Interface ▸ Timeline editor*
   - *Help*'s list of nine keys and the cue count → *Help ▸ Keyboard shortcuts…* (every key)
+- **The cart in the new interface, and a Window menu that fits it.** *Window ▸ Cart* now puts the
+  cart along the foot of the Operator view, under the GO, so spot effects are a click away while
+  you run the show (*Pop out* gives it a window of its own). In the new interface the *Window* menu
+  lists the views (*Editor*, *Operator*, *Patch*, *Timeline*), the timeline editor, the cart, *New
+  preview window* and any windows that are open, instead of the panes' ticks, which did nothing
+  there.
 
 ## 0.26.0
 

@@ -284,8 +284,17 @@ stays on the computer until you send it yourself.
   a cue to a display (a picture) or an audio output (its sound) to route it, and
   click a cue to select it. With timelines set to open as a workspace, a fourth
   view, *Timeline*, is the timeline workspace (see *Timelines*). *Settings* opens in place of the view. Routes
-  can't be changed in show mode. Checked by drawing every view in tests and a
-  test that drags routes, and by eye on Windows; not on a Mac or Linux.
+  can't be changed in show mode. The *Window* menu says the same things: in the new interface
+  it lists the views (*Editor*, *Operator*, *Patch*, and *Timeline* when it is a view), the
+  *Timeline* editor under the cue list, the *Cart*, *New preview window* and any windows of
+  their own that are open (untick one to close it); the classic interface's pane ticks and
+  *Reset layout* aren't there, since there is no dock to put a pane in. *Window ▸ Cart* puts
+  the cart along the foot of the Operator view, under the GO (two rows of buttons fit at
+  1280×760, more scroll; drag its top edge to make it taller), and *Cart ▸ Pop out* gives it a
+  window of its own. Checked by drawing every view in tests, a test that drags routes, one that
+  clicks every Window item and sees the window change, and one that fires and stops a cue from
+  the Operator view's cart; the views by eye on Windows, the Window menu and the cart under
+  Xvfb; not on a Mac.
 - **Panes you can rearrange and pop out:** the main window is a set of panes
   (*Cue list*, *Inspector*, *Preview*, *Active*, the *Cart* and the *Settings*)
   that tile it: drag a pane's tab onto another to move it, beside or above or
@@ -371,10 +380,12 @@ stays on the computer until you send it yourself.
 - **The menus.** *File* (new, open, save, export the cue sheet), *Edit* (undo, copy and
   paste, find, renumber, show mode), *Cue* (*Add ▸* every kind of cue, grouped by what it
   plays; new lists and timelines; arming, grouping and moving the selected cue), *Window*
-  (classic or new interface, the panes, new preview, where a timeline opens, reset),
+  (classic or new interface; then the classic interface's panes, new preview and reset, or the
+  new interface's views, timeline, cart and new preview window; where a timeline opens),
   *Tools* (*Media manager…*, *Test Mode…*, *Statistics*), *Settings* (every page) and
   *Help* (*About NewQ…*, *Keyboard shortcuts…*, which is the table under Keyboard below,
-  and *Open the log folder*). Both interfaces have the same menus.
+  and *Open the log folder*). Both interfaces have the same menus; only the *Window* menu's
+  middle differs, showing what the interface in use can show.
 - **Cue list with a GO button.** Space (or 0) fires the cue at the playhead and the
   playhead moves on. Cues can have pre-waits and can **auto-continue** (fire the
   next cue at the same time) or **auto-follow** (fire the next cue when this one
@@ -466,7 +477,7 @@ stays on the computer until you send it yourself.
   where the panes are are kept per computer, with the window layout, not in the
   show; the multiview's arrangement is the show's, and every pane in
   *Multiview* shows the same one. In the new interface the Operator view's
-  preview has the same modes, and *+* or Window ▸ *New preview* opens a preview
+  preview has the same modes, and *+* or Window ▸ *New preview window* opens a preview
   in a window of its own. There is no set limit on how many: each one is drawing
   work for the computer, and like every preview they make way for the displays
   (below).
@@ -948,7 +959,8 @@ stays on the computer until you send it yourself.
   giving it to another cue moves it. A *MIDI note* does the same from a
   note-on (with MIDI control on); a note with no cue bound to it still fires
   the cue whose number is the note, as before. Tick *On cart* for the cues you
-  want as buttons, then *Window ▸ Cart* for a grid of them: click to fire,
+  want as buttons, then *Window ▸ Cart* for a grid of them (a pane in the classic
+  interface, along the foot of the Operator view in the new one): click to fire,
   right-click to stop or fade out. Buttons show the hotkey, fill as the cue
   plays, and have a green dot when preloaded. Hotkeys work in the output windows
   too, and don't fire while you're typing in a text box. Copies of a cue don't inherit its hotkey or note.
