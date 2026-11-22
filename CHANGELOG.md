@@ -24,8 +24,8 @@ release page, and a release is refused if it has none.
   don't fetch it first.
 - **The same words everywhere, and hints that lead to the right place.** A cue's picture goes to a
   *Display* (the inspector said "Output"), the Preview pane's modes are *One display*, *Multiview*
-  and *3D stage*, the previews say they give way "to keep the displays smooth", *File ▸ Media
-  manager…* and *Help ▸ Test Mode…* are named as their windows are, and the new interface's
+  and *3D stage*, the previews say they give way "to keep the displays smooth", the *Media manager* and
+  *Test Mode* are named as their windows are, and the new interface's
   *Lock editing* button is *Show mode*. Two hints sent people to the wrong place: the "awake"
   mark in the status bar and the timeline's layers hint now name the page and section they mean.
 - **Settings say what travels with the show.** The pages above the line in the sidebar are saved
@@ -33,15 +33,7 @@ release page, and a release is refused if it has none.
   whatever show is open, so a show opened at the venue no longer hides why decoding or power
   are back as that computer has them. *General* is now *Show*, the *Media* page is only the
   show's files, and the frame-rate tick has left every Preview pane's header. Nothing in any file
-  changes. Where things went:
-  - *General ▸ Show, Stop All, Layers* → *Show* (the first section is now *Name and file*).
-  - *General ▸ Timeline editor* and *Previews* → *Interface* (the timeline still first), with
-    *Classic or new* (also *Window ▸ New interface*).
-  - The Preview pane's *Show on the display* tick → *Interface ▸ Previews ▸ Frame rate on the
-    display*.
-  - *General ▸ Recovery and logs* → *This computer ▸ Logs and recovery*.
-  - *Media ▸ Power* (and the battery warning in the sidebar), *Decoding* → *This computer*.
-  - *Media ▸ Streaming server* and *Programs* → *This computer ▸ Allowed here*.
+  changes. (See *Where things went*, below.)
 - **Test Mode's report says what the previews and the 3D stage did.** A new *Previews* part:
   this computer's preview settings, the previews open, how long they spent at each rate, how
   often they gave way to the displays and came back, each display window's late pictures, what
@@ -53,20 +45,8 @@ release page, and a release is refused if it has none.
 - **Menus with fewer surprises.** A new *Tools* menu holds what you run before and during a
   show; the *Displays* menu is gone (its adds made a display you couldn't see); *Cue ▸ Add*
   groups the cue kinds; *Help* has a window of every keyboard shortcut and a way to the log
-  folder. No shortcut changed and both interfaces have the same menus. Where things went:
-  - *File ▸ Media manager…* → *Tools ▸ Media manager…*
-  - *Help ▸ Test Mode…* → *Tools ▸ Test Mode…*
-  - *Window ▸ Statistics* → *Tools ▸ Statistics*
-  - *File ▸ Sync…* → *Settings ▸ Sync* (as it already was in the Settings menu)
-  - *Cue ▸ Show cart* → *Window ▸ Cart*
-  - *Cue ▸ Add … cue* → *Cue ▸ Add ▸* (From a file, Live, On screen, Control and timing, Group);
-    *Add Slide show from PowerPoint…* is now *Slides from a presentation…*
-  - *Displays ▸ Add display*, *Add blended projectors* → *Settings ▸ Displays ▸ + Add*, which now
-    scrolls to the new display; *Add sub display on* → *Settings ▸ Sub displays ▸ + Add*
-  - *Window ▸ New interface* tick → *Window ▸ Interface: Classic / New*
-  - *Window ▸ Timeline*'s *as a pane / as a workspace* → *Window ▸ Timeline opens ▸*; how its view
-    follows the playhead is only in *Settings ▸ Interface ▸ Timeline editor*
-  - *Help*'s list of nine keys and the cue count → *Help ▸ Keyboard shortcuts…* (every key)
+  folder. No shortcut changed and both interfaces have the same menus. (See *Where things went*,
+  below.)
 - **The cart in the new interface, and a Window menu that fits it.** *Window ▸ Cart* now puts the
   cart along the foot of the Operator view, under the GO, so spot effects are a click away while
   you run the show (*Pop out* gives it a window of its own). In the new interface the *Window* menu
@@ -85,6 +65,41 @@ release page, and a release is refused if it has none.
   stage under it: *Venue*, *Screens*, *Projectors*, *Viewpoints* and *Displays*. Only the tab
   scrolls, so the view shows each change as you make it. Drag the line beside or under the view to
   make it bigger; picking a screen or a projector in a view opens its tab.
+- **Where things went.** Nothing in a show or settings file changed, and no shortcut. Old place →
+  new place:
+  - *File ▸ Media…* → *Tools ▸ Media manager…*
+  - *Help ▸ Test mode…* → *Tools ▸ Test Mode…*
+  - *Window ▸ Statistics* → *Tools ▸ Statistics*
+  - *File ▸ Sync…* → *Settings ▸ Sync* (it was in the Settings menu already)
+  - *Cue ▸ Show cart* → *Window ▸ Cart*; in the new interface the cart is now along the foot of
+    the *Operator* view
+  - *Cue ▸ Add … cue* (one long list) → *Cue ▸ Add ▸*, grouped: From a file, Live, On screen,
+    Control and timing, Group; *Add Slide show from PowerPoint…* → *Slides from a presentation…*
+  - *Displays ▸ Add display* and *Add blended projectors* → *Settings ▸ Displays ▸ + Add*;
+    *Displays ▸ Add sub display on* → *Settings ▸ Sub displays ▸ + Add*. The *Displays* menu is
+    gone.
+  - *Window ▸ New interface* → *Window ▸ Interface ▸ Classic / New*, also *Settings ▸ Interface ▸
+    Classic or new*
+  - *Window ▸ Timeline ▸ as a pane / as a workspace* → *Window ▸ Timeline opens ▸*; how the view
+    follows the playhead → only *Settings ▸ Interface ▸ Timeline editor*
+  - *Help*'s list of keys and the cue count → *Help ▸ Keyboard shortcuts…*; the log folder is
+    *Help ▸ Open the log folder*
+  - *Settings ▸ General* → *Settings ▸ Show* (its *Show* section is *Name and file*; *Stop All*
+    and *Layers* as before)
+  - *Settings ▸ General ▸ Timeline editor* and *Previews* → *Settings ▸ Interface*
+  - The Preview pane's *Show on the display* tick → *Settings ▸ Interface ▸ Previews ▸ Frame rate
+    on the display*
+  - *Settings ▸ General ▸ Recovery and logs* → *Settings ▸ This computer ▸ Logs and recovery*
+  - *Settings ▸ Media ▸ Power* (and the battery warning beside it in the sidebar) and *Decoding*
+    → *Settings ▸ This computer*
+  - *Settings ▸ Media ▸ Streaming server* and *Programs* → *Settings ▸ This computer ▸ Allowed
+    here*
+  - *Settings ▸ 3D stage ▸ Displays that show the stage* → each display's *Shows* on *Settings ▸
+    Displays*; the 3D stage page lists them on its *Displays* tab
+  - *Settings ▸ 3D stage*'s sections (Venue, Screens, Projectors, Viewpoints) → tabs under the
+    view, which stays at the top
+  - The Preview pane's *3D* mode → *3D stage*; *Single* → *One display*
+  - The new interface's *Lock editing* → *Show mode*
 
 ## 0.26.0
 
