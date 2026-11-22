@@ -87,6 +87,36 @@ jobs:
             gh release create "$TAG" --draft --title "NewQ $TAG" --notes-file notes.md $pre
           fi
 
+  # The Mac's two halves, built side by side (each about as long as the one
+  # build was before): each uploads its two programs for the `macos` job,
+  # which joins them into universal ones. Uncached and --locked, as every
+  # release build.
+  mac-half:
+    needs: verify
+    name: mac-half (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-half-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/newq
+            target/${{ matrix.target }}/release/newq-display
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     needs: prepare
     strategy:
@@ -98,6 +128,132 @@ jobs:
           # Older Ubuntu = older glibc, so the binary runs on more distributions.
           - os: ubuntu-22.04
             platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Version label
+        shell: bash
+        run: echo "LABEL=${TAG:-dev-${GITHUB_SHA::7}}" >> "$GITHUB_ENV"
+      # Which signing secrets exist (a step's own env can't be used in its `if`).
+      - name: Check for signing secrets
+        id: signing
+        shell: bash
+        env:
+          MAC_CERT: ${{ secrets.MACOS_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MAC_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+          MAC_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          MAC_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+          WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX }}
+          MAC_UNSIGNED: ${{ inputs.mac_unsigned }}
+        run: |
+          mac=no
+          if [ -n "$MAC_CERT" ] && [ "$MAC_UNSIGNED" != "true" ]; then mac=yes; fi
+          [ "$MAC_UNSIGNED" = "true" ] && echo "The Mac download is ad-hoc signed this time (asked for)."
+          # A release's page says "signed and notarised" unless `mac_unsigned`
+          # was asked for: so a tagged Mac build without it must be both, or
+          # fail here (a dry run, with no tag, may be ad-hoc as before).
+          require=no
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "$TAG" ] && [ "$MAC_UNSIGNED" != "true" ]; then
+            require=yes
+            missing=""
+            for v in MAC_CERT MAC_CERT_PASSWORD MAC_KEY MAC_KEY_ID MAC_ISSUER; do
+              [ -n "${!v}" ] || missing="$missing $v"
+            done
+            if [ -n "$missing" ]; then
+              echo "::error::$TAG would be released as signed and notarised, but these secrets are missing:$missing (MACOS_CERT_P12, MACOS_CERT_PASSWORD, APPLE_API_KEY_P8, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID). Set them, or run the Release workflow with mac_unsigned: true."
+              exit 1
+            fi
+          fi
+          echo "mac=$mac" >> "$GITHUB_OUTPUT"
+          echo "mac_required=$require" >> "$GITHUB_OUTPUT"
+          echo "windows=$([ -n "$WIN_CERT" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # See ci.yml: use public DNS when the runner's can't find Ubuntu's archive.
+          if ! timeout 15 getent ahostsv4 azure.archive.ubuntu.com > /dev/null; then
+            echo "::warning::azure.archive.ubuntu.com does not resolve with the runner's DNS"
+            resolvectl status || true
+            for ns in 127.0.0.53 168.63.129.16 8.8.8.8 1.1.1.1; do
+              echo "== $ns"; timeout 10 dig +short +time=3 +tries=1 @"$ns" azure.archive.ubuntu.com A || true
+            done
+            sudo mkdir -p /etc/systemd/resolved.conf.d
+            printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/public.conf
+            sudo systemctl restart systemd-resolved
+            timeout 15 getent ahostsv4 azure.archive.ubuntu.com || echo "::warning::still not resolving"
+          fi
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked
+
+      # Windows: sign newq.exe when a code-signing certificate is set up as
+      # repository secrets (WINDOWS_CERT_PFX: the .pfx file in base64;
+      # WINDOWS_CERT_PASSWORD). Without them the build is unsigned and Windows
+      # SmartScreen warns on the first run (see the README). Not tried yet, and a
+      # new certificate can't be exported as a .pfx: it is a placeholder.
+      - name: Sign newq.exe (Windows)
+        if: runner.os == 'Windows' && steps.signing.outputs.windows == 'yes'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          # NewQ and the NewQ Display launcher.
+          foreach ($exe in @('target/release/newq.exe', 'target/release/newq-display.exe')) {
+            & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 /d "NewQ" $exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+            & $signtool.FullName verify /pa $exe
+            if ($LASTEXITCODE -ne 0) { throw "signature did not verify" }
+          }
+          Remove-Item $pfx
+
+      - name: Package
+        shell: bash
+        env:
+          # package_release.sh refuses to make anything less than signed and
+          # notarised for a release that will say so (see "Check for signing secrets").
+          NEWQ_REQUIRE_NOTARISED: ${{ steps.signing.outputs.mac_required == 'yes' && '1' || '' }}
+        run: |
+          export FFMPEG_MACOS_DIR="$PWD/ffmpeg-macos"
+          bash scripts/package_release.sh "${{ matrix.platform }}" "$LABEL"
+
+      # A tagged release goes straight onto the draft release made by `prepare`.
+      - name: Add to the release
+        if: env.TAG != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+      # A dry run has no release, so keep the packages briefly as an artifact.
+      - uses: actions/upload-artifact@v4
+        if: env.TAG == ''
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The Mac download: the two halves joined, then signed, notarised and
+  # packaged as before.
+  macos:
+    needs: [prepare, mac-half]
+    name: build (macos-latest, macos-universal)
+    strategy:
+      matrix:
+        include:
           - os: macos-latest
             platform: macos-universal
     runs-on: ${{ matrix.os }}
@@ -142,27 +298,6 @@ jobs:
           echo "mac=$mac" >> "$GITHUB_OUTPUT"
           echo "mac_required=$require" >> "$GITHUB_OUTPUT"
           echo "windows=$([ -n "$WIN_CERT" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          # See ci.yml: use public DNS when the runner's can't find Ubuntu's archive.
-          if ! timeout 15 getent ahostsv4 azure.archive.ubuntu.com > /dev/null; then
-            echo "::warning::azure.archive.ubuntu.com does not resolve with the runner's DNS"
-            resolvectl status || true
-            for ns in 127.0.0.53 168.63.129.16 8.8.8.8 1.1.1.1; do
-              echo "== $ns"; timeout 10 dig +short +time=3 +tries=1 @"$ns" azure.archive.ubuntu.com A || true
-            done
-            sudo mkdir -p /etc/systemd/resolved.conf.d
-            printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/public.conf
-            sudo systemctl restart systemd-resolved
-            timeout 15 getent ahostsv4 azure.archive.ubuntu.com || echo "::warning::still not resolving"
-          fi
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
-
       # macOS has no ready-made portable FFmpeg, so build an LGPL universal one
       # from source (cached; only rebuilt when the build script changes).
       - name: Cache FFmpeg (macOS)
@@ -178,55 +313,30 @@ jobs:
           brew install nasm
           bash scripts/build_ffmpeg_macos.sh ffmpeg-macos
 
-      - name: Build
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mac-half-*
+          path: halves
+      - name: Join the halves
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            cargo build --release --locked --target aarch64-apple-darwin
-            cargo build --release --locked --target x86_64-apple-darwin
-            mkdir -p target/release
-            # NewQ and the NewQ Display launcher, each one universal program.
-            for bin in newq newq-display; do
-              lipo -create -output "target/release/$bin" \
-                "target/aarch64-apple-darwin/release/$bin" "target/x86_64-apple-darwin/release/$bin"
-            done
-          else
-            cargo build --release --locked
-          fi
-
-      # Windows: sign newq.exe when a code-signing certificate is set up as
-      # repository secrets (WINDOWS_CERT_PFX: the .pfx file in base64;
-      # WINDOWS_CERT_PASSWORD). Without them the build is unsigned and Windows
-      # SmartScreen warns on the first run (see the README). Not tried yet, and a
-      # new certificate can't be exported as a .pfx: it is a placeholder.
-      - name: Sign newq.exe (Windows)
-        if: runner.os == 'Windows' && steps.signing.outputs.windows == 'yes'
-        shell: pwsh
-        env:
-          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: |
-          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
-          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          # NewQ and the NewQ Display launcher.
-          foreach ($exe in @('target/release/newq.exe', 'target/release/newq-display.exe')) {
-            & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 `
-              /tr http://timestamp.digicert.com /td SHA256 /d "NewQ" $exe
-            if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
-            & $signtool.FullName verify /pa $exe
-            if ($LASTEXITCODE -ne 0) { throw "signature did not verify" }
-          }
-          Remove-Item $pfx
+          mkdir -p target/release
+          # NewQ and the NewQ Display launcher, each one universal program.
+          for bin in newq newq-display; do
+            lipo -create -output "target/release/$bin" \
+              "halves/mac-half-aarch64-apple-darwin/$bin" "halves/mac-half-x86_64-apple-darwin/$bin"
+            # An artifact doesn't keep the executable bit.
+            chmod +x "target/release/$bin"
+            lipo -info "target/release/$bin"
+          done
 
       # macOS: sign with a Developer ID and notarise when the Apple secrets are
       # set (MACOS_CERT_P12 and MACOS_CERT_PASSWORD: the Developer ID
       # Application certificate as base64 and its password; APPLE_API_KEY_P8
       # base64, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID: an App Store Connect API
       # key). Without them the app is only ad-hoc signed and macOS warns on
-      # first open. Works: used for releases 0.16.0 onward (Apple takes about 30
-      # minutes to notarise).
+      # first open. Works: used for releases 0.16.0 onward (Apple takes about a
+      # minute to notarise; package_release.sh allows 40).
       - name: Import the signing certificate (macOS)
         if: runner.os == 'macOS' && steps.signing.outputs.mac == 'yes'
         shell: bash
@@ -303,7 +413,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: build
+    needs: [build, macos]
     if: github.ref_type == 'tag' || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
