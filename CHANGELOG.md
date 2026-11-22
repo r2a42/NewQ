@@ -4,67 +4,19 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
-## Unreleased
+## 0.27.0
 
-- **The debug test checks the 3D stage.** Test Mode's debug test (and `newq --self-test`) now
-  makes a sample venue, saves it as a .glb file and reads it back, checks that the stage's screens
-  show their displays' pictures and that a projector's picture fills its screen, has a display show
-  the stage while a clip plays and checks it was drawn with every screen's picture, and draws the
-  projectors' light (a graphics card that refuses the light is a pass that says so). With no
-  graphics card the last two say "not checked". Its report also says what the test's displays and
-  3D stage were pointed at.
-- **Test Mode has a 3D stage part**: it plays the same lap with previews off, with a turning 3D
-  view, with the projectors' light on and with a display showing the stage, and says whether the
-  3D stage makes this computer's displays miss pictures.
-- **A test keeps your 3D stage.** Test Mode used to leave every screen in the 3D stage grey and
-  the projectors with no picture, and with no monitor ticked a display that showed the stage hid
-  the test's pictures. Now the screens and projectors show the test's displays, so an open 3D view
-  shows the test as it plays, and the report says what the stage was pointed at. A test across a
-  show network leaves your venue model out (unless *3D stage* is ticked), so the other computers
-  don't fetch it first.
-- **The same words everywhere, and hints that lead to the right place.** A cue's picture goes to a
-  *Display* (the inspector said "Output"), the Preview pane's modes are *One display*, *Multiview*
-  and *3D stage*, the previews say they give way "to keep the displays smooth", the *Media manager* and
-  *Test Mode* are named as their windows are, and the new interface's
-  *Lock editing* button is *Show mode*. Two hints sent people to the wrong place: the "awake"
-  mark in the status bar and the timeline's layers hint now name the page and section they mean.
+- **Menus with fewer surprises.** A new *Tools* menu holds what you run before and during a
+  show; the *Displays* menu is gone (its adds made a display you couldn't see); *Cue ▸ Add*
+  groups the cue kinds; *Help* has a window of every keyboard shortcut and a way to the log
+  folder. No shortcut changed and both interfaces have the same menus. (See *Where things went*,
+  below.)
 - **Settings say what travels with the show.** The pages above the line in the sidebar are saved
   in the show file; a new group at the bottom, *This computer*, holds what stays on the computer
   whatever show is open, so a show opened at the venue no longer hides why decoding or power
   are back as that computer has them. *General* is now *Show*, the *Media* page is only the
   show's files, and the frame-rate tick has left every Preview pane's header. Nothing in any file
   changes. (See *Where things went*, below.)
-- **Test Mode's report says what the previews and the 3D stage did.** A new *Previews* part:
-  this computer's preview settings, the previews open, how long they spent at each rate, how
-  often they gave way to the displays and came back, each display window's late pictures, what
-  the 3D stage drew and how long a view took, and one sentence on whether the previews cost the
-  displays anything. If the displays missed pictures even with the previews paused, it says the
-  previews are not the cause. Each change of rate is in a new `previews.csv` and in `events.log`,
-  and `stats.csv` has three more columns (the previews' rate, the displays' late pictures and
-  the slowest 3D view).
-- **Menus with fewer surprises.** A new *Tools* menu holds what you run before and during a
-  show; the *Displays* menu is gone (its adds made a display you couldn't see); *Cue ▸ Add*
-  groups the cue kinds; *Help* has a window of every keyboard shortcut and a way to the log
-  folder. No shortcut changed and both interfaces have the same menus. (See *Where things went*,
-  below.)
-- **The cart in the new interface, and a Window menu that fits it.** *Window ▸ Cart* now puts the
-  cart along the foot of the Operator view, under the GO, so spot effects are a click away while
-  you run the show (*Pop out* gives it a window of its own). In the new interface the *Window* menu
-  lists the views (*Editor*, *Operator*, *Patch*, *Timeline*), the timeline editor, the cart, *New
-  preview window* and any windows that are open, instead of the panes' ticks, which did nothing
-  there.
-- **A display is set to show the 3D stage on the Displays page.** Its *Shows* now offers *The 3D
-  stage, from* each saved viewpoint (or *all of it*) beside *Its own cues* and *Part of …*; a
-  display that shows part of another's picture has them greyed, with the reason. The 3D stage
-  page's *Displays that show the stage* lists those displays, each with a button to it on the
-  Displays page.
-- **Arrows and "▸" are drawn as characters, not boxes.** The pointers such as "Settings ▸ Displays"
-  and shortcuts such as Ctrl+↑ showed an empty box where the arrow should be.
-- **The 3D stage page keeps its view in sight.** *Settings ▸ 3D stage* uses the whole width of
-  the window, keeps its 3D view at the top while you work, and has a tab for each part of the
-  stage under it: *Venue*, *Screens*, *Projectors*, *Viewpoints* and *Displays*. Only the tab
-  scrolls, so the view shows each change as you make it. Drag the line beside or under the view to
-  make it bigger; picking a screen or a projector in a view opens its tab.
 - **Where things went.** Nothing in a show or settings file changed, and no shortcut. Old place →
   new place:
   - *File ▸ Media…* → *Tools ▸ Media manager…*
@@ -100,6 +52,54 @@ release page, and a release is refused if it has none.
     view, which stays at the top
   - The Preview pane's *3D* mode → *3D stage*; *Single* → *One display*
   - The new interface's *Lock editing* → *Show mode*
+- **The cart in the new interface, and a Window menu that fits it.** *Window ▸ Cart* now puts the
+  cart along the foot of the Operator view, under the GO, so spot effects are a click away while
+  you run the show (*Pop out* gives it a window of its own). In the new interface the *Window* menu
+  lists the views (*Editor*, *Operator*, *Patch*, *Timeline*), the timeline editor, the cart, *New
+  preview window* and any windows that are open, instead of the panes' ticks, which did nothing
+  there.
+- **The 3D stage page keeps its view in sight.** *Settings ▸ 3D stage* uses the whole width of
+  the window, keeps its 3D view at the top while you work, and has a tab for each part of the
+  stage under it: *Venue*, *Screens*, *Projectors*, *Viewpoints* and *Displays*. Only the tab
+  scrolls, so the view shows each change as you make it. Drag the line beside or under the view to
+  make it bigger; picking a screen or a projector in a view opens its tab.
+- **A display is set to show the 3D stage on the Displays page.** Its *Shows* now offers *The 3D
+  stage, from* each saved viewpoint (or *all of it*) beside *Its own cues* and *Part of …*; a
+  display that shows part of another's picture has them greyed, with the reason. The 3D stage
+  page's *Displays that show the stage* lists those displays, each with a button to it on the
+  Displays page.
+- **The same words everywhere, and hints that lead to the right place.** A cue's picture goes to a
+  *Display* (the inspector said "Output"), the Preview pane's modes are *One display*, *Multiview*
+  and *3D stage*, the previews say they give way "to keep the displays smooth", the *Media manager* and
+  *Test Mode* are named as their windows are, and the new interface's
+  *Lock editing* button is *Show mode*. Two hints sent people to the wrong place: the "awake"
+  mark in the status bar and the timeline's layers hint now name the page and section they mean.
+- **Arrows and "▸" are drawn as characters, not boxes.** The pointers such as "Settings ▸ Displays"
+  and shortcuts such as Ctrl+↑ showed an empty box where the arrow should be.
+- **Test Mode has a 3D stage part**: it plays the same lap with previews off, with a turning 3D
+  view, with the projectors' light on and with a display showing the stage, and says whether the
+  3D stage makes this computer's displays miss pictures.
+- **A test keeps your 3D stage.** Test Mode used to leave every screen in the 3D stage grey and
+  the projectors with no picture, and with no monitor ticked a display that showed the stage hid
+  the test's pictures. Now the screens and projectors show the test's displays, so an open 3D view
+  shows the test as it plays, and the report says what the stage was pointed at. A test across a
+  show network leaves your venue model out (unless *3D stage* is ticked), so the other computers
+  don't fetch it first.
+- **Test Mode's report says what the previews and the 3D stage did.** A new *Previews* part:
+  this computer's preview settings, the previews open, how long they spent at each rate, how
+  often they gave way to the displays and came back, each display window's late pictures, what
+  the 3D stage drew and how long a view took, and one sentence on whether the previews cost the
+  displays anything. If the displays missed pictures even with the previews paused, it says the
+  previews are not the cause. Each change of rate is in a new `previews.csv` and in `events.log`,
+  and `stats.csv` has three more columns (the previews' rate, the displays' late pictures and
+  the slowest 3D view).
+- **The debug test checks the 3D stage.** Test Mode's debug test (and `newq --self-test`) now
+  makes a sample venue, saves it as a .glb file and reads it back, checks that the stage's screens
+  show their displays' pictures and that a projector's picture fills its screen, has a display show
+  the stage while a clip plays and checks it was drawn with every screen's picture, and draws the
+  projectors' light (a graphics card that refuses the light is a pass that says so). With no
+  graphics card the last two say "not checked". Its report also says what the test's displays and
+  3D stage were pointed at.
 
 ## 0.26.0
 
