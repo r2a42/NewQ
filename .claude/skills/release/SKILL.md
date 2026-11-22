@@ -7,27 +7,34 @@ description: Cut a NewQ release end to end (bump, PR, CI, merge, main CI, dry ru
 
 The user asks once. **Do not hand control back until the release is published and
 verified, or you are blocked on something only they can do.** Never end a turn with
-"waiting for CI" unless a check-in is already scheduled (see Staying with it).
+"waiting for CI" unless a Monitor is already watching (see Staying with it).
 
 ## Steps
 
-1. **Bump.** `version` in `Cargo.toml` and the `newq` entry in `Cargo.lock` (`cargo check`
-   updates it). Add the version's section to `CHANGELOG.md` (`## X.Y.Z`, moved from
-   `## Unreleased`): plain words for people who run shows, what they will notice, not commit
-   subjects. `scripts/changelog_section.sh vX.Y.Z` prints it; the dry run fails without one, and
-   the Release workflow puts it at the top of the release page. Commit "Bump version to X.Y.Z". Run fmt, clippy (also
-   `--target x86_64-pc-windows-msvc` and `--target aarch64-apple-darwin`) and
-   `NEWQ_REQUIRE_MEDIA=1 cargo test` first: one clean push beats three.
-2. **PR.** Push the session branch, `create_pull_request` (base `main`), then
-   `subscribe_pr_activity`. Schedule the first check-in (below) immediately.
-3. **CI.** Three jobs (ubuntu, windows, macos) plus `gate`. On a failure, read the job log
-   (`get_job_logs` with the `job_id` from the event) and decide:
-   - Ours (a test failed): fix, run the checks, push. The push restarts CI.
+0. **The pull request is already open.** Work goes onto a draft pull request from its first
+   push, each integrated batch pushed to it (CLAUDE.md, Pull requests), so Windows and macOS
+   have already tested it. If there is none yet, push the session branch, `create_pull_request`
+   (base `main`, draft), `subscribe_pr_activity`, and let CI go green before the bump.
+1. **Bump.** On the pull request that is already green: `version` in `Cargo.toml` and the `newq`
+   entry in `Cargo.lock` (`cargo check` updates it). Add the version's section to `CHANGELOG.md`
+   (`## X.Y.Z`, moved from `## Unreleased`): plain words for people who run shows, what they will
+   notice, not commit subjects. `scripts/changelog_section.sh vX.Y.Z` prints it; the dry run fails
+   without one, and the Release workflow puts it at the top of the release page. Commit "Bump
+   version to X.Y.Z". The bump needs `cargo fmt --check` and one CI round, not a full local check:
+   the code under it was already checked (`scripts/check.sh full`) and is green on all three
+   systems. If code changed since the last green round, run `scripts/check.sh full` first: one
+   clean push beats three.
+2. **Push.** Push the bump to the pull request and mark it ready
+   (`update_pull_request` with `draft: false`). Start the Monitor for CI (below) in the same turn.
+3. **CI.** On each system a tests job and a self-test job, plus `gate`. On a failure, read the job
+   log (`get_job_logs` with the `job_id` from the event) and decide:
+   - Ours (a test failed): fix, run `scripts/check.sh quick <the area>`, push. The push restarts CI.
+     A test that passes when run again goes in `.claude/notes/flaky-tests.md`.
    - Infrastructure (Chocolatey/apt/brew 5xx or timeout before any test ran, a runner
      that never started): comment once on the PR, then `actions_run_trigger`
      `rerun_failed_jobs` on the run. It answers 403 "already running" while other jobs of
-     the run are still going: that is not a failure, schedule a check-in and retry
-     when the run has finished. Re-run once; a second failure is real.
+     the run are still going: that is not a failure, wait for the run to finish and retry
+     then. Re-run once; a second failure is real.
    - Known trap: Homebrew's FFmpeg has no `hap` encoder. Tests that make Hap files use
      `test_media_with_hap` and skip. Timing tests must not assert upper bounds on
      counts: CI runners oversleep.
@@ -39,9 +46,10 @@ verified, or you are blocked on something only they can do.** Never end a turn w
    `completed`/`success`.
 6. **Dry run.** `actions_run_trigger` `run_workflow` with `workflow_id: cut-release.yml`,
    `ref: main`, `inputs: {"tag": "vX.Y.Z", "dry_run": "true"}`. Find the new run and wait
-   for `success` (about 15 seconds).
+   for `success` (about 20 seconds).
 7. **Real run.** The same with `"dry_run": "false"`. It tags `main` and starts the
-   `Release` workflow (about 8 to 10 minutes: builds for all three platforms).
+   `Release` workflow (16 to 21 minutes on 0.26.0 and 0.27.0, before the Mac release was
+   built as two parallel halves; signing, notarising and stapling take about 90 seconds of it).
 8. **Verify.** The `Release` run must be `success`, then `get_release_by_tag vX.Y.Z`
    must exist with the Windows, macOS and Linux downloads. Report the link and what is
    in it. A `Release` failure: `get_job_logs`, fix or report, do not stop silently.
@@ -69,27 +77,21 @@ workflow is meant to be started by `workflow_dispatch` (owner's token).
   string: it kills the shell. Use `pkill -x newq`.
 - Cloud sessions can't push tags; releases go only through the workflow.
 
-## Staying with it (use Monitor, not scheduled tasks)
+## Staying with it
 
-**Do not use `send_later` / `create_trigger` for waiting.** Since 2026-10-29 every one-shot
-trigger bound to this session fires and is refused within milliseconds
-(`ROUTINE_RUN_FAILURE_REASON_ACCESS_DENIED`; the docs don't cover this case). The trigger then
-stays `enabled`, retries the next day and sends the user a "routine isn't permitted to run"
-notification each time. If you did create one, `delete_trigger` it. (`list_triggers` shows
-`last_run.failure_reason`.)
-
-Instead use the Monitor tool with `scripts/gh_wait.sh`, which polls the public GitHub API
-once a minute with plain `curl` (no token, no routine). Monitor wakes the session when the
-script exits, and that works. Each wait is one Monitor call (`persistent: false`,
-`timeout_ms` up to its limit; if the monitor expires first, start another):
+Wait with the Monitor tool and `scripts/gh_wait.sh` (`--for 25m`), never with scheduled tasks
+(`send_later`/`create_trigger` bound to this session are refused; if you made one, `delete_trigger` it).
+`gh_wait.sh` polls the public GitHub API once a minute with plain `curl`; with `--for 25m` it
+exits with "still running" before the Monitor's limit, and then you start another. Each wait is
+one Monitor call (`persistent: false`):
 
 ```
-scripts/gh_wait.sh pr 34              # all checks on the PR head finished (exit 0 = all passed)
-scripts/gh_wait.sh latest ci.yml      # id/status/sha of the newest run (find the main CI run)
-scripts/gh_wait.sh run 40796485911    # a workflow run finished (exit 0 = success)
-scripts/gh_wait.sh latest cut-release.yml   # find the dry/real run you just dispatched
-scripts/gh_wait.sh latest release.yml       # the Release run it started
-scripts/gh_wait.sh release v0.12.0    # the release exists; prints its assets
+scripts/gh_wait.sh --for 25m pr 34              # all checks on the PR head finished (exit 0 = all passed)
+scripts/gh_wait.sh latest ci.yml                # id/status/sha of the newest run (find the main CI run)
+scripts/gh_wait.sh --for 25m run 40796485911    # a workflow run finished (exit 0 = success)
+scripts/gh_wait.sh latest cut-release.yml       # find the dry/real run you just dispatched
+scripts/gh_wait.sh latest release.yml           # the Release run it started
+scripts/gh_wait.sh --for 25m release v0.12.0    # the release exists; prints its assets
 ```
 
 So the loop is: do a step, start the Monitor for the next wait **in the same turn**, and when
