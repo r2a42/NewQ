@@ -265,7 +265,7 @@ Previews) · "output" as a word · the Window menu's pane ticks in the new inter
   keyboard table are updated in the same commits as the code.
 - Strings elsewhere that say "Help ▸ Test mode" (`ui.rs:11829`) and the `Settings ▸` pointers
   in `testmode/`, `net/node.rs`, `ui/network.rs`, `ui/net_media.rs` move to the helper.
-- CLAUDE.md's Layout section is updated per step (it names pages and menus).
+- CLAUDE.md's Layout section (now the area files under `.claude/notes/areas/`) is updated per step (it names pages and menus).
 
 ---
 
