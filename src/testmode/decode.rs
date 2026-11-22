@@ -417,7 +417,7 @@ impl Compare {
         engine.playhead = show.cues.first().map(|c| c.id);
         engine.go(show);
         engine.log(format!(
-            "Test mode: decoding comparison, hardware decoding {}",
+            "Test Mode: decoding comparison, hardware decoding {}",
             if hw { "on" } else { "off" }
         ));
         self.stage = Stage::Trial { hw, began: now };

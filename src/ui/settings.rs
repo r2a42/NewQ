@@ -1283,12 +1283,12 @@ fn sync_page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<A
         });
         hint(
             ui,
-            "These apply to every output. A delay changes cues as they start.",
+            "These apply to every display and audio output. A delay changes cues as they start.",
         );
     });
     if !show.audio_outputs.is_empty() || !show.outputs.is_empty() {
-        section(ui, "One output at a time", |ui| {
-            ui.label("On top of that, for one output (a slow projector, a Bluetooth speaker):");
+        section(ui, "One at a time", |ui| {
+            ui.label("On top of that, for one display or audio output (a slow projector, a Bluetooth speaker):");
             egui::Grid::new("sync_outputs")
                 .num_columns(2)
                 .show(ui, |ui| {

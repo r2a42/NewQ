@@ -2108,16 +2108,16 @@ fn launch(
     };
     crate::media::audio::set_muted(prep.sound.muted);
     engine.set_log_tap(true);
-    engine.log(format!("Test mode: the sound {}", prep.sound.describe()));
+    engine.log(format!("Test Mode: the sound {}", prep.sound.describe()));
     engine.log(format!(
-        "Test mode: {} test begins ({} cues from {} media files, a lap should take {:.0} s)",
+        "Test Mode: {} test begins ({} cues from {} media files, a lap should take {:.0} s)",
         name,
         built.cues,
         built.used.len(),
         built.lap_secs
     ));
     engine.log(format!(
-        "Test mode: the computer is {} ({})",
+        "Test Mode: the computer is {} ({})",
         if awake.held() {
             "being kept awake"
         } else {
@@ -2364,7 +2364,7 @@ impl Run {
                 .map(|c| format!("{} {}", c.number, c.name))
                 .collect();
             engine.log(format!(
-                "Test mode: memory at {mb} MB, over the limit of {} MB. Playing: {}",
+                "Test Mode: memory at {mb} MB, over the limit of {} MB. Playing: {}",
                 self.memory.limit_mb,
                 names.join("; ")
             ));
@@ -2467,7 +2467,7 @@ fn finish(
     if let Some(f) = &mut run.events {
         let _ = writeln!(
             f,
-            "[{:>9.3}] Test mode: ended ({end:?})",
+            "[{:>9.3}] Test Mode: ended ({end:?})",
             elapsed.as_secs_f64()
         );
         let _ = f.flush();
@@ -3645,7 +3645,7 @@ mod tests {
             assert!(d.folder.join(f).exists(), "{f} missing");
         }
         let events = std::fs::read_to_string(d.folder.join("events.log")).unwrap();
-        assert!(events.contains("Test mode: lap 1, GO"), "{events}");
+        assert!(events.contains("Test Mode: lap 1, GO"), "{events}");
         let _ = l;
         let _ = std::fs::remove_dir_all(&dir);
     }

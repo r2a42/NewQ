@@ -312,7 +312,7 @@ pub fn basic_driver_status(ui: &mut egui::Ui, monitors: &[(String, bool)]) {
         return;
     }
     ui.label(
-        egui::RichText::new("⚠ a screen has no graphics driver: pictures very slow")
+        egui::RichText::new("⚠ a monitor has no graphics driver: pictures very slow")
             .color(egui::Color32::from_rgb(230, 70, 60)),
     )
     .on_hover_text(said.join("\n"));

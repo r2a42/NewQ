@@ -735,8 +735,8 @@ pub(super) fn card_shows(
     }
 }
 
-/// Which screen of its computer a monitor is, as the primary numbers them (its
-/// Displays menu, Test Mode's *Show on*: the computer's report lists the
+/// Which screen of its computer a monitor is, as the primary numbers them (the
+/// Displays page's monitor menu, Test Mode's *Show on*: the computer's report lists the
 /// monitors in this order): "Assistant · Screen 1", even with one. Pure, for
 /// the tests.
 pub(super) fn screen_name(name: &str, monitor: usize) -> String {
