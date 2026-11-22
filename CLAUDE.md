@@ -108,7 +108,7 @@ scripts/check.sh full                         # fmt, clippy, the whole suite wit
   round takes means no run finishes. Before pushing again, look whether the last run finished.
 - When all three systems are green, mark it ready and **rebase-merge** it into `main`. Merging a
   green batch is not a release; the owner alone decides when to release.
-- Wait with the Monitor tool and `scripts/gh_wait.sh` (`--for 25m`, so a watch ends before the
+- Wait with the Monitor tool and `scripts/gh_wait.sh --for 25m <what>` (so a watch ends before the
   Monitor's limit), never with scheduled tasks (`send_later`/`create_trigger` are refused here).
 
 ## Conventions
@@ -169,8 +169,9 @@ The details (CI's jobs, the pins and mirrors, signing) are in `.claude/notes/are
   Changes that only touch `*.md` or `LICENSE-*` skip CI. A macOS runner that never starts (cancelled
   after 15 minutes, no steps run) is not a failure of the change: re-run it.
 - **Releasing:** follow `.claude/skills/release/SKILL.md`. The `Cut release` workflow checks the tag
-  against `Cargo.toml`, tags `main` and starts `Release`, which takes 16-21 minutes (the Mac release
-  is built as two parallel halves; signing, notarising and stapling take about a minute and a half).
+  against `Cargo.toml`, tags `main` and starts `Release`, which took 16-21 minutes before the Mac release
+  was built as two parallel halves (about 11-12 expected since; signing, notarising and stapling take
+  about a minute and a half).
 - Cloud sessions can't push tags (the git proxy only accepts branches). The GitHub comment tool
   mangles slash commands (`/release` becomes `·/·r·elease`), so the `/release` comment can't be
   posted by Claude; don't work around it. Start `cut-release.yml` by `workflow_dispatch` (inputs

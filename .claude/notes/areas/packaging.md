@@ -43,9 +43,29 @@ See also: `network.md`'s "after the 0.24.4 review" block has the rule for a tagg
 
 ## CI and releases (moved from CLAUDE.md; CLAUDE.md keeps a short version)
 
-Since 0.27.0 each system's CI job is split into tests and self-test, sharing a cache that
-`warm-cache.yml` fills from `main`, and `flaky-hunt.yml` runs the suite nightly; the text below is
-as it was before that.
+### The workflows today (after 0.27.0)
+
+CI (`ci.yml`) runs two jobs per system side by side: `tests (<os>)` (fmt, clippy, test media,
+`cargo test`) and `self-test (<os>)` (`cargo run -- --self-test`, artifact `selftest-<OS>`), one
+`check` job over os × part behind the `gate`. Both use rust-cache with `shared-key: newq-<OS>` and
+`add-job-id-key: false` (only tests saves; `cache-on-failure`). `warm-cache.yml` fills that cache on
+`main` (pushes touching Cargo.lock, Cargo.toml or the workflows, weekly, by hand), because a pull
+request can only use caches from itself or `main`; its rust-cache settings, toolchain and
+CARGO*/RUST*/CC* environment must match ci.yml's or nothing is found. It is its own workflow so
+`check_main_ci.sh` never waits for it. `flaky-hunt.yml` runs the suite three times nightly on the
+three systems with CI's environment; its job summary names each round's failures. `release.yml`
+builds the Mac's halves in two `mac-half` jobs (uncached, `--locked`, one-day artifacts), and
+`macos` joins them with lipo and signs, notarises and packages as before; `publish` needs `build`
+and `macos`. To try `release.yml` without publishing: dispatch it on a branch with no `tag`
+(`prepare` makes nothing, there is no `publish`, the packages are one-day artifacts; `mac_unsigned:
+true` for ad-hoc signing), then check `lipo -info` shows `x86_64 arm64`. Locally,
+`scripts/check.sh quick <filter>` (agents) and `scripts/check.sh full` (the integrator, once) are
+the checks; `full` needs `scripts/make_test_media.sh` and a Vulkan driver (`mesa-vulkan-drivers`),
+and runs cross clippy only when the change touches a .rs file with platform cfgs, Cargo.toml,
+Cargo.lock or build.rs. `CHECK_CARGO_ARGS` passes extra cargo arguments. `scripts/gh_wait.sh --for
+25m <cmd>` exits 4 with "still running" before a Monitor's 30-minute limit.
+
+### As it was before (kept word for word; the above wins where they differ)
 
 - CI runs fmt, clippy, tests and the real-media tests on Ubuntu, Windows and
   macOS, once per change: on pull requests (a newer push cancels the older run)
