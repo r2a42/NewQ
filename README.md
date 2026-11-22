@@ -306,7 +306,7 @@ stays on the computer until you send it yourself.
   each pane and has *Reset layout*. The arrangement is remembered on this
   computer (not in the show file).
 - **Frame rate readout:** the top of the *Preview* pane says how many pictures a second
-  are being drawn, on the output's own display window if it has one (the number to
+  are being drawn, on the display's own window if it has one (the number to
   trust for what the audience sees) and otherwise in the main window. *Settings ▸
   Interface ▸ Previews ▸ Frame rate on the display* writes the same figure in the top left
   corner of each display's picture, only while something is playing and never on an idle
@@ -319,9 +319,9 @@ stays on the computer until you send it yourself.
 - **Output windows on a Mac** are borderless windows above the menu bar, on every Space, so the
   menu bar and Dock are hidden on the output display and not on the display with the controls,
   and opening Finder or a swipe up for Mission Control does not bring them back over a show.
-- **Closing a laptop's lid mid-show** (the built-in display goes away) leaves the output where it
+- **Closing a laptop's lid mid-show** (the built-in display goes away) leaves the display where it
   is. The system moves the main window onto the remaining display, which used to make NewQ treat
-  that display as the main window's and drop the output from it; now the output stays, the main
+  that display as the main window's and drop the display from it; now the display stays, the main
   window stays behind it, and the window goes back to its own display when the lid opens.
 - **Output windows go back over their display (Mac):** NewQ checks every pass that each output
   window still exactly covers its display, and puts it back if the system has moved it, which is
@@ -372,7 +372,7 @@ stays on the computer until you send it yourself.
     finds these as that computer has them.
 
   Beside a page the sidebar shows what needs attention or is on: a red warning
-  when a display's monitor is missing, an output has a problem, files can't be
+  when a display's monitor is missing, the 3D stage's venue won't load, files can't be
   found, a listener failed to start or the computer is on battery, a green *on*
   for a listener that is working, and counts of displays and audio outputs. The
   *Settings* menu lists the same pages, in the same groups with the same two lines
@@ -392,10 +392,10 @@ stays on the computer until you send it yourself.
   finishes).
 - **Cue types:** Video, Image, Audio, Text, Fade, Stop, Wait and Group.
 - **Built-in transitions on every video/image cue:** no extra cues needed to
-  change what's on screen. Each cue chooses how it enters its output:
+  change what's on screen. Each cue chooses how it enters its display:
   - **Crossfade** (the default for new cues): fades in while everything else on
-    that output fades out and stops.
-  - **Dip to black** / **Dip to white**: the output fades to the colour, the new
+    that display fades out and stops.
+  - **Dip to black** / **Dip to white**: the display fades to the colour, the new
     content replaces the old underneath, then fades up from the colour.
   - **Cut**: replaces what's showing instantly.
   - **Fade in over**: fades in on top and leaves what's showing running (for layering).
@@ -827,7 +827,7 @@ stays on the computer until you send it yourself.
   opacity makes it see-through). A square, circle or star has one size and a
   rectangle or oval a width and a height, all as a share of the display's
   height; a star has 3 to 12 points. It plays like an image cue, with the same
-  output, layer, transition, fades, hold time and geometry (move and scale it
+  display, layer, transition, fades, hold time and geometry (move and scale it
   there), and the edges are smooth.
 - **Editing several cues at once:** pick cues (Ctrl-click or Shift-click) and
   change a setting in the inspector: it is changed in all of them, whatever it
@@ -841,9 +841,9 @@ stays on the computer until you send it yourself.
   item. The playback settings reach text, shape and camera cues as well as videos,
   pictures and sounds.
 - **Text cues:** titles, surtitles and lower-thirds. Type the text (several
-  lines are fine), then set its size (a share of the output's height), colour,
+  lines are fine), then set its size (a share of the display's height), colour,
   alignment, where it sits (top, middle or bottom) and where it wraps. It's
-  drawn at the output's own resolution and then plays like an image cue, so it
+  drawn at the display's own resolution and then plays like an image cue, so it
   gets the same transitions, fades, layers, hold time and geometry, and a Fade
   or Stop cue can target it. There's one built-in font (a light weight, so
   *Shadow* and *Bold* help over video), and editing a text cue takes effect
@@ -889,7 +889,7 @@ stays on the computer until you send it yourself.
     Look up the exact bytes in the device's manual: NewQ can't know them.
 - **Camera cues:** show a live camera or capture card (HDMI/SDI/USB) as a
   layer. Pick the device and the mode to ask of it (size and frame rate, which
-  the device must support), then set the output, layer, transition, fades and
+  the device must support), then set the display, layer, transition, fades and
   geometry as for a video cue. A camera cue runs until stopped, or for the time
   in *Run for*; a Fade or Stop cue can target it. The camera is opened as soon
   as the cue is next in line, so GO is instant, and only the newest picture is
@@ -905,7 +905,7 @@ stays on the computer until you send it yourself.
   NV12, YUY2, UYVY, Motion-JPEG, H.264): if a mode won't open, try another, or
   press *Modes…* to ask the device what it offers (sizes, frame rates and
   formats; Video4Linux gives no frame rates) and click one to set the cue to it.
-  Pictures are scaled down to the size of the output they go to, so a 4K card
+  Pictures are scaled down to the size of the display they go to, so a 4K card
   on a 1080p display doesn't send 4K frames to the screen (FFmpeg still has
   to take in and scale the 4K picture, which is heavy: 4K at 60 is more than
   a laptop may manage). On a Mac only the raw formats can be asked for. The
@@ -981,9 +981,9 @@ stays on the computer until you send it yourself.
   mixer, not in linear light.
 - **Per-cue geometry:** under *Geometry* in a visual cue's inspector, move,
   scale (or mirror, with a negative scale), rotate and crop the picture on its
-  output. Position is a share of the output's size, rotation is clockwise about
+  display. Position is a share of the display's size, rotation is clockwise about
   the middle of the picture, and edits apply live while the cue plays. Parts
-  that leave the output are clipped. Two videos can share one screen this way,
+  that leave the display are clipped. Two videos can share one display this way,
   without sub displays.
 - **Remote control (OSC and MIDI):** turn these on on the *OSC* and *MIDI* pages of
   the settings; they are saved in the show. Both are off until you
@@ -1038,9 +1038,9 @@ stays on the computer until you send it yourself.
     Run, Pause, Stop or Jump timeline control cue does what that cue does.
 - **Audio outputs and channel routing:** on the *Audio outputs* page of the settings,
   add named outputs and put each on any audio device (or the system
-  default). Each cue then picks an output and the first device channel its
+  default). Each cue then picks an audio output and the first device channel its
   stereo pair plays on, so one show can feed a PA, a monitor desk and a
-  multichannel interface at once. The first output is the default for cues
+  multichannel interface at once. The first audio output is the default for cues
   that don't choose; with no outputs, everything plays on the system default
   as before. NewQ opens each device with the most channels it offers; a
   device that is missing is reported in the panel, and retried while nothing
@@ -1201,9 +1201,9 @@ stays on the computer until you send it yourself.
 
 See the show in the room before you are in it: a model of the venue, the
 screens placed in it, and each screen showing what its display is showing now,
-test patterns and cues alike. It is for planning (previz): projectors can be
-stood in the room to plan a rig (below), but their light isn't drawn yet, and
-the 3D model does not drive the outputs.
+test patterns and cues alike. It is for planning: projectors can be stood in
+the room to plan a rig and their light drawn (below), but the 3D model does not
+drive the displays.
 
 - **Where it is.** *Settings ▸ 3D stage* has a 3D view that stays at the top
   while you work, and under it a tab for each part of the stage: *Venue*,
@@ -1214,7 +1214,7 @@ the 3D model does not drive the outputs.
   (the classic window, under the transport) the view stands to the left of the
   tabs instead, and its handle makes it wider; in a very small pane all of it
   scrolls. Picking a screen or a projector in a view opens its tab. A Preview
-  pane in its *3D* mode shows the stage too (several panes can, each from its
+  pane in its *3D stage* mode shows the stage too (several panes can, each from its
   own angle).
 - **Start.** *Load a venue model…*, *Use a sample venue* (an arena, a
   proscenium theatre, a thrust stage, a black box, a club, a festival main stage
@@ -1337,7 +1337,7 @@ bright the picture is, on any screen, curved wall or set.
   lux, 157 nits. Left out: lenses being dimmer at the edges, a screen's gain
   falling off to the side, black not being black, and light bouncing round the
   room. Treat the numbers as a guide.
-- **Light.** Tick *Light* over a 3D view (the Preview pane's *3D* mode or
+- **Light.** Tick *Light* over a 3D view (the Preview pane's *3D stage* mode or
   the view on *Settings ▸ 3D stage*) and each projector throws its display's
   picture into the room: onto the screens and the venue, fading with distance
   and angle, with shadows where something is in the way, and adding up where
@@ -1365,7 +1365,7 @@ bright the picture is, on any screen, curved wall or set.
   pictures and shadows when they need the computer. A display that shows the
   stage shows it without light. A graphics card that can't draw the light
   shows the view without it, and says so.
-- **Not yet:** the 3D model driving the outputs (mapping). The read-outs and
+- **Not yet:** the 3D model driving the displays (mapping). The read-outs and
   the light are sums: nothing here has met a real projector, a light meter or
   a real graphics card (only a software one).
 - A show with projectors opened in 0.25 plays as before; saving it there
@@ -1460,7 +1460,7 @@ Open it on a computer with projectors or screens and that is all you do there:
    on each of its screens for a few seconds, if you aren't sure which is which.
 5. **Displays:** in *Displays*, give each display of the show a monitor: the menu
    offers every computer's monitors beside this one's.
-6. **Sound:** in *Settings ▸ Audio*, tick *Plays on* for the computer (or
+6. **Sound:** in *Settings ▸ Audio outputs*, tick *Plays on* for the computer (or
    computers) each audio output should play on, and pick its device there.
 7. **Media:** nothing to copy. The show's files go to every computer by
    themselves (below). For content you may use later, add its folder under
@@ -1567,8 +1567,7 @@ never copy media by hand, and nothing waits for it.
   and checked. A sound on its way is silent until it arrives.
 - **Media not found.** A file the primary itself hasn't (it was moved, a disk
   isn't mounted) can't reach anyone: its displays say *Media not found* and the
-  primary's media manager lists it (*Settings ▸ Media ▸ Open the media
-  manager…*), where it is found as ever.
+  primary's media manager lists it (*Tools ▸ Media manager…*), where it is found as ever.
 - **Cards on display computers' screens.** *Settings ▸ Show network ▸ Cards on
   display computers' screens* has the two cards side by side, both kept in the
   show so every computer follows them:
@@ -1654,11 +1653,11 @@ never copy media by hand, and nothing waits for it.
 - **Cameras.** A computer plays a camera cue only if it has that camera (a
   capture card in each display computer); otherwise it shows nothing for it.
 - **Display computers** have no control window. Every monitor they have becomes
-  an output at start-up. Ctrl+Q (Command-Q on a Mac) on one quits NewQ there. From start-up until the
+  an output window at start-up. Ctrl+Q (Command-Q on a Mac) on one quits NewQ there. From start-up until the
   primary plays its first cue, a quiet grey card says its name, its address, who
   runs the show and how it is getting on; after that a monitor with nothing
   playing is black. *Identify* from the primary shows the name, screen number
-  and address on black on every output for a few seconds. A change
+  and address on black on every monitor for a few seconds. A change
   of role takes effect at once (the control window closes or opens again);
   *Restart* on the primary's row starts NewQ again on that computer.
 - **Backup computers** follow like any other computer and show the show, the
@@ -1677,7 +1676,7 @@ never copy media by hand, and nothing waits for it.
   with the sound system plugged into it): the new primary's status bar and its
   *Show network* page say so, and *Play it here instead* gives it to the new
   primary in the old one's place (the other computers given it keep it). The
-  page also says when an output is set to a sound device the new primary hasn't
+  page also says when an audio output is set to a sound device the new primary hasn't
   (the old primary's): it plays nothing there until one is chosen under
   *Settings ▸ Audio outputs*. The new primary
   sends the media from its own copy: a file it hadn't finished copying shows a
@@ -1737,11 +1736,11 @@ list* and *Timeline* parts and *More ▸ Check every feature*) runs across the
 show network: the test show and its media go to every computer first (the window
 shows each one's progress), then the primary plays it and every computer plays
 along, each measuring itself as a computer alone would be measured (memory,
-processor, FFmpeg processes, the frame rate of each output, stalls, sound
+processor, FFmpeg processes, the frame rate of each display, stalls, sound
 dropouts) and how it keeps to the primary (clock, round trip, each GO's lead, how
 far apart, corrections). While it runs the window has a line per computer: in
-step or not, each output's frames a second, and anything wrong. The result has a
-part per computer and one verdict; an output that draws only a few frames a
+step or not, each display's frames a second, and anything wrong. The result has a
+part per computer and one verdict; a display that draws only a few frames a
 second, a computer that stalls, and a computer whose measurements never came are
 each a problem, never a silent pass. Your show comes back on every computer in
 every ending (done, Stop, Cancel, NewQ closed, a computer dropping out and
@@ -1766,7 +1765,7 @@ returning).
   for; your show is put back.
 - **What the test adds** on each computer: the screens ticked for it, a look at
   memory and processor every 2 s on a thread of its own, and a short report over
-  the network every second. Nothing is drawn on the outputs for the test, so the
+  the network every second. Nothing is drawn on the displays for the test, so the
   frame rates are what a show would get.
 - A computer that follows (a display or backup computer) can't start a test: its
   window says tests are started from the computer that runs the show.
@@ -2113,7 +2112,7 @@ of it. *Run* or GO plays on from there. (A click at
 the very start shows the first frame.) If something else moves, runs, stops or pauses
 the timeline while you hold the playhead (a remote, a key, a cue, GO), your drag gives
 way: its playhead goes, and letting go does nothing. In show mode the ruler of a timeline group
-is locked, since parking puts its picture on the outputs; the ruler of the timeline
+is locked, since parking puts its picture on the displays; the ruler of the timeline
 list you are working on stays free, as the operator's way to cue it.
 
 **Keyframes on a timeline.** A clip's opacity, position and effect keyframes follow
@@ -2188,7 +2187,7 @@ ended: an FFmpeg you or another program started is never touched.
 something it did not expect while a show is running (a panic, in the
 programmer's word), that part's work is dropped for the moment and everything
 else carries on: the main loop comes round again, the cues keep playing and
-the outputs keep their pictures. A display whose drawing stopped is started
+the displays keep their pictures. A display whose drawing stopped is started
 again by itself within two seconds, a cue whose sound or picture reader failed
 ends with a message instead of hanging, a stream that stopped is retried, and
 the controls let go of what was selected and draw again. The status bar says
@@ -2206,11 +2205,11 @@ sooner. It is drawn on the processor, so it doesn't wait for the graphics card. 
 `NEWQ_NO_SPLASH=1` in the environment to start without it.
 
 If the displays are what stops NewQ starting, run it with `--main-window-only`
-(or set `NEWQ_MAIN_WINDOW_ONLY=1`): every output then stays in the main window
+(or set `NEWQ_MAIN_WINDOW_ONLY=1`): every display then stays in the main window
 and no output windows are opened, so you can open the app and set up the
 displays from the *Displays* page of the settings.
 
-## Test mode: try this computer before the show
+## Test Mode: try this computer before the show
 
 *Tools ▸ Test Mode…* plays a show of its own to find out how this computer copes, then puts
 your show back exactly as it was. Nothing to type. The window asks, top to bottom:
@@ -2226,9 +2225,9 @@ your show back exactly as it was. Nothing to type. The window asks, top to botto
   that runs a show network, with another computer in step; otherwise it is greyed and the
   line under it says why. In a show network the cue list and timeline play on every
   computer too, and the window says so.
-- **Show on**: a tick per screen (never the one the main window is on), grouped under each
+- **Show on**: a tick per monitor (never the one the main window is on), grouped under each
   computer's name in a show network. Opening the window with none ticked ticks them all;
-  *Start* needs at least one. With only the main window's screen, the test shows in its
+  *Start* needs at least one. With only the main window's monitor, the test shows in its
   Preview pane.
 - **Sound**: the device the test plays on (your show's own audio outputs unless you choose
   one) and *Muted*.
@@ -2237,7 +2236,7 @@ Then *Start*. *More* holds what is rarely needed: *Download real films and pictu
 unless you untick it; *Where from?* names the sources), *Heavier load for the graphics card*,
 *Load the network while testing* (in a show network: the network test, above),
 *Check every feature* (the debug test, below) and *Compare hardware decoding* (below). The
-window remembers the length, the ticks, the screens and the sound on this computer.
+window remembers the length, the ticks, the monitors and the sound on this computer.
 
 At *Medium* and *Long* the time is the whole run's: the network part plays 3 laps (Medium) or
 10 (Long), and the cue list and timeline parts share what is left of the hour or of the eight
@@ -2292,7 +2291,7 @@ say "not checked".
 *Live audio* is listed as not run (it would open a microphone). The sound parts are not
 run on a computer with no sound device, and say so. The server part is not run unless
 MediaMTX is with this copy of NewQ and this computer has been allowed to run a server
-(*Settings ▸ Media*): the test changes no settings. The show it plays has layers kept
+(*Settings ▸ This computer ▸ Allowed here*): the test changes no settings. The show it plays has layers kept
 apart, as new shows have, whatever your show's own setting is.
 
 **Nothing leaves the computer.** The check's show is a copy of yours with the cues taken
@@ -2465,7 +2464,7 @@ full rate throughout.*). The holding off ends with the leg however the test ends
 Never run on a real graphics card, a Mac or Windows, or with real monitors: only headless under
 Xvfb with a software card, where every figure is the software card's.
 
-**The media.** The first time, Test mode downloads free films and pictures (the
+**The media.** The first time, Test Mode downloads free films and pictures (the
 Blender Foundation's *Big Buck Bunny* and *Sintel* and the *Jellyfish* clip, under
 CC-BY, from test-videos.co.uk and download.blender.org, and NASA pictures, which are
 public domain) into `test-mode/media` in the log folder. The window says how much
@@ -2496,7 +2495,7 @@ lap checks and the figures around then aren't a fair measure. (On a Mac, an hour
 69 minutes by the wall clock because the Mac slept and woke briefly, and one lap took twice as
 long.)
 
-**Which display.** The ticked screens all show the same picture, in place of your show's own
+**Which display.** The ticked monitors all show the same picture, in place of your show's own
 displays while the test runs (in a show network, see
 [Every test on every computer](#every-test-on-every-computer)). The comparison below uses them
 too, and `system.txt` of each run says where the test was shown.
@@ -2507,7 +2506,7 @@ decoded, mixed and put through its effects, so it costs what it would with sound
 long enough to judge memory and nothing is rising, the window and the report say *Memory and
 cache use steady during this test*.
 
-**Heavier load.** *More ▸ Heavier load for the graphics card* adds three more whole-screen
+**Heavier load.** *More ▸ Heavier load for the graphics card* adds three more
 films, each with an effect, to the cue list part's layered lap, so up to seven films decode at
 once. Late frames then show where the computer's limit is, and are a note, not a problem.
 
