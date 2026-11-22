@@ -151,6 +151,13 @@ jobs:
       # the show engine and FFmpeg on this system, each checked for what it
       # did, and the same zip Test Mode makes kept as an artifact (the report,
       # the log at its Detailed level, any crash report), passed or not.
+      # Built in its own step: in a job of its own the self-test no longer finds
+      # the program already built, and a cold Windows build takes ~15 minutes on
+      # its own, which once used up the self-test's whole limit.
+      - name: Build for the self-test
+        if: matrix.part == 'self-test'
+        timeout-minutes: 30
+        run: cargo build
       - name: Self-test (the full check, headless)
         if: matrix.part == 'self-test'
         timeout-minutes: 15
