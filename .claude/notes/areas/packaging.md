@@ -6,6 +6,9 @@ Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Rea
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
 
+See also: `network.md`'s "after the 0.24.4 review" block has the rule for a tagged build
+(`NEWQ_REQUIRE_NOTARISED`); the cross-target clippy note is at the end of `testmode.md`'s `src/testmode/` entry.
+
 - Mac signing: `release.yml` imports a Developer ID certificate into a temporary keychain when the
   secrets `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD` (and, to notarise, `APPLE_API_KEY_P8`,
   `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`) exist; `package_release.sh` then signs ffmpeg, ffprobe

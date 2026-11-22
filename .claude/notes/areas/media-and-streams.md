@@ -6,6 +6,8 @@ Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Rea
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
 
+See also: `previews-and-ui.md` has `audio::LoadMeter` and `audio::cause`; `remote.md` has `src/text.rs`.
+
 - `src/media/`: `ffmpeg.rs` (find and probe), `video.rs`, `audio.rs` (devices,
   routing, mixer), `playback.rs` (looping passes).
 

@@ -15,9 +15,10 @@ These hold anywhere in the code. Each area file has its own rules besides.
 - **Show files stay backwards compatible.** A new field is `#[serde(default)]` and is left out of
   the file when it has its default value, with a test that old files load and that the default
   isn't written.
-- **A later NewQ's values are read, not refused.** Kinds that cross the network or sit in a show
-  read an unknown value leniently (`Unknown`/`Other` by `#[serde(other)]`, an untagged variant that
-  keeps it, or the default), so a newer computer never closes a session or loses a show.
+- **A later NewQ's kinds are read, not refused.** Kinds that cross the network, and most in a
+  show, read an unknown value leniently (`Unknown`/`Other` by `#[serde(other)]`, an untagged variant
+  that keeps it, or the default), so a newer computer never closes a session. `ControlAction` and
+  `TimelinePoint` in show files stay strict.
 - **A partial file is never handed out** (R20). A follower reaches media only through
   `net::media::local_path` and `Store::resolve`; an object is indexed only after its hash matched.
 - **R21 (owner's ruling): the network is a reference; a picture never waits for or jumps at the
@@ -31,11 +32,10 @@ These hold anywhere in the code. Each area file has its own rules besides.
   `Gpu::configure`.**
 - **One NewQ per node folder** (`node::lock_node_dir`); several NewQs on one machine need separate
   `NEWQ_NODE_DIR`s.
-- **No program NewQ starts outlives it**: `reaper::watch(&child)` after each spawn, and a child's
+- **No program NewQ starts outlives it**: `reaper::watch(&child)` after each spawn, and a stream's
   FFmpeg is never waited on without a limit.
-- **Nothing slow on the main thread**: processes are spawned by reader threads, system lookups and
-  ray tests run on their own threads. Panics are lived through (`crash::survive`); a worker thread
-  says it died with `crash::OnPanic`.
+- **Panics are lived through, not fatal** (`crash::survive`); a worker thread says it died with
+  `crash::OnPanic`.
 - **Pointers are never typed by hand.** "Settings ▸ This computer ▸ Power" is made by
   `settings::path(page, section)` from a `Section`, a menu item by its `settings::MenuItem`, so a
   pointer follows a move. A setting goes on the page it belongs to: the show's pages save in the
@@ -51,17 +51,17 @@ One line per area: the files, and the area file to read before working there.
 
 | Area | Code | Read |
 |---|---|---|
-| Show and engine | `show.rs`, `engine.rs`, `speed.rs`, `fx.rs`, `live_text.rs`, `text.rs`, `shape.rs`, layers, groups | `areas/show-and-engine.md` |
+| Show and engine | `show.rs`, `engine.rs`, `speed.rs`, `fx.rs`, `live_text.rs`, `shape.rs`, layers, groups (`text.rs`'s line is in `remote.md`) | `areas/show-and-engine.md` |
 | Show network | `net/` (clock, store, media, hub, play, paths), `app/play.rs`, `engine/net.rs`, `engine/cards.rs`, `autostart.rs`, `bin/newq-display.rs`, `ui/network.rs`, `ui/net_media.rs` | `areas/network.md` |
 | Timelines | `timeline/`, `engine/timeline.rs`, `engine/displays.rs`, `ui/timeline.rs`, `ui/timeline/` | `areas/timeline.md` |
 | 3D stage | `stage3d/` (projectors, light, samples), `stage_render.rs`, `stage_live.rs`, `stage_counts.rs`, `render3d/`, `ui/stage_*.rs` | `areas/stage3d.md` |
-| Test Mode | `testmode/` (with `selftest.rs`), `net/measure*.rs`, `net/load.rs`, `stats.rs`, `soak.rs` | `areas/testmode.md` |
+| Test Mode | `testmode/` (with `selftest.rs`), `net/measure*.rs`, `stats.rs`, `soak.rs` (Test Mode's network load, `net/load.rs`, is in `network.md`) | `areas/testmode.md` |
 | Previews and UI | `app.rs`, `ui.rs`, `ui/` (menus, keys, settings, modern, preview), `dock.rs`, `preview_pace.rs`, `multiview.rs`, `history.rs`, `export.rs` | `areas/previews-and-ui.md` |
 | Compositor and displays | `gpu.rs`, `render.rs`, `upload.rs`, `adapters.rs`, `mesh.rs`, `blend.rs`, `pattern.rs`, `color.rs`, `monitor.rs`, display slots | `areas/compositor-and-displays.md` |
 | Media and streams | `media/` (ffmpeg, video, audio, hap, camera, waveform), `ndi.rs`, `pdf.rs`, `pptx.rs`, `slides_export.rs`, `stream.rs`, `mediamtx.rs`, `streamlink.rs`, `relink.rs`, `recovery.rs` | `areas/media-and-streams.md` |
 | Remote control | `remote.rs`, `feedback.rs`, `timecode.rs`, `output.rs`, `projector.rs` (PJLink), `clock.rs`, `web.rs`, `web_page.html`, `clicker.rs` | `areas/remote.md` |
 | Platform | `awake.rs`, `splash.rs`, `macwin.rs`, `freeze.rs`, `power.rs`, `crash.rs`, `reaper.rs`, `logging.rs`, `crumbs.rs`, display loss | `areas/platform.md` |
-| Packaging and CI | `release.yml`, `package_release.sh`, signing, the FFmpeg and MediaMTX pins, the logo | `areas/packaging.md` |
+| Packaging and CI | `.github/workflows/release.yml`, `scripts/package_release.sh`, signing, the FFmpeg and MediaMTX pins, the logo | `areas/packaging.md` |
 
 Paths are under `src/` unless they say otherwise; the area files are under `.claude/notes/`. Plans
 and rulings for the larger pieces are beside them (`network-plan.md`, `timeline-plan.md`,

@@ -1,10 +1,13 @@
 # Test Mode
 
-Covers `src/testmode/`, `src/net/measure.rs`, `src/net/measure_local.rs`, `src/net/load.rs`, `src/stats.rs`, `src/soak.rs`.
+Covers `src/testmode/`, `src/net/measure.rs`, `src/net/measure_local.rs`, `src/stats.rs`, `src/soak.rs`.
 
 Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Read this before
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
+
+See also: `network.md` has Test Mode's network load (`src/net/load.rs`) and more on tests across a network
+in its "after the real tests" blocks. The cross-target clippy note ends the `src/testmode/` entry here.
 
 ## Part of the `src/net/` entry: the network test (stage 6)
 

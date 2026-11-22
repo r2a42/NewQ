@@ -24,8 +24,7 @@ verified, or you are blocked on something only they can do.** Never end a turn w
    the code under it was already checked (`scripts/check.sh full`) and is green on all three
    systems. If code changed since the last green round, run `scripts/check.sh full` first: one
    clean push beats three.
-2. **Push.** Push the bump to the pull request and mark it ready
-   (`update_pull_request` with `draft: false`). Start the Monitor for CI (below) in the same turn.
+2. **Push.** Push the bump to the pull request. Start the Monitor for CI (below) in the same turn.
 3. **CI.** On each system a tests job and a self-test job, plus `gate`. On a failure, read the job
    log (`get_job_logs` with the `job_id` from the event) and decide:
    - Ours (a test failed): fix, run `scripts/check.sh quick <the area>`, push. The push restarts CI.
@@ -38,7 +37,8 @@ verified, or you are blocked on something only they can do.** Never end a turn w
    - Known trap: Homebrew's FFmpeg has no `hap` encoder. Tests that make Hap files use
      `test_media_with_hap` and skip. Timing tests must not assert upper bounds on
      counts: CI runners oversleep.
-4. **Merge.** When all checks are green on the head, `merge_pull_request` with
+4. **Merge.** When all checks are green on the head, mark the pull request ready
+   (`update_pull_request` with `draft: false`), then `merge_pull_request` with
    `merge_method: rebase` (never merge or squash: `main` stays linear).
 5. **Main CI.** The rebase merge has the same tree, so the `gate` job skips the builds and
    the run is quick. `get_workflow_run` on that run's id (find it from the one run
@@ -79,11 +79,9 @@ workflow is meant to be started by `workflow_dispatch` (owner's token).
 
 ## Staying with it
 
-Wait with the Monitor tool and `scripts/gh_wait.sh` (`--for 25m`), never with scheduled tasks
-(`send_later`/`create_trigger` bound to this session are refused; if you made one, `delete_trigger` it).
-`gh_wait.sh` polls the public GitHub API once a minute with plain `curl`; with `--for 25m` it
-exits with "still running" before the Monitor's limit, and then you start another. Each wait is
-one Monitor call (`persistent: false`):
+Wait with the Monitor tool and `scripts/gh_wait.sh --for 25m` (one Monitor call per wait,
+`persistent: false`; on "still running" start another), never with scheduled tasks (`send_later`/`create_trigger` are refused here;
+`delete_trigger` any you made):
 
 ```
 scripts/gh_wait.sh --for 25m pr 34              # all checks on the PR head finished (exit 0 = all passed)

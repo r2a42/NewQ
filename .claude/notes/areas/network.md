@@ -1,10 +1,14 @@
 # The show network
 
-Covers `src/net/`, `src/app/play.rs`, `src/engine/net.rs`, `src/engine/cards.rs`, `src/autostart.rs`, `src/bin/newq-display.rs`, `src/ui/network.rs`, `src/ui/net_media.rs`.
+Covers `src/net/`, `src/app/play.rs`, `src/engine/net.rs`, `src/engine/cards.rs`, `src/autostart.rs`, `src/net/load.rs`, `src/bin/newq-display.rs`, `src/ui/network.rs`, `src/ui/net_media.rs`.
 
 Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Read this before
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
+
+See also: the blocks after the real tests also hold notes for other areas: picture uploads and
+`adapters::look_every` (`compositor-and-displays.md`), Test Mode across a network and its network load
+(`testmode.md`), and the rule for a tagged release build, `NEWQ_REQUIRE_NOTARISED` (`packaging.md`).
 
 - `src/net/` (stage 1 of `.claude/notes/network-plan.md`; results and what remains in
   `network-sync-trial.md`): `clock.rs` a follower's shared clock from NTP-style exchanges (pure;

@@ -6,6 +6,9 @@ Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Rea
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
 
+See also: `network.md`'s "after the 0.24.4 review" block has `upload::first`, the uploads thread's
+restart and `adapters::look_every`.
+
 - `src/gpu.rs`, `src/render.rs`: the compositor and the per-window render threads.
   Every `queue.submit` goes through `Gpu::submit` and every `surface.configure` through `Gpu::configure`
   (`Gpu::gate`, a RwLock): configuring waits for the device to go idle and fails if another thread submits
