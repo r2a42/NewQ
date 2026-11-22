@@ -1,0 +1,233 @@
+# The 3D stage, projectors and the 3D renderer
+
+Covers `src/stage3d/`, `src/stage_render.rs`, `src/stage_live.rs`, `src/stage_counts.rs`, `src/render3d/`, `src/ui/stage_view.rs`, `src/ui/stage_edit.rs`, `src/ui/stage_projectors.rs`.
+
+Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Read this before
+working in these files, and keep it true when the code changes. A heading that says "Part of"
+is a piece of a longer entry that covered several areas.
+
+- The 3D stage (0.25.0; plan and the FBX verdict: `.claude/notes/stage3d-plan.md`). `src/stage3d/`:
+  `mod.rs` `Show::stage3d` (`Stage3d`: `venue: Option<Venue>`, `surfaces`, `viewpoints`, `units`;
+  unwritten while empty, every field at its default too). Metres, degrees, right-handed, Y up; a
+  `Placement` is `T * Ry(yaw) * Rx(pitch) * Rz(roll)`. `Surface` (`SurfaceId` from `alloc_id`, in
+  `load`'s next-id guard) has a `SurfaceShape` (Flat, Curved: `width` along the arc, concave unless
+  `convex`; Faceted: `Facet`s with their own `uv` region) and a `Feed` (None or a display's
+  `region`, `[x, y, w, h]` as `PartOf::area`); `Show::whole_picture` is what a blended projector's
+  screen shows. `forget_missing_feeds` runs in `remove_output`, `load` and `use_displays_as`; the
+  venue's path is kept relative like cues' files. `Stage3d::scene(show, Option<&LoadedVenue>)` makes
+  the renderer's `Scene`: venue lit with `Venue::matrix` (units, up axis, placement), screens unlit
+  `Paint::Output` with the feed and piece regions composed, `UNFED_GREY` without one (or for a display
+  that isn't there). `scene.rs` the neutral types the renderer draws (`Mesh`, `Paint`, `Part`,
+  `Camera`, `Scene`; conventions in its header: CCW front faces, UV (0,0) top-left, column-major
+  `m[col][row]`, the renderer applies a region). `geometry.rs` pure meshes (`surface_mesh` ->
+  `Piece`s; `arc`, `jumbotron`, `angled_wall` presets; sizes and counts clamped, `MAX_FACETS`) and the
+  matrix sums. `load.rs` `load_venue` (worker thread; `catch_unwind` as a last guard): glTF/GLB via
+  `gltf` (no `import`: buffers and pictures read here, views/accessors checked first) and OBJ+MTL via
+  `tobj`; merged per material, node transforms baked, brightness baked (`Venue::needs_reload`),
+  `WARN_TRIANGLES`/`MAX_TRIANGLES`, `MAX_TEXTURE`; FBX refused in words (`FBX_WORDS`). A material's
+  triangles are cut into parts of at most `MAX_PART_VERTICES` (4M; the card's buffers are 256 MB
+  under `downlevel_defaults`) by `split_mesh`, which keeps only used corners (`Builder::part_vertices`
+  smaller in tests). Every file is found through `load_venue_with(path, venue, locate)` (`Found`
+  Here/Arriving/Missing; `Unread::Arriving` is never a failure): side files by `side_path` (textual,
+  the model's separator; refuses absolute, drive, UNC, URL, `..`), read by `read_capped` (regular
+  files only; a glTF buffer at most its byteLength, `MAX_PICTURE_FILE`, `MAX_MATERIALS_FILE`); OBJ
+  through `tobj::load_obj_buf`; `texture_tries`/`texture_file` (Missing beats Arriving: only one name
+  is in a primary's list). `venue_files(path)` lists those files (a .glb's JSON chunk only; a name
+  not there is listed too, so the primary's list says it is missing). Network: `manifest::media_paths`
+  adds the venue, `manifest::build` adds `venue_files` on the hashing thread, `Puller` ranking puts
+  used files the order doesn't name after it, `add_facts` skips `is_model_part`. Tests make their
+  models in the test (`load_tests.rs`; `net/store/tests.rs::a_venue_model_and_its_files_reach_…`).
+  In the Media manager (`relink.rs`, below). Lenient reading: `SurfaceShape::Unknown`/`Feed::Unknown`
+  (`#[serde(untagged)]` variants keep a later NewQ's value and write it back; drawn as nothing),
+  `lenient`/`lenient_option` for `LengthUnit`, `UpAxis`, `OutputConfig::source`.
+  `OutputConfig::source: Option<StageSource { viewpoint }>` (unwritten when None): a display that
+  shows the stage; `Show::stage_source` (the `whole_picture`'s, never a sub display's; the one rule
+  for app.rs and `shows_stage`), `stage_source_refused` (the page's reason for a projector or sub
+  display), `sanitize_stage` (in `load`, `take_show`, `play_load_kept`: a sub display's source
+  cleared, duplicate viewpoint names renamed), `rename_viewpoint` (sources follow, a taken name
+  refused; the page types into a draft). `Show::shows_stage` (itself or its `whole_picture`) makes `scene` leave a screen
+  fed by it unfed (`UNFED_GREY`): the stage is never drawn from itself (sampling the target being
+  drawn is a wgpu error). `Show::stage_camera` (the viewpoint, else all of the bounds from in front),
+  `outputs_in(scene)`, `Stage3d::part_surface` (a picked part's screen: venue parts come first, lit).
+  Integration: `src/stage_render.rs` the "stage-render" thread (`StageThread`, `StageDrawer`;
+  latest-wins `StageJob`s merged so no view is lost; `crash::OnPanic`): `FeedJob`s first (each
+  display's layers composited off screen, Rgba8Unorm, through the one `gpu::Slot::Stage`, one
+  `Gpu::submit` each before the next display's uniforms are written: a layer can be on two displays),
+  then `ViewJob`s drawn by `render3d::Renderer` into a `LayerTexture::new_target` (RENDER_ATTACHMENT;
+  `render_view`, `mark_drawn`); `feed_size` (1024 longest, times the governor's scale, at least 256).
+  `src/stage_live.rs` (`App::stage`): `begin` (venue on a "venue-load" thread through `locate` =
+  `net::media::local_path`, a brightness change waits `RELOAD_SETTLE`, a failure isn't retried until
+  the venue, `media_generation` or its files change; the load thread lists the model's files
+  (`venue_file_list`: itself and `venue_files`) and `stamp_of` them (located path, length, mtime) before
+  reading (`Read`); `VenueState::watch` stats that list on a "venue-watch" thread every `WATCH_EVERY`
+  (2 s; `wake_at` only while the thread runs) and two looks in a row that agree and differ from the read
+  make it `stale`, read again as a brightness change is (the old model kept until the new lands; a new
+  `scene_key` makes `update_outputs` redraw the control window and pop-outs), a venue on its way is `VenueStatus::Arriving`, looked at
+  every `ARRIVING_LOOK`; `stage_seen` compared each pass, `shape_key` (hashed through a writer) only
+  on a change; the scene made again only when its key changes, into `UiState::stage` with
+  `stage_bounds`: the venue's box and the screens), `output_layer` (a display showing the
+  stage gets its target as its only layer, `Fit::Stretch`, so window, keystone, blend, streams and
+  `part_of` projectors work unchanged), `send` (`StageOutput { seen, due }`: one no window or stream
+  shows is preview work at the previews' pace; the previews' `ViewRequest`s; each drawn again only
+  when its signature (with `feeds_key`, the stage's pictures' layers) changed or something plays;
+  displays first (`ViewJob::display`, `StageJob::merged` sorts them, `displays_done`), previews wait
+  while a job waits behind one whose displays are being drawn (`set_behind` in tests); a thread that stopped is noticed every pass, never busy, and
+  restarted by `wake_at` after `RESTART_EVERY`; `IDLE_RELEASE` (30 s) with no 3D view in sight and no
+  display showing the stage quits the thread and with it all it kept on the card (`stage_view::draw` pushes
+  `StageShared::in_sight` every frame it is drawn, asking or not, and asks a repaint every `IN_SIGHT_EVERY`,
+  10 s, so a still pane keeps it and its target); feeds by
+  `feed_groups`: the whole picture's layers on its canvas with no keystone, mesh or blend, sub
+  displays in their `area`), `landed` (the screens showing it and the control window redraw),
+  `forget_device` (in `watch_gpu`'s `stopping`). `src/stage_counts.rs` (pulled in by `#[path]` from `stage_render.rs`): `stage_render::totals()` returns `StageTotals`, relaxed atomics counted through `CountTo` (default `TOTALS`; a test's `Counters::for_test()` counts into both). It holds running sums (jobs, feeds, throws; `views` (previews, and displays only the previews show) and `displays` (shown in a window or stream) with their processor time and `frames_by_ms` bands (`FRAME_MS_BANDS`); missing pictures; `light_left_out` views; shadows; the thread's starts, stops, `restarts` (only after a stop) and idle releases; venue loads and failures) and levels (`cpu_us_worst` since start, `throws_left_out` past `MAX_THROWS`, the last venue's ms, parts and triangles). `since` subtracts the sums and keeps the levels, and `worst_band_ms` on a `since` gives the worst frame between two looks to a band. `StageDrawer::counting` counts in `draw`, `StageLive` counts the thread's life in `send`/`keep_thread` and the projectors left out in `light_up`, and the venue-load thread counts its read. `feeds_a_display` keeps those displays' uploads off
+  the previews' pace (not when every stage display is preview work, `governed_only`).
+  `App::stage_busy` keeps the loop coming round; `wake_at` brings it back. `src/ui/stage_view.rs`:
+  `StageShared` (`UiState::stage`: scene, bounds, `VenueStatus`, `requests`, `targets` by `PreviewId`,
+  `actions` drained into `ui::draw`/`draw_popout`, `picked`) and `draw(ui, &Show, st, &mut
+  StageViewState, PreviewId)`: orbit/pan/dolly/frame/pick, overlay (viewpoints, See all, Grid, X-ray,
+  Edit…), asks `preview_budget` each frame and pushes a request only when it may draw (or has no
+  picture), the governor's scale through `Quality::scaled_by`; shows its target through the compositor
+  (`preview::callback`, pace None). Hosted by a Preview pane in 3D mode (`PreviewId::Stage(host)`,
+  state in `UiState::preview_stage`) and by Settings ▸ 3D stage.
+  `src/ui/stage_edit.rs`: Settings ▸ 3D stage (`SettingsPage::Stage3d`), which lays itself out
+  (`settings_view` hands it the page without the 640 pt scroll column): `page` picks an
+  `Arrangement` by the room (Stacked: the view, `SETTINGS_VIEW`, pinned on top at `view_height`,
+  the `grip` under it dragging `StageShared::view_height`, then the tabs; SideBySide on a page
+  under `STACKED_FROM` high and `SIDE_BY_SIDE_FROM` wide, the classic window's: the view on the
+  left at `view_width`; Cramped: all in one scroll area), then `StageTab` tabs (Venue, Screens,
+  Projectors, Viewpoints, Displays; `StageShared::tab`, for the run; each a `settings::STAGE_*`
+  `Section`, its label noted by `settings::note_heading`) and only the chosen tab's content in a
+  `ScrollArea::both` salted by tab (`tab_scroll`; sections drawn in `settings::untitled` frames).
+  A new pick (`StageShared::tab_saw`, screens and projectors) opens its tab once. Test notes
+  "3D stage ▸ view", "▸ view size", "▸ tab ▸ <label>", "▸ tab content". It edits the show directly
+  as other pages do; `StageEdit` (`Action::Stage`, an edit
+  of the show) for what a view asks; `Preset` (Flat, Curved, Jumbotron, AngledWall), `add_surface`
+  (fed by `first_feed`), `feed_choices` (no display that shows the stage). A display is set to show
+  the stage on Settings ▸ Displays: its *Shows* (`ui.rs::shared_picture_editor`) draws
+  `stage_edit::StageItems::items` (`stage_choices`, `stage_source_words`; greyed with
+  `Show::stage_source_refused`'s reason); `ShowPartOf` clears a `source`; the page's `sources_section`
+  (the Displays tab, `settings::STAGE_DISPLAYS`) lists them, each a button to it there (`UiState::reveal_display`). Samples: *Use a sample
+  venue* (`StageEdit::UseSample`, with the usual screens and viewpoints), *Export as .glb…*. Tests: `stage_render_tests.rs` (GPU: a four-colour picture
+  the right way round on a screen and on a display showing the stage; the thread), `stage_live_tests.rs`
+  (venue loading with a made OBJ; a display's picture drawn and not again while still),
+  `ui/stage_view_tests.rs` (governor, pick, drag), `ui/stage_edit_tests.rs`. Tried headless under xvfb
+  (lavapipe): the view, the page, a display showing the stage; never on a real GPU or display.
+  Sample venues: `samples.rs` (pure) makes seven in code (`SampleVenue` Arena, Proscenium, Thrust,
+  BlackBox, Club, Festival, Ballroom; `ALL`, `label`, lenient: an unknown name reads as BlackBox). In
+  the show `Venue::sample` (`"sample": "Arena"`, `path` empty and unwritten); `load_venue` makes it
+  instead of reading the path (`sample_venue`, through `load::Builder`, so the same `LoadedVenue`:
+  a part per material, plain lit colours, brightness baked); `Venue::matrix` is the placement alone
+  (metres, Y up); `needs_reload` compares `sample`. All: floor y = 0 (the pit to `lowest()`), stage
+  towards -Z, audience +Z, origin per variant's doc. Pieces: `face` (winds to a hint, Newell normal,
+  flat normals, no zero-area halves), `cuboid`, `block`, `prism`, `bar`, and seating as a stepped
+  `Rake` swept along a `Path` (rounded rectangle, U, fan, straight). `screens(kind)` are
+  `StarterScreen`s (name, placement, shape) added unfed by `Show::add_sample_screens` (ids from
+  `alloc_id`; follows the venue's position and yaw, not pitch or roll); `viewpoints(kind)` and
+  `Stage3d::add_sample_viewpoints` (by the venue's matrix, once per name). Tests in
+  `samples/tests.rs` (budget, size, winding, screens inside, facing and seen from the first viewpoint
+  by a ray test); the ignored `draw_the_samples` rasterises each into `NEWQ_SAMPLE_PICTURES`.
+  `glb.rs` (pure) writes parts as a .glb (mesh, node and `baseColorFactor` material per part;
+  `samples::sample_glb`), read back through `load_venue` part for part in a test (so each sample's
+  materials have colours of their own). Not offered in the UI yet.
+  Projectors (steps P1 and P2 of `.claude/notes/projection-plan.md`). `stage3d/projector.rs`:
+  `Stage3d::projectors` (`Projector`: `ProjectorId` from `alloc_id`, in `load`'s next-id guard, and
+  `Show::number_projectors` after it for a missing or doubled id; `Lens { throw, zoom, shift, aspect, gamma }`,
+  `lumens`, `display`, `resolution`, `model`; every field but `id` defaulted and unwritten at it, and
+  `#[serde(flatten)] extra` on both keeps a later NewQ's fields; read through clamping getters, `Lens::zoom`
+  sorted and finite). Conventions in its header: the lens looks down its own -Z, throw = distance / width,
+  shift a share of the picture (0.5 up: the bottom edge on the axis). The throw calculator: `frustum`,
+  `picture_at`, `distance_for`, `ray(u, v)`, `in_picture`, `camera` (the look-through `Camera`), `aim_at`
+  (the picture's middle, not the axis, onto a point; roll kept), `fit_to` (square on, the box round the
+  shape, a `rear` screen from behind), `throw_for`, `on_flat` (corners, `fills` by polygon clipping,
+  `spill`), `pixel_size_at`, `footprint` (rays `FOOTPRINT_INSET` inside the edge) and `cone`;
+  `LensPreset` (plain-word lenses, `for_throw`), `BRIGHTNESS`, `RESOLUTIONS`. `Show::add_projector`,
+  `projector_display_refused` (sub display, shows the stage, taken), `sanitize_projectors` (in
+  `sanitize_stage`), `forget_missing_outputs` clears a gone display. `stage3d/light.rs` (pure): lux by the
+  inverse square law and the two cosines (`illuminance`, `Facing`), `luminance` (lux × gain / π),
+  `lit_by` (shadow test by `pick`). `Surface::gain`/`rear` (unwritten at 1/false). `Stage3d::scene` puts
+  a lit `projector_body` (wholly behind the lens) per shown projector after the screens:
+  `projectors_from`, `part_projector`; `part_surface` stops before them. `Part::catch` (`Catch { gain,
+  front_only }`: a screen's gain and side for the light; the venue's default). `Scene::throws` is filled
+  only in `stage_live`'s `lit_scene`. UI: `src/ui/stage_projectors.rs` (`section_ui`, the Projectors tab of Settings ▸ 3D
+  stage, `CORNER_PIN_WORDS`; `add_aimed_at`; rows with `readout_words`, *Fit to a screen*, `which_lens`;
+  "My projectors" in `my-projectors.json` in the log folder, `ProjectorsUi::library_dir` for tests);
+  `ProjectorsUi` (`StageShared::projectors`) runs a `projector-sums` worker (latest wins; footprints and
+  the light under the pointer, `ask_here`/`Here`, shown only in the view that asked, `here_in`; `waiting` makes a view repaint) so no venue ray test is
+  on the main thread; `view_lines` gives each `ViewRequest` its lines (cached by key). `stage_view`:
+  bodies picked by click, `StageViewState::through` (*Viewpoint ▸ Through …*; drag, wheel, double-click
+  or Esc leave to an orbit from the lens), `letterbox`. Tests: `projector_tests.rs`, `light_tests.rs`,
+  `render3d/tests.rs` (lines, cone and outline, look-through), `ui/stage_projectors_tests.rs` (mouse:
+  add aimed, point at, which lens, keep; the worker; pick and look through); the ignored
+  `write_a_show_with_two_projectors` (`NEWQ_PROJECTOR_SHOW`) makes a show to try by hand. Tried
+  headless under xvfb (lavapipe) with the proscenium sample and two projectors; never a real GPU,
+  projector, light meter or room.
+  The light (P2): `StageViewState::light`/`light_view` (`render3d::LightView` Picture/Brightness/Overlap/
+  PixelSize)/`auto_white`/`white_nits`, view state only (not the show, not saved); *Light* in the view's
+  bar when the show has projectors, `light_bar` (Show menu `LIGHT_VIEWS`, *Auto exposure* =
+  `stage_projectors::auto_white`, rounded to whole nits since the slider rounds), `legend`/`draw_legend`,
+  `light_notices` (refused GPU, more than `MAX_THROWS`). `light.rs` adds `MAX_THROWS` (16), `throw_of`
+  (matrix straight from `Projector::frustum`, not through `Camera`, whose angle is clamped), `throw_uv`/
+  `throw_lux` (the shader's sum on the CPU, tests compare), `band` with `BRIGHTNESS_STEPS`/
+  `PIXEL_STEPS_MM`/`SCALE`/`OVERLAP` (the shader is given them), `auto_white`, `ROOM_LIGHT`. App:
+  `app.rs::projector_throws` (only when a request has its light on; shape by `stage_projectors::shape_of`,
+  as the lines) and `throw_picture` (the display's group with `warp = pin`, its sub displays by
+  `corner_pin(area)`, `blend.clamped()`; None for a display that shows the stage) ->
+  `StageLive::send(.., projectors: &[ProjectorThrow], ..)` -> `light_up` (`lit_scene` made again only on
+  `lit_key`; a key of the pictures, `groups_key`, xored into a lit view's signature, so a blend width or a
+  still redraws it) -> `ThrowJob`s only in a job with a lit view, `throw_size(lit scale)` (960 wide 16:9,
+  the governor's scale). `stage_render`: `Throws` (an `Rgba8Unorm` array of `layers_for` layers, a D2 view per layer),
+  each throw composited through `Slot::Stage` with its own `BlendPass` (set, composite, submit, one at a
+  time) after the displays' views (`draw_throws`), `StageJob::merged` keeps newer throws by layer; `render_lit` gets the array for a lit view. A
+  display that shows the stage is drawn unlit. Tests: `light_tests.rs`, `render3d/lit.rs` (packing,
+  `box_meets`, naga writes HLSL 5.1/6.0 and MSL: naga is a dev-dependency), `render3d/tests.rs` (four
+  colours the right way round front and rear, a box's shadow and no acne, two throws add and match
+  `throw_lux`, the three colour views, a refused shader still draws, an LED wall keeps its picture),
+  `stage_render_tests.rs` (blend on the throw's layer, thrown the right way round, a blended pair's
+  overlap as bright as either alone in light), `light_tests` (every screen shape's normals out of its
+  CCW front, which `fs_lit`'s side relies on), `stage_live_tests.rs`
+  (`blended_pair_show`, the ignored `write_the_lights_demonstration_show` with `NEWQ_DEMO_SHOW`; what a
+  window sends, `light_up`, only a lit view lit), `ui/stage_view_tests.rs` (`Driven`: Light and the views
+  by mouse, notices, legends). Tried headless under xvfb (lavapipe); never a real GPU, Mac, Windows or
+  projector.
+
+- `src/render3d/`: the 3D stage's renderer (0.25.0 previz, `.claude/notes/stage3d-plan.md`; drawn on
+  `stage_render`'s thread, `#![allow(dead_code)]` for what isn't used yet). `scene.rs` re-exports `stage3d::scene`'s neutral types (`Mesh`, `Paint`,
+  `Part`, `Camera`, `Scene`); conventions: right-handed, Y up, metres, uv (0,0) the picture's
+  top-left, `Paint::Output::region` (left, top, width, height) like `PartOf::area`, nothing culled.
+  `Camera::shift`/`aspect` (a projector's lens): `frustum` (off-axis, letterboxed to the target's shape;
+  `maths::frustum_reversed`), `picture_in`, `clip_to_near`; `project` and `ray` use the same frustum.
+  `render_with_lines` draws `Line`s last, over everything (a `LineList` pipeline made through `checked`;
+  `FrameStats::lines`), for a preview's projector cones: `ViewRequest`/`ViewJob::lines`, hashed into
+  `stage_live::signature`; a display's job has none. `lit.rs` the light (P2; all optional, `checked`,
+  which now pushes Validation and Internal scopes: a backend's shader compiler failing is Internal):
+  `render_lit(.., throw_pictures: Option<&TextureView>)`, used when `Options::light` isn't Off and the
+  scene has throws; a `LightKit` made at the first lit view (its own module `shader.wgsl` + `light.wgsl`,
+  entry `fs_lit`, bind group 3: `LightsUniform` (vec4s only, 16 `ThrowUniform`s), the pictures array, a
+  sampler, a `Depth32Float` shadow array (`SHADOW_SIDE` 1024, `SHADOW_SIDE_LOW` 512 below full
+  scale, kept per side; `layers_for` the throws, a power of two up to 16, as the pictures' array) and a comparison sampler (`GreaterEqual`: reversed depth). Shadow maps by a
+  depth-only pipeline over `vs_part` with the frame uniform's `view_proj` swapped per layer
+  (`shadow_frames`), drawn only when `shadow_key` (every part's mesh and transform, the lens) changes
+  (`FrameStats::shadows_drawn`); lookup pushed along the normal (`NORMAL_PUSH`) and taken `DEPTH_SLACK`
+  nearer. An unlit part reaches the light only when `lit::reached` (`box_meets` on `GpuMesh::bounds`), else
+  it keeps its picture (an LED wall); flags.z/w carry gain and side. A refusal sets `light_refused` (never
+  tried again; `FrameStats::light_left_out`); `refuse_light` in tests uses a broken shader. `pick::Hit::normal` (towards the ray), `front`/`front_normal` (the CCW front: the light sums use a screen's own).
+  `Renderer` (one per `Gpu`): `render(gpu, &Target{view, format, size}, scene, camera, outputs: &dyn
+  Fn(OutputId) -> Option<&TextureView>, &Options) -> FrameStats` (draw calls, triangles, missing pictures)
+  submits through `Gpu::submit` itself (its uniforms are written per call, so two renders can't share a
+  submit). One uber-shader (`shader.wgsl`), colours in display values like the compositor's: lit = headlight
+  from the eye + sky/ground ambient, Lambert in linear light, both faces, `lift` adds grey to dark colours;
+  unlit = full brightness; a display with no picture is dark grey with an edge; optional grid (fragment-drawn
+  1 m / 5 m lines) and axes; `venue_opacity` < 1 is the x-ray (lit parts drawn last, blended). Reversed Z
+  (Depth32Float, clear 0, `Greater`). `Quality { msaa, scale }`: 4× where the adapter offers it for the
+  format and depth (`samples_for`), a scale below 1 draws smaller and scales up (`blit.wgsl`); a preview
+  passes its quality through `Quality::scaled_by(governor)` (multisampling off below 1), a 3D view that is a
+  display's source doesn't; a frame not drawn is no call at all (the target keeps its picture); targets are
+  kept per `Target::owner` (the view) and size, an owner's other sizes dropped on a resize, so the
+  governor's steps don't churn and a resize makes no pile. `FrameStats` has `cpu_time` and `samples_shaded`. Meshes are
+  kept by `mesh_key`, pictures by `key`, let go after `FORGET_AFTER` unused (looked over every `TIDY_EVERY`,
+  2 s, while drawing) or at once by `keep_only` when the stage-render thread's scenes change; bad meshes
+  (stray indices, no normals or uvs, NaNs) are mended or skipped; one bigger than the device's
+  `max_buffer_size` is skipped and remembered (`too_big`, `limit_buffers` in tests). `camera.rs` (pure): `Camera::{sane, view, projection,
+  project, ray}`, `Orbit` (`orbit`/`pan`/`dolly` from mouse deltas, `frame`/`frame_scene` zoom to fit,
+  `from_camera`); `pick.rs` (pure): `pick(scene, ray, wanted)` -> `Hit { part, point, distance }`. GPU
+  tests in `render3d/tests.rs` (lavapipe under `WGPU_BACKEND=vulkan`; `NEWQ_RENDER3D_PNG=<path>` writes the
+  little stage of `a_little_stage_draws`). No real GPU or display tried.
