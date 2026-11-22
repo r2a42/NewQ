@@ -378,6 +378,8 @@ in real time on all three systems, and Test Mode itself is run by hand on real m
 
 ### L. Fewer, larger releases, or small ones?
 
+The owner decides the release schedule; this section is advice only and is not adopted.
+
 Measured: eight releases in five days (#75 to #82). Each is a download for people who run shows,
 and each cost between 30 minutes and two hours of waiting.
 
