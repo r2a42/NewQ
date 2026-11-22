@@ -1,0 +1,74 @@
+name: Warm the cache
+
+# Fills the cache of compiled libraries that CI's jobs start from. A pull
+# request can only use caches made by itself or by `main`, and CI on `main`
+# skips its builds after a rebase merge (the `gate` job in ci.yml), so without
+# this every pull request's first round compiled every library from nothing.
+#
+# Its own workflow, not a job in ci.yml: scripts/check_main_ci.sh (Cut release)
+# waits for the CI run on `main` to pass, and a release must not wait for a
+# cache. It runs when the libraries or the workflows change, and weekly
+# (GitHub drops a cache nobody used for 7 days).
+#
+# The rust-cache settings and everything that goes into its key (the toolchain,
+# the CARGO*/RUST*/CC* environment) must be the same as in ci.yml, or CI never
+# finds what this saves.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - ".github/workflows/**"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: warm-cache
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: warm (${{ matrix.os }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          # See ci.yml: use public DNS when the runner's can't find Ubuntu's archive.
+          if ! timeout 15 getent ahostsv4 azure.archive.ubuntu.com > /dev/null; then
+            echo "::warning::azure.archive.ubuntu.com does not resolve with the runner's DNS"
+            sudo mkdir -p /etc/systemd/resolved.conf.d
+            printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/public.conf
+            sudo systemctl restart systemd-resolved
+          fi
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y libasound2-dev libudev-dev libxkbcommon-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: newq-${{ runner.os }}
+          add-job-id-key: false
+          # A new stable's lint failing clippy must not stop the save.
+          cache-on-failure: true
+      # What CI compiles: clippy's libraries, the test program's and the
+      # program's own (the self-test's `cargo run`). No -D warnings: this
+      # only fills the cache.
+      - run: cargo clippy --all-targets
+      - run: cargo test --no-run
+      - run: cargo build
