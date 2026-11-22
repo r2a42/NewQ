@@ -21,6 +21,7 @@ STILL_RUNNING=4
 deadline=""
 if [ "${1:-}" = --for ]; then
   limit="${2:-}"
+  [[ "$limit" =~ ^[0-9]+[smh]?$ ]] || { echo "--for needs a time such as 25m"; exit 2; }
   case "$limit" in
     *h) secs=$(( ${limit%h} * 3600 )) ;;
     *m) secs=$(( ${limit%m} * 60 )) ;;

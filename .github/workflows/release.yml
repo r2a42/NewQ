@@ -8,7 +8,8 @@ name: Release
 # download to it, and `publish` adds the checksums and releases it, so a failed
 # build never leaves a half-finished public release. Downloads go on the release
 # itself rather than through Actions artifact storage, which has a small quota
-# and can fill up.
+# and can fill up. (Only the Mac's two halves pass through it, between the
+# `mac-half` jobs and `macos`: four programs kept for a day.)
 on:
   push:
     tags: ["v*"]
