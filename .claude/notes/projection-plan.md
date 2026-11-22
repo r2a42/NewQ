@@ -1044,7 +1044,7 @@ that adds the shared types and nothing else.**
 `load.rs`, shader); C imports (`load.rs` cameras after B's `load.rs` change lands, `glb.rs`, a
 new `stage3d/mvr.rs`). B and C share `load.rs` here: order them.
 
-Every round ends with: CLAUDE.md's paragraph, `.claude/notes/stage3d-plan.md` updated, README,
+Every round ends with: the paragraph in `.claude/notes/areas/stage3d.md` (once CLAUDE.md's), `.claude/notes/stage3d-plan.md` updated, README,
 CHANGELOG lines, the old-show and default-unwritten tests, and a headless run of the app with a
 sample venue and two projectors, with screenshots looked at.
 
