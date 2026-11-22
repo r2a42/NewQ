@@ -559,10 +559,12 @@ fn when_room_is_short_replace_frees_the_old_file_before_fetching() {
             assert!(plan.words().contains("Room is short"), "{}", plan.words());
             assert_eq!(read_resolved(&s, &a), bytes(16, 60_000));
         } else {
+            // The plan's sentence, or the fetch's own when it began in the same
+            // pass and ran out of room before the plan's was ever published.
             wait_for("the problem to be told", || {
-                p.snapshot()
-                    .problem
-                    .is_some_and(|w| w.contains("Not enough room"))
+                p.snapshot().problem.is_some_and(|w| {
+                    w.contains("Not enough room") || w.contains("disk is too full")
+                })
             });
             assert!(matches!(
                 p.availability(&text(&a)),
