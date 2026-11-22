@@ -6,6 +6,9 @@ Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Rea
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
 
+See also: the `src/ui/preview.rs` piece ends with `audio::LoadMeter` and `audio::cause` (the sound
+mixer's load, `media-and-streams.md`'s area).
+
 ## Part of the `src/gpu.rs` entry: `src/ui/preview.rs`
 
   `src/ui/preview.rs`: every preview keeps the display's shape (`fit_picture`, `space`, `space_size`,

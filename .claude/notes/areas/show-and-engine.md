@@ -6,6 +6,8 @@ Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Rea
 working in these files, and keep it true when the code changes. A heading that says "Part of"
 is a piece of a longer entry that covered several areas.
 
+See also: `remote.md` holds the one line on `src/text.rs` (text cue rendering), in the `src/remote.rs` entry.
+
 - `src/show.rs`: the show data model and `.newq` (de)serialisation, plus the
   group, arm, cue-list and audio-output structure helpers. Cue lists: `Cue::list`
   (0 = main) and `Show::lists`; the cues of a list are kept together in
