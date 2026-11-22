@@ -1,0 +1,153 @@
+name: Flaky hunt
+
+# Each night, on the three systems, the whole test suite three times over with
+# the same environment as CI. A test that fails in one round and not another is
+# a race found while nobody waits for it, not on release day. The job summary
+# says which tests failed in which round; the logs are kept for a week.
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: flaky-hunt
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  hunt:
+    name: hunt (${{ matrix.os }})
+    # Three rounds of up to 40 minutes each, plus the build.
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # The same set-up as ci.yml.
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          if ! timeout 15 getent ahostsv4 azure.archive.ubuntu.com > /dev/null; then
+            echo "::warning::azure.archive.ubuntu.com does not resolve with the runner's DNS"
+            sudo mkdir -p /etc/systemd/resolved.conf.d
+            printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/public.conf
+            sudo systemctl restart systemd-resolved
+          fi
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y libasound2-dev libudev-dev libxkbcommon-dev ffmpeg mesa-vulkan-drivers libvulkan1
+          # As in ci.yml: Linux only, since the checks read whether NEWQ_REQUIRE_GPU is set at all.
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          echo "NEWQ_REQUIRE_GPU=1" >> "$GITHUB_ENV"
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+      - name: FFmpeg version
+        shell: bash
+        run: ffmpeg -hide_banner -version | head -1
+
+      # CI's cache (see ci.yml and warm-cache.yml), only read.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: newq-${{ runner.os }}
+          add-job-id-key: false
+          save-if: false
+
+      - name: Generate test media
+        shell: bash
+        run: bash scripts/make_test_media.sh
+      - name: Build the tests
+        run: cargo test --no-run
+
+      # Each round is its own step, so a hang uses up only its own time.
+      - name: Round 1
+        id: round1
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: bash
+        env:
+          NEWQ_REQUIRE_MEDIA: "1"
+        run: set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-1.log
+      - name: Round 2
+        id: round2
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: bash
+        env:
+          NEWQ_REQUIRE_MEDIA: "1"
+        run: set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-2.log
+      - name: Round 3
+        id: round3
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: bash
+        env:
+          NEWQ_REQUIRE_MEDIA: "1"
+        run: set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-3.log
+
+      - name: Which tests failed in which round
+        if: always()
+        shell: bash
+        env:
+          OUTCOME_1: ${{ steps.round1.outcome }}
+          OUTCOME_2: ${{ steps.round2.outcome }}
+          OUTCOME_3: ${{ steps.round3.outcome }}
+          OS: ${{ runner.os }}
+        run: |
+          bad=0
+          {
+            echo "## Flaky hunt on $OS"
+            echo
+            for n in 1 2 3; do
+              outcome_var="OUTCOME_$n"
+              outcome="${!outcome_var}"
+              log="round-$n.log"
+              failed=""
+              [ -f "$log" ] && failed="$(sed -nE 's/^test (.+) \.\.\. FAILED\r?$/\1/p' "$log" | sort -u)"
+              passed=""
+              [ -f "$log" ] && passed="$(grep -E '^test result: ' "$log" | tail -1)"
+              if [ "$outcome" = success ]; then
+                echo "- Round $n: passed. ${passed}"
+              else
+                bad=1
+                if [ -n "$failed" ]; then
+                  echo "- Round $n: **$(wc -l <<< "$failed" | tr -d ' ') failed**"
+                  while IFS= read -r t; do printf '  - \x60%s\x60\n' "$t"; done <<< "$failed"
+                else
+                  # No FAILED line: the run aborted, crashed or ran out of time.
+                  echo "- Round $n: **$outcome with no failed test named** (aborted, crashed or timed out; see round-$n.log)"
+                fi
+              fi
+            done
+            all="$(cat round-*.log 2> /dev/null | sed -nE 's/^test (.+) \.\.\. FAILED\r?$/\1/p' | sort | uniq -c | sort -rn)"
+            if [ -n "$all" ]; then
+              echo
+              echo "Rounds each test failed in (of 3):"
+              echo
+              echo '```'
+              echo "$all"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+          exit "$bad"
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-hunt-${{ runner.os }}
+          path: round-*.log
+          if-no-files-found: warn
+          retention-days: 7
