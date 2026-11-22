@@ -139,7 +139,8 @@ mod tests {
 
     /// The README's Keyboard table, row by row.
     fn readme_rows() -> Vec<(String, String)> {
-        let readme = include_str!("../../README.md");
+        // A Windows checkout has CRLF line ends (`text=auto`).
+        let readme = include_str!("../../README.md").replace("\r\n", "\n");
         let at = readme.find("\n## Keyboard\n").expect("a Keyboard section");
         readme[at..]
             .lines()
