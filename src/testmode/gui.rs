@@ -210,7 +210,7 @@ pub fn stats_window(ctx: &egui::Context, st: &mut UiState) {
                     .previews
                     .iter()
                     .find(|p| p.id == *id)
-                    .map_or("An output", |p| p.name.as_str());
+                    .map_or("A display", |p| p.name.as_str());
                 ui.label(format!("{name}: {} on its display", crate::fps::text(*f)));
             }
             ui.separator();
@@ -947,7 +947,7 @@ fn more(
         );
     });
     ui.checkbox(&mut test.heavy, "Heavier load for the graphics card")
-        .on_hover_text("The cue list part blends three more whole-screen films with effects over the others: late frames then show where this computer's limit is.");
+        .on_hover_text("The cue list part blends three more films the size of the picture, with effects, over the others: late frames then show where this computer's limit is.");
     load_choice(ui, test, &facts.net);
     ui.separator();
     let can = facts.refusal.is_none() && engine.ff.is_some();
@@ -1762,7 +1762,7 @@ fn sound_section(ui: &mut egui::Ui, devices: &[String], sound: &mut (Option<Stri
 /// How many rows of screens show before the list scrolls in its own space.
 const SCREEN_ROWS: usize = 8;
 
-/// A tick per screen, one row each; with other computers, grouped under each
+/// A tick per monitor, one row each; with other computers, grouped under each
 /// computer's name (this one first), with All and None where a computer has
 /// more than one.
 fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<String>) {
@@ -1771,7 +1771,7 @@ fn displays_section(ui: &mut egui::Ui, screens: &[Screen], selected: &mut Vec<St
     if offered.is_empty() {
         net_label(
             ui,
-            RichText::new("Only the main window's screen: the test shows in its Preview pane.")
+            RichText::new("Only the main window's monitor: the test shows in its Preview pane.")
                 .weak()
                 .small(),
         );

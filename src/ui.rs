@@ -2033,7 +2033,7 @@ fn outputs_text(show: &Show, m: &MediaCue) -> String {
     let home = m
         .output
         .and_then(|o| show.output(o))
-        .map_or("no output", |o| o.name.as_str());
+        .map_or("no display", |o| o.name.as_str());
     let more = m
         .also_on
         .iter()
@@ -5590,7 +5590,7 @@ fn audio_panel(
         });
     }
     ui.label(
-        RichText::new("The first output is the default for cues that don't choose one.")
+        RichText::new("The first audio output is the default for cues that don't choose one.")
             .weak()
             .small(),
     );
@@ -6356,8 +6356,8 @@ fn stream_editor(
                                         Some(id) => audio_names
                                             .iter()
                                             .find(|(i, _)| *i == id)
-                                            .map_or("(removed output)".to_string(), |(_, n)| n.clone()),
-                                        None => "Default output".to_string(),
+                                            .map_or("(removed audio output)".to_string(), |(_, n)| n.clone()),
+                                        None => "Default audio output".to_string(),
                                     };
                                     ui.horizontal(|ui| {
                                         egui::ComboBox::from_id_salt(("record_audio", d.id.0))
@@ -6366,7 +6366,7 @@ fn stream_editor(
                                                 ui.selectable_value(
                                                     &mut a.output,
                                                     None,
-                                                    "Default output",
+                                                    "Default audio output",
                                                 );
                                                 for (id, n) in audio_names {
                                                     ui.selectable_value(&mut a.output, Some(*id), n);

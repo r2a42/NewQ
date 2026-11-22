@@ -1061,7 +1061,7 @@ impl Fleet {
         );
         let _ = writeln!(
             s,
-            "  What the test adds on each computer: the screens ticked for it (each its own window, all showing the same picture), a look at memory and processor every {} s on a thread of its own, and a short report over the network every second. Nothing is drawn on the outputs for the test, so what they show is what a show would.",
+            "  What the test adds on each computer: the monitors ticked for it (each its own window, all showing the same picture), a look at memory and processor every {} s on a thread of its own, and a short report over the network every second. Nothing is drawn on the outputs for the test, so what they show is what a show would.",
             crate::net::measure_local::ROW_EVERY
         );
         for l in self.load_lines() {

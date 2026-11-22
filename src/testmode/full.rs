@@ -450,9 +450,9 @@ pub fn launch(
     };
     crate::media::audio::set_muted(prep.sound.muted);
     engine.set_log_tap(true);
-    engine.log(format!("Test mode: the sound {}", prep.sound.describe()));
+    engine.log(format!("Test Mode: the sound {}", prep.sound.describe()));
     engine.log(format!(
-        "Test mode: the full check begins ({parts} parts, about {:.0} s)",
+        "Test Mode: the full check begins ({parts} parts, about {:.0} s)",
         planned
     ));
     let started = Instant::now();
@@ -810,7 +810,7 @@ impl FullRun {
             .iter()
             .map(|r| {
                 format!(
-                    "Test mode: {} ({}): {}",
+                    "Test Mode: {} ({}): {}",
                     r.kind,
                     r.title,
                     match r.outcome {
@@ -1014,7 +1014,7 @@ pub fn finish(
         run.log_at(rel, &text);
     }
     engine.set_log_tap(false);
-    run.log_at(t_end, &format!("Test mode: ended ({end:?})"));
+    run.log_at(t_end, &format!("Test Mode: ended ({end:?})"));
 
     let results = std::mem::take(&mut run.runner.results);
     let mut findings = feature::findings(&results);

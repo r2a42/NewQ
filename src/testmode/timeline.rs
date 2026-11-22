@@ -141,14 +141,14 @@ impl Driver {
                     other => {
                         // Not what GO would do here (it should be): go on all the same.
                         out.push(Happened::Said(format!(
-                            "Test mode: GO would not continue the timeline ({other:?}); it is continued by hand"
+                            "Test Mode: GO would not continue the timeline ({other:?}); it is continued by hand"
                         )));
                         engine.timeline_continue(show, key);
                     }
                 }
                 self.presses += 1;
                 out.push(Happened::Said(format!(
-                    "Test mode: GO after {:.0} s at the pause at {pos:.1} s on {}",
+                    "Test Mode: GO after {:.0} s at the pause at {pos:.1} s on {}",
                     self.script.hold,
                     name(show, key)
                 )));
@@ -181,7 +181,7 @@ impl Driver {
                         self.leaves += 1;
                         self.looping = None;
                         out.push(Happened::Said(format!(
-                            "Test mode: GO leaves the loop on {} after {passes} passes",
+                            "Test Mode: GO leaves the loop on {} after {passes} passes",
                             name(show, key)
                         )));
                     }
@@ -200,7 +200,7 @@ impl Driver {
             self.seeks += 1;
             engine.timeline_seek(show, key, to, true);
             out.push(Happened::Said(format!(
-                "Test mode: seek from {pos:.1} s to {to:.1} s on {}",
+                "Test Mode: seek from {pos:.1} s to {to:.1} s on {}",
                 name(show, key)
             )));
         }
@@ -255,7 +255,7 @@ impl Driver {
             .map_or_else(|| name(show, key), |(does, _)| does);
         engine.go(show);
         out.push(Happened::Said(format!(
-            "Test mode: lap {}, GO: {what}",
+            "Test Mode: lap {}, GO: {what}",
             self.laps
         )));
         self.leg_since = Some(now);

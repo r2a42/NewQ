@@ -127,7 +127,8 @@ where
         .unwrap_or_default())
 }
 
-/// This computer's ceiling on the previews' rate (Settings ▸ General).
+/// This computer's ceiling on the previews' rate (Settings ▸ Interface ▸
+/// Previews).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub enum Cap {
     /// Full rate unless the outputs need the room. (A limit from a later NewQ
@@ -233,7 +234,7 @@ impl SizeCap {
     /// What the choice does, in one sentence.
     pub fn words(self) -> &'static str {
         match self {
-            SizeCap::Full => "Previews are drawn as sharp as the screen shows them.",
+            SizeCap::Full => "Previews are drawn at full sharpness.",
             SizeCap::Half => {
                 "Previews are drawn at half size and scaled up: a little soft, less work."
             }
@@ -1363,7 +1364,7 @@ pub fn window_fps(level: Level, full: f64, least: f64) -> f64 {
 pub const NOT_THEIRS_SAID: Duration = Duration::from_secs(20);
 
 /// What a preview says in place of its picture while this computer's previews
-/// are switched off (Settings ▸ General ▸ Previews).
+/// are switched off (Settings ▸ Interface ▸ Previews).
 pub const OFF_WORDS: &str = "Previews are off on this computer";
 
 /// What the Preview pane's header says while the previews draw less, or

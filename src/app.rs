@@ -173,7 +173,7 @@ impl Drop for ScreenWindow {
 }
 
 /// Give an output window a surface and a render thread. The error says what
-/// to tell the user; "{display}" stands for the display's number.
+/// to tell the user; "{display}" stands for the monitor's number.
 fn start_output_thread(
     gpu: &Gpu,
     window: &Arc<Window>,
@@ -186,8 +186,7 @@ fn start_output_thread(
     let size = window.inner_size();
     let size = (size.width, size.height);
     let config = gpu.surface_config(&surface, size).ok_or_else(|| {
-        "This graphics card can't draw to display {display}: outputs on it are not shown"
-            .to_string()
+        "This graphics card can't draw to monitor {display}: nothing is shown on it".to_string()
     })?;
     gpu.configure(&surface, &config);
     let thread = OutputThread::spawn(
@@ -197,7 +196,7 @@ fn start_output_thread(
         config,
         gpu::Slot::Window(slot),
     )
-    .map_err(|e| format!("Could not start drawing on display {{display}}: {e}"))?;
+    .map_err(|e| format!("Could not start drawing on monitor {{display}}: {e}"))?;
     Ok((thread, size))
 }
 

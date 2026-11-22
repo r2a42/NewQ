@@ -282,7 +282,7 @@ pub fn what_it_does(p: &PartPlan) -> String {
         Some(super::Flavour::Stage) => super::stage::WHAT_IT_DOES,
         Some(f) => f.summary(p.level),
         None => {
-            "Plays a short show of its own on every screen of every computer and measures how closely each keeps to this one: the clock, each GO, the pictures, corrections and stalls. It opens with a Sync flash you can film in slow motion across two screens. Its media is sent to every computer first."
+            "Plays a short show of its own on every monitor of every computer and measures how closely each keeps to this one: the clock, each GO, the pictures, corrections and stalls. It opens with a Sync flash you can film in slow motion across two screens. Its media is sent to every computer first."
         }
     };
     let text = match p.part {
