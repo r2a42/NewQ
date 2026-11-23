@@ -141,11 +141,22 @@ jobs:
         if: matrix.part == 'tests'
         shell: bash
         run: bash scripts/make_test_media.sh
+      # On Linux a test program that dies by a signal leaves a core, and the step
+      # after prints where each thread was (scripts/crash_backtrace.sh).
+      - name: Allow core files (Linux)
+        if: matrix.part == 'tests' && runner.os == 'Linux'
+        run: bash scripts/crash_backtrace.sh setup
       - name: Test (integration tests must not skip)
         if: matrix.part == 'tests'
-        run: cargo test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
+          cargo test
         env:
           NEWQ_REQUIRE_MEDIA: "1"
+      - name: Where a crashed test program was (Linux)
+        if: failure() && matrix.part == 'tests' && runner.os == 'Linux'
+        run: bash scripts/crash_backtrace.sh report
 
       # The program itself, with no window: every kind of cue played through
       # the show engine and FFmpeg on this system, each checked for what it
