@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: "43 2 * * *"
   workflow_dispatch:
+    inputs:
+      os:
+        description: "Which system (all three when left at all)"
+        type: choice
+        default: all
+        options: [all, ubuntu-latest, windows-latest, macos-latest]
 
 concurrency:
   group: flaky-hunt
@@ -24,7 +30,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # The nightly run, and a dispatch left at "all", take all three.
+        os: ${{ fromJSON((inputs.os == '' || inputs.os == 'all') && '["ubuntu-latest","windows-latest","macos-latest"]' || format('["{0}"]', inputs.os)) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +77,9 @@ jobs:
         run: bash scripts/make_test_media.sh
       - name: Build the tests
         run: cargo test --no-run
+      - name: Allow core files (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/crash_backtrace.sh setup
 
       # Each round is its own step, so a hang uses up only its own time.
       - name: Round 1
@@ -79,7 +89,7 @@ jobs:
         shell: bash
         env:
           NEWQ_REQUIRE_MEDIA: "1"
-        run: set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-1.log
+        run: if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi; set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-1.log
       - name: Round 2
         id: round2
         continue-on-error: true
@@ -87,7 +97,7 @@ jobs:
         shell: bash
         env:
           NEWQ_REQUIRE_MEDIA: "1"
-        run: set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-2.log
+        run: if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi; set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-2.log
       - name: Round 3
         id: round3
         continue-on-error: true
@@ -95,8 +105,11 @@ jobs:
         shell: bash
         env:
           NEWQ_REQUIRE_MEDIA: "1"
-        run: set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-3.log
+        run: if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi; set -o pipefail; cargo test --no-fail-fast 2>&1 | tee round-3.log
 
+      - name: Where a crashed test program was (Linux)
+        if: always() && runner.os == 'Linux'
+        run: bash scripts/crash_backtrace.sh report
       - name: Which tests failed in which round
         if: always()
         shell: bash
