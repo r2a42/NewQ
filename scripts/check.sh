@@ -120,8 +120,14 @@ full)
     finish 1
   fi
   common
+  # As CI: only the software driver (lavapipe), so the Vulkan loader never loads and
+  # unloads the drivers for hardware that isn't there while another test makes its
+  # device (that crashed the test program; .claude/notes/flaky-tests.md).
+  lvp=/usr/share/vulkan/icd.d/lvp_icd.json
+  drivers=()
+  if [ -z "${VK_DRIVER_FILES:-}" ] && [ -f "$lvp" ]; then drivers=(VK_DRIVER_FILES="$lvp"); fi
   step "test (whole suite)" env WGPU_BACKEND=vulkan NEWQ_REQUIRE_MEDIA=1 NEWQ_REQUIRE_GPU=1 \
-    cargo test ${extra[@]+"${extra[@]}"}
+    ${drivers[@]+"${drivers[@]}"} cargo test ${extra[@]+"${extra[@]}"}
   reason="$(cross_reason)"
   if [ -n "$reason" ]; then
     note "cross clippy runs: $reason"

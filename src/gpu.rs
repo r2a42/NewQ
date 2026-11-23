@@ -97,11 +97,12 @@ pub fn instance_for(display: Option<winit::event_loop::OwnedDisplayHandle>) -> w
 
 /// Every instance's settings, then the `WGPU_*` environment's. wgpu's default in a
 /// debug build (the tests, CI's self-test) has `DEBUG`, which names every object
-/// through `VK_EXT_debug_utils`; on Ubuntu 26.04's Vulkan loader (1.4.341) that call
-/// crashed the test program (SIGSEGV in `vkSetDebugUtilsObjectNameEXT`, twice, from
-/// two different tests) while several instances lived on several threads, as the
-/// tests make them (`.claude/notes/flaky-tests.md`). A release build never had it.
-/// `WGPU_DEBUG=1` turns it back on, for labels in a GPU debugger.
+/// through `VK_EXT_debug_utils`, a call that goes through the Vulkan loader's own
+/// code each time; a release build never had it. In CI that call was one of two
+/// places the test program crashed while another test's instance had the loader
+/// unload a driver (the cause, met in CI by `VK_DRIVER_FILES`; see
+/// `.claude/notes/flaky-tests.md`), so it is off in every build. `WGPU_DEBUG=1`
+/// turns it back on, for labels in a GPU debugger.
 pub(crate) fn with_env(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
     desc.flags.remove(wgpu::InstanceFlags::DEBUG);
     desc.with_env()
