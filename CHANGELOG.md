@@ -4,7 +4,7 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
-## Unreleased
+## 0.27.1
 
 - **The Live audio and Control cues have icons again.** In the cue list and *Cue ▸ Add* they showed
   an empty box; they are now a microphone and a cog.
