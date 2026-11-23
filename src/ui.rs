@@ -12426,6 +12426,33 @@ mod tests {
         }
     }
 
+    /// Every cue type's icon (the cue list, *Cue ▸ Add*) is in one of the interface's fonts.
+    /// Read from the fonts' own character tables (`ab_glyph`): egui's `has_glyphs` answers no for
+    /// characters only its emoji fonts hold, though it draws them.
+    #[test]
+    fn every_cue_icon_is_in_a_font_not_drawn_as_a_box() {
+        use crate::show::CueType::*;
+        let defs = super::fonts();
+        let fonts: Vec<ab_glyph::FontRef> = defs.families[&egui::FontFamily::Proportional]
+            .iter()
+            .map(|name| ab_glyph::FontRef::try_from_slice(&defs.font_data[name].font).unwrap())
+            .collect();
+        let held = |c: char| {
+            use ab_glyph::Font;
+            fonts.iter().any(|f| f.glyph_id(c).0 != 0)
+        };
+        let mut missing = Vec::new();
+        for t in [
+            Video, Image, Audio, Fade, Stop, Wait, Group, Text, Shape, Camera, Send, LiveAudio,
+            Control, Clock, Timer, Timecode,
+        ] {
+            for c in t.icon().chars().filter(|c| !held(*c)) {
+                missing.push(format!("{} ({c} U+{:04X})", t.label(), c as u32));
+            }
+        }
+        assert!(missing.is_empty(), "icons drawn as a box: {missing:?}");
+    }
+
     #[test]
     fn every_import_of_a_deck_gets_a_folder_of_its_own_and_touches_nothing_there() {
         let dir = std::env::temp_dir().join(format!("newq_deck_{}", std::process::id()));
