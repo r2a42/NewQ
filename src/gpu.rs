@@ -92,7 +92,19 @@ pub fn instance_for(display: Option<winit::event_loop::OwnedDisplayHandle>) -> w
     if cfg!(windows) {
         desc.backends = wgpu::Backends::DX12;
     }
-    wgpu::Instance::new(desc.with_env())
+    wgpu::Instance::new(with_env(desc))
+}
+
+/// Every instance's settings, then the `WGPU_*` environment's. wgpu's default in a
+/// debug build (the tests, CI's self-test) has `DEBUG`, which names every object
+/// through `VK_EXT_debug_utils`; on Ubuntu 26.04's Vulkan loader (1.4.341) that call
+/// crashed the test program (SIGSEGV in `vkSetDebugUtilsObjectNameEXT`, twice, from
+/// two different tests) while several instances lived on several threads, as the
+/// tests make them (`.claude/notes/flaky-tests.md`). A release build never had it.
+/// `WGPU_DEBUG=1` turns it back on, for labels in a GPU debugger.
+pub(crate) fn with_env(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
+    desc.flags.remove(wgpu::InstanceFlags::DEBUG);
+    desc.with_env()
 }
 
 /// The hardware graphics adapters the system offers now (their names), from
@@ -309,8 +321,9 @@ impl Gpu {
     /// A GPU with no window (for the benchmark and the tests), if this machine has
     /// one, or a software one. Not tied to a surface.
     pub fn headless() -> Option<Gpu> {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let instance = wgpu::Instance::new(with_env(
+            wgpu::InstanceDescriptor::new_without_display_handle(),
+        ));
         let adapter =
             pollster::block_on(
                 instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1993,13 +2006,22 @@ mod tests {
 
     // ----- The shader, run for real --------------------------------------------------
 
+    /// No instance names its objects through `VK_EXT_debug_utils` unless
+    /// `WGPU_DEBUG` asks for it, debug build or not (see `with_env`).
+    #[test]
+    fn instances_never_name_their_objects_unless_asked() {
+        let desc = super::with_env(wgpu::InstanceDescriptor::new_without_display_handle());
+        let asked = std::env::var("WGPU_DEBUG").is_ok_and(|v| v != "0");
+        assert_eq!(desc.flags.contains(wgpu::InstanceFlags::DEBUG), asked);
+    }
+
     /// A GPU with no window, if this machine has one (or a software one).
     /// `NEWQ_REQUIRE_GPU` makes having none a failure instead of a skip.
     fn test_gpu() -> Option<Gpu> {
         let try_make = || -> Option<Gpu> {
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle().with_env(),
-            );
+            let instance = wgpu::Instance::new(super::with_env(
+                wgpu::InstanceDescriptor::new_without_display_handle(),
+            ));
             let adapter =
                 pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::LowPower,

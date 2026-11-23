@@ -15,7 +15,7 @@ look (`git log -S <test name>`) before starting on one.
 
 | Date | System | Test | Cause | State |
 |---|---|---|---|---|
-| 22 Nov (#83) | Ubuntu | The whole test program: SIGSEGV during or just after the `render3d::tests` GPU tests (lavapipe), last named `render3d::tests::a_little_stage_draws` | Cause unknown: the test process crashed, no test failed by assertion; the same code passed on Ubuntu one round earlier. First crash of this kind on record | Open |
+| 22-23 Nov (#83, #84, a hunt) | Ubuntu 26.04 | The whole test program: SIGSEGV, four times (last tests seen: `render3d::tests::images_and_meshes_are_kept_by_key_and_let_go`, `render::capture_loop`) | Inside the Vulkan loader (libvulkan 1.4.341) in `vkSetDebugUtilsObjectNameEXT`, which wgpu calls to name objects in a debug build, with many instances alive on many threads; found by `scripts/crash_backtrace.sh`. Never in a release build (no `DEBUG` flag) | Fixed: `gpu::with_env` leaves `DEBUG` off (`WGPU_DEBUG=1` turns it on). Watch the nightly hunt |
 | 22 Nov (0.27.0) | Windows | `ui::keys::tests::the_readme_keyboard_table_is_this_table` | Windows checks README out with CRLF line ends and the table didn't match | Fixed in 9c143e9: reads the table whatever its line ends |
 | 22 Nov (0.27.0) | macOS | `net::store::tests::when_room_is_short_replace_frees_the_old_file_before_fetching` | Two wordings are legitimate (the plan's or the fetch's); the test waited 180 s for one while the other was already on screen | Fixed in cea6cd9: accepts either by name |
 | 21 Nov (#81) | Windows | `media::video::tests::hardware_decoding_asks_ffmpeg_and_still_decodes_what_it_cannot` | Cause unknown; passed when re-run with no change (a race) | Open |
