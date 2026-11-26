@@ -4067,3 +4067,44 @@ fn a_follower_never_starts_a_timelines_clip_by_itself() {
     assert!(active(&e, free).is_some(), "{done:?}");
     assert_eq!(done.len(), 1, "{done:?}");
 }
+
+#[test]
+fn two_timeline_lists_that_stop_and_run_each_other_at_their_start_stop_and_say_so() {
+    let mut show = Show::default();
+    let l1 = timeline_list(&mut show);
+    let l2 = timeline_list(&mut show);
+    let by_key = |show: &mut Show, action, list| {
+        control(
+            show,
+            ControlCue {
+                action,
+                timeline: Some(TimelineKey::List(list)),
+                ..Default::default()
+            },
+        )
+    };
+    for (on, other) in [(l1, l2), (l2, l1)] {
+        let c = by_key(&mut show, ControlAction::TimelineStop, other);
+        top(&mut show, c, on, 0.0);
+        let c = by_key(&mut show, ControlAction::TimelineRun, other);
+        top(&mut show, c, on, 0.0);
+    }
+    let c = by_key(&mut show, ControlAction::TimelineRun, l1);
+    let go = top(&mut show, c, 0, 0.0);
+    let mut e = Engine::for_tests();
+    // Before the guard this nested until the stack overflowed.
+    e.fire(&show, go);
+    let said = e
+        .messages
+        .iter()
+        .filter(|m| m.1.contains("no wait"))
+        .count();
+    assert_eq!(said, 1, "{:?}", e.messages);
+    assert!(!e.firing && e.fire_queue.is_empty());
+    // The next frame goes on, and a cue fired then starts.
+    ticks(&mut e, &show, 0.1, 3);
+    let w = wait(&mut show, 30.0);
+    let w = top(&mut show, w, 0, 0.0);
+    e.fire(&show, w);
+    assert!(playing(&e, w));
+}
