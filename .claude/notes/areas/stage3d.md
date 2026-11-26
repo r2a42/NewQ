@@ -215,8 +215,10 @@ is a piece of a longer entry that covered several areas.
   `BakedSlot` given by `StageThread::spawn_with` (`StageDrawer::baked_into`); counted
   (`maps_baked`, `maps_refused`). `stage_live`: `lens_map(projector, size, use_)` (aspect
   `Projector::aspect(size)`, or its own pixels' for `Preview`) and `lens_map_shaped(.., aspect, ..)`:
-  the call is the ask (`MapEntry` by projector and size: `want`, `in_flight`, `refused`, `asked_at`,
-  let go after `MAP_KEPT`), None until the first map, the old map until the new lands; `begin` makes
+  the call is the ask (`MapEntry` by projector, size and shape, `MapAt`: `want`, `in_flight`,
+  `refused`, `asked_at`, let go after `MAP_KEPT`; a `give_lens_map` map is asked for as any other and
+  never baked), None until the first map, the old map until the new lands; a refusal landing is said
+  once from `begin` (`Said::Problem`, "stays black"); `begin` makes
   `still`/`still_key` with the scene; the scene's key is `stage_key_of` (`shape_key` with fine and
   line-up cleared; `stage_seen` kept when only those changed); `send` -> `maps_due` (output maps
   always, preview maps only with a lit request this pass and not while `displays_behind`; a due map

@@ -136,6 +136,7 @@ pub struct MapJob {
 pub struct Baked {
     pub projector: ProjectorId,
     pub size: (u32, u32),
+    pub aspect: f32,
     pub key: u64,
     pub map: Option<Arc<LensMap>>,
 }
@@ -193,10 +194,9 @@ impl StageJob {
         // The newer maps, and the older ones of those the newer job hasn't.
         let mut maps = newer.maps;
         for m in self.maps {
-            if !maps
-                .iter()
-                .any(|n| n.projector.id == m.projector.id && n.size == m.size)
-            {
+            if !maps.iter().any(|n| {
+                n.projector.id == m.projector.id && n.size == m.size && n.aspect == m.aspect
+            }) {
                 maps.push(m);
             }
         }
@@ -460,6 +460,7 @@ impl StageDrawer {
         self.baked.lock().push(Baked {
             projector: job.projector.id,
             size: job.size,
+            aspect: job.aspect,
             key: job.key,
             map: made.ok().map(Arc::new),
         });
