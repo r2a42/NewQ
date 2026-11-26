@@ -3,7 +3,9 @@
 //! The messages are built by plain functions (tested byte for byte, and read
 //! back with the same parsers the remote listeners use). Actual sending is on
 //! a worker thread, so a slow name lookup or a stuck port can never stall the
-//! show; problems come back through `errors`.
+//! show; problems come back through `errors`. MIDI and OSC to an address go
+//! from that thread; OSC (and UDP) to a host *name* goes from a thread for
+//! that name, so its lookup holds up nothing else (`start_name_sender`).
 
 use crate::show::{
     MidiKind, MidiOut, MscCommand, NetworkOut, OscOut, ProjectorOut, SendCue, SendTarget,
@@ -11,7 +13,7 @@ use crate::show::{
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -438,6 +440,20 @@ fn lived_through(send: impl FnOnce() -> Result<(), String>) -> Option<String> {
     }
 }
 
+/// Looks a host name up: the system's resolver, or a stand-in in tests (one
+/// that can be made slow). Its addresses, best first.
+pub type Resolver = Arc<dyn Fn(&str) -> std::io::Result<Vec<IpAddr>> + Send + Sync>;
+
+/// The system's name lookup. It blocks, for seconds when a name is unknown on a
+/// network with no DNS, so it never runs on a thread another send waits on.
+pub fn system_resolver() -> Resolver {
+    Arc::new(|name: &str| {
+        (name, 0)
+            .to_socket_addrs()
+            .map(|found| found.map(|a| a.ip()).collect())
+    })
+}
+
 /// Where messages go. A real one sends from a worker thread; a recording one
 /// (for tests) keeps what it was asked to send.
 pub struct Outbox {
@@ -448,6 +464,12 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn new() -> Outbox {
+        Outbox::start(system_resolver(), NAME_HOLD)
+    }
+
+    /// An outbox that looks names up with `resolve` (the system's, or a
+    /// stand-in); `hold`: how long a message may wait for its name to be found.
+    fn start(resolve: Resolver, hold: Duration) -> Outbox {
         let (jobs, rx) = unbounded::<Outgoing>();
         let (err_tx, errors) = unbounded();
         let _ = std::thread::Builder::new()
@@ -455,7 +477,45 @@ impl Outbox {
             .spawn(move || {
                 let mut sender = SocketSet::default();
                 let mut hosts: HashMap<String, Sender<Outgoing>> = HashMap::new();
+                let mut names: HashMap<String, Sender<ForName>> = HashMap::new();
                 for job in rx {
+                    // An OSC (or UDP) message to a name: looking it up can
+                    // take seconds, so each name has a thread of its own, and
+                    // MIDI and messages to addresses never wait for one.
+                    if let Outgoing::Osc { host, port, packet } = &job
+                        && literal_ip(host).is_none()
+                    {
+                        let key = host.to_ascii_lowercase();
+                        let queued = match names.get(&key) {
+                            Some(tx) => Ok(tx.clone()),
+                            None => start_name_sender(host, resolve.clone(), err_tx.clone(), hold)
+                                .inspect(|tx| {
+                                    names.insert(key.clone(), tx.clone());
+                                }),
+                        }
+                        .and_then(|tx| {
+                            tx.try_send(ForName {
+                                since: Instant::now(),
+                                port: *port,
+                                packet: packet.clone(),
+                            })
+                            .map_err(|e| match e {
+                                crossbeam_channel::TrySendError::Full(_) => format!(
+                                    "UDP to {host}:{port}: not sent, {NAME_QUEUE} messages \
+                                     are already waiting for the name to be found"
+                                ),
+                                crossbeam_channel::TrySendError::Disconnected(_) => {
+                                    // Its thread is gone: the next message starts another.
+                                    names.remove(&key);
+                                    format!("UDP to {host}:{port}: not sent, its sender stopped")
+                                }
+                            })
+                        });
+                        if let Err(e) = queued {
+                            let _ = err_tx.send(e);
+                        }
+                        continue;
+                    }
                     // Projectors and TCP hosts can be slow or gone, so each
                     // has a thread of its own: one that doesn't answer holds
                     // up nobody else, and commands to it still go in order.
@@ -746,11 +806,173 @@ impl Drop for MtcRunner {
     }
 }
 
+/// UDP sockets kept open between sends, one for each kind of address.
+#[derive(Default)]
+struct Udp {
+    v4: Option<UdpSocket>,
+    v6: Option<UdpSocket>,
+}
+
+impl Udp {
+    fn send(&mut self, addr: SocketAddr, host: &str, packet: &[u8]) -> Result<(), String> {
+        let (socket, bind) = if addr.is_ipv4() {
+            (&mut self.v4, "0.0.0.0:0")
+        } else {
+            (&mut self.v6, "[::]:0")
+        };
+        if socket.is_none() {
+            *socket = Some(UdpSocket::bind(bind).map_err(|e| format!("UDP: {e}"))?);
+        }
+        socket
+            .as_ref()
+            .expect("just opened")
+            .send_to(packet, addr)
+            .map_err(|e| format!("UDP to {host}:{}: {e}", addr.port()))?;
+        Ok(())
+    }
+}
+
+/// The address a host box holds, if it is one (`10.0.0.5`, `::1`, `[::1]`):
+/// it goes out at once, with no lookup.
+fn literal_ip(host: &str) -> Option<IpAddr> {
+    let host = host.trim();
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    bare.parse().ok()
+}
+
+/// Messages for one host name wait in its queue while the name is first
+/// looked up. Past this many, a message is not sent and the operator is told,
+/// rather than piling up behind a name that may never answer.
+const NAME_QUEUE: usize = 64;
+/// A message that has waited this long for its name to be found is not sent,
+/// and the operator is told: a GO that reaches a desk seconds late fires a
+/// look out of time with everything else, which is worse than one that is
+/// said to be lost and can be fired again by hand.
+const NAME_HOLD: Duration = Duration::from_secs(3);
+/// How long a name's address is used before it is looked up again. The new
+/// lookup runs in the background; messages go to the address known meanwhile,
+/// and a lookup that fails keeps it.
+const NAME_FRESH: Duration = Duration::from_secs(30);
+
+/// An OSC (or UDP) message for a host name, and when it was queued.
+struct ForName {
+    since: Instant,
+    port: u16,
+    packet: Vec<u8>,
+}
+
+/// Looks `host` up with `resolve`, outliving a panic in it.
+fn look_up(resolve: &Resolver, host: &str) -> Result<IpAddr, String> {
+    match crate::crash::survive("Looking a send cue's host up", || resolve(host)) {
+        Some(Ok(found)) => found
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("UDP: no address for {host}")),
+        Some(Err(e)) => Err(format!("UDP: can't find {host}: {e}")),
+        None => Err(format!(
+            "UDP: looking {host} up failed (a report was saved)"
+        )),
+    }
+}
+
+/// Starts the thread that sends to one host name, in the order the messages
+/// came. Only this thread ever waits for the name: the first lookup holds up
+/// messages for this name alone, and later ones run in the background.
+fn start_name_sender(
+    host: &str,
+    resolve: Resolver,
+    errors: Sender<String>,
+    hold: Duration,
+) -> Result<Sender<ForName>, String> {
+    let (tx, jobs) = crossbeam_channel::bounded::<ForName>(NAME_QUEUE);
+    let name = host.to_string();
+    std::thread::Builder::new()
+        .name(format!("osc {host}"))
+        .spawn(move || send_by_name(&name, &jobs, &resolve, &errors, hold))
+        .map_err(|e| format!("UDP to {host}: can't start its sender: {e}"))?;
+    Ok(tx)
+}
+
+fn send_by_name(
+    host: &str,
+    jobs: &Receiver<ForName>,
+    resolve: &Resolver,
+    errors: &Sender<String>,
+    hold: Duration,
+) {
+    let mut udp = Udp::default();
+    // The address, and when it was found.
+    let mut known: Option<(IpAddr, Instant)> = None;
+    // A background lookup's answer, once it has one.
+    let mut refresh: Option<Receiver<Option<IpAddr>>> = None;
+    while let Ok(job) = jobs.recv() {
+        if let Some(answer) = refresh.as_ref().map(|r| r.try_recv()) {
+            match answer {
+                Ok(found) => {
+                    let ip = found.or(known.map(|(ip, _)| ip));
+                    known = ip.map(|ip| (ip, Instant::now()));
+                    refresh = None;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => refresh = None,
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+        }
+        let ip = match known {
+            Some((ip, at)) => {
+                if at.elapsed() >= NAME_FRESH && refresh.is_none() {
+                    let (tx, rx) = crossbeam_channel::bounded(1);
+                    let (resolve, name) = (resolve.clone(), host.to_string());
+                    let spawned = std::thread::Builder::new()
+                        .name(format!("osc lookup {host}"))
+                        .spawn(move || {
+                            let _ = tx.send(look_up(&resolve, &name).ok());
+                        });
+                    if spawned.is_ok() {
+                        refresh = Some(rx);
+                    }
+                }
+                ip
+            }
+            None => match look_up(resolve, host) {
+                Ok(ip) => {
+                    known = Some((ip, Instant::now()));
+                    ip
+                }
+                Err(e) => {
+                    // Everything that waited for this lookup fails with it,
+                    // rather than each looking the name up again in turn.
+                    let more = jobs.try_iter().count();
+                    let _ = errors.send(match more {
+                        0 => e,
+                        1 => format!("{e} (1 more message not sent)"),
+                        n => format!("{e} ({n} more messages not sent)"),
+                    });
+                    continue;
+                }
+            },
+        };
+        if job.since.elapsed() > hold {
+            let _ = errors.send(format!(
+                "UDP to {host}:{}: not sent, it waited over {} s for the name to be found",
+                job.port,
+                hold.as_secs()
+            ));
+            continue;
+        }
+        let addr = SocketAddr::new(ip, job.port);
+        if let Some(e) = lived_through(|| udp.send(addr, host, &job.packet)) {
+            let _ = errors.send(e);
+        }
+    }
+}
+
 /// The sockets and MIDI connections the worker keeps open between sends.
 #[derive(Default)]
 struct SocketSet {
-    udp4: Option<UdpSocket>,
-    udp6: Option<UdpSocket>,
+    udp: Udp,
     midi: HashMap<String, midir::MidiOutputConnection>,
 }
 
@@ -758,30 +980,9 @@ impl SocketSet {
     fn send(&mut self, job: &Outgoing) -> Result<(), String> {
         match job {
             Outgoing::Osc { host, port, packet } => {
-                let addr = (host.as_str(), *port)
-                    .to_socket_addrs()
-                    .map_err(|e| format!("UDP: can't find {host}: {e}"))?
-                    .next()
-                    .ok_or_else(|| format!("UDP: no address for {host}"))?;
-                let socket = if addr.is_ipv4() {
-                    &mut self.udp4
-                } else {
-                    &mut self.udp6
-                };
-                if socket.is_none() {
-                    let bind = if addr.is_ipv4() {
-                        "0.0.0.0:0"
-                    } else {
-                        "[::]:0"
-                    };
-                    *socket = Some(UdpSocket::bind(bind).map_err(|e| format!("UDP: {e}"))?);
-                }
-                socket
-                    .as_ref()
-                    .expect("just opened")
-                    .send_to(packet, addr)
-                    .map_err(|e| format!("UDP to {host}:{port}: {e}"))?;
-                Ok(())
+                let ip = literal_ip(host)
+                    .ok_or_else(|| format!("internal: {host} is a name, not an address"))?;
+                self.udp.send(SocketAddr::new(ip, *port), host, packet)
             }
             Outgoing::Projector(_) | Outgoing::Tcp { .. } | Outgoing::Script { .. } => {
                 send_network(job)
@@ -1183,13 +1384,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(errors.len(), 3, "{errors:?}");
-        assert!(errors[0].contains("no output chosen"), "{errors:?}");
+        // The name is looked up on a thread of its own, so its error can come
+        // before or after the MIDI ones; those two keep their order.
+        let (names, midi): (Vec<_>, Vec<_>) =
+            errors.iter().partition(|e| e.contains("no-such-host"));
+        assert_eq!(names.len(), 1, "{errors:?}");
+        assert!(midi[0].contains("no output chosen"), "{errors:?}");
         // Where there is no MIDI system at all (a bare server) it says so instead.
         assert!(
-            errors[1].contains("No such output") || errors[1].starts_with("MIDI:"),
+            midi[1].contains("No such output") || midi[1].starts_with("MIDI:"),
             "{errors:?}"
         );
-        assert!(errors[2].contains("no-such-host"), "{errors:?}");
         // And the worker carries on afterwards.
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
         receiver
@@ -1202,6 +1407,208 @@ mod tests {
         });
         let mut buf = [0u8; 64];
         assert!(receiver.recv_from(&mut buf).is_ok());
+    }
+
+    /// A stand-in resolver: a lookup of `slow` waits until the gate opens (the
+    /// returned sender is dropped) and answers `answer`; any other name is
+    /// read as an address, as the system would. Each lookup of `slow` that
+    /// starts is said on the receiver.
+    fn gated_resolver(
+        slow: &'static str,
+        answer: Option<IpAddr>,
+    ) -> (Resolver, Sender<()>, Receiver<()>) {
+        let (gate, closed) = unbounded::<()>();
+        let (started_tx, started) = unbounded::<()>();
+        let resolve: Resolver = Arc::new(move |name: &str| {
+            if name != slow {
+                return name
+                    .parse::<IpAddr>()
+                    .map(|ip| vec![ip])
+                    .map_err(std::io::Error::other);
+            }
+            let _ = started_tx.send(());
+            while closed.recv().is_ok() {}
+            answer
+                .map(|ip| vec![ip])
+                .ok_or_else(|| std::io::Error::other("the stand-in knows no such name"))
+        });
+        (resolve, gate, started)
+    }
+
+    fn receiver() -> (UdpSocket, u16) {
+        let r = UdpSocket::bind("127.0.0.1:0").unwrap();
+        r.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let port = r.local_addr().unwrap().port();
+        (r, port)
+    }
+
+    fn osc(host: &str, port: u16, address: &str) -> Outgoing {
+        Outgoing::Osc {
+            host: host.into(),
+            port,
+            packet: osc_message(address, &[]),
+        }
+    }
+
+    fn received(r: &UdpSocket) -> Option<String> {
+        let mut buf = [0u8; 256];
+        let (n, _) = r.recv_from(&mut buf).ok()?;
+        let end = buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
+        Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+    }
+
+    /// Errors from the outbox until one has `wanted` in it (or ten seconds pass).
+    fn wait_for_error(outbox: &Outbox, wanted: &str) -> Vec<String> {
+        let began = Instant::now();
+        let mut errors = Vec::new();
+        while !errors.iter().any(|e: &String| e.contains(wanted))
+            && began.elapsed() < Duration::from_secs(10)
+        {
+            errors.extend(outbox.errors());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        errors
+    }
+
+    /// Long enough that no test's message is dropped for waiting.
+    const PATIENT: Duration = Duration::from_secs(600);
+
+    const LOCALHOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    #[test]
+    fn a_slow_name_lookup_holds_up_no_midi_and_no_osc_to_an_address() {
+        let (resolve, gate, started) = gated_resolver("slow-desk", Some(LOCALHOST));
+        let outbox = Outbox::start(resolve, PATIENT);
+        let (named, named_port) = receiver();
+        let (literal, literal_port) = receiver();
+        outbox.send(osc("slow-desk", named_port, "/named"));
+        started.recv().unwrap();
+        // While the name is being looked up (the gate is shut until the end):
+        // a MIDI send (there is no MIDI hardware here; its error shows it was
+        // tried) and an OSC send to an address both go.
+        outbox.send(Outgoing::Midi {
+            port: None,
+            bytes: vec![0x90, 60, 100],
+        });
+        outbox.send(osc("127.0.0.1", literal_port, "/literal"));
+        assert_eq!(
+            received(&literal).as_deref(),
+            Some("/literal"),
+            "an address goes out while a name is still being looked up"
+        );
+        let errors = wait_for_error(&outbox, "no output chosen");
+        assert!(
+            errors.iter().any(|e| e.contains("no output chosen")),
+            "MIDI was tried while a name was being looked up: {errors:?}"
+        );
+        drop(gate);
+        assert_eq!(received(&named).as_deref(), Some("/named"));
+        assert!(outbox.errors().is_empty());
+    }
+
+    #[test]
+    fn messages_to_one_name_go_in_order_once_it_is_found() {
+        let (resolve, gate, started) = gated_resolver("desk", Some(LOCALHOST));
+        let outbox = Outbox::start(resolve, PATIENT);
+        let (r, port) = receiver();
+        let (r2, port2) = receiver();
+        outbox.send(osc("desk", port, "/n/0"));
+        started.recv().unwrap();
+        for n in 1..10 {
+            // The same name on another port is the same queue.
+            if n == 5 {
+                outbox.send(osc("desk", port2, "/other"));
+            }
+            outbox.send(osc("desk", port, &format!("/n/{n}")));
+        }
+        drop(gate);
+        for n in 10..15 {
+            outbox.send(osc("desk", port, &format!("/n/{n}")));
+        }
+        let got: Vec<String> = (0..15).filter_map(|_| received(&r)).collect();
+        let wanted: Vec<String> = (0..15).map(|n| format!("/n/{n}")).collect();
+        assert_eq!(got, wanted);
+        assert_eq!(received(&r2).as_deref(), Some("/other"));
+        assert!(outbox.errors().is_empty());
+    }
+
+    #[test]
+    fn an_address_is_told_from_a_name() {
+        assert_eq!(literal_ip("10.0.0.5"), Some(IpAddr::from([10, 0, 0, 5])));
+        assert_eq!(
+            literal_ip(" ::1 "),
+            Some(IpAddr::from([0u16, 0, 0, 0, 0, 0, 0, 1]))
+        );
+        assert_eq!(literal_ip("[::1]"), literal_ip("::1"));
+        assert_eq!(literal_ip("eos"), None);
+        assert_eq!(literal_ip("lx-desk.local"), None);
+        assert_eq!(literal_ip("10.0.0"), None, "not a whole address: a name");
+    }
+
+    #[test]
+    fn a_name_that_is_slow_to_answer_queues_a_bounded_number_and_says_what_it_dropped() {
+        let (resolve, gate, started) = gated_resolver("desk", Some(LOCALHOST));
+        let outbox = Outbox::start(resolve, PATIENT);
+        let (r, port) = receiver();
+        outbox.send(osc("desk", port, "/n/0"));
+        started.recv().unwrap();
+        // The first is being looked up; the queue holds NAME_QUEUE more.
+        for n in 1..=NAME_QUEUE + 3 {
+            outbox.send(osc("desk", port, &format!("/n/{n}")));
+        }
+        let began = Instant::now();
+        let mut errors = Vec::new();
+        while errors.len() < 3 && began.elapsed() < Duration::from_secs(10) {
+            errors.extend(outbox.errors());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(
+            errors.iter().all(|e| e.contains("already waiting")),
+            "{errors:?}"
+        );
+        drop(gate);
+        let got: Vec<String> = (0..=NAME_QUEUE).filter_map(|_| received(&r)).collect();
+        let wanted: Vec<String> = (0..=NAME_QUEUE).map(|n| format!("/n/{n}")).collect();
+        assert_eq!(got, wanted, "the ones kept go, in order");
+    }
+
+    #[test]
+    fn a_failed_lookup_fails_what_waited_for_it_and_the_next_message_tries_again() {
+        let (resolve, gate, started) = gated_resolver("gone", None);
+        let outbox = Outbox::start(resolve, PATIENT);
+        outbox.send(osc("gone", 9, "/a"));
+        started.recv().unwrap();
+        outbox.send(osc("gone", 9, "/b"));
+        outbox.send(osc("gone", 9, "/c"));
+        drop(gate);
+        let errors = wait_for_error(&outbox, "2 more messages not sent");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("can't find gone"), "{errors:?}");
+        // A message after it looks the name up afresh.
+        outbox.send(osc("gone", 9, "/d"));
+        let errors = wait_for_error(&outbox, "can't find gone");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(!errors[0].contains("more"), "{errors:?}");
+        assert_eq!(started.try_iter().count(), 1, "looked up once more");
+    }
+
+    #[test]
+    fn a_message_that_waited_too_long_for_its_name_is_not_sent_and_says_so() {
+        let (resolve, gate, started) = gated_resolver("desk", Some(LOCALHOST));
+        let outbox = Outbox::start(resolve, Duration::ZERO);
+        let (r, port) = receiver();
+        r.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        outbox.send(osc("desk", port, "/late"));
+        started.recv().unwrap();
+        drop(gate);
+        let errors = wait_for_error(&outbox, "waited over");
+        assert!(
+            errors.iter().any(|e| e.contains("waited over")),
+            "{errors:?}"
+        );
+        assert_eq!(received(&r), None, "it was not sent");
     }
 
     #[test]
