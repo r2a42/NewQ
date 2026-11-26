@@ -375,7 +375,10 @@ pub fn rq(m: &M3) -> Option<(M3, M3)> {
     if k00 < 1e-12 * k22 || k11 < 1e-12 * k22 {
         return None;
     }
-    Some(([[k00, k01, k02], [0.0, k11, k12], [0.0, 0.0, k22]], [q0, q1, q2]))
+    Some((
+        [[k00, k01, k02], [0.0, k11, k12], [0.0, 0.0, k22]],
+        [q0, q1, q2],
+    ))
 }
 
 /// The spread of a set of points: their middle, and the eigenvalues

@@ -35,25 +35,36 @@
 //! `Solution::notes` says why one wasn't.
 //!
 //! Method: starting guesses (the caller's `Problem::start`, a flat set's
-//! homography, the 3x4 DLT of six or more points that aren't flat, and a
-//! fixed ring of places round the points facing them), each refined by
-//! Levenberg-Marquardt on the error in pixels (pose only, lens as entered),
-//! the best kept; then the rungs, each refined from the one below (and from
-//! the DLT's lens). Then each point's error, and with five or more points a
-//! leave-one-out: the point whose removal leaves the others agreeing best,
-//! named when it stands out.
+//! homography, the 3x4 DLT of six or more points that aren't flat, and,
+//! only when those leave the points over a pixel out, a fixed ring of
+//! places round the points facing them), each given `model::START_ROUNDS`
+//! of Levenberg-Marquardt on the error in pixels (pose only, lens as
+//! entered), the best taken on to at most `model::MAX_ROUNDS`
+//! (`Solution::capped` says if it got there still moving). Then the rungs
+//! from the top down: the highest the points and `Freedom` allow, refined
+//! from that pose and from the DLT's lens, and a rung lower each time one
+//! isn't pinned down. Then each point's error, and with five or more points
+//! a leave-one-out: the point whose removal leaves the others agreeing
+//! best, named when it stands out. A poor fit that would be good with the
+//! picture flipped left to right (a mirror, a projector's rear setting) is
+//! refused. Everything is bounded; no clock.
 //!
-//! Use: build a `Problem` (`Problem::new` from a projector's lens, its
-//! pixels and the points), call `solve`, and show `Solution::words` or
-//! `Refusal::words`. Apply with `Solution::placement` and
-//! `Solution::lens_onto`. Everything is serde, so one computer can solve
-//! and send the `Solution` (with `points_key`, the fingerprint of the
-//! points it came from) for another to apply without solving again.
+//! Use: build a `Problem` (`Problem::new` from a projector's lens, the
+//! picture's size in pixels, an argument, and the points in room metres:
+//! the caller turns a point kept in a screen's own frame into the room's),
+//! call `solve`, and show `Solution::words` or `Refusal::words`. Apply with
+//! `Solution::placement` and `Solution::lens_onto`. `project` is the forward
+//! sum on the show's own types, the very one the solver fits (for the
+//! overlay's outline and each point's error). `fit_rigid` is the rigid fit
+//! (turn and move between two sets of points) for lining up a screen or a
+//! tracker later. Everything is serde, so the primary can solve and send
+//! the `Solution` (with `points_key`, the fingerprint of the points it came
+//! from) for another computer to apply without solving again.
 //!
 //! Determinism: no clock, no threads, no hashing by address and loops in a
 //! fixed order, so the same `Problem` gives the same `Solution` on the same
-//! computer, bit for bit. Another system's `sin` or `atan2` may differ in the
-//! last bit, so solve once and send the answer rather than solve on each.
+//! computer, bit for bit. Only the primary solves, so nothing is promised
+//! between systems (another's `sin` or `atan2` may differ in the last bit).
 
 #[cfg(test)]
 mod tests;
@@ -312,9 +323,10 @@ impl Problem {
 }
 
 /// How much was solved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum Rung {
     /// Where it is and its aim; the lens as entered.
+    #[default]
     Pose,
     /// And the throw.
     Throw,
@@ -413,12 +425,6 @@ pub(crate) struct Solution {
     /// answer is the best it reached; nudging again carries on from it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
-}
-
-impl Default for Rung {
-    fn default() -> Self {
-        Rung::Pose
-    }
 }
 
 /// Why nothing was solved.
@@ -530,9 +536,23 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
     let mut notes = Vec::new();
     let mut fit = ladder(problem, &pairs, lens, pixels, size, flat, &mut notes)?;
 
+    fit.state.r = linalg::nearest_rotation(&fit.state.r);
+    let mut residuals = vec![None; problem.points.len()];
+    let mut sum = 0.0;
+    let mut max: f64 = 0.0;
+    for (k, &i) in used.iter().enumerate() {
+        let e = model::project(&fit.state, pixels, pairs[k].0)
+            .map(|p| (p[0] - pairs[k].1[0]).hypot(p[1] - pairs[k].1[1]))
+            .ok_or(Refusal::Behind)?;
+        residuals[i] = Some(e);
+        sum += e * e;
+        max = max.max(e);
+    }
     // Leave one out: the point whose removal leaves the others agreeing best.
+    // Not when every point is within a pixel: then none stands out (and a
+    // nudge on a good line-up stays quick).
     let mut worst = None;
-    if pairs.len() > POSE_POINTS {
+    if pairs.len() > POSE_POINTS && max >= 1.0 {
         let mut best: Option<Outlier> = None;
         for k in 0..pairs.len() {
             let rest: Vec<Pair> = pairs
@@ -548,7 +568,7 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
                 pixels,
                 &rest,
                 size,
-                model::START_ROUNDS,
+                model::LEAVE_OUT_ROUNDS,
             ) else {
                 continue;
             };
@@ -569,20 +589,10 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
         });
     }
 
-    fit.state.r = linalg::nearest_rotation(&fit.state.r);
-    let mut residuals = vec![None; problem.points.len()];
-    let mut sum = 0.0;
-    let mut max: f64 = 0.0;
-    for (k, &i) in used.iter().enumerate() {
-        let e = model::project(&fit.state, pixels, pairs[k].0)
-            .map(|p| (p[0] - pairs[k].1[0]).hypot(p[1] - pairs[k].1[1]))
-            .ok_or(Refusal::Behind)?;
-        residuals[i] = Some(e);
-        sum += e * e;
-        max = max.max(e);
-    }
     let rms_px = (sum / used.len() as f64).sqrt();
-    if rms_px > POOR_PX && worst.is_none() && mirrored(problem, &pairs, lens, pixels, size, flat, rms_px)
+    if rms_px > POOR_PX
+        && worst.is_none()
+        && mirrored(problem, &pairs, lens, pixels, size, flat, rms_px)
     {
         return Err(Refusal::Mirrored);
     }
@@ -737,32 +747,35 @@ fn ladder(
         .flatten();
     if let Some(d) = &dlt {
         // Its place and turn, with the lens as entered.
-        starts.push(State {
-            lens,
-            ..d.clone()
-        });
+        starts.push(State { lens, ..d.clone() });
     }
-    starts.extend(start::ring(pairs, &lens, pixels, 8));
 
-    // Each guess a few rounds, the best of them to the end.
-    let mut best: Option<Fitted> = None;
-    for s in &starts {
-        if let Some((state, cost, _)) =
-            model::refine(s, Rung::Pose, pixels, pairs, size, model::START_ROUNDS)
-            && best.as_ref().is_none_or(|b| cost < b.cost)
+    // Each guess a few rounds, the best of them to the end. The ring of
+    // places is tried only when the guesses above leave the points more
+    // than a pixel out (a nudge, starting from the last answer, seldom
+    // needs it).
+    let mut best = best_of(&starts, pixels, pairs, size);
+    if best
+        .as_ref()
+        .is_none_or(|b| b.cost > pairs.len() as f64 * 1.0)
+    {
+        let ring = start::ring(pairs, &lens, pixels, 8);
+        if let Some(r) = best_of(&ring, pixels, pairs, size)
+            && best.as_ref().is_none_or(|b| r.cost < b.cost)
         {
-            best = Some(Fitted {
-                state,
-                rung: Rung::Pose,
-                cost,
-                capped: false,
-            });
+            best = Some(r);
         }
     }
     let best = best.ok_or(Refusal::Behind)?;
-    let (state, cost, capped) =
-        model::refine(&best.state, Rung::Pose, pixels, pairs, size, model::MAX_ROUNDS)
-            .ok_or(Refusal::Behind)?;
+    let (state, cost, capped) = model::refine(
+        &best.state,
+        Rung::Pose,
+        pixels,
+        pairs,
+        size,
+        model::MAX_ROUNDS,
+    )
+    .ok_or(Refusal::Behind)?;
     let best = Fitted {
         state,
         rung: Rung::Pose,
@@ -844,6 +857,26 @@ fn ladder(
     Ok(best)
 }
 
+/// The best of `starts` after a few rounds each (pose only), the first of
+/// equals.
+fn best_of(starts: &[State], pixels: (f64, f64), pairs: &[Pair], size: f64) -> Option<Fitted> {
+    let mut best: Option<Fitted> = None;
+    for s in starts {
+        if let Some((state, cost, _)) =
+            model::refine(s, Rung::Pose, pixels, pairs, size, model::START_ROUNDS)
+            && best.as_ref().is_none_or(|b| cost < b.cost)
+        {
+            best = Some(Fitted {
+                state,
+                rung: Rung::Pose,
+                cost,
+                capped: false,
+            });
+        }
+    }
+    best
+}
+
 /// The first lens number the rung frees that sits on a bound.
 fn at_limit(l: &LensFit, rung: Rung) -> Option<LensPart> {
     let on = |v: f64, lo: f64, hi: f64| v <= lo * (1.0 + 1e-6) || v >= hi * (1.0 - 1e-6);
@@ -861,7 +894,13 @@ fn at_limit(l: &LensFit, rung: Rung) -> Option<LensPart> {
 }
 
 /// The first lens number the rung frees that the points don't pin down.
-fn unsure(s: &State, rung: Rung, pixels: (f64, f64), pairs: &[Pair], size: f64) -> Option<LensPart> {
+fn unsure(
+    s: &State,
+    rung: Rung,
+    pixels: (f64, f64),
+    pairs: &[Pair],
+    size: f64,
+) -> Option<LensPart> {
     let Some(sd) = model::spreads(s, rung, pixels, pairs, size) else {
         return Some(match rung {
             Rung::Throw => LensPart::Throw,
@@ -909,8 +948,8 @@ impl Solution {
         }
         if self.rung == Rung::Aspect {
             let own = pixels.0.max(1) as f64 / pixels.1.max(1) as f64;
-            out.aspect = ((self.lens.aspect - own).abs() > own * 1e-4)
-                .then_some(self.lens.aspect as f32);
+            out.aspect =
+                ((self.lens.aspect - own).abs() > own * 1e-4).then_some(self.lens.aspect as f32);
         }
         out
     }
@@ -937,7 +976,11 @@ impl Solution {
         let l = &self.lens;
         let shift = || {
             let side = |v: f64, plus: &str, minus: &str| {
-                format!("{:.0}% {}", (v * 100.0).abs(), if v < 0.0 { minus } else { plus })
+                format!(
+                    "{:.0}% {}",
+                    (v * 100.0).abs(),
+                    if v < 0.0 { minus } else { plus }
+                )
             };
             format!(
                 "{}, {}",
@@ -1020,7 +1063,10 @@ impl Refusal {
             ),
             Refusal::NoPicture => "The projector's picture has no size yet.".into(),
             Refusal::NotANumber { point } => {
-                format!("Point {} has a number that isn't one: place it again.", point + 1)
+                format!(
+                    "Point {} has a number that isn't one: place it again.",
+                    point + 1
+                )
             }
             Refusal::SameSpot { a, b } => format!(
                 "Points {} and {} are the same spot on the model: move one, or switch it off.",

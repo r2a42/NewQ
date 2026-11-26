@@ -189,6 +189,9 @@ pub fn normal(j: &[f64], r: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 pub const MAX_ROUNDS: usize = 100;
 /// The rounds a starting guess (or a leave-one-out from the answer) gets.
 pub const START_ROUNDS: usize = 30;
+/// The rounds a leave-one-out gets, from the answer (a point less moves it
+/// a little; LM is back within rounding in a few).
+pub const LEAVE_OUT_ROUNDS: usize = 10;
 
 /// Levenberg-Marquardt from `s` over the numbers `rung` frees, on the error
 /// in pixels. A step that would put a point behind the lens is refused like
@@ -207,6 +210,7 @@ pub fn refine(
     let mut cost_now = cost(&s, pixels, pairs)?;
     let mut lambda = 1e-3;
     let mut capped = true;
+
     for _ in 0..rounds {
         if cost_now < 1e-26 {
             capped = false;
