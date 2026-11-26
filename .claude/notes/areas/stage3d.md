@@ -202,15 +202,15 @@ is a piece of a longer entry that covered several areas.
   refused), `spreads` the standard deviations for a pixel's error per point. `start.rs` the starting
   guesses: a flat set's homography, the 3x4 DLT (six or more, not flat; RQ split with `D = diag(1,-1,-1)`
   for the -Z lens and the downward v), a 64-direction ring of places facing the points (Horn; only
-  when the others leave the points over a pixel out); plus
+  when the others leave the points over a pixel out and there is no start or no linear guess); plus
   `Problem::start` (the placement now). `linalg.rs` 3-vectors, row-major 3x3s, `from_euler`/`to_euler`
   (straight up or down: roll 0, all yaw), cyclic Jacobi, Cholesky, `nearest_rotation` (Horn), `rq`.
   `solve(&Problem) -> Result<Solution, Refusal>`: checks first (`Refusal`: too few, no picture, not a
   number, same spot, same pixel, in a line, in a line in the picture, three of four flat points in a
-  line, behind, mirrored: a left-to-right flipped picture), then the ladder, top down (`Rung`: Pose at 4, Throw at 6 not flat, Shift at 8 not flat, Aspect only
+  line, behind; after the fit, mirrored: a left-to-right flipped picture, over 5 px, not on a flat set), then the ladder, top down (`Rung`: Pose at 4, Throw at 6 not flat, Shift at 8 not flat, Aspect only
   when `Freedom::aspect`; a rung is kept only inside the lens's bounds and with each number's sd under
-  2%, else a `Note` says why), then leave-one-out with five or more points when one is a pixel or more
-  out (`Outlier`, named when it is
+  2%, else a `Note` says why), each rung judged after 30 rounds, only the kept one refined on), then leave-one-out of the three
+  points furthest off, with five or more points and one a pixel or more out (`Outlier`, named when it is
   3 px and five times the others' error off). `Solution::words`/`Refusal::words` are the operator's
   sentences; `placement()` and `lens_onto(&Lens, pixels)` apply it; `points_key` (FNV-1a of the
   points and picture size) lets another computer tell a sent `Solution` is for its points
