@@ -220,8 +220,7 @@ fn the_map_pass_draws_made_up_maps_pixel_for_pixel() {
     let run = |drawer: &mut Option<Drawer>, map: &CpuMap, feeds: Vec<FeedFrame>, shares| {
         let mut f = frame(&gpu, map, feeds);
         f.shares = shares;
-        let out = window(&gpu, drawer, 0, &[shown(&f, plain((W, H)))], &[f]);
-        out
+        window(&gpu, drawer, 0, &[shown(&f, plain((W, H)))], &[f])
     };
     // Identity: the canvas as it is.
     let identity = made_up(1, |x, y| Some((0, (x, y), 1.0, 1.0)));
@@ -349,12 +348,17 @@ fn two_windows_drawing_one_canvas_dont_share_uniforms() {
     let (mut d0, mut d1) = (None, None);
     // Both windows' commands recorded before either is submitted: uniforms
     // written by the second would overwrite the first's if they shared.
-    let mut cmds = draw_mapped(&mut d0, &gpu, MapOwner::Window(0), &[left.clone()]);
+    let mut cmds = draw_mapped(
+        &mut d0,
+        &gpu,
+        MapOwner::Window(0),
+        std::slice::from_ref(&left),
+    );
     cmds.extend(draw_mapped(
         &mut d1,
         &gpu,
         MapOwner::Window(1),
-        &[right.clone()],
+        std::slice::from_ref(&right),
     ));
     let g0 = [shown(&left, plain((W, H)))];
     let g1 = [shown(&right, plain((W, H)))];
@@ -447,5 +451,64 @@ fn a_pixel_the_map_gives_no_feed_is_black_among_ones_it_does() {
             assert_eq!(p[0], want, "({x},{y})");
         }
     }
-    let _ = WGSL_UNPACK;
+}
+
+/// A mapped display's stream (section 4.5): a made-up map (a flip) drawn by
+/// `render::capture_loop` into a real FFmpeg, read back the right way round,
+/// and the same as the window's helper draws it. The map isn't this
+/// computer's window's (the primary streams a follower's projector): the
+/// stream draws it all the same.
+#[test]
+fn a_mapped_displays_stream_goes_through_ffmpeg_the_right_way_round() {
+    use crate::media::ffmpeg::Ffmpeg;
+    use crate::render::CaptureThread;
+    use crate::show::StreamKind;
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter here; skipping the mapped stream test");
+        return;
+    };
+    let Some(ff) = Ffmpeg::locate() else {
+        if std::env::var_os("NEWQ_REQUIRE_MEDIA").is_some() {
+            panic!("NEWQ_REQUIRE_MEDIA is set but ffmpeg was not found");
+        }
+        eprintln!("no ffmpeg; skipping the mapped stream test");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("newq_mapped_stream_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("out.rgba");
+    let _ = std::fs::remove_file(&out);
+    const FRAMES: u64 = 12;
+    let kind = StreamKind::Custom {
+        args: format!(
+            "-frames:v {FRAMES} -f rawvideo -pix_fmt rgba \"{}\"",
+            out.display()
+        ),
+    };
+    let thread = CaptureThread::spawn(gpu.clone(), Slot::Capture(1), (W, H), 30, ff, kind).unwrap();
+    let content = picture(77);
+    let tex = layer(&gpu, &content);
+    let flip = made_up(1, |x, y| Some((0, (W - 1 - x, y), 1.0, 1.0)));
+    let f = frame(&gpu, &flip, vec![feed(100, &tex)]);
+    // As `update_streams` sends it: the target as the stream's one layer.
+    thread.submit_mapped(vec![shown(&f, plain((W, H)))], vec![f.clone()]);
+    let want = u64::from(W * H * 4) * FRAMES;
+    let t0 = std::time::Instant::now();
+    while std::fs::metadata(&out).map_or(0, |m| m.len()) < want {
+        assert!(
+            t0.elapsed().as_secs() < 20,
+            "no frames arrived (failure: {:?})",
+            thread.failure()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    thread.stop();
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(bytes.len() as u64, want, "whole frames");
+    let last = &bytes[bytes.len() - (W * H * 4) as usize..];
+    each_pixel(last, "the stream", |x, y| pixel(&content, W - 1 - x, y));
+    // The window's helper draws the same picture.
+    let windowed = window(&gpu, &mut None, 3, &[shown(&f, plain((W, H)))], &[f]);
+    each_pixel(&windowed, "the window", |x, y| pixel(last, x, y));
+    std::fs::remove_dir_all(&dir).ok();
 }

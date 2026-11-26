@@ -84,3 +84,36 @@ restart and `adapters::look_every`.
   `src/monitor.rs`: what a display is called (a Mac's name for it) and where a
   window starting on it goes. winit's Mac `name()` is "Monitor #" and a number,
   and its `position()` is in that display's own pixels, so convert to points.
+
+## Mapped projectors' pictures (mapping plan round 1, `.claude/notes/mapping-plan.md` 4.1, 4.5)
+
+  `src/mapped.rs` (`mapped_tests.rs` beside it): a mapped projector's display shows, per pixel,
+  its feed's canvas at the place a `LensMap` gives (byte layout in the module header, packing
+  functions `pack_place`/`pack_how`/`pack_depth` and `WGSL_UNPACK`; `CpuMap` and
+  `LensMap::from_cpu` for made-up maps; `LensMap::stamp` is unique per map). `Drawer` (one per
+  thread that draws: made at the first mapped frame by `draw_mapped`, in error scopes, so a window
+  with no mapped display never makes one) draws each `MappedFrame`'s canvases with the compositor
+  through `Slot::Map(owner, frame * 4 + feed)` (`MapOwner::number`: windows 0-7, captures 8-15,
+  throws 16-31; indices past every `Slot::View`), then the map pass (`MAP_SHADER`, one triangle,
+  `textureLoad` of the map, `textureSampleLevel` of the feed, times coverage and, with `shares`,
+  `share^(1/gamma)`) into `frame.target`, marked filled once (its stamp then stays). Canvases,
+  uniforms, bind groups (by map `Arc` and canvas serial) and the target's view are kept between
+  frames. `render.rs`: `OutputJob::Frame::mapped` (`OutputThread::submit_mapped`) and
+  `CaptureJob::Picture { groups, mapped }` (`CaptureThread::submit_mapped`); both loops call
+  `draw_mapped` before their own composite and submit it all together (with none, `output_loop`
+  submits `[cmd]` as before). `Shot::mapped` (map stamp, shares, canvases' layer shots, moving
+  screens) tells a mapped window's new pictures. `app.rs`: `lens_maps` asks
+  `StageLive::lens_map` every pass for each `mapped::wanted` (the window at its area's size, a
+  stream at the stream's size) and keeps `mapped_targets` (made again only at a new size, cleared
+  with a lost device); a mapped display's `OutputSetup` ignores its corners, mesh, part and picture
+  size and takes `Projector::fine` as its mesh; its one layer is its target (`whole_layer`), none
+  till its map lands (black); it is not in `pictures`. `mapped_frames` builds the frames after the
+  loop from `stage_live::feed_groups` in the map's feed order. The screen's submit carries the
+  frames of the displays on it (`maps_sent` redraws on a new map). `is_preview_work`/`uploads_now`:
+  a canvas a map here uses (`map_feeds`, and `StageLive::feeds_output`) is never preview work.
+  `update_streams`/`may_stream`: a mapped display is streamed though it keeps `part_of`, at
+  `stream_picture` (the projector's own pixels), as its target stretched, `shares` off. Tests:
+  made-up maps pixel for pixel, the fine-tune mesh, two windows on one canvas, slots apart from
+  views, naga HLSL/MSL, an unmapped display unchanged byte for byte, the new-picture count, the
+  stream through FFmpeg, the preview rule (pure). Tried on lavapipe only; never a real projector,
+  card or the app with a baked map.

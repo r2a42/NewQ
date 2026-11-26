@@ -4,6 +4,16 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
+## Unreleased
+
+- **Mapped projectors draw the stage's screens (groundwork, tried only in simulation).** A
+  projector in the 3D stage can be set to show, at every pixel, the content of the spot on a screen
+  it lands on, from the displays with no monitor that the screens show. Its fine-tune, edge blend,
+  sub displays, cards and Identify work as on any display, and its stream or recording shows the
+  mapped picture (without the fine-tune or blend). Displays that aren't mapped draw exactly as
+  before. Not reachable in the program yet: the setting and its page come with the next steps.
+  Tried only on a software graphics card, never with a real projector.
+
 ## 0.27.2
 
 - **Cues that start each other no longer freeze NewQ.** Two Start cues that start each other, or

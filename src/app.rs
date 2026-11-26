@@ -52,6 +52,8 @@ struct OutputSetup {
     part: Option<PartOf>,
     /// The size of its picture, when that isn't its monitor's.
     picture: Option<(u32, u32)>,
+    /// A mapped projector's display: it shows its mapped picture.
+    mapped: bool,
 }
 
 /// The control UI only needs to animate progress bars while cues run...
@@ -145,6 +147,8 @@ struct ScreenWindow {
     needs_redraw: bool,
     /// Outputs and warps last sent to the render thread.
     sent: Vec<SentGeometry>,
+    /// The lens maps of the mapped pictures last sent (`LensMap::stamp`).
+    maps_sent: Vec<u64>,
     /// The fade at the edges last sent.
     blend: EdgeBlend,
     /// The title last given to the window (asking a window for its title is a
@@ -326,6 +330,9 @@ pub struct App {
     screens: HashMap<usize, ScreenWindow>,
     /// Where each output with a screen is drawn.
     targets: HashMap<OutputId, Target>,
+    /// What each mapped display's mapped picture is drawn into, for its
+    /// window and for its stream (made again only at a new size).
+    mapped_targets: HashMap<(OutputId, crate::mapped::MapUse), Arc<LayerTexture>>,
     /// Windows whose render thread is shutting down; kept alive until it exits.
     closing: Vec<(Arc<Window>, JoinHandle<()>)>,
     /// GPU textures for playing layers, with the serial of the uploaded frame.
@@ -623,6 +630,7 @@ impl App {
             control: None,
             screens: HashMap::new(),
             targets: HashMap::new(),
+            mapped_targets: HashMap::new(),
             closing: Vec::new(),
             popouts: Vec::new(),
             popout_stopping: Vec::new(),
@@ -1281,6 +1289,7 @@ impl App {
                 outputs: Vec::new(),
                 needs_redraw: true,
                 sent: Vec::new(),
+                maps_sent: Vec::new(),
                 blend: EdgeBlend::default(),
                 title: String::new(),
                 shown: !OUTPUTS_START_HIDDEN,
@@ -1409,6 +1418,7 @@ impl App {
             // (they start again once there is a new device).
             self.stop_streams();
             self.forget_pictures();
+            self.mapped_targets.clear();
             self.uploader = None;
         }
         let Some(rec) = &mut self.recovery else {
@@ -2002,7 +2012,7 @@ impl App {
             .show
             .outputs
             .iter()
-            .filter(|o| o.enabled && !o.is_sub_display() && self.show.part_of(o.id).is_none())
+            .filter(|o| self.may_stream(o))
             .filter(|_| self.sends_here())
             .filter_map(|o| o.stream.as_ref().filter(|s| s.enabled))
             .map(|s| s.kind.clone())
@@ -2087,14 +2097,18 @@ impl App {
     /// Start, restart and stop the streams the show asks for, and give each
     /// the picture it is to send: the display's own picture on its own canvas,
     /// without the shaping a projector needs.
-    fn update_streams(&mut self, groups: &HashMap<OutputId, OutputGroup>) {
+    fn update_streams(
+        &mut self,
+        groups: &HashMap<OutputId, OutputGroup>,
+        mapped: &HashMap<(OutputId, crate::mapped::MapUse), crate::mapped::MappedFrame>,
+    ) {
         let plan = self.update_hosting();
         let Some(gpu) = self.gpu.clone() else { return };
         let wanted: HashMap<OutputId, (StreamOut, (u32, u32))> = self
             .show
             .outputs
             .iter()
-            .filter(|o| o.enabled && !o.is_sub_display() && self.show.part_of(o.id).is_none())
+            .filter(|o| self.may_stream(o))
             // Streams and recordings are the primary's (R8).
             .filter(|_| self.sends_here())
             .filter_map(|o| {
@@ -2102,7 +2116,7 @@ impl App {
                 if let Some(p) = &plan {
                     crate::mediamtx::align(&mut s.kind, p);
                 }
-                let size = crate::stream::size_for(self.picture_size(o.id), s.height);
+                let size = crate::stream::size_for(self.stream_picture(o.id), s.height);
                 Some((o.id, (s, size)))
             })
             .collect();
@@ -2245,6 +2259,23 @@ impl App {
             );
         }
         for (id, running) in &self.streams {
+            // A mapped display: its mapped picture, drawn at the stream's
+            // size, without the fine-tune or the blend; black until its map
+            // is made.
+            if self.show.mapped_projector(*id).is_some() {
+                let key = (*id, crate::mapped::MapUse::Stream);
+                match mapped.get(&key) {
+                    Some(frame) => running.thread.submit_mapped(
+                        vec![OutputGroup {
+                            layers: vec![whole_layer(frame.target.clone())],
+                            geometry: plain_geometry(running.size),
+                        }],
+                        vec![frame.clone()],
+                    ),
+                    None => running.thread.submit_mapped(Vec::new(), Vec::new()),
+                }
+                continue;
+            }
             let Some(g) = groups.get(id) else { continue };
             let mut clean = g.clone();
             clean.geometry = Geometry {
@@ -2254,8 +2285,111 @@ impl App {
                 mesh: None,
                 slice: Geometry::WHOLE,
             };
-            running.thread.submit(vec![clean]);
+            running.thread.submit_mapped(vec![clean], Vec::new());
         }
+    }
+
+    /// Whether display `o` is one a stream can be sent from: a whole
+    /// display, on, not part of another's picture, unless it is mapped (a
+    /// blended pair turned mapped keeps its parts in the file, and is
+    /// streamed as its own mapped picture).
+    fn may_stream(&self, o: &OutputConfig) -> bool {
+        o.enabled
+            && !o.is_sub_display()
+            && (self.show.part_of(o.id).is_none() || self.show.mapped_projector(o.id).is_some())
+    }
+
+    /// The size of the picture a stream of display `id` is made from: a
+    /// mapped projector's own pixels (the primary may not have its
+    /// monitor), else the display's picture.
+    fn stream_picture(&self, id: OutputId) -> (u32, u32) {
+        match self.show.mapped_projector(id) {
+            Some(p) => p.pixels(
+                self.window_size(id)
+                    .or(self.show.output(id).and_then(|o| o.picture)),
+            ),
+            None => self.picture_size(id),
+        }
+    }
+
+    /// The size of display `id`'s area of its window on this computer, if
+    /// it has one here.
+    fn window_size(&self, id: OutputId) -> Option<(u32, u32)> {
+        let t = self.targets.get(&id)?;
+        Some(t.area.size_on(self.screens.get(&t.monitor)?.size))
+    }
+
+    /// The lens maps of the mapped pictures this computer draws, by display
+    /// and use, each with the target it is drawn into (the map's size; made
+    /// again only when that changes). A map not made yet is left out, and its
+    /// display is black. Targets no longer drawn are let go.
+    fn lens_maps(&mut self, gpu: &Gpu) -> MappedTargets {
+        let me = self.ui.net.me.id;
+        let streams: Vec<(OutputId, (u32, u32))> =
+            self.streams.iter().map(|(id, r)| (*id, r.size)).collect();
+        let wanted = crate::mapped::wanted(&self.show, me, &streams, &|id| self.window_size(id));
+        let mut out = HashMap::new();
+        for w in wanted {
+            let Some(map) = self.stage.lens_map(w.projector, w.size, w.use_) else {
+                continue;
+            };
+            let key = (w.display, w.use_);
+            let target = match self.mapped_targets.get(&key) {
+                Some(t) if (t.width, t.height) == map.size => t.clone(),
+                _ => {
+                    let t = Arc::new(LayerTexture::new_target(gpu, map.size.0, map.size.1));
+                    self.mapped_targets.insert(key, t.clone());
+                    t
+                }
+            };
+            out.insert(key, (target, map));
+        }
+        self.mapped_targets.retain(|k, _| out.contains_key(k));
+        out
+    }
+
+    /// The mapped frames for `maps`: each map's canvases, in its order, from
+    /// `pictures` (a canvas with nothing to show keeps its place, black).
+    fn mapped_frames(
+        &self,
+        maps: &MappedTargets,
+        pictures: &HashMap<OutputId, crate::stage_live::PictureLayers>,
+    ) -> HashMap<(OutputId, crate::mapped::MapUse), crate::mapped::MappedFrame> {
+        maps.iter()
+            .filter_map(|(key, (target, map))| {
+                let p = self.show.mapped_projector(key.0)?;
+                let feeds = map
+                    .feeds
+                    .iter()
+                    .map(
+                        |o| match crate::stage_live::feed_groups(&self.show, *o, pictures) {
+                            Some((groups, canvas)) => crate::mapped::FeedFrame {
+                                output: *o,
+                                groups,
+                                canvas,
+                            },
+                            None => crate::mapped::FeedFrame {
+                                output: *o,
+                                groups: Vec::new(),
+                                canvas: (16, 16),
+                            },
+                        },
+                    )
+                    .collect();
+                let frame = crate::mapped::MappedFrame {
+                    target: target.clone(),
+                    map: map.clone(),
+                    feeds,
+                    moving: Vec::new(),
+                    lens: IDENTITY_4,
+                    // A stream is what the projector is asked to show, before
+                    // any blending (mapping plan 4.5).
+                    shares: key.1 != crate::mapped::MapUse::Stream,
+                    gamma: p.lens.gamma(),
+                };
+                Some((*key, frame))
+            })
+            .collect()
     }
 
     /// The size of display `id`'s picture: the one it is given, or its
@@ -2456,6 +2590,23 @@ impl App {
                     .clone()
                     .filter(|m| !o.is_sub_display() && m.is_valid())
                     .map(Arc::new);
+                // A mapped projector's display: the 3D stage decides where
+                // its picture goes, so its own keystone, mesh and part are
+                // not read (they come back when it is no longer mapped); the
+                // projector's fine-tune is its mesh.
+                let mapped = self
+                    .show
+                    .mapped_projector(o.id)
+                    .filter(|_| !o.is_sub_display());
+                let (corners, mesh, part, picture) = match mapped {
+                    Some(p) => (
+                        Corners::default(),
+                        p.fine.clone().filter(|m| m.is_valid()).map(Arc::new),
+                        None,
+                        None,
+                    ),
+                    None => (corners, mesh, self.show.part_of(o.id), o.picture),
+                };
                 OutputSetup {
                     id: o.id,
                     name: o.name.clone(),
@@ -2465,11 +2616,28 @@ impl App {
                     number: if o.pattern_number { i + 1 } else { 0 },
                     corners,
                     mesh,
-                    part: self.show.part_of(o.id),
-                    picture: o.picture,
+                    part,
+                    picture,
+                    mapped: mapped.is_some(),
                 }
             })
             .collect();
+        // The mapped pictures this computer draws (`mapped::wanted`): their
+        // lens maps (asked for every pass: the ask is what has them made),
+        // the targets they are drawn into, and the canvases they show, which
+        // are output work here (never at the previews' pace).
+        let maps = self.lens_maps(gpu);
+        let mut map_feeds: HashSet<OutputId> = HashSet::new();
+        for (_, map) in maps.values() {
+            for o in &map.feeds {
+                let whole = self.show.whole_picture(*o);
+                map_feeds.insert(*o);
+                map_feeds.insert(whole);
+                for s in self.show.outputs.iter().filter(|s| s.within == Some(whole)) {
+                    map_feeds.insert(s.id);
+                }
+            }
+        }
         let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
         for setup in configs {
             let OutputSetup {
@@ -2482,6 +2650,7 @@ impl App {
                 mesh,
                 part,
                 picture,
+                mapped,
             } = setup;
             let target = self.targets.get(&id).copied();
             let screen = target.and_then(|t| Some((t, self.screens.get(&t.monitor)?.size)));
@@ -2530,14 +2699,27 @@ impl App {
             // A display that shows the 3D stage (or whose whole picture does)
             // has the stage's picture in place of its cues.
             let stage_source = self.show.stage_source(id).cloned();
-            let has_picture = !engine_layers.is_empty() || stage_source.is_some();
+            // A mapped display's one layer is its mapped picture, once its map
+            // is made (black till then); cues sent to it aren't seen.
+            let mapped_layer = maps
+                .get(&(id, crate::mapped::MapUse::Window))
+                .map(|(target, _)| whole_layer(target.clone()));
+            let has_picture = if mapped {
+                mapped_layer.is_some()
+            } else {
+                !engine_layers.is_empty() || stage_source.is_some()
+            };
             // An output only the previews show here (no window, no stream) is
             // preview work: while the previews give way, its pictures are
             // uploaded no more often than the previews draw, and not at all
             // while they are paused; in between it shows what is uploaded.
-            let preview_only = target.is_none()
-                && !self.streams.contains_key(&id)
-                && !self.stage.feeds_a_display(id);
+            let preview_only = is_preview_work(
+                target.is_some(),
+                self.streams.contains_key(&id),
+                self.stage.feeds_a_display(id)
+                    || self.stage.feeds_output(id)
+                    || map_feeds.contains(&id),
+            );
             let level = if self.ui.prefs.previews_off || self.ui.preview_governor.held() {
                 crate::preview_pace::Level::Paused
             } else {
@@ -2547,13 +2729,15 @@ impl App {
                 )
             };
             let now = Instant::now();
-            let upload = !preview_only
-                || crate::preview_pace::uploads_due(
-                    level,
-                    self.preview_uploads.get(&id).copied(),
-                    now,
-                );
-            let mut layers = if let Some(src) = &stage_source {
+            let upload = uploads_now(
+                preview_only,
+                level,
+                self.preview_uploads.get(&id).copied(),
+                now,
+            );
+            let mut layers = if mapped {
+                mapped_layer.into_iter().collect()
+            } else if let Some(src) = &stage_source {
                 // Seen if a window or stream shows it (or a projector of its
                 // picture); else preview work, drawn at the previews' pace.
                 let seen = target.is_some() || self.streams.contains_key(&id);
@@ -2711,7 +2895,8 @@ impl App {
                 }
             }
 
-            if part.is_none() {
+            // (A mapped display's picture is no screen's feed.)
+            if part.is_none() && !mapped {
                 pictures.insert(
                     id,
                     crate::stage_live::PictureLayers {
@@ -2751,7 +2936,9 @@ impl App {
             });
         }
 
-        self.update_streams(&groups);
+        // The mapped pictures, now that every canvas's layers are known.
+        let frames = self.mapped_frames(&maps, &pictures);
+        self.update_streams(&groups, &frames);
         // The projectors in the 3D stage, for the views with their light on:
         // each one's shape and what its display sends.
         let light_asked = self
@@ -2859,6 +3046,14 @@ impl App {
                     Some((*id, g.warp, g.mesh.clone(), g.slice))
                 })
                 .collect();
+            // The mapped pictures of the displays on it (a map made or
+            // replaced is a redraw).
+            let mapped: Vec<crate::mapped::MappedFrame> = screen
+                .outputs
+                .iter()
+                .filter_map(|id| frames.get(&(*id, crate::mapped::MapUse::Window)).cloned())
+                .collect();
+            let maps_sent: Vec<u64> = mapped.iter().map(|f| f.map.stamp()).collect();
             // The fade at the edges is the display's own, whatever sub displays
             // share its monitor.
             let blend = screen
@@ -2874,12 +3069,14 @@ impl App {
                 || screen.needs_redraw
                 || sent != screen.sent
                 || blend != screen.blend
+                || maps_sent != screen.maps_sent
             {
                 screen.needs_redraw = false;
                 screen.sent = sent;
                 screen.blend = blend;
+                screen.maps_sent = maps_sent;
                 if let Some(t) = &screen.thread {
-                    t.submit(screen.size, list.clone(), blend);
+                    t.submit_mapped(screen.size, list.clone(), blend, mapped);
                 }
             }
             self.ui.screens.insert(*m, (screen.size, list));
@@ -4531,6 +4728,62 @@ fn picture_layers(
 
 /// The layers as they are on the graphics card now, nothing uploaded or made:
 /// a preview-only output's while the previews give way (`update_outputs`).
+/// The mapped pictures' lens maps and targets, by display and use.
+type MappedTargets =
+    HashMap<(OutputId, crate::mapped::MapUse), (Arc<LayerTexture>, Arc<crate::mapped::LensMap>)>;
+
+/// The identity matrix (column-major).
+const IDENTITY_4: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+/// Whether a display's pictures are preview work: shown only by the
+/// previews here (no window, no stream) and wanted by nothing that is
+/// output work (a display that shows the stage, a mapped projector drawn
+/// here that shows it as a canvas). Preview work is uploaded at the
+/// previews' pace.
+fn is_preview_work(has_window: bool, streamed: bool, feeds_output: bool) -> bool {
+    !has_window && !streamed && !feeds_output
+}
+
+/// Whether a display's pictures are uploaded this pass: always for output
+/// work; for preview work only when the previews' pace says (never while
+/// they are paused, but the first).
+fn uploads_now(
+    preview_only: bool,
+    level: crate::preview_pace::Level,
+    last: Option<Instant>,
+    now: Instant,
+) -> bool {
+    !preview_only || crate::preview_pace::uploads_due(level, last, now)
+}
+
+/// A layer of all of `texture`, stretched over its group's canvas.
+fn whole_layer(texture: Arc<LayerTexture>) -> OutputLayer {
+    OutputLayer {
+        texture,
+        opacity: 1.0,
+        fit: Fit::Stretch,
+        transform: LayerTransform::default(),
+        color: ColorAdjust::default(),
+        fx: Default::default(),
+    }
+}
+
+/// A canvas of `size` with nothing between it and the picture.
+fn plain_geometry(size: (u32, u32)) -> Geometry {
+    Geometry {
+        canvas: size,
+        warp: gpu::IDENTITY,
+        pin: gpu::IDENTITY,
+        mesh: None,
+        slice: Geometry::WHOLE,
+    }
+}
+
 fn held_layers(
     textures: &HashMap<u64, (Arc<LayerTexture>, u64)>,
     engine_layers: Vec<crate::engine::LayerRef<'_>>,
@@ -4878,6 +5131,42 @@ mod tests {
         if let Some(h) = stage.forget_device(&mut crate::ui::stage_view::StageShared::default()) {
             h.join().unwrap();
         }
+    }
+
+    /// A canvas has no window and no stream, so it was preview work, and its
+    /// video went to the previews' pace when they gave way. Shown by a mapped
+    /// projector drawn here it is output work: with the previews paused its
+    /// pictures are still uploaded at every pass (and `render`'s
+    /// `a_mapped_frame_is_a_new_picture_when_its_canvas_or_map_changes` has
+    /// the mapped window count each of them as a new picture).
+    #[test]
+    fn a_canvas_a_mapped_projector_here_shows_is_never_preview_work() {
+        use crate::preview_pace::Level;
+        let t = Instant::now();
+        // Only in the previews, wanted by nothing else: preview work, held
+        // while the previews are paused (after its first picture).
+        assert!(is_preview_work(false, false, false));
+        let canvas_alone = is_preview_work(false, false, false);
+        assert!(uploads_now(canvas_alone, Level::Paused, None, t));
+        for ms in [16, 33, 50, 1000, 5000] {
+            let now = t + Duration::from_millis(ms);
+            assert!(!uploads_now(canvas_alone, Level::Paused, Some(t), now));
+        }
+        // Used by a mapped projector drawn here (`feeds_output`): uploaded at
+        // every pass, the previews paused or not.
+        let canvas_mapped = is_preview_work(false, false, true);
+        assert!(!canvas_mapped);
+        let mut last = Some(t);
+        for ms in [16, 33, 50, 66] {
+            let now = t + Duration::from_millis(ms);
+            for level in [Level::Paused, Level::Quarter, Level::Full] {
+                assert!(uploads_now(canvas_mapped, level, last, now), "{level:?}");
+            }
+            last = Some(now);
+        }
+        // A window or a stream of its own makes it output work as before.
+        assert!(!is_preview_work(true, false, false));
+        assert!(!is_preview_work(false, true, false));
     }
 
     fn keys(names: &[&str]) -> Vec<MonitorKey> {
