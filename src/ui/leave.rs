@@ -160,7 +160,8 @@ pub(super) fn settle(show: &mut Show, engine: &mut Engine, st: &mut UiState) {
         }
         (Question::Unsaved(then), Some(Answer::DontSave)) => go(then, show, engine, st),
         (Question::Unsaved(then), Some(Answer::Save)) => {
-            match st.show_path.clone() {
+            // Not over a file a newer NewQ saved (`newer_file`): that goes to Save As.
+            match super::newer_file::save_target(st) {
                 Some(path) => start_save(show, engine, st, path),
                 // Where to? On the file dialog's thread; its answer is a
                 // `SaveShowTo`, saved as any other.
