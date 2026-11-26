@@ -312,7 +312,135 @@ pub struct Projector {
     /// The "My projectors" entry it was made from (words only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Its display shows the stage's screens as this projector sees them
+    /// (`mapped::LensMap`), instead of its own picture. Switching it off
+    /// gives back the display's hand-made keystone, mesh and part exactly.
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "super::lenient"
+    )]
+    pub mapped: bool,
+    /// A hand fine-tune on top of the mapping (a mesh only), drawn by the
+    /// compositor's mesh warp on the mapped picture. To be left out of the
+    /// scene's key and a map's: dragging a point should re-bake nothing.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::lenient_option"
+    )]
+    pub fine: Option<crate::mesh::Mesh>,
+    /// The points it was lined up by, and the last answer (`LineUp`). To be
+    /// left out of the scene's key and a map's too.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::lenient_option"
+    )]
+    pub line_up: Option<LineUp>,
     /// What a later NewQ wrote that this one doesn't know: kept as it was.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A line-up as it is kept (mapping plan, section 5): the points, the
+/// picture's size they were placed in, the last answer and what *Back to
+/// before line-up* restores. Every field defaulted and left out at it; a
+/// later NewQ's fields kept (`extra`). The solver (`calib`) takes room
+/// positions and pixels from these and returns plain values.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LineUp {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<LinePoint>,
+    /// The picture's size in pixels the points are in.
+    #[serde(default, skip_serializing_if = "no_pixels")]
+    pub pixels: (u32, u32),
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::lenient_option"
+    )]
+    pub solved: Option<Solved>,
+    /// Where it stood and its lens before the first line-up.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::lenient_option"
+    )]
+    pub before: Option<Before>,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn no_pixels(p: &(u32, u32)) -> bool {
+    *p == (0, 0)
+}
+
+/// One line-up point: a spot on the model and where it is in the picture.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinePoint {
+    /// Metres: in the screen's own frame when `surface` is set (so it stays
+    /// true when the screen moves), else in the room's (a venue corner).
+    #[serde(default)]
+    pub at: [f32; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<super::SurfaceId>,
+    /// Pixels in the projector's picture: (0, 0) its top-left corner, x
+    /// right, y down (`calib`'s convention).
+    #[serde(default)]
+    pub pixel: [f32; 2],
+    /// Switched off: kept, numbered, not used.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub on: bool,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// How much the last solve worked out (`calib::Rung`). One a later NewQ
+/// wrote reads as `Unknown`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Rung {
+    /// Where it is and its aim; the lens as entered.
+    #[default]
+    Pose,
+    /// And the throw.
+    Throw,
+    /// And the lens shift.
+    Shift,
+    /// And the picture's shape.
+    Aspect,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The last solve's answer, as kept (named as `calib::Solution`'s fields).
+/// The placement and lens it found are the projector's own.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Solved {
+    #[serde(default, deserialize_with = "super::lenient")]
+    pub rung: Rung,
+    /// Over the points used (pixels).
+    #[serde(default)]
+    pub rms_px: f32,
+    #[serde(default)]
+    pub max_px: f32,
+    /// The picture's size it was solved at.
+    #[serde(default)]
+    pub pixels: (u32, u32),
+    /// `calib::points_key` of the points it was solved from.
+    #[serde(default)]
+    pub points_key: u64,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What *Back to before line-up* restores.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Before {
+    #[serde(default)]
+    pub placement: Placement,
+    #[serde(default)]
+    pub lens: Lens,
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -356,6 +484,9 @@ impl Projector {
             display: None,
             resolution: None,
             model: None,
+            mapped: false,
+            fine: None,
+            line_up: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -912,6 +1043,16 @@ impl Show {
 
     pub fn projector_mut(&mut self, id: ProjectorId) -> Option<&mut Projector> {
         self.stage3d.projectors.iter_mut().find(|p| p.id == id)
+    }
+
+    /// The mapped projector whose display `display` is, if one is (worked
+    /// out, never stored): that display shows the stage's screens through
+    /// the projector and takes no cues.
+    pub fn mapped_projector(&self, display: OutputId) -> Option<&Projector> {
+        self.stage3d
+            .projectors
+            .iter()
+            .find(|p| p.mapped && p.display == Some(display))
     }
 
     /// Add a projector named "Projector N", standing 10 m in front of the

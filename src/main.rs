@@ -33,6 +33,7 @@ mod live_text;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macwin;
+mod mapped;
 mod media;
 mod mediamtx;
 mod mesh;

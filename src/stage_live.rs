@@ -274,6 +274,9 @@ pub struct StageLive {
     /// The thread was found stopped and hasn't been started again (the
     /// next start is a restart).
     died: bool,
+    /// Lens maps handed in by a test (`give_lens_map`), by projector: what
+    /// `lens_map` returns until the bake makes them.
+    given_maps: HashMap<ProjectorId, Arc<crate::mapped::LensMap>>,
 }
 
 /// A preview's target is kept this long after it last asked for a picture.
@@ -603,6 +606,47 @@ impl StageLive {
     /// stage (so they are uploaded as a display's, not paced as a preview's).
     pub fn feeds_a_display(&self, id: OutputId) -> bool {
         self.needed_by_outputs.contains(&id)
+    }
+
+    /// The lens map of mapped projector `projector` at `size`, for `use_`:
+    /// None until one is made (its display is black meanwhile, never its
+    /// flat picture). The app calls it every pass, before `send`, for each
+    /// map it draws (`mapped::wanted`, and the 3D views' light): a call is
+    /// the ask, and a map not asked for a while may be let go. A map being
+    /// replaced is returned until the new one is ready.
+    #[allow(dead_code)]
+    pub fn lens_map(
+        &mut self,
+        projector: ProjectorId,
+        size: (u32, u32),
+        use_: crate::mapped::MapUse,
+    ) -> Option<Arc<crate::mapped::LensMap>> {
+        let _ = use_;
+        self.given_maps
+            .get(&projector)
+            .filter(|m| m.size == size)
+            .cloned()
+    }
+
+    /// A lens map for `projector` made by a test (`lens_map` returns it at
+    /// its size, whatever the bake would make).
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn give_lens_map(
+        &mut self,
+        projector: ProjectorId,
+        map: Arc<crate::mapped::LensMap>,
+    ) {
+        self.given_maps.insert(projector, map);
+    }
+
+    /// Whether display `id` is a canvas that a mapped projector this
+    /// computer draws (for a window or a stream) uses: its pictures are then
+    /// output work, never at the previews' pace.
+    #[allow(dead_code)]
+    pub fn feeds_output(&self, id: OutputId) -> bool {
+        let _ = id;
+        false
     }
 
     /// The picture of display `id`, which shows the stage, `canvas` big: its

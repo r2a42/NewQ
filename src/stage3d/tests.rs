@@ -435,8 +435,10 @@ fn a_later_newqs_stage_loads_keeping_what_this_one_doesnt_know() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({
-            "id": 900, "name": "Dome", "shape": sphere, "feed": hologram
+            "id": 900, "name": "Dome", "shape": sphere, "feed": hologram, "kind": "Led"
         }));
+    stage["surfaces"][0]["track"] = serde_json::json!({ "psn": 3 });
+    stage["moves"] = serde_json::json!([{ "to": [1, 2, 3] }]);
     stage["venue"] = serde_json::json!({ "path": "room.obj", "up": "W", "units": "Leagues" });
     json["outputs"][0]["source"] = "Camera".into();
     let text = serde_json::to_string(&json).unwrap();
@@ -459,6 +461,10 @@ fn a_later_newqs_stage_loads_keeping_what_this_one_doesnt_know() {
     let again: serde_json::Value = serde_json::to_value(&back).unwrap();
     assert_eq!(again["stage3d"]["surfaces"][1]["shape"], sphere);
     assert_eq!(again["stage3d"]["surfaces"][1]["feed"], hologram);
+    // And a later NewQ's fields on a screen and on the stage.
+    assert_eq!(again["stage3d"]["surfaces"][1]["kind"], "Led");
+    assert_eq!(again["stage3d"]["surfaces"][0]["track"]["psn"], 3);
+    assert_eq!(again["stage3d"]["moves"][0]["to"][2], 3);
     // Known ones still read as themselves, not as unknown.
     assert!(st.surfaces[0].shape.is_known());
     assert!(matches!(st.surfaces[0].feed, Feed::Display { .. }));

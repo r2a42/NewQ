@@ -16,6 +16,7 @@
 
 pub mod geometry;
 pub mod glb;
+pub mod lensmap;
 pub mod light;
 pub mod load;
 pub mod projector;
@@ -97,6 +98,9 @@ pub struct Stage3d {
         deserialize_with = "lenient"
     )]
     pub units: LengthUnit,
+    /// What a later NewQ wrote that this one doesn't know: kept as it was.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A value a later NewQ may write in a way this one doesn't know (a new
@@ -378,6 +382,9 @@ pub struct Surface {
     /// A rear-projection screen: lit from behind, seen from the front.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rear: bool,
+    /// What a later NewQ wrote that this one doesn't know: kept as it was.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Surface {
@@ -774,6 +781,33 @@ impl Show {
         self.stage_source(output).is_some()
     }
 
+    /// Whether display `output` is a canvas (worked out, never stored): a
+    /// whole display (not a sub display, not a part of another's picture,
+    /// not one that shows the stage, not a mapped projector's), with no
+    /// monitor, that at least one screen shows.
+    pub fn is_canvas(&self, output: OutputId) -> bool {
+        let Some(o) = self.output(output) else {
+            return false;
+        };
+        !o.is_sub_display()
+            && o.part_of.is_none()
+            && o.source.is_none()
+            && o.monitor.is_none()
+            && self.mapped_projector(output).is_none()
+            && self
+                .stage3d
+                .surfaces
+                .iter()
+                .any(|s| s.feed.output() == Some(output))
+    }
+
+    /// Whether screen `surface` can move (a cue moves it, or a tracker is
+    /// bound to it): worked out from the show. A movable screen is never in
+    /// a lens map; it is drawn live (mapping plan 4.2). None can yet.
+    pub fn movable(&self, _surface: SurfaceId) -> bool {
+        false
+    }
+
     /// How display `output`'s picture shows the stage, if it does: the
     /// source of the display whose whole picture it shows (itself, or the one
     /// it shows part of). A sub display never shows the stage (it is an area
@@ -928,6 +962,7 @@ impl Show {
             feed: Feed::None,
             gain: 1.0,
             rear: false,
+            extra: Default::default(),
         });
         id
     }
@@ -963,6 +998,7 @@ impl Show {
                 feed: Feed::None,
                 gain: 1.0,
                 rear: false,
+                extra: Default::default(),
             });
             ids.push(id);
         }
