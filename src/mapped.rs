@@ -431,15 +431,132 @@ pub struct MappedFrame {
     pub gamma: f32,
 }
 
+/// The map pass's shader (with `WGSL_UNPACK` in front): one triangle over
+/// the whole target; each pixel looks the map up at its own place (one map
+/// pixel per picture pixel when the target is the map's size, as a
+/// window's is) and samples its feed's canvas at the place the map gives.
+/// No derivatives (`textureSampleLevel`), so a branch per feed is fine.
+pub const MAP_SHADER: &str = r#"
+struct MapUniform {
+    map_size: vec2<f32>,
+    target_size: vec2<f32>,
+    shares: u32,
+    inv_gamma: f32,
+    _a: u32,
+    _b: u32,
+};
+@group(0) @binding(0) var<uniform> u: MapUniform;
+@group(0) @binding(1) var place_t: texture_2d<f32>;
+@group(0) @binding(2) var how_t: texture_2d<f32>;
+@group(0) @binding(3) var feed0: texture_2d<f32>;
+@group(0) @binding(4) var feed1: texture_2d<f32>;
+@group(0) @binding(5) var feed2: texture_2d<f32>;
+@group(0) @binding(6) var feed3: texture_2d<f32>;
+@group(0) @binding(7) var samp: sampler;
+
+@vertex
+fn vs_map(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_map(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let most = max(vec2<i32>(u.map_size) - vec2<i32>(1, 1), vec2<i32>(0, 0));
+    let scale = u.map_size / max(u.target_size, vec2<f32>(1.0, 1.0));
+    let at = clamp(vec2<i32>(floor(p.xy * scale)), vec2<i32>(0, 0), most);
+    let place = textureLoad(place_t, at, 0);
+    let how = textureLoad(how_t, at, 0);
+    let uv = unpack_place(place);
+    var c = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    switch unpack_feed(how) {
+        case 1u: { c = textureSampleLevel(feed0, samp, uv, 0.0); }
+        case 2u: { c = textureSampleLevel(feed1, samp, uv, 0.0); }
+        case 3u: { c = textureSampleLevel(feed2, samp, uv, 0.0); }
+        case 4u: { c = textureSampleLevel(feed3, samp, uv, 0.0); }
+        default: { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+    }
+    var k = how.b;
+    if (u.shares != 0u) {
+        k = k * pow(max(how.r, 0.0), u.inv_gamma);
+    }
+    return vec4<f32>(c.rgb * k, 1.0);
+}
+"#;
+
+/// The map pass's shader as compiled: `WGSL_UNPACK` then `MAP_SHADER`.
+pub fn map_shader_source() -> String {
+    format!("{WGSL_UNPACK}{MAP_SHADER}")
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MapUniform {
+    map_size: [f32; 2],
+    target_size: [f32; 2],
+    shares: u32,
+    inv_gamma: f32,
+    _pad: [u32; 2],
+}
+
+/// What a drawer makes once: the map pass and the compositor's pipeline for
+/// the canvases.
+struct Kit {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    compositor: wgpu::RenderPipeline,
+    /// Bound for a feed the frame doesn't have.
+    blank: wgpu::TextureView,
+}
+
+/// A canvas's picture, kept from frame to frame (made again only at a new
+/// size).
+struct Canvas {
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    /// Which texture this is (a new one is a new bind group).
+    serial: u64,
+}
+
+/// What a drawer keeps for each frame it draws in one go.
+#[derive(Default)]
+struct FrameKit {
+    uniform: Option<wgpu::Buffer>,
+    canvases: [Option<Canvas>; MAX_FEEDS],
+    /// The bind group, and the map and canvases it was made for.
+    group: Option<(Arc<LensMap>, [u64; MAX_FEEDS], wgpu::BindGroup)>,
+    /// The target last drawn into, and a view to draw into it.
+    target: Option<(Arc<LayerTexture>, wgpu::TextureView)>,
+}
+
 /// Draws mapped pictures: one per thread that draws them (a window's, a
-/// stream's). Keeps its pipelines and the canvases' pictures between frames.
+/// stream's). Keeps its pipelines, the canvases' pictures and the bind
+/// groups between frames, so a frame makes nothing new on the card unless a
+/// size, a map or a target changed. Made when the first mapped frame comes:
+/// a thread that never draws one never makes any of it.
 pub struct Drawer {
-    _private: (),
+    /// None: the graphics card refused the map pass (said once, in the log);
+    /// mapped pictures stay black.
+    kit: Option<Kit>,
+    frames: Vec<FrameKit>,
+    serial: u64,
 }
 
 impl Drawer {
-    pub fn new(_gpu: &Gpu) -> Drawer {
-        Drawer { _private: () }
+    pub fn new(gpu: &Gpu) -> Drawer {
+        let kit = checked(&gpu.device, || Kit::new(gpu));
+        Drawer {
+            kit,
+            frames: Vec::new(),
+            serial: 0,
+        }
+    }
+
+    /// Whether the map pass was made (a refused one draws nothing).
+    pub fn works(&self) -> bool {
+        self.kit.is_some()
     }
 
     /// Record `frame`'s canvas passes and map pass, through `owner`'s slots,
@@ -454,15 +571,332 @@ impl Drawer {
         self.draw_all(gpu, owner, std::slice::from_ref(frame))
     }
 
-    /// `draw` for each of `frames` (each through slots of its own).
+    /// `draw` for each of `frames` (each through slots of its own; at most
+    /// `MAX_FRAMES`).
     pub fn draw_all(
         &mut self,
-        _gpu: &Gpu,
-        _owner: MapOwner,
-        _frames: &[MappedFrame],
+        gpu: &Gpu,
+        owner: MapOwner,
+        frames: &[MappedFrame],
     ) -> Vec<wgpu::CommandBuffer> {
-        Vec::new()
+        let Some(kit) = &self.kit else {
+            return Vec::new();
+        };
+        let mut cmds = Vec::with_capacity(frames.len() * (MAX_FEEDS + 1));
+        let most = gpu.device.limits().max_texture_dimension_2d.max(1);
+        for (i, frame) in frames.iter().take(MAX_FRAMES).enumerate() {
+            if self.frames.len() <= i {
+                self.frames.resize_with(i + 1, FrameKit::default);
+            }
+            let fk = &mut self.frames[i];
+            // The canvases: each feed's layers on its plain picture.
+            for (j, feed) in frame.feeds.iter().take(MAX_FEEDS).enumerate() {
+                let size = capped(feed.canvas, most);
+                if fk.canvases[j].as_ref().is_none_or(|c| c.size != size) {
+                    self.serial += 1;
+                    fk.canvases[j] = Some(Canvas {
+                        view: canvas_texture(gpu, size).create_view(&Default::default()),
+                        size,
+                        serial: self.serial,
+                    });
+                }
+                let Some(canvas) = &fk.canvases[j] else {
+                    continue;
+                };
+                let draw: Vec<_> = feed.groups.iter().map(OutputGroup::draw).collect();
+                cmds.push(gpu.composite(
+                    &kit.compositor,
+                    owner.slot(i, j),
+                    &canvas.view,
+                    &draw,
+                    None,
+                ));
+            }
+            let uniform = fk.uniform.get_or_insert_with(|| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("map pass uniform"),
+                    size: std::mem::size_of::<MapUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let target_size = (frame.target.width, frame.target.height);
+            let gamma = if frame.gamma.is_finite() && frame.gamma > 0.1 {
+                frame.gamma
+            } else {
+                crate::stage3d::projector::DEFAULT_GAMMA
+            };
+            let u = MapUniform {
+                map_size: [frame.map.size.0 as f32, frame.map.size.1 as f32],
+                target_size: [target_size.0 as f32, target_size.1 as f32],
+                shares: u32::from(frame.shares),
+                inv_gamma: 1.0 / gamma,
+                _pad: [0; 2],
+            };
+            gpu.queue.write_buffer(uniform, 0, bytemuck::bytes_of(&u));
+            // The feeds the frame has, in the map's order; any it lacks blank.
+            let serials: [u64; MAX_FEEDS] = std::array::from_fn(|j| {
+                if j < frame.feeds.len() {
+                    fk.canvases[j].as_ref().map_or(0, |c| c.serial)
+                } else {
+                    0
+                }
+            });
+            let stale = fk
+                .group
+                .as_ref()
+                .is_none_or(|(m, s, _)| !Arc::ptr_eq(m, &frame.map) || *s != serials);
+            if stale {
+                let views: [&wgpu::TextureView; MAX_FEEDS] =
+                    std::array::from_fn(|j| match (&fk.canvases[j], serials[j]) {
+                        (Some(c), s) if s != 0 => &c.view,
+                        _ => &kit.blank,
+                    });
+                let group = kit.group(gpu, uniform, &frame.map, views);
+                fk.group = Some((frame.map.clone(), serials, group));
+            }
+            if fk
+                .target
+                .as_ref()
+                .is_none_or(|(t, _)| !Arc::ptr_eq(t, &frame.target))
+            {
+                fk.target = frame
+                    .target
+                    .render_view()
+                    .map(|v| (frame.target.clone(), v));
+            }
+            let (Some((_, _, group)), Some((_, view))) = (&fk.group, &fk.target) else {
+                continue;
+            };
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("map pass"),
+                });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("map pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&kit.pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            cmds.push(encoder.finish());
+            // Filled once: its stamp stays, so `render::Shot` tells a new
+            // picture by the frame's feeds and map, not by this.
+            if !frame.target.is_filled() {
+                frame.target.mark_drawn();
+            }
+        }
+        cmds
     }
+}
+
+/// A canvas's size within what the card can make, its shape kept.
+fn capped(size: (u32, u32), most: u32) -> (u32, u32) {
+    let (w, h) = (size.0.max(1), size.1.max(1));
+    let big = w.max(h);
+    if big <= most {
+        return (w, h);
+    }
+    let s = f64::from(most) / f64::from(big);
+    let f = |v: u32| ((f64::from(v) * s).round() as u32).clamp(1, most);
+    (f(w), f(h))
+}
+
+fn canvas_texture(gpu: &Gpu, size: (u32, u32)) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mapped canvas"),
+        size: wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+impl Kit {
+    fn new(gpu: &Gpu) -> Kit {
+        let device = &gpu.device;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("map pass"),
+            source: wgpu::ShaderSource::Wgsl(map_shader_source().into()),
+        });
+        let texture = |binding: u32, filterable: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("map pass"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                texture(1, false),
+                texture(2, false),
+                texture(3, true),
+                texture(4, true),
+                texture(5, true),
+                texture(6, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("map pass"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("map pass"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_map"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_map"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("map pass"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blank = canvas_texture(gpu, (1, 1)).create_view(&Default::default());
+        Kit {
+            pipeline,
+            layout,
+            sampler,
+            compositor: gpu.compositor.pipeline(device, FORMAT),
+            blank,
+        }
+    }
+
+    fn group(
+        &self,
+        gpu: &Gpu,
+        uniform: &wgpu::Buffer,
+        map: &LensMap,
+        feeds: [&wgpu::TextureView; MAX_FEEDS],
+    ) -> wgpu::BindGroup {
+        fn tex(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            }
+        }
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("map pass"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                tex(1, map.place_view()),
+                tex(2, map.how_view()),
+                tex(3, feeds[0]),
+                tex(4, feeds[1]),
+                tex(5, feeds[2]),
+                tex(6, feeds[3]),
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+}
+
+/// `f`, in error scopes: None (and a line in the log) if the card refused
+/// what it made, so a card that won't take the map pass leaves a projector
+/// black, never a broken window.
+fn checked<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Option<T> {
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let made = f();
+    let inner = pollster::block_on(internal.pop());
+    let outer = pollster::block_on(validation.pop());
+    match inner.or(outer) {
+        None => Some(made),
+        Some(e) => {
+            log::warn!("mapped projectors stay black: this GPU won't draw the map pass ({e})");
+            None
+        }
+    }
+}
+
+/// What a window or a stream draws before its own composite: `frames`, by
+/// `drawer` (made at the first one). With none, nothing, and no drawer made:
+/// the thread draws as it did before mapping.
+pub fn draw_mapped(
+    drawer: &mut Option<Drawer>,
+    gpu: &Gpu,
+    owner: MapOwner,
+    frames: &[MappedFrame],
+) -> Vec<wgpu::CommandBuffer> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    drawer
+        .get_or_insert_with(|| Drawer::new(gpu))
+        .draw_all(gpu, owner, frames)
 }
 
 // ----- Which maps this computer makes -------------------------------------------
@@ -520,6 +954,10 @@ pub fn wanted(
     }
     out
 }
+
+#[cfg(test)]
+#[path = "mapped_tests.rs"]
+pub(crate) mod gpu_tests;
 
 #[cfg(test)]
 mod tests {
