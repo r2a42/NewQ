@@ -26,11 +26,20 @@
 //! the renderer throws into the room (`render3d::lit`). Throws are drawn only
 //! in a job with such a view (a preview), through the same slot, after the
 //! displays' views: an output never waits for them.
+//!
+//! Mapped projectors' lens maps (`MapJob`, `render3d::bake`): those a window
+//! or a stream draws (output work) first of all, before the feeds; those a
+//! 3D view's light wants (preview work, sent only with a governed lit view)
+//! after the previews. Each lands, as soon as it is made, in the slot the
+//! thread was given (`StageThread::spawn_with`), which the app owns, so a
+//! map outlives the thread.
 
 use crate::gpu::{Gpu, LayerTexture, Slot};
+use crate::mapped::LensMap;
 use crate::render::{Mailbox, OutputGroup};
 use crate::render3d::{Camera, FrameStats, LightView, Line, Options, Renderer, Scene, Target};
 use crate::show::{EdgeBlend, OutputId};
+use crate::stage3d::{Projector, ProjectorId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +117,32 @@ pub struct ViewJob {
     pub lines: Arc<Vec<Line>>,
 }
 
+/// A lens map to bake: projector `projector`'s at `size`, its picture
+/// `aspect` wide per high, of `scene` (`lensmap::still_scene`); `key` is
+/// `lensmap::map_key`'s.
+#[derive(Clone)]
+pub struct MapJob {
+    pub projector: Projector,
+    pub aspect: f32,
+    pub size: (u32, u32),
+    pub key: u64,
+    pub scene: Arc<Scene>,
+    /// For a window or a stream: baked before anything else, never
+    /// governed. Else for a 3D view's light, after the previews.
+    pub output: bool,
+}
+
+/// A lens map made (or refused: None, said in the log).
+pub struct Baked {
+    pub projector: ProjectorId,
+    pub size: (u32, u32),
+    pub key: u64,
+    pub map: Option<Arc<LensMap>>,
+}
+
+/// Where the maps the thread makes land (`StageThread::spawn_with`).
+pub type BakedSlot = Arc<parking_lot::Mutex<Vec<Baked>>>;
+
 #[derive(Clone, Default)]
 pub struct StageJob {
     pub feeds: Vec<FeedJob>,
@@ -116,6 +151,8 @@ pub struct StageJob {
     /// The size they are drawn at (`throw_size`).
     pub throw_size: (u32, u32),
     pub views: Vec<ViewJob>,
+    /// Lens maps to bake.
+    pub maps: Vec<MapJob>,
     /// Counts up; `StageThread::done` says the last one drawn.
     pub serial: u64,
 }
@@ -153,11 +190,22 @@ impl StageJob {
             }
             (throws, newer.throw_size)
         };
+        // The newer maps, and the older ones of those the newer job hasn't.
+        let mut maps = newer.maps;
+        for m in self.maps {
+            if !maps
+                .iter()
+                .any(|n| n.projector.id == m.projector.id && n.size == m.size)
+            {
+                maps.push(m);
+            }
+        }
         StageJob {
             feeds,
             throws,
             throw_size,
             views,
+            maps,
             serial: newer.serial.max(self.serial),
         }
     }
@@ -202,8 +250,14 @@ pub struct StageThread {
 
 impl StageThread {
     /// The thread, counting what it draws into `count` (`TOTALS` by
-    /// default).
+    /// default); its lens maps land in a slot of its own.
+    #[cfg(test)]
     pub fn spawn(gpu: Gpu, count: CountTo) -> std::io::Result<StageThread> {
+        StageThread::spawn_with(gpu, count, BakedSlot::default())
+    }
+
+    /// The thread, its lens maps landing in `baked`.
+    pub fn spawn_with(gpu: Gpu, count: CountTo, baked: BakedSlot) -> std::io::Result<StageThread> {
         let mailbox: Arc<Mailbox<Work>> = Arc::new(Mailbox::new());
         let mb = mailbox.clone();
         let done = Arc::new(AtomicU64::new(0));
@@ -218,7 +272,7 @@ impl StageThread {
                 let _said = crate::crash::OnPanic(|| {
                     log::warn!("the 3D stage's drawing thread stopped unexpectedly");
                 });
-                stage_loop(gpu, mb, d, dd, s, count)
+                stage_loop(gpu, mb, d, dd, s, count, baked)
             })?;
         Ok(StageThread {
             mailbox,
@@ -347,6 +401,8 @@ pub struct StageDrawer {
     scenes: Vec<Arc<Scene>>,
     /// Where what it draws is counted.
     count: CountTo,
+    /// Where the lens maps it makes land.
+    baked: BakedSlot,
 }
 
 impl StageDrawer {
@@ -366,7 +422,47 @@ impl StageDrawer {
             throws: None,
             scenes: Vec::new(),
             count,
+            baked: BakedSlot::default(),
         }
+    }
+
+    /// The lens maps it makes land in `baked`.
+    pub fn baked_into(&mut self, baked: BakedSlot) {
+        self.baked = baked;
+    }
+
+    /// The lens maps made since this was last asked (for a test).
+    #[cfg(test)]
+    pub fn take_baked(&self) -> Vec<Baked> {
+        std::mem::take(&mut *self.baked.lock())
+    }
+
+    /// Have the renderer refuse the bake, as a card that won't build its
+    /// pipeline does (for a test).
+    #[cfg(test)]
+    pub fn refuse_bake(&mut self) {
+        self.renderer.refuse_bake();
+    }
+
+    /// Bake `job`'s map, and put it (or None, refused) where they land.
+    fn bake(&mut self, gpu: &Gpu, job: &MapJob) {
+        let made = self.renderer.bake(
+            gpu,
+            &crate::render3d::bake::Bake {
+                scene: &job.scene,
+                projector: &job.projector,
+                aspect: job.aspect,
+                size: job.size,
+                key: job.key,
+            },
+        );
+        self.count.map_baked(made.is_ok());
+        self.baked.lock().push(Baked {
+            projector: job.projector.id,
+            size: job.size,
+            key: job.key,
+            map: made.ok().map(Arc::new),
+        });
     }
 
     /// Have the renderer refuse the light, as a card that won't build its
@@ -401,19 +497,25 @@ impl StageDrawer {
         // A new scene (the stage edited, a venue read again): what only the
         // old one had goes now.
         let mut scenes: Vec<Arc<Scene>> = Vec::new();
-        for v in &job.views {
-            if !scenes.iter().any(|s| Arc::ptr_eq(s, &v.scene)) {
-                scenes.push(v.scene.clone());
+        let in_views = job.views.iter().map(|v| &v.scene);
+        for s in in_views.chain(job.maps.iter().map(|m| &m.scene)) {
+            if !scenes.iter().any(|o| Arc::ptr_eq(o, s)) {
+                scenes.push(s.clone());
             }
         }
         let same = scenes.len() == self.scenes.len()
             && scenes
                 .iter()
                 .all(|s| self.scenes.iter().any(|o| Arc::ptr_eq(s, o)));
-        if !same && !scenes.is_empty() {
+        // (Only with a view: a job of maps alone keeps the views' meshes.)
+        if !same && !job.views.is_empty() {
             let refs: Vec<&Scene> = scenes.iter().map(|s| s.as_ref()).collect();
             self.renderer.keep_only(&refs);
             self.scenes = scenes;
+        }
+        // The maps a window or stream draws: output work, first of all.
+        for m in job.maps.iter().filter(|m| m.output) {
+            self.bake(gpu, m);
         }
         let now = Instant::now();
         for f in &job.feeds {
@@ -499,6 +601,10 @@ impl StageDrawer {
         if displays {
             after_displays();
         }
+        // The maps a 3D view's light wants: preview work, last.
+        for m in job.maps.iter().filter(|m| !m.output) {
+            self.bake(gpu, m);
+        }
         self.count.job(job.feeds.len(), thrown);
         stats
     }
@@ -561,6 +667,7 @@ fn stage_loop(
     displays_done: Arc<AtomicU64>,
     stats: Arc<parking_lot::Mutex<HashMap<u64, FrameStats>>>,
     count: CountTo,
+    baked: BakedSlot,
 ) {
     // Made at the first job: a show with no stage never builds the pipelines.
     let mut drawer: Option<StageDrawer> = None;
@@ -571,7 +678,11 @@ fn stage_loop(
             #[cfg(test)]
             Work::Panic => panic!("a test stops the 3D stage's drawing thread"),
         };
-        let d = drawer.get_or_insert_with(|| StageDrawer::counting(&gpu, count));
+        let d = drawer.get_or_insert_with(|| {
+            let mut d = StageDrawer::counting(&gpu, count);
+            d.baked_into(baked.clone());
+            d
+        });
         let drawn = d.draw(&gpu, &job, &mut || {
             displays_done.store(job.serial, Ordering::Release);
         });
@@ -588,3 +699,7 @@ fn stage_loop(
 #[cfg(test)]
 #[path = "stage_render_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stage_render_map_tests.rs"]
+mod map_tests;
