@@ -722,11 +722,15 @@ pub fn screen_middle(s: &Surface) -> [f32; 3] {
 
 /// The first display that can be a new projector (not taken, not a sub
 /// display, not showing the stage).
+/// The first display that can be a new projector's: one that isn't a canvas
+/// if there is one (a canvas is content for the screens; made a mapped
+/// projector's, its cues would be unseen), else the first that can.
 fn free_display(show: &Show) -> Option<OutputId> {
-    show.outputs
-        .iter()
-        .map(|o| o.id)
-        .find(|o| show.projector_display_refused(*o, ProjectorId(0)).is_none())
+    let free = |o: &OutputId| show.projector_display_refused(*o, ProjectorId(0)).is_none();
+    let ids = || show.outputs.iter().map(|o| o.id);
+    ids()
+        .find(|o| free(o) && !show.is_canvas(*o))
+        .or_else(|| ids().find(free))
 }
 
 /// Add a projector with a standard zoom, 10,000 lumens, the first free

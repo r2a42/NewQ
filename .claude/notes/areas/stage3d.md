@@ -317,9 +317,12 @@ is a piece of a longer entry that covered several areas.
   `Surface` and `Stage3d`; `Show::is_canvas` (a whole display, no monitor, no source, not a mapped
   projector's, that a screen shows: worked out, never stored), `mapped_projector`, `movable` (false
   until round 3). A `fine`/`line_up` this NewQ can't read is kept in `extra` under its own name by
-  `ProjectorFile` (`Projector`'s serde is `from`/`into` it) and written back unchanged, and is no
-  fine-tune or line-up here; `Rung::Unknown(Value)` keeps a later rung. `Stage3d::shape_key` and
-  `stage_projectors::key_of` hash `Projector::without_tuning` (no `fine`, no `line_up`), so a
+  `ProjectorFile` (`Projector`'s serde is `from`/`into` it: a new field goes there too; the
+  attributes on `Projector`'s own fields do nothing) and written back unchanged, and is no
+  fine-tune or line-up here (a later `mapped` likewise: not mapped here; `LineUp::solved`/`before`
+  are read strictly, so a later shape of either keeps the whole line-up as written); `Rung::Unknown(Value)` keeps a later rung. `Stage3d::shape_key` and
+  `stage_projectors::free_display` (a new projector's display) passes over canvases while another
+  display is free. `stage_projectors::key_of` hash `Projector::without_tuning` (no `fine`, no `line_up`), so a
   dragged point rebuilds no scene, map or footprint. The screen's kind: `Surface::kind:
   Option<SurfaceKind>` (`Projection`/`Led`, untagged `Unknown` kept; None, left out, is "works it
   out"), `rear` as before; `chosen_kind`/`choose_kind`, `KIND_CHOICES`, `ScreenKind {Front, Rear,

@@ -369,12 +369,8 @@ struct ProjectorFile {
     resolution: Option<(u32, u32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "std::ops::Not::not",
-        deserialize_with = "super::lenient"
-    )]
-    mapped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mapped: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fine: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -408,6 +404,7 @@ impl From<ProjectorFile> for Projector {
         let mut extra = f.extra;
         let fine = read_or_keep(f.fine, "fine", &mut extra);
         let line_up = read_or_keep(f.line_up, "line_up", &mut extra);
+        let mapped = read_or_keep(f.mapped, "mapped", &mut extra).unwrap_or(false);
         Projector {
             id: f.id,
             name: f.name,
@@ -418,7 +415,7 @@ impl From<ProjectorFile> for Projector {
             display: f.display,
             resolution: f.resolution,
             model: f.model,
-            mapped: f.mapped,
+            mapped,
             fine,
             line_up,
             extra,
@@ -442,6 +439,8 @@ impl From<Projector> for ProjectorFile {
             "line_up",
             p.line_up.and_then(|l| serde_json::to_value(l).ok()),
         );
+        // Ticked here, it is this NewQ's; left off, a kept one stays.
+        let mapped = known("mapped", p.mapped.then_some(serde_json::Value::Bool(true)));
         ProjectorFile {
             id: p.id,
             name: p.name,
@@ -452,7 +451,7 @@ impl From<Projector> for ProjectorFile {
             display: p.display,
             resolution: p.resolution,
             model: p.model,
-            mapped: p.mapped,
+            mapped,
             fine,
             line_up,
             extra,
@@ -472,18 +471,12 @@ pub struct LineUp {
     /// The picture's size in pixels the points are in.
     #[serde(default, skip_serializing_if = "no_pixels")]
     pub pixels: (u32, u32),
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "super::lenient_option"
-    )]
+    // Read strictly: one this NewQ can't read makes the whole line-up
+    // unreadable, and `ProjectorFile` keeps it as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solved: Option<Solved>,
     /// Where it stood and its lens before the first line-up.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "super::lenient_option"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<Before>,
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -635,9 +628,14 @@ impl Projector {
     /// light's test (`lit::box_meets`), made where things are at rest. Its
     /// pixels are its own `resolution` (the show doesn't know the monitor).
     pub fn reaches_screen(&self, s: &Surface) -> bool {
+        self.reaches_boxes(&s.boxes())
+    }
+
+    /// `reaches_screen` for a screen's `Surface::boxes`, made once.
+    pub fn reaches_boxes(&self, boxes: &[[[f32; 3]; 8]]) -> bool {
         let pixels = self.pixels(None);
         let t = super::light::throw_of(self, self.aspect(pixels), pixels, 0, false);
-        s.boxes()
+        boxes
             .iter()
             .any(|b| render3d::lit::box_meets(&t.view_proj, b))
     }
@@ -1241,7 +1239,12 @@ impl Show {
         if let Some(k) = s.chosen_kind() {
             return k;
         }
-        let reached = self.stage3d.projectors.iter().any(|p| p.reaches_screen(s));
+        let boxes = s.boxes();
+        let reached = self
+            .stage3d
+            .projectors
+            .iter()
+            .any(|p| p.reaches_boxes(&boxes));
         match (reached, s.rear) {
             (false, _) => ScreenKind::Led,
             (true, true) => ScreenKind::Rear,

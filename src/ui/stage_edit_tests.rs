@@ -972,6 +972,11 @@ fn a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_every
         assert!(w.has("Canvas 1 (canvas)"), "modern {modern}: {:?}", w.texts);
         // The mapped display is greyed: clicking it changes nothing.
         w.click_text(&mut show, &mut st, &mapped);
+        let on = show
+            .cue(cue_id)
+            .and_then(|c| c.kind.media())
+            .and_then(|m| m.output);
+        assert_eq!(on, Some(d), "modern {modern}: still where it was");
         // Choose the canvas instead.
         if !w.has("Canvas 1 (canvas)") {
             w.click_text(&mut show, &mut st, &mapped);
@@ -1006,6 +1011,47 @@ fn a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_every
             assert_eq!(sub("Canvas 1"), "canvas → Screen 1");
             assert_eq!(sub("Proj"), super::super::MAPPED_LABEL);
         }
+        assert!(kept_by_sanitize(&show), "modern {modern}");
+    }
+}
+
+#[test]
+fn a_projector_whose_display_a_screen_shows_is_refused_mapped_and_given_a_canvas_in_one_click() {
+    for modern in [false, true] {
+        // The usual start: a new screen shows the first display, which is
+        // also the projector's.
+        let mut show = Show::default();
+        let d = show.outputs[0].id;
+        let screen = add_surface(&mut show, Preset::Flat);
+        let st0 = UiState::default();
+        let p = super::super::stage_projectors::add_aimed_at(&mut show, &st0, screen);
+        assert_eq!(show.projector(p).unwrap().display, Some(d));
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        w.tab(&mut show, &mut st, "Projectors");
+        st.stage.projectors.picked = Some(p);
+        w.settle(&mut show, &mut st);
+        // The tick is greyed: clicking it does nothing, and the reason is said.
+        w.press(&mut show, &mut st, "Projectors ▸ Projector 1 ▸ Mapped");
+        assert!(!show.projector(p).unwrap().mapped, "modern {modern}");
+        assert!(
+            w.texts
+                .iter()
+                .any(|t| t.starts_with("Screen 1 shows this display's picture.")),
+            "modern {modern}: {:?}",
+            w.texts
+        );
+        // One click: the screen gets a canvas of its own, and it is mapped.
+        w.press(
+            &mut show,
+            &mut st,
+            "Projectors ▸ Projector 1 ▸ Give a canvas",
+        );
+        assert!(show.projector(p).unwrap().mapped, "modern {modern}");
+        let feed = show.stage3d.surface(screen).unwrap().feed.output().unwrap();
+        assert_ne!(feed, d);
+        assert!(show.is_canvas(feed));
+        assert_eq!(show.output(feed).unwrap().name, "Canvas 1");
+        assert!(show.mapped_projector(d).is_some());
         assert!(kept_by_sanitize(&show), "modern {modern}");
     }
 }
