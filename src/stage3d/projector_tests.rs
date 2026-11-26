@@ -26,6 +26,7 @@ fn flat(w: f32, h: f32, placement: Placement) -> Surface {
         feed: Feed::None,
         gain: 1.0,
         rear: false,
+        kind: None,
         extra: Default::default(),
     }
 }

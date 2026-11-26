@@ -30,7 +30,7 @@
 //! it, and a field a later NewQ adds is kept (`extra`) and written back.
 
 use super::geometry::{self, Mat4};
-use super::{Placement, Surface, SurfaceShape};
+use super::{Placement, ScreenKind, Surface, SurfaceId, SurfaceShape};
 use crate::render3d::camera::{Frustum, MAX_SHIFT};
 use crate::render3d::{self, Camera, Part, Ray, Scene};
 use crate::show::{OutputId, Show};
@@ -445,6 +445,27 @@ pub struct Before {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The canvases a mapped projector shows (`Show::mapped_feeds`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MappedFeeds {
+    /// At most `mapped::MAX_FEEDS`, in the order of the screens.
+    pub used: Vec<OutputId>,
+    /// Past the limit: their screens are black through this projector.
+    pub left_out: Vec<OutputId>,
+    /// The screens it maps onto.
+    pub screens: Vec<SurfaceId>,
+}
+
+/// Why a projector can't be mapped (`Show::mapped_refused`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MappedRefused {
+    /// It has no display (or one that isn't there).
+    NoDisplay,
+    /// These screens show its display's picture: mapped, it would show
+    /// itself. They need a canvas of their own first.
+    OnAScreen(Vec<SurfaceId>),
+}
+
 /// Where the edge of a projector's picture falls in the room.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Footprint {
@@ -488,6 +509,30 @@ impl Projector {
             fine: None,
             line_up: None,
             extra: serde_json::Map::new(),
+        }
+    }
+
+    /// Whether its beam can reach screen `s` where both stand (some piece's
+    /// box is inside the picture's frustum, in front of the lens): the
+    /// light's test (`lit::box_meets`), made where things are at rest. Its
+    /// pixels are its own `resolution` (the show doesn't know the monitor).
+    pub fn reaches_screen(&self, s: &Surface) -> bool {
+        let pixels = self.pixels(None);
+        let t = super::light::throw_of(self, self.aspect(pixels), pixels, 0, false);
+        s.boxes()
+            .iter()
+            .any(|b| render3d::lit::box_meets(&t.view_proj, b))
+    }
+
+    /// Itself without what a line-up or a fine-tune keeps (`fine`,
+    /// `line_up`): what keys of the scene and of a lens map hash, so a
+    /// dragged fine-tune point or a stored point re-bakes nothing (mapping
+    /// plan 4.1).
+    pub fn without_tuning(&self) -> Projector {
+        Projector {
+            fine: None,
+            line_up: None,
+            ..self.clone()
         }
     }
 
@@ -1055,6 +1100,90 @@ impl Show {
             .find(|p| p.mapped && p.display == Some(display))
     }
 
+    /// The screens that show display `output`'s picture (`Feed::Display`).
+    pub fn screens_showing(&self, output: OutputId) -> Vec<&Surface> {
+        self.stage3d
+            .surfaces
+            .iter()
+            .filter(|s| s.feed.output() == Some(output))
+            .collect()
+    }
+
+    /// What screen `surface` is (mapping plan, section 8): what was chosen on
+    /// it, or, left to be worked out, projection when some projector's beam
+    /// reaches it where everything stands (front or rear as `Surface::rear`
+    /// says), else LED. Worked out from the show alone, never per frame, so
+    /// a screen doesn't change kind as it moves through a beam.
+    pub fn screen_kind(&self, surface: SurfaceId) -> Option<ScreenKind> {
+        self.stage3d.surface(surface).map(|s| self.kind_of(s))
+    }
+
+    /// `screen_kind` for a screen in hand.
+    pub fn kind_of(&self, s: &Surface) -> ScreenKind {
+        if let Some(k) = s.chosen_kind() {
+            return k;
+        }
+        let reached = self.stage3d.projectors.iter().any(|p| p.reaches_screen(s));
+        match (reached, s.rear) {
+            (false, _) => ScreenKind::Led,
+            (true, true) => ScreenKind::Rear,
+            (true, false) => ScreenKind::Front,
+        }
+    }
+
+    /// The canvases mapped projector `id` shows (mapping plan 4.1): the
+    /// displays whose pictures are on the projection screens its beam
+    /// reaches where they stand, in the order of the screens, each once. At
+    /// most `mapped::MAX_FEEDS` are `used`; the rest are `left_out` (their
+    /// screens are black through this projector), said in words on the page.
+    /// A screen that is hidden, LED, can move, or shows nothing (or a
+    /// display that shows the stage, or a mapped projector's) is no feed.
+    pub fn mapped_feeds(&self, id: ProjectorId) -> MappedFeeds {
+        let mut out = MappedFeeds::default();
+        let Some(p) = self.projector(id) else {
+            return out;
+        };
+        for s in &self.stage3d.surfaces {
+            let Some(o) = s.feed.output() else { continue };
+            let usable = s.visible
+                && s.shape.is_known()
+                && !self.movable(s.id)
+                && self.output(o).is_some()
+                && !self.shows_stage(o)
+                && self.mapped_projector(o).is_none()
+                && self.kind_of(s).is_projection()
+                && p.reaches_screen(s);
+            if !usable {
+                continue;
+            }
+            out.screens.push(s.id);
+            if out.used.contains(&o) || out.left_out.contains(&o) {
+                continue;
+            }
+            if out.used.len() < crate::mapped::MAX_FEEDS {
+                out.used.push(o);
+            } else {
+                out.left_out.push(o);
+            }
+        }
+        out
+    }
+
+    /// Why projector `id` can't be mapped now (None: it can). The page says
+    /// it in words (`ui::stage_projectors::mapped_refusal_words`).
+    pub fn mapped_refused(&self, id: ProjectorId) -> Option<MappedRefused> {
+        let p = self.projector(id)?;
+        let Some(d) = p.display.filter(|d| self.output(*d).is_some()) else {
+            return Some(MappedRefused::NoDisplay);
+        };
+        let on: Vec<SurfaceId> = self.screens_showing(d).iter().map(|s| s.id).collect();
+        if on.is_empty() {
+            None
+        } else {
+            Some(MappedRefused::OnAScreen(on))
+        }
+    }
+
     /// Add a projector named "Projector N", standing 10 m in front of the
     /// middle of the room at head height, pointing at the stage.
     pub fn add_projector(&mut self) -> ProjectorId {
@@ -1096,6 +1225,13 @@ impl Show {
             .any(|p| p.id != for_projector && p.display == Some(output))
         {
             Some("Another projector is this display already.")
+        } else if self.projector(for_projector).is_some_and(|p| p.mapped)
+            && !self.screens_showing(output).is_empty()
+        {
+            Some(
+                "A screen shows this display. A mapped projector's display shows the screens, \
+                 so it can't be on one: it would show itself.",
+            )
         } else {
             None
         }
