@@ -286,6 +286,7 @@ impl LensPreset {
 
 /// A projector in the room.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ProjectorFile", into = "ProjectorFile")]
 pub struct Projector {
     /// From the show's ids (`Show::alloc_id`).
     #[serde(default)]
@@ -343,6 +344,122 @@ pub struct Projector {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A projector as the show file has it: `Projector`'s fields, with `fine`
+/// and `line_up` as they were written. One this NewQ can't read (a later
+/// NewQ's shape of it) is kept in `extra` under its own name, so it is
+/// written back unchanged, and is no fine-tune or line-up here; a readable
+/// one written later replaces it.
+#[derive(Serialize, Deserialize)]
+struct ProjectorFile {
+    #[serde(default)]
+    id: ProjectorId,
+    #[serde(default)]
+    name: String,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    visible: bool,
+    #[serde(default, skip_serializing_if = "Placement::is_default")]
+    placement: Placement,
+    #[serde(default, skip_serializing_if = "Lens::is_default")]
+    lens: Lens,
+    #[serde(default = "default_lumens", skip_serializing_if = "is_default_lumens")]
+    lumens: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<OutputId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolution: Option<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "super::lenient"
+    )]
+    mapped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fine: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_up: Option<serde_json::Value>,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `value` read as a `T`, or kept in `extra` under `key` when this NewQ
+/// can't read it (a JSON null is nothing at all).
+fn read_or_keep<T: serde::de::DeserializeOwned>(
+    value: Option<serde_json::Value>,
+    key: &str,
+    extra: &mut serde_json::Map<String, serde_json::Value>,
+) -> Option<T> {
+    let value = value.filter(|v| !v.is_null())?;
+    match T::deserialize(&value) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            log::warn!(
+                "3D stage: a projector's {key} isn't known to this NewQ ({e}); kept as it is"
+            );
+            extra.insert(key.to_string(), value);
+            None
+        }
+    }
+}
+
+impl From<ProjectorFile> for Projector {
+    fn from(f: ProjectorFile) -> Projector {
+        let mut extra = f.extra;
+        let fine = read_or_keep(f.fine, "fine", &mut extra);
+        let line_up = read_or_keep(f.line_up, "line_up", &mut extra);
+        Projector {
+            id: f.id,
+            name: f.name,
+            visible: f.visible,
+            placement: f.placement,
+            lens: f.lens,
+            lumens: f.lumens,
+            display: f.display,
+            resolution: f.resolution,
+            model: f.model,
+            mapped: f.mapped,
+            fine,
+            line_up,
+            extra,
+        }
+    }
+}
+
+impl From<Projector> for ProjectorFile {
+    fn from(p: Projector) -> ProjectorFile {
+        let mut extra = p.extra;
+        // A readable one, set since, wins over what was kept.
+        let mut known = |key: &str, v: Option<serde_json::Value>| match v {
+            Some(v) => {
+                extra.remove(key);
+                Some(v)
+            }
+            None => None,
+        };
+        let fine = known("fine", p.fine.and_then(|m| serde_json::to_value(m).ok()));
+        let line_up = known(
+            "line_up",
+            p.line_up.and_then(|l| serde_json::to_value(l).ok()),
+        );
+        ProjectorFile {
+            id: p.id,
+            name: p.name,
+            visible: p.visible,
+            placement: p.placement,
+            lens: p.lens,
+            lumens: p.lumens,
+            display: p.display,
+            resolution: p.resolution,
+            model: p.model,
+            mapped: p.mapped,
+            fine,
+            line_up,
+            extra,
+        }
+    }
+}
+
 /// A line-up as it is kept (mapping plan, section 5): the points, the
 /// picture's size they were placed in, the last answer and what *Back to
 /// before line-up* restores. Every field defaulted and left out at it; a
@@ -397,8 +514,8 @@ pub struct LinePoint {
 }
 
 /// How much the last solve worked out (`calib::Rung`). One a later NewQ
-/// wrote reads as `Unknown`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// wrote reads as `Unknown`, which keeps it as written (and writes it back).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Rung {
     /// Where it is and its aim; the lens as entered.
     #[default]
@@ -409,8 +526,9 @@ pub enum Rung {
     Shift,
     /// And the picture's shape.
     Aspect,
-    #[serde(other)]
-    Unknown,
+    /// A rung a later NewQ wrote, kept as it was.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 /// The last solve's answer, as kept (named as `calib::Solution`'s fields).

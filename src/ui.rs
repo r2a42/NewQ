@@ -4515,10 +4515,7 @@ fn tile_menu(
     let mut pick = None;
     for p in outputs {
         let name = labels.get(&p.id).unwrap_or(&p.name);
-        if ui
-            .selectable_label(current == Some(p.id), name)
-            .clicked()
-        {
+        if ui.selectable_label(current == Some(p.id), name).clicked() {
             pick = Some(Some(p.id));
         }
     }
@@ -5993,10 +5990,7 @@ fn displays_panel(
     {
         let state = st.display_states.get(&d.id).copied();
         let role = stage_roles.get(&d.id);
-        let on_a_screen = matches!(
-            role,
-            Some(StageRole::Canvas(_) | StageRole::AlsoOnStage(_))
-        );
+        let on_a_screen = matches!(role, Some(StageRole::Canvas(_) | StageRole::AlsoOnStage(_)));
         let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -6277,7 +6271,10 @@ fn stage_role_lines(
     choices: &HashSet<OutputId>,
     actions: &mut Vec<Action>,
 ) {
-    let to_screens = |ui: &mut Ui, words: &str, on: &[(crate::stage3d::SurfaceId, String)], actions: &mut Vec<Action>| {
+    let to_screens = |ui: &mut Ui,
+                      words: &str,
+                      on: &[(crate::stage3d::SurfaceId, String)],
+                      actions: &mut Vec<Action>| {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(words).small());
             for (s, name) in on {
@@ -6317,7 +6314,11 @@ fn stage_role_lines(
                 return;
             }
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("On no screen of the 3D stage.").weak().small());
+                ui.label(
+                    RichText::new("On no screen of the 3D stage.")
+                        .weak()
+                        .small(),
+                );
                 if screens.is_empty() {
                     ui.label(
                         RichText::new(format!(

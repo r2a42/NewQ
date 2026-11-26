@@ -457,7 +457,8 @@ pub fn look_through(show: &Show, st: &UiState, id: ProjectorId) -> Option<Camera
 fn key_of(scene_key: u64, p: &Projector, aspect: f32) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     scene_key.hash(&mut h);
-    format!("{p:?}").hash(&mut h);
+    // Not its fine-tune or line-up points: they move no footprint.
+    format!("{:?}", p.without_tuning()).hash(&mut h);
     aspect.to_bits().hash(&mut h);
     h.finish()
 }
