@@ -537,6 +537,8 @@ struct Conn {
     /// A primary's trust in a computer it runs (`heeded`): welcomed, and with a
     /// passcode, proved it, or given the key by this primary over this session.
     trusted: bool,
+    /// Our own passcode proof waits for theirs (see `hello`).
+    proof_withheld: bool,
     /// We take orders from them (`node::judge` said so, the passcode proved
     /// when this computer holds one).
     obeying: bool,
@@ -1081,6 +1083,7 @@ impl State {
             proof: None,
             welcomed: false,
             trusted: false,
+            proof_withheld: false,
             obeying: false,
             closing: false,
             opened: now,
@@ -1241,10 +1244,18 @@ impl State {
         {
             m.note = Some(format!("Found {}.", h.name));
         }
+        // A computer holding the key that isn't a primary proves it only to
+        // a peer that proved it first (a primary always goes first): else
+        // anyone could have it sign their own nonce under its id, and pass
+        // that on to another computer as a primary's proof (a relay).
+        let withhold = mac.is_some() && self.me.role != Role::Primary;
         if let Some(conn) = self.conns.get_mut(&c) {
             conn.hello = Some(h);
+            conn.proof_withheld = withhold;
         }
-        self.send(c, &Msg::Prove { mac });
+        if !withhold {
+            self.send(c, &Msg::Prove { mac });
+        }
     }
 
     /// The claim a primary's session makes.
@@ -1277,7 +1288,16 @@ impl State {
                 .is_some_and(|m| k.checks(m, conn.nonce, h.id))
         });
         conn.proof = Some(checked);
+        // Its proof checked out: this computer's own, withheld until now,
+        // goes (before any `Welcome`, so a primary has it when that comes).
+        let ours = (conn.proof_withheld && checked == Some(true))
+            .then(|| self.me.passcode.map(|k| k.proof(h.nonce, self.me.id)))
+            .flatten();
         let (role, network) = (h.role, h.network);
+        if let Some(mac) = ours {
+            conn.proof_withheld = false;
+            self.send(c, &Msg::Prove { mac: Some(mac) });
+        }
         let conn = &self.conns[&c];
         if let Some(claim) = self.claim_of(conn) {
             match node::judge(&self.me, &claim) {

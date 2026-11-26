@@ -1698,47 +1698,68 @@ fn connections_that_havent_said_hello_are_capped_in_all_and_per_address() {
 }
 
 /// Many silent connections from one address: only `UNNAMED_PER_ADDRESS` are
-/// let in (each is sent the hub's hello); the rest are closed with nothing
-/// sent. Once they are gone a real computer connects as before.
+/// let in (sessions started); the rest are shut as they come, with nothing
+/// sent and no threads. The hub's own state is driven here, so nothing
+/// depends on how quickly the connections were made.
 #[test]
 fn many_silent_connections_are_capped() {
     let mut rig = Rig::new();
-    let p = rig.hub("Booth");
-    p.ask(NetAction::BecomePrimary);
-    let port = until(&p, "listening", |v| v.port.is_some()).port.unwrap();
-    let extra = 8;
-    // A round whose connections took longer to open than a silent one may
-    // stay (`HELLO_WITHIN`) proves nothing (a slot may have come free): it is
-    // tried again; any other outcome is decided at once.
-    let mut decided = false;
-    for _ in 0..5 {
-        let began = Instant::now();
-        let mut socks: Vec<TcpStream> = (0..UNNAMED_PER_ADDRESS + extra)
-            .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
-            .collect();
-        let opened = began.elapsed();
-        let greeted: Vec<bool> = socks
-            .iter_mut()
-            .map(|s| !frames_until_closed(s, Duration::from_secs(60)).is_empty())
-            .collect();
-        if opened >= HELLO_WITHIN / 2 {
-            continue;
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let (out, _events) = crossbeam_channel::unbounded();
+    let me = Identity {
+        on: true,
+        ..Identity::default()
+    };
+    let mut st = State::new(rig.cfg("capped"), me, tx, out);
+    st.open(Instant::now());
+    let port = st.net.as_ref().expect("listening").port;
+    let n = UNNAMED_PER_ADDRESS + 8;
+    let mut socks: Vec<TcpStream> = (0..n)
+        .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+        .collect();
+    let mut accepted = 0;
+    let began = Instant::now();
+    while accepted < n {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "accepted {accepted}"
+        );
+        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100))
+            && matches!(ev, Event::Accepted(_))
+        {
+            accepted += 1;
+            st.handle(ev);
         }
-        let n = greeted.iter().filter(|g| **g).count();
-        assert_eq!(n, UNNAMED_PER_ADDRESS, "{greeted:?}");
-        decided = true;
-        break;
     }
-    assert!(
-        decided,
-        "the connections never opened quickly enough to tell"
-    );
-    let d = rig.hub("Left");
-    d.ask(NetAction::SetOn(true));
-    let did = id_of(&d);
-    until(&p, "a real computer after the silent ones", |v| {
-        peer(v, did).is_some_and(|x| x.connected)
-    });
+    assert_eq!(st.conns.len(), UNNAMED_PER_ADDRESS);
+    // Those let in were sent the hub's hello; the others nothing, and closed.
+    let greeted = socks
+        .iter_mut()
+        .map(|s| {
+            s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+            proto::read_frame(s).is_ok()
+        })
+        .filter(|g| *g)
+        .count();
+    assert_eq!(greeted, UNNAMED_PER_ADDRESS);
+    // One that said hello no longer counts: another is let in.
+    let first = *st.conns.keys().min().unwrap();
+    st.conns.get_mut(&first).unwrap().hello =
+        match raw_hello(NodeId(3), Role::Alone, None, "Left".into()) {
+            Msg::Hello(h) => Some(h),
+            _ => unreachable!(),
+        };
+    let _more = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    loop {
+        assert!(began.elapsed() < Duration::from_secs(60));
+        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100))
+            && matches!(ev, Event::Accepted(_))
+        {
+            st.handle(ev);
+            break;
+        }
+    }
+    assert_eq!(st.conns.len(), UNNAMED_PER_ADDRESS + 1);
 }
 
 // ---- Who is heard (review 2026-11-26: Fable R3, Opus R1) ----
@@ -1875,8 +1896,10 @@ fn a_stranger_with_the_primarys_id_is_not_heard_and_the_real_primary_is() {
         let mut strangers = Vec::new();
         for role in claims {
             let mut s = Stranger::connect(dport, raw_hello(pid, role, network, "Booth".into()));
-            s.until("the display's hello and proof request", |seen, _| {
-                seen.iter().any(|m| matches!(m, Msg::Prove { .. }))
+            // (With a passcode the display keeps its proof back until the
+            // other side has proved it.)
+            s.until("the display's hello", |seen, _| {
+                seen.iter().any(|m| matches!(m, Msg::Hello(_)))
             });
             s.say(&Msg::Prove { mac: None });
             s.say(&Msg::Welcome);
@@ -1991,4 +2014,158 @@ fn a_stranger_with_a_displays_id_is_sent_nothing_by_a_primary_with_a_passcode() 
         peer(&p.view(), did).is_some_and(|x| !x.connected),
         "never shown connected"
     );
+}
+
+/// The passcode set before anything is added: the display and the backup are
+/// added, the primary's orders and a show piece of 256 KB of JSON (quotes
+/// that double when sent) reach the display; the backup takes control and is
+/// heard in turn; the old primary comes back as the backup of the new one.
+#[test]
+fn with_a_passcode_from_the_start_adding_orders_and_taking_control_work() {
+    let mut rig = Rig::new();
+    let p = rig.hub("Booth");
+    p.ask(NetAction::BecomePrimary);
+    until(&p, "primary", |v| v.me.role == Role::Primary);
+    p.ask(NetAction::SetPasscode(Some("opening night".into())));
+    until(&p, "the passcode", |v| v.me.passcode.is_some());
+    let d = rig.hub("Left");
+    let b = rig.hub("Backup");
+    let (pid, did, bid) = (id_of(&p), id_of(&d), id_of(&b));
+    for (h, id) in [(&d, did), (&b, bid)] {
+        h.ask(NetAction::SetOn(true));
+        until(&p, "heard", |v| {
+            peer(v, id).is_some_and(|x| x.waiting && x.connected)
+        });
+        p.ask(NetAction::Adopt(id));
+        until(&p, "added and reporting", |v| {
+            peer(v, id).is_some_and(|x| x.ours && x.connected && x.status.is_some())
+        });
+    }
+    p.ask(NetAction::SetRole(bid, Role::Backup));
+    until(&b, "the backup role", |v| v.me.role == Role::Backup);
+    let heard = |from: &Hub, to: &Hub, fid: NodeId, tid: NodeId, what: &str| {
+        let _ = to.take_events();
+        from.ask(NetAction::Restart(tid));
+        let began = Instant::now();
+        loop {
+            if messages_from(to, fid)
+                .iter()
+                .any(|m| matches!(m, Msg::Restart))
+            {
+                break;
+            }
+            assert!(began.elapsed() < Duration::from_secs(60), "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    heard(&p, &d, pid, did, "the primary's order to the display");
+    // A big piece, as `show_parts` sends.
+    let part = crate::net::play::ShowPart {
+        version: 1,
+        hash: 2,
+        part: 0,
+        parts: 1,
+        data: "\"".repeat(crate::net::play::SHOW_PART),
+    };
+    let _ = d.take_events();
+    p.tell(Some(did), Msg::ShowPart(Box::new(part.clone())), false);
+    let began = Instant::now();
+    loop {
+        if messages_from(&d, pid)
+            .iter()
+            .any(|m| matches!(m, Msg::ShowPart(x) if **x == part))
+        {
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(60), "the big piece");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The primary goes; the backup takes control.
+    let pdir = rig.dirs[0].clone();
+    drop(p);
+    until(&b, "the primary gone", |v| {
+        v.following.as_ref().is_some_and(|f| !f.online)
+    });
+    b.ask(NetAction::TakeControl);
+    until(&d, "the display following the backup", |v| {
+        v.following
+            .as_ref()
+            .is_some_and(|f| f.id == bid && f.online)
+    });
+    until(&b, "the display under the new primary", |v| {
+        peer(v, did).is_some_and(|x| x.connected && x.ours)
+    });
+    heard(&b, &d, bid, did, "the new primary's order");
+    let p = restart(pdir, rig.base);
+    until(&p, "the old primary as the backup", |v| {
+        v.me.role == Role::Backup
+            && v.following
+                .as_ref()
+                .is_some_and(|f| f.id == bid && f.online)
+    });
+    until(&b, "the old primary under the new", |v| {
+        peer(v, pid).is_some_and(|x| x.connected && x.role == Role::Backup)
+    });
+    heard(&b, &p, bid, pid, "the new primary's order to the old");
+}
+
+/// A relay: a stranger takes the display's nonce from its hello and says
+/// hello to the backup with it, to have the backup sign it. The backup (a
+/// computer with the key that isn't a primary) proves the passcode only to a
+/// peer that proved it first: the stranger gets no proof to pass on.
+#[test]
+fn a_computer_with_the_key_proves_it_only_to_a_peer_that_proved_it_first() {
+    let mut rig = Rig::new();
+    let (p, d, b) = primary_display_backup(&mut rig);
+    p.ask(NetAction::SetPasscode(Some("opening night".into())));
+    until(&d, "the key", |v| v.me.passcode.is_some());
+    until(&b, "the key", |v| v.me.passcode.is_some());
+    let network = p.view().me.network;
+    let (dport, bport) = (d.view().port.unwrap(), b.view().port.unwrap());
+    let sd = Stranger::connect(
+        dport,
+        raw_hello(
+            NodeId(node::random_u64()),
+            Role::Display,
+            network,
+            "X".into(),
+        ),
+    );
+    sd.until("the display's hello", |seen, _| {
+        seen.iter().any(|m| matches!(m, Msg::Hello(_)))
+    });
+    let nonce = sd
+        .seen
+        .lock()
+        .iter()
+        .find_map(|m| match m {
+            Msg::Hello(h) => Some(h.nonce),
+            _ => None,
+        })
+        .unwrap();
+    let Msg::Hello(mut h) = raw_hello(
+        NodeId(node::random_u64()),
+        Role::Display,
+        network,
+        "Y".into(),
+    ) else {
+        unreachable!()
+    };
+    h.nonce = nonce;
+    let mut sb = Stranger::connect(bport, Msg::Hello(h));
+    sb.say(&Msg::Ping { n: 7 });
+    sb.until("the backup's pong", |seen, closed| {
+        closed || seen.iter().any(|m| matches!(m, Msg::Pong { n: 7 }))
+    });
+    let seen = sb.seen.lock().clone();
+    assert!(
+        !seen
+            .iter()
+            .any(|m| matches!(m, Msg::Prove { mac: Some(_) })),
+        "the backup signed a stranger's nonce: {seen:?}"
+    );
+    // The real ones still prove to each other: the display and the backup
+    // follow the primary as before.
+    assert!(d.view().following.as_ref().is_some_and(|f| f.online));
+    assert!(b.view().following.as_ref().is_some_and(|f| f.online));
 }
