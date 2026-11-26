@@ -6,13 +6,6 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
-- **Mapped projectors draw the stage's screens (groundwork, tried only in simulation).** A
-  projector in the 3D stage can be set to show, at every pixel, the content of the spot on a screen
-  it lands on, from the displays with no monitor that the screens show. Its fine-tune, edge blend,
-  sub displays, cards and Identify work as on any display, and its stream or recording shows the
-  mapped picture (without the fine-tune or blend). Displays that aren't mapped draw exactly as
-  before. Not reachable in the program yet: the setting and its page come with the next steps.
-  Tried only on a software graphics card, never with a real projector.
 - **Canvases for the 3D stage** (mapping; tried only in simulation). A canvas is a display with
   no monitor that a screen of the 3D stage shows: send cues to it, and the screens show it.
   *Settings ▸ Displays ▸ + Add ▸ Canvas* makes one, as does a screen's *Shows ▸ New canvas…*. Its
@@ -22,8 +15,11 @@ release page, and a release is refused if it has none.
   Tick *Mapped* on a projector in *Settings ▸ 3D stage ▸ Projectors* and its display shows the
   stage's screens as that projector sees them, at most four canvases each. Its display takes no
   cues and says so; the Displays page keeps its corners and warp for when *Mapped* is switched off.
-  Lining a projector up by points comes next; for one flat screen, the four corners on the Displays
-  page still do the job with less work.
+  Its fine-tune, edge blend, sub displays, cards and Identify work as on any display, and its stream
+  or recording shows the mapped picture (without the fine-tune or blend). Displays that aren't
+  mapped draw exactly as before. Lining a projector up by points comes next; until then its place
+  and aim are typed in, and for one flat screen the four corners on the Displays page still do the
+  job with less work. Tried only on a software graphics card.
 - **A screen's kind.** Each screen of the 3D stage is *Projection, front*, *Projection, rear*,
   *LED or monitor*, or *Works it out* (the default: projection where a projector reaches it, else
   LED), worked out where things stand, never while something moves.
