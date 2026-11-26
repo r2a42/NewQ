@@ -1552,6 +1552,14 @@ impl LayerTexture {
         f(&e.uniform, &e.group, &e.cells)
     }
 
+    /// Make `slot` now, if it is one made when first drawn, so the thread
+    /// that draws it never makes it (the main thread does this for the
+    /// `Slot::Map`s an output window will draw: a new layer at a GO would
+    /// otherwise cost the window a buffer and a bind group).
+    pub fn ensure_slot(&self, slot: Slot) {
+        self.with_slot(slot, |_, _, _| ());
+    }
+
     /// How many `Slot::View`s have been made (for the tests).
     #[cfg(test)]
     pub(crate) fn extra_slots(&self) -> usize {

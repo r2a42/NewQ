@@ -109,7 +109,10 @@ restart and `adapters::look_every`.
   size and takes `Projector::fine` as its mesh; its one layer is its target (`whole_layer`), none
   till its map lands (black); it is not in `pictures`. `mapped_frames` builds the frames after the
   loop from `stage_live::feed_groups` in the map's feed order. The screen's submit carries the
-  frames of the displays on it (`maps_sent` redraws on a new map). `is_preview_work`/`uploads_now`:
+  frames of the displays on it (`maps_sent`: a new map, or a canvas's groups moved, redraws
+  though nothing plays); `make_map_slots` makes the `Slot::Map`s on the main thread
+  (`LayerTexture::ensure_slot`) so the output thread makes none. `lens_maps`, `canvases_of`,
+  `mapped_frames`, `may_stream` are free functions, tested in `app::tests`. `is_preview_work`/`uploads_now`:
   a canvas a map here uses (`map_feeds`, and `StageLive::feeds_output`) is never preview work.
   `update_streams`/`may_stream`: a mapped display is streamed though it keeps `part_of`, at
   `stream_picture` (the projector's own pixels), as its target stretched, `shares` off. Tests:
