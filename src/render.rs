@@ -515,13 +515,8 @@ impl OutputThread {
     }
 
     /// Draw `groups` (bottom first) on the whole screen, with its edges
-    /// faded as `blend` says.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn submit(&self, size: (u32, u32), groups: Vec<OutputGroup>, blend: EdgeBlend) {
-        self.submit_mapped(size, groups, blend, Vec::new());
-    }
-
-    /// `submit`, with the mapped pictures `groups` show drawn first.
+    /// faded as `blend` says, after drawing the mapped pictures they show
+    /// (none for a window with no mapped display).
     pub fn submit_mapped(
         &self,
         size: (u32, u32),
