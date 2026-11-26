@@ -1218,8 +1218,8 @@ stays on the computer until you send it yourself.
 See the show in the room before you are in it: a model of the venue, the
 screens placed in it, and each screen showing what its display is showing now,
 test patterns and cues alike. It is for planning: projectors can be stood in
-the room to plan a rig and their light drawn (below), but the 3D model does not
-drive the displays.
+the room to plan a rig and their light drawn (below); a projector ticked
+*Mapped* lets the 3D model drive its display (tried only in simulation).
 
 - **Where it is.** *Settings ▸ 3D stage* has a 3D view that stays at the top
   while you work, and under it a tab for each part of the stage: *Venue*,
@@ -1381,11 +1381,59 @@ bright the picture is, on any screen, curved wall or set.
   pictures and shadows when they need the computer. A display that shows the
   stage shows it without light. A graphics card that can't draw the light
   shows the view without it, and says so.
-- **Not yet:** the 3D model driving the displays (mapping). The read-outs and
-  the light are sums: nothing here has met a real projector, a light meter or
-  a real graphics card (only a software one).
+- **A screen's kind.** Each screen has a *Kind* on the Screens tab:
+  *Projection, front*, *Projection, rear*, *LED or monitor* (it makes its own
+  light: the light leaves its picture as it is and no mapped projector maps
+  onto it), or *Works it out* (the default): a screen a projector's beam
+  reaches, where everything stands, is projection, any other is LED. The row
+  says what it came to ("Works it out: projection, front"). It is worked out
+  from where things stand, not as they move, so a screen never changes kind
+  while it travels through a beam.
+- **Mapped** (tried only in simulation). Tick *Mapped* on a projector and its
+  display shows the stage's screens as that projector sees them, instead of a
+  picture of its own: each of its pixels shows the content of the spot on a
+  screen it lands on. The content is on **canvases** (below). The projector's
+  display then takes no cues; on the Displays page its *Shows* reads "The
+  stage's screens, through Projector 1", its corners, warp and part of a
+  picture are greyed (and kept, for when *Mapped* is switched off), and cues
+  still sent to it are counted and not seen. A projector shows at most four
+  canvases; past that its row says which are left black. The tick is greyed
+  while the projector has no display, or while a screen shows its display
+  (it would show itself): *Give Screen 1 a new canvas, and map it* does both
+  in one click. For one flat screen, the four corners on the Displays page
+  still do the same job with less work.
+- **Not yet:** lining a mapped projector up by clicking points (for now its
+  position and lens are typed in), and screens that move. The read-outs, the
+  light and mapping are sums: nothing here has met a real projector, a light
+  meter or a real graphics card (only a software one).
 - A show with projectors opened in 0.25 plays as before; saving it there
   drops the projectors.
+
+### Canvases
+
+A **canvas** is a display with no monitor that a screen of the 3D stage shows.
+You send cues to it as to any display; the screens show it, and the mapped
+projectors that light those screens show each part of it where it lands. A
+canvas is worked out, never set: a display becomes one when a screen shows it
+and stops being one when it gets a monitor or no screen shows it. A display
+with a monitor that a screen also shows (an LED wall's) stays a display and
+says "Also on the stage: LED wall".
+
+- **Make one.** *Settings ▸ Displays ▸ + Add ▸ Canvas* adds a display with no
+  monitor and a picture size of its own (1920 × 1080 to start with); its row
+  offers *Put it on a screen*. Or, on a screen's row (*Settings ▸ 3D stage ▸
+  Screens*), *Shows ▸ New canvas…* makes one and points the screen at it.
+- **Where it shows.** Its row on the Displays page has the tag *Canvas*,
+  "Shown on: Cyc, Portal left" (each a button to that screen) and "No monitor
+  (a canvas for the stage's screens)". Every menu of displays names it "Cyc
+  content (canvas)" (a cue's *Display*, the Preview pane, the multiview, a
+  projector's *Is display*), and a mapped projector's display "Projector 1
+  (shows the stage's screens)", greyed in a cue's *Display* menu. In the new
+  interface's Patch view a canvas's node says "canvas → Cyc", and a mapped
+  projector's display takes no cue dropped on it. The 3D stage's *Displays*
+  tab lists the canvases and what they feed.
+- A canvas's delay (*Settings ▸ Sync*) is the one that counts for what is on
+  it, for every projector that shows it.
 
 ## Show network: several computers
 

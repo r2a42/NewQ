@@ -13,6 +13,22 @@ release page, and a release is refused if it has none.
   mapped picture (without the fine-tune or blend). Displays that aren't mapped draw exactly as
   before. Not reachable in the program yet: the setting and its page come with the next steps.
   Tried only on a software graphics card, never with a real projector.
+- **Canvases for the 3D stage** (mapping; tried only in simulation). A canvas is a display with
+  no monitor that a screen of the 3D stage shows: send cues to it, and the screens show it.
+  *Settings ▸ Displays ▸ + Add ▸ Canvas* makes one, as does a screen's *Shows ▸ New canvas…*. Its
+  row on the Displays page says which screens it is shown on, and every menu of displays names it
+  "Cyc content (canvas)".
+- **Mapped projectors** (tried only in simulation; no real projector, wall or second computer yet).
+  Tick *Mapped* on a projector in *Settings ▸ 3D stage ▸ Projectors* and its display shows the
+  stage's screens as that projector sees them, at most four canvases each. Its display takes no
+  cues and says so; the Displays page keeps its corners and warp for when *Mapped* is switched off.
+  Lining a projector up by points comes next; for one flat screen, the four corners on the Displays
+  page still do the job with less work.
+- **A screen's kind.** Each screen of the 3D stage is *Projection, front*, *Projection, rear*,
+  *LED or monitor*, or *Works it out* (the default: projection where a projector reaches it, else
+  LED), worked out where things stand, never while something moves.
+- A show from a later NewQ keeps the new things it has on its screens, its stage and its
+  projectors (a fine-tune or line-up of a shape this one can't read included) when saved here.
 
 ## 0.27.2
 

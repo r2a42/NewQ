@@ -122,3 +122,22 @@ mixer's load, `media-and-streams.md`'s area).
 
   `src/export.rs`: the cue sheet as CSV or a printable page (a timeline clip's Start, Track and Also
   on columns, its pre-wait left empty; marker rows, `Row::marker`, after the timeline's last clip).
+
+## Canvases and mapped projectors' displays in the UI (mapping plan 4.3)
+
+  `ui::display_label(show, id)` names a display in every list of displays: "Cyc (canvas)",
+  "Projector 1 (shows the stage's screens)" (`MAPPED_LABEL`), "Surtitles (on Main)", else the
+  name; `UiState::display_labels` holds them for the previews' menus (`tile_menu`,
+  `preview_label`; made at the start of `draw` and `draw_popout`). The cue inspector's *Display*
+  lists mapped projectors' displays last, greyed (`OutputChoices::mapped`,
+  `MAPPED_TAKES_NO_CUES`), with a warning when the cue is on one. The Displays page: `StageRole`
+  (Canvas, AlsoOnStage, Mapped, worked out each frame), the *Canvas*/*Mapped* tag,
+  `stage_role_lines` ("Shown on:" and "Also on the stage:" with a button per screen,
+  `Action::OpenScreen`; the count of cues a mapped display won't show; *Put it on a screen*,
+  `Action::PutOnScreen`, for a display with no monitor on no screen), `no_monitor_words` (the
+  monitor menu's first entry), the picture size for a canvas, and `mapped_shows_row` (in place of
+  *Shows*; *Open Projector 1*, `Action::OpenProjector`; corners greyed). *+ Add ▸ Canvas*
+  (`Action::AddCanvas`, `CANVAS_WORDS`). The Patch view (`ui/modern.rs`): a canvas's node says
+  "canvas → Cyc", a mapped one's `MAPPED_LABEL`, and `Mid::takes_cues` keeps a cue from being
+  dropped on it (`PatchRects::subs` for tests). Not changed (other owners' files): the Sync page's
+  delay row of a mapped display (`ui/settings.rs`), `export.rs`'s display names.

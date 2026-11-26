@@ -45,7 +45,8 @@ These hold anywhere in the code. Each area file has its own rules besides.
   pointer follows a move. A setting goes on the page it belongs to: the show's pages save in the
   show, THIS COMPUTER's in `Prefs`/`node.json`.
 - **The words**: *display* (never "output" for one), *monitor* (the thing plugged in), *screen* (a
-  3D stage surface; display computers' cards keep "Screen N"), *audio output*, *3D stage*, *Test
+  3D stage surface; display computers' cards keep "Screen N"), *canvas* (a display with no monitor
+  that a screen shows; worked out, never a kind that is stored), *audio output*, *3D stage*, *Test
   Mode*, *Media manager*, *Show mode*.
 - **`ui::keys::KEYS` must equal README's Keyboard table** (a test reads it).
 

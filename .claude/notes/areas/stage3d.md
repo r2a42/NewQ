@@ -310,3 +310,38 @@ is a piece of a longer entry that covered several areas.
   `from_camera`); `pick.rs` (pure): `pick(scene, ray, wanted)` -> `Hit { part, point, distance }`. GPU
   tests in `render3d/tests.rs` (lavapipe under `WGPU_BACKEND=vulkan`; `NEWQ_RENDER3D_PNG=<path>` writes the
   little stage of `a_little_stage_draws`). No real GPU or display tried.
+
+- Mapping, round 1's model and words (`.claude/notes/mapping-plan.md` 4.1, 4.3, 8; tried only in
+  simulation). Contract (B): `Projector::{mapped, fine, line_up}` with `LineUp`, `LinePoint` (`at`
+  in the screen's own frame when `surface` is set), `Solved`, `Rung`, `Before`; `extra` on
+  `Surface` and `Stage3d`; `Show::is_canvas` (a whole display, no monitor, no source, not a mapped
+  projector's, that a screen shows: worked out, never stored), `mapped_projector`, `movable` (false
+  until round 3). A `fine`/`line_up` this NewQ can't read is kept in `extra` under its own name by
+  `ProjectorFile` (`Projector`'s serde is `from`/`into` it) and written back unchanged, and is no
+  fine-tune or line-up here; `Rung::Unknown(Value)` keeps a later rung. `Stage3d::shape_key` and
+  `stage_projectors::key_of` hash `Projector::without_tuning` (no `fine`, no `line_up`), so a
+  dragged point rebuilds no scene, map or footprint. The screen's kind: `Surface::kind:
+  Option<SurfaceKind>` (`Projection`/`Led`, untagged `Unknown` kept; None, left out, is "works it
+  out"), `rear` as before; `chosen_kind`/`choose_kind`, `KIND_CHOICES`, `ScreenKind {Front, Rear,
+  Led}`; `Show::kind_of`/`screen_kind`: as chosen, else projection when any projector
+  `reaches_screen` (the light's `lit::box_meets` on `Surface::boxes`, at rest, the projector's own
+  `resolution`), else LED. Not yet used by the light (`lit::reached`) or the bake: round 1's A.
+  `Show::mapped_feeds(projector)` -> `MappedFeeds { used, left_out, screens }`: the displays of the
+  visible, known-shape, unmovable projection screens it reaches, in the screens' order, each once,
+  at most `mapped::MAX_FEEDS` used (the rest left out: black through it, said on its row; the file
+  is never changed for it). The rules: `mapped_refused` (`MappedRefused::NoDisplay`,
+  `OnAScreen(screens)`; words in `stage_projectors::mapped_refusal_words`);
+  `projector_display_refused` refuses a display a screen shows for a mapped projector;
+  `stage_source_refused` gives `MAPPED_SHOWS_NO_STAGE`; `sanitize_stage` clears a screen fed by a
+  mapped projector's display (the tick is kept); `feed_choices` and `first_feed` leave those
+  displays out. `Show::add_canvas` ("Canvas N", no monitor, 1920 × 1080 picture),
+  `new_canvas_for(surface)`, `screens_showing`, `canvases`. UI: the Screens tab's *Kind* row
+  (`kind_row`, "Works it out: projection, front") and *Shows ▸ New canvas…* (`NEW_CANVAS`,
+  `feed_rows` returns it, made after the loop); the Displays tab's `canvases_list`; the
+  Projectors tab's *Mapped* tick (`mapped_rows`: greyed with the reason, *Give Screen 1 a new
+  canvas, and map it*, "Maps Cyc onto Cyc screen.", the four-canvas warning,
+  `ONE_FLAT_SCREEN_WORDS` for one flat screen, `MAPPED_WORDS`). Tests: `projector_tests.rs`
+  (kind, defaults unwritten, feeds, rules, scene key, a later fine/line-up kept),
+  `stage3d/tests.rs` (a later kind and field on a screen kept), and the mouse-driven
+  `ui/stage_edit_tests.rs::a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_everywhere`
+  (both interfaces, 1280×760; `Win::see`, `press_add`).
