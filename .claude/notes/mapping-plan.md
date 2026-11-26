@@ -947,6 +947,10 @@ four clicks, from the control desk, and stream what it shows." Static screens; h
 
 ### Round 3: screens that move on a cue
 
+**Carried over from round 1's integration:** `app.rs` sets `MappedFrame::lens` to `IDENTITY_4`
+(it is read only for moving screens); round 3 must set it from `stage3d::lensmap::lens_matrix(p,
+aspect)`, and put `Show::movable` into the still scene's key (agent A's note).
+
 Every agent reads `areas/stage3d.md`; A also `areas/show-and-engine.md` and `areas/network.md`.
 
 **Contract commit** (agent A): `CueKind::Screen(ScreenCue)` and `compat::KNOWN_KINDS`;
