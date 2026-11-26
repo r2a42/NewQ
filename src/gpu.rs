@@ -1174,6 +1174,12 @@ pub enum Slot {
     /// Made only when first drawn (`LayerTexture::extra`). Made with
     /// `Slot::single` and `Slot::tile`.
     View(u8, u8),
+    /// A canvas drawn for a mapped picture (`mapped::Drawer`): by its owner
+    /// (`mapped::MapOwner::number`: a window, a stream, the stage's throws)
+    /// and its place there (frame and feed). A layer may be on two canvases,
+    /// and two windows may show one canvas, so none shares another's. Made
+    /// only when first drawn, as `View`s are.
+    Map(u8, u8),
 }
 
 /// How many windows can draw the same layer at once without sharing a slot.
@@ -1187,6 +1193,12 @@ pub const MULTI_SLOTS: usize = 16;
 const SLOTS: usize = 2 + WINDOW_SLOTS + CAPTURE_SLOTS + MULTI_SLOTS + 1;
 /// The places a preview host has: its single picture and its tiles.
 const VIEW_PLACES: usize = 1 + MULTI_SLOTS;
+/// Where the `Slot::Map`s start: past every `Slot::View` a `u8` host can name.
+const MAP_SLOTS_FROM: usize = SLOTS + 256 * VIEW_PLACES;
+/// How many owners of mapped pictures there can be (`mapped::MapOwner`).
+pub const MAP_OWNERS: usize = 32;
+/// And how many canvases each draws at once (frames times feeds).
+pub const MAP_PLACES: usize = crate::mapped::MAX_FRAMES * crate::mapped::MAX_FEEDS;
 
 impl Slot {
     pub(crate) fn index(self) -> usize {
@@ -1199,6 +1211,11 @@ impl Slot {
             Slot::Stage => 2 + WINDOW_SLOTS + CAPTURE_SLOTS + MULTI_SLOTS,
             Slot::View(host, place) => {
                 SLOTS + host as usize * VIEW_PLACES + (place as usize).min(VIEW_PLACES - 1)
+            }
+            Slot::Map(owner, place) => {
+                MAP_SLOTS_FROM
+                    + owner as usize % MAP_OWNERS * MAP_PLACES
+                    + (place as usize).min(MAP_PLACES - 1)
             }
         }
     }

@@ -26,6 +26,7 @@ fn flat(w: f32, h: f32, placement: Placement) -> Surface {
         feed: Feed::None,
         gain: 1.0,
         rear: false,
+        extra: Default::default(),
     }
 }
 
@@ -361,6 +362,10 @@ fn projectors_are_written_only_with_what_isnt_their_default() {
         "model",
         "gain",
         "rear",
+        "mapped",
+        "fine",
+        "line_up",
+        "extra",
     ] {
         assert!(!json.contains(absent), "{absent} in {json}");
     }
@@ -403,7 +408,13 @@ fn a_later_newqs_projector_keeps_what_this_one_doesnt_know() {
     let mut json: serde_json::Value = serde_json::to_value(&show).unwrap();
     let p = &mut json["stage3d"]["projectors"][0];
     p["mapped"] = true.into();
-    p["line_up"] = serde_json::json!({ "points": [[1.0, 2.0]] });
+    p["line_up"] = serde_json::json!({
+        "points": [{ "at": [1.0, 2.0, 3.0], "pixel": [4.0, 5.0], "weight": 2.0 }],
+        "pixels": [1920, 1080],
+        "solved": { "rung": "Distortion", "rms_px": 0.4, "residuals": [0.1] },
+        "drafts": 3
+    });
+    p["holo"] = serde_json::json!({ "beams": 2 });
     p["lens"] = serde_json::json!({ "throw": 2.0, "distortion": [0.1, 0.0] });
     // A second one written with almost nothing: every field has a default.
     json["stage3d"]["projectors"]
@@ -426,13 +437,27 @@ fn a_later_newqs_projector_keeps_what_this_one_doesnt_know() {
     assert_ne!(ps[1].id, id);
     assert!(back.next_id > ps[1].id.0);
     assert_eq!(ps[1].lumens, DEFAULT_LUMENS);
+    // This NewQ reads the mapping fields it knows, and a later rung as one
+    // it doesn't.
+    assert!(ps[0].mapped);
+    let line_up = ps[0].line_up.as_ref().expect("its line-up is read");
+    assert_eq!(line_up.points[0].at, [1.0, 2.0, 3.0]);
+    assert_eq!(line_up.points[0].pixel, [4.0, 5.0]);
+    assert!(line_up.points[0].on);
+    assert_eq!(line_up.pixels, (1920, 1080));
+    let solved = line_up.solved.as_ref().unwrap();
+    assert_eq!(solved.rung, crate::stage3d::projector::Rung::Unknown);
+    assert_eq!(solved.rms_px, 0.4);
     // Saved again, the later fields are written as they were.
     back.save(&path).unwrap();
     let again: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let p = &again["stage3d"]["projectors"][0];
     assert_eq!(p["mapped"], true);
-    assert_eq!(p["line_up"]["points"][0][1], 2.0);
+    assert_eq!(p["line_up"]["points"][0]["weight"], 2.0);
+    assert_eq!(p["line_up"]["drafts"], 3);
+    assert_eq!(p["line_up"]["solved"]["residuals"][0], 0.1);
+    assert_eq!(p["holo"]["beams"], 2);
     assert_eq!(p["lens"]["distortion"][0], 0.1);
     assert_eq!(again["stage3d"]["projectors"][1]["hologram"], 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -493,4 +518,107 @@ fn projectors_bodies_come_after_the_screens_and_stay_behind_the_lens() {
     let scene = show.stage3d.scene(&show, None);
     assert_eq!(scene.parts.len(), 2);
     assert_eq!(show.stage3d.part_projector(&scene, 1), Some(b));
+}
+
+/// The mapping fields (mapping plan, round 1): left out at their defaults, so
+/// a show that doesn't map is written as 0.27.2 wrote it; written and read
+/// back when set; one a later NewQ wrote in a way this one can't read is
+/// left out rather than stopping the show from loading.
+#[test]
+fn a_projectors_mapping_fields_are_written_only_when_set_and_read_leniently() {
+    use crate::stage3d::projector::{Before, LinePoint, LineUp, Rung, Solved};
+    let mut show = Show::default();
+    let display = show.outputs[0].id;
+    let id = show.add_projector();
+    let plain = serde_json::to_value(&show.stage3d.projectors[0]).unwrap();
+    for absent in ["mapped", "fine", "line_up"] {
+        assert!(plain.get(absent).is_none(), "{absent} in {plain}");
+    }
+    assert!(show.mapped_projector(display).is_none());
+    // Set, they go round.
+    let p = show.projector_mut(id).unwrap();
+    p.display = Some(display);
+    p.mapped = true;
+    p.fine = Some(crate::mesh::Mesh::grid(3, 3));
+    p.line_up = Some(LineUp {
+        points: vec![
+            LinePoint {
+                at: [0.5, 1.0, 0.0],
+                surface: Some(crate::stage3d::SurfaceId(4)),
+                pixel: [10.0, 20.5],
+                on: true,
+                extra: Default::default(),
+            },
+            LinePoint {
+                at: [3.0, 0.0, -2.0],
+                surface: None,
+                pixel: [1900.0, 1000.0],
+                on: false,
+                extra: Default::default(),
+            },
+        ],
+        pixels: (1920, 1080),
+        solved: Some(Solved {
+            rung: Rung::Throw,
+            rms_px: 0.7,
+            max_px: 1.5,
+            pixels: (1920, 1080),
+            points_key: 42,
+            extra: Default::default(),
+        }),
+        before: Some(Before::default()),
+        extra: Default::default(),
+    });
+    let json = serde_json::to_string(&show).unwrap();
+    let back: Show = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.stage3d.projectors, show.stage3d.projectors);
+    assert_eq!(back.mapped_projector(display).map(|p| p.id), Some(id));
+    // A point that is on, and one with no screen, write neither.
+    let v = serde_json::to_value(&back.stage3d.projectors[0]).unwrap();
+    let first = &v["line_up"]["points"][0];
+    assert!(first.get("on").is_none(), "{first}");
+    assert_eq!(v["line_up"]["points"][1]["on"], false);
+    assert!(v["line_up"]["points"][1].get("surface").is_none());
+    // An empty line-up writes nothing but itself.
+    assert_eq!(
+        serde_json::to_value(LineUp::default()).unwrap(),
+        serde_json::json!({})
+    );
+    // Fields this NewQ can't read: the show loads, they are left out.
+    let mut odd = serde_json::to_value(&show).unwrap();
+    let p = &mut odd["stage3d"]["projectors"][0];
+    p["mapped"] = "sometimes".into();
+    p["fine"] = serde_json::json!({ "spline": "nurbs" });
+    p["line_up"] = serde_json::json!([1, 2, 3]);
+    let back: Show = serde_json::from_value(odd).expect("still loads");
+    let p = &back.stage3d.projectors[0];
+    assert!(!p.mapped && p.fine.is_none() && p.line_up.is_none());
+}
+
+/// A canvas is worked out: a whole display with no monitor that a screen
+/// shows, and never a mapped projector's own display.
+#[test]
+fn a_canvas_is_a_display_with_no_monitor_that_a_screen_shows() {
+    let mut show = Show::default();
+    let canvas = show.add_display();
+    assert!(!show.is_canvas(canvas), "no screen shows it yet");
+    show.add_surface(None);
+    show.stage3d.surfaces[0].feed = crate::stage3d::Feed::whole_picture(&show, canvas);
+    assert!(show.is_canvas(canvas));
+    // With a monitor it is a display (an LED wall's), not a canvas.
+    show.outputs[1].monitor = Some(crate::show::DisplayRef {
+        name: "LED".into(),
+        index: 1,
+        hardware: None,
+    });
+    assert!(!show.is_canvas(canvas));
+    show.outputs[1].monitor = None;
+    // A mapped projector's display is never one, whatever feeds what.
+    let id = show.add_projector();
+    let p = show.projector_mut(id).unwrap();
+    p.display = Some(canvas);
+    p.mapped = true;
+    assert!(!show.is_canvas(canvas));
+    assert!(!show.is_canvas(crate::show::OutputId(9999)));
+    assert!(!show.movable(show.stage3d.surfaces[0].id));
 }
