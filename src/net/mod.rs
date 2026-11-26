@@ -9,6 +9,9 @@
 pub mod clock;
 pub mod discover;
 pub mod hub;
+// Line-up across the network: the primary's crosses on another computer's
+// projector, and their lease.
+pub mod lineup;
 // Test Mode's generated network load (both ways, its own connections).
 pub mod load;
 // The network test's measurements (stage 6).

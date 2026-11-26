@@ -239,7 +239,7 @@ is a piece of a longer entry that covered several areas.
 - `src/calib/`: the line-up solver (step P3 of `.claude/notes/projection-plan.md`, section 5.3). Pure
   f64, hand-written (no linear algebra crate, the owner's choice), `pub(crate)`, `#[allow(dead_code)]`
   on `mod calib` in `main.rs` until P5 wires it in. Conventions in `mod.rs`'s header: points in metres
-  (`LinePoint::world`) and **pixels** of the projector's picture (`LinePoint::pixel`, (0, 0) its top-left
+  (`RoomPoint::world`) and **pixels** of the projector's picture (`RoomPoint::pixel`, (0, 0) its top-left
   corner, (W, H) its bottom-right, y down: `in_picture`'s `(u, v)` times `Problem::pixels`); the lens
   (`LensFit`) and pose (`Pose`, `Placement`'s yaw/pitch/roll in f64) as `projector.rs`'s; point numbers
   in words are index + 1, switched-off points counted. `model.rs` `project` is `in_picture` in f64
@@ -259,10 +259,18 @@ is a piece of a longer entry that covered several areas.
   2%, else a `Note` says why), each rung judged after 30 rounds, only the kept one refined on), then leave-one-out of the three
   points furthest off, with five or more points and one a pixel or more out (`Outlier`, named when it is
   3 px and five times the others' error off). `Solution::words`/`Refusal::words` are the operator's
-  sentences; `placement()` and `lens_onto(&Lens, pixels)` apply it; `points_key` (FNV-1a of the
-  points and picture size) lets another computer tell a sent `Solution` is for its points
-  (`LineUp::is_current`). Every type is serde with defaults, lenient enums (`Unknown`) and `extra` on
-  `LinePoint`/`LineUp`. `project(placement, lens, pixels, world)` is the forward sum on the show's types
+  sentences; `placement()` and `lens_onto(&Lens, pixels)` apply it, `solved()` is what the show keeps.
+  **One set of line-up types** (round 2's contract): the kept ones are the show's
+  (`projector::{LineUp, LinePoint, Solved, Before, Rung}`; `calib` has no `LineUp`/`LinePoint`/`Rung` of
+  its own, `calib::Rung` is the show's, ordered by `PartialOrd` with a later `Unknown(Value)` above or
+  below none). The solver takes `RoomPoint`s (room metres); `to_room(stage, &LinePoint)` is the one way
+  from a kept point (screen frame through the screen's `Placement`, as the scene places it) and
+  `to_screen` the way back; `room_points`/`Problem::for_line_up` refuse a point on a screen that is
+  gone (`Refusal::NoScreen`, a switched-off one is passed by). `projector::points_key` (FNV-1a of each
+  kept point's `at`, screen, pixel and `on`, f32 bits, and the picture size) is the one fingerprint:
+  `LineUp::points_key`/`is_current`, carried as `Problem::key` into `Solution::points_key`; worked out
+  from the kept numbers, so a moved screen or another system's last bit leaves a line-up current. Every
+  type is serde with defaults and lenient enums (`Unknown`). `project(placement, lens, pixels, world)` is the forward sum on the show's types
   (what the solver fits); `fit_rigid(from, to)` a rigid fit (Horn) for later. `Solution::capped`: the
   refinement hit `MAX_ROUNDS` (100; starts get 30). Deterministic on one computer; solve once and send the answer (another
   system's libm may differ in the last bit). Tests: `calib/tests.rs` (made-up projectors with

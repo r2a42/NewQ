@@ -137,6 +137,13 @@ pub struct ProjectorThrow {
 pub struct ThrowPicture {
     pub groups: Vec<OutputGroup>,
     pub blend: crate::show::EdgeBlend,
+    /// A mapped projector's display: its mapped picture, drawn at the
+    /// throw's size by `mapped::Drawer::draw` into `target` (`app.rs::
+    /// throw_picture` makes it; the stage thread draws it, mapping plan
+    /// 4.1). `groups` then shows that target as the display's layer.
+    // (Read by the stage thread: round 2, agent C.)
+    #[allow(dead_code)]
+    pub mapped: Option<crate::mapped::MappedFrame>,
 }
 
 /// What a display's picture is made of, for drawing it as the stage shows it.

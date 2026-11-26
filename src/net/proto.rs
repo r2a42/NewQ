@@ -305,6 +305,10 @@ pub enum Msg {
     /// computer measured. An older NewQ reads it as `Unknown`.
     NetTest(Box<super::measure::NetTest>),
     // ---- end of the network test's ----
+    /// Line-up across the network (`net::lineup`, mapping plan 4.4): the
+    /// primary's crosses for a projector another computer drives, and that
+    /// computer's `Seen`. An older NewQ reads it as `Unknown`.
+    LineUp(Box<super::lineup::LineUpMsg>),
     /// A message a later NewQ of the same protocol sent, unknown here.
     #[serde(other)]
     Unknown,

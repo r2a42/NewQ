@@ -77,21 +77,22 @@ impl Rig {
         linalg::add(c, linalg::scale(d, t))
     }
 
-    fn points(&self, world: &[V3]) -> Vec<LinePoint> {
+    fn points(&self, world: &[V3]) -> Vec<RoomPoint> {
         let s = self.state();
         world
             .iter()
-            .map(|x| LinePoint::new(*x, model::project(&s, px(self.pixels), *x).unwrap()))
+            .map(|x| RoomPoint::new(*x, model::project(&s, px(self.pixels), *x).unwrap()))
             .collect()
     }
 
-    fn problem(&self, points: Vec<LinePoint>, entered: LensFit, free: Freedom) -> Problem {
+    fn problem(&self, points: Vec<RoomPoint>, entered: LensFit, free: Freedom) -> Problem {
         Problem {
             points,
             pixels: self.pixels,
             lens: entered,
             start: None,
             free,
+            key: 0,
         }
     }
 }
@@ -611,7 +612,7 @@ fn a_projector_looking_straight_down_solves() {
 
 /// `points` with `sigma` pixels of Gaussian noise (the same draws for the
 /// same seed, so two sigmas give errors in proportion).
-fn noisy(points: &[LinePoint], sigma: f64, seed: u64) -> Vec<LinePoint> {
+fn noisy(points: &[RoomPoint], sigma: f64, seed: u64) -> Vec<RoomPoint> {
     let mut rng = Rng(seed);
     points
         .iter()
@@ -632,7 +633,7 @@ fn pixel_noise_moves_the_answer_by_what_the_points_allow() {
     let pairs: Vec<model::Pair> = exact.iter().map(|p| (p.world, p.pixel)).collect();
     let (_, s, _) = linalg::spread(&world);
     let size = s[2].sqrt();
-    let sd = model::spreads(&rig.state(), Rung::Shift, px(PIXELS), &pairs, size).unwrap();
+    let sd = model::spreads(&rig.state(), &Rung::Shift, px(PIXELS), &pairs, size).unwrap();
     let sd_turn = (sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]).sqrt();
     let sd_place = (sd[3] * sd[3] + sd[4] * sd[4] + sd[5] * sd[5]).sqrt();
     let entered = LensFit {
@@ -674,7 +675,7 @@ fn half_a_pixel_of_noise_with_four_points_is_still_close() {
     let exact = rig.points(&world);
     let pairs: Vec<model::Pair> = exact.iter().map(|p| (p.world, p.pixel)).collect();
     let (_, s, _) = linalg::spread(&world);
-    let sd = model::spreads(&rig.state(), Rung::Pose, px(PIXELS), &pairs, s[2].sqrt()).unwrap();
+    let sd = model::spreads(&rig.state(), &Rung::Pose, px(PIXELS), &pairs, s[2].sqrt()).unwrap();
     let sd_turn = (sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]).sqrt();
     let sd_place = (sd[3] * sd[3] + sd[4] * sd[4] + sd[5] * sd[5]).sqrt();
     let sol = solve(&rig.problem(noisy(&exact, 0.5, 5), rig.lens, Freedom::default())).unwrap();
@@ -743,7 +744,7 @@ fn sets_that_cant_be_solved_are_refused_in_words() {
     let rig = audience_rig(1.6, [0.0, 0.0]);
     let world = deep_points(&rig, 6, 8.0);
     let good = rig.points(&world);
-    let refuse = |points: Vec<LinePoint>| {
+    let refuse = |points: Vec<RoomPoint>| {
         solve(&rig.problem(points, rig.lens, Freedom::default())).unwrap_err()
     };
 
@@ -900,9 +901,14 @@ fn the_same_problem_gives_the_same_answer() {
 
 #[test]
 fn a_solution_travels_and_applies_on_a_real_projector() {
+    use crate::stage3d::projector::{LinePoint, LineUp};
     let rig = audience_rig(1.6, [0.1, 0.3]);
     let world = deep_points(&rig, 9, 9.0);
-    let points = rig.points(&world);
+    let points: Vec<LinePoint> = rig
+        .points(&world)
+        .iter()
+        .map(|p| LinePoint::in_room(p.world.map(|v| v as f32), p.pixel.map(|v| v as f32)))
+        .collect();
     let mut line_up = LineUp {
         points: points.clone(),
         pixels: PIXELS,
@@ -917,26 +923,30 @@ fn a_solution_travels_and_applies_on_a_real_projector() {
         roll: 0.0,
     };
     proj.resolution = Some(PIXELS);
-    let sol = line_up.solve(&proj).unwrap().clone();
+    let stage = crate::stage3d::Stage3d::default();
+    let sol = solve(&Problem::for_line_up(&proj, &line_up, &stage).unwrap()).unwrap();
+    assert_eq!(sol.points_key, line_up.points_key());
+    line_up.solved = Some(sol.solved());
     assert!(line_up.is_current());
-    // Sent as JSON, read on another computer, applied there.
+    // Kept in the show as JSON, read on another computer: still current.
     let json = serde_json::to_string(&line_up).unwrap();
     let there: LineUp = serde_json::from_str(&json).unwrap();
     assert!(there.is_current());
-    let s = there.solved.as_ref().unwrap();
-    assert_eq!(s.points_key, sol.points_key);
-    assert!(linalg::norm(linalg::sub(s.pose.position, sol.pose.position)) < 1e-12);
-    proj.placement = s.placement();
-    proj.lens = s.lens_onto(&proj.lens, PIXELS);
+    assert_eq!(there.solved.as_ref().unwrap().rung, sol.rung);
+    // And the solution itself travels whole.
+    let carried: Solution = serde_json::from_str(&serde_json::to_string(&sol).unwrap()).unwrap();
+    assert!(linalg::norm(linalg::sub(carried.pose.position, sol.pose.position)) < 1e-12);
+    proj.placement = carried.placement();
+    proj.lens = carried.lens_onto(&proj.lens, PIXELS);
     assert_eq!(proj.lens.aspect, None);
     let aspect = proj.aspect(PIXELS);
     // NewQ's own sums now put every point where it was placed, to the f32
     // rounding of the show's numbers (about a millionth of the picture).
     for p in &points {
-        let ([u, v], _) = proj.in_picture(p.world.map(|v| v as f32), aspect).unwrap();
+        let ([u, v], _) = proj.in_picture(p.at, aspect).unwrap();
         let (x, y) = (u as f64 * 1920.0, v as f64 * 1080.0);
         assert!(
-            (x - p.pixel[0]).hypot(y - p.pixel[1]) < 0.02,
+            (x - p.pixel[0] as f64).hypot(y - p.pixel[1] as f64) < 0.02,
             "{:?} vs {:?}",
             [x, y],
             p.pixel
@@ -948,36 +958,155 @@ fn a_solution_travels_and_applies_on_a_real_projector() {
     assert!(!moved.is_current());
 }
 
+/// The one shape (mapping plan, round 2): a line-up kept in the show with
+/// points on a turned screen and one on the room, saved, read back and
+/// turned into the room gives the solver the same points and the same key;
+/// the key is the kept points', so a screen moved since leaves it current;
+/// a screen that is gone is refused in words, never read as the room.
+#[test]
+fn a_line_up_kept_in_the_show_gives_the_solver_the_same_points_and_key() {
+    use crate::render3d::maths::transform_point;
+    use crate::stage3d::projector::{LinePoint, LineUp};
+    let rig = audience_rig(1.6, [0.0, 0.2]);
+    let mut show = crate::show::Show::default();
+    let screen = show.add_surface(None);
+    show.stage3d.surfaces[0].placement = Placement {
+        position: [0.5, 3.0, -1.0],
+        yaw: 20.0,
+        pitch: 5.0,
+        roll: -3.0,
+    };
+    // The truth: spots on the screen's plane (its own frame) and one corner
+    // of the room, each through the rig.
+    let on_screen: [[f32; 3]; 5] = [
+        [-2.0, 1.0, 0.0],
+        [2.0, 1.2, 0.0],
+        [1.8, -1.1, 0.0],
+        [-1.9, -0.9, 0.0],
+        [0.2, 0.1, 0.0],
+    ];
+    let s = rig.state();
+    let mut points = Vec::new();
+    for at in on_screen {
+        // Where the scene puts it (the f32 matrix it draws the screen with).
+        let room = transform_point(&show.stage3d.surfaces[0].placement.matrix(), at);
+        let mine = to_room(&show.stage3d, &LinePoint::on_screen(screen, at, [0.0; 2])).unwrap();
+        for k in 0..3 {
+            assert!(
+                (mine[k] - room[k] as f64).abs() < 1e-5,
+                "{mine:?} vs {room:?}"
+            );
+        }
+        // And back into the screen's frame.
+        let back = to_screen(&show.stage3d, Some(screen), mine).unwrap();
+        for k in 0..3 {
+            assert!((back[k] - at[k]).abs() < 1e-5, "{back:?} vs {at:?}");
+        }
+        let pixel = model::project(&s, px(PIXELS), mine)
+            .unwrap()
+            .map(|v| v as f32);
+        points.push(LinePoint::on_screen(screen, at, pixel));
+    }
+    let corner = [-6.0f32, 0.0, -4.0];
+    let pixel = model::project(&s, px(PIXELS), corner.map(|v| v as f64))
+        .unwrap()
+        .map(|v| v as f32);
+    points.push(LinePoint::in_room(corner, pixel));
+    let id = show.add_projector();
+    let p = show.projector_mut(id).unwrap();
+    p.resolution = Some(PIXELS);
+    // The lens as it is (six points, one surface and a corner: the pose).
+    p.lens.throw = 1.6;
+    p.lens.shift = [0.0, 0.2];
+    p.line_up = Some(LineUp {
+        points,
+        pixels: PIXELS,
+        ..LineUp::default()
+    });
+
+    let json = serde_json::to_string(&show).unwrap();
+    let back: crate::show::Show = serde_json::from_str(&json).unwrap();
+    let kept = |sh: &crate::show::Show| {
+        let p = sh.stage3d.projectors[0].clone();
+        let l = p.line_up.clone().unwrap();
+        (p, l)
+    };
+    let (p0, l0) = kept(&show);
+    let (p1, l1) = kept(&back);
+    let a = Problem::for_line_up(&p0, &l0, &show.stage3d).unwrap();
+    let b = Problem::for_line_up(&p1, &l1, &back.stage3d).unwrap();
+    assert_eq!(a.points, b.points, "the same points in the room");
+    assert_eq!(a.key, b.key);
+    assert_eq!(a.key, l1.points_key());
+    assert_eq!(
+        a.key,
+        crate::stage3d::projector::points_key(&l1.points, l1.pixels)
+    );
+    let sol = solve(&b).unwrap();
+    assert_eq!(
+        sol.points_key,
+        l1.points_key(),
+        "the solver hands the key on"
+    );
+    assert!(sol.max_px < 0.05, "{}", sol.words());
+    let mut l1 = l1;
+    l1.solved = Some(sol.solved());
+    assert!(l1.is_current());
+
+    // The screen moved since: the kept points (and so the key) are as they
+    // were, so the answer is still current; their room places follow it.
+    let mut moved = back.clone();
+    moved.stage3d.surfaces[0].placement.position[0] += 1.0;
+    let c = Problem::for_line_up(&p1, &l1, &moved.stage3d).unwrap();
+    assert_eq!(c.key, a.key);
+    assert!(l1.is_current());
+    assert!((c.points[0].world[0] - a.points[0].world[0] - 1.0).abs() < 1e-6);
+    assert_eq!(c.points[5], a.points[5], "the room's corner stays");
+
+    // The screen deleted: refused in words, naming the point; switched off,
+    // it is passed by.
+    let mut gone = back.clone();
+    gone.stage3d.surfaces.clear();
+    let r = Problem::for_line_up(&p1, &l1, &gone.stage3d).unwrap_err();
+    assert_eq!(r, Refusal::NoScreen { point: 0 });
+    assert!(r.words().contains("Point 1"), "{}", r.words());
+    let mut off = l1.clone();
+    for p in off.points.iter_mut().take(5) {
+        p.on = false;
+    }
+    let only = Problem::for_line_up(&p1, &off, &gone.stage3d).unwrap();
+    assert_eq!(only.points.len(), 6);
+    assert_eq!(only.points[5], a.points[5]);
+}
+
 #[test]
 fn line_ups_read_leniently_and_write_little() {
-    let p = LinePoint::new([1.0, 2.0, 3.0], [10.0, 20.0]);
+    let p = RoomPoint::new([1.0, 2.0, 3.0], [10.0, 20.0]);
     let json = serde_json::to_string(&p).unwrap();
     assert!(!json.contains("\"on\""), "{json}");
-    let back: LinePoint = serde_json::from_str(&json).unwrap();
+    let back: RoomPoint = serde_json::from_str(&json).unwrap();
     assert_eq!(back, p);
-    // A later NewQ's fields are kept and written back.
-    let later: LinePoint =
-        serde_json::from_str(r#"{"world":[0,0,0],"pixel":[1,1],"surface":7}"#).unwrap();
-    assert!(
-        serde_json::to_string(&later)
-            .unwrap()
-            .contains("\"surface\":7")
-    );
-    assert!(later.on);
-    // Unknown rungs, notes and refusals don't stop a read.
+    // Unknown rungs, notes and refusals don't stop a read; a later rung is
+    // kept as written, and puts nothing into a lens.
     let s: Solution =
         serde_json::from_str(r#"{"rung":"Fisheye","notes":[{"note":"Wobbly"},{"note":"Flat"}]}"#)
             .unwrap();
-    assert_eq!(s.rung, Rung::Unknown);
+    assert_eq!(s.rung, Rung::Unknown(serde_json::json!("Fisheye")));
+    assert!(serde_json::to_string(&s).unwrap().contains("\"Fisheye\""));
     assert_eq!(s.notes, vec![Note::Unknown, Note::Flat]);
+    let lens = Lens::default();
+    assert_eq!(s.lens_onto(&lens, PIXELS), lens);
     let r: Refusal = serde_json::from_str(r#"{"why":"Cloudy"}"#).unwrap();
     assert_eq!(r, Refusal::Unknown);
-    let empty: LineUp = serde_json::from_str("{}").unwrap();
-    assert_eq!(empty, LineUp::default());
-    assert_eq!(
-        serde_json::to_string(&LineUp::default()).unwrap(),
-        r#"{"pixels":[0,0]}"#
-    );
+    // The ladder's order, and a later rung in none of it.
+    assert!(Rung::Pose < Rung::Throw && Rung::Shift < Rung::Aspect);
+    let later = Rung::Unknown(serde_json::json!("Fisheye"));
+    assert_eq!(later.partial_cmp(&Rung::Pose), None);
+    assert!(later >= later.clone());
+    // The kept line-up: nothing written at its defaults.
+    let empty: crate::stage3d::projector::LineUp = serde_json::from_str("{}").unwrap();
+    assert_eq!(empty, Default::default());
+    assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
 }
 
 /// Many made-up projectors, all solved exactly: a property test with a
@@ -1044,7 +1173,7 @@ fn many_projectors_are_found_exactly() {
                     problem.points.iter().map(|p| (p.world, p.pixel)).collect();
                 let (_, sp, _) = linalg::spread(&world);
                 let sd =
-                    model::spreads(&rig.state(), Rung::Shift, px(PIXELS), &pairs, sp[2].sqrt())
+                    model::spreads(&rig.state(), &Rung::Shift, px(PIXELS), &pairs, sp[2].sqrt())
                         .unwrap();
                 let worst = (sd[6] / rig.lens.throw).max(sd[7]).max(sd[8]);
                 assert!(worst > SURE * 0.999, "case {case}: sd {sd:?}, {sol:?}");
@@ -1133,7 +1262,7 @@ fn a_mirrored_picture_is_refused_in_words() {
     // picture is flipped left to right: no placement gives that.
     let rig = audience_rig(1.6, [0.0, 0.0]);
     let world = deep_points(&rig, 8, 8.0);
-    let flipped: Vec<LinePoint> = rig
+    let flipped: Vec<RoomPoint> = rig
         .points(&world)
         .into_iter()
         .map(|mut p| {
@@ -1145,7 +1274,7 @@ fn a_mirrored_picture_is_refused_in_words() {
     assert_eq!(r, Refusal::Mirrored);
     assert!(r.words().contains("flipped left to right"));
     // Flipped both ways is only a turn (a projector hung upside down): fine.
-    let upside: Vec<LinePoint> = rig
+    let upside: Vec<RoomPoint> = rig
         .points(&world)
         .into_iter()
         .map(|mut p| {

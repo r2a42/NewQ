@@ -486,6 +486,75 @@ fn no_pixels(p: &(u32, u32)) -> bool {
     *p == (0, 0)
 }
 
+impl LineUp {
+    /// The fingerprint of its points and picture size (`points_key`).
+    pub fn points_key(&self) -> u64 {
+        points_key(&self.points, self.pixels)
+    }
+
+    /// Whether the kept answer is for the points as they are now.
+    pub fn is_current(&self) -> bool {
+        self.solved
+            .as_ref()
+            .is_some_and(|s| s.points_key == self.points_key())
+    }
+}
+
+/// The fingerprint of line-up points (all of them, on or off) and the
+/// picture's size, as they are kept: each point's `at` (in its screen's own
+/// frame), its screen, its pixel and whether it is on. The one definition:
+/// `Solved::points_key` and `calib::Solution::points_key` are both this.
+/// Worked out from the kept numbers, not from room positions, so a screen
+/// that is moved (or a computer whose `sin` differs in the last bit) never
+/// makes a line-up read as stale. FNV-1a over the numbers' f32 bits.
+pub fn points_key(points: &[LinePoint], pixels: (u32, u32)) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(&pixels.0.to_le_bytes());
+    eat(&pixels.1.to_le_bytes());
+    for p in points {
+        for v in p.at.iter().chain(&p.pixel) {
+            eat(&v.to_bits().to_le_bytes());
+        }
+        match p.surface {
+            Some(s) => {
+                eat(&[1]);
+                eat(&s.0.to_le_bytes());
+            }
+            None => eat(&[0]),
+        }
+        eat(&[p.on as u8]);
+    }
+    h
+}
+
+impl LinePoint {
+    /// A point on the room itself (a venue corner): `at` in room metres.
+    pub fn in_room(at: [f32; 3], pixel: [f32; 2]) -> LinePoint {
+        LinePoint {
+            at,
+            surface: None,
+            pixel,
+            on: true,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// A point on screen `surface`: `at` in the screen's own frame
+    /// (`calib::to_screen` turns a room position into it).
+    pub fn on_screen(surface: SurfaceId, at: [f32; 3], pixel: [f32; 2]) -> LinePoint {
+        LinePoint {
+            surface: Some(surface),
+            ..LinePoint::in_room(at, pixel)
+        }
+    }
+}
+
 /// One line-up point: a spot on the model and where it is in the picture.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinePoint {
@@ -522,6 +591,31 @@ pub enum Rung {
     /// A rung a later NewQ wrote, kept as it was.
     #[serde(untagged)]
     Unknown(serde_json::Value),
+}
+
+impl Rung {
+    /// Its place on the ladder; None for one a later NewQ wrote.
+    pub fn rank(&self) -> Option<u8> {
+        match self {
+            Rung::Pose => Some(0),
+            Rung::Throw => Some(1),
+            Rung::Shift => Some(2),
+            Rung::Aspect => Some(3),
+            Rung::Unknown(_) => None,
+        }
+    }
+}
+
+/// Up the ladder: Pose < Throw < Shift < Aspect. A later NewQ's rung is no
+/// higher or lower than any (every comparison with it is false).
+impl PartialOrd for Rung {
+    fn partial_cmp(&self, other: &Rung) -> Option<std::cmp::Ordering> {
+        match (self.rank(), other.rank()) {
+            (Some(a), Some(b)) => Some(a.cmp(&b)),
+            _ if self == other => Some(std::cmp::Ordering::Equal),
+            _ => None,
+        }
+    }
 }
 
 /// The last solve's answer, as kept (named as `calib::Solution`'s fields).

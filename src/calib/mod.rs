@@ -5,10 +5,10 @@
 //!
 //! Conventions (the same as `stage3d::projector`'s, tested against
 //! `Projector::in_picture` and `ray`):
-//! - **The room**: metres, right-handed, Y up. A point on the model is
-//!   `LinePoint::world`.
+//! - **The room**: metres, right-handed, Y up. The solver's point on the
+//!   model is `RoomPoint::world`.
 //! - **The picture**: a point's place in the projector's picture is in
-//!   **pixels** (`LinePoint::pixel`), `(0, 0)` the picture's top-left corner
+//!   **pixels** (`RoomPoint::pixel`), `(0, 0)` the picture's top-left corner
 //!   and `(W, H)` its bottom-right, x right and y down; pixel `(i, j)`'s
 //!   middle is `(i + 0.5, j + 0.5)`. `W` and `H` are `Problem::pixels` (the
 //!   picture's size the points were placed at). That is `in_picture`'s
@@ -52,17 +52,26 @@
 //! refused (not on a flat set, where a flipped picture fits from behind).
 //! Everything is bounded; no clock.
 //!
-//! Use: build a `Problem` (`Problem::new` from a projector's lens, the
-//! picture's size in pixels, an argument, and the points in room metres:
-//! the caller turns a point kept in a screen's own frame into the room's),
-//! call `solve`, and show `Solution::words` or `Refusal::words`. Apply with
-//! `Solution::placement` and `Solution::lens_onto`. `project` is the forward
-//! sum on the show's own types, the very one the solver fits (for the
-//! overlay's outline and each point's error). `fit_rigid` is the rigid fit
-//! (turn and move between two sets of points) for lining up a screen or a
-//! tracker later. Everything is serde, so the primary can solve and send
-//! the `Solution` (with `points_key`, the fingerprint of the points it came
-//! from) for another computer to apply without solving again.
+//! The types that are kept are the show's (`stage3d::projector::{LineUp,
+//! LinePoint, Solved, Before, Rung}`): a point is kept in its screen's own
+//! frame (`LinePoint::at` with `surface`), or the room's for a venue corner.
+//! This module works in room metres only. `to_room` is the one way from a
+//! kept point to the room (and `to_screen` the way back, for a point placed
+//! on a screen); `Problem::for_line_up` uses it for every point and carries
+//! the line-up's `projector::points_key` (the one fingerprint, worked out
+//! from the kept numbers) through to `Solution::points_key`, so
+//! `LineUp::is_current` agrees with what was solved.
+//!
+//! Use: build a `Problem` (`Problem::for_line_up` from a projector, its
+//! line-up and the stage; or `Problem::new` from a projector's lens, the
+//! picture's size in pixels and points already in room metres), call
+//! `solve`, and show `Solution::words` or `Refusal::words`. Apply with
+//! `Solution::placement`, `Solution::lens_onto` and keep `Solution::solved`.
+//! `project` is the forward sum on the show's own types, the very one the
+//! solver fits (for the overlay's outline and each point's error).
+//! `fit_rigid` is the rigid fit (turn and move between two sets of points)
+//! for lining up a screen or a tracker later. Everything is serde, so a
+//! `Solution` can be carried as it is.
 //!
 //! Determinism: no clock, no threads, no hashing by address and loops in a
 //! fixed order, so the same `Problem` gives the same `Solution` on the same
@@ -77,8 +86,9 @@ mod model;
 mod start;
 
 use crate::render3d::camera::MAX_SHIFT;
-use crate::stage3d::Placement;
-use crate::stage3d::projector::{Lens, MAX_THROW, MIN_THROW, Projector};
+pub(crate) use crate::stage3d::projector::Rung;
+use crate::stage3d::projector::{self, Lens, LineUp, MAX_THROW, MIN_THROW, Projector, Solved};
+use crate::stage3d::{Placement, Stage3d, SurfaceId};
 use linalg::{M3, V3};
 use model::{Pair, State};
 use serde::{Deserialize, Serialize};
@@ -132,9 +142,11 @@ fn is_true(v: &bool) -> bool {
     *v
 }
 
-/// One pair: a spot on the model and where it is in the picture.
+/// One pair as the solver takes it: a spot in the room and where it is in
+/// the picture. Made from a kept `projector::LinePoint` by `to_room` (never
+/// kept itself: the show keeps `projector::LinePoint`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct LinePoint {
+pub(crate) struct RoomPoint {
     /// Metres, in the room.
     #[serde(default)]
     pub world: [f64; 3],
@@ -144,20 +156,71 @@ pub(crate) struct LinePoint {
     /// Switched off: kept, numbered, not used.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub on: bool,
-    /// What a later NewQ wrote that this one doesn't know: kept as it was.
-    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-impl LinePoint {
-    pub fn new(world: [f64; 3], pixel: [f64; 2]) -> LinePoint {
-        LinePoint {
+impl RoomPoint {
+    pub fn new(world: [f64; 3], pixel: [f64; 2]) -> RoomPoint {
+        RoomPoint {
             world,
             pixel,
             on: true,
-            extra: serde_json::Map::new(),
         }
     }
+}
+
+/// A kept point's place in the room (metres): `at` through its screen's
+/// placement (`Placement::matrix`, as the scene places the screen) when it
+/// is on one, else `at` itself. The one way from what the show keeps to
+/// what the solver takes. None when its screen is gone.
+pub(crate) fn to_room(stage: &Stage3d, p: &projector::LinePoint) -> Option<[f64; 3]> {
+    let at = p.at.map(|v| v as f64);
+    let Some(id) = p.surface else {
+        return Some(at);
+    };
+    let pose = Pose::of(&stage.surface(id)?.placement);
+    Some(linalg::add(linalg::mul_v(&pose.turn(), at), pose.position))
+}
+
+/// The way back: room position `room` in screen `surface`'s own frame (None
+/// when there is no such screen), or as it is for no screen. What a point
+/// placed on a screen is kept as.
+pub(crate) fn to_screen(
+    stage: &Stage3d,
+    surface: Option<SurfaceId>,
+    room: [f64; 3],
+) -> Option<[f32; 3]> {
+    let Some(id) = surface else {
+        return Some(room.map(|v| v as f32));
+    };
+    let pose = Pose::of(&stage.surface(id)?.placement);
+    let r = pose.turn();
+    let d = linalg::sub(room, pose.position);
+    // A turn's inverse is its transpose.
+    let back = [0, 1, 2].map(|k| r[0][k] * d[0] + r[1][k] * d[1] + r[2][k] * d[2]);
+    Some(back.map(|v| v as f32))
+}
+
+/// Every point of `line_up` in the room, in its order (switched-off points
+/// too). Refused when a point that is on is on a screen that is gone (one
+/// switched off stays numbered, at the room's origin).
+pub(crate) fn room_points(stage: &Stage3d, line_up: &LineUp) -> Result<Vec<RoomPoint>, Refusal> {
+    line_up
+        .points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let world = match to_room(stage, p) {
+                Some(w) => w,
+                None if !p.on => [0.0; 3],
+                None => return Err(Refusal::NoScreen { point: i }),
+            };
+            Ok(RoomPoint {
+                world,
+                pixel: p.pixel.map(|v| v as f64),
+                on: p.on,
+            })
+        })
+        .collect()
 }
 
 /// A lens, as the solver holds it (`Lens`'s numbers in f64).
@@ -312,7 +375,7 @@ impl Default for Freedom {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Problem {
     #[serde(default)]
-    pub points: Vec<LinePoint>,
+    pub points: Vec<RoomPoint>,
     /// The picture's width and height in pixels.
     #[serde(default)]
     pub pixels: (u32, u32),
@@ -324,36 +387,40 @@ pub(crate) struct Problem {
     pub start: Option<Pose>,
     #[serde(default)]
     pub free: Freedom,
+    /// The kept points' fingerprint (`projector::points_key`), handed on to
+    /// `Solution::points_key`. Set by `for_line_up`; 0 for points made here.
+    #[serde(default)]
+    pub key: u64,
 }
 
 impl Problem {
     /// The problem for `projector` with its picture `pixels` big, starting
-    /// from where it stands now.
-    pub fn new(projector: &Projector, pixels: (u32, u32), points: Vec<LinePoint>) -> Problem {
+    /// from where it stands now, from points already in room metres.
+    pub fn new(projector: &Projector, pixels: (u32, u32), points: Vec<RoomPoint>) -> Problem {
         Problem {
             points,
             pixels,
             lens: LensFit::of(projector, pixels),
             start: Some(Pose::of(&projector.placement)),
             free: Freedom::default(),
+            key: 0,
         }
     }
-}
 
-/// How much was solved.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) enum Rung {
-    /// Where it is and its aim; the lens as entered.
-    #[default]
-    Pose,
-    /// And the throw.
-    Throw,
-    /// And the lens shift.
-    Shift,
-    /// And the picture's shape.
-    Aspect,
-    #[serde(other)]
-    Unknown,
+    /// The problem for `projector`'s line-up as the show keeps it: each
+    /// point turned into the room by `to_room`, the line-up's picture size,
+    /// and its `points_key`.
+    pub fn for_line_up(
+        projector: &Projector,
+        line_up: &LineUp,
+        stage: &Stage3d,
+    ) -> Result<Problem, Refusal> {
+        let points = room_points(stage, line_up)?;
+        Ok(Problem {
+            key: line_up.points_key(),
+            ..Problem::new(projector, line_up.pixels, points)
+        })
+    }
 }
 
 /// A lens number.
@@ -436,7 +503,8 @@ pub(crate) struct Solution {
     /// The picture's size the points were in.
     #[serde(default)]
     pub pixels: (u32, u32),
-    /// `points_key` of the points and picture it was solved from.
+    /// `projector::points_key` of the kept points it was solved from
+    /// (`Problem::key`).
     #[serde(default)]
     pub points_key: u64,
     /// The refinement stopped at `model::MAX_ROUNDS` still moving (the
@@ -470,63 +538,10 @@ pub(crate) enum Refusal {
     /// The points fit a picture flipped left to right (a mirror, or the
     /// projector's own rear setting), which no projector placement gives.
     Mirrored,
+    /// A point is on a screen that isn't in the stage any more.
+    NoScreen { point: usize },
     #[serde(other)]
     Unknown,
-}
-
-/// The fingerprint of the points (all of them, on or off) and the picture's
-/// size: the same on every computer (FNV-1a over the numbers' bits).
-pub(crate) fn points_key(points: &[LinePoint], pixels: (u32, u32)) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |bytes: &[u8]| {
-        for b in bytes {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    eat(&pixels.0.to_le_bytes());
-    eat(&pixels.1.to_le_bytes());
-    for p in points {
-        // As f32: a number carried as JSON may come back a bit different in
-        // its last f64 digit, never in its f32.
-        for v in p.world.iter().chain(&p.pixel) {
-            eat(&(*v as f32).to_bits().to_le_bytes());
-        }
-        eat(&[p.on as u8]);
-    }
-    h
-}
-
-/// A line-up as it is kept: the points, the picture's size they were placed
-/// in, and the last answer. (The show model and the network carry it; this
-/// module doesn't wire it in.)
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct LineUp {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub points: Vec<LinePoint>,
-    #[serde(default)]
-    pub pixels: (u32, u32),
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub solved: Option<Solution>,
-    /// What a later NewQ wrote that this one doesn't know: kept as it was.
-    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
-}
-
-impl LineUp {
-    /// Solve for `projector` from these points (and keep the answer).
-    pub fn solve(&mut self, projector: &Projector) -> Result<&Solution, Refusal> {
-        let problem = Problem::new(projector, self.pixels, self.points.clone());
-        let s = solve(&problem)?;
-        Ok(self.solved.insert(s))
-    }
-
-    /// Whether the kept answer is for the points as they are now.
-    pub fn is_current(&self) -> bool {
-        self.solved
-            .as_ref()
-            .is_some_and(|s| s.points_key == points_key(&self.points, self.pixels))
-    }
 }
 
 /// The lens and the pose, the rung's numbers from `s`.
@@ -606,10 +621,10 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
                 .filter(|(i, _)| *i != k)
                 .map(|(_, p)| *p)
                 .collect();
-            let rung = rung_for(fit.rung, rest.len(), flat);
+            let rung = rung_for(&fit.rung, rest.len(), flat);
             let Some((s, c, _)) = model::refine(
                 &fit.state,
-                rung,
+                &rung,
                 pixels,
                 &rest,
                 size,
@@ -657,7 +672,7 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
         worst,
         notes,
         pixels: problem.pixels,
-        points_key: points_key(&problem.points, problem.pixels),
+        points_key: problem.key,
         capped: fit.capped,
     })
 }
@@ -694,7 +709,7 @@ fn mirrored(
 
 /// The rung a leave-one-out solves: the one used, or the highest below it
 /// that `n` points allow.
-fn rung_for(used: Rung, n: usize, flat: bool) -> Rung {
+fn rung_for(used: &Rung, n: usize, flat: bool) -> Rung {
     let allowed = if flat || n < THROW_POINTS {
         Rung::Pose
     } else if n < SHIFT_POINTS {
@@ -702,7 +717,11 @@ fn rung_for(used: Rung, n: usize, flat: bool) -> Rung {
     } else {
         Rung::Aspect
     };
-    used.min(allowed)
+    if *used < allowed {
+        used.clone()
+    } else {
+        allowed
+    }
 }
 
 /// The points that are on, refused in words if they can't give an answer.
@@ -812,7 +831,7 @@ fn ladder(
     let best = best.ok_or(Refusal::Behind)?;
     let (state, cost, capped) = model::refine(
         &best.state,
-        Rung::Pose,
+        &Rung::Pose,
         pixels,
         pairs,
         size,
@@ -840,7 +859,7 @@ fn ladder(
         return Ok(best);
     }
     let mut top = 0;
-    for (_, part, asked, need) in wanted {
+    for &(_, part, asked, need) in &wanted {
         if !asked {
             // A number not freed stays as entered; the ones above it need
             // it, so the ladder stops there.
@@ -852,7 +871,7 @@ fn ladder(
         }
         top += 1;
     }
-    for &(rung, part, _, _) in wanted[..top].iter().rev() {
+    for (rung, part, _, _) in wanted[..top].iter().rev().cloned() {
         let mut tries = vec![best.state.clone()];
         if let Some(d) = &dlt {
             // The DLT's lens numbers up to this rung, the rest as entered.
@@ -874,12 +893,12 @@ fn ladder(
         let mut found: Option<Fitted> = None;
         for t in &tries {
             if let Some((state, cost, capped)) =
-                model::refine(t, rung, pixels, pairs, size, model::START_ROUNDS)
+                model::refine(t, &rung, pixels, pairs, size, model::START_ROUNDS)
                 && found.as_ref().is_none_or(|b| cost < b.cost)
             {
                 found = Some(Fitted {
                     state,
-                    rung,
+                    rung: rung.clone(),
                     cost,
                     capped,
                 });
@@ -887,13 +906,13 @@ fn ladder(
         }
         let why = match &found {
             None => Note::Unsure { part },
-            Some(f) => match at_limit(&f.state.lens, rung) {
+            Some(f) => match at_limit(&f.state.lens, &rung) {
                 Some(part) => Note::AtLimit { part },
-                None => match unsure(&f.state, rung, pixels, pairs, size) {
+                None => match unsure(&f.state, &rung, pixels, pairs, size) {
                     Some(part) => Note::Unsure { part },
                     None => {
                         let (state, cost, capped) =
-                            model::refine(&f.state, rung, pixels, pairs, size, model::MAX_ROUNDS)
+                            model::refine(&f.state, &rung, pixels, pairs, size, model::MAX_ROUNDS)
                                 .unwrap_or((f.state.clone(), f.cost, f.capped));
                         return Ok(Fitted {
                             state,
@@ -918,7 +937,7 @@ fn best_of(starts: &[State], pixels: (f64, f64), pairs: &[Pair], size: f64) -> O
     let mut best: Option<Fitted> = None;
     for s in starts {
         if let Some((state, cost, _)) =
-            model::refine(s, Rung::Pose, pixels, pairs, size, model::START_ROUNDS)
+            model::refine(s, &Rung::Pose, pixels, pairs, size, model::START_ROUNDS)
             && best.as_ref().is_none_or(|b| cost < b.cost)
         {
             best = Some(Fitted {
@@ -933,16 +952,16 @@ fn best_of(starts: &[State], pixels: (f64, f64), pairs: &[Pair], size: f64) -> O
 }
 
 /// The first lens number the rung frees that sits on a bound.
-fn at_limit(l: &LensFit, rung: Rung) -> Option<LensPart> {
+fn at_limit(l: &LensFit, rung: &Rung) -> Option<LensPart> {
     let on = |v: f64, lo: f64, hi: f64| v <= lo * (1.0 + 1e-6) || v >= hi * (1.0 - 1e-6);
     let s = MAX_SHIFT as f64;
     if on(l.throw, MIN_THROW as f64, MAX_THROW as f64) {
         return Some(LensPart::Throw);
     }
-    if rung >= Rung::Shift && l.shift.iter().any(|v| v.abs() >= s * (1.0 - 1e-6)) {
+    if *rung >= Rung::Shift && l.shift.iter().any(|v| v.abs() >= s * (1.0 - 1e-6)) {
         return Some(LensPart::Shift);
     }
-    if rung >= Rung::Aspect && on(l.aspect, MIN_ASPECT, MAX_ASPECT) {
+    if *rung >= Rung::Aspect && on(l.aspect, MIN_ASPECT, MAX_ASPECT) {
         return Some(LensPart::Aspect);
     }
     None
@@ -951,7 +970,7 @@ fn at_limit(l: &LensFit, rung: Rung) -> Option<LensPart> {
 /// The first lens number the rung frees that the points don't pin down.
 fn unsure(
     s: &State,
-    rung: Rung,
+    rung: &Rung,
     pixels: (f64, f64),
     pairs: &[Pair],
     size: f64,
@@ -966,10 +985,10 @@ fn unsure(
     if sd[6] > SURE * s.lens.throw {
         return Some(LensPart::Throw);
     }
-    if rung >= Rung::Shift && (sd[7] > SURE || sd[8] > SURE) {
+    if *rung >= Rung::Shift && (sd[7] > SURE || sd[8] > SURE) {
         return Some(LensPart::Shift);
     }
-    if rung >= Rung::Aspect && sd[9] > SURE * s.lens.aspect {
+    if *rung >= Rung::Aspect && sd[9] > SURE * s.lens.aspect {
         return Some(LensPart::Aspect);
     }
     None
@@ -995,10 +1014,11 @@ impl Solution {
     /// pixels' own (then no `aspect` is kept).
     pub fn lens_onto(&self, lens: &Lens, pixels: (u32, u32)) -> Lens {
         let mut out = lens.clone();
-        if self.rung >= Rung::Throw && self.rung != Rung::Unknown {
+        // (A later NewQ's rung is above or below none: nothing is put in.)
+        if self.rung >= Rung::Throw {
             out.throw = self.lens.throw as f32;
         }
-        if self.rung >= Rung::Shift && self.rung != Rung::Unknown {
+        if self.rung >= Rung::Shift {
             out.shift = self.lens.shift.map(|v| v as f32);
         }
         if self.rung == Rung::Aspect {
@@ -1007,6 +1027,19 @@ impl Solution {
                 ((self.lens.aspect - own).abs() > own * 1e-4).then_some(self.lens.aspect as f32);
         }
         out
+    }
+
+    /// The answer as the show keeps it (`LineUp::solved`); the placement and
+    /// lens it found go on the projector itself.
+    pub fn solved(&self) -> Solved {
+        Solved {
+            rung: self.rung.clone(),
+            rms_px: self.rms_px as f32,
+            max_px: self.max_px as f32,
+            pixels: self.pixels,
+            points_key: self.points_key,
+            extra: serde_json::Map::new(),
+        }
     }
 
     /// The fit, and what was worked out, in words for the operator.
@@ -1044,7 +1077,7 @@ impl Solution {
             )
         };
         s.push(match self.rung {
-            Rung::Pose | Rung::Unknown => {
+            Rung::Pose | Rung::Unknown(_) => {
                 format!("Using the lens you entered (throw {:.2}).", l.throw)
             }
             Rung::Throw => format!("Worked out the throw from the points: {:.2}.", l.throw),
@@ -1154,6 +1187,11 @@ impl Refusal {
             Refusal::Behind => "No place for the projector has all the points in front of it: \
                                 check each point is matched to the right spot."
                 .into(),
+            Refusal::NoScreen { point } => format!(
+                "Point {} is on a screen that isn't in the 3D stage any more: place it again, \
+                 or switch it off.",
+                point + 1
+            ),
             Refusal::Unknown => "This line-up can't be solved here.".into(),
         }
     }
