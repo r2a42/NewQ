@@ -266,7 +266,23 @@ pub fn shown_totals() -> [crate::preview_pace::Shown; 8] {
 struct Shot {
     size: (u32, u32),
     blend: EdgeBlend,
-    groups: Vec<(Geometry, Vec<LayerShot>)>,
+    groups: Vec<GroupShot>,
+    /// The mapped pictures drawn for it (`mapped::MappedFrame`): a mapped
+    /// display's layer is a target drawn into, whose stamp stays the same,
+    /// so what is new is told by its canvases' layers and its map.
+    mapped: Vec<MappedShot>,
+}
+
+type GroupShot = (Geometry, Vec<LayerShot>);
+
+/// A mapped frame as plain values: its map, whether shares are on, its
+/// canvases' layers and its moving screens.
+#[derive(Clone, Debug, PartialEq)]
+struct MappedShot {
+    map: u64,
+    shares: bool,
+    feeds: Vec<(crate::show::OutputId, (u32, u32), Vec<GroupShot>)>,
+    moving: Vec<crate::mapped::MovingScreen>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -280,30 +296,52 @@ struct LayerShot {
 }
 
 impl Shot {
-    fn of(size: (u32, u32), groups: &[OutputGroup], blend: EdgeBlend) -> Shot {
+    fn of(
+        size: (u32, u32),
+        groups: &[OutputGroup],
+        blend: EdgeBlend,
+        mapped: &[crate::mapped::MappedFrame],
+    ) -> Shot {
         Shot {
             size,
             blend,
-            groups: groups
+            groups: group_shots(groups),
+            mapped: mapped
                 .iter()
-                .map(|g| {
-                    let layers = g
-                        .layers
+                .map(|f| MappedShot {
+                    map: f.map.stamp(),
+                    shares: f.shares,
+                    feeds: f
+                        .feeds
                         .iter()
-                        .map(|l| LayerShot {
-                            stamp: l.texture.stamp(),
-                            opacity: l.opacity,
-                            fit: l.fit,
-                            transform: l.transform,
-                            color: l.color,
-                            fx: l.fx,
-                        })
-                        .collect();
-                    (g.geometry.clone(), layers)
+                        .map(|c| (c.output, c.canvas, group_shots(&c.groups)))
+                        .collect(),
+                    moving: f.moving.clone(),
                 })
                 .collect(),
         }
     }
+}
+
+fn group_shots(groups: &[OutputGroup]) -> Vec<GroupShot> {
+    groups
+        .iter()
+        .map(|g| {
+            let layers = g
+                .layers
+                .iter()
+                .map(|l| LayerShot {
+                    stamp: l.texture.stamp(),
+                    opacity: l.opacity,
+                    fit: l.fit,
+                    transform: l.transform,
+                    color: l.color,
+                    fx: l.fx,
+                })
+                .collect();
+            (g.geometry.clone(), layers)
+        })
+        .collect()
 }
 
 /// Whether a frame showing `now` puts a new picture up after `last` (the last
@@ -425,6 +463,10 @@ enum OutputJob {
         size: (u32, u32),
         groups: Vec<OutputGroup>,
         blend: EdgeBlend,
+        /// The mapped pictures to draw first (`mapped::Drawer`), which
+        /// `groups` show as layers: empty for every display that isn't a
+        /// mapped projector's, and then the loop draws as it always has.
+        mapped: Vec<crate::mapped::MappedFrame>,
     },
     Quit,
 }
@@ -474,12 +516,25 @@ impl OutputThread {
 
     /// Draw `groups` (bottom first) on the whole screen, with its edges
     /// faded as `blend` says.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn submit(&self, size: (u32, u32), groups: Vec<OutputGroup>, blend: EdgeBlend) {
+        self.submit_mapped(size, groups, blend, Vec::new());
+    }
+
+    /// `submit`, with the mapped pictures `groups` show drawn first.
+    pub fn submit_mapped(
+        &self,
+        size: (u32, u32),
+        groups: Vec<OutputGroup>,
+        blend: EdgeBlend,
+        mapped: Vec<crate::mapped::MappedFrame>,
+    ) {
         self.mailbox.put(
             OutputJob::Frame {
                 size,
                 groups,
                 blend,
+                mapped,
             },
             |old, new| match old {
                 OutputJob::Quit => OutputJob::Quit,
@@ -548,14 +603,21 @@ fn output_loop(
     let mut last_shot: Option<Shot> = None;
     let mut ready = Ready::new(format!("output {slot:?} on {monitor}"));
     ready.configure(&gpu, &surface, &config, "it would not configure at start");
+    // Made at the first mapped frame (a window that shows none never makes it).
+    let mut drawer: Option<crate::mapped::Drawer> = None;
+    let owner = crate::mapped::MapOwner::Window(match slot {
+        Slot::Window(n) => n,
+        _ => 0,
+    });
     loop {
-        let (size, groups, blend) = match mailbox.take() {
+        let (size, groups, blend, mapped) = match mailbox.take() {
             OutputJob::Quit => break,
             OutputJob::Frame {
                 size,
                 groups,
                 blend,
-            } => (size, groups, blend),
+                mapped,
+            } => (size, groups, blend, mapped),
         };
         let started = Instant::now();
         crate::crash::test_panic("render");
@@ -592,7 +654,10 @@ fn output_loop(
             continue;
         }
         let view = frame.texture.create_view(&Default::default());
-        let shot = Shot::of(size, &groups, blend);
+        // The mapped pictures first (nothing, with none), so their targets
+        // are filled before the frame's picture is told.
+        let maps = crate::mapped::draw_mapped(&mut drawer, &gpu, owner, &mapped);
+        let shot = Shot::of(size, &groups, blend, &mapped);
         let fresh = is_new_picture(last_shot.as_ref(), &shot);
         let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
         if trace {
@@ -614,7 +679,11 @@ fn output_loop(
             &fade
         });
         let cmd = gpu.composite(&pipeline, slot, &view, &draw, faded);
-        gpu.submit([cmd]);
+        if maps.is_empty() {
+            gpu.submit([cmd]);
+        } else {
+            gpu.submit(maps.into_iter().chain([cmd]));
+        }
         window.pre_present_notify();
         gpu.queue.present(frame);
         presented.store(
@@ -764,7 +833,12 @@ fn slot_index(slot: Slot) -> usize {
 // ----- Streams out ------------------------------------------------------------
 
 enum CaptureJob {
-    Groups(Vec<OutputGroup>),
+    /// The picture's layers on its own canvas, and the mapped pictures they
+    /// show (drawn first; none for a display that isn't mapped).
+    Picture {
+        groups: Vec<OutputGroup>,
+        mapped: Vec<crate::mapped::MappedFrame>,
+    },
     Quit,
 }
 
@@ -881,12 +955,20 @@ impl CaptureThread {
     }
 
     /// What to draw from now on (the picture's layers, on its own canvas).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn submit(&self, groups: Vec<OutputGroup>) {
-        self.mailbox
-            .put(CaptureJob::Groups(groups), |old, new| match old {
+        self.submit_mapped(groups, Vec::new());
+    }
+
+    /// `submit`, with the mapped pictures `groups` show drawn first.
+    pub fn submit_mapped(&self, groups: Vec<OutputGroup>, mapped: Vec<crate::mapped::MappedFrame>) {
+        self.mailbox.put(
+            CaptureJob::Picture { groups, mapped },
+            |old, new| match old {
                 CaptureJob::Quit => CaptureJob::Quit,
                 _ => new,
-            });
+            },
+        );
     }
 
     /// Why it stopped, if it has.
@@ -966,6 +1048,12 @@ fn capture_loop(
     });
     let frame_time = std::time::Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));
     let mut groups: Vec<OutputGroup> = Vec::new();
+    let mut mapped: Vec<crate::mapped::MappedFrame> = Vec::new();
+    let mut drawer: Option<crate::mapped::Drawer> = None;
+    let owner = crate::mapped::MapOwner::Capture(match slot {
+        Slot::Capture(n) => n,
+        _ => 0,
+    });
     let mut next = std::time::Instant::now();
     let mut frame = vec![0u8; (row * size.1) as usize];
     loop {
@@ -974,14 +1062,20 @@ fn capture_loop(
         // there is no waiting, and a picture would never be taken up.
         match mailbox.take_timeout(std::time::Duration::ZERO) {
             Some(CaptureJob::Quit) => break,
-            Some(CaptureJob::Groups(g)) => groups = g,
+            Some(CaptureJob::Picture {
+                groups: g,
+                mapped: m,
+            }) => (groups, mapped) = (g, m),
             None => {}
         }
         let now = std::time::Instant::now();
         if now < next {
             match mailbox.take_timeout(next - now) {
                 Some(CaptureJob::Quit) => break,
-                Some(CaptureJob::Groups(g)) => groups = g,
+                Some(CaptureJob::Picture {
+                    groups: g,
+                    mapped: m,
+                }) => (groups, mapped) = (g, m),
                 None => {}
             }
             continue;
@@ -991,6 +1085,8 @@ fn capture_loop(
         if next + frame_time * 3 < now {
             next = now + frame_time;
         }
+        // A mapped display's picture first (no blend, no shares: section 4.5).
+        let maps = crate::mapped::draw_mapped(&mut drawer, &gpu, owner, &mapped);
         let draw: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
         let cmd = gpu.composite(&pipeline, slot, &view, &draw, None);
         std::thread::sleep(slow);
@@ -1013,7 +1109,7 @@ fn capture_loop(
                 depth_or_array_layers: 1,
             },
         );
-        gpu.submit([cmd, encoder.finish()]);
+        gpu.submit(maps.into_iter().chain([cmd, encoder.finish()]));
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -1870,7 +1966,7 @@ mod pace_tests {
         let Some(gpu) = gpu() else { return };
         let tex = solid(&gpu, [255, 0, 0, 255]);
         let blend = EdgeBlend::default();
-        let shot = |groups: &[OutputGroup]| Shot::of(SIZE, groups, blend);
+        let shot = |groups: &[OutputGroup]| Shot::of(SIZE, groups, blend, &[]);
         let first = shot(&[group(&tex, crate::gpu::IDENTITY)]);
         // The first frame can't be told: it counts.
         assert!(is_new_picture(None, &first));
@@ -2179,5 +2275,128 @@ mod pace_tests {
             }
             assert_eq!(output_frame(&gpu, &out), before, "{level:?}");
         }
+    }
+
+    /// A display that isn't mapped draws exactly what it drew before mapping:
+    /// the window's frame with no mapped pictures is today's one composite,
+    /// byte for byte, makes no drawer, and stays so while another window
+    /// maps a canvas made of the very same layers in the same submit.
+    #[test]
+    fn an_unmapped_display_draws_exactly_what_it_drew_before() {
+        use crate::mapped::gpu_tests as m;
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter here; skipping");
+            return;
+        };
+        let a = m::layer(&gpu, &m::picture(30));
+        let b = m::layer(&gpu, &m::picture(220));
+        // Two layers, one faded and moved, through a keystone and a mesh,
+        // and a sub display over them: what a busy display sends.
+        let pin = crate::gpu::corner_pin(&[[0.05, 0.0], [0.95, 0.1], [1.0, 1.0], [0.0, 0.9]]);
+        let mut mesh = crate::mesh::Mesh::grid(3, 3);
+        *mesh.point_mut(1, 1) = [0.55, 0.45];
+        let mut top = OutputLayer {
+            opacity: 0.6,
+            ..m::stretched(b.clone())
+        };
+        top.transform.x = 0.1;
+        top.transform.rotation = 12.0;
+        let groups = vec![
+            OutputGroup {
+                layers: vec![m::stretched(a.clone()), top],
+                geometry: Geometry {
+                    canvas: SIZE,
+                    warp: crate::gpu::IDENTITY,
+                    pin: crate::gpu::IDENTITY,
+                    mesh: Some(Arc::new(mesh)),
+                    slice: Geometry::WHOLE,
+                },
+            },
+            group(&b, pin),
+        ];
+        let before = output_frame(&gpu, &groups);
+        // Through the window's new path, with nothing mapped.
+        let mut drawer = None;
+        let now = m::window(&gpu, &mut drawer, 0, &groups, &[]);
+        assert!(drawer.is_none(), "no drawer for a window that maps nothing");
+        assert_eq!(now, before);
+        // Another window maps a canvas of the same layers in the same submit.
+        let identity = m::made_up(1, |x, y| Some((0, (x, y), 1.0, 1.0)));
+        let mut canvas = m::feed(100, &a);
+        canvas.groups[0].layers.push(OutputLayer {
+            opacity: 0.3,
+            ..m::stretched(b.clone())
+        });
+        canvas.groups[0].layers[0].transform.scale_x = -1.0;
+        let f = m::frame(&gpu, &identity, vec![canvas]);
+        let (t0, v0) = m::window_target(&gpu);
+        let (t1, v1) = m::window_target(&gpu);
+        let pipeline = gpu.compositor.pipeline(&gpu.device, FORMAT);
+        let mut other = None;
+        let mut cmds = crate::mapped::draw_mapped(
+            &mut other,
+            &gpu,
+            crate::mapped::MapOwner::Window(1),
+            std::slice::from_ref(&f),
+        );
+        let plain: Vec<DrawGroup> = groups.iter().map(OutputGroup::draw).collect();
+        cmds.push(gpu.composite(&pipeline, Slot::Window(0), &v0, &plain, None));
+        let mapped = [m::shown(&f, m::plain(SIZE))];
+        let mapped: Vec<DrawGroup> = mapped.iter().map(OutputGroup::draw).collect();
+        cmds.push(gpu.composite(&pipeline, Slot::Window(1), &v1, &mapped, None));
+        gpu.submit(cmds);
+        assert_eq!(m::read(&gpu, &t0, Vec::new()), before);
+        let shown = m::read(&gpu, &t1, Vec::new());
+        assert_ne!(shown, before, "the mapped window drew its own picture");
+    }
+
+    /// A mapped window's frames are new pictures when a canvas's layer is
+    /// written, faded or moved, or the map changes, and not when nothing did:
+    /// its own layer is a target whose stamp stays the same however often it
+    /// is drawn into.
+    #[test]
+    fn a_mapped_frame_is_a_new_picture_when_its_canvas_or_map_changes() {
+        use crate::mapped::gpu_tests as m;
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter here; skipping");
+            return;
+        };
+        let content = m::picture(10);
+        let tex = m::layer(&gpu, &content);
+        let identity = m::made_up(1, |x, y| Some((0, (x, y), 1.0, 1.0)));
+        let f = m::frame(&gpu, &identity, vec![m::feed(100, &tex)]);
+        let groups = [m::shown(&f, m::plain(SIZE))];
+        let blend = EdgeBlend::default();
+        let mut drawer = None;
+        // Drawn as a window draws it: the mapped pictures, then the shot.
+        let mut frame = |f: &crate::mapped::MappedFrame| {
+            let _ = m::window(&gpu, &mut drawer, 0, &groups, std::slice::from_ref(f));
+            Shot::of(SIZE, &groups, blend, std::slice::from_ref(f))
+        };
+        let first = frame(&f);
+        let again = frame(&f);
+        assert!(!is_new_picture(Some(&first), &again), "nothing changed");
+        assert!(f.target.is_filled());
+        // A new frame of the canvas's video: new, at every one.
+        let mut last = again;
+        for _ in 0..5 {
+            tex.upload_rgba(&gpu.queue, &content);
+            let now = frame(&f);
+            assert!(is_new_picture(Some(&last), &now));
+            last = now;
+        }
+        // A fade on the canvas: new.
+        let mut faded = f.clone();
+        faded.feeds[0].groups[0].layers[0].opacity = 0.5;
+        assert!(is_new_picture(Some(&last), &frame(&faded)));
+        // Another map (a re-bake): new.
+        let mut remapped = f.clone();
+        remapped.map = Arc::new(crate::mapped::LensMap::from_cpu(&gpu, &identity, 2));
+        assert!(is_new_picture(Some(&last), &frame(&remapped)));
+        // A frame without its mapped picture is another picture.
+        assert!(is_new_picture(
+            Some(&last),
+            &Shot::of(SIZE, &groups, blend, &[])
+        ));
     }
 }
