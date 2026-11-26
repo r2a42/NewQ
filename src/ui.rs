@@ -587,7 +587,11 @@ impl UiState {
         self.handle_sel.set(None);
         self.capture_hotkey = None;
         self.confirm_edit_mode = false;
-        self.question = None;
+        // (A crashed session's copy is still offered: answering is all that
+        // keeps the autosave off it.)
+        if !self.offering_recovery() {
+            self.question = None;
+        }
         self.answer = None;
         self.show_media = false;
         self.show_about = false;
@@ -644,7 +648,10 @@ impl UiState {
         self.show_mode = true;
         self.confirm_edit_mode = false;
         // A question about leaving the user's show is not about the test's.
-        self.question = None;
+        // (A test doesn't start while one is up: `test_refusal_base`.)
+        if !self.offering_recovery() {
+            self.question = None;
+        }
         self.answer = None;
         self.capture_hotkey = None;
         // Corners, an area or the multiview's layout being edited name the
@@ -748,9 +755,17 @@ impl UiState {
         })
     }
 
+    /// Whether a crashed session's changes are being offered (`leave`): the
+    /// autosave keeps off their file until the question is answered.
+    pub fn offering_recovery(&self) -> bool {
+        matches!(self.question, Some(Question::Recover(_)))
+    }
+
     /// Why no test at all can start now (the show, a dialog), if one can't.
     pub fn test_refusal_base(&self) -> Option<&'static str> {
-        if self.dirty {
+        if self.question.is_some() {
+            Some("Answer the question in the window first.")
+        } else if self.dirty {
             Some(
                 "Save your show first: it has changes that aren't saved. (The test puts your show aside and brings it back, but a test is no time to risk unsaved work.)",
             )
@@ -1197,6 +1212,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     let locked = network::locked(st);
     if !locked {
         keyboard(ui.ctx(), show, st, &mut actions);
+        leave::keys_behind(st, &mut actions);
     }
     timeline::next_pass(st);
 
@@ -1765,6 +1781,7 @@ pub fn draw_popout(
     // window; the answer is acted on there.
     leave::window(ui.ctx(), engine, st);
     keyboard(ui.ctx(), show, st, &mut actions);
+    leave::keys_behind(st, &mut actions);
     egui::Panel::top("popout_bar").show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(pane.title()).strong());

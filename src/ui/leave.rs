@@ -102,7 +102,8 @@ pub fn quit_would_ask(engine: &Engine, st: &UiState) -> bool {
 
 /// The unsaved-changes question, if there are any; else on with `then`.
 fn unsaved_or_go(then: Leave, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
-    if saving_or_asking(st) {
+    // (A file dialog open for something else doesn't hold a quit up.)
+    if st.saving.is_some() || st.save_next.is_some() {
         st.question = Some(Question::Saving(then));
     } else if st.dirty {
         st.question = Some(Question::Unsaved(then));
@@ -199,6 +200,21 @@ fn restore(rec: &Path, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
             engine.problem(format!("Could not read the recovery file: {e:#}"));
             recovery::set_aside(rec);
         }
+    }
+}
+
+/// While a question is up, the keys that run the show (GO, the hotkeys,
+/// pause, the arrows) still work behind it; those that edit, save or open
+/// wait for the answer.
+pub(super) fn keys_behind(st: &UiState, actions: &mut Vec<Action>) {
+    if st.question.is_some() {
+        actions.retain(|a| {
+            !a.edits_the_show()
+                && !matches!(
+                    a,
+                    Action::Save | Action::SaveAs | Action::Quit | Action::Copy | Action::FocusFind
+                )
+        });
     }
 }
 
