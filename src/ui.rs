@@ -6156,7 +6156,9 @@ fn displays_panel(
                     &sources,
                     &stage,
                     shared.contains(&d.id),
-                    matches!(role, Some(StageRole::Canvas(_))),
+                    // A canvas, or one made to be (no monitor, a picture of its own).
+                    matches!(role, Some(StageRole::Canvas(_)))
+                        || (d.monitor.is_none() && d.picture.is_some()),
                     &picture_sizes,
                     actions,
                 );
