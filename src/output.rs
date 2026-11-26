@@ -1581,6 +1581,11 @@ mod tests {
         started.recv().unwrap();
         outbox.send(osc("gone", 9, "/b"));
         outbox.send(osc("gone", 9, "/c"));
+        // The dispatcher is in order: once a message to an address after them
+        // has gone, /b and /c are in the name's queue.
+        let (r, port) = receiver();
+        outbox.send(osc("127.0.0.1", port, "/barrier"));
+        assert_eq!(received(&r).as_deref(), Some("/barrier"));
         drop(gate);
         let errors = wait_for_error(&outbox, "2 more messages not sent");
         assert_eq!(errors.len(), 1, "{errors:?}");
