@@ -19,6 +19,12 @@ is a piece of a longer entry that covered several areas.
   menu bar's level, on all Spaces, stationary, no shadow (winit's simple fullscreen hid the menu bar
   for the whole app, only auto-hid it, and left the window to Mission Control; it stays the fallback).
   Checked for the Mac target with `scripts/cross_clippy.sh mac`, not tried on a Mac.
+  Quitting (Mac): the default app menu's Quit (Cmd+Q) and the Dock's send `terminate:`, which winit's
+  delegate lets straight through. `macwin::ask_before_quitting` (in `try_open_main_window`) adds an
+  `applicationShouldTerminate:` to winit's `WinitApplicationDelegate` class: NSTerminateNow while
+  `set_quit_freely` (set each pass by `App::mac_quit`: a display computer, or nothing to ask and no
+  test running), else NSTerminateCancel, a flag and a wake; `mac_quit` then sets `quit_requested` (the
+  window asks, `ui/leave.rs`) or quits a display computer. Not tried on a Mac.
 
 ## Part of the "Starting video and audio" entry: `crumbs.rs`
 
@@ -27,6 +33,9 @@ is a piece of a longer entry that covered several areas.
   engine's own crumbs (`Engine::crumbs`, `tick_breakdown`, slowest cue) and the slowest picture made, and kept for
   Test Mode (`note_stall`/`take_stalls`, with `past_minute`). `Children::close` warns if it takes 30 ms.
 
+- Closing a display's window (`app.rs::display_window_closed`): switches the displays on it off in
+  the show, except in Show mode or while anything plays, when it is ignored with a status-bar line.
+  On a display computer it quits, as before.
 - Display loss: `app.rs::control_for_outputs` treats the main window as being on no display while its
   remembered display (`control_home`) is disconnected (a lid closed), so an output stays on its display
   even though the system moved the window there. `HomeTracker` (app.rs) makes a display the window's home
