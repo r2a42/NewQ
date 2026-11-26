@@ -1483,6 +1483,7 @@ fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec
                     ui.end_row();
                 }
             });
+        canvases_list(ui, show, st, actions);
         if !any {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("No display shows the stage.").weak());
@@ -1494,6 +1495,48 @@ fn sources_section(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec
             });
         }
     });
+}
+
+/// The Displays tab's canvases (mapping plan 4.3): each with the screens it
+/// is on, and the way to it on the Displays page.
+fn canvases_list(ui: &mut Ui, show: &Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    let canvases = show.canvases();
+    ui.add_space(6.0);
+    if canvases.is_empty() {
+        hint(
+            ui,
+            &format!(
+                "No canvases. A canvas is a display with no monitor that a screen shows: send \
+                 cues to it, and a mapped projector shows them where they land on the screen. \
+                 Make one with a screen's Shows ▸ {NEW_CANVAS} on {}.",
+                super::settings::STAGE_SCREENS.path()
+            ),
+        );
+        return;
+    }
+    ui.label(RichText::new("Canvases").strong());
+    egui::Grid::new("stage_canvases")
+        .num_columns(3)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            for c in canvases {
+                let Some(o) = show.output(c) else { continue };
+                ui.label(&o.name);
+                let on: Vec<&str> = show
+                    .screens_showing(c)
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect();
+                ui.label(RichText::new(format!("→ {}", on.join(", "))).weak());
+                let r = ui.button("Open on the Displays page");
+                note(ui, &format!("3D stage ▸ canvas {} ▸ Open", o.name), &r);
+                if r.clicked() {
+                    st.reveal_display.set(Some(c));
+                    actions.push(Action::OpenSettings(super::SettingsPage::Displays));
+                }
+                ui.end_row();
+            }
+        });
 }
 
 #[cfg(test)]

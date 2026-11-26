@@ -940,9 +940,8 @@ fn a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_every
         w.see(&mut show, &mut st, "Displays ▸ Proj ▸ Mapped");
         assert!(w.has("Mapped"), "modern {modern}: {:?}", w.texts);
         w.see(&mut show, &mut st, "Displays ▸ Proj ▸ Open Projector 1");
-        for words in ["The stage's screens, through Projector 1"] {
-            assert!(w.has(words), "modern {modern}: {words:?} in {:?}", w.texts);
-        }
+        let words = "The stage's screens, through Projector 1";
+        assert!(w.has(words), "modern {modern}: {words:?} in {:?}", w.texts);
         assert!(
             w.texts
                 .iter()
