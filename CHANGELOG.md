@@ -15,6 +15,10 @@ release page, and a release is refused if it has none.
   the close button and Alt+F4 used to stop every cue and close NewQ at once when the show was
   saved. Now, while cues are playing or show mode is on, NewQ asks "Cues are playing. Quit and
   stop them?", and nothing stops until you say Quit.
+- **Quitting in the middle of a show asks first.** File ▸ Quit, Command-Q on a Mac, the close
+  button and Alt+F4 used to stop every cue and close NewQ at once when the show was saved. Now, while cues are playing or show mode is on, NewQ asks "Cues are playing. Quit and
+  stop them?", and nothing stops until you say Quit. Ctrl+Q now quits on Windows and Linux too,
+  asking the same way.
 - **The unsaved-changes question no longer freezes the show.** Asking about unsaved changes
   (quitting, New, Open), and offering to restore a crashed session's changes, used a system box
   that held every picture on its frame and stopped fades and waits until it was answered. They

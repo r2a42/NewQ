@@ -3238,7 +3238,13 @@ impl App {
             .map(|v| Instant::now() + v.repaint_delay.min(Duration::from_secs(3600)));
 
         // Keep a copy of unsaved changes, so a crash doesn't lose them.
-        if !self.ui.test_locked && self.last_autosave.elapsed() >= recovery::INTERVAL {
+        // (Not while a crashed session's copy is being offered: it is the
+        // same file, which a write or a clear would take from the offer.)
+        if !self.ui.test_locked
+            && self.pending_recovery.is_none()
+            && !self.ui.offering_recovery()
+            && self.last_autosave.elapsed() >= recovery::INTERVAL
+        {
             self.last_autosave = Instant::now();
             let path = self.ui.show_path.as_deref();
             if !self.ui.dirty {

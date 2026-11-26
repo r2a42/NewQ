@@ -243,6 +243,11 @@ fn the_close_button_and_ctrl_q_ask_the_same() {
 #[test]
 fn a_saved_show_with_nothing_playing_quits_without_a_question() {
     both(|mut w, ui| {
+        // Even with a file dialog open for something else.
+        let (_release, wait) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        start_dialog_with(&mut w.st, &w.show, DialogFor::ExportCueSheet, move || {
+            wait.recv().ok().flatten()
+        });
         w.quit_from_the_menu();
         assert!(w.st.quit_now && w.st.question.is_none(), "{ui}");
     });
@@ -447,7 +452,22 @@ fn a_crashed_sessions_changes_are_offered_in_the_window() {
         .unwrap();
         w.play();
         w.st.question = Some(Question::Recover(rec.clone()));
+        // The autosave keeps off the copy while it is offered (`App`), a
+        // test doesn't start over it, and a panic doesn't drop it.
+        assert!(w.st.offering_recovery(), "{ui}");
+        assert!(w.st.test_refusal_base().is_some(), "{ui}");
+        w.st.after_panic();
+        assert!(w.st.offering_recovery(), "{ui}");
         w.plays_on_behind(ui);
+        // Editing keys wait for the answer; the show's keys don't.
+        let cues = w.show.cues.len();
+        w.st.selected = Some(w.wait);
+        w.key(Key::D, egui::Modifiers::COMMAND);
+        assert_eq!(
+            w.show.cues.len(),
+            cues,
+            "{ui}: no duplicate behind the question"
+        );
         w.click("Question ▸ Restore them");
         assert_eq!(w.show.name, "Recovered", "{ui}");
         assert!(w.st.question.is_none(), "{ui}");

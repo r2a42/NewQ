@@ -49,9 +49,14 @@ mixer's load, `media-and-streams.md`'s area).
   `engine.is_active()` or Show mode), `Unsaved(then)` (Save / Don't save / Cancel), `Saving(then)`
   (waits for `saving`, `save_next` and an open `dialog`, then goes on if the show equals
   `saved_json`, else asks `Unsaved` again: a failed or cancelled save never leaves), `Recover(path)`
-  (the crashed session's copy, put up by `App::render_control` from `pending_recovery`). Buttons
+  (the crashed session's copy, put up by `App::render_control` from `pending_recovery`; it is
+  the autosave's own file, so the autosave is skipped while it is pending or offered,
+  `UiState::offering_recovery`, which `after_panic` and `begin_test` keep; no test starts while a
+  question is up, `test_refusal_base`). A clean quit isn't held by a file dialog open for something
+  else. Buttons
   only set `UiState::answer` (never focusable, so Space/Enter stay GO; Esc, consumed by
-  `leave::window` before `keyboard`, is Cancel), acted on by `leave::settle` at the very end of
+  `leave::window` before `keyboard`, is Cancel; `leave::keys_behind` drops the editing, saving and
+  opening keys while a question is up, the show's keys still work), acted on by `leave::settle` at the very end of
   `draw` (so a follower, whose actions are dropped, and a pop-out can answer). A quit that needs
   no asking or was agreed to sets `UiState::quit_now`, which `render_control` acts on (Test Mode's
   shutdown, `net_test_flush`, `stop_all`, exit). `test_locked`: Quit goes straight to `quit_now`.
