@@ -30,6 +30,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Cues from the playhead onward (along a continue chain) that get preloaded.
+/// How many times one outside call to `Engine::fire` (a GO, a hotkey, a
+/// remote command, a cue's end) may start the same cue. A cue is started twice
+/// when a group starts it and a Start cue in the same chain starts it again;
+/// one more is to spare. A circle of cues that take no time (R1) goes round
+/// this many times and stops: each round leaves another copy of each cue in
+/// it that plays, so the number is small.
+const FIRE_TIMES_PER_CUE: u32 = 3;
+/// The least number of cues one outside call to `fire` may start in all
+/// (twice the show's cues when that is more). A backstop: the limit per cue
+/// already ends any circle, and a chain that starts each cue once or twice
+/// never reaches this.
+const FIRE_TOTAL_MIN: usize = 10_000;
 const MAX_PRELOAD: usize = 4;
 /// Children of a group about to start that are preloaded with it, over and
 /// above `MAX_PRELOAD`: a group of layers starts all of them at once.
@@ -1864,7 +1876,38 @@ impl Engine {
             return;
         }
         self.firing = true;
+        // Cues that take no time (control, send and memo cues, an empty group)
+        // can lead back to each other, and the queue would never empty: count
+        // what this one call starts (R1). Only what the show says is counted,
+        // never what this computer has (a camera, a file), so every computer
+        // of a show network stops at the same cue.
+        let total = FIRE_TOTAL_MIN.max(show.cues.len().saturating_mul(2));
+        let mut times: HashMap<CueId, u32> = HashMap::new();
+        let mut fired = 0usize;
         while let Some(id) = self.fire_queue.pop_front() {
+            let n = times.entry(id).or_insert(0);
+            *n += 1;
+            fired += 1;
+            if *n > FIRE_TIMES_PER_CUE || fired > total {
+                self.fire_queue.clear();
+                let name = show
+                    .cue(id)
+                    .map_or_else(String::new, |c| format!("{} ({})", c.number, c.name));
+                self.problem(if fired > total {
+                    format!(
+                        "Cue {name}: {total} cues were started at once, one leading to the \
+                         next with no wait; the rest were not started. Give one cue in the \
+                         circle a pre-wait"
+                    )
+                } else {
+                    format!(
+                        "Cue {name}: the cues it leads to start it again with no wait between \
+                         them; it was started {FIRE_TIMES_PER_CUE} times and the rest were not \
+                         started. Give one cue in the circle a pre-wait"
+                    )
+                });
+                break;
+            }
             self.fire_one(show, id);
         }
         self.firing = false;
@@ -8488,6 +8531,145 @@ mod tests {
         assert!(playing(&e, w));
         // It took no time itself and left nothing running.
         assert!(!playing(&e, start));
+    }
+
+    /// The one problem a circle of cues reported, naming the cue `id`.
+    fn said_circle(e: &Engine, show: &Show, id: CueId) {
+        let number = &show.cue(id).unwrap().number;
+        let circles: Vec<&String> = e
+            .messages
+            .iter()
+            .map(|m| &m.1)
+            .filter(|m| m.contains("no wait"))
+            .collect();
+        assert_eq!(circles.len(), 1, "said once: {:?}", e.messages);
+        assert!(
+            circles[0].starts_with(&format!("Cue {number} (")),
+            "names the cue: {}",
+            circles[0]
+        );
+    }
+
+    /// After a circle was cut, the engine goes on as before: nothing is left
+    /// queued, and the next cue fired starts.
+    fn goes_on_after_a_circle(e: &mut Engine, show: &mut Show) {
+        assert!(!e.firing && e.fire_queue.is_empty());
+        for _ in 0..3 {
+            e.tick(show, 0.1);
+        }
+        let w = wait_cue(show, 30.0, ContinueMode::DoNotContinue);
+        e.fire(show, w);
+        assert!(playing(e, w));
+    }
+
+    #[test]
+    fn two_start_cues_that_start_each_other_stop_and_say_so() {
+        let mut show = Show::default();
+        let a = control_cue(&mut show, ControlAction::Start, CueId(0));
+        let b = control_cue(&mut show, ControlAction::Start, a);
+        let i = show.cue_index(a).unwrap();
+        if let CueKind::Control(c) = &mut show.cues[i].kind {
+            c.target = Some(b);
+        }
+        let mut e = engine_without_media();
+        // Before R1's guard this never returned.
+        e.fire(&show, a);
+        said_circle(&e, &show, a);
+        goes_on_after_a_circle(&mut e, &mut show);
+    }
+
+    #[test]
+    fn a_looped_section_of_instant_cues_stops_and_says_so() {
+        let mut show = Show::default();
+        // A memo, a send, an empty group, each going on to the next, and a
+        // Start cue back to the top: nothing in the circle waits.
+        let mut memo = show.make_cue(CueType::Control, None, show.cues.len());
+        memo.kind = CueKind::Control(ControlCue {
+            action: ControlAction::Memo,
+            target: None,
+            ..Default::default()
+        });
+        let top = memo.id;
+        show.cues.push(memo);
+        let send = show.make_cue(CueType::Send, None, show.cues.len());
+        show.cues.push(send);
+        let empty = show.make_cue(CueType::Group, None, show.cues.len());
+        show.cues.push(empty);
+        for c in &mut show.cues {
+            c.continue_mode = ContinueMode::AutoContinue;
+        }
+        control_cue(&mut show, ControlAction::Start, top);
+        let mut e = engine_without_media();
+        e.playhead = Some(top);
+        // Before R1's guard this never returned.
+        e.go(&show);
+        said_circle(&e, &show, top);
+        goes_on_after_a_circle(&mut e, &mut show);
+    }
+
+    #[test]
+    fn a_long_chain_of_auto_continues_fires_every_cue() {
+        // Longer than a cap of 1,000 cues a press would allow.
+        let mut show = Show::default();
+        let ids: Vec<CueId> = (0..1500)
+            .map(|_| wait_cue(&mut show, 30.0, ContinueMode::AutoContinue))
+            .collect();
+        let mut e = engine_without_media();
+        e.playhead = Some(ids[0]);
+        e.go(&show);
+        assert!(ids.iter().all(|id| playing(&e, *id)));
+        assert!(!e.messages.iter().any(|m| m.1.contains("no wait")));
+    }
+
+    #[test]
+    fn a_group_with_many_children_starts_them_all() {
+        // Started all together by its timeline's run, and, as a slide show
+        // set to start all together, through the queue `fire` keeps.
+        for slides in [false, true] {
+            let mut show = Show::default();
+            let (g, kids) = group(&mut show, GroupMode::Timeline, &[30.0; 1500]);
+            if slides {
+                let i = show.cue_index(g).unwrap();
+                if let CueKind::Group(gc) = &mut show.cues[i].kind {
+                    gc.slides = Some(SlideShow {
+                        fade: 0.0,
+                        duration: 5.0,
+                        advance: Advance::Automatic,
+                    });
+                }
+            }
+            let mut e = engine_without_media();
+            e.fire(&show, g);
+            assert!(kids.iter().all(|id| playing(&e, *id)), "slides: {slides}");
+            assert!(!e.messages.iter().any(|m| m.1.contains("no wait")));
+        }
+    }
+
+    #[test]
+    fn a_cue_may_be_started_twice_by_one_go() {
+        // GO on a memo that goes on to two Start cues, each starting the
+        // same cue (already playing once when the second does).
+        let mut show = Show::default();
+        let w = wait_cue(&mut show, 30.0, ContinueMode::DoNotContinue);
+        let mut memo = show.make_cue(CueType::Control, None, show.cues.len());
+        memo.kind = CueKind::Control(ControlCue {
+            action: ControlAction::Memo,
+            target: None,
+            ..Default::default()
+        });
+        memo.continue_mode = ContinueMode::AutoContinue;
+        let top = memo.id;
+        show.cues.push(memo);
+        let s1 = control_cue(&mut show, ControlAction::Start, w);
+        control_cue(&mut show, ControlAction::Start, w);
+        let i = show.cue_index(s1).unwrap();
+        show.cues[i].continue_mode = ContinueMode::AutoContinue;
+        let mut e = engine_without_media();
+        e.playhead = Some(top);
+        e.go(&show);
+        let copies = e.active.iter().filter(|a| a.cue_id == w).count();
+        assert_eq!(copies, 2, "each Start cue's");
+        assert!(!e.messages.iter().any(|m| m.1.contains("no wait")));
     }
 
     #[test]
