@@ -141,3 +141,83 @@ pub fn cover_display(window: &Window, monitor: &MonitorHandle) -> bool {
     }
     true
 }
+
+/// Set when a Quit from the app menu (Cmd+Q, the Dock's Quit) was turned into
+/// a question in the window (see `ask_before_quitting`).
+static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
+/// Whether a Quit now may go straight through: nothing to ask
+/// (`ui::quit_would_ask`), or a display computer. Set by the app each pass.
+static QUIT_FREELY: AtomicBool = AtomicBool::new(true);
+
+thread_local! {
+    /// What brings the event loop round once a Quit has been asked for.
+    static QUIT_WAKE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether the app menu's Quit was turned into a question since this was last
+/// asked; asking clears it.
+pub fn take_quit_asked() -> bool {
+    QUIT_ASKED.swap(false, Ordering::AcqRel)
+}
+
+/// Whether the app menu's Quit may end NewQ without a question now.
+pub fn set_quit_freely(free: bool) {
+    QUIT_FREELY.store(free, Ordering::Release);
+}
+
+/// The method's type: NSUInteger `applicationShouldTerminate:(id)sender`.
+type ShouldTerminate = extern "C" fn(
+    *mut objc2::runtime::AnyObject,
+    objc2::runtime::Sel,
+    *mut objc2::runtime::AnyObject,
+) -> usize;
+
+/// `-[NSApplicationDelegate applicationShouldTerminate:]`: straight through
+/// when there is nothing to ask; else cancelled, and the question put up in
+/// the window (the flag, and the event loop woken to see it).
+extern "C" fn should_terminate(
+    _this: *mut objc2::runtime::AnyObject,
+    _cmd: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) -> usize {
+    // NSTerminateCancel = 0, NSTerminateNow = 1.
+    if QUIT_FREELY.load(Ordering::Acquire) {
+        return 1;
+    }
+    QUIT_ASKED.store(true, Ordering::Release);
+    QUIT_WAKE.with(|w| {
+        if let Some(wake) = &*w.borrow() {
+            wake();
+        }
+    });
+    0
+}
+
+/// The app menu's Quit (Cmd+Q) and the Dock's send `terminate:`, which
+/// winit's application delegate lets through at once: NewQ ended with cues
+/// playing and changes unsaved, without a word. This gives winit's delegate
+/// an `applicationShouldTerminate:` (it has none), which cancels the quit and
+/// calls `wake` whenever the window would ask (`set_quit_freely`), for the app
+/// to ask there. Once, on the main thread, after the event loop has started.
+/// False if the delegate's class wasn't found or already had the method
+/// (Quit then goes through at once, as before).
+pub fn ask_before_quitting(wake: impl Fn() + 'static) -> bool {
+    QUIT_WAKE.with(|w| *w.borrow_mut() = Some(Box::new(wake)));
+    let Some(class) = objc2::runtime::AnyClass::get("WinitApplicationDelegate") else {
+        return false;
+    };
+    let imp: ShouldTerminate = should_terminate;
+    // SAFETY: the class is winit's, registered; the function has the method's
+    // signature (NSUInteger return; self, _cmd, sender), which the type
+    // encoding says; a method winit's class doesn't have changes nothing it does.
+    let added = unsafe {
+        objc2::ffi::class_addMethod(
+            class as *const objc2::runtime::AnyClass as *mut objc2::ffi::objc_class,
+            objc2::sel!(applicationShouldTerminate:).as_ptr(),
+            Some(std::mem::transmute::<ShouldTerminate, unsafe extern "C" fn()>(imp)),
+            c"Q@:@".as_ptr(),
+        )
+    };
+    added != objc2::ffi::NO
+}

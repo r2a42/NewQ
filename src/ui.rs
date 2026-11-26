@@ -1,6 +1,10 @@
 //! The control window UI: transport, cue list, inspector, active cues and outputs.
 
 mod keys;
+mod leave;
+pub use leave::Question;
+#[cfg(target_os = "macos")]
+pub(crate) use leave::quit_would_ask;
 mod menus;
 use menus::menu_bar;
 mod modern;
@@ -185,6 +189,15 @@ struct SaveJob {
     path: PathBuf,
     done: std::sync::mpsc::Receiver<Result<(), String>>,
     /// The show as it was saved, which is what it is "unchanged" against.
+    snapshot: Option<String>,
+}
+
+/// A save asked for while another was still being written (a slow disk, a
+/// Save As to a new name a moment after a Save): the show as it was then, and
+/// where it goes. Started as soon as the save before it has finished.
+struct NextSave {
+    path: PathBuf,
+    copy: Show,
     snapshot: Option<String>,
 }
 
@@ -377,7 +390,18 @@ pub struct UiState {
     /// The corner (or whole area) last clicked in an open editor, which the
     /// arrow keys move. Set while drawing, hence the `Cell`.
     handle_sel: Cell<Option<HandleSel>>,
+    /// The main window's close button (Alt+F4) or a Mac's app menu asked to
+    /// quit: asked about in the next frame (`leave::ask`).
     pub quit_requested: bool,
+    /// The question up in the window, if any (`leave`), and the answer given
+    /// to it, acted on at the end of the main window's frame.
+    pub question: Option<Question>,
+    answer: Option<leave::Answer>,
+    /// A quit was agreed to (or needed no asking): the app stops what plays
+    /// and ends.
+    pub quit_now: bool,
+    /// A save that failed, said in the window until read (`tell_save_failed`).
+    save_failed: Option<String>,
     /// MIDI inputs that are connected now (set by the app every few seconds).
     pub midi_ports: Vec<String>,
     /// MIDI outputs that are connected now (set with the inputs).
@@ -443,6 +467,12 @@ pub struct UiState {
     deck_error: Option<String>,
     /// A save being written, if any.
     saving: Option<SaveJob>,
+    /// A save asked for while that one was being written: the latest asked
+    /// for, started when it has finished.
+    save_next: Option<NextSave>,
+    /// Tests: called on the save's thread before it writes (a slow disk).
+    #[cfg(test)]
+    save_hold: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// The show as last serialised, for the unsaved-changes mark and the undo
     /// history, and when (egui time). It is redone when something may have
     /// changed it, not every frame: serialising a big show is over a
@@ -557,6 +587,8 @@ impl UiState {
         self.handle_sel.set(None);
         self.capture_hotkey = None;
         self.confirm_edit_mode = false;
+        self.question = None;
+        self.answer = None;
         self.show_media = false;
         self.show_about = false;
         self.show_keys = false;
@@ -611,6 +643,9 @@ impl UiState {
         self.dirty = false;
         self.show_mode = true;
         self.confirm_edit_mode = false;
+        // A question about leaving the user's show is not about the test's.
+        self.question = None;
+        self.answer = None;
         self.capture_hotkey = None;
         // Corners, an area or the multiview's layout being edited name the
         // user's displays, which the test's take the place of.
@@ -1152,6 +1187,12 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     network::identify(ui.ctx(), st);
     poll_save(ui.ctx(), engine, st);
     refresh_missing(ui.ctx(), show, st);
+    // The close button (or a Mac's app menu): asked about in the window.
+    if std::mem::take(&mut st.quit_requested) {
+        leave::ask(leave::Leave::Quit, show, engine, st);
+    }
+    // Before the keys, so that Esc answers it (and isn't also the panic key).
+    leave::window(ui.ctx(), engine, st);
     // A computer following a primary is locked: the show is run from there.
     let locked = network::locked(st);
     if !locked {
@@ -1283,6 +1324,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         track_history(st, &json, now, acted);
         st.json = Some(json);
     }
+    leave::settle(show, engine, st);
 }
 
 /// How long the show may go without being looked at for changes (seconds).
@@ -1413,6 +1455,10 @@ fn keyboard(ctx: &egui::Context, show: &Show, st: &UiState, actions: &mut Vec<Ac
         }
         if fresh_key(i, egui::Modifiers::COMMAND, Key::N) {
             actions.push(Action::New);
+        }
+        // (On a Mac, Cmd+Q is the app menu's: `macwin::ask_before_quitting`.)
+        if fresh_key(i, egui::Modifiers::COMMAND, Key::Q) {
+            actions.push(Action::Quit);
         }
         if fresh_key(i, egui::Modifiers::COMMAND, Key::Comma) {
             actions.push(Action::ToggleSettings);
@@ -1715,6 +1761,9 @@ pub fn draw_popout(
 ) {
     let mut actions: Vec<Action> = Vec::new();
     actions.append(&mut st.stage.actions);
+    // A quit asked for here (Ctrl+Q) is asked about here too, as in the main
+    // window; the answer is acted on there.
+    leave::window(ui.ctx(), engine, st);
     keyboard(ui.ctx(), show, st, &mut actions);
     egui::Panel::top("popout_bar").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -10861,70 +10910,6 @@ fn show_dialog() -> rfd::FileDialog {
     rfd::FileDialog::new().add_filter("NewQ show", &[SHOW_EXTENSION])
 }
 
-/// Ask what to do with unsaved changes. Returns true if it is OK to continue.
-pub fn confirm_discard(show: &Show, st: &mut UiState) -> bool {
-    // During a test the show is the test's, which is put away unsaved and the
-    // user's own comes back: there is nothing here to ask about (and a Save
-    // would put the test show in a file of the user's).
-    if st.test_locked {
-        return true;
-    }
-    if let Some(why) = finish_save(show, st) {
-        tell_save_failed(&why, true);
-    }
-    if !st.dirty {
-        recovery::clear(st.show_path.as_deref());
-        return true;
-    }
-    let answer = rfd::MessageDialog::new()
-        .set_title("Unsaved changes")
-        .set_description("Save changes to this show first?")
-        .set_buttons(rfd::MessageButtons::YesNoCancel)
-        .show();
-    let proceed = match answer {
-        rfd::MessageDialogResult::Yes => save(show, st, false),
-        rfd::MessageDialogResult::No => true,
-        _ => false,
-    };
-    if proceed {
-        // Deliberately leaving this show behind (saved or not): nothing to recover.
-        recovery::clear(st.show_path.as_deref());
-    }
-    proceed
-}
-
-/// Save, asking where first if the show has no file or `save_as`. This waits
-/// for the dialog, which is fine when something else waits on the answer
-/// (leaving a show); otherwise `Action::Save` asks on a thread of its own.
-fn save(show: &Show, st: &mut UiState, save_as: bool) -> bool {
-    let path = match (&st.show_path, save_as) {
-        (Some(p), false) => p.clone(),
-        _ => match show_dialog()
-            .set_file_name(format!("{}.{SHOW_EXTENSION}", show.name))
-            .save_file()
-        {
-            Some(p) => p.with_extension(SHOW_EXTENSION),
-            None => return false,
-        },
-    };
-    write_show(show, st, &path)
-}
-
-/// Save the show to `path` and wait for it, telling the operator if that
-/// fails. For when something waits on the answer (leaving the show).
-fn write_show(show: &Show, st: &mut UiState, path: &Path) -> bool {
-    match show.save(path) {
-        Ok(()) => {
-            saved(st, path.to_path_buf(), serde_json::to_string(show).ok());
-            true
-        }
-        Err(e) => {
-            tell_save_failed(&format!("{e:#}"), true);
-            false
-        }
-    }
-}
-
 /// The show is on the disk at `path`, as `snapshot`.
 fn saved(st: &mut UiState, path: PathBuf, snapshot: Option<String>) {
     // What was kept as a recovery copy, for the old name and the new, is now
@@ -10936,42 +10921,52 @@ fn saved(st: &mut UiState, path: PathBuf, snapshot: Option<String>) {
     st.saved_json = snapshot;
 }
 
-/// Say that a save failed. Waiting for the operator to read it would stop the
-/// show, so unless something is waiting on the answer anyway, it is shown on
-/// a thread of its own.
-fn tell_save_failed(why: &str, wait: bool) {
-    // (No dialogs in tests.)
-    if cfg!(test) {
-        return;
-    }
-    let why = why.to_string();
-    let show = move || {
-        rfd::MessageDialog::new()
-            .set_title("Save failed")
-            .set_description(why)
-            .show();
-    };
-    if wait {
-        show();
-    } else {
-        let _ = std::thread::Builder::new()
-            .name("save-failed".into())
-            .spawn(show);
-    }
+/// Say that a save failed, in the window, until the operator has read it
+/// (`leave::save_failed_window`). Waiting for them to read it would stop the
+/// show, so it is not a system dialog (and the status bar says it too).
+fn tell_save_failed(st: &mut UiState, why: &str) {
+    st.save_failed = Some(why.to_string());
 }
 
-/// Start writing the show to `path` on a thread of its own. One save at a time.
-fn start_save(show: &Show, st: &mut UiState, path: PathBuf) {
+/// Start writing the show to `path` on a thread of its own. One save at a
+/// time: one asked for while another is being written is kept (the latest of
+/// them, with the show as it is now) and started when that one has finished,
+/// so a Save As made meanwhile is never lost.
+fn start_save(show: &Show, engine: &mut Engine, st: &mut UiState, path: PathBuf) {
+    let next = NextSave {
+        path,
+        copy: show.clone(),
+        snapshot: serde_json::to_string(show).ok(),
+    };
     if st.saving.is_some() {
+        engine.log(format!(
+            "Still saving: {} is written as soon as that has finished",
+            next.path.display()
+        ));
+        st.save_next = Some(next);
         return;
     }
-    let copy = show.clone();
-    let snapshot = serde_json::to_string(show).ok();
+    begin_save(st, next);
+}
+
+/// Write `job` on a thread of its own.
+fn begin_save(st: &mut UiState, job: NextSave) {
+    let NextSave {
+        path,
+        copy,
+        snapshot,
+    } = job;
     let (tx, done) = std::sync::mpsc::channel();
     let to = path.clone();
+    #[cfg(test)]
+    let hold = st.save_hold.clone();
     let spawned = std::thread::Builder::new()
         .name("save".into())
         .spawn(move || {
+            #[cfg(test)]
+            if let Some(hold) = hold {
+                hold();
+            }
             let _ = tx.send(copy.save(&to).map_err(|e| format!("{e:#}")));
         });
     if spawned.is_ok() {
@@ -10998,28 +10993,14 @@ fn poll_save(ctx: &egui::Context, engine: &mut Engine, st: &mut UiState) {
     match result {
         Ok(()) => saved(st, job.path, job.snapshot),
         Err(why) => {
-            engine.log(format!("Could not save the show: {why}"));
-            tell_save_failed(&why, false);
+            engine.problem(format!("Could not save the show: {why}"));
+            tell_save_failed(st, &why);
         }
     }
-}
-
-/// Wait for the save being written, if there is one, so leaving the show
-/// doesn't race it. Returns why it failed, if it did.
-fn finish_save(show: &Show, st: &mut UiState) -> Option<String> {
-    let job = st.saving.take()?;
-    let result = job
-        .done
-        .recv()
-        .unwrap_or_else(|_| Err("the save stopped".into()));
-    match result {
-        Ok(()) => {
-            saved(st, job.path, job.snapshot);
-            // Unchanged since, unless edited meanwhile.
-            st.dirty = serde_json::to_string(show).ok() != st.saved_json;
-            None
-        }
-        Err(why) => Some(why),
+    // The save asked for meanwhile, if any.
+    if let Some(next) = st.save_next.take() {
+        begin_save(st, next);
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
@@ -11694,12 +11675,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
             for f in files {
                 if f.extension().is_some_and(|e| e == SHOW_EXTENSION) {
-                    if confirm_discard(show, st) {
-                        match Show::load(&f) {
-                            Ok(new) => load_into(new, Some(f), show, engine, st),
-                            Err(e) => engine.log(format!("Could not open show: {e:#}")),
-                        }
-                    }
+                    leave::ask(leave::Leave::OpenFile(f), show, engine, st);
                     return;
                 }
                 match guess_cue_type(&f) {
@@ -11901,19 +11877,13 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 st.scroll_to_selected = true;
             }
         }
-        Action::New => {
-            if confirm_discard(show, st) {
-                load_into(Show::default(), None, show, engine, st);
-            }
-        }
-        Action::Open => {
-            if confirm_discard(show, st) {
-                start_dialog(st, show, DialogFor::OpenShow);
-            }
-        }
+        Action::New => leave::ask(leave::Leave::New, show, engine, st),
+        Action::Open => leave::ask(leave::Leave::Open, show, engine, st),
         Action::OpenShowFile(path, changed) => {
             // Edited while the dialog was open: ask again before they are lost.
-            if !changed || confirm_discard(show, st) {
+            if changed {
+                leave::ask(leave::Leave::OpenFile(path), show, engine, st);
+            } else {
                 match Show::load(&path) {
                     Ok(new) => load_into(new, Some(path), show, engine, st),
                     Err(e) => engine.log(format!("Could not open show: {e:#}")),
@@ -11921,11 +11891,11 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::Save => match st.show_path.clone() {
-            Some(path) => start_save(show, st, path),
+            Some(path) => start_save(show, engine, st, path),
             None => start_dialog(st, show, DialogFor::SaveShow),
         },
         Action::SaveAs => start_dialog(st, show, DialogFor::SaveShow),
-        Action::SaveShowTo(path) => start_save(show, st, path),
+        Action::SaveShowTo(path) => start_save(show, engine, st, path),
         Action::FireSelected => {
             if let Some(id) = st.selected {
                 engine.fire(show, id);
@@ -12419,7 +12389,7 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 st.geometry_edit = None;
             }
         }
-        Action::Quit => st.quit_requested = true,
+        Action::Quit => leave::ask(leave::Leave::Quit, show, engine, st),
     }
 }
 
@@ -13143,11 +13113,14 @@ mod tests {
 
     #[test]
     fn quitting_during_a_test_does_not_ask_to_save_the_test_show() {
-        let (show, _e, mut st) = running();
+        let (mut show, mut e, mut st) = running();
         st.dirty = true;
         st.test_locked = true;
-        // No dialog (it would block this test): straight through.
-        assert!(confirm_discard(&show, &mut st));
+        st.show_mode = true;
+        // The test's cues play, but nothing is asked: straight through.
+        e.fire(&show, show.cues[0].id);
+        apply(Action::Quit, &mut show, &mut e, &mut st);
+        assert!(st.quit_now && st.question.is_none());
     }
 
     #[test]
@@ -13400,10 +13373,13 @@ mod tests {
             "{}",
             a.len()
         );
-        // Shift doesn't matter; Ctrl does.
+        // Shift doesn't matter; Ctrl does (Ctrl+Q is Quit, which asks first).
         let a = keys_with(&show, &st, &[(Key::Q, M::SHIFT)]);
         assert!(matches!(a[..], [Action::FireCue(id)] if id == d));
-        assert!(keys_with(&show, &st, &[(Key::Q, M::COMMAND)]).is_empty());
+        assert!(matches!(
+            keys_with(&show, &st, &[(Key::Q, M::COMMAND)])[..],
+            [Action::Quit]
+        ));
         // Unbound keys do nothing, and the transport keys are untouched.
         assert!(keys_with(&show, &st, &[(Key::W, M::NONE)]).is_empty());
         let a = keys_with(&show, &st, &[(Key::Space, M::NONE)]);
@@ -17136,7 +17112,7 @@ mod tests {
     fn wait_for_save(engine: &mut Engine, st: &mut UiState) {
         let ctx = egui::Context::default();
         let t0 = std::time::Instant::now();
-        while st.saving.is_some() {
+        while st.saving.is_some() || st.save_next.is_some() {
             assert!(t0.elapsed().as_secs() < 10, "the save never finished");
             std::thread::sleep(std::time::Duration::from_millis(5));
             poll_save(&ctx, engine, st);
@@ -17167,17 +17143,9 @@ mod tests {
             st.saving.is_some(),
             "the request returns with the write still to do"
         );
-        // A second request while one runs is ignored.
-        apply(
-            Action::SaveShowTo(d.join("other.newq")),
-            &mut show,
-            &mut e,
-            &mut st,
-        );
         wait_for_save(&mut e, &mut st);
         assert!(st.saving.is_none());
         assert_eq!(Show::load(&path).unwrap().name, "Saved");
-        assert!(!d.join("other.newq").exists());
         assert_eq!(st.show_path.as_deref(), Some(path.as_path()));
         // The recovery copy is cleared (on a thread of its own, so a moment later).
         let t0 = std::time::Instant::now();
@@ -17220,22 +17188,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A slow disk: each save waits on its thread until `release` is sent.
+    fn slow_disk(st: &mut UiState) -> std::sync::mpsc::Sender<()> {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        st.save_hold = Some(std::sync::Arc::new(move || {
+            let _ = wait.lock().map(|w| w.recv());
+        }));
+        release
+    }
+
     #[test]
-    fn leaving_a_show_waits_for_a_save_that_is_still_being_written() {
-        let d = save_dir("leave");
-        let path = d.join("a.newq");
-        let mut show = Show::default();
+    fn a_save_as_asked_for_during_a_slow_save_is_still_written() {
+        let d = save_dir("slow");
+        let (first, second, third) = (d.join("a.newq"), d.join("b.newq"), d.join("c.newq"));
+        let mut show = Show {
+            name: "One".into(),
+            ..Show::default()
+        };
         let (mut e, mut st) = (Engine::for_tests(), UiState::default());
         frame_end(&show, &mut st, 0.0, false);
-        show.name = "Edited".into();
-        st.dirty = true;
-        apply(Action::SaveShowTo(path.clone()), &mut show, &mut e, &mut st);
-        // Quitting right away: it waits for the write, finds nothing unsaved,
-        // and doesn't ask.
-        assert!(confirm_discard(&show, &mut st));
-        assert!(st.saving.is_none());
-        assert_eq!(Show::load(&path).unwrap().name, "Edited");
-        assert!(!st.dirty);
+        let release = slow_disk(&mut st);
+        apply(
+            Action::SaveShowTo(first.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(st.saving.is_some(), "the first is being written");
+        // Two Save As while it is: the later one (and the show as it was
+        // then) is what is written next; the status bar says so.
+        show.name = "Two".into();
+        apply(
+            Action::SaveShowTo(second.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        show.name = "Three".into();
+        apply(
+            Action::SaveShowTo(third.clone()),
+            &mut show,
+            &mut e,
+            &mut st,
+        );
+        assert!(
+            e.messages.iter().any(|(_, m)| m.contains("Still saving")),
+            "{:?}",
+            e.messages
+        );
+        show.name = "Edited after".into();
+        // The disk catches up.
+        for _ in 0..2 {
+            release.send(()).unwrap();
+        }
+        wait_for_save(&mut e, &mut st);
+        assert_eq!(Show::load(&first).unwrap().name, "One");
+        assert!(!second.exists(), "replaced by the later Save As");
+        assert_eq!(Show::load(&third).unwrap().name, "Three");
+        assert_eq!(st.show_path.as_deref(), Some(third.as_path()));
         let _ = std::fs::remove_dir_all(&d);
     }
 

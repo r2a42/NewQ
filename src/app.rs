@@ -3211,8 +3211,11 @@ impl App {
             self.ui.preview_fps = Some((f, ctl.last_paint));
         }
 
-        if let Some(rec) = self.pending_recovery.take() {
-            offer_recovery(&rec, &mut self.show, &mut self.engine, &mut self.ui);
+        // Asked in the window (`ui::leave`): the show may already be playing.
+        if self.ui.question.is_none()
+            && let Some(rec) = self.pending_recovery.take()
+        {
+            self.ui.question = Some(ui::Question::Recover(rec));
         }
 
         let raw = ctl.state.take_egui_input(&ctl.window);
@@ -3264,17 +3267,15 @@ impl App {
             None => textures.clear(),
         }
 
-        if self.ui.quit_requested {
-            self.ui.quit_requested = false;
-            if ui::confirm_discard(&self.show, &mut self.ui) {
-                let mut test = std::mem::take(&mut self.ui.test);
-                test.shutdown(&mut self.show, &mut self.engine, &mut self.ui);
-                self.ui.test = test;
-                // The computers told the test is over before anything else.
-                self.net_test_flush();
-                self.engine.stop_all(0.0);
-                event_loop.exit();
-            }
+        // Agreed to in the window, or nothing to ask (`ui::leave`).
+        if std::mem::take(&mut self.ui.quit_now) {
+            let mut test = std::mem::take(&mut self.ui.test);
+            test.shutdown(&mut self.show, &mut self.engine, &mut self.ui);
+            self.ui.test = test;
+            // The computers told the test is over before anything else.
+            self.net_test_flush();
+            self.engine.stop_all(0.0);
+            event_loop.exit();
         }
     }
 
@@ -3316,6 +3317,29 @@ impl App {
 }
 
 impl App {
+    /// A Mac's app menu Quit (Cmd+Q, the Dock's Quit): through at once when
+    /// nothing would be asked (or on a display computer, which asks nothing),
+    /// else asked in the window as the close button is (`macwin::ask_before_quitting`).
+    #[cfg(target_os = "macos")]
+    fn mac_quit(&mut self, event_loop: &ActiveEventLoop) {
+        let display = self.is_display_computer();
+        // (A test, which asks nothing either, is ended in order on the way
+        // out: through the window's quit, `render_control`.)
+        crate::macwin::set_quit_freely(
+            display || (!self.ui.test_locked && !ui::quit_would_ask(&self.engine, &self.ui)),
+        );
+        if crate::macwin::take_quit_asked() {
+            if display {
+                self.quit_display_computer(event_loop, "the app menu's Quit");
+            } else {
+                self.ui.quit_requested = true;
+                if let Some(ctl) = &self.control {
+                    ctl.window.request_redraw();
+                }
+            }
+        }
+    }
+
     /// A display computer quits at once: it has no show of its own to save
     /// (it plays its primary's) and nobody at it to ask.
     fn quit_display_computer(&mut self, event_loop: &ActiveEventLoop, how: &str) {
@@ -3385,6 +3409,10 @@ impl App {
             let wake = self.wake.clone();
             self.screen_watch = Some(crate::macwin::watch_screens(move || wake()));
             crate::freeze::start_watching(crate::crash::log_dir());
+            let wake = self.wake.clone();
+            if !crate::macwin::ask_before_quitting(move || wake()) {
+                log::warn!("the app menu's Quit can't ask first: it quits at once");
+            }
         }
         let window = Arc::new(
             event_loop
@@ -3885,6 +3913,8 @@ impl App {
             app.sync_clicker();
         });
         self.crumbs.lap("layout, audio outputs and remote control");
+        #[cfg(target_os = "macos")]
+        self.mac_quit(event_loop);
         // The primary asked NewQ to start again.
         if self.play.restart {
             self.play.restart = false;
@@ -4660,35 +4690,6 @@ fn handed_show_refused(playing: bool, testing: bool, following: bool) -> Option<
     } else {
         None
     }
-}
-
-/// Ask whether to take back the changes a crashed session left in `rec`.
-fn offer_recovery(rec: &std::path::Path, show: &mut Show, engine: &mut Engine, ui: &mut UiState) {
-    let restore = rfd::MessageDialog::new()
-        .set_title("Recover unsaved changes?")
-        .set_description(
-            "NewQ didn't close properly last time and kept a copy of the changes that \
-             hadn't been saved. Restore them?",
-        )
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
-        == rfd::MessageDialogResult::Yes;
-    if restore {
-        match Show::load(rec) {
-            Ok(recovered) => {
-                // The show on disk stays the saved one, so the title shows the edits.
-                ui.set_saved(show);
-                *show = recovered;
-                engine.forget_lists();
-                engine.playhead = show.cues.first().map(|c| c.id);
-                ui.selected = engine.playhead;
-                return;
-            }
-            Err(e) => engine.problem(format!("Could not read the recovery file: {e:#}")),
-        }
-    }
-    // Declined, or the question couldn't be asked: keep the copy, out of the way.
-    recovery::set_aside(rec);
 }
 
 /// Each visible projector of the 3D stage, as the views with their light on

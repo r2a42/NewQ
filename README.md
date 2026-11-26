@@ -99,6 +99,16 @@ stays on the computer until you send it yourself.
   pause, the cart, hotkeys, OSC, MIDI and the web remote work as always. Leaving
   show mode asks first. The mode is remembered for this computer, so a restart
   in the middle of a show comes back in show mode; it isn't saved in the show.
+- **Quitting during a show:** File ▸ Quit, Ctrl+Q (Command-Q on a Mac), the main
+  window's close button and Alt+F4 ask first while cues are playing or show mode is
+  on ("Cues are playing. Quit and stop them?"), and then about unsaved changes (Save,
+  Don't save, Cancel; Save quits once the show is written, and a save that fails
+  doesn't quit). These questions, and the ones for New and Open, are drawn in the
+  window: the show plays on behind them, the keys still work, and Esc is Cancel.
+  Closing a display's window in show mode or while cues play is ignored (the status
+  bar says so) rather than switching that display off. A Save or Save As made while
+  an earlier save is still being written (a slow USB stick or network share) is
+  written as soon as that one has finished.
 - **Control cues:** *Cue ▸ Add ▸ Control* makes a cue that acts on another
   cue (or the list) and takes no time: **Start** (fire it as if by hand),
   **Pause** and **Resume** (hold just that cue, picture and sound, while the
@@ -1114,8 +1124,8 @@ stays on the computer until you send it yourself.
   text box, Ctrl+Z undoes the typing there instead.
 - **Autosave and recovery:** every 30 seconds, unsaved changes are copied to
   `<show>.newq.recovery` beside the show (a show that has no name yet uses the
-  temporary folder). If NewQ doesn't close properly, the next start offers to
-  restore them. Saving, or choosing not to save when closing, deletes the copy.
+  temporary folder). If NewQ doesn't close properly, the next start offers, in
+  the window, to restore them. Saving, or choosing not to save when closing, deletes the copy.
   If you decline the offer the copy is kept as `.recovery.old` rather than
   deleted. Saving writes to a temporary file and renames it, so a crash during
   a save can't leave half a show.
@@ -2615,6 +2625,7 @@ night is about 3,000 rows.
 | Ctrl+C / Ctrl+X / Ctrl+V (tracks editor) | Copy / cut the picked clips / paste at the playhead on their tracks |
 | Ctrl+D (tracks editor) | Duplicate the picked clips just after them     |
 | Ctrl+Shift+S          | Save as                                         |
+| Ctrl+Q                | Quit (asks first while cues play, in Show mode, or with unsaved changes) |
 | Ctrl+F                | Find cues                                       |
 | Ctrl+,                | Open / close the settings                       |
 | Ctrl+Shift+L          | Show mode / edit mode (leaving show mode asks first) |
