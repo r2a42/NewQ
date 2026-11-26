@@ -22,11 +22,11 @@
 //! started late catches up).
 
 use crate::engine::{CueStatus, Engine, GoPlan, RunState, RunView};
-use crate::output::{OscArg, osc_message};
+use crate::output::{OscArg, Resolver, osc_message};
 use crate::show::{CueId, Show, TimelineKey};
 use crate::timeline::model;
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -320,25 +320,47 @@ pub fn repeat(now: &Snapshot) -> Vec<Message> {
     out
 }
 
+/// The address in `host:port`: an address as it is, a name looked up with
+/// `resolve` (which can take seconds).
+fn look_up(resolve: &Resolver, wanted: &str) -> Option<SocketAddr> {
+    if let Ok(addr) = wanted.parse::<SocketAddr>() {
+        return Some(addr);
+    }
+    let (host, port) = wanted.rsplit_once(':')?;
+    let port = port.trim().parse::<u16>().ok()?;
+    let ip = resolve(host.trim()).ok()?.into_iter().next()?;
+    Some(SocketAddr::new(ip, port))
+}
+
 /// Sends the show's state to the address in the settings.
 pub struct Feedback {
     wanted: String,
     /// Filled in by the thread that looks the address up (a name may take a while).
-    addr: Arc<parking_lot::Mutex<Option<SocketAddr>>>,
+    /// With the number of the setting it was looked up for: a change of
+    /// the setting counts up, and an answer for an older one is dropped (a
+    /// slow name answering last must not undo a newer setting).
+    addr: Arc<parking_lot::Mutex<(u64, Option<SocketAddr>)>>,
     socket: Option<UdpSocket>,
     last: Option<Snapshot>,
     at: Instant,
     repeated: Instant,
     /// The last problem, for the settings page.
     pub error: Option<String>,
+    resolve: Resolver,
 }
 
 impl Feedback {
     pub fn new() -> Feedback {
+        Feedback::with_resolver(crate::output::system_resolver())
+    }
+
+    /// Feedback that looks names up with `resolve` (a stand-in in tests).
+    fn with_resolver(resolve: Resolver) -> Feedback {
         let now = Instant::now();
         Feedback {
+            resolve,
             wanted: String::new(),
-            addr: Arc::new(parking_lot::Mutex::new(None)),
+            addr: Arc::new(parking_lot::Mutex::new((0, None))),
             socket: None,
             last: None,
             at: now,
@@ -356,7 +378,12 @@ impl Feedback {
         self.wanted = wanted.to_string();
         self.last = None;
         self.error = None;
-        *self.addr.lock() = None;
+        let generation = {
+            let mut slot = self.addr.lock();
+            slot.0 += 1;
+            slot.1 = None;
+            slot.0
+        };
         self.socket = None;
         if wanted.is_empty() {
             return;
@@ -368,16 +395,24 @@ impl Feedback {
                 return;
             }
         }
-        let (slot, name) = (self.addr.clone(), wanted.to_string());
+        let (slot, name, resolve) = (self.addr.clone(), wanted.to_string(), self.resolve.clone());
         let spawned = std::thread::Builder::new()
             .name("osc-feedback-lookup".into())
             .spawn(move || {
-                let found = name.to_socket_addrs().ok().and_then(|mut a| a.next());
-                *slot.lock() = found;
+                let found = look_up(&resolve, &name);
+                let mut slot = slot.lock();
+                if slot.0 == generation {
+                    slot.1 = found;
+                }
             });
         if spawned.is_err() {
             self.error = Some("could not look the address up".into());
         }
+    }
+
+    #[cfg(test)]
+    fn address(&self) -> Option<SocketAddr> {
+        self.addr.lock().1
     }
 
     /// Send what has changed, at most ten times a second.
@@ -385,7 +420,7 @@ impl Feedback {
         if self.socket.is_none() || now.duration_since(self.at) < INTERVAL {
             return;
         }
-        let Some(addr) = *self.addr.lock() else {
+        let Some(addr) = self.addr.lock().1 else {
             return;
         };
         self.at = now;
@@ -536,6 +571,41 @@ mod tests {
         let _ = parse_osc(&got[0]);
         f.set_target("");
         assert!(f.socket.is_none());
+    }
+
+    #[test]
+    fn an_older_slow_lookup_does_not_overwrite_a_newer_address() {
+        // The stand-in: "old-desk" answers only when the gate opens.
+        let (gate, closed) = crossbeam_channel::unbounded::<()>();
+        let (started_tx, started) = crossbeam_channel::unbounded::<()>();
+        let resolve: Resolver = Arc::new(move |name: &str| {
+            assert_eq!(name, "old-desk", "an address is not looked up");
+            let _ = started_tx.send(());
+            while closed.recv().is_ok() {}
+            Ok(vec![std::net::IpAddr::from([127, 0, 0, 1])])
+        });
+        let mut f = Feedback::with_resolver(resolve);
+        f.set_target("old-desk:9000");
+        started.recv().unwrap();
+        f.set_target("127.0.0.1:9001");
+        let newer: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let began = Instant::now();
+        while f.address() != Some(newer) && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(f.address(), Some(newer));
+        // The old lookup answers last; once every lookup thread is done (each
+        // holds the slot), the newer address is still the one.
+        drop(gate);
+        let began = Instant::now();
+        while Arc::strong_count(&f.addr) > 1 && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(Arc::strong_count(&f.addr), 1, "the lookups ended");
+        assert_eq!(f.address(), Some(newer), "the older answer was dropped");
+        // And one for a target that was then switched off is dropped too.
+        f.set_target("");
+        assert_eq!(f.address(), None);
     }
 
     fn with_timeline(word: &'static str, tenths: i64) -> Snapshot {
