@@ -360,7 +360,9 @@ impl App {
         if self.play.have == Some(hash) {
             return;
         }
-        let mut show: crate::show::Show = match serde_json::from_str(&json) {
+        // (The hash stays the bytes', so putting the show right never puts
+        // the computer out of step.)
+        let (show, unknown) = match crate::net::play::read_show(&json) {
             Ok(s) => s,
             Err(e) => {
                 self.engine.problem(format!(
@@ -369,9 +371,12 @@ impl App {
                 return;
             }
         };
-        // (The hash stays the bytes', so putting this right never puts the
-        // computer out of step.)
-        show.sanitize_stage();
+        if unknown > 0 {
+            self.engine.problem(format!(
+                "Show network: {unknown} of the primary's cues were made in a newer NewQ and \
+                 can't play on this computer (update NewQ here)"
+            ));
+        }
         self.show = show;
         self.ui.took_synced_show(&self.show, &mut self.engine);
         self.ui.check_media(&self.show);
@@ -411,10 +416,9 @@ impl App {
         let Ok(json) = std::fs::read_to_string(&path) else {
             return false;
         };
-        let Ok(mut show) = serde_json::from_str::<crate::show::Show>(&json) else {
+        let Ok((show, _)) = crate::net::play::read_show(&json) else {
             return false;
         };
-        show.sanitize_stage();
         self.show = show;
         self.engine.playhead = self.show.cues.first().map(|c| c.id);
         self.ui.took_synced_show(&self.show, &mut self.engine);
