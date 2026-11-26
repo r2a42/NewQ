@@ -1545,6 +1545,14 @@ Open it on a computer with projectors or screens and that is all you do there:
   set one on the primary and the computers of the show obey no primary that
   doesn't have it (the passcode itself never crosses the network). A computer
   waiting to join can be given it too, and then only that show takes it.
+- **Without a passcode the show network trusts your network.** Anything on the
+  same network that speaks NewQ's language and says it is your primary can run
+  your display computers' cues and replace their show. Set a passcode when the
+  network isn't only yours (a venue's, a festival's, one with guests on it):
+  then a computer obeys only a primary that proves it, and a primary sends the
+  show only to computers that prove it or that it added itself. Even then, keep
+  the show network on a network you control: the passcode guards commands, it
+  doesn't hide them.
 
 ### Media on every computer
 

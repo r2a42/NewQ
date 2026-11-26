@@ -21,6 +21,14 @@ release page, and a release is refused if it has none.
 - **Timeline lists that stop and run each other at their start no longer crash NewQ.** Two
   timeline lists whose first cues stopped and ran each other made NewQ close at once; now the
   circle stops and the status bar names the list.
+- **The show network's passcode now guards commands.** A display computer acts only on the primary
+  it follows, and with a passcode only on one that proved it: something else on the network that
+  merely gives the primary's name can no longer fire cues, replace the show or restart the
+  computer, even while the real primary is away, and it no longer keeps the real primary out when
+  it comes back. A primary sends the show and its cues only to computers it added, and with a
+  passcode only to those that proved it. Without a passcode the show network still trusts
+  everything on your network: the README's *Show network* section says so.
+
 - **The show network turns away connections that don't say who they are.** A connection to a
   computer's show network port must introduce itself at once and briefly; only a few that haven't
   may wait at a time, and a message that claims to be huge no longer makes NewQ set memory aside

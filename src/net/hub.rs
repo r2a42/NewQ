@@ -61,6 +61,10 @@ pub const UNNAMED_PER_ADDRESS: usize = 4;
 /// A connection that hasn't said hello this long after it opened is closed (a
 /// NewQ says it the moment it connects).
 pub const HELLO_WITHIN: Duration = Duration::from_secs(3);
+/// A primary with a passcode closes a session that says it is of its network
+/// and hasn't proved the passcode this long after it opened (a NewQ proves it
+/// straight after its hello): it would hold that computer's place.
+pub const PROVE_WITHIN: Duration = Duration::from_secs(10);
 
 /// Where the hub keeps its file and which ports it uses.
 #[derive(Clone, Debug)]
@@ -527,9 +531,14 @@ struct Conn {
     /// Their proof checked against our key: None when we have no key; unset
     /// until it arrives.
     proof: Option<Option<bool>>,
-    /// They take orders from us (or will be adopted by us).
+    /// They take orders from us (or will be adopted by us): they said
+    /// `Welcome`, counted only while this computer is a primary.
     welcomed: bool,
-    /// We take orders from them.
+    /// A primary's trust in a computer it runs (`heeded`): welcomed, and with a
+    /// passcode, proved it, or given the key by this primary over this session.
+    trusted: bool,
+    /// We take orders from them (`node::judge` said so, the passcode proved
+    /// when this computer holds one).
     obeying: bool,
     closing: bool,
     /// When the connection was made (a hello is due within `HELLO_WITHIN`).
@@ -786,7 +795,15 @@ impl State {
             }
             Event::Media(m) => self.media = m,
             Event::Send(to, msg) => {
-                if let Some(c) = self.peers.get(&to).and_then(|p| p.conn) {
+                // Only over a session this computer heeds: never to one that
+                // only says it is that computer.
+                let role = self.me.role;
+                if let Some(c) = self
+                    .peers
+                    .get(&to)
+                    .and_then(|p| p.conn)
+                    .filter(|c| self.conns.get(c).is_some_and(|c| heeded(c, role)))
+                {
                     self.send(c, &msg);
                 }
             }
@@ -802,12 +819,13 @@ impl State {
         }
     }
 
-    /// One frame to every computer welcomed or obeyed.
+    /// One frame to every session this computer heeds (`heeded`).
     fn broadcast_frame(&mut self, frame: Arc<Vec<u8>>) {
+        let role = self.me.role;
         let to: Vec<ConnId> = self
             .conns
             .iter()
-            .filter(|(_, c)| (c.welcomed || c.obeying) && !c.closing)
+            .filter(|(_, c)| heeded(c, role))
             .map(|(id, _)| *id)
             .collect();
         for c in to {
@@ -1062,6 +1080,7 @@ impl State {
             nonce,
             proof: None,
             welcomed: false,
+            trusted: false,
             obeying: false,
             closing: false,
             opened: now,
@@ -1162,11 +1181,16 @@ impl State {
             conn.session.close();
             return;
         }
-        // One session per computer: a second one (found twice) is let go.
+        // One session per computer: a second one (found twice, or a second
+        // NewQ with its identity) is let go while the first is heeded. One
+        // that isn't yet (or never will be: a program that only says it is
+        // that computer) doesn't keep the real one out: both stay until one
+        // is heeded, which closes the other (`hold_only`).
+        let role = self.me.role;
         if let Some(p) = self.peers.get(&h.id)
             && let Some(other) = p.conn
             && other != c
-            && self.conns.get(&other).is_some_and(|o| !o.closing)
+            && self.conns.get(&other).is_some_and(|o| heeded(o, role))
         {
             if let Some(conn) = self.conns.get_mut(&c) {
                 conn.closing = true;
@@ -1284,6 +1308,7 @@ impl State {
                             conn.last_status = None;
                         }
                         self.leave_other_primaries(c);
+                        self.hold_only(c);
                     }
                     self.send(c, &Msg::Welcome);
                 }
@@ -1291,6 +1316,7 @@ impl State {
             }
             return;
         }
+        self.latch_trust(c);
         // A computer of this network that should know the passcode and doesn't.
         if self.me.role == Role::Primary
             && network.is_some()
@@ -1332,6 +1358,65 @@ impl State {
         }
     }
 
+    /// A primary trusts a computer that welcomed it once it has proved the
+    /// passcode (or when the network has none).
+    fn latch_trust(&mut self, c: ConnId) {
+        let key = self.me.passcode.is_some();
+        let primary = self.me.role == Role::Primary;
+        let Some(conn) = self.conns.get_mut(&c) else {
+            return;
+        };
+        if primary
+            && conn.welcomed
+            && !conn.trusted
+            && !conn.closing
+            && (!key || conn.proof == Some(Some(true)))
+        {
+            conn.trusted = true;
+            self.hold_only(c);
+        }
+    }
+
+    /// This primary gave its key (or its network) to the computer on session
+    /// `c` itself (Add to the show, a new passcode): it is trusted on it.
+    fn gave_key(&mut self, c: ConnId) {
+        if self.me.role != Role::Primary {
+            return;
+        }
+        if let Some(conn) = self.conns.get_mut(&c)
+            && !conn.closing
+            && !conn.trusted
+        {
+            conn.trusted = true;
+            self.hold_only(c);
+        }
+    }
+
+    /// Session `c` is now the one heeded with its computer: it is that
+    /// computer's place, and any other session claiming its id ends.
+    fn hold_only(&mut self, c: ConnId) {
+        let Some(id) = self.conns.get(&c).and_then(|conn| conn.peer) else {
+            return;
+        };
+        if let Some(p) = self.peers.get_mut(&id) {
+            p.conn = Some(c);
+        }
+        for (other, conn) in self.conns.iter_mut() {
+            if *other != c && conn.peer == Some(id) && !conn.closing {
+                log::info!(
+                    "show network: a second connection as {} (from {}) is closed",
+                    conn.hello
+                        .as_ref()
+                        .map_or("a computer", |h| h.name.as_str()),
+                    conn.session.peer
+                );
+                conn.closing = true;
+                conn.obeying = false;
+                conn.session.close();
+            }
+        }
+    }
+
     fn message(&mut self, c: ConnId, m: Msg, now: Instant) {
         let Some(conn) = self.conns.get_mut(&c) else {
             return;
@@ -1349,7 +1434,17 @@ impl State {
             Msg::Ping { n } => self.send(c, &Msg::Pong { n }),
             Msg::Pong { .. } => {}
             Msg::Welcome => {
+                // Said by a computer that takes orders from this one: it means
+                // something only to a primary (only a primary is judged and
+                // obeyed). Anywhere else it is passed by.
+                if self.me.role != Role::Primary {
+                    log::debug!(
+                        "show network: a welcome to a computer that isn't a primary, passed by"
+                    );
+                    return;
+                }
                 conn.welcomed = true;
+                let mut keyed = false;
                 if let Some(p) = from.and_then(|id| self.peers.get_mut(&id)) {
                     p.backoff = Duration::from_millis(500);
                     p.problem = None;
@@ -1357,9 +1452,14 @@ impl State {
                     p.adopt_asked = None;
                     let pending = std::mem::take(&mut p.pending);
                     for msg in pending {
+                        keyed |= matches!(msg, Msg::Adopt { .. });
                         self.send(c, &msg);
                     }
                 }
+                if keyed {
+                    self.gave_key(c);
+                }
+                self.latch_trust(c);
             }
             Msg::Refused { text, .. } => {
                 conn.closing = true;
@@ -1372,6 +1472,11 @@ impl State {
                 }
             }
             Msg::Status(s) => {
+                // A report counts from a session heeded (a stranger saying it is
+                // that computer doesn't write its row).
+                if !heeded(conn, self.me.role) {
+                    return;
+                }
                 if let Some(p) = from.and_then(|id| self.peers.get_mut(&id)) {
                     p.name = s.name.clone();
                     p.role = s.role;
@@ -1412,6 +1517,7 @@ impl State {
                                 conn.obeying = true;
                             }
                             self.leave_other_primaries(c);
+                            self.hold_only(c);
                         }
                         Err(why) => {
                             self.refuse(c, why);
@@ -1452,8 +1558,11 @@ impl State {
             #[allow(unreachable_patterns)] // none yet: later stages add them
             other => {
                 // A message of a later stage: for the app, from a computer of
-                // the network.
-                if (obeying || conn.welcomed)
+                // the network, only over a session this computer heeds. A
+                // follower hears its primary alone (the session it obeys); a
+                // primary, the computers it trusts. `from` is then the id that
+                // session proved (or, with no passcode, said).
+                if heeded(conn, self.me.role)
                     && let Some(from) = from
                 {
                     let _ = self.out.send(NetEvent::Message { from, msg: other });
@@ -1505,11 +1614,24 @@ impl State {
                 m.backoff = (m.backoff * 2).min(MAX_BACKOFF);
             }
         }
-        if let Some(p) = peer.and_then(|id| self.peers.get_mut(&id))
-            && p.conn == Some(c)
+        if let Some(id) = peer
+            && self.peers.get(&id).is_some_and(|p| p.conn == Some(c))
         {
-            p.conn = None;
-            p.failed(now);
+            // Another session with it still up (two at once, neither heeded
+            // yet) takes its place.
+            let role = self.me.role;
+            let next = self
+                .conns
+                .iter()
+                .filter(|(_, o)| o.peer == Some(id) && !o.closing && o.hello.is_some())
+                .max_by_key(|(k, o)| (heeded(o, role), **k))
+                .map(|(k, _)| *k);
+            if let Some(p) = self.peers.get_mut(&id) {
+                p.conn = next;
+                if next.is_none() {
+                    p.failed(now);
+                }
+            }
         }
         if let Some(Target::Peer(id)) = conn.target
             && let Some(p) = self.peers.get_mut(&id)
@@ -1568,7 +1690,10 @@ impl State {
                     .conn
                     .filter(|c| self.conns.get(c).is_some_and(|c| c.welcomed));
                 match up {
-                    Some(c) => self.send(c, &msg),
+                    Some(c) => {
+                        self.send(c, &msg);
+                        self.gave_key(c);
+                    }
                     None => {
                         p.adopt_asked = Some(now);
                         p.pending = vec![msg];
@@ -1663,11 +1788,13 @@ impl State {
                 if self.me.role == Role::Primary
                     && let Some(network) = self.me.network
                 {
+                    let me_role = self.me.role;
                     let ours: Vec<(ConnId, Role)> = self
                         .peers
                         .values()
                         .filter(|p| p.network == Some(network))
                         .filter_map(|p| Some((p.conn?, p.role)))
+                        .filter(|(c, _)| self.conns.get(c).is_some_and(|c| heeded(c, me_role)))
                         .collect();
                     for (c, role) in ours {
                         let msg = Msg::Adopt {
@@ -1678,6 +1805,7 @@ impl State {
                             primary_name: self.name(),
                         };
                         self.send(c, &msg);
+                        self.gave_key(c);
                     }
                 }
             }
@@ -1695,7 +1823,7 @@ impl State {
             .get(&id)
             .filter(|p| p.network.is_some() && p.network == self.me.network)
             .and_then(|p| p.conn)
-            .filter(|c| self.conns.get(c).is_some_and(|c| c.welcomed));
+            .filter(|c| self.conns.get(c).is_some_and(|c| heeded(c, Role::Primary)));
         if let Some(c) = up {
             self.send(c, &msg);
         }
@@ -1738,6 +1866,29 @@ impl State {
                 );
                 conn.closing = true;
                 conn.session.close();
+                continue;
+            }
+            // A primary with a passcode: one that says it is of the network
+            // and hasn't proved it holds no computer's place.
+            if self.me.role == Role::Primary
+                && self.me.passcode.is_some()
+                && !conn.trusted
+                && !conn.obeying
+                && conn
+                    .hello
+                    .as_ref()
+                    .is_some_and(|h| h.network.is_some() && h.network == self.me.network)
+                && now.saturating_duration_since(conn.opened) > PROVE_WITHIN
+            {
+                log::info!(
+                    "show network: {} (at {}) says it is of this show network but hasn't \
+                     proved the passcode: the connection is closed",
+                    conn.hello
+                        .as_ref()
+                        .map_or("a computer", |h| h.name.as_str()),
+                    conn.session.peer
+                );
+                self.refuse(c, Refusal::Passcode);
                 continue;
             }
             if now.saturating_duration_since(conn.last_rx) > SILENT_FOR {
@@ -1946,21 +2097,19 @@ impl State {
 
     // ---- Playing together (stage 4a) ----
 
-    /// Send to the computers of this network that have a session up (`to`:
-    /// one of them).
+    /// Send to the computers of this network that have a session up that this
+    /// computer heeds (`to`: one of them): a primary's trusted computers, a
+    /// follower's primary.
     fn tell(&mut self, to: Option<NodeId>, msg: &Msg, urgent: bool) {
         let mine = self.me.network;
+        let role = self.me.role;
         let conns: Vec<ConnId> = self
             .peers
             .values()
             .filter(|p| to.is_none_or(|t| t == p.id))
             .filter(|p| p.network.is_some() && p.network == mine)
             .filter_map(|p| p.conn)
-            .filter(|c| {
-                self.conns
-                    .get(c)
-                    .is_some_and(|c| (c.welcomed || c.obeying) && !c.closing)
-            })
+            .filter(|c| self.conns.get(c).is_some_and(|c| heeded(c, role)))
             .collect();
         if conns.is_empty() {
             return;
@@ -2286,6 +2435,12 @@ impl State {
         self.adapters = super::paths::own_adapters();
     }
 
+    /// A row is connected over a session heeded, or one a computer waiting
+    /// to be added welcomed this primary on (it has no network to prove).
+    fn shown_connected(&self, p: &Peer, c: &Conn) -> bool {
+        heeded(c, self.me.role) || (!c.closing && c.welcomed && p.network.is_none())
+    }
+
     fn view(&self) -> NetView {
         let now = Instant::now();
         let mine = self.me.network;
@@ -2294,7 +2449,7 @@ impl State {
             .values()
             .map(|p| {
                 let conn = p.conn.and_then(|c| self.conns.get(&c));
-                let connected = conn.is_some_and(|c| !c.closing && (c.welcomed || c.obeying));
+                let connected = conn.is_some_and(|c| self.shown_connected(p, c));
                 PeerView {
                     id: p.id,
                     name: p.name.clone(),
@@ -2390,7 +2545,7 @@ impl State {
                 .values()
                 .filter_map(|p| {
                     let c = self.conns.get(&p.conn?)?;
-                    (!c.closing && (c.welcomed || c.obeying)).then(|| {
+                    self.shown_connected(p, c).then(|| {
                         // The session's own address (the one in use), and the
                         // port it listens on, not the far end of a socket it
                         // dialled from.
@@ -2408,6 +2563,15 @@ impl State {
                 .collect(),
         }
     }
+}
+
+/// Whether this computer acts on, and sends the show's traffic over, session
+/// `c`, being of `role`: a follower the session it obeys (judged, and the
+/// passcode proved when it holds one); a primary a session it trusts
+/// (`Conn::trusted`). Nothing else: what a peer only says of itself (its id,
+/// its role, a `Welcome`) never makes a session heeded.
+fn heeded(c: &Conn, role: Role) -> bool {
+    !c.closing && (c.obeying || (role == Role::Primary && c.trusted))
 }
 
 /// Whether a connection from `ip` is let in, beside the connections accepted

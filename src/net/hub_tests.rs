@@ -1688,7 +1688,7 @@ fn an_oversized_first_frame_closes_the_connection_unread() {
 fn connections_that_havent_said_hello_are_capped_in_all_and_per_address() {
     let ip = |n: u8| IpAddr::V4(Ipv4Addr::new(10, 0, 0, n));
     assert!(admits(std::iter::empty(), ip(1)));
-    let same = vec![ip(1); UNNAMED_PER_ADDRESS];
+    let same = [ip(1); UNNAMED_PER_ADDRESS];
     assert!(!admits(same.iter().copied(), ip(1)));
     assert!(admits(same.iter().copied(), ip(2)));
     assert!(admits(same[1..].iter().copied(), ip(1)));
@@ -1739,4 +1739,256 @@ fn many_silent_connections_are_capped() {
     until(&p, "a real computer after the silent ones", |v| {
         peer(v, did).is_some_and(|x| x.connected)
     });
+}
+
+// ---- Who is heard (review 2026-11-26: Fable R3, Opus R1) ----
+
+/// A program on the LAN that isn't a NewQ, speaking the show network's
+/// protocol by hand: what comes to it is collected; it keeps its session
+/// alive with pings until it is closed.
+struct Stranger {
+    stream: TcpStream,
+    seen: Arc<Mutex<Vec<Msg>>>,
+    closed: Arc<AtomicBool>,
+}
+
+impl Stranger {
+    fn connect(port: u16, hello: Msg) -> Stranger {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        proto::write_frame(&mut stream, &hello).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        {
+            let mut r = stream.try_clone().unwrap();
+            let (seen, closed) = (seen.clone(), closed.clone());
+            std::thread::spawn(move || {
+                while let Ok(body) = proto::read_frame(&mut r) {
+                    match proto::decode(&body) {
+                        Ok(m) => seen.lock().push(m),
+                        Err(_) => break,
+                    }
+                }
+                closed.store(true, Ordering::Relaxed);
+            });
+        }
+        {
+            let mut w = stream.try_clone().unwrap();
+            let closed = closed.clone();
+            std::thread::spawn(move || {
+                let mut n = 1_000_000;
+                while !closed.load(Ordering::Relaxed) {
+                    n += 1;
+                    if proto::write_frame(&mut w, &Msg::Ping { n }).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+        }
+        Stranger {
+            stream,
+            seen,
+            closed,
+        }
+    }
+
+    fn say(&mut self, m: &Msg) {
+        let _ = proto::write_frame(&mut self.stream, m);
+    }
+
+    /// Wait until `f` holds of what came (a minute at most).
+    fn until(&self, what: &str, f: impl Fn(&[Msg], bool) -> bool) {
+        let began = Instant::now();
+        loop {
+            if f(&self.seen.lock(), self.closed.load(Ordering::Relaxed)) {
+                return;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(60),
+                "waited a minute for {what}; it saw {:?}",
+                self.seen.lock()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Every order a primary gives a follower, then a ping: once its pong
+    /// comes, the hub has read everything before it.
+    fn give_orders_and_wait(&mut self) {
+        let part = crate::net::play::ShowPart {
+            version: 99,
+            hash: 1,
+            part: 0,
+            parts: 1,
+            data: "{}".into(),
+        };
+        self.say(&Msg::ShowPart(Box::new(part)));
+        self.say(&Msg::Restart);
+        self.say(&Msg::StartAtLogin { on: true });
+        self.say(&Msg::MediaVerify);
+        self.say(&Msg::Ping { n: 7 });
+        self.until("the pong after the orders", |seen, closed| {
+            closed || seen.iter().any(|m| matches!(m, Msg::Pong { n: 7 }))
+        });
+    }
+}
+
+/// What the app was given from `from` (none but those of `from`).
+fn messages_from(h: &Hub, from: NodeId) -> Vec<Msg> {
+    h.take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            NetEvent::Message { from: f, msg } if f == from => Some(msg),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A display whose primary has gone: a stranger says hello with the primary's
+/// id (from its beacons), says `Welcome`, and gives orders. None reaches the
+/// app, with or without a passcode, whether it says it is a display or (with
+/// a passcode, and no proof) the primary. The real primary, back, is heard
+/// again at once: the stranger never held its place.
+#[test]
+fn a_stranger_with_the_primarys_id_is_not_heard_and_the_real_primary_is() {
+    for passcode in [false, true] {
+        let mut rig = Rig::new();
+        let (p, d) = primary_and_display(&mut rig);
+        let (pid, did) = (id_of(&p), id_of(&d));
+        if passcode {
+            p.ask(NetAction::SetPasscode(Some("opening night".into())));
+            until(&d, "the key", |v| v.me.passcode.is_some());
+        }
+        let network = p.view().me.network;
+        let dport = d.view().port.unwrap();
+        let pdir = rig.dirs[0].clone();
+        drop(p);
+        until(&d, "the primary gone", |v| {
+            v.following.as_ref().is_some_and(|f| !f.online)
+        });
+        let _ = d.take_events();
+        let mut claims = vec![Role::Display, Role::Alone];
+        if passcode {
+            // With a passcode, claiming to be the primary needs its proof.
+            claims.push(Role::Primary);
+        }
+        let mut strangers = Vec::new();
+        for role in claims {
+            let mut s = Stranger::connect(dport, raw_hello(pid, role, network, "Booth".into()));
+            s.until("the display's hello and proof request", |seen, _| {
+                seen.iter().any(|m| matches!(m, Msg::Prove { .. }))
+            });
+            s.say(&Msg::Prove { mac: None });
+            s.say(&Msg::Welcome);
+            s.give_orders_and_wait();
+            let heard = messages_from(&d, pid);
+            assert!(
+                heard.is_empty(),
+                "passcode {passcode}, claimed {role:?}: the app heard {heard:?}"
+            );
+            let v = d.view();
+            assert_eq!(v.me.primary, Some(pid));
+            assert_eq!(v.me.role, Role::Display);
+            assert!(v.following.as_ref().is_some_and(|f| !f.online), "{v:#?}");
+            strangers.push(s);
+        }
+        // The primary starts again: it reaches the display though strangers
+        // hold sessions as it, they are closed, and its orders are heard.
+        let p = restart(pdir, rig.base);
+        until(&d, "the real primary back", |v| {
+            v.following.as_ref().is_some_and(|f| f.online)
+        });
+        for s in &strangers {
+            s.until("the stranger closed", |_, closed| closed);
+        }
+        until(&p, "the display back", |v| {
+            peer(v, did).is_some_and(|x| x.connected && x.ours)
+        });
+        let _ = d.take_events();
+        p.ask(NetAction::Restart(did));
+        let began = Instant::now();
+        loop {
+            let heard = messages_from(&d, pid);
+            if heard.iter().any(|m| matches!(m, Msg::Restart)) {
+                break;
+            }
+            assert!(heard.is_empty(), "{heard:?}");
+            assert!(
+                began.elapsed() < Duration::from_secs(60),
+                "the real primary's order never came (passcode {passcode})"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// A primary with a passcode: a stranger says it is one of its displays (the
+/// id from the beacons) and `Welcome`, with no proof. It is sent no show, no
+/// command, no order, and is closed with the passcode refusal.
+#[test]
+fn a_stranger_with_a_displays_id_is_sent_nothing_by_a_primary_with_a_passcode() {
+    let mut rig = Rig::new();
+    let (p, d) = primary_and_display(&mut rig);
+    let did = id_of(&d);
+    p.ask(NetAction::SetPasscode(Some("opening night".into())));
+    until(&d, "the key", |v| v.me.passcode.is_some());
+    let network = p.view().me.network;
+    let pport = p.view().port.unwrap();
+    drop(d);
+    until(&p, "the display gone", |v| {
+        peer(v, did).is_some_and(|x| !x.connected)
+    });
+    let mut s = Stranger::connect(pport, raw_hello(did, Role::Display, network, "Left".into()));
+    s.until("the primary's proof request", |seen, _| {
+        seen.iter().any(|m| matches!(m, Msg::Prove { .. }))
+    });
+    s.say(&Msg::Welcome);
+    s.say(&Msg::Ping { n: 7 });
+    s.until("the welcome read", |seen, _| {
+        seen.iter().any(|m| matches!(m, Msg::Pong { n: 7 }))
+    });
+    let part = crate::net::play::ShowPart {
+        version: 1,
+        hash: 2,
+        part: 0,
+        parts: 1,
+        data: "{}".into(),
+    };
+    p.tell(None, Msg::ShowPart(Box::new(part.clone())), false);
+    p.tell(Some(did), Msg::ShowPart(Box::new(part)), true);
+    p.send_to(did, Msg::MediaVerify);
+    p.broadcast(Msg::MediaVerify);
+    p.ask(NetAction::Restart(did));
+    p.ask(NetAction::Identify(did));
+    // Not proved within `PROVE_WITHIN`: refused, and closed.
+    s.until("the refusal", |_, closed| closed);
+    let seen = s.seen.lock().clone();
+    assert!(
+        seen.iter().any(|m| matches!(
+            m,
+            Msg::Refused {
+                why: Refusal::Passcode,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+    let sent: Vec<&Msg> = seen
+        .iter()
+        .filter(|m| {
+            !matches!(
+                m,
+                Msg::Hello(_)
+                    | Msg::Prove { .. }
+                    | Msg::Ping { .. }
+                    | Msg::Pong { .. }
+                    | Msg::Refused { .. }
+            )
+        })
+        .collect();
+    assert!(sent.is_empty(), "the stranger was sent {sent:?}");
+    assert!(
+        peer(&p.view(), did).is_some_and(|x| !x.connected),
+        "never shown connected"
+    );
 }

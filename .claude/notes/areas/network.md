@@ -41,7 +41,8 @@ See also: the blocks after the real tests also hold notes for other areas: pictu
   pure rules: `judge` (first primary wins, own network only, passcode if held, highest term; a primary
   obeys only a newer one of its network and becomes `Backup`), `adopt`, `release`, `set_role`,
   `switch_off`; `--join`/`--primary` (`apply_startup`). `proto.rs`: frames (4-byte length + JSON `Msg`,
-  `MAX_FRAME`), `PROTOCOL`, a lenient first `Hello` (`mismatch_sentence`), `Msg::Unknown` for messages a
+  `MAX_FRAME`; the first frame at most `HELLO_MAX`, 16 KB, by `read_frame_up_to`; a body grows as its
+  bytes arrive, `read_body`, never reserved from the length), `PROTOCOL`, a lenient first `Hello` (`mismatch_sentence`), `Msg::Unknown` for messages a
   later NewQ adds, `Beacon`, `StatusReport` (monitors, sound devices, disk, `Link`; clock/show/media
   fields unfilled). `session.rs`: a reader and a writer thread per TCP connection, bounded queue (a full
   one drops the peer), 5 s write timeout. `discover.rs`: a UDP beacon each second to every port of
@@ -49,7 +50,25 @@ See also: the blocks after the real tests also hold notes for other areas: pictu
   hand; each NewQ binds the first free port (UDP and TCP the same number), so several on one machine
   find each other. `hub.rs`: the `net-hub` thread; **nothing is opened until switched on** (D1); the
   primary dials its computers and the waiting ones; Ping each second, 6 s of silence closes; followers
-  report `Status` each second; `NetView` is published on a change with the app's `wake`;
+  report `Status` each second; connections accepted that haven't said hello: at most `UNNAMED_MAX` (16),
+  `UNNAMED_PER_ADDRESS` (4) from one address (`admits`, pure; one more is shut with no threads), closed
+  after `HELLO_WITHIN` (3 s). **Who is heard** (review 2026-11-26, Fable R3/Opus R1): `heeded(conn,
+  role)` is the one gate for forwarding app messages (`NetEvent::Message`), `Status`, `tell`,
+  `broadcast`, `send_to`, `order` and the `SetPasscode` key: a follower heeds only the session it
+  `obeying` (after `judge`/`adopt`, the proof checked when it holds a key); a primary only a session
+  `trusted` (latched: `Welcome`, counted only while this computer is a primary, plus the proof when it
+  has a passcode, `latch_trust`; or this primary sent the key over it, `gave_key`: *Add to the show*, a
+  new passcode). A peer's claimed id, role or `Welcome` alone never counts. One session per computer
+  holds only for a heeded one: an unheeded session with an id doesn't keep a newcomer out; the first
+  heeded closes the others with that id (`hold_only`; `closed` moves `Peer::conn` to one left). A primary
+  with a passcode refuses (`Refusal::Passcode`) a session that claims its network and hasn't proved it
+  within `PROVE_WITHIN` (10 s). `NetView` `connected`/`reached`: heeded, or a waiting computer that
+  welcomed (`shown_connected`). Without a passcode the LAN is trusted (README says so): a claimed
+  primary of the network with the term is obeyed as before. Known, not fixed: a proof is
+  `MAC(verifier's nonce, prover's id)`, so a stranger can relay a live key-holder's proof (it says hello
+  to the real primary with the follower's nonce) during the moment the real primary is up but not yet
+  connected; *Add to the show* (and `add_vouched`) give the key to whoever answers as that waiting id;
+  sessions past hello are not capped in number; commands are not encrypted. `NetView` is published on a change with the app's `wake`;
   `Hub::send_to`/`broadcast`, messages the hub doesn't handle come out of `take_events` as
   `NetEvent::Message`, a role change as `NetEvent::RoleChanged`. Tests in `net/hub_tests.rs` (two and
   three hubs on loopback, `lan: false`). App: `App::net`, `pass_net`, `sync_audio_outputs`
