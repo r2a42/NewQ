@@ -447,7 +447,11 @@ fn a_later_newqs_projector_keeps_what_this_one_doesnt_know() {
     assert!(line_up.points[0].on);
     assert_eq!(line_up.pixels, (1920, 1080));
     let solved = line_up.solved.as_ref().unwrap();
-    assert_eq!(solved.rung, crate::stage3d::projector::Rung::Unknown);
+    assert!(
+        matches!(&solved.rung, crate::stage3d::projector::Rung::Unknown(v) if v == "Distortion"),
+        "{:?}",
+        solved.rung
+    );
     assert_eq!(solved.rms_px, 0.4);
     // Saved again, the later fields are written as they were.
     back.save(&path).unwrap();
@@ -461,7 +465,50 @@ fn a_later_newqs_projector_keeps_what_this_one_doesnt_know() {
     assert_eq!(p["holo"]["beams"], 2);
     assert_eq!(p["lens"]["distortion"][0], 0.1);
     assert_eq!(again["stage3d"]["projectors"][1]["hologram"], 1);
+    // A later rung is written back as it was, not as "Unknown".
+    assert_eq!(p["line_up"]["solved"]["rung"], "Distortion");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_later_newqs_fine_tune_and_line_up_of_a_new_shape_are_kept_as_written() {
+    let mut show = Show::default();
+    show.add_projector();
+    let mut json: serde_json::Value = serde_json::to_value(&show).unwrap();
+    let p = &mut json["stage3d"]["projectors"][0];
+    // Shapes this NewQ can't read: a fine-tune as a list of patches, a
+    // line-up as words.
+    let fine = serde_json::json!({ "patches": [[0.1, 0.2], [0.3, 0.4]], "kind": "bezier" });
+    let line_up = serde_json::json!("from-camera-calibration-v9");
+    p["fine"] = fine.clone();
+    p["line_up"] = line_up.clone();
+    p["mapped"] = true.into();
+    let text = serde_json::to_string(&json).unwrap();
+    let back: Show = serde_json::from_str(&text).expect("it loads");
+    let q = &back.stage3d.projectors[0];
+    // Here they are nothing: no fine-tune, no line-up.
+    assert!(q.fine.is_none() && q.line_up.is_none());
+    assert!(q.mapped);
+    // Written back unchanged.
+    let again: serde_json::Value = serde_json::to_value(&back).unwrap();
+    let p = &again["stage3d"]["projectors"][0];
+    assert_eq!(p["fine"], fine);
+    assert_eq!(p["line_up"], line_up);
+    assert_eq!(
+        serde_json::to_string(&again["stage3d"]["projectors"][0]).unwrap(),
+        serde_json::to_string(&json["stage3d"]["projectors"][0]).unwrap(),
+        "the projector round-trips as it was written"
+    );
+    // A fine-tune made here replaces the kept one (one key, this NewQ's).
+    let mut edited = back.clone();
+    edited.stage3d.projectors[0].fine = Some(crate::mesh::Mesh::grid(3, 3));
+    let text = serde_json::to_string(&edited).unwrap();
+    assert_eq!(text.matches("\"fine\"").count(), 1, "{text}");
+    let read: Show = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        read.stage3d.projectors[0].fine,
+        Some(crate::mesh::Mesh::grid(3, 3))
+    );
 }
 
 #[test]
