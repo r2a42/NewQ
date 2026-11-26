@@ -1390,9 +1390,7 @@ fn build_chain(sound: &[EffectKind], rate: u32) -> (Option<AudioChain>, Option<A
     if chain.is_empty() {
         return (None, None);
     }
-    let shared = Arc::new(FxShared::new(
-        sound.iter().filter(|k| !k.is_video()).count(),
-    ));
+    let shared = Arc::new(FxShared::new(sound.iter().filter(|k| k.is_sound()).count()));
     (Some(chain), Some(shared))
 }
 
@@ -1403,7 +1401,7 @@ impl Voice {
     /// added to or taken away, while it plays.
     pub fn set_effects(&self, effects: &[Effect], t: f64) {
         let Some(shared) = &self.fx else { return };
-        let sound: Vec<&Effect> = effects.iter().filter(|e| !e.kind.is_video()).collect();
+        let sound: Vec<&Effect> = effects.iter().filter(|e| e.kind.is_sound()).collect();
         if sound.len() != shared.len() {
             return;
         }

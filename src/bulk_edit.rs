@@ -326,6 +326,9 @@ impl Change {
         for item in &self.items {
             any |= match item.scope {
                 Scope::Cue => set(&mut value, &item.path, item.value.as_ref()),
+                // A cue this NewQ can't read keeps its kind as it was written:
+                // only the fields every cue has reach it.
+                Scope::Media | Scope::Kind if !target.kind.is_known() => continue,
                 Scope::Media | Scope::Kind => {
                     let Some((name, inner)) = kind_of(&mut value) else {
                         continue;

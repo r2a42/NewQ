@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+pub mod compat;
+pub use compat::{Kept, THIS_NEWQ};
+
 pub const SHOW_EXTENSION: &str = "newq";
 /// Volumes at or below this are treated as silence.
 pub const MIN_DB: f32 = -60.0;
@@ -33,6 +36,17 @@ pub struct Show {
     /// 1 = shows with outputs placed on displays (before displays and
     /// outputs were one thing), 2 = displays and sub displays.
     pub version: u32,
+    /// The NewQ that saved the file this show was read from, as the file says
+    /// (None: a file from before there was this field, or a show made here). `Show::save`
+    /// always writes this NewQ's version into the file, whatever the show holds,
+    /// so that whichever NewQ opens it next can tell whether a newer one wrote
+    /// it (`compat::newer_than_this`): only the writer can say, and an older
+    /// NewQ can't know what it is missing. In memory it stays as read and is
+    /// written only when set, so a show sent over the network, kept for undo or
+    /// compared for unsaved changes is as it was before there was this field.
+    /// Older NewQs ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_with: Option<String>,
     pub name: String,
     /// The show's displays and sub displays, which cues are sent to. A
     /// display is assigned by the user to a monitor and stays assigned: if
@@ -91,7 +105,12 @@ pub struct Show {
     pub no_transfer_cards: bool,
     /// What a display computer's screens show while they wait for the show
     /// (its name, address and how it stands): `WaitCards`.
-    #[serde(default, skip_serializing_if = "WaitCards::is_default")]
+    /// (One a newer NewQ wrote reads as the default, `compat::lenient`.)
+    #[serde(
+        default,
+        skip_serializing_if = "WaitCards::is_default",
+        deserialize_with = "compat::lenient"
+    )]
     pub wait_cards: WaitCards,
     /// The 3D stage: a venue model and the screens in it (`stage3d`).
     #[serde(default, skip_serializing_if = "crate::stage3d::Stage3d::is_empty")]
@@ -105,6 +124,11 @@ pub struct Show {
         deserialize_with = "crate::multiview::lenient"
     )]
     pub multiview: Option<crate::multiview::Layout>,
+    /// The show's fields that a newer NewQ wrote and this one doesn't know,
+    /// kept as they were and written back (`show::compat`). Empty for a show
+    /// this NewQ wrote, and then nothing is written.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// When a display computer shows its start-up card (its name, address, who
@@ -356,6 +380,8 @@ impl Default for Show {
             wait_cards: WaitCards::UntilReady,
             stage3d: Default::default(),
             multiview: None,
+            saved_with: None,
+            extra: serde_json::Map::new(),
         };
         let id = OutputId(show.alloc_id());
         show.outputs.push(OutputConfig::new(id, "Display 1".into()));
@@ -706,8 +732,13 @@ pub struct OutputConfig {
     /// Display: edges that fade out where projectors overlap.
     #[serde(default, skip_serializing_if = "EdgeBlend::is_off")]
     pub blend: EdgeBlend,
-    /// Display: its picture is also sent out as a video stream.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Display: its picture is also sent out as a video stream. (One of a
+    /// kind a newer NewQ wrote reads as none, `compat::lenient`.)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "compat::lenient"
+    )]
     pub stream: Option<StreamOut>,
     /// Milliseconds everything on it is held back (a slow projector).
     #[serde(default, skip_serializing_if = "no_delay")]
@@ -1254,6 +1285,11 @@ pub enum ContinueMode {
     AutoContinue,
     /// Fire the next cue when this one finishes.
     AutoFollow,
+    /// One a newer NewQ wrote, kept as it was written (`show::compat`). It
+    /// doesn't continue here: this NewQ never fires a cue on a rule it doesn't
+    /// know.
+    #[serde(untagged)]
+    Other(Kept),
 }
 
 impl ContinueMode {
@@ -1267,6 +1303,7 @@ impl ContinueMode {
             ContinueMode::DoNotContinue => "Do not continue",
             ContinueMode::AutoContinue => "Auto-continue",
             ContinueMode::AutoFollow => "Auto-follow",
+            ContinueMode::Other(_) => "A newer NewQ's (doesn't continue here)",
         }
     }
 }
@@ -1277,6 +1314,10 @@ pub enum Fit {
     Contain,
     Cover,
     Stretch,
+    /// One a newer NewQ wrote, kept as it was written (`show::compat`). It is
+    /// fitted as `Contain` here, which shows all of the picture.
+    #[serde(untagged)]
+    Other(Kept),
 }
 
 impl Fit {
@@ -1286,6 +1327,7 @@ impl Fit {
             Fit::Contain => "Fit (letterbox)",
             Fit::Cover => "Fill (crop)",
             Fit::Stretch => "Stretch",
+            Fit::Other(_) => "A newer NewQ's (fitted here)",
         }
     }
 }
@@ -1328,6 +1370,12 @@ pub enum Transition {
     DipToBlack,
     /// Fade what is showing to white, then fade up the new content.
     DipToWhite,
+    /// One a newer NewQ wrote, kept as it was written (`show::compat`). It
+    /// enters as `FadeIn` here, over its fade-in time: it takes nothing away
+    /// from what is showing, which a transition this NewQ doesn't know could
+    /// mean to keep.
+    #[serde(untagged)]
+    Other(Kept),
 }
 
 impl Transition {
@@ -1345,6 +1393,7 @@ impl Transition {
             Transition::Crossfade => "Crossfade",
             Transition::DipToBlack => "Dip to black",
             Transition::DipToWhite => "Dip to white",
+            Transition::Other(_) => "A newer NewQ's (fades in here)",
         }
     }
     pub fn short_label(self) -> &'static str {
@@ -1354,6 +1403,7 @@ impl Transition {
             Transition::Crossfade => "X-fade",
             Transition::DipToBlack => "Dip black",
             Transition::DipToWhite => "Dip white",
+            Transition::Other(_) => "Newer",
         }
     }
     pub fn description(self) -> &'static str {
@@ -1374,6 +1424,10 @@ impl Transition {
             }
             Transition::DipToWhite => {
                 "Fades the output to white (first half), then fades this cue up (second half)."
+            }
+            Transition::Other(_) => {
+                "A transition a newer NewQ wrote, which this one doesn't know: here it fades in \
+                 on top of what is showing, and it is saved as it was."
             }
         }
     }
@@ -1422,11 +1476,20 @@ pub struct Cue {
     /// Show this cue as a button on the cart.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cart: bool,
-    /// Fire this cue when incoming MIDI Time Code reaches this position.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Fire this cue when incoming MIDI Time Code reaches this position. (One
+    /// written in a way this NewQ can't read is none, `compat::lenient`.)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "compat::lenient"
+    )]
     pub timecode: Option<Timecode>,
-    /// Fire this cue when the time of day reaches this time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Fire this cue when the time of day reaches this time. (As `timecode`.)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "compat::lenient"
+    )]
     pub clock: Option<TimeOfDay>,
     /// A colour label, to find it by in the list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1436,6 +1499,11 @@ pub struct Cue {
     #[serde(default, skip_serializing_if = "is_main_list")]
     pub list: u32,
     pub kind: CueKind,
+    /// The cue's fields that a newer NewQ wrote and this one doesn't know,
+    /// kept as they were and written back (`show::compat`). Empty for a cue
+    /// this NewQ wrote, and then nothing is written.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn is_main_list(l: &u32) -> bool {
@@ -1465,6 +1533,10 @@ pub enum CueColor {
     Blue,
     Purple,
     Pink,
+    /// One a newer NewQ wrote, kept as it was written (`show::compat`), shown
+    /// grey here.
+    #[serde(untagged)]
+    Other(Kept),
 }
 
 impl CueColor {
@@ -1487,6 +1559,7 @@ impl CueColor {
             CueColor::Blue => "Blue",
             CueColor::Purple => "Purple",
             CueColor::Pink => "Pink",
+            CueColor::Other(_) => "A newer NewQ's colour",
         }
     }
 
@@ -1499,6 +1572,7 @@ impl CueColor {
             CueColor::Blue => [76, 140, 232],
             CueColor::Purple => [158, 104, 216],
             CueColor::Pink => [226, 112, 176],
+            CueColor::Other(_) => [150, 150, 150],
         }
     }
 }
@@ -1519,6 +1593,14 @@ pub enum CueKind {
     LiveAudio(LiveAudioCue),
     Control(ControlCue),
     Timecode(TimecodeCue),
+    /// A cue this NewQ can't read: of a kind a newer NewQ made, or of a kind
+    /// it knows with settings it doesn't (`show::compat`). The kind is kept as
+    /// it was written (`{"Kind": {...}}`) and written back so; the cue keeps its
+    /// number, name and place, and never plays here (`Engine::fire`,
+    /// `Engine::start_with`). Last, so that every kind this NewQ knows is
+    /// tried first.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1542,6 +1624,8 @@ pub enum CueType {
     Timer,
     /// Makes MIDI Time Code on a MIDI output while it runs.
     Timecode,
+    /// A cue this NewQ can't read (`CueKind::Unknown`). Never made here.
+    Unknown,
 }
 
 impl CueType {
@@ -1563,6 +1647,7 @@ impl CueType {
             CueType::Clock => "Clock",
             CueType::Timer => "Timer",
             CueType::Timecode => "Timecode",
+            CueType::Unknown => "Unknown",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -1583,6 +1668,7 @@ impl CueType {
             CueType::Clock => "🕒",
             CueType::Timer => "⏳",
             CueType::Timecode => "🎞",
+            CueType::Unknown => "❓",
         }
     }
 }
@@ -1604,7 +1690,24 @@ impl CueKind {
             CueKind::LiveAudio(_) => CueType::LiveAudio,
             CueKind::Control(_) => CueType::Control,
             CueKind::Timecode(_) => CueType::Timecode,
+            CueKind::Unknown(_) => CueType::Unknown,
         }
+    }
+    /// Whether this NewQ can read the cue, and so play it (`CueKind::Unknown`).
+    pub fn is_known(&self) -> bool {
+        !matches!(self, CueKind::Unknown(_))
+    }
+    /// For a cue this NewQ can't read, what to say of it in the cue list.
+    pub fn unknown_note(&self) -> Option<String> {
+        let CueKind::Unknown(raw) = self else {
+            return None;
+        };
+        let name = compat::kind_name(raw);
+        Some(if compat::KNOWN_KINDS.contains(&name.as_str()) {
+            format!("{name} cue with settings from a newer NewQ: can't play here")
+        } else {
+            format!("{name} cue, made in a newer NewQ: can't play here")
+        })
     }
     /// The playback settings of a cue that plays something: transitions,
     /// fades, output, layer and so on. A text cue has them too.
@@ -1996,6 +2099,11 @@ pub enum EffectKind {
     Compressor,
     Echo,
     Reverb,
+    /// One a newer NewQ wrote, kept as it was written with its numbers
+    /// (`show::compat`). It does nothing here, to the picture or the sound:
+    /// the cue plays as if it were switched off.
+    #[serde(untagged)]
+    Other(Kept),
 }
 
 /// One number an effect takes.
@@ -2046,6 +2154,12 @@ impl EffectKind {
         Self::VIDEO.contains(&self)
     }
 
+    /// One of the sound effects. (One a newer NewQ wrote is neither: it is
+    /// left out of the picture's effects and the sound's.)
+    pub fn is_sound(self) -> bool {
+        Self::AUDIO.contains(&self)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             EffectKind::Blur => "Blur",
@@ -2058,6 +2172,7 @@ impl EffectKind {
             EffectKind::Compressor => "Compressor",
             EffectKind::Echo => "Echo",
             EffectKind::Reverb => "Reverb",
+            EffectKind::Other(_) => "A newer NewQ's effect",
         }
     }
 
@@ -2073,6 +2188,10 @@ impl EffectKind {
             EffectKind::Compressor => "Evens out loud and quiet",
             EffectKind::Echo => "Repeats the sound after a delay",
             EffectKind::Reverb => "Puts the sound in a room",
+            EffectKind::Other(_) => {
+                "An effect a newer NewQ wrote, which this one doesn't know: it does nothing here, \
+                 and it is saved as it was"
+            }
         }
     }
 
@@ -2089,6 +2208,7 @@ impl EffectKind {
             EffectKind::Compressor => &COMPRESSOR,
             EffectKind::Echo => &ECHO,
             EffectKind::Reverb => &REVERB,
+            EffectKind::Other(_) => &[],
         }
     }
 }
@@ -2426,7 +2546,7 @@ impl MediaCue {
     pub fn sound_chain(&self) -> Vec<EffectKind> {
         self.effects
             .iter()
-            .filter(|e| !e.kind.is_video())
+            .filter(|e| e.kind.is_sound())
             .map(|e| e.kind)
             .collect()
     }
@@ -3921,7 +4041,10 @@ impl Show {
                     use_own_fade: true,
                 }),
             ),
-            CueType::Wait => ("Wait".into(), CueKind::Wait(WaitCue { duration: 5.0 })),
+            // (No list offers to make an Unknown cue: asked for one, a wait.)
+            CueType::Wait | CueType::Unknown => {
+                ("Wait".into(), CueKind::Wait(WaitCue { duration: 5.0 }))
+            }
             CueType::Group => ("Group".into(), CueKind::Group(GroupCue::default())),
             CueType::Text => ("Text".into(), CueKind::Text(TextCue::new(default_output))),
             CueType::Shape => (
@@ -3976,6 +4099,7 @@ impl Show {
             color: None,
             list: 0,
             kind,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -4101,6 +4225,8 @@ impl Show {
         {
             v.path = rel.to_path_buf();
         }
+        // Every file says which NewQ wrote it (see `saved_with`).
+        copy.saved_with = Some(THIS_NEWQ.to_string());
         let text = serde_json::to_string_pretty(&copy)?;
         // Write beside the file and rename over it, so a crash mid-write
         // can't leave a half-written show.
@@ -4421,7 +4547,10 @@ impl Show {
                 && (self.cues[i - 1].id == p || self.cues[i - 1].parent == Some(p))
                 && self
                     .cue(p)
-                    .is_some_and(|g| matches!(g.kind, CueKind::Group(_)));
+                    // A cue this NewQ can't read keeps what a newer NewQ put
+                    // in it (a group of a kind it doesn't know): its children
+                    // stay its own, never fired by GO here, and saved so.
+                    .is_some_and(|g| matches!(g.kind, CueKind::Group(_) | CueKind::Unknown(_)));
             if !follows_parent || matches!(self.cues[i].kind, CueKind::Group(_)) {
                 self.cues[i].parent = None;
             }
@@ -4892,6 +5021,7 @@ impl Show {
                     color: None,
                     list: self.cues[g].list,
                     kind: CueKind::Image(MediaCue::new_visual(file, output)),
+                    extra: serde_json::Map::new(),
                 },
             );
         }

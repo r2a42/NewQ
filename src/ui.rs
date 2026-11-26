@@ -2160,6 +2160,7 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Unknown(_) => c.kind.unknown_note().unwrap_or_default(),
         CueKind::Timecode(t) => format!(
             "{} from {} ({})",
             t.port.as_deref().unwrap_or("(no output)"),
@@ -2800,6 +2801,8 @@ fn cue_list(
                         ContinueMode::DoNotContinue => "",
                         ContinueMode::AutoContinue => "⏩ auto",
                         ContinueMode::AutoFollow => "⏭ follow",
+                        // A newer NewQ's: it doesn't continue here.
+                        ContinueMode::Other(_) => "⏸ newer",
                     }
                     .into(),
                     PLAYHEAD,
@@ -8801,6 +8804,17 @@ fn inspector_one(
                     .weak(),
                 );
             }
+            CueKind::Unknown(_) => {
+                let note = cue.kind.unknown_note().unwrap_or_default();
+                ui.label(RichText::new(format!("❓ {note}.")).strong());
+                ui.label(
+                    RichText::new(
+                        "This NewQ keeps it as it was and saves it so, for the newer NewQ to \
+                         play; here GO passes it by and firing it does nothing.",
+                    )
+                    .weak(),
+                );
+            }
         }
         if let Some(n) = new_name {
             cue.name = n;
@@ -9396,7 +9410,7 @@ fn effects_inspector(ui: &mut Ui, cue_id: CueId, ty: CueType, m: &mut MediaCue, 
             } else if let Some(i) = up {
                 m.effects.swap(i, i - 1);
             }
-            if m.effects.iter().any(|e| !e.kind.is_video()) {
+            if m.effects.iter().any(|e| e.kind.is_sound()) {
                 ui.label(
                     RichText::new(
                         "Sound effects are set up when the cue starts: adding or removing one \

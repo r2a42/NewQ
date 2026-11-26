@@ -1712,11 +1712,12 @@ pub fn fit_rect(tex: (u32, u32), win: (u32, u32), fit: Fit) -> [f32; 4] {
     let (ww, wh) = (win.0.max(1) as f32, win.1.max(1) as f32);
     let (sx, sy) = match fit {
         Fit::Stretch => (1.0, 1.0),
-        Fit::Contain | Fit::Cover => {
-            let s = if fit == Fit::Contain {
-                (ww / tw).min(wh / th)
-            } else {
+        // (One a newer NewQ wrote is fitted as `Contain`.)
+        Fit::Contain | Fit::Cover | Fit::Other(_) => {
+            let s = if fit == Fit::Cover {
                 (ww / tw).max(wh / th)
+            } else {
+                (ww / tw).min(wh / th)
             };
             (tw * s / ww, th * s / wh)
         }
