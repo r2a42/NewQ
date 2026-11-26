@@ -41,6 +41,25 @@ is a piece of a longer entry that covered several areas.
   against a fake projector on loopback). Projector and TCP sends run on a
   thread per host from `output.rs`.
 
+  **No OSC or MIDI send waits on a name lookup** (R2 of the 2026-11-26 review). The
+  `send-cues` thread sends MIDI and OSC/UDP to a literal address (`literal_ip`) itself,
+  with no lookup. OSC and UDP (`NetworkOut` without TCP is an `Outgoing::Osc` too) to a
+  host *name* go to a thread for that name (`start_name_sender`, keyed by the lowercased
+  name, so every port of it keeps one order). While its first lookup runs, that name's
+  messages queue (`NAME_QUEUE` = 64; past that one is not sent, with an error); a message
+  that waited over `NAME_HOLD` (3 s) is not sent and says so, since a GO seconds late is
+  worse than one the operator is told was lost. A failed lookup fails what waited for it
+  in one error, and the next message looks again. A found address lasts `NAME_FRESH`
+  (30 s), then is looked up again in the background while messages go to the one known (a
+  failed refresh keeps it). Errors reach the status bar and log through `Outbox::errors`
+  → `Engine::problem`. Lookups go through a `Resolver` (`system_resolver`, or a stand-in
+  in tests that a test holds shut). Order between a name and an address for the same
+  machine is not kept: they are two queues.
+
+  `Feedback` (`feedback.rs`) uses an address as it is and looks a name up on a thread; the
+  slot carries a generation number so a slow, older lookup can't overwrite a newer
+  setting (R14 of the Fable review).
+
 ## Part of the `src/remote.rs` entry (a run of other files' notes): time-of-day triggers
 
   `src/clock.rs`: time-of-day triggers (local time via `jiff`).

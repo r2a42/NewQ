@@ -4,6 +4,16 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
+## Unreleased
+
+- **A send cue to a computer's name no longer holds up the others.** An OSC or UDP send cue whose
+  host is a name (`eos`, `lx-desk.local`) rather than an address could wait seconds on a show
+  network with no DNS, and every OSC and MIDI send cue behind it waited too, so a lighting or sound
+  GO arrived late. Now only that name's own messages wait for it to be found, in order; one that
+  waits over 3 seconds, or a name that can't be found, is not sent and the status bar says so.
+  MIDI and sends to an address (`10.0.0.5`) go at once. OSC feedback set to a name that answers
+  slowly no longer goes back to an older address you had changed it from.
+
 ## 0.27.1
 
 - **The Live audio and Control cues have icons again.** In the cue list and *Cue ▸ Add* they showed
