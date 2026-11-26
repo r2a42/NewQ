@@ -1188,33 +1188,75 @@ fn a_rigid_fit_finds_the_turn_and_the_move() {
 
 #[test]
 fn a_nudge_solves_from_the_last_answer() {
-    // What the line-up page does at every nudge: the last answer is the
-    // start, one point moved a pixel. Same answer as from nothing, and the
-    // time it took printed (not asserted: CI oversleeps).
+    // What the line-up page does at every nudge: the projector's placement
+    // (the last answer) is the start, the lens is still as entered, one point
+    // moved a pixel. The same answer as a solve from nothing, and the time it
+    // took printed (not asserted: CI oversleeps).
     let rig = audience_rig(1.6, [0.1, 0.3]);
-    let world = deep_points(&rig, 12, 9.0);
     let entered = LensFit {
         throw: 1.5,
         shift: [0.0; 2],
         aspect: HD,
     };
-    let mut problem = rig.problem(
-        noisy(&rig.points(&world), 0.5, 3),
-        entered,
-        Freedom::default(),
-    );
-    let first = solve(&problem).unwrap();
-    problem.start = Some(first.pose);
-    problem.lens = first.lens;
-    problem.points[5].pixel[0] += 1.0;
-    let began = std::time::Instant::now();
-    let nudged = solve(&problem).unwrap();
-    let took = began.elapsed();
-    problem.start = None;
-    let fresh = solve(&problem).unwrap();
-    eprintln!("a nudge took {took:?} (this build)");
-    assert_eq!(nudged.rung, fresh.rung);
-    assert!(!nudged.capped);
-    assert!(linalg::norm(linalg::sub(nudged.pose.position, fresh.pose.position)) < 1e-9);
-    assert!((nudged.lens.throw - fresh.lens.throw).abs() < 1e-9);
+    let mut rng = Rng(77);
+    for (n, sigma, bad) in [
+        (12, 0.5, false),
+        (12, 2.0, false),
+        (36, 0.5, false),
+        (36, 2.0, true),
+    ] {
+        let world: Vec<V3> = (0..n)
+            .map(|_| {
+                rig.spot(
+                    rng.range(0.05, 0.95),
+                    rng.range(0.05, 0.95),
+                    9.0 * rng.range(0.7, 1.3),
+                )
+            })
+            .collect();
+        let mut points = noisy(&rig.points(&world), sigma, n as u64);
+        if bad {
+            points[7].pixel[1] += 20.0;
+        }
+        let mut problem = rig.problem(points, entered, Freedom::default());
+        let first = solve(&problem).unwrap();
+        problem.start = Some(first.pose);
+        problem.points[5].pixel[0] += 1.0;
+        let began = std::time::Instant::now();
+        let nudged = solve(&problem).unwrap();
+        let took = began.elapsed();
+        problem.start = None;
+        let fresh = solve(&problem).unwrap();
+        eprintln!("{n} points, {sigma} px, bad point {bad}: a nudge took {took:?} (this build)");
+        assert_eq!(nudged.rung, fresh.rung);
+        assert_eq!(nudged.worst.map(|w| w.point), fresh.worst.map(|w| w.point));
+        assert_eq!(nudged.worst.map(|w| w.point), bad.then_some(7));
+        assert!(!nudged.capped);
+        assert!(linalg::norm(linalg::sub(nudged.pose.position, fresh.pose.position)) < 1e-6);
+        assert!((nudged.lens.throw - fresh.lens.throw).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn a_very_wide_picture_is_drawn_and_fitted_alike() {
+    // Pixels wider than a lens's own aspect may be (12.8:1): the solver
+    // uses the shape NewQ draws, as `sane_aspect` keeps it.
+    let pixels = (3840, 300);
+    let mut rig = audience_rig(1.6, [0.0, 0.0]);
+    rig.pixels = pixels;
+    rig.lens.aspect = 12.8;
+    let proj = projector_of(&rig);
+    let s = State {
+        r: rig.pose.turn(),
+        c: rig.pose.position,
+        lens: LensFit::of(&proj, pixels),
+    };
+    assert!((s.lens.aspect - 12.8).abs() < 1e-6);
+    let x = rig.spot(0.3, 0.6, 8.0);
+    let ours = model::project(&s, px(pixels), x).unwrap();
+    let ([u, v], _) = proj
+        .in_picture(x.map(|v| v as f32), proj.aspect(pixels))
+        .unwrap();
+    assert!((ours[0] - u as f64 * 3840.0).abs() < 0.01);
+    assert!((ours[1] - v as f64 * 300.0).abs() < 0.01);
 }

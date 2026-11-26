@@ -35,19 +35,22 @@
 //! `Solution::notes` says why one wasn't.
 //!
 //! Method: starting guesses (the caller's `Problem::start`, a flat set's
-//! homography, the 3x4 DLT of six or more points that aren't flat, and,
-//! only when those leave the points over a pixel out, a fixed ring of
-//! places round the points facing them), each given `model::START_ROUNDS`
-//! of Levenberg-Marquardt on the error in pixels (pose only, lens as
-//! entered), the best taken on to at most `model::MAX_ROUNDS`
-//! (`Solution::capped` says if it got there still moving). Then the rungs
-//! from the top down: the highest the points and `Freedom` allow, refined
-//! from that pose and from the DLT's lens, and a rung lower each time one
-//! isn't pinned down. Then each point's error, and with five or more points
-//! a leave-one-out: the point whose removal leaves the others agreeing
-//! best, named when it stands out. A poor fit that would be good with the
+//! homography, the 3x4 DLT of six or more points that aren't flat; a fixed
+//! ring of places round the points facing them only when those leave the
+//! points over a pixel out and there is no start or no linear guess), each
+//! given `model::START_ROUNDS` of Levenberg-Marquardt on the error in pixels
+//! (pose only, lens as entered), the best taken on to at most
+//! `model::MAX_ROUNDS` (`Solution::capped` says if it got there still
+//! moving). Then the rungs from the top down: the highest the points and
+//! `Freedom` allow, tried from that pose and from the DLT's lens, judged
+//! after `START_ROUNDS`, a rung lower each time one isn't pinned down, the
+//! one kept refined to the end. Then each point's error, and with five or
+//! more points, one a pixel or more out, a leave-one-out of the three
+//! furthest off: the point whose removal leaves the others agreeing best,
+//! named when it stands out. A fit over 5 px that would be good with the
 //! picture flipped left to right (a mirror, a projector's rear setting) is
-//! refused. Everything is bounded; no clock.
+//! refused (not on a flat set, where a flipped picture fits from behind).
+//! Everything is bounded; no clock.
 //!
 //! Use: build a `Problem` (`Problem::new` from a projector's lens, the
 //! picture's size in pixels, an argument, and the points in room metres:
@@ -80,9 +83,14 @@ use linalg::{M3, V3};
 use model::{Pair, State};
 use serde::{Deserialize, Serialize};
 
-/// The narrowest and widest picture shape a lens is given (width / height).
+/// The narrowest and widest picture shape a solve may give a lens (width /
+/// height; `Lens::aspect`'s bounds).
 pub(crate) const MIN_ASPECT: f64 = 0.2;
 pub(crate) const MAX_ASPECT: f64 = 10.0;
+/// The shapes drawn at all (`projector::sane_aspect`'s bounds): an entered
+/// aspect (the pixels') is kept within these, as NewQ draws it.
+const MIN_DRAWN_ASPECT: f64 = 0.1;
+const MAX_DRAWN_ASPECT: f64 = 20.0;
 
 /// The fewest points anything is solved from, and for each lens number.
 pub(crate) const POSE_POINTS: usize = 4;
@@ -94,6 +102,8 @@ pub(crate) const SHIFT_POINTS: usize = 8;
 const FLAT: f64 = 0.05;
 /// A set is in a line when its second axis is under this share of its widest.
 const IN_A_LINE: f64 = 0.01;
+/// How many of the points furthest off a leave-one-out tries.
+const LEAVE_OUT_TRIES: usize = 3;
 /// Two points closer than this (metres) are the same spot.
 const SAME_SPOT: f64 = 1e-3;
 /// Two points closer than this in the picture (pixels) are at the same place.
@@ -108,6 +118,9 @@ const STANDS_OUT_PX: f64 = 3.0;
 const STANDS_OUT_TIMES: f64 = 5.0;
 /// Fits better than this are "within half a pixel".
 const HALF: f64 = 0.5;
+/// Over this (RMS) a flipped picture is looked for: a mirrored rig fits
+/// tens of pixels out, a wrong lens shift a few.
+const MIRROR_PX: f64 = 5.0;
 /// Over this the shift is worth asking about when it wasn't solved.
 const POOR_PX: f64 = 2.0;
 
@@ -203,7 +216,12 @@ impl LensFit {
                 default_throw(),
             ),
             shift: self.shift.map(|v| within(v, -s, s, 0.0)),
-            aspect: within(self.aspect, MIN_ASPECT, MAX_ASPECT, default_aspect()),
+            // As `sane_aspect`: outside, the 16:9 NewQ draws instead.
+            aspect: if (MIN_DRAWN_ASPECT..=MAX_DRAWN_ASPECT).contains(&self.aspect) {
+                self.aspect
+            } else {
+                default_aspect()
+            },
         }
     }
 }
@@ -534,7 +552,29 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
     let flat = spread[0].max(0.0).sqrt() < FLAT * spread[2].sqrt();
 
     let mut notes = Vec::new();
-    let mut fit = ladder(problem, &pairs, lens, pixels, size, flat, &mut notes)?;
+    let mut fit = ladder(problem, &pairs, lens, pixels, size, flat, false, &mut notes)?;
+    // The ring of places round the points, only when the quick guesses leave
+    // them over a pixel out and nothing better is there to start from: no
+    // placement given, or four or five points not on one surface (no linear
+    // guess). A nudge, from the last answer, never needs it.
+    let linear = flat || pairs.len() >= THROW_POINTS;
+    if fit.cost > pairs.len() as f64 && (problem.start.is_none() || !linear) {
+        let mut ring_notes = Vec::new();
+        if let Ok(f) = ladder(
+            problem,
+            &pairs,
+            lens,
+            pixels,
+            size,
+            flat,
+            true,
+            &mut ring_notes,
+        ) && f.cost < fit.cost
+        {
+            fit = f;
+            notes = ring_notes;
+        }
+    }
 
     fit.state.r = linalg::nearest_rotation(&fit.state.r);
     let mut residuals = vec![None; problem.points.len()];
@@ -553,8 +593,13 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
     // nudge on a good line-up stays quick).
     let mut worst = None;
     if pairs.len() > POSE_POINTS && max >= 1.0 {
+        // Only the points furthest off are tried: a point that stands out
+        // is among them, and a few dozen points stay quick.
+        let mut order: Vec<usize> = (0..pairs.len()).collect();
+        let err = |k: usize| residuals[used[k]].unwrap_or(0.0);
+        order.sort_by(|&a, &b| err(b).total_cmp(&err(a)));
         let mut best: Option<Outlier> = None;
-        for k in 0..pairs.len() {
+        for &k in order.iter().take(LEAVE_OUT_TRIES) {
             let rest: Vec<Pair> = pairs
                 .iter()
                 .enumerate()
@@ -590,7 +635,7 @@ pub(crate) fn solve(problem: &Problem) -> Result<Solution, Refusal> {
     }
 
     let rms_px = (sum / used.len() as f64).sqrt();
-    if rms_px > POOR_PX
+    if rms_px > MIRROR_PX
         && worst.is_none()
         && mirrored(problem, &pairs, lens, pixels, size, flat, rms_px)
     {
@@ -640,7 +685,7 @@ fn mirrored(
         start: None,
         ..problem.clone()
     };
-    let Ok(fit) = ladder(&plain, &flipped, l, pixels, size, flat, &mut notes) else {
+    let Ok(fit) = ladder(&plain, &flipped, l, pixels, size, flat, false, &mut notes) else {
         return false;
     };
     let rms = (fit.cost / flipped.len() as f64).sqrt();
@@ -724,6 +769,8 @@ fn check(problem: &Problem) -> Result<Vec<usize>, Refusal> {
 }
 
 /// The best pose, then each rung the points and `problem.free` allow.
+// The solve's fixed inputs, passed down as they are.
+#[allow(clippy::too_many_arguments)]
 fn ladder(
     problem: &Problem,
     pairs: &[Pair],
@@ -731,6 +778,7 @@ fn ladder(
     pixels: (f64, f64),
     size: f64,
     flat: bool,
+    ring: bool,
     notes: &mut Vec<Note>,
 ) -> Result<Fitted, Refusal> {
     let mut starts: Vec<State> = Vec::new();
@@ -750,15 +798,10 @@ fn ladder(
         starts.push(State { lens, ..d.clone() });
     }
 
-    // Each guess a few rounds, the best of them to the end. The ring of
-    // places is tried only when the guesses above leave the points more
-    // than a pixel out (a nudge, starting from the last answer, seldom
-    // needs it).
+    // Each guess a few rounds, the best of them to the end; the ring too
+    // when asked for, or when no other guess has the points in front.
     let mut best = best_of(&starts, pixels, pairs, size);
-    if best
-        .as_ref()
-        .is_none_or(|b| b.cost > pairs.len() as f64 * 1.0)
-    {
+    if ring || best.is_none() {
         let ring = start::ring(pairs, &lens, pixels, 8);
         if let Some(r) = best_of(&ring, pixels, pairs, size)
             && best.as_ref().is_none_or(|b| r.cost < b.cost)
@@ -826,10 +869,12 @@ fn ladder(
                 ..d.clone()
             });
         }
+        // Each try a few rounds, judged there (the sds hardly move after);
+        // only a rung that passes is taken to the end.
         let mut found: Option<Fitted> = None;
         for t in &tries {
             if let Some((state, cost, capped)) =
-                model::refine(t, rung, pixels, pairs, size, model::MAX_ROUNDS)
+                model::refine(t, rung, pixels, pairs, size, model::START_ROUNDS)
                 && found.as_ref().is_none_or(|b| cost < b.cost)
             {
                 found = Some(Fitted {
@@ -846,7 +891,17 @@ fn ladder(
                 Some(part) => Note::AtLimit { part },
                 None => match unsure(&f.state, rung, pixels, pairs, size) {
                     Some(part) => Note::Unsure { part },
-                    None => return Ok(found.unwrap_or(best)),
+                    None => {
+                        let (state, cost, capped) =
+                            model::refine(&f.state, rung, pixels, pairs, size, model::MAX_ROUNDS)
+                                .unwrap_or((f.state.clone(), f.cost, f.capped));
+                        return Ok(Fitted {
+                            state,
+                            rung,
+                            cost,
+                            capped,
+                        });
+                    }
                 },
             },
         };
