@@ -11,6 +11,22 @@ release page, and a release is refused if it has none.
   until it was killed. Now each cue is started at most three times by one GO; then NewQ stops
   there and the status bar names the cue that came round again, so you can give one cue in the
   circle a pre-wait. Long chains of auto-continues and big groups play as before.
+- **Quitting in the middle of a show asks first.** File ▸ Quit, Ctrl+Q (Command-Q on a Mac),
+  the close button and Alt+F4 used to stop every cue and close NewQ at once when the show was
+  saved. Now, while cues are playing or show mode is on, NewQ asks "Cues are playing. Quit and
+  stop them?", and nothing stops until you say Quit.
+- **The unsaved-changes question no longer freezes the show.** Asking about unsaved changes
+  (quitting, New, Open), and offering to restore a crashed session's changes, used a system box
+  that held every picture on its frame and stopped fades and waits until it was answered. They
+  are now asked inside NewQ's window while the show plays on; Save quits once the show is
+  written, and a save that fails says so in the window and doesn't quit.
+- **Browse… for a recording's folder no longer freezes the show** while the folder picker is
+  open.
+- **Closing a display's window during a show no longer switches that display off.** In show
+  mode, or while cues play, Alt+F4 on a display's window is ignored and the status bar says so.
+- **A Save As made while a save is still being written is no longer lost.** On a slow disk the
+  second save was dropped without a word; now it is written as soon as the first has finished.
+
 - **A send cue to a computer's name no longer holds up the others.** An OSC or UDP send cue whose
   host is a name (`eos`, `lx-desk.local`) rather than an address could wait seconds on a show
   network with no DNS, and every OSC and MIDI send cue behind it waited too, so a lighting or sound

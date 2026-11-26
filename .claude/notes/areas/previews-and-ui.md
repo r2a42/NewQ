@@ -37,6 +37,39 @@ mixer's load, `media-and-streams.md`'s area).
   (`UiState::show_keys`, `Action::ToggleKeys`, Help ▸ Keyboard shortcuts). `Action::OpenLogFolder`
   (Help). The Displays page's *+ Add* scrolls to the new display (`UiState::reveal_display`).
 
+## Leaving the show, saving, and dialogs (the main thread runs the show)
+
+  **Nothing on the main thread waits for a person**: `App::pass` ticks the engine there (video
+  frames, fades, pre-waits, network heartbeats). `src/ui/leave.rs`: the questions before the show is
+  left, drawn in the window as an `egui::Modal` (both interfaces, and in each pop-out, whose
+  `keyboard` also takes Ctrl+Q): `leave::ask(Leave::{Quit, New, Open, OpenFile(path)})` is called by
+  `Action::Quit/New/Open`, `OpenShowFile(_, true)` (edited while the dialog was open; a handed-over
+  show), a dropped `.newq`, and `UiState::quit_requested` (the main window's close button/Alt+F4, a
+  Mac's app-menu Quit), taken at the start of `draw`. `UiState::question`: `Playing` (a quit while
+  `engine.is_active()` or Show mode), `Unsaved(then)` (Save / Don't save / Cancel), `Saving(then)`
+  (waits for `saving`, `save_next` and an open `dialog`, then goes on if the show equals
+  `saved_json`, else asks `Unsaved` again: a failed or cancelled save never leaves), `Recover(path)`
+  (the crashed session's copy, put up by `App::render_control` from `pending_recovery`). Buttons
+  only set `UiState::answer` (never focusable, so Space/Enter stay GO; Esc, consumed by
+  `leave::window` before `keyboard`, is Cancel), acted on by `leave::settle` at the very end of
+  `draw` (so a follower, whose actions are dropped, and a pop-out can answer). A quit that needs
+  no asking or was agreed to sets `UiState::quit_now`, which `render_control` acts on (Test Mode's
+  shutdown, `net_test_flush`, `stop_all`, exit). `test_locked`: Quit goes straight to `quit_now`.
+  Deliberately leaving clears the recovery copy (`leave::go`). `quit_would_ask` feeds the Mac's
+  `macwin::set_quit_freely`. Tests: `src/ui/leave_tests.rs` (whole window by mouse, engine ticked
+  between frames), including `no_system_dialog_is_shown_on_the_thread_that_runs_the_show`, which
+  reads `src/` and fails on any `rfd::`/`pick_file`/`pick_folder`/`save_file(` outside
+  `DIALOGS_ALLOWED_IN` (the dialog threads: `start_dialog`, `start_slide_dialog`,
+  `start_deck_dialog`, timeline `keys::pick_file`; builders `media_dialog`/`show_dialog`; and the
+  exceptions where nothing plays: `open_main_window`'s failure, `crash::install_in`'s fatal box,
+  `main.rs::hold_node_folder`).
+  Saving: `start_save` writes on a `save` thread; one asked for while another is being written is
+  kept in `UiState::save_next` (the latest, path and a copy of the show) and started by `poll_save`
+  when that one ends, with "Still saving: …" in the status bar. A failed save is
+  `tell_save_failed` -> `UiState::save_failed`, a non-modal "Save failed" window (`leave`) and a
+  status-bar problem. File dialogs: `start_dialog` (`DialogFor`, a `file-dialog` thread, polled by
+  `poll_dialog`), including `DialogFor::RecordFolder` for a recording's Browse….
+
 ## Part of the `src/app.rs` / `src/ui.rs` entry: selection and the clipboard
 
   Selection state: `multi` only counts while `selected == multi_for` (`sync_selection` at the start of `draw` and `apply`, and `forget_multi` in `load_into`, `restore` and the test stash), so an old selection never returns when ids repeat in another show. The clipboard remembers the show it came from (`show_epoch`) and whether it was cut: `paste_cues` remaps a fade/stop/control cue's target to the copy, clears targets from another show, and gives a cut its old ids back. The right-click menu's Fire/Fade out/Stop name the clicked cue (`FireCue` etc.), not `selected`. Copying also writes a short text to the system clipboard, since egui-winit sends Paste only when it holds some text. In a group, `crossfade_into_next` applies only to pictures on the same display and layer, and the automatic fade-out waits for the crossfade only while it is coming or running (`running` set in `tick`).
