@@ -292,6 +292,12 @@ impl Win {
     /// Clicks the control `name`, scrolling the page down to it first if it
     /// is out of sight.
     fn press(&mut self, show: &mut Show, st: &mut UiState, name: &str) {
+        let r = self.see(show, st, name);
+        self.click_at(show, st, r);
+    }
+
+    /// Scrolls the control `name` into sight, and where it is.
+    fn see(&mut self, show: &mut Show, st: &mut UiState, name: &str) -> Rect {
         for _ in 0..40 {
             match self.find(name) {
                 Some((_, true)) | None => break,
@@ -324,7 +330,7 @@ impl Win {
             Rect::from_min_size(Pos2::ZERO, self.size).contains_rect(r),
             "{name} is in the window: {r:?}"
         );
-        self.click_at(show, st, r);
+        r
     }
 
     /// Turns the wheel over the page: on the 3D stage page, over its tab's
@@ -824,4 +830,183 @@ fn the_page_is_laid_out_by_the_room_it_has() {
         602.0 - SIDE_CONTENT_LEAST
     );
     assert_eq!(view_width(602.0, Some(0.0)), SIDE_VIEW_LEAST);
+}
+
+impl Win {
+    /// Clicks an entry of a page's *+ Add* menu (noted as "page_adds").
+    fn press_add(&mut self, show: &mut Show, st: &mut UiState, name: &str) {
+        let r = self
+            .ctx
+            .data(|d| d.get_temp::<Vec<(String, Rect)>>(egui::Id::new("page_adds")))
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("no {name}"));
+        self.click_at(show, st, r);
+    }
+
+    fn has(&self, words: &str) -> bool {
+        self.texts.iter().any(|t| t == words)
+    }
+}
+
+/// A show put right as a loaded one is equals itself: what the page lets
+/// be made is what `sanitize_stage` keeps.
+fn kept_by_sanitize(show: &Show) -> bool {
+    let mut again = show.clone();
+    again.sanitize_stage();
+    serde_json::to_value(&again).ok() == serde_json::to_value(show).ok()
+}
+
+#[test]
+fn a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_everywhere() {
+    for modern in [false, true] {
+        let mut show = Show::default();
+        let d = show.outputs[0].id;
+        show.outputs[0].name = "Proj".into();
+        let screen = add_surface(&mut show, Preset::Flat);
+        // A projector aimed at the screen, whose display is Proj (which the
+        // new screen shows, as the first display).
+        let st0 = UiState::default();
+        let p = super::super::stage_projectors::add_aimed_at(&mut show, &st0, screen);
+        show.projector_mut(p).unwrap().display = Some(d);
+        // A video cue on Proj, to be told it isn't seen once Proj is mapped.
+        let mut cue = show.make_cue(crate::show::CueType::Video, None, 0);
+        if let Some(m) = cue.kind.media_mut() {
+            m.output = Some(d);
+        }
+        let cue_id = cue.id;
+        show.cues.push(cue);
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Displays, &mut show);
+
+        // + Add ▸ Canvas: a display with no monitor, a picture of its own.
+        w.press_add(&mut show, &mut st, "Displays ▸ + Add");
+        w.press_add(&mut show, &mut st, "Displays ▸ + Add ▸ Canvas");
+        let canvas = show.outputs.last().unwrap().id;
+        let c = show.output(canvas).unwrap();
+        assert_eq!(c.name, "Canvas 1", "modern {modern}");
+        assert!(c.monitor.is_none() && c.picture == Some((1920, 1080)));
+        // Not a canvas until a screen shows it; its row offers a screen.
+        assert!(!show.is_canvas(canvas));
+        assert!(w.find("Displays ▸ Canvas 1 ▸ Put it on a screen").is_some());
+
+        // Point the screen at it, on the 3D stage's Screens tab.
+        st.settings_page = SettingsPage::Stage3d;
+        st.stage.picked = Some(screen);
+        w.settle(&mut show, &mut st);
+        w.tab(&mut show, &mut st, "Screens");
+        let menu = "3D stage ▸ Screen 1 ▸ Shows";
+        w.press(&mut show, &mut st, menu);
+        w.press(&mut show, &mut st, &format!("{menu} ▸ Canvas 1"));
+        assert_eq!(
+            show.stage3d.surface(screen).unwrap().feed.output(),
+            Some(canvas)
+        );
+        assert!(show.is_canvas(canvas), "modern {modern}");
+        // Worked out: a projector reaches it, so it is projection.
+        assert!(
+            w.texts
+                .iter()
+                .any(|t| t == "Works it out: projection, front"),
+            "modern {modern}: {:?}",
+            w.texts
+        );
+
+        // Tick Mapped on the projector.
+        w.tab(&mut show, &mut st, "Projectors");
+        st.stage.projectors.picked = Some(p);
+        w.settle(&mut show, &mut st);
+        w.press(&mut show, &mut st, "Projectors ▸ Projector 1 ▸ Mapped");
+        assert!(show.projector(p).unwrap().mapped, "modern {modern}");
+        assert!(w.has(super::super::stage_projectors::MAPPED_WORDS));
+        // One flat screen: the small theatre's line.
+        assert!(w.has(super::super::stage_projectors::ONE_FLAT_SCREEN_WORDS));
+        assert!(w.has("Maps Canvas 1 onto Screen 1."), "{:?}", w.texts);
+        assert!(kept_by_sanitize(&show), "modern {modern}");
+
+        // The Displays page: the canvas's row and the projector's.
+        st.settings_page = SettingsPage::Displays;
+        w.settle(&mut show, &mut st);
+        w.see(&mut show, &mut st, "Displays ▸ Canvas 1 ▸ Canvas");
+        for words in [
+            "Canvas",
+            "Shown on:",
+            "No monitor (a canvas for the stage's screens)",
+        ] {
+            assert!(w.has(words), "modern {modern}: {words:?} in {:?}", w.texts);
+        }
+        w.see(&mut show, &mut st, "Displays ▸ Proj ▸ Mapped");
+        assert!(w.has("Mapped"), "modern {modern}: {:?}", w.texts);
+        w.see(&mut show, &mut st, "Displays ▸ Proj ▸ Open Projector 1");
+        for words in ["The stage's screens, through Projector 1"] {
+            assert!(w.has(words), "modern {modern}: {words:?} in {:?}", w.texts);
+        }
+        assert!(
+            w.texts
+                .iter()
+                .any(|t| t.starts_with("1 cue is sent to this display.")),
+            "modern {modern}: {:?}",
+            w.texts
+        );
+        // Its screen button goes to the screen.
+        w.press(
+            &mut show,
+            &mut st,
+            "Displays ▸ Canvas 1 ▸ Shown on: Screen 1",
+        );
+        assert_eq!(st.settings_page, SettingsPage::Stage3d);
+        assert_eq!(st.stage.tab, StageTab::Screens);
+        assert_eq!(st.stage.picked, Some(screen));
+
+        // The cue inspector's Display menu.
+        st.layout.close(super::super::Pane::Settings);
+        st.selected = Some(cue_id);
+        if modern {
+            st.modern_view = super::super::modern::View::Editor;
+        }
+        w.settle(&mut show, &mut st);
+        let mapped = format!("Proj ({})", super::super::MAPPED_LABEL);
+        assert!(w.has(&mapped), "modern {modern}: {:?}", w.texts);
+        w.click_text(&mut show, &mut st, &mapped);
+        assert!(w.has("Canvas 1 (canvas)"), "modern {modern}: {:?}", w.texts);
+        // The mapped display is greyed: clicking it changes nothing.
+        w.click_text(&mut show, &mut st, &mapped);
+        // Choose the canvas instead.
+        if !w.has("Canvas 1 (canvas)") {
+            w.click_text(&mut show, &mut st, &mapped);
+        }
+        w.click_text(&mut show, &mut st, "Canvas 1 (canvas)");
+        let on = show
+            .cue(cue_id)
+            .and_then(|c| c.kind.media())
+            .and_then(|m| m.output);
+        assert_eq!(on, Some(canvas), "modern {modern}");
+
+        // The Patch view (the new interface's).
+        if modern {
+            st.modern_view = super::super::modern::View::Patch;
+            w.settle(&mut show, &mut st);
+            let rects = w
+                .ctx
+                .data(|d| {
+                    d.get_temp::<super::super::modern::PatchRects>(egui::Id::new(
+                        "modern_patch_rects",
+                    ))
+                })
+                .expect("the patch view was drawn");
+            let sub = |t: &str| {
+                rects
+                    .subs
+                    .iter()
+                    .find(|(n, _)| n == t)
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_default()
+            };
+            assert_eq!(sub("Canvas 1"), "canvas → Screen 1");
+            assert_eq!(sub("Proj"), super::super::MAPPED_LABEL);
+        }
+        assert!(kept_by_sanitize(&show), "modern {modern}");
+    }
 }

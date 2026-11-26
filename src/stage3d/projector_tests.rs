@@ -1,5 +1,5 @@
 use super::*;
-use crate::stage3d::{Feed, Stage3d, Surface, SurfaceId, WHOLE};
+use crate::stage3d::{Feed, ScreenKind, Stage3d, Surface, SurfaceId, WHOLE};
 
 const HD: f32 = 16.0 / 9.0;
 
@@ -669,4 +669,183 @@ fn a_canvas_is_a_display_with_no_monitor_that_a_screen_shows() {
     assert!(!show.is_canvas(canvas));
     assert!(!show.is_canvas(crate::show::OutputId(9999)));
     assert!(!show.movable(show.stage3d.surfaces[0].id));
+}
+
+// ----- Mapping's rules (mapping plan 4.1, 4.3 and 8) -------------------------
+
+/// A show with `screens` flat screens side by side 6 m apart, each showing
+/// a display of its own with no monitor, and one projector standing back far
+/// enough to take them all in, its display `Proj`.
+fn mapped_room(screens: usize) -> (Show, ProjectorId, OutputId, Vec<SurfaceId>, Vec<OutputId>) {
+    let mut show = Show::default();
+    let proj = show.outputs[0].id;
+    let mut ids = Vec::new();
+    let mut canvases = Vec::new();
+    for i in 0..screens {
+        let c = show.add_canvas();
+        let s = show.add_surface(None);
+        let x = (i as f32 - (screens as f32 - 1.0) / 2.0) * 6.0;
+        let sf = show.stage3d.surface_mut(s).unwrap();
+        sf.placement.position = [x, 2.0, 0.0];
+        sf.feed = Feed::Display {
+            output: c,
+            region: WHOLE,
+        };
+        ids.push(s);
+        canvases.push(c);
+    }
+    let p = show.add_projector();
+    let pr = show.projector_mut(p).unwrap();
+    pr.placement.position = [0.0, 2.0, 40.0];
+    pr.lens.throw = 0.8;
+    pr.display = Some(proj);
+    (show, p, proj, ids, canvases)
+}
+
+#[test]
+fn a_screen_works_out_its_kind_where_things_stand_unless_one_is_chosen() {
+    let (mut show, p, _, s, _) = mapped_room(1);
+    let s = s[0];
+    // A projector reaches it: projection, from the side `rear` says.
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Front));
+    show.stage3d.surface_mut(s).unwrap().rear = true;
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Rear));
+    show.stage3d.surface_mut(s).unwrap().rear = false;
+    // Turned away, nothing reaches it: an LED wall.
+    show.projector_mut(p).unwrap().placement.yaw = 180.0;
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Led));
+    // Chosen, it is what was chosen, wherever the projectors are.
+    let sf = show.stage3d.surface_mut(s).unwrap();
+    sf.choose_kind(Some(ScreenKind::Rear));
+    assert!(sf.rear);
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Rear));
+    let sf = show.stage3d.surface_mut(s).unwrap();
+    sf.choose_kind(Some(ScreenKind::Led));
+    assert!(!sf.rear, "an LED wall is never rear");
+    show.projector_mut(p).unwrap().placement.yaw = 0.0;
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Led));
+    // In the file: "Projection" or "Led"; worked out, nothing at all.
+    let json = serde_json::to_value(show.stage3d.surface(s).unwrap()).unwrap();
+    assert_eq!(json["kind"], "Led");
+    let sf = show.stage3d.surface_mut(s).unwrap();
+    sf.choose_kind(Some(ScreenKind::Front));
+    let json = serde_json::to_value(&*sf).unwrap();
+    assert_eq!(json["kind"], "Projection");
+    assert!(json.get("rear").is_none());
+    sf.choose_kind(None);
+    let json = serde_json::to_value(&*sf).unwrap();
+    assert!(json.get("kind").is_none(), "{json}");
+}
+
+#[test]
+fn nothing_mapping_adds_is_written_at_its_defaults_and_an_old_show_reads_the_same() {
+    let (mut show, p, ..) = mapped_room(2);
+    // A 0.27 show (no kind, no mapped, no fine-tune, no line-up) reads as
+    // one with every new thing at its default.
+    let text = serde_json::to_string(&show.stage3d).unwrap();
+    for key in ["\"kind\"", "\"mapped\"", "\"fine\"", "\"line_up\""] {
+        assert!(!text.contains(key), "{key} in {text}");
+    }
+    let back: Stage3d = serde_json::from_str(&text).unwrap();
+    assert!(
+        back.surfaces
+            .iter()
+            .all(|s| s.kind.is_none() && s.extra.is_empty())
+    );
+    assert!(
+        back.projectors
+            .iter()
+            .all(|p| !p.mapped && p.fine.is_none())
+    );
+    assert!(back.extra.is_empty());
+    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    // Switched on and off again, it writes what it wrote before.
+    show.projector_mut(p).unwrap().mapped = true;
+    show.projector_mut(p).unwrap().mapped = false;
+    assert_eq!(serde_json::to_string(&show.stage3d).unwrap(), text);
+}
+
+#[test]
+fn a_mapped_projector_shows_at_most_four_canvases_in_the_order_of_the_screens() {
+    let (mut show, p, _, screens, canvases) = mapped_room(5);
+    let f = show.mapped_feeds(p);
+    assert_eq!(f.screens, screens, "it reaches all five");
+    assert_eq!(f.used, canvases[..4].to_vec());
+    assert_eq!(f.left_out, vec![canvases[4]]);
+    // An LED screen, or a hidden one, is no feed.
+    show.stage3d
+        .surface_mut(screens[0])
+        .unwrap()
+        .choose_kind(Some(ScreenKind::Led));
+    show.stage3d.surface_mut(screens[1]).unwrap().visible = false;
+    let f = show.mapped_feeds(p);
+    assert_eq!(f.used, canvases[2..].to_vec());
+    assert!(f.left_out.is_empty());
+    // Two screens of one canvas count it once.
+    show.stage3d.surface_mut(screens[3]).unwrap().feed = Feed::Display {
+        output: canvases[2],
+        region: WHOLE,
+    };
+    let f = show.mapped_feeds(p);
+    assert_eq!(f.used, vec![canvases[2], canvases[4]]);
+    assert_eq!(f.screens.len(), 3);
+    // The file isn't changed by any of this.
+    let before = serde_json::to_string(&show).unwrap();
+    show.sanitize_stage();
+    assert_eq!(serde_json::to_string(&show).unwrap(), before);
+}
+
+#[test]
+fn a_mapped_projectors_display_is_on_no_screen_and_shows_no_stage() {
+    let (mut show, p, proj, screens, canvases) = mapped_room(1);
+    assert!(show.is_canvas(canvases[0]));
+    assert!(show.mapped_refused(p).is_none());
+    // A screen showing the projector's display: ticking is refused, naming it.
+    show.stage3d.surface_mut(screens[0]).unwrap().feed = Feed::Display {
+        output: proj,
+        region: WHOLE,
+    };
+    assert_eq!(
+        show.mapped_refused(p),
+        Some(MappedRefused::OnAScreen(vec![screens[0]]))
+    );
+    // The way out: a new canvas for the screen.
+    let c = show.new_canvas_for(screens[0]).unwrap();
+    assert!(show.is_canvas(c));
+    assert!(show.mapped_refused(p).is_none());
+    show.projector_mut(p).unwrap().mapped = true;
+    assert!(show.mapped_projector(proj).is_some());
+    assert!(!show.is_canvas(proj));
+    // It can't then be given a display a screen shows, nor show the stage.
+    assert!(show.projector_display_refused(c, p).is_some());
+    assert_eq!(
+        show.stage_source_refused(proj),
+        Some(crate::stage3d::MAPPED_SHOWS_NO_STAGE)
+    );
+    // A hand-written file that has a screen on it: the screen shows nothing.
+    show.stage3d.surface_mut(screens[0]).unwrap().feed = Feed::Display {
+        output: proj,
+        region: WHOLE,
+    };
+    show.sanitize_stage();
+    assert_eq!(show.stage3d.surface(screens[0]).unwrap().feed, Feed::None);
+    assert!(show.projector(p).unwrap().mapped, "the tick is kept");
+    // With no display it can't be mapped.
+    show.projector_mut(p).unwrap().display = None;
+    assert_eq!(show.mapped_refused(p), Some(MappedRefused::NoDisplay));
+}
+
+#[test]
+fn a_fine_tune_or_line_up_points_change_no_scene_key() {
+    let (mut show, p, ..) = mapped_room(1);
+    let key = show.stage3d.shape_key();
+    let pr = show.projector_mut(p).unwrap();
+    pr.fine = Some(crate::mesh::Mesh::grid(3, 3));
+    pr.line_up = Some(LineUp {
+        pixels: (1920, 1080),
+        ..Default::default()
+    });
+    assert_eq!(show.stage3d.shape_key(), key);
+    show.projector_mut(p).unwrap().placement.position[0] = 1.0;
+    assert_ne!(show.stage3d.shape_key(), key, "a move is in it");
 }

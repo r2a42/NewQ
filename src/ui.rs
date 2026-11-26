@@ -6292,17 +6292,16 @@ fn stage_role_lines(
         Some(StageRole::Canvas(on)) => to_screens(ui, "Shown on:", on, actions),
         Some(StageRole::AlsoOnStage(on)) => to_screens(ui, "Also on the stage:", on, actions),
         Some(StageRole::Mapped { cues, .. }) if *cues > 0 => {
-            let n = match cues {
-                1 => "1 cue is".to_string(),
-                n => format!("{n} cues are"),
-            };
-            settings::warning(
-                ui,
-                &format!(
-                    "{n} sent to this display. They aren't seen while it is mapped: send them \
-                     to a canvas."
+            let words = match cues {
+                1 => "1 cue is sent to this display. It isn't seen while the display is \
+                      mapped: send it to a canvas."
+                    .to_string(),
+                n => format!(
+                    "{n} cues are sent to this display. They aren't seen while it is mapped: \
+                     send them to a canvas."
                 ),
-            );
+            };
+            settings::warning(ui, &words);
         }
         Some(StageRole::Mapped { .. }) => {}
         None => {

@@ -698,6 +698,8 @@ fn patch(
         gear: String,
         gear_ok: bool,
         level: f32,
+        /// A cue can be dropped on it (not a mapped projector's display).
+        takes_cues: bool,
     }
     let mut mids: Vec<Mid> = Vec::new();
     for o in show.outputs.iter().filter(|o| !o.is_sub_display()) {
@@ -705,18 +707,32 @@ fn patch(
             st.display_states.get(&o.id),
             Some(DisplayState::Connected(_) | DisplayState::OnMainWindowDisplay(_))
         );
+        let mapped = show.mapped_projector(o.id).is_some();
+        let what = if mapped {
+            crate::ui::MAPPED_LABEL.to_string()
+        } else if show.is_canvas(o.id) {
+            let on: Vec<&str> = show
+                .screens_showing(o.id)
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect();
+            format!("canvas → {}", on.join(", "))
+        } else {
+            "display".into()
+        };
         mids.push(Mid {
             title: o.name.clone(),
             sub: if o.enabled {
-                "display".into()
+                what
             } else {
-                "display · off".to_string()
+                format!("{what} · off")
             },
             display: Some(o.id),
             audio: None,
             gear: gear_line(o),
             gear_ok: o.monitor.is_none() || connected,
             level: 0.0,
+            takes_cues: !mapped,
         });
     }
     if show.audio_outputs.is_empty() {
@@ -731,6 +747,7 @@ fn patch(
                 .map_or("No audio device".into(), |s| s.name.clone()),
             gear_ok: s.as_ref().is_some_and(|s| s.error.is_none()),
             level: engine.audio.meters(None).into_iter().fold(0.0, f32::max),
+            takes_cues: true,
         });
     }
     for o in &show.audio_outputs {
@@ -753,6 +770,7 @@ fn patch(
                 .meters(Some(o.id))
                 .into_iter()
                 .fold(0.0, f32::max),
+            takes_cues: true,
         });
     }
     let first_display = show
@@ -857,7 +875,10 @@ fn patch(
                 let port = Rect::from_center_size(rect.right_center(), Vec2::splat(18.0));
                 ports.push((*id, rect, port));
             }
-            let mid_hit = |p: Pos2| (0..mids.len()).find(|i| node_rect(1, *i).contains(p));
+            // A mapped projector's display takes no cues: nothing is dropped on it.
+            let mid_hit = |p: Pos2| {
+                (0..mids.len()).find(|i| mids[*i].takes_cues && node_rect(1, *i).contains(p))
+            };
             #[cfg(test)]
             ui.data_mut(|m| {
                 m.insert_temp(
@@ -866,6 +887,10 @@ fn patch(
                         ports: ports.iter().map(|(id, _, p)| (*id, p.center())).collect(),
                         mids: (0..mids.len())
                             .map(|i| (mids[i].title.clone(), node_rect(1, i)))
+                            .collect(),
+                        subs: mids
+                            .iter()
+                            .map(|m| (m.title.clone(), m.sub.clone()))
                             .collect(),
                     },
                 )
@@ -1011,9 +1036,11 @@ fn patch(
 /// Where the patch view put things, for the tests to aim at.
 #[cfg(test)]
 #[derive(Clone)]
-struct PatchRects {
+pub(crate) struct PatchRects {
     ports: Vec<(CueId, Pos2)>,
-    mids: Vec<(String, Rect)>,
+    pub(crate) mids: Vec<(String, Rect)>,
+    /// Each middle node's title and second line.
+    pub(crate) subs: Vec<(String, String)>,
 }
 
 #[cfg(test)]
