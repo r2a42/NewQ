@@ -1489,3 +1489,50 @@ fn trailers_in_timeline_groups_follow_one_another_together_with_the_sound_on_one
     assert_eq!(w.uncompared[1], after_go, "heartbeats not compared");
     assert!(worst < 0.002, "{:.1} ms apart", worst * 1000.0);
 }
+
+/// A follower given a show by a newer primary, with a cue of a kind this NewQ
+/// doesn't know (R10): it takes the show, with that cue marked, instead of
+/// failing at each resend, and the primary's command to fire the cue does
+/// nothing here.
+#[test]
+fn a_follower_takes_a_newer_primarys_show_and_its_unknown_cue_does_nothing() {
+    let json = crate::show::compat::tests::newer_show().to_string();
+    let mut a = ShowAssembly::default();
+    let (_, _, whole) = show_parts(1, &json)
+        .into_iter()
+        .find_map(|p| a.take(p))
+        .expect("whole");
+    let (show, unknown) = read_show(&whole).expect("a newer primary's show is taken");
+    assert_eq!(unknown, 1);
+    let holo = CueId(900);
+    assert!(!show.cue(holo).expect("kept").kind.is_known());
+    let mut f = Engine::for_tests();
+    f.net_set_mode(NetMode::Follower);
+    let mut fo = Follower::default();
+    f.tick_shared(&show, 10.0);
+    let t = Timed {
+        epoch: 1,
+        seq: 1,
+        at: 10.05,
+        cmd: Command::Fire { cue: holo },
+    };
+    fo.receive(t, &mut f, &show);
+    for k in 1..20 {
+        fo.step(
+            &mut f,
+            &show,
+            Some(10.0 + 0.02 * f64::from(k)),
+            0.02,
+            Some(1),
+        );
+    }
+    assert!(f.active.iter().all(|a| a.cue_id != holo));
+    assert!(
+        f.messages
+            .iter()
+            .any(|(_, m)| m.contains("can't play here")),
+        "the command came and was turned away: {:?}",
+        f.messages
+    );
+    assert_eq!(f.net_sent(), 0);
+}

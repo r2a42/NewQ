@@ -346,6 +346,18 @@ impl ShowAssembly {
     }
 }
 
+/// A follower reading the show the primary sent (or the one it kept from
+/// last time), put right as a loaded show is. A show from a newer primary
+/// reads too (`show::compat`): its cues of kinds this NewQ doesn't know are
+/// there, can't play, and a command that names one does nothing here; the
+/// second number is how many there are.
+pub fn read_show(json: &str) -> serde_json::Result<(Show, usize)> {
+    let mut show: Show = serde_json::from_str(json)?;
+    show.sanitize_stage();
+    let unknown = show.cues.iter().filter(|c| !c.kind.is_known()).count();
+    Ok((show, unknown))
+}
+
 /// How far ahead a command is timed, from the worst recent round trip to the
 /// followers (seconds): 50 ms on a show LAN (the network needs a few; the rest
 /// is for a busy main loop and getting media ready), more as the round trip
