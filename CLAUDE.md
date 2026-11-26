@@ -15,10 +15,14 @@ These hold anywhere in the code. Each area file has its own rules besides.
 - **Show files stay backwards compatible.** A new field is `#[serde(default)]` and is left out of
   the file when it has its default value, with a test that old files load and that the default
   isn't written.
-- **A later NewQ's kinds are read, not refused.** Kinds that cross the network, and most in a
-  show, read an unknown value leniently (`Unknown`/`Other` by `#[serde(other)]`, an untagged variant
-  that keeps it, or the default), so a newer computer never closes a session. `ControlAction` and
-  `TimelinePoint` in show files stay strict.
+- **A later NewQ's kinds are read, not refused.** Kinds that cross the network read an unknown
+  value leniently (`Unknown`/`Other` by `#[serde(other)]`, an untagged variant that keeps it, or the
+  default), so a newer computer never closes a session. No value stops a show from loading
+  (`show/compat.rs`): a cue whose kind or settings this NewQ can't read is `CueKind::Unknown`, kept
+  as written, marked and never played; the main small kinds keep an unknown value in an untagged
+  `Other(Kept)`; a cue's and the show's unknown fields are kept in `extra`. A new kind in the show
+  model gets one of these, and a new `match` on one handles them. `ControlAction` and
+  `TimelinePoint` stay strict: an unknown one makes its cue `Unknown`, never a different action.
 - **A partial file is never handed out** (R20). A follower reaches media only through
   `net::media::local_path` and `Store::resolve`; an object is indexed only after its hash matched.
 - **R21 (owner's ruling): the network is a reference; a picture never waits for or jumps at the
