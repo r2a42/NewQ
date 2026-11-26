@@ -1306,6 +1306,10 @@ impl ContinueMode {
             ContinueMode::Other(_) => "A newer NewQ's (doesn't continue here)",
         }
     }
+    /// Whether the next cue is fired by this one (`Other` never is here).
+    pub fn continues(self) -> bool {
+        matches!(self, ContinueMode::AutoContinue | ContinueMode::AutoFollow)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1328,6 +1332,13 @@ impl Fit {
             Fit::Cover => "Fill (crop)",
             Fit::Stretch => "Stretch",
             Fit::Other(_) => "A newer NewQ's (fitted here)",
+        }
+    }
+    /// How it is fitted here: itself, or `Contain` for one this NewQ doesn't know.
+    pub fn here(self) -> Fit {
+        match self {
+            Fit::Other(_) => Fit::Contain,
+            known => known,
         }
     }
 }
@@ -1704,9 +1715,9 @@ impl CueKind {
         };
         let name = compat::kind_name(raw);
         Some(if compat::KNOWN_KINDS.contains(&name.as_str()) {
-            format!("{name} cue with settings from a newer NewQ: can't play here")
+            format!("Settings from a newer NewQ: can't play here (a {name} cue)")
         } else {
-            format!("{name} cue, made in a newer NewQ: can't play here")
+            format!("Made in a newer NewQ: can't play here (a {name} cue)")
         })
     }
     /// The playback settings of a cue that plays something: transitions,
@@ -4433,10 +4444,10 @@ impl Show {
     pub fn block_end(&self, idx: usize) -> usize {
         let id = self.cues[idx].id;
         let mut end = idx + 1;
-        if self.is_group(idx) {
-            while end < self.cues.len() && self.cues[end].parent == Some(id) {
-                end += 1;
-            }
+        // A group's children, or those a cue this NewQ can't read keeps (a
+        // newer NewQ's kind of group): no other cue has any.
+        while end < self.cues.len() && self.cues[end].parent == Some(id) {
+            end += 1;
         }
         end
     }
