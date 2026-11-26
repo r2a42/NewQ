@@ -84,9 +84,9 @@ pub fn cost(s: &State, pixels: (f64, f64), pairs: &[Pair]) -> Option<f64> {
 }
 
 /// How many numbers a rung solves.
-pub fn unknowns(rung: Rung) -> usize {
+pub fn unknowns(rung: &Rung) -> usize {
     match rung {
-        Rung::Pose | Rung::Unknown => 6,
+        Rung::Pose | Rung::Unknown(_) => 6,
         Rung::Throw => 7,
         Rung::Shift => 9,
         Rung::Aspect => 10,
@@ -199,7 +199,7 @@ pub const LEAVE_OUT_ROUNDS: usize = 10;
 /// The flag is whether it stopped at `rounds` still moving.
 pub fn refine(
     s: &State,
-    rung: Rung,
+    rung: &Rung,
     pixels: (f64, f64),
     pairs: &[Pair],
     size: f64,
@@ -274,7 +274,7 @@ pub fn refine(
 /// points don't fix them at all.
 pub fn spreads(
     s: &State,
-    rung: Rung,
+    rung: &Rung,
     pixels: (f64, f64),
     pairs: &[Pair],
     size: f64,

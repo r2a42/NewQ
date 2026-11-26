@@ -18,6 +18,8 @@ pub(crate) use newer_file::opened as note_opened;
 mod settings;
 // The 3D stage (0.25.0): its view in a preview and its settings page.
 pub(crate) mod stage_edit;
+// Line-up on the 3D stage's page (mapping plan 4.4): the draft.
+pub(crate) mod stage_lineup;
 pub(crate) mod stage_projectors;
 pub(crate) mod stage_view;
 mod timeline;
@@ -371,6 +373,12 @@ pub struct UiState {
     pub want_new_preview: bool,
     /// The 3D stage: what the app and the 3D views share (`stage_view`).
     pub stage: stage_view::StageShared,
+    /// A projector's line-up in progress (`stage_lineup`): UI state, never in
+    /// the show until *Done*. The app sends its crosses to the computer that
+    /// drives the projector, and `End` once it is gone.
+    // (Read by the app and the panes: round 2, agents A and B.)
+    #[allow(dead_code)]
+    pub line_up: Option<stage_lineup::LineUpDraft>,
     /// The one governor of every preview (`preview_pace`): the app tells it
     /// how the outputs are doing each pass; each preview asks it
     /// (`preview_budget`) before it draws.

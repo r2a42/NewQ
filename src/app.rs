@@ -5092,6 +5092,7 @@ pub(crate) fn throw_picture(
     Some(crate::stage_live::ThrowPicture {
         groups: list,
         blend: o.blend.clamped(),
+        mapped: None,
     })
 }
 

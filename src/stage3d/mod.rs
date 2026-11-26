@@ -18,6 +18,7 @@ pub mod geometry;
 pub mod glb;
 pub mod lensmap;
 pub mod light;
+pub mod lineup_overlay;
 pub mod load;
 pub mod projector;
 pub mod samples;
