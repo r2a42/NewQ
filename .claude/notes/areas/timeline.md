@@ -35,6 +35,9 @@ is a piece of a longer entry that covered several areas.
   crossfade (`timeline_overlap`, `ActiveCue::crossed_by`) and abutting pictures are held over the join
   (`timeline_joins`, `JOIN_GAP`, `ActiveCue::joined`); a loop pause (`ControlCue::loop_from`,
   `leave_at_once`, `is_loop()`) is `Run::looping` (`timeline_loop`, `timeline_leave_loop`);
+  jumps are `MAX_JUMPS` a frame (`may_jump`), a step starts `MAX_STARTS` at most, and a list's start
+  from the top nests inside itself (clips at 0 that stop and run it again) at most
+  `FIRE_TIMES_PER_CUE` deep (`Runs::list_starts`, a depth, not a count per frame);
   `timeline_waiting`/`timeline_detached` feed the editor's hatching. The active panels show a
   clocked clip set to Hold or Loop on the clock (`ActiveCue::panel_times`); one set to End by its own time. A clip's keys read at
   `ActiveCue::key_time()` (its run's clock less `clip_zero`; `elapsed` off a timeline). Ramps a run

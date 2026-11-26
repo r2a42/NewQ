@@ -291,6 +291,11 @@ pub struct Runs {
     map: HashMap<TimelineKey, Run>,
     /// Jumps made this frame (`MAX_JUMPS`).
     jumps: u32,
+    /// The timeline lists being started from the top, each with how many of
+    /// its starts are under way inside each other (`FIRE_TIMES_PER_CUE` at
+    /// most): lists whose clips at 0 stop and run each other would start each
+    /// other again for ever, nesting until the stack ran out.
+    list_starts: HashMap<u32, u32>,
     /// Counts the times a run has been put at a new place (`timeline_place`):
     /// a clock step that started a jump stops there.
     placed: u64,
@@ -810,23 +815,48 @@ impl Engine {
         }
         match key {
             TimelineKey::Group(id) => self.fire(show, id),
-            TimelineKey::List(_) => {
-                let pos = self.runs.map.get(&key).map_or(0.0, |r| r.pos);
-                // As firing a cue does, running lets go of the show's pause.
-                if self.paused {
-                    self.set_paused(false);
-                }
-                if pos > 0.0 {
-                    if !self.timeline_place(show, key, pos, Then::Run) {
-                        self.log("GO: the timeline is at its end");
-                    }
+            TimelineKey::List(list) => {
+                // Started from inside its own start (its clips, or another
+                // list's, stop and run it again with no time between): a
+                // circle that would nest until the stack ran out.
+                let depth = self.runs.list_starts.get(&list).copied().unwrap_or(0);
+                if depth >= super::FIRE_TIMES_PER_CUE {
+                    self.problem(format!(
+                        "The timeline list \u{201c}{}\u{201d} was started {} times at once: cues \
+                         on timelines stop and run it again with no wait between them, so it is \
+                         not started again. Give one of them a later place",
+                        show.list_name(list),
+                        depth + 1
+                    ));
                     return;
                 }
-                let instance = self.alloc_instance();
-                self.timeline_begin(show, key, instance);
-                self.timeline_step(show, key, 0.0);
+                self.runs.list_starts.insert(list, depth + 1);
+                self.timeline_start_list(show, key);
+                if depth == 0 {
+                    self.runs.list_starts.remove(&list);
+                } else {
+                    self.runs.list_starts.insert(list, depth);
+                }
             }
         }
+    }
+
+    /// `timeline_start` of a list.
+    fn timeline_start_list(&mut self, show: &Show, key: TimelineKey) {
+        let pos = self.runs.map.get(&key).map_or(0.0, |r| r.pos);
+        // As firing a cue does, running lets go of the show's pause.
+        if self.paused {
+            self.set_paused(false);
+        }
+        if pos > 0.0 {
+            if !self.timeline_place(show, key, pos, Then::Run) {
+                self.log("GO: the timeline is at its end");
+            }
+            return;
+        }
+        let instance = self.alloc_instance();
+        self.timeline_begin(show, key, instance);
+        self.timeline_step(show, key, 0.0);
     }
 
     /// A new run of `key` from its top (instance `instance`): its clips wait for

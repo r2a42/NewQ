@@ -18,6 +18,9 @@ release page, and a release is refused if it has none.
   waits over 3 seconds, or a name that can't be found, is not sent and the status bar says so.
   MIDI and sends to an address (`10.0.0.5`) go at once. OSC feedback set to a name that answers
   slowly no longer goes back to an older address you had changed it from.
+- **Timeline lists that stop and run each other at their start no longer crash NewQ.** Two
+  timeline lists whose first cues stopped and ran each other made NewQ close at once; now the
+  circle stops and the status bar names the list.
 
 ## 0.27.1
 
