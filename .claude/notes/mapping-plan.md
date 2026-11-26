@@ -1109,6 +1109,14 @@ imports: round 5, still yours to rank), 14 (house lights in the simulation: not 
 
 ## 9. Questions still open for the owner
 
+**Answered by the owner, 26 Nov 2026:** (1) canvases are only displays with no monitor that a
+screen shows; (2) a stream of a mapped projector's display is for recording and watching (no
+fine-tune or blend); (3) moving scenery is not yet known: round 3 (cue-driven) as planned,
+PosiStageNet first in round 4; (4) no real projector, wall or second computer yet: a mapping
+release is marked "tried only in simulation" in its notes and changelog.
+
+The questions as they were put:
+
 Only the ones I can't settle from the code.
 
 1. **Is a display that has a monitor *and* is shown on a screen a canvas?** You said "the displays
