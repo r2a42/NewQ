@@ -6,6 +6,11 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Cues that start each other no longer freeze NewQ.** Two Start cues that start each other, or
+  a section looped back to its top by a Start cue where no cue has a pre-wait, used to lock NewQ up
+  until it was killed. Now each cue is started at most three times by one GO; then NewQ stops
+  there and the status bar names the cue that came round again, so you can give one cue in the
+  circle a pre-wait. Long chains of auto-continues and big groups play as before.
 - **A send cue to a computer's name no longer holds up the others.** An OSC or UDP send cue whose
   host is a name (`eos`, `lx-desk.local`) rather than an address could wait seconds on a show
   network with no DNS, and every OSC and MIDI send cue behind it waited too, so a lighting or sound

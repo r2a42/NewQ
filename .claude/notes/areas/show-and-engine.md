@@ -15,6 +15,14 @@ See also: `remote.md` holds the one line on `src/text.rs` (text cue rendering), 
   `next_top`, `move_cue` and `insert_slot` stay inside a list. The engine's
   `playhead` is the active list's; the other lists' are in `list_playheads`.
 - `src/engine.rs`: GO, pre-waits, continues, transitions, fades, groups, preload.
+  `Engine::fire` takes the cues one firing leads to (continues, a group's children, Start
+  cues) from `fire_queue`, never nested; the outermost call counts what it starts
+  (`FIRE_TIMES_PER_CUE` starts of one cue, `FIRE_TOTAL_MIN` or twice the show's cues in all,
+  R1): past that it clears the queue and says which cue came round, so cues that take no time
+  and lead back to each other can't spin the main thread. Every path that starts a cue from
+  inside another (control actions, `fire_next`, groups, `go`, `deck_step`, hotkeys, remote and
+  network commands) reaches the queue through `fire`, so the count sees it; a timeline's clips
+  are started by its run (`timeline_step`, `MAX_STARTS`, `MAX_JUMPS`).
 
 ## Part of the `src/app.rs` / `src/ui.rs` entry: group crossfade, shape cues, editing several cues
 
