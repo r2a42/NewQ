@@ -21,6 +21,10 @@ release page, and a release is refused if it has none.
 - **Timeline lists that stop and run each other at their start no longer crash NewQ.** Two
   timeline lists whose first cues stopped and ran each other made NewQ close at once; now the
   circle stops and the status bar names the list.
+- **The show network turns away connections that don't say who they are.** A connection to a
+  computer's show network port must introduce itself at once and briefly; only a few that haven't
+  may wait at a time, and a message that claims to be huge no longer makes NewQ set memory aside
+  for it before it arrives. A NewQ on the network notices nothing.
 
 ## 0.27.1
 

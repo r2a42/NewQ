@@ -52,6 +52,15 @@ const DIAL_LOG_EVERY: Duration = Duration::from_secs(30);
 /// once).
 const TWIN_SWITCHES: usize = 3;
 pub const TWIN_WINDOW: Duration = Duration::from_secs(10);
+/// Connections accepted that haven't said hello yet, at most, in all and from
+/// one address (several NewQs on one computer dial from one address, each
+/// saying hello at once). One more is closed as it comes, with no threads
+/// started for it.
+pub const UNNAMED_MAX: usize = 16;
+pub const UNNAMED_PER_ADDRESS: usize = 4;
+/// A connection that hasn't said hello this long after it opened is closed (a
+/// NewQ says it the moment it connects).
+pub const HELLO_WITHIN: Duration = Duration::from_secs(3);
 
 /// Where the hub keeps its file and which ports it uses.
 #[derive(Clone, Debug)]
@@ -523,6 +532,8 @@ struct Conn {
     /// We take orders from them.
     obeying: bool,
     closing: bool,
+    /// When the connection was made (a hello is due within `HELLO_WITHIN`).
+    opened: Instant,
     last_rx: Instant,
     last_ping: Instant,
     ping: u64,
@@ -738,8 +749,25 @@ impl State {
             Event::Quit => self.quit = true,
             Event::Heard(h) => self.heard(h, now),
             Event::Accepted(stream) => {
-                if self.net.is_some() {
+                if self.net.is_none() {
+                    return;
+                }
+                let Ok(from) = stream.peer_addr() else {
+                    return;
+                };
+                let unnamed = self
+                    .conns
+                    .values()
+                    .filter(|c| c.target.is_none() && c.hello.is_none() && !c.closing)
+                    .map(|c| c.session.peer.ip());
+                if admits(unnamed, from.ip()) {
                     self.add_conn(stream, None, now);
+                } else {
+                    log::debug!(
+                        "show network: a connection from {from} closed: too many that haven't \
+                         said who they are"
+                    );
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
                 }
             }
             Event::Dialled(target, result) => self.dialled(target, result, now),
@@ -1036,6 +1064,7 @@ impl State {
             welcomed: false,
             obeying: false,
             closing: false,
+            opened: now,
             last_rx: now,
             last_ping: now,
             ping: 0,
@@ -1699,6 +1728,16 @@ impl State {
                 continue;
             };
             if conn.closing || conn.session.is_closed() {
+                continue;
+            }
+            if conn.hello.is_none() && now.saturating_duration_since(conn.opened) > HELLO_WITHIN {
+                log::debug!(
+                    "show network: a connection from {} said nothing in {} s: closed",
+                    conn.session.peer,
+                    HELLO_WITHIN.as_secs()
+                );
+                conn.closing = true;
+                conn.session.close();
                 continue;
             }
             if now.saturating_duration_since(conn.last_rx) > SILENT_FOR {
@@ -2369,6 +2408,20 @@ impl State {
                 .collect(),
         }
     }
+}
+
+/// Whether a connection from `ip` is let in, beside the connections accepted
+/// that haven't said hello yet (`unnamed`, each one's address): at most
+/// `UNNAMED_MAX` in all, `UNNAMED_PER_ADDRESS` from one address.
+fn admits(unnamed: impl Iterator<Item = IpAddr>, ip: IpAddr) -> bool {
+    let (mut all, mut same) = (0, 0);
+    for a in unnamed {
+        all += 1;
+        if a == ip {
+            same += 1;
+        }
+    }
+    all < UNNAMED_MAX && same < UNNAMED_PER_ADDRESS
 }
 
 /// Two ports one id's beacons went back and forth between, at least

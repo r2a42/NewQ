@@ -183,7 +183,13 @@ fn read_loop(
     use super::hub::Event;
     let mut first = true;
     let why = loop {
-        let body = match proto::read_frame(&mut stream) {
+        // Until it has said who it is, a peer may send only a hello's worth.
+        let limit = if first {
+            proto::HELLO_MAX
+        } else {
+            proto::MAX_FRAME
+        };
+        let body = match proto::read_frame_up_to(&mut stream, limit) {
             Ok(b) => b,
             Err(e) => break e,
         };
