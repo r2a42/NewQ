@@ -1178,7 +1178,13 @@ stays on the computer until you send it yourself.
   Each relink or copy is one step in the undo history; the copied files stay on
   disk if you undo it.
 - **Show files** are plain JSON (`.newq`) with media paths stored relative to
-  the show file, so a show folder can move between machines.
+  the show file, so a show folder can move between machines. Each file says
+  which NewQ saved it. A show saved by a newer NewQ still opens: a strip over
+  the window says so, cues of kinds this NewQ doesn't know are kept and marked
+  *made in a newer NewQ: can't play here* (GO passes them by), settings it
+  doesn't know are kept or fall back (a transition fades in, a fit letterboxes,
+  an effect does nothing), and the first *Save* asks for a new name so the
+  newer file isn't replaced by a copy that may lack some of it.
 - Drag and drop media files onto the window to create cues.
 - **Graphics device recovery:** if the graphics driver resets or the card is
   taken away mid-show, NewQ notices, says so in the status bar, and starts the

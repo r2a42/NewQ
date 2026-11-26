@@ -14,6 +14,26 @@ See also: `remote.md` holds the one line on `src/text.rs` (text cue rendering), 
   `Show::cues`, the main list first (`normalize_lists` repairs a loaded show), so
   `next_top`, `move_cue` and `insert_slot` stay inside a list. The engine's
   `playhead` is the active list's; the other lists' are in `list_playheads`.
+- `src/show/compat.rs`: a show from a newer NewQ (R4 and R10 of the 2026-11-26 reviews). Nothing
+  in a show stops it loading: a cue whose kind is unknown, or whose kind's settings can't be read
+  (an unknown `ControlAction`, `TimelinePoint` or `GroupMode` included), is `CueKind::Unknown`
+  (an untagged `Value`, the kind as written, `CueType::Unknown`); `Engine::fire` turns it away
+  before the network gate and `start_with` before anything starts, so it is never played or sent;
+  `bulk_edit` leaves its kind alone; `normalize_groups` keeps its children its own; the cue list
+  and export show `CueKind::unknown_note`. `Transition`, `Fit`, `ContinueMode`, `EffectKind` and
+  `CueColor` have an untagged `Other(Kept)`: `Kept` is an interned `&'static Value`, so they stay
+  `Copy`/`Eq`/`Hash` and write the value back; they act as `FadeIn`, `Contain`,
+  `DoNotContinue`, nothing (neither `is_video` nor `is_sound`) and grey. `Cue::extra` and
+  `Show::extra` (`#[serde(flatten)]`) keep unknown fields; fields deeper in a known cue (a
+  `MediaCue`'s, an output's) are still dropped. `compat::lenient`/`lenient_vec` read as the
+  default the few kinds outside a cue that aren't kept (`wait_cards`, an output's `stream`, a
+  cue's `timecode`/`clock`, a timeline's `tracks`). `Show::save` writes `saved_with` (this
+  NewQ's version) into every file; in memory it is as read and written only when set, so the
+  network hash, undo and the dirty check don't see it. `ui/newer_file.rs`: a file saved by a newer
+  NewQ (`compat::newer_than_this`) gets a strip over the window and its path is kept from a plain
+  Save (`save_target`) until the show is saved anywhere (`saved`); the recovery copy is beside the
+  file, and the protection is in `UiState` (by path), so undo and a recovery restore keep it.
+  `net::play::read_show` is the follower's parse (`take_show`, `play_load_kept`).
 - `src/engine.rs`: GO, pre-waits, continues, transitions, fades, groups, preload.
   `Engine::fire` takes the cues one firing leads to (continues, a group's children, Start
   cues) from `fire_queue`, never nested; the outermost call counts what it starts
