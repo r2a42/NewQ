@@ -448,6 +448,8 @@ pub struct UiState {
     /// A display just added on the Displays page, scrolled into sight on its
     /// next drawing (and then let go).
     reveal_display: Cell<Option<OutputId>>,
+    /// Every display's `display_label`, made at the start of each frame.
+    display_labels: HashMap<OutputId, String>,
     about_logo: Option<egui::TextureHandle>,
     sync_clip: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// Videos being converted to Hap, by the cue they are for.
@@ -1010,6 +1012,15 @@ enum Action {
     Nudge(Vec2),
     AddSubDisplay(OutputId),
     AddDisplay,
+    /// A canvas: a display with no monitor, for a screen of the 3D stage to
+    /// show (`Show::add_canvas`).
+    AddCanvas,
+    /// Screen (second) shows display (first)'s whole picture.
+    PutOnScreen(OutputId, crate::stage3d::SurfaceId),
+    /// Open Settings ▸ 3D stage at this screen.
+    OpenScreen(crate::stage3d::SurfaceId),
+    /// Open Settings ▸ 3D stage at this projector.
+    OpenProjector(crate::stage3d::ProjectorId),
     /// Two projectors that share a wide picture, with fading edges.
     AddBlendedPair,
     /// Make a display show part of another's picture (or its own again).
@@ -1099,6 +1110,8 @@ impl Action {
                 | Action::ConvertToHap(..)
                 | Action::AddSubDisplay(_)
                 | Action::AddDisplay
+                | Action::AddCanvas
+                | Action::PutOnScreen(..)
                 | Action::AddBlendedPair
                 | Action::ShowPartOf(..)
                 | Action::SetTransition(..)
@@ -1182,6 +1195,7 @@ fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<String
 
 pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     st.sync_selection();
+    st.display_labels = display_labels(show);
     st.note_preview_panes();
     if st.saved_json.is_none() {
         st.saved_json = serde_json::to_string(show).ok();
@@ -1780,6 +1794,7 @@ pub fn draw_popout(
     engine: &mut Engine,
     st: &mut UiState,
 ) {
+    st.display_labels = display_labels(show);
     let mut actions: Vec<Action> = Vec::new();
     actions.append(&mut st.stage.actions);
     // A quit asked for here (Ctrl+Q) is asked about here too, as in the main
@@ -4495,11 +4510,13 @@ fn tile_menu(
     ui: &mut Ui,
     current: Option<OutputId>,
     outputs: &[PreviewOutput],
+    labels: &HashMap<OutputId, String>,
 ) -> Option<Option<OutputId>> {
     let mut pick = None;
     for p in outputs {
+        let name = labels.get(&p.id).unwrap_or(&p.name);
         if ui
-            .selectable_label(current == Some(p.id), &p.name)
+            .selectable_label(current == Some(p.id), name)
             .clicked()
         {
             pick = Some(Some(p.id));
@@ -4552,7 +4569,7 @@ fn tile_interact(
         edits.push(TileEdit::Swap(from.0, i));
     }
     r.context_menu(|ui| {
-        if let Some(pick) = tile_menu(ui, current, &st.previews) {
+        if let Some(pick) = tile_menu(ui, current, &st.previews, &st.display_labels) {
             edits.push(TileEdit::Assign(i, pick));
         }
     });
@@ -4762,7 +4779,7 @@ fn multiview_layout(
         if editable {
             head_ui
                 .menu_button(job, |ui| {
-                    if let Some(pick) = tile_menu(ui, current, &st.previews) {
+                    if let Some(pick) = tile_menu(ui, current, &st.previews, &st.display_labels) {
                         edits.push(TileEdit::Assign(i, pick));
                     }
                 })
@@ -4873,13 +4890,13 @@ fn multiview_editor(ctx: &egui::Context, show: &mut Show, st: &mut UiState) {
                                     let current = layout.tiles[i];
                                     let text = current
                                         .and_then(|id| st.previews.iter().find(|p| p.id == id))
-                                        .map_or_else(|| "Empty".to_string(), |p| p.name.clone());
+                                        .map_or_else(|| "Empty".to_string(), |p| preview_label(st, p));
                                     egui::ComboBox::from_id_salt(("multiview_tile_pick", i))
                                         .selected_text(text)
                                         .width(180.0)
                                         .show_ui(ui, |ui| {
                                             if let Some(pick) =
-                                                tile_menu(ui, current, &st.previews)
+                                                tile_menu(ui, current, &st.previews, &st.display_labels)
                                             {
                                                 layout.assign(i, pick);
                                             }
@@ -5045,10 +5062,10 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
             if st.previews.len() > 1 {
                 ui.add_enabled_ui(!editing, |ui| {
                     egui::ComboBox::from_id_salt(("preview_output", host))
-                        .selected_text(RichText::new(&st.previews[i].name).strong())
+                        .selected_text(RichText::new(preview_label(st, &st.previews[i])).strong())
                         .show_ui(ui, |ui| {
                             for p in &st.previews {
-                                ui.selectable_value(&mut chosen, Some(p.id), &p.name);
+                                ui.selectable_value(&mut chosen, Some(p.id), preview_label(st, p));
                             }
                         })
                         .response
@@ -5519,6 +5536,52 @@ pub fn monitor_keys(monitors: &[MonitorInfo]) -> Vec<MonitorKey> {
         .collect()
 }
 
+/// What display `id` is called in every menu and list that offers displays
+/// (mapping plan 4.3), so a new menu can't forget: "Cyc content (canvas)",
+/// "Projector 1 (shows the stage's screens)", "Surtitles (on Main)" for a sub
+/// display, else its name.
+pub(crate) fn display_label(show: &Show, id: OutputId) -> String {
+    let Some(o) = show.output(id) else {
+        return String::new();
+    };
+    if show.mapped_projector(id).is_some() {
+        format!("{} ({MAPPED_LABEL})", o.name)
+    } else if show.is_canvas(id) {
+        format!("{} (canvas)", o.name)
+    } else {
+        match show.display_of(o) {
+            Some(d) if d.id != o.id => format!("{} (on {})", o.name, d.name),
+            _ => o.name.clone(),
+        }
+    }
+}
+
+/// What a mapped projector's display shows, in a menu's label.
+pub(crate) const MAPPED_LABEL: &str = "shows the stage's screens";
+
+/// Why a mapped projector's display is greyed in a cue's Display menu, and
+/// what a cue already sent to one is told.
+pub(crate) const MAPPED_TAKES_NO_CUES: &str = "This display shows the stage's screens through its \
+     projector, so cues sent to it aren't seen. Send the cue to a canvas: the display a screen \
+     shows.";
+
+/// Every display's `display_label`, by id (kept in `UiState::display_labels`
+/// each frame, for the lists drawn from the previews).
+fn display_labels(show: &Show) -> HashMap<OutputId, String> {
+    show.outputs
+        .iter()
+        .map(|o| (o.id, display_label(show, o.id)))
+        .collect()
+}
+
+/// A preview's name as the menus show it (`display_label`).
+fn preview_label(st: &UiState, p: &PreviewOutput) -> String {
+    st.display_labels
+        .get(&p.id)
+        .cloned()
+        .unwrap_or_else(|| p.name.clone())
+}
+
 pub(crate) fn monitor_label(st: &UiState, i: usize) -> String {
     let m = &st.monitors[i];
     format!(
@@ -5856,6 +5919,12 @@ fn displays_panel(
                     actions.push(Action::AddBlendedPair);
                     ui.close();
                 }
+                let r = ui.button("Canvas").on_hover_text(CANVAS_WORDS);
+                note_page_add(ui, "Displays ▸ + Add ▸ Canvas", &r);
+                if r.clicked() {
+                    actions.push(Action::AddCanvas);
+                    ui.close();
+                }
             });
             note_page_add(ui, "Displays ▸ + Add", &r.response);
         });
@@ -5876,7 +5945,23 @@ fn displays_panel(
         .outputs
         .iter()
         .filter(|o| !o.is_sub_display() && show.part_of(o.id).is_none())
-        .map(|o| (o.id, o.name.clone()))
+        .filter(|o| show.mapped_projector(o.id).is_none())
+        .map(|o| (o.id, display_label(show, o.id)))
+        .collect();
+    let stage_roles: HashMap<OutputId, StageRole> = show
+        .outputs
+        .iter()
+        .filter_map(|o| Some((o.id, StageRole::of(show, o.id)?)))
+        .collect();
+    let screens: Vec<(crate::stage3d::SurfaceId, String)> = show
+        .stage3d
+        .surfaces
+        .iter()
+        .map(|s| (s.id, s.name.clone()))
+        .collect();
+    let screen_choices: HashSet<OutputId> = stage_edit::feed_choices(show)
+        .into_iter()
+        .map(|(o, _)| o)
         .collect();
     let shared: HashSet<OutputId> = show
         .outputs
@@ -5907,11 +5992,20 @@ fn displays_panel(
         .enumerate()
     {
         let state = st.display_states.get(&d.id).copied();
+        let role = stage_roles.get(&d.id);
+        let on_a_screen = matches!(
+            role,
+            Some(StageRole::Canvas(_) | StageRole::AlsoOnStage(_))
+        );
         let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{}", di + 1)).strong().size(18.0));
                 ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(140.0));
+                if let Some(tag) = role.and_then(StageRole::tag) {
+                    let r = ui.label(RichText::new(tag).strong().color(CANVAS_TAG));
+                    stage_edit::note(ui, &format!("Displays ▸ {} ▸ {tag}", d.name), &r);
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if n_displays > 1
                         && ui
@@ -5925,7 +6019,7 @@ fn displays_panel(
             });
             let elsewhere = d.computer.filter(|c| *c != st.net.me.id);
             let shown = match (&d.monitor, state, elsewhere) {
-                (None, _, _) => "Not assigned".to_string(),
+                (None, _, _) => no_monitor_words(on_a_screen).to_string(),
                 (Some(r), _, Some(c)) => format!("{}: {}", st.net.name_of(c), r.name),
                 (
                     Some(_),
@@ -5946,7 +6040,7 @@ fn displays_panel(
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
                     if ui
-                        .selectable_label(d.monitor.is_none(), "Not assigned")
+                        .selectable_label(d.monitor.is_none(), no_monitor_words(on_a_screen))
                         .clicked()
                     {
                         d.monitor = None;
@@ -6040,6 +6134,7 @@ fn displays_panel(
                 Some(c) => label.color(c),
                 None => label.weak(),
             });
+            stage_role_lines(ui, d, role, &screens, &screen_choices, actions);
             ui.horizontal(|ui| {
                 ui.checkbox(&mut d.enabled, "On");
                 pattern_picker(
@@ -6056,16 +6151,23 @@ fn displays_panel(
                 }
                 _ => None,
             };
-            shared_picture_editor(
-                ui,
-                d,
-                &sources,
-                &stage,
-                shared.contains(&d.id),
-                &picture_sizes,
-                actions,
-            );
-            corner_pin_editor(ui, d, st, actions);
+            if let Some(StageRole::Mapped { projector, name, .. }) = role {
+                // Mapped: the 3D stage decides what it shows and where.
+                mapped_shows_row(ui, d, *projector, name, actions);
+                ui.add_enabled_ui(false, |ui| corner_pin_editor(ui, d, st, actions));
+            } else {
+                shared_picture_editor(
+                    ui,
+                    d,
+                    &sources,
+                    &stage,
+                    shared.contains(&d.id),
+                    matches!(role, Some(StageRole::Canvas(_))),
+                    &picture_sizes,
+                    actions,
+                );
+                corner_pin_editor(ui, d, st, actions);
+            }
             edge_blend_editor(ui, d, state_size.unwrap_or((1920, 1080)));
             stream_editor(ui, d, engine, st, &audio_names, actions);
         });
@@ -6091,6 +6193,193 @@ fn displays_panel(
 /// The words of a display's *Shows* row.
 pub(crate) const SHOWS_ROW: &str = "Shows";
 
+/// What *+ Add ▸ Canvas* makes, in words.
+pub(crate) const CANVAS_WORDS: &str = "A display with no monitor, for a screen of the 3D stage to \
+     show: send cues to it, and the projectors that light the screen show them where they land";
+
+/// The colour of the *Canvas* tag beside a display's name.
+const CANVAS_TAG: Color32 = Color32::from_rgb(110, 190, 240);
+
+/// The words of a display's monitor menu for no monitor: a canvas's
+/// (`on_a_screen`) or one shown only in the previews.
+pub(crate) fn no_monitor_words(on_a_screen: bool) -> &'static str {
+    if on_a_screen {
+        "No monitor (a canvas for the stage's screens)"
+    } else {
+        "No monitor (previews only)"
+    }
+}
+
+/// What a display is to the 3D stage (mapping plan 4.3), for its row on the
+/// Displays page. Worked out each frame, never stored.
+enum StageRole {
+    /// A canvas: no monitor, and these screens show it.
+    Canvas(Vec<(crate::stage3d::SurfaceId, String)>),
+    /// It has a monitor and these screens show it too (an LED wall).
+    AlsoOnStage(Vec<(crate::stage3d::SurfaceId, String)>),
+    /// A mapped projector's: it shows the stage's screens through it; `cues`
+    /// are sent to it all the same (and not seen).
+    Mapped {
+        projector: crate::stage3d::ProjectorId,
+        name: String,
+        cues: usize,
+    },
+}
+
+impl StageRole {
+    fn of(show: &Show, id: OutputId) -> Option<StageRole> {
+        if let Some(p) = show.mapped_projector(id) {
+            let cues = show
+                .cues
+                .iter()
+                .filter(|c| c.kind.media().is_some_and(|m| m.output == Some(id)))
+                .count();
+            return Some(StageRole::Mapped {
+                projector: p.id,
+                name: p.name.clone(),
+                cues,
+            });
+        }
+        let screens: Vec<_> = show
+            .screens_showing(id)
+            .iter()
+            .map(|s| (s.id, s.name.clone()))
+            .collect();
+        if show.is_canvas(id) {
+            Some(StageRole::Canvas(screens))
+        } else if !screens.is_empty() && show.output(id).is_some_and(|o| o.monitor.is_some()) {
+            Some(StageRole::AlsoOnStage(screens))
+        } else {
+            None
+        }
+    }
+
+    /// The tag beside the display's name.
+    fn tag(&self) -> Option<&'static str> {
+        match self {
+            StageRole::Canvas(_) => Some("Canvas"),
+            StageRole::Mapped { .. } => Some("Mapped"),
+            StageRole::AlsoOnStage(_) => None,
+        }
+    }
+}
+
+/// The lines under a display's monitor that say what it is to the 3D stage:
+/// the screens a canvas is shown on (each a way to it), the screens an LED
+/// wall's display is also on, the cues a mapped projector's display won't
+/// show, or, for a display with no monitor on no screen, a menu to put it on
+/// one.
+fn stage_role_lines(
+    ui: &mut Ui,
+    d: &OutputConfig,
+    role: Option<&StageRole>,
+    screens: &[(crate::stage3d::SurfaceId, String)],
+    choices: &HashSet<OutputId>,
+    actions: &mut Vec<Action>,
+) {
+    let to_screens = |ui: &mut Ui, words: &str, on: &[(crate::stage3d::SurfaceId, String)], actions: &mut Vec<Action>| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(words).small());
+            for (s, name) in on {
+                let r = ui
+                    .small_button(name)
+                    .on_hover_text(format!("{}: {name}", settings::STAGE_SCREENS.path()));
+                stage_edit::note(ui, &format!("Displays ▸ {} ▸ {words} {name}", d.name), &r);
+                if r.clicked() {
+                    actions.push(Action::OpenScreen(*s));
+                }
+            }
+        });
+    };
+    match role {
+        Some(StageRole::Canvas(on)) => to_screens(ui, "Shown on:", on, actions),
+        Some(StageRole::AlsoOnStage(on)) => to_screens(ui, "Also on the stage:", on, actions),
+        Some(StageRole::Mapped { cues, .. }) if *cues > 0 => {
+            let n = match cues {
+                1 => "1 cue is".to_string(),
+                n => format!("{n} cues are"),
+            };
+            settings::warning(
+                ui,
+                &format!(
+                    "{n} sent to this display. They aren't seen while it is mapped: send them \
+                     to a canvas."
+                ),
+            );
+        }
+        Some(StageRole::Mapped { .. }) => {}
+        None => {
+            let alone = d.monitor.is_none()
+                && d.part_of.is_none()
+                && d.source.is_none()
+                && choices.contains(&d.id);
+            if !alone {
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("On no screen of the 3D stage.").weak().small());
+                if screens.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "Add a screen on {} to make it a canvas.",
+                            settings::STAGE_SCREENS.path()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    return;
+                }
+                let menu = format!("Displays ▸ {} ▸ Put it on a screen", d.name);
+                let r = ui.menu_button("Put it on a screen ⏷", |ui| {
+                    for (s, name) in screens {
+                        let r = ui.button(name);
+                        stage_edit::note(ui, &format!("{menu} ▸ {name}"), &r);
+                        if r.clicked() {
+                            actions.push(Action::PutOnScreen(d.id, *s));
+                            ui.close();
+                        }
+                    }
+                });
+                stage_edit::note(ui, &menu, &r.response);
+                r.response.on_hover_text(
+                    "Make it a canvas: the screen shows its picture, and the projectors that \
+                     light the screen show it where it lands",
+                );
+            });
+        }
+    }
+}
+
+/// A mapped projector's display's *Shows* row: the stage's screens through
+/// its projector, greyed, with the way to the projector.
+fn mapped_shows_row(
+    ui: &mut Ui,
+    d: &OutputConfig,
+    projector: crate::stage3d::ProjectorId,
+    name: &str,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(SHOWS_ROW);
+        ui.label(RichText::new(format!("The stage's screens, through {name}")).weak());
+        let r = ui
+            .small_button(format!("Open {name}"))
+            .on_hover_text(format!("{}: {name}", settings::STAGE_PROJECTORS.path()));
+        stage_edit::note(ui, &format!("Displays ▸ {} ▸ Open {name}", d.name), &r);
+        if r.clicked() {
+            actions.push(Action::OpenProjector(projector));
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Mapped: the 3D stage decides this. Fine-tune it on the projector. Its corners, \
+             warp and part of a picture are kept for when Mapped is switched off.",
+        )
+        .weak()
+        .small(),
+    );
+}
+
 /// What a display shows: its own cues, a part of another display's picture
 /// (which several projectors can share between them), or the 3D stage. Also,
 /// for a picture that is shared, how big it is.
@@ -6101,6 +6390,7 @@ fn shared_picture_editor(
     sources: &[(OutputId, String)],
     stage: &stage_edit::StageItems,
     is_shared: bool,
+    is_canvas: bool,
     picture_sizes: &HashMap<OutputId, (u32, u32)>,
     actions: &mut Vec<Action>,
 ) {
@@ -6207,7 +6497,7 @@ fn shared_picture_editor(
             .small(),
         );
     }
-    if is_shared {
+    if is_shared || is_canvas {
         let mut size = d.picture.unwrap_or((1920, 1080));
         ui.horizontal(|ui| {
             ui.label("Picture size");
@@ -6229,7 +6519,12 @@ fn shared_picture_editor(
             }
         })
         .response
-        .on_hover_text("How big the shared picture is: the projectors show parts of it");
+        .on_hover_text(if is_shared {
+            "How big the shared picture is: the projectors show parts of it"
+        } else {
+            "How big the canvas's picture is: what is laid out on it, before the screens \
+             and the projectors that show them"
+        });
     }
 }
 
@@ -8204,16 +8499,23 @@ fn inspector_one(
         .filter(|c| c.kind.media().is_some() || matches!(c.kind, CueKind::Group(_)))
         .map(|c| (c.id, cue_label(c)))
         .collect();
-    // Displays first, then sub displays with the display they are part of.
+    // Displays first (canvases among them), then sub displays with the
+    // display they are part of, then mapped projectors' displays, which take
+    // no cues (offered greyed, so a cue already sent to one can be seen).
+    let unmapped = |o: &&OutputConfig| show.mapped_projector(o.id).is_none();
     let outputs: Vec<(OutputId, String)> = show
         .outputs
         .iter()
         .filter(|o| !o.is_sub_display() && show.part_of(o.id).is_none())
+        .filter(unmapped)
         .chain(show.outputs.iter().filter(|o| o.is_sub_display()))
-        .map(|o| match show.display_of(o) {
-            Some(d) if d.id != o.id => (o.id, format!("{} (on {})", o.name, d.name)),
-            _ => (o.id, o.name.clone()),
-        })
+        .map(|o| (o.id, display_label(show, o.id)))
+        .collect();
+    let mapped_outputs: Vec<(OutputId, String)> = show
+        .outputs
+        .iter()
+        .filter(|o| show.mapped_projector(o.id).is_some())
+        .map(|o| (o.id, display_label(show, o.id)))
         .collect();
     let audio_outputs: Vec<(AudioOutputId, String)> = show
         .audio_outputs
@@ -8450,6 +8752,7 @@ fn inspector_one(
                 m,
                 OutputChoices {
                     video: &outputs,
+                    mapped: &mapped_outputs,
                     audio: &audio_outputs,
                 },
                 engine,
@@ -8669,6 +8972,7 @@ fn inspector_one(
                     &mut t.media,
                     OutputChoices {
                         video: &outputs,
+                        mapped: &mapped_outputs,
                         audio: &audio_outputs,
                     },
                     engine,
@@ -8685,6 +8989,7 @@ fn inspector_one(
                     &mut s.media,
                     OutputChoices {
                         video: &outputs,
+                        mapped: &mapped_outputs,
                         audio: &audio_outputs,
                     },
                     engine,
@@ -8703,6 +9008,7 @@ fn inspector_one(
                     &mut c.media,
                     OutputChoices {
                         video: &outputs,
+                        mapped: &mapped_outputs,
                         audio: &audio_outputs,
                     },
                     engine,
@@ -8719,6 +9025,7 @@ fn inspector_one(
                     &mut c.media,
                     OutputChoices {
                         video: &outputs,
+                        mapped: &mapped_outputs,
                         audio: &audio_outputs,
                     },
                     engine,
@@ -8848,6 +9155,8 @@ fn curve_combo(ui: &mut Ui, id: &str, curve: &mut Curve) {
 /// The outputs a cue can be sent to, by id and name.
 struct OutputChoices<'a> {
     video: &'a [(OutputId, String)],
+    /// Mapped projectors' displays: listed last, greyed (they take no cues).
+    mapped: &'a [(OutputId, String)],
     audio: &'a [(AudioOutputId, String)],
 }
 
@@ -8862,6 +9171,7 @@ fn media_inspector(
 ) {
     let OutputChoices {
         video: outputs,
+        mapped: mapped_outputs,
         audio: audio_outputs,
     } = choices;
     let visual = !matches!(ty, CueType::Audio | CueType::LiveAudio);
@@ -8959,7 +9269,7 @@ fn media_inspector(
                 ui.label("Display");
                 let sel = m
                     .output
-                    .and_then(|o| outputs.iter().find(|x| x.0 == o))
+                    .and_then(|o| outputs.iter().chain(mapped_outputs).find(|x| x.0 == o))
                     .map(|x| x.1.clone())
                     .unwrap_or_else(|| "(none)".into());
                 egui::ComboBox::from_id_salt("output")
@@ -8968,8 +9278,24 @@ fn media_inspector(
                         for (id, name) in outputs {
                             ui.selectable_value(&mut m.output, Some(*id), name);
                         }
+                        if !mapped_outputs.is_empty() {
+                            ui.separator();
+                        }
+                        // Shown, never chosen here: a cue on one isn't seen.
+                        for (id, name) in mapped_outputs {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::selectable(m.output == Some(*id), name),
+                            )
+                            .on_disabled_hover_text(MAPPED_TAKES_NO_CUES);
+                        }
                     });
                 ui.end_row();
+                if m.output.is_some_and(|o| mapped_outputs.iter().any(|x| x.0 == o)) {
+                    ui.label("");
+                    settings::warning(ui, MAPPED_TAKES_NO_CUES);
+                    ui.end_row();
+                }
                 // Its home display is never one of the others.
                 if m.also_on.iter().any(|o| Some(*o) == m.output) {
                     m.also_on.retain(|o| Some(*o) != m.output);
@@ -12374,6 +12700,30 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::AddDisplay => {
             let id = show.add_display();
             st.reveal_display.set(Some(id));
+        }
+        Action::AddCanvas => {
+            let id = show.add_canvas();
+            st.reveal_display.set(Some(id));
+        }
+        Action::PutOnScreen(o, s) => {
+            let feed = crate::stage3d::Feed::whole_picture(show, o);
+            if stage_edit::feed_choices(show).iter().any(|(c, _)| *c == o)
+                && let Some(s) = show.stage3d.surface_mut(s)
+            {
+                s.feed = feed;
+            }
+        }
+        Action::OpenScreen(s) => {
+            st.stage.picked = Some(s);
+            st.stage.tab = stage_edit::StageTab::Screens;
+            st.layout.open(Pane::Settings);
+            st.settings_page = SettingsPage::Stage3d;
+        }
+        Action::OpenProjector(p) => {
+            st.stage.projectors.picked = Some(p);
+            st.stage.tab = stage_edit::StageTab::Projectors;
+            st.layout.open(Pane::Settings);
+            st.settings_page = SettingsPage::Stage3d;
         }
         Action::AddBlendedPair => {
             let (picture, _, _) = show.add_blended_pair(1920, 1080, 0.15);

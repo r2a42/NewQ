@@ -43,6 +43,10 @@ pub const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 /// What a projector's body is painted (lit, like the venue).
 pub const PROJECTOR_GREY: [f32; 4] = [0.62, 0.64, 0.7, 1.0];
 
+/// Why a mapped projector's display can't show the stage (`stage_source_refused`).
+pub const MAPPED_SHOWS_NO_STAGE: &str = "This display is a mapped projector's: it shows the stage's \
+     screens through that projector, so it can't show the stage from a viewpoint as well.";
+
 /// A projector's body in its own frame: a box wholly behind the lens (which
 /// is at the origin, looking down -Z), so looking through the lens never
 /// sees its inside. 44 cm wide, 18 cm high, 45 cm deep.
@@ -382,12 +386,119 @@ pub struct Surface {
     /// A rear-projection screen: lit from behind, seen from the front.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rear: bool,
+    /// Projection or LED, as chosen; None (left out): worked out, once, from
+    /// where things stand (`Show::screen_kind`). Mapping plan, section 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SurfaceKind>,
     /// What a later NewQ wrote that this one doesn't know: kept as it was.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// What a screen is, as chosen on it (`Surface::kind`). Its side (front or
+/// rear projection) is `Surface::rear`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SurfaceKind {
+    /// Projectors light it.
+    Projection,
+    /// It makes its own light (an LED wall, a monitor): no projector maps
+    /// onto it, and the light leaves its picture as it is.
+    Led,
+    /// A kind a later NewQ wrote that this one doesn't know: kept as it was
+    /// written (and written back), worked out here as if none were chosen.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
+}
+
+/// What a screen is, worked out (`Show::screen_kind`): what the light and a
+/// mapped projector go by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenKind {
+    /// Projection, lit from the front.
+    Front,
+    /// Projection, lit from behind.
+    Rear,
+    /// An LED wall or a monitor: it makes its own light.
+    Led,
+}
+
+impl ScreenKind {
+    /// Its words ("projection, front").
+    pub fn words(self) -> &'static str {
+        match self {
+            ScreenKind::Front => "projection, front",
+            ScreenKind::Rear => "projection, rear",
+            ScreenKind::Led => "LED or monitor",
+        }
+    }
+
+    pub fn is_projection(self) -> bool {
+        self != ScreenKind::Led
+    }
+}
+
+/// A screen's kinds as its menu offers them: None is "Works it out".
+pub const KIND_CHOICES: [Option<ScreenKind>; 4] = [
+    None,
+    Some(ScreenKind::Front),
+    Some(ScreenKind::Rear),
+    Some(ScreenKind::Led),
+];
+
 impl Surface {
+    /// What was chosen for it, if anything (a kind this NewQ doesn't know:
+    /// nothing, so it is worked out).
+    pub fn chosen_kind(&self) -> Option<ScreenKind> {
+        match self.kind {
+            Some(SurfaceKind::Projection) if self.rear => Some(ScreenKind::Rear),
+            Some(SurfaceKind::Projection) => Some(ScreenKind::Front),
+            Some(SurfaceKind::Led) => Some(ScreenKind::Led),
+            Some(SurfaceKind::Unknown(_)) | None => None,
+        }
+    }
+
+    /// Choose its kind (None: work it out, keeping the side it had). An LED
+    /// wall is never rear.
+    pub fn choose_kind(&mut self, kind: Option<ScreenKind>) {
+        match kind {
+            None => self.kind = None,
+            Some(ScreenKind::Front) => {
+                self.kind = Some(SurfaceKind::Projection);
+                self.rear = false;
+            }
+            Some(ScreenKind::Rear) => {
+                self.kind = Some(SurfaceKind::Projection);
+                self.rear = true;
+            }
+            Some(ScreenKind::Led) => {
+                self.kind = Some(SurfaceKind::Led);
+                self.rear = false;
+            }
+        }
+    }
+
+    /// The boxes its pieces fill in the room, each as its eight corners:
+    /// what a projector's beam is tested against (as the light's
+    /// `lit::reached` does, but where things stand, not per frame).
+    pub fn boxes(&self) -> Vec<[[f32; 3]; 8]> {
+        let place = self.placement.matrix();
+        geometry::surface_mesh(&self.shape)
+            .iter()
+            .filter_map(|piece| {
+                let mut ps = piece.mesh.positions.iter();
+                let first = *ps.next()?;
+                let (min, max) = ps.fold((first, first), |(lo, hi), p| {
+                    (
+                        [0, 1, 2].map(|i| lo[i].min(p[i])),
+                        [0, 1, 2].map(|i| hi[i].max(p[i])),
+                    )
+                });
+                let m = geometry::mul(&place, &piece.transform);
+                Some(crate::render3d::lit::box_corners(min, max, &m))
+            })
+            .collect()
+    }
+
     /// Which side light counts on (`light::Facing`).
     pub fn facing(&self) -> light::Facing {
         if self.rear {
@@ -755,7 +866,21 @@ impl Stage3d {
             }
         }
         let mut h = Hashing(Fnv::new());
-        let _ = serde_json::to_writer(&mut h, self);
+        // A projector's fine-tune and line-up points change no part of the
+        // scene (nor a lens map): left out, so dragging one rebuilds nothing.
+        if self
+            .projectors
+            .iter()
+            .any(|p| p.fine.is_some() || p.line_up.is_some())
+        {
+            let still = Stage3d {
+                projectors: self.projectors.iter().map(|p| p.without_tuning()).collect(),
+                ..self.clone()
+            };
+            let _ = serde_json::to_writer(&mut h, &still);
+        } else {
+            let _ = serde_json::to_writer(&mut h, self);
+        }
         h.0.0
     }
 }
@@ -779,6 +904,15 @@ impl Show {
     /// display whose picture it shows a part of.
     pub fn shows_stage(&self, output: OutputId) -> bool {
         self.stage_source(output).is_some()
+    }
+
+    /// The displays that are canvases (`is_canvas`), in the show's order.
+    pub fn canvases(&self) -> Vec<OutputId> {
+        self.outputs
+            .iter()
+            .map(|o| o.id)
+            .filter(|o| self.is_canvas(*o))
+            .collect()
     }
 
     /// Whether display `output` is a canvas (worked out, never stored): a
@@ -828,6 +962,8 @@ impl Show {
         let c = self.output(output)?;
         if c.is_sub_display() {
             Some("A sub display is an area of another display's picture: it can't show the stage.")
+        } else if self.mapped_projector(output).is_some() {
+            Some(MAPPED_SHOWS_NO_STAGE)
         } else if self.part_of(output).is_some() {
             Some(
                 "This display shows part of another display's picture: set the stage on that \
@@ -877,6 +1013,24 @@ impl Show {
     /// source names the first).
     pub fn sanitize_stage(&mut self) {
         self.sanitize_projectors();
+        // A mapped projector's display is never on a screen: it shows the
+        // screens, so it would show itself. (The page never lets one be.)
+        let mapped: Vec<OutputId> = self
+            .stage3d
+            .projectors
+            .iter()
+            .filter(|p| p.mapped)
+            .filter_map(|p| p.display)
+            .collect();
+        for s in &mut self.stage3d.surfaces {
+            if s.feed.output().is_some_and(|o| mapped.contains(&o)) {
+                log::warn!(
+                    "3D stage: screen {} showed a mapped projector's display; it shows nothing",
+                    s.name
+                );
+                s.feed = Feed::None;
+            }
+        }
         // (`is_sub_display` reads only the display itself.)
         for o in &mut self.outputs {
             if o.is_sub_display() && o.source.take().is_some() {
@@ -962,6 +1116,7 @@ impl Show {
             feed: Feed::None,
             gain: 1.0,
             rear: false,
+            kind: None,
             extra: Default::default(),
         });
         id
@@ -998,6 +1153,7 @@ impl Show {
                 feed: Feed::None,
                 gain: 1.0,
                 rear: false,
+                kind: None,
                 extra: Default::default(),
             });
             ids.push(id);

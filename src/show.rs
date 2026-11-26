@@ -3612,6 +3612,43 @@ impl Show {
         id
     }
 
+    /// Add a display meant as a canvas (mapping plan 4.3): no monitor, a
+    /// picture of its own size (1920 × 1080 to start with), named "Canvas N".
+    /// It is a canvas once a screen of the 3D stage shows it (`is_canvas`).
+    pub fn add_canvas(&mut self) -> OutputId {
+        let id = OutputId(self.alloc_id());
+        let n = (1..)
+            .find(|n| {
+                let name = format!("Canvas {n}");
+                !self.outputs.iter().any(|o| o.name == name)
+            })
+            .unwrap_or(1);
+        let mut o = OutputConfig::new(id, format!("Canvas {n}"));
+        o.monitor = None;
+        o.picture = Some((1920, 1080));
+        self.outputs.push(o);
+        id
+    }
+
+    /// Give screen `surface` a new canvas to show, the size of the picture it
+    /// showed (or 1920 × 1080): the way out when its display is to become a
+    /// mapped projector's. The canvas's id.
+    pub fn new_canvas_for(&mut self, surface: crate::stage3d::SurfaceId) -> Option<OutputId> {
+        let was = self.stage3d.surface(surface)?.feed.output();
+        let size = was.and_then(|o| self.output(o)).and_then(|o| o.picture);
+        let id = self.add_canvas();
+        if let Some(size) = size
+            && let Some(o) = self.outputs.iter_mut().find(|o| o.id == id)
+        {
+            o.picture = Some(size);
+        }
+        let feed = crate::stage3d::Feed::whole_picture(self, id);
+        if let Some(s) = self.stage3d.surface_mut(surface) {
+            s.feed = feed;
+        }
+        Some(id)
+    }
+
     /// Set up two projectors that share one wide picture: a display for the
     /// picture (a `width` wide `height` tall one, `overlap` of a projector's
     /// width of it shown by both), and a display for each projector showing

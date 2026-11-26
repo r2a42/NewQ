@@ -18,9 +18,10 @@ use super::{Action, UiState};
 use crate::show::{OutputId, Show};
 use crate::stage3d::samples::SampleVenue;
 use crate::stage3d::{
-    Facet, Feed, LengthUnit, Placement, StageSource, Surface, SurfaceId, SurfaceShape, UpAxis,
-    Venue, Viewpoint, WHOLE, geometry,
+    Facet, Feed, LengthUnit, Placement, ScreenKind, StageSource, Surface, SurfaceId, SurfaceShape,
+    UpAxis, Venue, Viewpoint, WHOLE, geometry,
 };
+use std::collections::HashMap;
 
 /// What the page says of a screen whose shape a later NewQ wrote.
 pub const UNKNOWN_SHAPE_WORDS: &str =
@@ -208,7 +209,12 @@ pub(super) fn sample_menu(ui: &mut Ui, label: &str) -> Option<(SampleVenue, bool
 pub fn first_feed(show: &Show) -> Feed {
     show.outputs
         .iter()
-        .find(|o| o.enabled && !o.is_sub_display() && !show.shows_stage(o.id))
+        .find(|o| {
+            o.enabled
+                && !o.is_sub_display()
+                && !show.shows_stage(o.id)
+                && show.mapped_projector(o.id).is_none()
+        })
         .map_or(Feed::None, |o| Feed::whole_picture(show, o.id))
 }
 
@@ -324,11 +330,13 @@ fn duplicate(show: &mut Show, s: &Surface) -> SurfaceId {
 }
 
 /// The displays a screen can show: every display that doesn't show the
-/// stage itself, with words for a projector (its whole picture is shown).
+/// stage itself and isn't a mapped projector's (it shows the screens: it
+/// would show itself), with words for a projector (its whole picture is
+/// shown) and a canvas (`ui::display_label`).
 pub fn feed_choices(show: &Show) -> Vec<(OutputId, String)> {
     show.outputs
         .iter()
-        .filter(|o| !show.shows_stage(o.id))
+        .filter(|o| !show.shows_stage(o.id) && show.mapped_projector(o.id).is_none())
         .map(|o| {
             let label = if show.whole_picture(o.id) != o.id {
                 let whole = show
@@ -338,7 +346,7 @@ pub fn feed_choices(show: &Show) -> Vec<(OutputId, String)> {
             } else if o.is_sub_display() {
                 format!("{} (sub display)", o.name)
             } else {
-                o.name.clone()
+                super::display_label(show, o.id)
             };
             (o.id, label)
         })
@@ -877,8 +885,15 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
         }
         let unit = show.stage3d.units;
         let choices = feed_choices(show);
+        let kinds: HashMap<SurfaceId, ScreenKind> = show
+            .stage3d
+            .surfaces
+            .iter()
+            .map(|s| (s.id, show.kind_of(s)))
+            .collect();
         let mut remove = None;
         let mut copy = None;
+        let mut new_canvas = None;
         let ids: Vec<SurfaceId> = show.stage3d.surfaces.iter().map(|s| s.id).collect();
         let newly_picked = st.stage.picked != st.stage.opened_for;
         st.stage.opened_for = st.stage.picked;
@@ -912,7 +927,10 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        feed_rows(ui, id, &mut s.feed, &choices);
+                        if feed_rows(ui, id, &s.name, &mut s.feed, &choices) {
+                            new_canvas = Some(id);
+                        }
+                        kind_row(ui, s, kinds.get(&id).copied());
                         placement_rows(ui, &format!("s{}", id.0), &mut s.placement, unit);
                         shape_rows(ui, id, &mut s.shape, unit);
                     });
@@ -928,6 +946,11 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
         if let Some(s) = copy {
             st.stage.picked = Some(duplicate(show, &s));
         }
+        if let Some(s) = new_canvas
+            && let Some(canvas) = show.new_canvas_for(s)
+        {
+            st.reveal_display.set(Some(canvas));
+        }
         if let Some(id) = remove {
             show.remove_surface(id);
             if st.stage.picked == Some(id) {
@@ -937,13 +960,23 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     });
 }
 
-fn feed_rows(ui: &mut Ui, id: SurfaceId, feed: &mut Feed, choices: &[(OutputId, String)]) {
+/// A screen's *Shows* rows. True when *New canvas…* was chosen (the caller
+/// makes it: the show is borrowed here).
+fn feed_rows(
+    ui: &mut Ui,
+    id: SurfaceId,
+    screen: &str,
+    feed: &mut Feed,
+    choices: &[(OutputId, String)],
+) -> bool {
+    let mut wants_canvas = false;
     ui.label("Shows");
     let current = feed.output();
     let text = current
         .and_then(|o| choices.iter().find(|(c, _)| *c == o))
         .map_or("Nothing".to_string(), |(_, l)| l.clone());
-    egui::ComboBox::from_id_salt(("feed", id.0))
+    let menu = format!("3D stage ▸ {screen} ▸ Shows");
+    let r = egui::ComboBox::from_id_salt(("feed", id.0))
         .selected_text(text)
         .width(260.0)
         .show_ui(ui, |ui| {
@@ -951,7 +984,9 @@ fn feed_rows(ui: &mut Ui, id: SurfaceId, feed: &mut Feed, choices: &[(OutputId, 
                 *feed = Feed::None;
             }
             for (o, label) in choices {
-                if ui.selectable_label(current == Some(*o), label).clicked() {
+                let r = ui.selectable_label(current == Some(*o), label);
+                note(ui, &format!("{menu} ▸ {label}"), &r);
+                if r.clicked() {
                     let region = match feed {
                         Feed::Display { region, .. } => *region,
                         Feed::None | Feed::Unknown(_) => WHOLE,
@@ -959,12 +994,20 @@ fn feed_rows(ui: &mut Ui, id: SurfaceId, feed: &mut Feed, choices: &[(OutputId, 
                     *feed = Feed::Display { output: *o, region };
                 }
             }
+            ui.separator();
+            let r = ui.button(NEW_CANVAS).on_hover_text(super::CANVAS_WORDS);
+            note(ui, &format!("{menu} ▸ {NEW_CANVAS}"), &r);
+            if r.clicked() {
+                wants_canvas = true;
+                ui.close();
+            }
         })
         .response
         .on_hover_text(
             "Which display's picture is on it. A display that itself shows the stage \
-             can't be: it would show itself.",
+             can't be, nor a mapped projector's: it would show itself.",
         );
+    note(ui, &menu, &r);
     ui.end_row();
     if let Feed::Display { region, .. } = feed {
         ui.label("");
@@ -994,6 +1037,59 @@ fn feed_rows(ui: &mut Ui, id: SurfaceId, feed: &mut Feed, choices: &[(OutputId, 
         });
         ui.end_row();
     }
+    wants_canvas
+}
+
+/// The last entry of a screen's *Shows*: a new canvas for it.
+pub const NEW_CANVAS: &str = "New canvas…";
+
+/// What "Works it out" is called in a screen's *Kind* menu.
+pub const WORKS_IT_OUT: &str = "Works it out";
+
+/// A screen's *Kind* row (mapping plan, section 8): projection from the
+/// front or from behind, or an LED wall (or monitor) that makes its own
+/// light, or worked out where everything stands: a screen a projector
+/// reaches is projection, any other LED. `now` is what it comes to.
+fn kind_row(ui: &mut Ui, s: &mut Surface, now: Option<ScreenKind>) {
+    ui.label("Kind");
+    let words = |k: Option<ScreenKind>| match k {
+        Some(k) => upper_first(k.words()),
+        None => WORKS_IT_OUT.to_string(),
+    };
+    let chosen = s.chosen_kind();
+    let text = match (chosen, now) {
+        (None, Some(now)) => format!("{WORKS_IT_OUT}: {}", now.words()),
+        (k, _) => words(k),
+    };
+    let menu = format!("3D stage ▸ {} ▸ Kind", s.name);
+    let r = egui::ComboBox::from_id_salt(("screen_kind", s.id.0))
+        .selected_text(text)
+        .width(260.0)
+        .show_ui(ui, |ui| {
+            for k in crate::stage3d::KIND_CHOICES {
+                let r = ui.selectable_label(chosen == k, words(k));
+                note(ui, &format!("{menu} ▸ {}", words(k)), &r);
+                if r.clicked() && chosen != k {
+                    s.choose_kind(k);
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Lit by projectors (from in front, or from behind for a rear-projection screen), \
+             or an LED wall or monitor that makes its own light: no projector maps onto it. \
+             Works it out: a screen a projector reaches, where everything stands, is \
+             projection; any other is LED. A screen doesn't change kind while it moves.",
+        );
+    note(ui, &menu, &r);
+    ui.end_row();
+}
+
+fn upper_first(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 fn shape_rows(ui: &mut Ui, id: SurfaceId, shape: &mut SurfaceShape, unit: LengthUnit) {
