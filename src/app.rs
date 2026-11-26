@@ -3725,13 +3725,8 @@ impl App {
                 self.quit_display_computer(event_loop, "its window was closed");
             }
             WindowEvent::CloseRequested => {
-                // Closing a display's window (e.g. Alt+F4) turns off what's on it.
                 let on_it = self.screens[&m].outputs.clone();
-                for cfg in &mut self.show.outputs {
-                    if on_it.contains(&cfg.id) {
-                        cfg.enabled = false;
-                    }
-                }
+                display_window_closed(&mut self.show, &mut self.engine, self.ui.show_mode, &on_it);
             }
             WindowEvent::Resized(size) => {
                 if let Some(s) = self.screens.get_mut(&m) {
@@ -4620,6 +4615,37 @@ fn card_group(texture: Arc<LayerTexture>, size: (u32, u32)) -> OutputGroup {
     }
 }
 
+/// A display's window was closed (Alt+F4 with it in front, or the system
+/// closing it). That switches off the displays on it, in the show itself, so
+/// in Show mode or while anything plays it is refused and the status bar says
+/// why: a slip would take the picture off for the rest of the performance,
+/// and the next save would keep it off. Returns whether they were switched off.
+fn display_window_closed(
+    show: &mut Show,
+    engine: &mut Engine,
+    show_mode: bool,
+    on_it: &[OutputId],
+) -> bool {
+    if show_mode || engine.is_active() {
+        engine.log(format!(
+            "A display's window can't be closed {}: switch the display off on {} instead",
+            if show_mode {
+                "in Show mode"
+            } else {
+                "while cues are playing"
+            },
+            ui::settings_path(ui::SettingsPage::Displays, None)
+        ));
+        return false;
+    }
+    for cfg in &mut show.outputs {
+        if on_it.contains(&cfg.id) {
+            cfg.enabled = false;
+        }
+    }
+    true
+}
+
 /// Why a show handed over by a second copy of NewQ is not opened, if it isn't:
 /// never in the middle of a show (something plays), a test, or on a computer
 /// following a primary (its show comes from there). The window still comes
@@ -4737,6 +4763,38 @@ pub(crate) fn throw_picture(
 mod tests {
     use super::*;
     use crate::show::{DisplayRef, NodeId};
+
+    #[test]
+    fn closing_a_displays_window_in_show_mode_or_while_playing_keeps_the_display_on() {
+        let mut show = Show::default();
+        let id = show.outputs[0].id;
+        let mut c = show.make_cue(crate::show::CueType::Wait, None, 0);
+        if let crate::show::CueKind::Wait(w) = &mut c.kind {
+            w.duration = 5.0;
+        }
+        let wait = c.id;
+        show.cues.push(c);
+        let mut e = Engine::for_tests();
+        // Show mode, nothing playing: refused, and the status bar says why.
+        assert!(!display_window_closed(&mut show, &mut e, true, &[id]));
+        assert!(show.outputs[0].enabled);
+        assert!(
+            e.messages.iter().any(|(_, m)| m.contains("in Show mode")),
+            "{:?}",
+            e.messages
+        );
+        // Edit mode while a cue plays: refused too.
+        e.fire(&show, wait);
+        e.tick(&show, 0.1);
+        assert!(!display_window_closed(&mut show, &mut e, false, &[id]));
+        assert!(show.outputs[0].enabled);
+        // Edit mode, nothing playing: as before, the display is switched off.
+        e.stop_all(0.0);
+        e.tick(&show, 0.1);
+        assert!(!e.is_active());
+        assert!(display_window_closed(&mut show, &mut e, false, &[id]));
+        assert!(!show.outputs[0].enabled);
+    }
 
     #[test]
     fn an_output_window_is_shown_once_it_has_drawn_at_its_displays_size() {
