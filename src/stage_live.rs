@@ -80,7 +80,13 @@ struct MapEntry {
     refused: Option<u64>,
     /// The canvases its projector sees, for `want`'s key (`feeds_output`).
     feeds: (u64, Vec<OutputId>),
+    /// The map is a test's (`give_lens_map`): never baked.
+    given: bool,
 }
+
+/// Which map an entry is: a projector's, at a size and for a picture shape
+/// (its bits): a stream and a 3D view's throw of one size may differ in shape.
+type MapAt = (ProjectorId, (u32, u32), u32);
 
 /// Whose picture a target is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -312,7 +318,9 @@ pub struct StageLive {
     still: Arc<Scene>,
     still_key: u64,
     /// Mapped projectors' lens maps, by projector and size.
-    maps: HashMap<(ProjectorId, (u32, u32)), MapEntry>,
+    maps: HashMap<MapAt, MapEntry>,
+    /// A bake the card refused has landed since `begin` last said so.
+    refusal_to_say: bool,
     /// Where the thread's maps land (the same slot for every thread).
     baked: BakedSlot,
     /// A map landed since `landed` was last asked.
@@ -429,6 +437,14 @@ impl StageLive {
             Err(TryRecvError::Disconnected) => false,
         });
         self.look_after_venue(show, shared, say);
+        // A mapped projector the card won't draw: said once a refusal lands.
+        self.take_baked();
+        if std::mem::take(&mut self.refusal_to_say) {
+            say.push(Said::Problem(
+                "This graphics card can't draw a mapped projector's picture: its display stays black"
+                    .into(),
+            ));
+        }
         let stage = &show.stage3d;
         // (Comparing is cheap; a key is worked out only on a change, and the
         // copy kept only when the key moved, so a stage with a NaN in it,
@@ -719,13 +735,22 @@ impl StageLive {
         aspect: f32,
         use_: MapUse,
     ) -> Option<Arc<LensMap>> {
+        let at = (projector, size, aspect.to_bits());
         if let Some(m) = self.given_maps.get(&projector).filter(|m| m.size == size) {
+            // Asked for as any other (its canvases are output work).
+            let e = self.maps.entry(at).or_default();
+            e.map = Some(m.clone());
+            e.want = Some((m.key, aspect));
+            e.given = true;
+            e.asked_at = Some(Instant::now());
+            e.output |= use_ != MapUse::Preview;
             return Some(m.clone());
         }
         self.take_baked();
         let p = self.stage_seen.as_ref()?.projector(projector)?;
         let key = lensmap::map_key(self.still_key, p, aspect, size, false);
-        let e = self.maps.entry((projector, size)).or_default();
+        let e = self.maps.entry(at).or_default();
+        e.given = false;
         e.want = Some((key, aspect));
         e.asked_at = Some(Instant::now());
         e.output |= use_ != MapUse::Preview;
@@ -737,7 +762,10 @@ impl StageLive {
     fn take_baked(&mut self) {
         let landed = std::mem::take(&mut *self.baked.lock());
         for b in landed {
-            let Some(e) = self.maps.get_mut(&(b.projector, b.size)) else {
+            let Some(e) = self
+                .maps
+                .get_mut(&(b.projector, b.size, b.aspect.to_bits()))
+            else {
                 continue;
             };
             if e.in_flight == Some(b.key) {
@@ -748,7 +776,10 @@ impl StageLive {
                     e.map = Some(m);
                     self.map_landed = true;
                 }
-                None => e.refused = Some(b.key),
+                None => {
+                    e.refused = Some(b.key);
+                    self.refusal_to_say = true;
+                }
             }
         }
     }
@@ -995,7 +1026,8 @@ impl StageLive {
                         (Vec::new(), (0, 0))
                     };
                     for m in &map_jobs {
-                        if let Some(e) = self.maps.get_mut(&(m.projector.id, m.size)) {
+                        let at = (m.projector.id, m.size, m.aspect.to_bits());
+                        if let Some(e) = self.maps.get_mut(&at) {
                             e.in_flight = Some(m.key);
                         }
                     }
@@ -1045,8 +1077,8 @@ impl StageLive {
         let Some(stage) = self.stage_seen.as_ref() else {
             return (jobs, false);
         };
-        for (&(id, size), e) in &self.maps {
-            let Some((key, aspect)) = e.want else {
+        for (&(id, size, _), e) in &self.maps {
+            let Some((key, aspect)) = e.want.filter(|_| !e.given) else {
                 continue;
             };
             if e.map.as_ref().is_some_and(|m| m.key == key) || e.refused == Some(key) {
@@ -1079,14 +1111,19 @@ impl StageLive {
     /// again next pass).
     fn feeds_of_outputs(&mut self, show: &Show) -> HashSet<OutputId> {
         let mut out = HashSet::new();
-        for (&(id, _), e) in &mut self.maps {
+        for (&(id, _, _), e) in &mut self.maps {
             if !std::mem::take(&mut e.output) {
                 continue;
             }
             let Some((key, aspect)) = e.want else {
                 continue;
             };
-            if e.feeds.0 != key || key == 0 {
+            if e.given {
+                e.feeds = (
+                    key,
+                    e.map.as_ref().map_or_else(Vec::new, |m| m.feeds.clone()),
+                );
+            } else if e.feeds.0 != key || key == 0 {
                 let Some(p) = self.stage_seen.as_ref().and_then(|s| s.projector(id)) else {
                     continue;
                 };

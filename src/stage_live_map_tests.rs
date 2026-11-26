@@ -11,7 +11,9 @@ const LONG: Duration = Duration::from_secs(20);
 type Ask = (ProjectorId, (u32, u32), MapUse);
 
 /// One pass of the app's as far as the lens maps go: `begin`, the asks,
-/// `send` with nothing else to draw; what each ask was given.
+/// `send` with nothing else to draw but something playing (`fresh`, every
+/// display's pictures given): nothing a cue changes may bake; what each ask
+/// was given.
 fn map_pass(
     live: &mut StageLive,
     gpu: &Gpu,
@@ -24,7 +26,20 @@ fn map_pass(
         .iter()
         .map(|&(p, size, use_)| live.lens_map(p, size, use_))
         .collect();
-    live.send(gpu, show, shared, &[], &HashMap::new(), &[], false);
+    let pictures: HashMap<OutputId, PictureLayers> = show
+        .outputs
+        .iter()
+        .map(|o| {
+            (
+                o.id,
+                PictureLayers {
+                    layers: Vec::new(),
+                    canvas: (1920, 1080),
+                },
+            )
+        })
+        .collect();
+    live.send(gpu, show, shared, &[], &pictures, &[], true);
     maps
 }
 
@@ -293,4 +308,80 @@ fn a_venue_that_lands_later_is_baked_into_the_map_again() {
         h.join().unwrap();
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_map_given_by_a_test_is_asked_for_as_any_other_and_never_baked() {
+    let Some(gpu) = map_gpu() else { return };
+    let (show, a, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
+    let mut shared = StageShared::default();
+    let mut made = crate::mapped::CpuMap::black((16, 9));
+    made.feeds = vec![a];
+    let given = Arc::new(LensMap::from_cpu(&gpu, &made, 7));
+    live.give_lens_map(p, given.clone());
+    let asks = [(p, (16, 9), MapUse::Window)];
+    for _ in 0..3 {
+        let maps = map_pass(&mut live, &gpu, &show, &mut shared, &asks);
+        assert!(same(&maps[0], &given));
+    }
+    assert!(live.feeds_output(a), "its canvas is output work");
+    assert!(!live.has_thread());
+    assert_eq!(count.0.totals().maps_baked, 0);
+}
+
+#[test]
+fn a_stream_and_a_views_throw_of_one_size_and_two_shapes_are_two_maps() {
+    let (show, _, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    assert!(live.lens_map(p, (64, 36), MapUse::Stream).is_none());
+    assert!(
+        live.lens_map_shaped(p, (64, 36), 1.6, MapUse::Preview)
+            .is_none()
+    );
+    assert_eq!(live.maps.len(), 2);
+    let wants: HashSet<u64> = live
+        .maps
+        .values()
+        .filter_map(|e| e.want)
+        .map(|w| w.0)
+        .collect();
+    assert_eq!(wants.len(), 2, "two keys");
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn a_refused_bake_is_said_once_and_not_baked_again() {
+    let (show, _, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    assert!(live.lens_map(p, (16, 9), MapUse::Window).is_none());
+    let (jobs, due) = live.maps_due(false);
+    assert!(due);
+    let job = &jobs[0];
+    // The card refused it (as `StageDrawer::bake` lands a refusal).
+    live.baked.lock().push(crate::stage_render::Baked {
+        projector: p,
+        size: job.size,
+        aspect: job.aspect,
+        key: job.key,
+        map: None,
+    });
+    let mut said = Vec::new();
+    live.begin(&show, &mut shared, &mut said);
+    assert_eq!(said.len(), 1);
+    assert!(matches!(&said[0], Said::Problem(w) if w.contains("stays black")));
+    assert!(live.lens_map(p, (16, 9), MapUse::Window).is_none(), "black");
+    let (jobs, due) = live.maps_due(false);
+    assert!(jobs.is_empty() && !due, "not baked again");
+    let mut said = Vec::new();
+    live.begin(&show, &mut shared, &mut said);
+    assert!(said.is_empty(), "said once");
 }
