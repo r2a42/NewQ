@@ -64,11 +64,15 @@ See also: the blocks after the real tests also hold notes for other areas: pictu
   with a passcode refuses (`Refusal::Passcode`) a session that claims its network and hasn't proved it
   within `PROVE_WITHIN` (10 s). `NetView` `connected`/`reached`: heeded, or a waiting computer that
   welcomed (`shown_connected`). Without a passcode the LAN is trusted (README says so): a claimed
-  primary of the network with the term is obeyed as before. Known, not fixed: a proof is
-  `MAC(verifier's nonce, prover's id)`, so a stranger can relay a live key-holder's proof (it says hello
-  to the real primary with the follower's nonce) during the moment the real primary is up but not yet
-  connected; *Add to the show* (and `add_vouched`) give the key to whoever answers as that waiting id;
-  sessions past hello are not capped in number; commands are not encrypted. `NetView` is published on a change with the app's `wake`;
+  primary of the network with the term is obeyed as before. A proof is `MAC(verifier's nonce,
+  prover's id)`, so whoever signs a nonce can be relayed: a computer with the key that isn't a primary
+  proves it only once the peer's proof checked (`Conn::proof_withheld`; a primary goes first), so only a
+  primary's own proof can be had, and only under its id. Known, not fixed (a wire change): that relay of
+  the primary's proof while its session with a follower is down but it is up; *Add to the show* (and
+  `add_vouched`) give the key to whoever answers as that waiting id; an unheeded session as a follower's
+  id holds `Peer::conn` on the primary, so it isn't dialled (closed each `PROVE_WITHIN` when it claims
+  the network, held while it claims none); unheeded sessions as the primary's id live on a follower as
+  long as they ping; sessions past hello aren't capped in number; nothing is encrypted. `NetView` is published on a change with the app's `wake`;
   `Hub::send_to`/`broadcast`, messages the hub doesn't handle come out of `take_events` as
   `NetEvent::Message`, a role change as `NetEvent::RoleChanged`. Tests in `net/hub_tests.rs` (two and
   three hubs on loopback, `lan: false`). App: `App::net`, `pass_net`, `sync_audio_outputs`
