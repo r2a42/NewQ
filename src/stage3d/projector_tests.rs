@@ -499,6 +499,26 @@ fn a_later_newqs_fine_tune_and_line_up_of_a_new_shape_are_kept_as_written() {
         serde_json::to_string(&json["stage3d"]["projectors"][0]).unwrap(),
         "the projector round-trips as it was written"
     );
+    // A line-up whose answer or "before" is of a later shape is kept whole,
+    // and a later kind of `mapped` is kept too (and is not mapped here).
+    let mut later = json.clone();
+    let lp = &mut later["stage3d"]["projectors"][0];
+    let deep = serde_json::json!({
+        "points": [{ "at": [1.0, 2.0, 3.0], "pixel": [4.0, 5.0] }],
+        "solved": { "rung": "Pose", "rms_px": { "per_point": [0.1] } },
+        "before": { "placement": "as found by the camera" }
+    });
+    lp["line_up"] = deep.clone();
+    lp["mapped"] = serde_json::json!({ "mode": "auto" });
+    let back: Show = serde_json::from_str(&serde_json::to_string(&later).unwrap()).unwrap();
+    let q = &back.stage3d.projectors[0];
+    assert!(q.line_up.is_none() && !q.mapped);
+    let again = serde_json::to_value(&back).unwrap();
+    assert_eq!(again["stage3d"]["projectors"][0]["line_up"], deep);
+    assert_eq!(
+        again["stage3d"]["projectors"][0]["mapped"],
+        serde_json::json!({ "mode": "auto" })
+    );
     // A fine-tune made here replaces the kept one (one key, this NewQ's).
     let mut edited = back.clone();
     edited.stage3d.projectors[0].fine = Some(crate::mesh::Mesh::grid(3, 3));
