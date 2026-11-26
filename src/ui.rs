@@ -150,6 +150,8 @@ pub enum DialogFor {
     Venue,
     /// Where to write a sample venue as a .glb.
     SampleGlb(crate::stage3d::samples::SampleVenue),
+    /// The folder this display's recording is written into.
+    RecordFolder(OutputId),
 }
 
 impl DialogFor {
@@ -171,6 +173,7 @@ impl DialogFor {
             DialogFor::SampleGlb(kind) => {
                 Action::Stage(stage_edit::StageEdit::ExportGlb(kind, path))
             }
+            DialogFor::RecordFolder(id) => Action::SetRecordFolder(id, path),
         }
     }
 }
@@ -943,6 +946,8 @@ enum Action {
     AddCueFile(CueType, PathBuf),
     /// This cue now plays this file.
     SetCueFile(CueId, PathBuf),
+    /// This display's recording goes into this folder (`DialogFor::RecordFolder`).
+    SetRecordFolder(OutputId, PathBuf),
     /// Make a Hap copy of the cue's video, and play that instead.
     ConvertToHap(CueId, HapKind),
     EditGeometry(Option<OutputId>),
@@ -1036,6 +1041,7 @@ impl Action {
                 | Action::SetPreWait(..)
                 | Action::AddCueFile(..)
                 | Action::SetCueFile(..)
+                | Action::SetRecordFolder(..)
                 | Action::ConvertToHap(..)
                 | Action::AddSubDisplay(_)
                 | Action::AddDisplay
@@ -2955,6 +2961,9 @@ fn start_dialog(st: &mut UiState, show: &Show, purpose: DialogFor) {
             .pick_file(),
         DialogFor::LibraryFolder => rfd::FileDialog::new()
             .set_title("A folder to keep on every computer")
+            .pick_folder(),
+        DialogFor::RecordFolder(_) => rfd::FileDialog::new()
+            .set_title("Record into…")
             .pick_folder(),
         DialogFor::CollectMedia => {
             let mut dialog = rfd::FileDialog::new().set_title("Copy the media into…");
@@ -5984,7 +5993,7 @@ fn displays_panel(
             );
             corner_pin_editor(ui, d, st, actions);
             edge_blend_editor(ui, d, state_size.unwrap_or((1920, 1080)));
-            stream_editor(ui, d, engine, st, &audio_names);
+            stream_editor(ui, d, engine, st, &audio_names, actions);
         });
         // One just added (at the bottom), or asked for from another page, is
         // brought into sight, its top at the top of the page. It is asked for
@@ -6158,6 +6167,7 @@ fn stream_editor(
     engine: &mut Engine,
     st: &UiState,
     audio_names: &[(AudioOutputId, String)],
+    actions: &mut Vec<Action>,
 ) {
     use crate::show::{ServerProtocol, StreamKind, StreamOut};
     let on = d.stream.as_ref().is_some_and(|s| s.enabled);
@@ -6294,12 +6304,10 @@ fn stream_editor(
                                 } else {
                                     ui.data_mut(|m| m.remove_temp::<String>(typed_id));
                                 }
-                                if ui.button("Browse…").clicked()
-                                    && let Some(p) = rfd::FileDialog::new()
-                                        .set_title("Record into…")
-                                        .pick_folder()
-                                {
-                                    *folder = p.to_string_lossy().into_owned();
+                                // On a thread of its own (`start_dialog`): the show
+                                // goes on while the folder is chosen.
+                                if ui.button("Browse…").clicked() {
+                                    actions.push(Action::AskFile(DialogFor::RecordFolder(d.id)));
                                 }
                             });
                             ui.end_row();
@@ -11645,6 +11653,19 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 _ => {}
             }
         }
+        Action::SetRecordFolder(id, folder) => {
+            if let Some(crate::show::StreamOut {
+                kind: crate::show::StreamKind::Record { folder: f, .. },
+                ..
+            }) = show
+                .outputs
+                .iter_mut()
+                .find(|o| o.id == id)
+                .and_then(|o| o.stream.as_mut())
+            {
+                *f = folder.to_string_lossy().into_owned();
+            }
+        }
         Action::SetCueFile(id, file) => {
             if let Some(i) = show.cue_index(id)
                 && let Some(m) = show.cues[i].kind.media_mut()
@@ -16860,6 +16881,106 @@ mod tests {
         }
     }
 
+    /// Where the text `words` was drawn in `out`.
+    fn drawn_at(out: &egui::FullOutput, words: &str) -> Option<Rect> {
+        out.shapes.iter().find_map(|c| match &c.shape {
+            egui::epaint::Shape::Text(t) if t.galley.text() == words => {
+                Some(t.galley.rect.translate(t.pos.to_vec2()))
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn browse_for_a_recordings_folder_asks_on_a_thread_of_its_own() {
+        use crate::show::{StreamKind, StreamOut};
+        let mut show = Show::default();
+        let id = show.outputs[0].id;
+        show.outputs[0].stream = Some(StreamOut {
+            enabled: true,
+            kind: StreamKind::Record {
+                folder: String::new(),
+                codec: Default::default(),
+                container: Default::default(),
+                kbps: 16_000,
+                area: None,
+                audio: None,
+            },
+            ..StreamOut::default()
+        });
+        let mut c = show.make_cue(CueType::Wait, None, 0);
+        if let CueKind::Wait(w) = &mut c.kind {
+            w.duration = 5.0;
+        }
+        let wait = c.id;
+        show.cues.push(c);
+        let mut e = Engine::for_tests();
+        let mut st = UiState::default();
+        e.fire(&show, wait);
+        // The display's Send out settings, clicked with the mouse.
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut frame = |show: &mut Show, e: &mut Engine, st: &UiState, events: Vec<Event>| {
+            t += 1.0 / 60.0;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    stream_editor(ui, &mut show.outputs[0], e, st, &[], &mut actions);
+                });
+            });
+            out.textures_delta.clear();
+            (out, actions)
+        };
+        let (out, _) = frame(&mut show, &mut e, &st, vec![]);
+        let at = drawn_at(&out, "Browse…")
+            .expect("a Browse… button")
+            .center();
+        let mut asked = Vec::new();
+        for events in [
+            vec![Event::PointerMoved(at)],
+            vec![button(at, true)],
+            vec![button(at, false)],
+        ] {
+            asked.extend(frame(&mut show, &mut e, &st, events).1);
+        }
+        // The click returns at once and asks for a dialog (one that waited
+        // here, on the thread that runs the show, would freeze every picture).
+        assert!(
+            matches!(
+                asked.as_slice(),
+                [Action::AskFile(DialogFor::RecordFolder(o))] if *o == id
+            ),
+            "{} actions",
+            asked.len()
+        );
+        // That dialog stays open while the show goes on.
+        let (release, ask) = blocked_dialog();
+        start_dialog_with(&mut st, &show, DialogFor::RecordFolder(id), ask);
+        let mut actions = Vec::new();
+        for _ in 0..5 {
+            e.tick(&show, 0.1);
+            poll_dialog(&ctx, &show, &mut st, &mut actions);
+        }
+        assert!(actions.is_empty());
+        assert!(
+            matches!(e.status(wait), crate::engine::CueStatus::Playing { elapsed, .. } if elapsed > 0.4)
+        );
+        release.send(Some(PathBuf::from("/recordings"))).unwrap();
+        for a in poll_until_answered(&show, &mut st) {
+            apply(a, &mut show, &mut e, &mut st);
+        }
+        assert!(matches!(
+            &show.outputs[0].stream,
+            Some(StreamOut { kind: StreamKind::Record { folder, .. }, .. }) if folder == "/recordings"
+        ));
+    }
+
     #[test]
     fn a_file_dialog_does_not_stop_the_show_while_it_is_open() {
         let mut show = Show::default();
@@ -16949,6 +17070,10 @@ mod tests {
         assert!(matches!(
             DialogFor::RelinkFolder.answer(p(), false),
             Action::RelinkFolder(_)
+        ));
+        assert!(matches!(
+            DialogFor::RecordFolder(OutputId(2)).answer(p(), false),
+            Action::SetRecordFolder(OutputId(2), _)
         ));
         assert!(matches!(
             DialogFor::CollectMedia.answer(p(), false),
