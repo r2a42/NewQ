@@ -8,17 +8,27 @@
 //! the stage, and ends with `send`: the views asked for (the previews that
 //! the governor let draw, `StageShared::requests`, and every display showing
 //! the stage), with the pictures of the displays their scene shows.
+//!
+//! Mapped projectors' lens maps (mapping plan 4.1) are kept here, not on the
+//! thread: the app asks for each map it draws every pass (`lens_map`), and
+//! `send` hands the thread a bake (`MapJob`) for each one missing or out of
+//! date (output work first, a 3D view's only with a governed lit view). A
+//! finished map lands in a slot this owns (`baked`), so the thread's idle
+//! release never loses one; a map replaced is used until the new one lands.
 
 use crate::gpu::{Geometry, Gpu, LayerTexture};
+use crate::mapped::{LensMap, MapUse};
 use crate::preview_pace::PreviewId;
 use crate::render::{OutputGroup, OutputLayer};
 use crate::render3d::{self, Camera, Options, Scene};
 use crate::show::{OutputId, Show};
 use crate::stage_render::{
-    CountTo, FeedJob, StageJob, StageThread, ThrowJob, ViewJob, feed_size, throw_size,
+    BakedSlot, CountTo, FeedJob, MapJob, StageJob, StageThread, ThrowJob, ViewJob, feed_size,
+    throw_size,
 };
 use crate::stage3d::ProjectorId;
 use crate::stage3d::Venue;
+use crate::stage3d::lensmap;
 use crate::stage3d::light::{self, MAX_THROWS};
 use crate::stage3d::load::{Found, LoadedVenue, Unread, load_venue_with};
 use crate::stage3d::samples::SampleVenue;
@@ -51,6 +61,26 @@ pub const WATCH_EVERY: Duration = Duration::from_secs(2);
 const ARRIVING_LOOK: Duration = Duration::from_secs(1);
 /// The largest side of a display's stage picture.
 const MOST_SIDE: u32 = 4096;
+/// A lens map not asked for in this long is let go.
+pub const MAP_KEPT: Duration = Duration::from_secs(10);
+
+/// One mapped projector's lens map at one size, as the app asks for it.
+#[derive(Default)]
+struct MapEntry {
+    /// The map in use (perhaps out of date: used until the new one lands).
+    map: Option<Arc<LensMap>>,
+    /// What is wanted: its key (`lensmap::map_key`) and the picture's shape.
+    want: Option<(u64, f32)>,
+    /// A window or a stream asked for it this pass: output work.
+    output: bool,
+    asked_at: Option<Instant>,
+    /// The key of a bake handed to the thread and not back yet.
+    in_flight: Option<u64>,
+    /// A key the card refused: not baked again (the projector stays black).
+    refused: Option<u64>,
+    /// The canvases its projector sees, for `want`'s key (`feeds_output`).
+    feeds: (u64, Vec<OutputId>),
+}
 
 /// Whose picture a target is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -277,6 +307,45 @@ pub struct StageLive {
     /// Lens maps handed in by a test (`give_lens_map`), by projector: what
     /// `lens_map` returns until the bake makes them.
     given_maps: HashMap<ProjectorId, Arc<crate::mapped::LensMap>>,
+    /// What lens maps are made of (`lensmap::still_scene`) and its key, made
+    /// again with the scene.
+    still: Arc<Scene>,
+    still_key: u64,
+    /// Mapped projectors' lens maps, by projector and size.
+    maps: HashMap<(ProjectorId, (u32, u32)), MapEntry>,
+    /// Where the thread's maps land (the same slot for every thread).
+    baked: BakedSlot,
+    /// A map landed since `landed` was last asked.
+    map_landed: bool,
+    /// The canvases the maps a window or stream draws use, and the displays
+    /// they are drawn from (`feeds_output`).
+    output_feeds: HashSet<OutputId>,
+}
+
+/// `Stage3d::shape_key` without the projectors' fine-tunes and line-ups:
+/// dragging a fine-tune point or placing a line-up point makes no new scene
+/// and no new lens map.
+fn stage_key_of(stage: &crate::stage3d::Stage3d) -> u64 {
+    if stage
+        .projectors
+        .iter()
+        .all(|p| p.fine.is_none() && p.line_up.is_none())
+    {
+        return stage.shape_key();
+    }
+    let mut s = stage.clone();
+    for p in &mut s.projectors {
+        p.fine = None;
+        p.line_up = None;
+    }
+    s.shape_key()
+}
+
+/// Whether `stage` equals itself (one with a number that isn't, never
+/// does).
+#[allow(clippy::eq_op)]
+fn equal_to_itself(stage: &crate::stage3d::Stage3d) -> bool {
+    stage == stage
 }
 
 /// A preview's target is kept this long after it last asked for a picture.
@@ -368,9 +437,11 @@ impl StageLive {
             let key = if stage.is_empty() {
                 0
             } else {
-                stage.shape_key()
+                stage_key_of(stage)
             };
-            if key != self.stage_key || self.stage_seen.is_none() {
+            // (Kept too when only what the key leaves out changed, so that
+            // isn't worked out again every pass.)
+            if key != self.stage_key || self.stage_seen.is_none() || equal_to_itself(stage) {
                 self.stage_seen = Some(stage.clone());
             }
             self.stage_key = key;
@@ -395,6 +466,9 @@ impl StageLive {
             self.scene_key = h.0;
             let scene = stage.scene(show, self.venue.loaded.as_deref());
             self.bounds = stage_bounds(stage, &scene, self.venue.loaded.as_deref());
+            let still = lensmap::still_scene(show, &scene);
+            self.still_key = lensmap::still_key(&still);
+            self.still = Arc::new(still);
             self.scene = Arc::new(scene);
             shared.scene = self.scene.clone();
             shared.scene_key = h.0;
@@ -612,20 +686,71 @@ impl StageLive {
     /// None until one is made (its display is black meanwhile, never its
     /// flat picture). The app calls it every pass, before `send`, for each
     /// map it draws (`mapped::wanted`, and the 3D views' light): a call is
-    /// the ask, and a map not asked for a while may be let go. A map being
-    /// replaced is returned until the new one is ready.
-    #[allow(dead_code)]
+    /// the ask, and a map not asked for `MAP_KEPT` is let go. A map being
+    /// replaced is returned until the new one is ready. The picture's shape
+    /// is the projector's at `size` (`Projector::aspect`); for a 3D view's
+    /// light, whose pictures are all 16:9, use `lens_map_shaped`.
+    #[allow(dead_code)] // (app.rs, agent B)
     pub fn lens_map(
         &mut self,
         projector: ProjectorId,
         size: (u32, u32),
-        use_: crate::mapped::MapUse,
-    ) -> Option<Arc<crate::mapped::LensMap>> {
-        let _ = use_;
-        self.given_maps
-            .get(&projector)
-            .filter(|m| m.size == size)
-            .cloned()
+        use_: MapUse,
+    ) -> Option<Arc<LensMap>> {
+        let aspect = self
+            .stage_seen
+            .as_ref()
+            .and_then(|s| s.projector(projector))
+            .map_or(16.0 / 9.0, |p| match use_ {
+                MapUse::Window | MapUse::Stream => p.aspect(size),
+                MapUse::Preview => p.aspect(p.pixels(None)),
+            });
+        self.lens_map_shaped(projector, size, aspect, use_)
+    }
+
+    /// `lens_map` for a picture `aspect` wide per high whatever its size
+    /// (the projector's own shape, `stage_projectors::shape_of`, drawn into
+    /// a 16:9 throw).
+    #[allow(dead_code)] // (app.rs, agent B)
+    pub fn lens_map_shaped(
+        &mut self,
+        projector: ProjectorId,
+        size: (u32, u32),
+        aspect: f32,
+        use_: MapUse,
+    ) -> Option<Arc<LensMap>> {
+        if let Some(m) = self.given_maps.get(&projector).filter(|m| m.size == size) {
+            return Some(m.clone());
+        }
+        self.take_baked();
+        let p = self.stage_seen.as_ref()?.projector(projector)?;
+        let key = lensmap::map_key(self.still_key, p, aspect, size, false);
+        let e = self.maps.entry((projector, size)).or_default();
+        e.want = Some((key, aspect));
+        e.asked_at = Some(Instant::now());
+        e.output |= use_ != MapUse::Preview;
+        e.map.clone()
+    }
+
+    /// The maps the thread has made since last looked: each into its entry
+    /// (a refusal remembered, so its key isn't baked again).
+    fn take_baked(&mut self) {
+        let landed = std::mem::take(&mut *self.baked.lock());
+        for b in landed {
+            let Some(e) = self.maps.get_mut(&(b.projector, b.size)) else {
+                continue;
+            };
+            if e.in_flight == Some(b.key) {
+                e.in_flight = None;
+            }
+            match b.map {
+                Some(m) => {
+                    e.map = Some(m);
+                    self.map_landed = true;
+                }
+                None => e.refused = Some(b.key),
+            }
+        }
     }
 
     /// A lens map for `projector` made by a test (`lens_map` returns it at
@@ -641,12 +766,14 @@ impl StageLive {
     }
 
     /// Whether display `id` is a canvas that a mapped projector this
-    /// computer draws (for a window or a stream) uses: its pictures are then
-    /// output work, never at the previews' pace.
-    #[allow(dead_code)]
+    /// computer draws (for a window or a stream) uses, or a display such a
+    /// canvas is drawn from (the whole picture, its sub displays): its
+    /// pictures are then output work, never at the previews' pace. From the
+    /// last pass's asks (`lens_map` for a window or stream), true before the
+    /// projector's first map lands.
+    #[allow(dead_code)] // (app.rs, agent B)
     pub fn feeds_output(&self, id: OutputId) -> bool {
-        let _ = id;
-        false
+        self.output_feeds.contains(&id)
     }
 
     /// The picture of display `id`, which shows the stage, `canvas` big: its
@@ -705,7 +832,16 @@ impl StageLive {
             self.died = true;
             self.thread = None;
             self.drawn_with.clear();
+            // Its bakes are handed to the next one.
+            for e in self.maps.values_mut() {
+                e.in_flight = None;
+            }
         }
+        self.take_baked();
+        self.maps.retain(|_, e| {
+            e.asked_at
+                .is_some_and(|t| now.saturating_duration_since(t) < MAP_KEPT)
+        });
         // Behind with the displays: a job is waiting while another's
         // displays are still being drawn (one job under way is normal).
         let behind = self.force_behind
@@ -834,11 +970,22 @@ impl StageLive {
         if !outputs.is_empty() || !shown.is_empty() || !in_sight.is_empty() {
             self.wanted_at = Some(now);
         }
-        if !views.is_empty() {
+        // The lens maps missing or out of date: a window's or a stream's
+        // always, a 3D view's light's only with a lit view the governor let
+        // draw, and not while the displays are behind.
+        let (map_jobs, bakes_due) = self.maps_due(lit_asked && !displays_behind);
+        if bakes_due {
+            self.wanted_at = Some(now);
+        }
+        if !views.is_empty() || !map_jobs.is_empty() {
             self.keep_thread(gpu);
             match &self.thread {
                 Some(t) => {
-                    let feeds = feed_jobs(show, &self.scene, pictures, scale);
+                    let feeds = if views.is_empty() {
+                        Vec::new()
+                    } else {
+                        feed_jobs(show, &self.scene, pictures, scale)
+                    };
                     self.serial += 1;
                     // Displays first (`StageJob::merged` keeps them so).
                     // The projectors' pictures, only for a view with its light on.
@@ -847,11 +994,17 @@ impl StageLive {
                     } else {
                         (Vec::new(), (0, 0))
                     };
+                    for m in &map_jobs {
+                        if let Some(e) = self.maps.get_mut(&(m.projector.id, m.size)) {
+                            e.in_flight = Some(m.key);
+                        }
+                    }
                     let job = StageJob {
                         feeds,
                         throws,
                         throw_size,
                         views,
+                        maps: map_jobs,
                         serial: self.serial,
                     }
                     .merged(StageJob::default());
@@ -879,7 +1032,76 @@ impl StageLive {
             self.started = None;
             self.restart_wanted = false;
         }
+        self.output_feeds = self.feeds_of_outputs(show);
         self.busy()
+    }
+
+    /// The bakes to hand over now (`previews`: a 3D view's light's may go
+    /// too), and whether any map is missing or out of date that wants the
+    /// thread (one being baked included).
+    fn maps_due(&self, previews: bool) -> (Vec<MapJob>, bool) {
+        let mut jobs = Vec::new();
+        let mut due = false;
+        let Some(stage) = self.stage_seen.as_ref() else {
+            return (jobs, false);
+        };
+        for (&(id, size), e) in &self.maps {
+            let Some((key, aspect)) = e.want else {
+                continue;
+            };
+            if e.map.as_ref().is_some_and(|m| m.key == key) || e.refused == Some(key) {
+                continue;
+            }
+            let may = e.output || previews;
+            due |= may || e.in_flight.is_some();
+            if !may || e.in_flight == Some(key) {
+                continue;
+            }
+            let Some(p) = stage.projector(id) else {
+                continue;
+            };
+            jobs.push(MapJob {
+                projector: p.clone(),
+                aspect,
+                size,
+                key,
+                scene: self.still.clone(),
+                output: e.output,
+            });
+        }
+        // Output work first (the thread bakes it before anything else).
+        jobs.sort_by_key(|j| !j.output);
+        (jobs, due)
+    }
+
+    /// The canvases the maps windows and streams asked for this pass use,
+    /// with the displays they are drawn from; their asks are taken (made
+    /// again next pass).
+    fn feeds_of_outputs(&mut self, show: &Show) -> HashSet<OutputId> {
+        let mut out = HashSet::new();
+        for (&(id, _), e) in &mut self.maps {
+            if !std::mem::take(&mut e.output) {
+                continue;
+            }
+            let Some((key, aspect)) = e.want else {
+                continue;
+            };
+            if e.feeds.0 != key || key == 0 {
+                let Some(p) = self.stage_seen.as_ref().and_then(|s| s.projector(id)) else {
+                    continue;
+                };
+                e.feeds = (key, lensmap::feeds_seen(&self.still, p, aspect));
+            }
+            for &f in &e.feeds.1 {
+                let whole = show.whole_picture(f);
+                out.insert(f);
+                out.insert(whole);
+                for s in show.outputs.iter().filter(|s| s.within == Some(whole)) {
+                    out.insert(s.id);
+                }
+            }
+        }
+        out
     }
 
     /// The scene with the projectors' light in it (`lit_scene`, made again
@@ -979,6 +1201,7 @@ impl StageLive {
     /// windows showing one are to be drawn again. A job's displays land
     /// before its previews are drawn.
     pub fn landed(&mut self) -> bool {
+        self.take_baked();
         let (done, displays) = self
             .thread
             .as_ref()
@@ -986,7 +1209,7 @@ impl StageLive {
         let new = done != self.seen_done || displays != self.seen_displays;
         self.seen_done = done;
         self.seen_displays = displays;
-        new
+        new || std::mem::take(&mut self.map_landed)
     }
 
     /// Start the drawing thread if there is none (at most every
@@ -994,7 +1217,7 @@ impl StageLive {
     fn keep_thread(&mut self, gpu: &Gpu) {
         if self.thread.is_none() && self.started.is_none_or(|t| t.elapsed() >= RESTART_EVERY) {
             self.started = Some(Instant::now());
-            match StageThread::spawn(gpu.clone(), self.count) {
+            match StageThread::spawn_with(gpu.clone(), self.count, self.baked.clone()) {
                 Ok(t) => {
                     self.count.thread_started(self.died);
                     self.died = false;
@@ -1078,6 +1301,11 @@ impl StageLive {
         self.drawn_with.clear();
         shared.targets.clear();
         self.started = None;
+        // Lens maps too: made again on the new device.
+        self.maps.clear();
+        self.baked.lock().clear();
+        self.output_feeds.clear();
+        self.map_landed = false;
         self.thread.take().map(StageThread::quit)
     }
 
@@ -1284,3 +1512,7 @@ pub fn feed_jobs(
 #[cfg(test)]
 #[path = "stage_live_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stage_live_map_tests.rs"]
+mod map_tests;

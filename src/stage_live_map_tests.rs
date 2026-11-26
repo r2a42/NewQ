@@ -1,0 +1,296 @@
+//! Lens maps as the app keeps them (`StageLive::lens_map`): baked on the
+//! stage thread for real (lavapipe under `WGPU_BACKEND=vulkan`; skipped with
+//! no GPU adapter unless `NEWQ_REQUIRE_GPU` is set).
+
+use super::*;
+use crate::stage3d::lensmap::tests::flat_show;
+
+/// Long enough for anything to happen.
+const LONG: Duration = Duration::from_secs(20);
+
+type Ask = (ProjectorId, (u32, u32), MapUse);
+
+/// One pass of the app's as far as the lens maps go: `begin`, the asks,
+/// `send` with nothing else to draw; what each ask was given.
+fn map_pass(
+    live: &mut StageLive,
+    gpu: &Gpu,
+    show: &Show,
+    shared: &mut StageShared,
+    asks: &[Ask],
+) -> Vec<Option<Arc<LensMap>>> {
+    live.begin(show, shared, &mut Vec::new());
+    let maps = asks
+        .iter()
+        .map(|&(p, size, use_)| live.lens_map(p, size, use_))
+        .collect();
+    live.send(gpu, show, shared, &[], &HashMap::new(), &[], false);
+    maps
+}
+
+/// Passes until `done` says yes to what the asks were given (at most
+/// `LONG`); the last answers.
+fn passes_until(
+    live: &mut StageLive,
+    gpu: &Gpu,
+    show: &Show,
+    shared: &mut StageShared,
+    asks: &[Ask],
+    done: impl Fn(&[Option<Arc<LensMap>>]) -> bool,
+) -> Vec<Option<Arc<LensMap>>> {
+    let end = Instant::now() + LONG;
+    loop {
+        let maps = map_pass(live, gpu, show, shared, asks);
+        if done(&maps) || Instant::now() > end {
+            return maps;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn all_there(maps: &[Option<Arc<LensMap>>]) -> bool {
+    maps.iter().all(Option::is_some)
+}
+
+/// Passes until nothing is in hand: every map asked for is up to date and
+/// the thread has drawn all it was given (or the time is up).
+fn passes_still(
+    live: &mut StageLive,
+    gpu: &Gpu,
+    show: &Show,
+    shared: &mut StageShared,
+    asks: &[Ask],
+) -> Vec<Option<Arc<LensMap>>> {
+    let end = Instant::now() + LONG;
+    loop {
+        let maps = map_pass(live, gpu, show, shared, asks);
+        if (!live.busy() && !live.maps_due(true).1) || Instant::now() > end {
+            return maps;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn map_gpu() -> Option<Gpu> {
+    let gpu = Gpu::headless();
+    if gpu.is_none() {
+        assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+    }
+    gpu
+}
+
+fn same(a: &Option<Arc<LensMap>>, b: &Arc<LensMap>) -> bool {
+    a.as_ref().is_some_and(|a| Arc::ptr_eq(a, b))
+}
+
+#[test]
+fn a_bake_wanted_starts_the_thread_and_its_map_outlives_the_idle_release() {
+    let Some(gpu) = map_gpu() else { return };
+    let (show, a, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
+    let mut shared = StageShared::default();
+    let asks = [(p, (64, 36), MapUse::Window)];
+    // Asked for: black until it is made, and the thread started for it
+    // though no view wants it.
+    let first = map_pass(&mut live, &gpu, &show, &mut shared, &asks);
+    assert!(first[0].is_none(), "black until the first map");
+    assert!(live.has_thread());
+    assert!(live.feeds_output(a), "its canvas is output work already");
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    let map = maps[0].clone().expect("baked");
+    assert_eq!(map.size, (64, 36));
+    assert_eq!(map.feeds, vec![a]);
+    assert!(live.landed(), "the windows are drawn again");
+    // Up to date and asked for every pass: the thread still idles out, and
+    // the map stays.
+    passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    live.as_if_idle();
+    let after = map_pass(&mut live, &gpu, &show, &mut shared, &asks);
+    assert!(!live.has_thread(), "let go");
+    assert!(same(&after[0], &map));
+    assert_eq!(live.wake_at(), None, "nothing to come back for");
+    let t = count.0.totals();
+    assert_eq!((t.maps_baked, t.idle_releases), (1, 1), "{t:?}");
+    // Not asked for a while: let go of too.
+    for e in live.maps.values_mut() {
+        e.asked_at = Instant::now().checked_sub(MAP_KEPT);
+    }
+    live.send(&gpu, &show, &mut shared, &[], &HashMap::new(), &[], false);
+    assert!(live.maps.is_empty());
+    assert!(!live.feeds_output(a));
+}
+
+#[test]
+fn a_still_scene_bakes_once_and_a_fine_tune_or_a_line_up_bakes_nothing() {
+    let Some(gpu) = map_gpu() else { return };
+    let (mut show, _, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
+    let mut shared = StageShared::default();
+    let asks = [(p, (64, 36), MapUse::Window), (p, (32, 18), MapUse::Stream)];
+    passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    let maps = passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    let (window, stream) = (maps[0].clone().unwrap(), maps[1].clone().unwrap());
+    for _ in 0..20 {
+        let again = map_pass(&mut live, &gpu, &show, &mut shared, &asks);
+        assert!(same(&again[0], &window) && same(&again[1], &stream));
+    }
+    // A fine-tune dragged, a line-up point placed: no new scene, no bake.
+    let scene = shared.scene.clone();
+    let pr = show.projector_mut(p).unwrap();
+    pr.fine = Some(crate::mesh::Mesh::grid(3, 3));
+    pr.line_up = Some(Default::default());
+    let again = passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    assert!(same(&again[0], &window));
+    assert!(Arc::ptr_eq(&shared.scene, &scene), "no new scene");
+    let t = count.0.totals();
+    assert_eq!(t.maps_baked, 2, "one each size, once: {t:?}");
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn a_moved_projector_re_bakes_its_own_map_and_no_other() {
+    let Some(gpu) = map_gpu() else { return };
+    let (mut show, _, _, p) = flat_show();
+    let q = show.add_projector();
+    let d = show.projector(p).unwrap().placement.position[2];
+    show.projector_mut(q).unwrap().placement.position = [0.5, 0.2, d * 1.2];
+    let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
+    let mut shared = StageShared::default();
+    let asks = [(p, (64, 36), MapUse::Window), (q, (64, 36), MapUse::Window)];
+    passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    let maps = passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    let (mp, mq) = (maps[0].clone().unwrap(), maps[1].clone().unwrap());
+    // P moves (its body moves in the scene too): its old map is used until
+    // the new one lands.
+    show.projector_mut(p).unwrap().placement.position[0] = 0.3;
+    let next = map_pass(&mut live, &gpu, &show, &mut shared, &asks);
+    assert!(next[0].is_some(), "the old map meanwhile, never black");
+    passes_until(&mut live, &gpu, &show, &mut shared, &asks, |m| {
+        !same(&m[0], &mp)
+    });
+    let still = passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    assert!(!same(&still[0], &mp), "P's baked again");
+    assert!(same(&still[1], &mq), "Q's kept");
+    assert_eq!(count.0.totals().maps_baked, 3);
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn a_3d_views_map_waits_for_a_lit_view_the_governor_lets_draw() {
+    let Some(gpu) = map_gpu() else { return };
+    let (show, a, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    let asks = [(p, (64, 36), MapUse::Preview)];
+    for _ in 0..3 {
+        let maps = map_pass(&mut live, &gpu, &show, &mut shared, &asks);
+        assert!(maps[0].is_none());
+    }
+    assert!(!live.has_thread(), "no lit view drawn: no bake, no thread");
+    assert!(
+        !live.feeds_output(a),
+        "a preview's canvas isn't output work"
+    );
+    // A lit view the governor let draw: baked with it.
+    let end = Instant::now() + LONG;
+    let mut map = None;
+    while map.is_none() && Instant::now() < end {
+        live.begin(&show, &mut shared, &mut Vec::new());
+        map = live.lens_map_shaped(p, (64, 36), 16.0 / 9.0, MapUse::Preview);
+        shared.requests.push(crate::ui::stage_view::ViewRequest {
+            id: PreviewId::Stage(1),
+            size: (64, 36),
+            camera: Camera::default(),
+            options: Options {
+                light: crate::render3d::LightView::Picture,
+                ..Options::default()
+            },
+            lines: Default::default(),
+        });
+        live.send(&gpu, &show, &mut shared, &[], &HashMap::new(), &[], false);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(map.is_some());
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn a_lost_device_forgets_the_maps_and_they_are_made_again() {
+    let Some(gpu) = map_gpu() else { return };
+    let (show, _, _, p) = flat_show();
+    let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
+    let mut shared = StageShared::default();
+    let asks = [(p, (64, 36), MapUse::Window)];
+    passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+    live.begin(&show, &mut shared, &mut Vec::new());
+    assert!(live.lens_map(p, (64, 36), MapUse::Window).is_none());
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    assert!(maps[0].is_some());
+    assert_eq!(count.0.totals().maps_baked, 2);
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn a_venue_that_lands_later_is_baked_into_the_map_again() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static COME: AtomicBool = AtomicBool::new(false);
+    fn store(p: &std::path::Path) -> Found {
+        if p.extension().is_some_and(|e| e == "obj") && !COME.load(Ordering::SeqCst) {
+            Found::Arriving
+        } else {
+            Found::Here(p.to_path_buf())
+        }
+    }
+    let Some(gpu) = map_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("newq-stage-live-map-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("room.obj");
+    // A wall across the screen's top half, a metre in front of it.
+    std::fs::write(
+        &path,
+        "v -5 0 1\nv 5 0 1\nv 5 5 1\nv -5 5 1\nf 1 2 3\nf 1 3 4\n",
+    )
+    .unwrap();
+    let (mut show, _, _, p) = flat_show();
+    show.stage3d.venue = Some(Venue::new(path.clone()));
+    let mut live = StageLive::default();
+    live.locate_with(store);
+    let mut shared = StageShared::default();
+    let asks = [(p, (32, 18), MapUse::Window)];
+    // A follower without its venue yet: baked without it.
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    let first = maps[0].clone().unwrap();
+    assert_eq!(shared.venue, VenueStatus::Arriving("room.obj".into()));
+    COME.store(true, Ordering::SeqCst);
+    std::thread::sleep(ARRIVING_LOOK);
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, |m| {
+        !same(&m[0], &first)
+    });
+    let again = maps[0].clone().unwrap();
+    assert!(!Arc::ptr_eq(&again, &first), "baked again with the venue");
+    assert_ne!(again.key, first.key);
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

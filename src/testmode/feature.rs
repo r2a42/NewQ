@@ -764,6 +764,7 @@ pub fn stage_trial(
                 throw_size: (160, 90),
                 views: vec![job],
                 serial: 2,
+                ..StageJob::default()
             },
             &mut || {},
         );

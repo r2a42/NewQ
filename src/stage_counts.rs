@@ -42,6 +42,8 @@ pub struct Counters {
     venue_load_ms: AtomicU64,
     venue_parts: AtomicU64,
     venue_triangles: AtomicU64,
+    maps_baked: AtomicU64,
+    maps_refused: AtomicU64,
 }
 
 /// The whole program's counts (`totals()`).
@@ -139,6 +141,15 @@ impl CountTo {
         self.add(|c| &c.idle_releases, 1);
     }
 
+    /// A lens map baked (`ok`), or refused by the card.
+    pub fn map_baked(self, ok: bool) {
+        if ok {
+            self.add(|c| &c.maps_baked, 1);
+        } else {
+            self.add(|c| &c.maps_refused, 1);
+        }
+    }
+
     /// The visible projectors past `MAX_THROWS` at this lit pass.
     pub fn throws_left_out(self, n: usize) {
         self.set(|c| &c.throws_left_out, n as u64);
@@ -190,6 +201,8 @@ impl Counters {
             venue_load_ms: Z,
             venue_parts: Z,
             venue_triangles: Z,
+            maps_baked: Z,
+            maps_refused: Z,
         }
     }
 
@@ -226,6 +239,8 @@ impl Counters {
             venue_load_ms: g(&self.venue_load_ms),
             venue_parts: g(&self.venue_parts),
             venue_triangles: g(&self.venue_triangles),
+            maps_baked: g(&self.maps_baked),
+            maps_refused: g(&self.maps_refused),
         }
     }
 }
@@ -294,6 +309,10 @@ pub struct StageTotals {
     pub venue_load_ms: u64,
     pub venue_parts: u64,
     pub venue_triangles: u64,
+    /// Mapped projectors' lens maps baked...
+    pub maps_baked: u64,
+    /// ...and those the card refused (the projector stays black).
+    pub maps_refused: u64,
 }
 
 impl StageTotals {
@@ -323,6 +342,8 @@ impl StageTotals {
             idle_releases: d(self.idle_releases, earlier.idle_releases),
             venue_loads: d(self.venue_loads, earlier.venue_loads),
             venue_failures: d(self.venue_failures, earlier.venue_failures),
+            maps_baked: d(self.maps_baked, earlier.maps_baked),
+            maps_refused: d(self.maps_refused, earlier.maps_refused),
             ..*self
         }
     }
