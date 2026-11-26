@@ -177,6 +177,61 @@ Changes from the plan:
 Not tested here: any real GPU (only lavapipe), Windows' DirectX 12 or a Mac's Metal compiling the
 shader, shadow acne on real drivers, the cost on a weak card, any projector, light meter or room.
 
+### P3, the line-up solver (worktree branch, 2026-11-26)
+
+Nothing a user sees yet: `src/calib/`, pure f64, hand-written (no `nalgebra`), `pub(crate)` and
+`#[allow(dead_code)]` until P5. `solve(&Problem) -> Result<Solution, Refusal>`; `project(placement,
+lens, pixels, world) -> Option<[f32; 2]>` (the very sum the solver fits, for the overlay and each
+point's error); `fit_rigid(from, to) -> Option<(rotation, translation, rms)>` (for lining up a screen
+and a tracker's frame later). Conventions in `calib/mod.rs`'s header; points are room metres and
+picture pixels ((0, 0) the top-left corner, y down), the caller turns a screen's own-frame points into
+room positions; the picture's size is an argument (no display, window, scene or GPU).
+
+Method as 5.3: starts (the placement now, a flat set's homography, the 3x4 DLT for six or more not
+flat, and only when those leave the points more than a pixel out a ring of 192 places facing the
+points), each 30 Levenberg-Marquardt rounds, the best to at most 100 (`Solution::capped` says if the
+cap was hit; no clock). The ladder is tried from the top down (the highest rung the count and
+`Freedom` allow, then lower), each rung kept only if its lens numbers are within the bounds and pinned
+to 2% (their standard deviation for a pixel's error per point, from `jᵀj`), else a `Note` in words.
+Leave-one-out with five or more points (and a point a pixel or more out; leave-one-outs get 10
+rounds) names a point 3 px and five times the others' error off.
+
+Changes from the plan:
+
+- **Aspect (an anamorphic lens) is a fourth rung**, only when the caller frees it (`Freedom::aspect`);
+  the brief asked for it with an unknown lens, 5.3's table never solves it.
+- **A lens number that wants to leave its bounds isn't a refusal**: that rung isn't used and the words
+  say so ("The throw came out beyond what a lens can be, so it is as you entered it: check the
+  points."); the pose is still solved with the lens as entered. The new mapping plan (section 5,
+  item 5) asks for a refusal; P5 can turn `Note::AtLimit` into one if the owner prefers.
+- **Four points always carry "a point in the wrong place can't be told from the others"**: a test
+  showed a point moved 15 px left the fit under 1.5 px, so the fit alone can't warn.
+- **A left-to-right flipped picture is refused** (`Refusal::Mirrored`: a mirror rig, or the
+  projector's own rear setting): checked only when the fit is over 2 px, by solving the flipped
+  points too. Upside down (both flipped) is a turn and solves.
+- `LinePoint`, `LineUp`, `Solution` are serde types in `calib` (f64, lenient enums, `extra` kept);
+  the mapping plan moves the show's `LineUp`/`LinePoint` to `projector.rs` (`at` + `surface`), which
+  can use or replace them. `points_key` (FNV-1a of the points as f32, and the picture's size) lets a
+  follower tell a sent answer is for its points; JSON doesn't give f64s back bit for bit, f32s yes.
+- Deterministic on one computer (no clock, threads or hashing; fixed loop order). Only the primary
+  solves, so nothing more is promised.
+
+Cost: a nudge (12 points, nine unknowns, from the last answer) took about 1.2 ms in the test
+build (`opt-level = 1`) on a busy 4-core cloud machine; a release build (opt-level 3) wasn't
+measured, and "well under a millisecond" needs it. The slowest of 60 cold
+solves (no start, the ring tried) was 4 to 11 ms there.
+
+Tests (`calib/tests.rs`, made-up projectors with `LensPreset`'s throws): the projection is
+`in_picture`'s and `ray`'s (to f32 rounding); exact data recovers 1e-6 m and 1e-6 rad (and 1e-6 of the
+lens) for 4 points with the lens, 6 (throw), 8 (shift), 12 (aspect), flat screens, rear projection,
+straight down and up; 0.5 and 2 px of noise within four of the solver's own standard deviations,
+errors in proportion; one bad point named; refusals in words; no input panics; determinism; a stored
+f32 answer reprojects within 0.1 px of the f64 one; 60 random projectors with a fixed seed, each
+solved exactly (29) or (31, mostly long lenses) the shift kept as entered only because its
+standard deviation at the truth is over the bar.
+
+Not tested here: any real projector, room, or operator's nudging.
+
 ---
 
 ## 1. What the code is today (the facts the design rests on)

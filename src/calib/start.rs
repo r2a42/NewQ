@@ -282,8 +282,7 @@ pub fn ring(pairs: &[Pair], lens: &LensFit, pixels: (f64, f64), keep: usize) -> 
         .iter()
         .filter_map(|p| linalg::unit(model::bearing(lens, pixels, p.1)))
         .collect();
-    let Some(mean) = linalg::unit(bearings.iter().fold([0.0; 3], |a, b| linalg::add(a, *b)))
-    else {
+    let Some(mean) = linalg::unit(bearings.iter().fold([0.0; 3], |a, b| linalg::add(a, *b))) else {
         return Vec::new();
     };
     let half = bearings

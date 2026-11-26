@@ -13,7 +13,7 @@
 use super::linalg::{self, M3, V3};
 use super::model::{self, State};
 use super::*;
-use crate::stage3d::projector::{LensPreset, ProjectorId};
+use crate::stage3d::projector::{Lens, LensPreset, ProjectorId};
 
 const PIXELS: (u32, u32) = (1920, 1080);
 const HD: f64 = 1920.0 / 1080.0;
@@ -370,7 +370,10 @@ fn four_points_and_the_lens_find_the_projector() {
             "{words}"
         );
         // Four points can't free the lens, nor show a bad one: both said.
-        assert!(words.contains("With 6 points or more (there are 4)"), "{words}");
+        assert!(
+            words.contains("With 6 points or more (there are 4)"),
+            "{words}"
+        );
         assert!(sol.notes.contains(&Note::CantTellWhich));
     }
 }
@@ -484,7 +487,10 @@ fn a_long_lens_with_eight_points_keeps_the_shift_as_entered_and_says_so() {
     // With the shift entered right, the rest is exact.
     assert_recovers(&sol, &rig, 1e-6, 1e-6);
     assert_lens(&sol, &rig.lens, 1e-6);
-    assert!(sol.words().contains("don't pin the lens shift down well enough"));
+    assert!(
+        sol.words()
+            .contains("don't pin the lens shift down well enough")
+    );
 }
 
 #[test]
@@ -545,10 +551,16 @@ fn rear_projection_solves() {
     // Behind a screen at z = -8 (its front towards the audience at +Z),
     // looking towards +Z through it.
     let rig = Rig::new([0.3, 2.6, -15.0], 180.0, 1.5, 0.0, 1.2, [0.0, -0.1]);
-    let world: Vec<V3> = [(0.08, 0.1), (0.9, 0.08), (0.93, 0.92), (0.1, 0.88), (0.5, 0.45)]
-        .iter()
-        .map(|&(u, v)| rig.on_plane(u, v, [0.0, 2.5, -8.0], [0.0, 0.0, 1.0]))
-        .collect();
+    let world: Vec<V3> = [
+        (0.08, 0.1),
+        (0.9, 0.08),
+        (0.93, 0.92),
+        (0.1, 0.88),
+        (0.5, 0.45),
+    ]
+    .iter()
+    .map(|&(u, v)| rig.on_plane(u, v, [0.0, 2.5, -8.0], [0.0, 0.0, 1.0]))
+    .collect();
     let sol = solve(&rig.problem(rig.points(&world), rig.lens, Freedom::default())).unwrap();
     assert_recovers(&sol, &rig, 1e-6, 1e-6);
     // And with points off the screen too (its frame, the floor behind),
@@ -630,7 +642,8 @@ fn pixel_noise_moves_the_answer_by_what_the_points_allow() {
     };
     let mut errors = Vec::new();
     for sigma in [0.5, 2.0] {
-        let sol = solve(&rig.problem(noisy(&exact, sigma, 11), entered, Freedom::default())).unwrap();
+        let sol =
+            solve(&rig.problem(noisy(&exact, sigma, 11), entered, Freedom::default())).unwrap();
         assert_eq!(sol.rung, Rung::Shift, "{sigma}: {:?}", sol.notes);
         assert_recovers(&sol, &rig, 4.0 * sigma * sd_place, 4.0 * sigma * sd_turn);
         assert!((sol.lens.throw - rig.lens.throw).abs() <= 4.0 * sigma * sd[6]);
@@ -644,7 +657,10 @@ fn pixel_noise_moves_the_answer_by_what_the_points_allow() {
             sol.rms_px
         );
         assert!(sol.worst.is_none(), "{sigma}: {:?}", sol.worst);
-        errors.push(linalg::norm(linalg::sub(sol.pose.position, rig.pose.position)));
+        errors.push(linalg::norm(linalg::sub(
+            sol.pose.position,
+            rig.pose.position,
+        )));
     }
     // The same draws four times as big move it about four times as far.
     let ratio = errors[1] / errors[0];
@@ -680,7 +696,9 @@ fn one_bad_point_is_named() {
             aspect: HD,
         };
         let sol = solve(&rig.problem(points, entered, Freedom::default())).unwrap();
-        let w = sol.worst.unwrap_or_else(|| panic!("{sigma}: none named: {sol:?}"));
+        let w = sol
+            .worst
+            .unwrap_or_else(|| panic!("{sigma}: none named: {sol:?}"));
         assert_eq!(w.point, 3);
         // Solved without it, the others put it where it really is.
         assert!((w.off_px - 12.0).abs() < 1.0 + 4.0 * sigma, "{w:?}");
@@ -765,10 +783,16 @@ fn sets_that_cant_be_solved_are_refused_in_words() {
 
     // On the floor, seen from the floor's own height: a line in the picture.
     let low = Rig::new([0.0, 0.0, 12.0], 0.0, 0.0, 0.0, 1.6, [0.0, 0.3]);
-    let floor: Vec<V3> = [(-3.0, 0.0), (2.0, -1.0), (0.5, -4.0), (-1.0, -6.0), (3.0, -3.0)]
-        .iter()
-        .map(|&(x, z)| [x, 0.0, z])
-        .collect();
+    let floor: Vec<V3> = [
+        (-3.0, 0.0),
+        (2.0, -1.0),
+        (0.5, -4.0),
+        (-1.0, -6.0),
+        (3.0, -3.0),
+    ]
+    .iter()
+    .map(|&(x, z)| [x, 0.0, z])
+    .collect();
     let r = solve(&low.problem(low.points(&floor), low.lens, Freedom::default())).unwrap_err();
     assert_eq!(r, Refusal::InALineInPicture);
 
@@ -864,11 +888,13 @@ fn the_same_problem_gives_the_same_answer() {
     }
     // A problem that came over the network (JSON, which may give a number
     // back a bit different in its last digit) solves to the same answer.
-    let carried: Problem =
-        serde_json::from_str(&serde_json::to_string(&problem).unwrap()).unwrap();
+    let carried: Problem = serde_json::from_str(&serde_json::to_string(&problem).unwrap()).unwrap();
     let b = solve(&carried).unwrap();
     assert_eq!(b.points_key, a.points_key);
-    assert_eq!((b.rung, b.worst.map(|w| w.point)), (a.rung, a.worst.map(|w| w.point)));
+    assert_eq!(
+        (b.rung, b.worst.map(|w| w.point)),
+        (a.rung, a.worst.map(|w| w.point))
+    );
     assert!(linalg::norm(linalg::sub(a.pose.position, b.pose.position)) < 1e-9);
 }
 
@@ -932,13 +958,16 @@ fn line_ups_read_leniently_and_write_little() {
     // A later NewQ's fields are kept and written back.
     let later: LinePoint =
         serde_json::from_str(r#"{"world":[0,0,0],"pixel":[1,1],"surface":7}"#).unwrap();
-    assert!(serde_json::to_string(&later).unwrap().contains("\"surface\":7"));
+    assert!(
+        serde_json::to_string(&later)
+            .unwrap()
+            .contains("\"surface\":7")
+    );
     assert!(later.on);
     // Unknown rungs, notes and refusals don't stop a read.
-    let s: Solution = serde_json::from_str(
-        r#"{"rung":"Fisheye","notes":[{"note":"Wobbly"},{"note":"Flat"}]}"#,
-    )
-    .unwrap();
+    let s: Solution =
+        serde_json::from_str(r#"{"rung":"Fisheye","notes":[{"note":"Wobbly"},{"note":"Flat"}]}"#)
+            .unwrap();
     assert_eq!(s.rung, Rung::Unknown);
     assert_eq!(s.notes, vec![Note::Unknown, Note::Flat]);
     let r: Refusal = serde_json::from_str(r#"{"why":"Cloudy"}"#).unwrap();
@@ -956,6 +985,8 @@ fn line_ups_read_leniently_and_write_little() {
 #[test]
 fn many_projectors_are_found_exactly() {
     let mut rng = Rng(2026);
+    let mut whole = 0;
+    let mut slowest = std::time::Duration::ZERO;
     for case in 0..60 {
         let preset = LensPreset::ALL[case % LensPreset::ALL.len()];
         let (a, b) = preset.range();
@@ -990,21 +1021,200 @@ fn many_projectors_are_found_exactly() {
             aspect: HD,
         };
         let problem = rig.problem(rig.points(&world), entered, Freedom::default());
-        match solve(&problem) {
+        let began = std::time::Instant::now();
+        let answer = solve(&problem);
+        slowest = slowest.max(began.elapsed());
+        match answer {
             Ok(sol) if sol.rung == Rung::Shift => {
                 assert_recovers(&sol, &rig, 1e-6, 1e-6);
                 assert_lens(&sol, &rig.lens, 1e-6);
+                assert!(!sol.capped, "case {case}");
+                whole += 1;
             }
-            // Random points can happen to say too little about the lens;
-            // then the solve must say so, not guess.
-            Ok(sol) => assert!(
-                sol.notes
-                    .iter()
-                    .any(|n| matches!(n, Note::Unsure { .. } | Note::Flat)),
-                "case {case}: {sol:?}"
-            ),
+            // Random points (a long lens most of all) can say too little
+            // about the shift. Then the solve must say so, and only because
+            // the points truly don't pin it: the solver's sd at the truth is
+            // over the bar. Never because the refinement got lost.
+            Ok(sol) => {
+                assert!(
+                    sol.notes.iter().any(|n| matches!(n, Note::Unsure { .. })),
+                    "case {case}: {sol:?}"
+                );
+                let pairs: Vec<model::Pair> =
+                    problem.points.iter().map(|p| (p.world, p.pixel)).collect();
+                let (_, sp, _) = linalg::spread(&world);
+                let sd =
+                    model::spreads(&rig.state(), Rung::Shift, px(PIXELS), &pairs, sp[2].sqrt())
+                        .unwrap();
+                let worst = (sd[6] / rig.lens.throw).max(sd[7]).max(sd[8]);
+                assert!(worst > SURE * 0.999, "case {case}: sd {sd:?}, {sol:?}");
+            }
             Err(r) => panic!("case {case}: {r:?}"),
         }
     }
+    // Not a timing test (CI oversleeps): what a solve costs, for the report.
+    eprintln!("{whole} of 60 solved whole; slowest solve {slowest:?}");
+    assert!(whole >= 20, "{whole} of 60");
 }
 
+#[test]
+fn project_is_what_the_solver_fits_and_what_newq_draws() {
+    let rig = audience_rig(0.5, [0.15, -0.2]);
+    let proj = projector_of(&rig);
+    let aspect = proj.aspect(PIXELS);
+    let s = model::state_of(&proj.placement, &proj.lens, PIXELS);
+    let mut rng = Rng(8);
+    for _ in 0..100 {
+        let x = rig.spot(
+            rng.range(0.0, 1.0),
+            rng.range(0.0, 1.0),
+            rng.range(1.0, 20.0),
+        );
+        let x32 = x.map(|v| v as f32);
+        let ours = project(&proj.placement, &proj.lens, PIXELS, x32).unwrap();
+        let fitted = model::project(&s, px(PIXELS), x32.map(|v| v as f64)).unwrap();
+        assert_eq!(ours, fitted.map(|v| v as f32));
+        let ([u, v], _) = proj.in_picture(x32, aspect).unwrap();
+        assert!((ours[0] - u * 1920.0).abs() < 0.01 && (ours[1] - v * 1080.0).abs() < 0.01);
+    }
+    let behind = linalg::sub(
+        rig.pose.position,
+        linalg::mul_v(&rig.pose.turn(), [0.0, 0.0, -1.0]),
+    );
+    assert_eq!(
+        project(
+            &proj.placement,
+            &proj.lens,
+            PIXELS,
+            behind.map(|v| v as f32)
+        ),
+        None
+    );
+    // No picture size still answers (as one pixel), never panics.
+    let _ = project(&proj.placement, &proj.lens, (0, 0), [0.0; 3]);
+}
+
+#[test]
+fn a_stored_answer_reprojects_within_a_tenth_of_a_pixel() {
+    // Noisy points, so the answer isn't the truth: the show's f32 copy of
+    // it must put each point where the f64 answer does.
+    let rig = audience_rig(1.6, [0.1, 0.3]);
+    let world = deep_points(&rig, 12, 9.0);
+    let points = noisy(&rig.points(&world), 1.0, 42);
+    let entered = LensFit {
+        throw: 1.5,
+        shift: [0.0; 2],
+        aspect: HD,
+    };
+    let sol = solve(&rig.problem(points.clone(), entered, Freedom::default())).unwrap();
+    let f64_state = State {
+        r: sol.pose.turn(),
+        c: sol.pose.position,
+        lens: sol.lens,
+    };
+    // Stored in a show (JSON of the f32 types) and read back.
+    let placement: Placement =
+        serde_json::from_str(&serde_json::to_string(&sol.placement()).unwrap()).unwrap();
+    let lens: Lens = serde_json::from_str(
+        &serde_json::to_string(&sol.lens_onto(&Lens::default(), PIXELS)).unwrap(),
+    )
+    .unwrap();
+    for p in &points {
+        let a = model::project(&f64_state, px(PIXELS), p.world).unwrap();
+        let b = project(&placement, &lens, PIXELS, p.world.map(|v| v as f32)).unwrap();
+        let d = (a[0] - b[0] as f64).hypot(a[1] - b[1] as f64);
+        assert!(d < 0.1, "{d} px");
+    }
+}
+
+#[test]
+fn a_mirrored_picture_is_refused_in_words() {
+    // Through a mirror (or with the projector's own rear setting on), the
+    // picture is flipped left to right: no placement gives that.
+    let rig = audience_rig(1.6, [0.0, 0.0]);
+    let world = deep_points(&rig, 8, 8.0);
+    let flipped: Vec<LinePoint> = rig
+        .points(&world)
+        .into_iter()
+        .map(|mut p| {
+            p.pixel[0] = 1920.0 - p.pixel[0];
+            p
+        })
+        .collect();
+    let r = solve(&rig.problem(flipped, rig.lens, Freedom::default())).unwrap_err();
+    assert_eq!(r, Refusal::Mirrored);
+    assert!(r.words().contains("flipped left to right"));
+    // Flipped both ways is only a turn (a projector hung upside down): fine.
+    let upside: Vec<LinePoint> = rig
+        .points(&world)
+        .into_iter()
+        .map(|mut p| {
+            p.pixel = [1920.0 - p.pixel[0], 1080.0 - p.pixel[1]];
+            p
+        })
+        .collect();
+    let sol = solve(&rig.problem(upside, rig.lens, Freedom::default())).unwrap();
+    assert!(sol.max_px < 1e-6, "{sol:?}");
+    assert!((sol.pose.roll.abs() - 180.0).abs() < 2.0 || sol.pose.yaw.abs() > 90.0);
+}
+
+#[test]
+fn a_rigid_fit_finds_the_turn_and_the_move() {
+    let r = linalg::from_euler(25.0, -40.0, 70.0);
+    let t = [1.5, -2.0, 3.25];
+    let from: Vec<V3> = UV.iter().map(|&(u, v, k)| [u * 4.0, v * 3.0, k]).collect();
+    let to: Vec<V3> = from
+        .iter()
+        .map(|p| linalg::add(linalg::mul_v(&r, *p), t))
+        .collect();
+    let (rot, tr, rms) = fit_rigid(&from, &to).unwrap();
+    assert!(linalg::angle_between(&rot, &r) < 1e-12);
+    assert!(linalg::norm(linalg::sub(tr, t)) < 1e-12);
+    assert!(rms < 1e-12);
+    // Three points are enough; a line, two points or a NaN aren't.
+    assert!(fit_rigid(&from[..3], &to[..3]).is_some());
+    assert!(fit_rigid(&from[..2], &to[..2]).is_none());
+    let line: Vec<V3> = (0..5).map(|i| [i as f64, 0.0, 0.0]).collect();
+    assert!(fit_rigid(&line, &line).is_none());
+    let mut nan = to.clone();
+    nan[1][2] = f64::NAN;
+    assert!(fit_rigid(&from, &nan).is_none());
+    assert!(fit_rigid(&from, &to[..4]).is_none());
+    // A mirror image is never answered with a mirror.
+    let mirrored: Vec<V3> = from.iter().map(|p| [-p[0], p[1], p[2]]).collect();
+    let (rot, _, rms) = fit_rigid(&from, &mirrored).unwrap();
+    assert!(linalg::det(&rot) > 0.0 && rms > 0.1);
+}
+
+#[test]
+fn a_nudge_solves_from_the_last_answer() {
+    // What the line-up page does at every nudge: the last answer is the
+    // start, one point moved a pixel. Same answer as from nothing, and the
+    // time it took printed (not asserted: CI oversleeps).
+    let rig = audience_rig(1.6, [0.1, 0.3]);
+    let world = deep_points(&rig, 12, 9.0);
+    let entered = LensFit {
+        throw: 1.5,
+        shift: [0.0; 2],
+        aspect: HD,
+    };
+    let mut problem = rig.problem(
+        noisy(&rig.points(&world), 0.5, 3),
+        entered,
+        Freedom::default(),
+    );
+    let first = solve(&problem).unwrap();
+    problem.start = Some(first.pose);
+    problem.lens = first.lens;
+    problem.points[5].pixel[0] += 1.0;
+    let began = std::time::Instant::now();
+    let nudged = solve(&problem).unwrap();
+    let took = began.elapsed();
+    problem.start = None;
+    let fresh = solve(&problem).unwrap();
+    eprintln!("a nudge took {took:?} (this build)");
+    assert_eq!(nudged.rung, fresh.rung);
+    assert!(!nudged.capped);
+    assert!(linalg::norm(linalg::sub(nudged.pose.position, fresh.pose.position)) < 1e-9);
+    assert!((nudged.lens.throw - fresh.lens.throw).abs() < 1e-9);
+}
