@@ -332,6 +332,37 @@ fn save_then_quit_waits_for_the_save_without_holding_the_show_up() {
     });
 }
 
+/// The question's Save, like File ▸ Save, never writes over a file a newer NewQ
+/// saved (`newer_file`): it asks for a new name instead.
+#[test]
+fn save_in_the_question_never_writes_over_a_newer_newqs_file() {
+    both(|mut w, ui| {
+        let d = save_dir(&format!("newer_{ui}"));
+        let path = d.join("from-a-newer-newq.newq");
+        std::fs::write(&path, "kept as it is").unwrap();
+        w.st.show_path = Some(path.clone());
+        w.st.newer_file = Some(super::newer_file::NewerFile {
+            path: path.clone(),
+            saved_with: "999.0.0".into(),
+            hidden: false,
+        });
+        w.edit();
+        w.play();
+        w.quit_from_the_menu();
+        w.click("Question ▸ Quit and stop them");
+        w.click("Question ▸ Save");
+        assert!(w.st.saving.is_none(), "{ui}: saved over the newer file");
+        assert!(w.st.dialog.is_some(), "{ui}: Save As wasn't asked for");
+        assert!(!w.st.quit_now, "{ui}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "kept as it is",
+            "{ui}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    });
+}
+
 #[test]
 fn a_save_that_fails_does_not_quit() {
     both(|mut w, ui| {
