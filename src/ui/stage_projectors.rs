@@ -35,15 +35,19 @@ use crate::preview_pace::PreviewId;
 use crate::render3d::{self, Camera, Line, Paint, Part, Ray, Scene};
 use crate::show::{DisplayState, OutputId, Show};
 use crate::stage3d::light::{self, Facing};
+use crate::stage3d::projector::MappedRefused;
 use crate::stage3d::projector::{
     self, BRIGHTNESS, Footprint, Lens, LensPreset, MAX_LUMENS, MAX_THROW, MIN_THROW, RESOLUTIONS,
 };
-use crate::stage3d::{LengthUnit, Projector, ProjectorId, Stage3d, Surface, SurfaceId};
+use crate::stage3d::{
+    LengthUnit, Projector, ProjectorId, Stage3d, Surface, SurfaceId, SurfaceShape,
+};
 
 /// What the page says where projectors are added.
 pub const CORNER_PIN_WORDS: &str = "For one flat screen, the four corners on the Displays page \
      do the same job with less work. Projectors here are for planning: where to hang one, which \
-     lens, how big and how bright the picture is, on any screen or set.";
+     lens, how big and how bright the picture is, on any screen or set. Ticked Mapped, a \
+     projector shows the canvases of the screens it lights, as they land on them.";
 
 /// Rays along each side of a picture for its outline.
 pub const OUTLINE_RAYS: usize = 24;
@@ -894,7 +898,7 @@ fn row(ui: &mut Ui, show: &mut Show, st: &mut UiState, id: ProjectorId) -> bool 
         .map(|o| {
             (
                 o.id,
-                o.name.clone(),
+                super::display_label(show, o.id),
                 show.projector_display_refused(o.id, id),
             )
         })
@@ -1042,6 +1046,7 @@ fn row(ui: &mut Ui, show: &mut Show, st: &mut UiState, id: ProjectorId) -> bool 
         });
     // What it gives.
     readouts(ui, show, st, &p, pixels, aspect);
+    let canvases_for = mapped_rows(ui, show, &mut p);
     ui.horizontal_wrapped(|ui| {
         ui.menu_button("Fit to a screen ⏷", |ui| {
             if screens.is_empty() {
@@ -1122,7 +1127,153 @@ fn row(ui: &mut Ui, show: &mut Show, st: &mut UiState, id: ProjectorId) -> bool 
     {
         *slot = p;
     }
+    // Screens that showed its display get canvases of their own, and then
+    // it is mapped (one edit).
+    if !canvases_for.is_empty() {
+        for s in canvases_for {
+            show.new_canvas_for(s);
+        }
+        if show.mapped_refused(id).is_none()
+            && let Some(p) = show.projector_mut(id)
+        {
+            p.mapped = true;
+        }
+    }
     delete
+}
+
+/// The line under the *Mapped* tick (old plan 8.1).
+pub const MAPPED_WORDS: &str =
+    "This display shows the screens as this projector sees them, instead of its own picture.";
+
+/// The small theatre's line (old plan 8.4), for a mapped projector on one
+/// flat screen.
+pub const ONE_FLAT_SCREEN_WORDS: &str =
+    "For one flat screen, the four corners on the Displays page do the same job with less work.";
+
+/// The words of the tick itself.
+pub const MAPPED_TICK: &str = "Mapped";
+
+/// Why projector `p` can't be mapped, in words (`Show::mapped_refused`).
+pub fn mapped_refusal_words(show: &Show, why: &MappedRefused) -> String {
+    match why {
+        MappedRefused::NoDisplay => {
+            "Choose the display it is first (Is display): mapped, that display shows the \
+             stage's screens through this projector."
+                .to_string()
+        }
+        MappedRefused::OnAScreen(screens) => {
+            let names = names_of_screens(show, screens);
+            format!(
+                "{names} {} this display's picture. Mapped, it shows the screens, so it can't \
+                 be on one: give {} a canvas of its own (its Shows ▸ {}), or use the button.",
+                if screens.len() == 1 { "shows" } else { "show" },
+                if screens.len() == 1 { "it" } else { "each" },
+                super::stage_edit::NEW_CANVAS,
+            )
+        }
+    }
+}
+
+fn names_of_screens(show: &Show, screens: &[SurfaceId]) -> String {
+    let names: Vec<&str> = screens
+        .iter()
+        .filter_map(|s| show.stage3d.surface(*s))
+        .map(|s| s.name.as_str())
+        .collect();
+    and_list(&names)
+}
+
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// A projector's *Mapped* tick and its lines. The screens that are to get a
+/// canvas of their own before it is mapped (the caller makes them: the show
+/// is read here while `p` is a copy being edited).
+fn mapped_rows(ui: &mut Ui, show: &Show, p: &mut Projector) -> Vec<SurfaceId> {
+    let mut canvases_for = Vec::new();
+    let refused = show.mapped_refused(p.id);
+    ui.horizontal_wrapped(|ui| {
+        // A mapped one can always be switched off.
+        let can = p.mapped || refused.is_none();
+        let r = ui.add_enabled(can, egui::Checkbox::new(&mut p.mapped, MAPPED_TICK));
+        super::stage_edit::note(ui, &format!("Projectors ▸ {} ▸ {MAPPED_TICK}", p.name), &r);
+        let r = r.on_hover_text(MAPPED_WORDS);
+        if let Some(why) = &refused {
+            r.on_disabled_hover_text(mapped_refusal_words(show, why));
+        }
+    });
+    hint(ui, MAPPED_WORDS);
+    if !p.mapped {
+        if let Some(why) = &refused {
+            hint(ui, &mapped_refusal_words(show, why));
+            if let MappedRefused::OnAScreen(screens) = why {
+                let words = format!(
+                    "Give {} a new canvas, and map it",
+                    names_of_screens(show, screens)
+                );
+                let r = ui.button(&words).on_hover_text(
+                    "Each of those screens shows a new canvas instead (cues sent to this \
+                     display stay on it, and aren't seen while it is mapped)",
+                );
+                super::stage_edit::note(
+                    ui,
+                    &format!("Projectors ▸ {} ▸ Give a canvas", p.name),
+                    &r,
+                );
+                if r.clicked() {
+                    canvases_for = screens.clone();
+                }
+            }
+        }
+        return canvases_for;
+    }
+    let feeds = show.mapped_feeds(p.id);
+    let name = |o: &OutputId| show.output(*o).map_or("", |o| o.name.as_str());
+    if feeds.screens.is_empty() {
+        warning(
+            ui,
+            "Its beam reaches no projection screen that shows a canvas: its display is black. \
+             Point it at a screen, or give the screen something to show.",
+        );
+    } else {
+        let used: Vec<&str> = feeds.used.iter().map(name).collect();
+        hint(
+            ui,
+            &format!(
+                "Maps {} onto {}.",
+                and_list(&used),
+                names_of_screens(show, &feeds.screens)
+            ),
+        );
+    }
+    if !feeds.left_out.is_empty() {
+        let out: Vec<&str> = feeds.left_out.iter().map(name).collect();
+        warning(
+            ui,
+            &format!(
+                "A mapped projector shows at most {} canvases; this one sees {}. Where it \
+                 meets {} it is black: show fewer canvases on the screens it reaches.",
+                crate::mapped::MAX_FEEDS,
+                feeds.used.len() + feeds.left_out.len(),
+                and_list(&out),
+            ),
+        );
+    }
+    let one_flat = feeds.screens.len() == 1
+        && show
+            .stage3d
+            .surface(feeds.screens[0])
+            .is_some_and(|s| matches!(s.shape, SurfaceShape::Flat { .. }));
+    if one_flat {
+        hint(ui, ONE_FLAT_SCREEN_WORDS);
+    }
+    canvases_for
 }
 
 fn lens_rows(ui: &mut Ui, id: ProjectorId, lens: &mut Lens) {
