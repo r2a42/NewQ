@@ -3,7 +3,8 @@
 //!
 //! A TCP frame is a 4-byte big-endian length and that many bytes of JSON, one
 //! `Msg`. A frame over `MAX_FRAME` is refused (the session is closed), as is
-//! one that isn't JSON. `PROTOCOL` changes only when two NewQs could no longer
+//! one that isn't JSON, and a first frame over `HELLO_MAX`; a body is read as
+//! its bytes arrive, so a length that lies reserves nothing. `PROTOCOL` changes only when two NewQs could no longer
 //! understand each other; a session's first frame is a `Hello`, read leniently
 //! so that a NewQ speaking another protocol is told apart and named. Within a
 //! protocol, later stages add `Msg` variants (the clock, commands, show sync,
@@ -23,6 +24,15 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The largest frame accepted: room for a large show (later stages send it
 /// whole), not for a runaway length.
 pub const MAX_FRAME: usize = 64 << 20;
+
+/// The largest first frame (the `Hello`) accepted: a real one is a few hundred
+/// bytes, a long computer name included. A session that hasn't said who it is
+/// can't make this computer reserve more.
+pub const HELLO_MAX: usize = 16 * 1024;
+
+/// A frame's body is read in pieces of this size and the buffer grows only as
+/// bytes arrive, so a length that lies reserves nothing up front.
+const READ_PIECE: usize = 64 * 1024;
 
 /// The first frame each side sends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -345,19 +355,45 @@ pub fn write_frame(w: &mut impl std::io::Write, msg: &Msg) -> std::io::Result<()
     w.flush()
 }
 
-/// The next frame's bytes (blocking).
+/// The next frame's bytes (blocking), of any length up to `MAX_FRAME`.
+#[cfg(test)]
 pub fn read_frame(r: &mut impl Read) -> Result<Vec<u8>, FrameError> {
+    read_frame_up_to(r, MAX_FRAME)
+}
+
+/// The next frame's bytes (blocking), refused when it says it is longer than
+/// `limit`. The body is read as it comes (`read_body`): a length that lies
+/// costs only the bytes really sent.
+pub fn read_frame_up_to(r: &mut impl Read, limit: usize) -> Result<Vec<u8>, FrameError> {
     let mut head = [0u8; 4];
     r.read_exact(&mut head)
         .map_err(|e| FrameError::Closed(e.to_string()))?;
     let n = u32::from_be_bytes(head) as usize;
-    if n > MAX_FRAME {
+    if n > limit.min(MAX_FRAME) {
         return Err(FrameError::TooBig(n));
     }
-    let mut body = vec![0u8; n];
-    r.read_exact(&mut body)
-        .map_err(|e| FrameError::Closed(e.to_string()))?;
+    let mut body = Vec::new();
+    read_body(r, n, &mut body).map_err(|e| FrameError::Closed(e.to_string()))?;
     Ok(body)
+}
+
+/// Read exactly `n` bytes onto `body`, a piece at a time: it grows with what
+/// arrives, never by `n` before the bytes are there.
+fn read_body(r: &mut impl Read, n: usize, body: &mut Vec<u8>) -> std::io::Result<()> {
+    let mut piece = vec![0u8; READ_PIECE.min(n)];
+    while body.len() < n {
+        let want = (n - body.len()).min(piece.len());
+        let got = match r.read(&mut piece[..want]) {
+            Ok(g) => g,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if got == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        body.extend_from_slice(&piece[..got]);
+    }
+    Ok(())
 }
 
 pub fn decode(body: &[u8]) -> Result<Msg, FrameError> {
@@ -542,6 +578,16 @@ mod tests {
             decode_hello(&serde_json::to_vec(&Msg::Welcome).unwrap()),
             Err(FrameError::Garbage(_))
         ));
+        // A first frame over the hello's limit is refused before its body is read.
+        let big = encode(&Msg::Hello(Hello {
+            name: "x".repeat(HELLO_MAX),
+            ..hello()
+        }));
+        assert_eq!(
+            read_frame_up_to(&mut &big[..], HELLO_MAX),
+            Err(FrameError::TooBig(big.len() - 4))
+        );
+        assert!(read_frame_up_to(&mut &encode(&Msg::Hello(hello()))[..], HELLO_MAX).is_ok());
         // A frame cut short is the connection ending.
         let mut cut = encode(&Msg::Welcome);
         cut.truncate(cut.len() - 2);
@@ -549,6 +595,41 @@ mod tests {
             read_frame(&mut &cut[..]),
             Err(FrameError::Closed(_))
         ));
+    }
+
+    /// A length that lies (60 MB said, a few bytes sent) reserves no more than
+    /// what came: the buffer grows only as bytes arrive.
+    #[test]
+    fn a_lying_length_reserves_only_what_arrives() {
+        let mut wire = ((60usize << 20) as u32).to_be_bytes().to_vec();
+        wire.extend([b'{'; 10]);
+        assert!(matches!(
+            read_frame(&mut &wire[..]),
+            Err(FrameError::Closed(_))
+        ));
+        let mut body = Vec::new();
+        assert!(read_body(&mut &[1u8; 10][..], 60 << 20, &mut body).is_err());
+        assert_eq!(body.len(), 10);
+        assert!(body.capacity() <= READ_PIECE, "{}", body.capacity());
+        // And a real frame larger than a piece comes whole.
+        let data = vec![7u8; 3 * READ_PIECE + 5];
+        let mut body = Vec::new();
+        read_body(&mut &data[..], data.len(), &mut body).unwrap();
+        assert_eq!(body, data);
+    }
+
+    /// The hello this NewQ sends is far under `HELLO_MAX`, a long name too.
+    #[test]
+    fn a_real_hello_fits_the_first_frames_limit() {
+        let long = encode(&Msg::Hello(Hello {
+            name: "A rather long computer name for the booth".repeat(8),
+            version: "10.20.30-beta.4".into(),
+            network: Some(NetworkId(u64::MAX)),
+            term: u64::MAX,
+            nonce: u64::MAX,
+            ..hello()
+        }));
+        assert!(long.len() < HELLO_MAX / 8, "{}", long.len());
     }
 
     /// Values a later NewQ may add inside a known message (a kind of network

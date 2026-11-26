@@ -1601,3 +1601,142 @@ fn this_computers_identity_from_another_computer_on_the_same_port_is_a_twin() {
     assert!(from_here(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), &[]));
     assert!(!from_here(IpAddr::V4(ours), &[]));
 }
+
+// ---- Connection limits (review 2026-11-26: Fable R9, Opus R6) ----
+
+/// The frames that come on `s` until it closes (or `limit` passes with
+/// nothing more).
+fn frames_until_closed(s: &mut TcpStream, limit: Duration) -> Vec<Msg> {
+    s.set_read_timeout(Some(limit)).unwrap();
+    let mut seen = Vec::new();
+    while let Ok(body) = proto::read_frame(s) {
+        match proto::decode(&body) {
+            Ok(m) => seen.push(m),
+            Err(_) => break,
+        }
+    }
+    seen
+}
+
+/// A hello from a program that isn't a NewQ, as `id`.
+fn raw_hello(id: NodeId, role: Role, network: Option<node::NetworkId>, name: String) -> Msg {
+    Msg::Hello(Hello {
+        proto: proto::PROTOCOL,
+        version: proto::VERSION.into(),
+        id,
+        name,
+        role,
+        network,
+        term: 0,
+        nonce: 1,
+        tcp_port: 0,
+    })
+}
+
+/// A first frame over `HELLO_MAX` (a real hello padded with a long name)
+/// closes the connection unread: no passcode proof comes back, as it does for
+/// the same hello a little shorter.
+#[test]
+fn an_oversized_first_frame_closes_the_connection_unread() {
+    let mut rig = Rig::new();
+    let p = rig.hub("Booth");
+    p.ask(NetAction::BecomePrimary);
+    let port = until(&p, "listening", |v| v.port.is_some()).port.unwrap();
+    let say = |name: String| {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let hello = raw_hello(NodeId(node::random_u64()), Role::Alone, None, name);
+        proto::write_frame(&mut s, &hello).unwrap();
+        s
+    };
+    // Just under: it is answered (the hub's hello, then its proof).
+    let mut s = say("x".repeat(proto::HELLO_MAX - 400));
+    s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let mut answered = false;
+    while let Ok(body) = proto::read_frame(&mut s) {
+        if matches!(proto::decode(&body), Ok(Msg::Prove { .. })) {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "a hello under the limit is answered");
+    drop(s);
+    // Over: closed with nothing but the hub's own hello sent.
+    let mut s = say("x".repeat(proto::HELLO_MAX + 1));
+    let seen = frames_until_closed(&mut s, Duration::from_secs(60));
+    assert!(
+        seen.iter().all(|m| matches!(m, Msg::Hello(_))),
+        "nothing but the hub's hello: {seen:?}"
+    );
+    // A huge length first is closed the same way, and the hub works on.
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    use std::io::Write;
+    s.write_all(&((proto::MAX_FRAME - 1) as u32).to_be_bytes())
+        .unwrap();
+    let seen = frames_until_closed(&mut s, Duration::from_secs(60));
+    assert!(seen.iter().all(|m| matches!(m, Msg::Hello(_))), "{seen:?}");
+    let d = rig.hub("Left");
+    d.ask(NetAction::SetOn(true));
+    let did = id_of(&d);
+    until(&p, "a real computer after the oversized frames", |v| {
+        peer(v, did).is_some_and(|x| x.connected)
+    });
+}
+
+/// The pure rule: at most `UNNAMED_MAX` connections that haven't said hello,
+/// `UNNAMED_PER_ADDRESS` from one address.
+#[test]
+fn connections_that_havent_said_hello_are_capped_in_all_and_per_address() {
+    let ip = |n: u8| IpAddr::V4(Ipv4Addr::new(10, 0, 0, n));
+    assert!(admits(std::iter::empty(), ip(1)));
+    let same = vec![ip(1); UNNAMED_PER_ADDRESS];
+    assert!(!admits(same.iter().copied(), ip(1)));
+    assert!(admits(same.iter().copied(), ip(2)));
+    assert!(admits(same[1..].iter().copied(), ip(1)));
+    let spread: Vec<IpAddr> = (0..UNNAMED_MAX as u8).map(|n| ip(n + 10)).collect();
+    assert!(!admits(spread.iter().copied(), ip(1)));
+    assert!(admits(spread[1..].iter().copied(), ip(1)));
+}
+
+/// Many silent connections from one address: only `UNNAMED_PER_ADDRESS` are
+/// let in (each is sent the hub's hello); the rest are closed with nothing
+/// sent. Once they are gone a real computer connects as before.
+#[test]
+fn many_silent_connections_are_capped() {
+    let mut rig = Rig::new();
+    let p = rig.hub("Booth");
+    p.ask(NetAction::BecomePrimary);
+    let port = until(&p, "listening", |v| v.port.is_some()).port.unwrap();
+    let extra = 8;
+    // A round whose connections took longer to open than a silent one may
+    // stay (`HELLO_WITHIN`) proves nothing (a slot may have come free): it is
+    // tried again; any other outcome is decided at once.
+    let mut decided = false;
+    for _ in 0..5 {
+        let began = Instant::now();
+        let mut socks: Vec<TcpStream> = (0..UNNAMED_PER_ADDRESS + extra)
+            .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+            .collect();
+        let opened = began.elapsed();
+        let greeted: Vec<bool> = socks
+            .iter_mut()
+            .map(|s| !frames_until_closed(s, Duration::from_secs(60)).is_empty())
+            .collect();
+        if opened >= HELLO_WITHIN / 2 {
+            continue;
+        }
+        let n = greeted.iter().filter(|g| **g).count();
+        assert_eq!(n, UNNAMED_PER_ADDRESS, "{greeted:?}");
+        decided = true;
+        break;
+    }
+    assert!(
+        decided,
+        "the connections never opened quickly enough to tell"
+    );
+    let d = rig.hub("Left");
+    d.ask(NetAction::SetOn(true));
+    let did = id_of(&d);
+    until(&p, "a real computer after the silent ones", |v| {
+        peer(v, did).is_some_and(|x| x.connected)
+    });
+}
