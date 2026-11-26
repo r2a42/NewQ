@@ -307,4 +307,4 @@ fn meets(ray: &Ray, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, f32, f32)> {
 
 #[cfg(test)]
 #[path = "lensmap_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -22,6 +22,7 @@
 // the 3D view as a display source) uses this API.
 #![allow(dead_code, unused_imports)]
 
+pub mod bake;
 pub mod camera;
 pub mod lit;
 pub mod maths;
@@ -376,6 +377,14 @@ pub struct Renderer {
     light_refused: bool,
     /// The light's shader (a test's broken one: `refuse_light`).
     light_source: &'static str,
+    /// The lens maps' pipelines, made at the first bake (`bake.rs`).
+    bake_kit: Option<bake::BakeKit>,
+    /// This GPU won't make lens maps (said once): never tried again.
+    bake_refused: bool,
+    /// The largest tile a map is baked in (`bake::TILE`; smaller in a test).
+    bake_tile: u32,
+    /// The bake's shader (a test's broken one: `refuse_bake`).
+    bake_source: String,
 }
 
 impl Renderer {
@@ -533,6 +542,10 @@ impl Renderer {
             light: None,
             light_refused: false,
             light_source: lit::SOURCE,
+            bake_kit: None,
+            bake_refused: false,
+            bake_tile: bake::TILE,
+            bake_source: bake::source(),
         }
     }
 
