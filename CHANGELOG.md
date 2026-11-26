@@ -4,7 +4,7 @@ What changed in each NewQ release, newest first, in words for the people who run
 shows with it. The section for a version is put at the top of that version's
 release page, and a release is refused if it has none.
 
-## Unreleased
+## 0.27.2
 
 - **Cues that start each other no longer freeze NewQ.** Two Start cues that start each other, or
   a section looped back to its top by a Start cue where no cue has a pre-wait, used to lock NewQ up
