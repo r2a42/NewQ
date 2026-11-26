@@ -569,7 +569,7 @@ fn file_menu(ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.close();
     }
     ui.separator();
-    if item(ui, F, "Quit", None).clicked() {
+    if item(ui, F, "Quit", Some("Ctrl+Q")).clicked() {
         actions.push(Action::Quit);
         ui.close();
     }

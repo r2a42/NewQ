@@ -4,7 +4,7 @@
 use super::*;
 
 /// (key, what it does), in the README's order.
-pub(super) const KEYS: [(&str, &str); 29] = [
+pub(super) const KEYS: [(&str, &str); 30] = [
     (
         "Space",
         "GO on a cue list; on a timeline you are working on (a timeline list's tab, or the tracks editor you last clicked in or are pointing at): play / pause it — running, it pauses; paused, parked, at a pause cue or in a loop it does what GO does there; stopped, it runs",
@@ -68,6 +68,10 @@ pub(super) const KEYS: [(&str, &str); 29] = [
         "Duplicate the picked clips just after them",
     ),
     ("Ctrl+Shift+S", "Save as"),
+    (
+        "Ctrl+Q",
+        "Quit (asks first while cues play, in Show mode, or with unsaved changes)",
+    ),
     ("Ctrl+F", "Find cues"),
     ("Ctrl+,", "Open / close the settings"),
     (
