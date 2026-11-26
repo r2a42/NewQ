@@ -188,6 +188,51 @@ is a piece of a longer entry that covered several areas.
   window sends, `light_up`, only a lit view lit), `ui/stage_view_tests.rs` (`Driven`: Light and the views
   by mouse, notices, legends). Tried headless under xvfb (lavapipe); never a real GPU, Mac, Windows or
   projector.
+  Lens maps (mapping plan 4.1, round 1 agent A; the drawer and the output path are `mapped.rs`,
+  `compositor-and-displays.md`). `stage3d/lensmap.rs` (pure): `still_scene` (the views' scene without
+  the projectors' bodies, `projectors_from`, and without any screen `Show::movable` names), `still_key`
+  (each part's mesh key, transform, output and region, lit, side), `map_key` (still key, placement,
+  lens, aspect, size, depth: never `Projector::fine`/`line_up`, nothing a cue changes),
+  `lens_matrix`/`tile_matrix` (the light's `throw_of` lens; a tile's part of its frustum),
+  `feeds_seen` (fed screens whose box meets the lens, `lit::box_meets`, scene order, at most
+  `MAX_FEEDS`; past them a screen is only in the way), `part_feed`, `SCREEN_SLACK` (a fed screen wins
+  up to 0.1% of its distance behind anything else: a screen on a wall), a front screen
+  (`Catch::front_only`) met from behind shows nothing; `reference`/`reference_with(.., aspect)`: a ray
+  through each pixel's middle (`Projector::ray`), `pick` among fed screens and among the rest, the
+  hit's uv by barycentrics through `part_region`. `render3d/bake.rs` + `bake.wgsl` (its own module,
+  after `mapped::WGSL_UNPACK`; never `fs_part`/`fs_lit`): `Renderer::bake(gpu, &Bake { scene,
+  projector, aspect, size, key }) -> Result<LensMap, String>`, the renderer's meshes
+  (`ensure_mesh`), one pipeline (fed screens write packed place and how, everything else "none";
+  reversed depth, `Greater`; fed screens' clip z pushed by `SCREEN_SLACK`) into twice-size scratch,
+  then `fs_resolve` (majority feed of the four samples, the average of their places, their share as
+  coverage) into `LensMap::texture`s; in tiles of `TILE` (1024, at most half the card's largest
+  texture; `bake_in_tiles` in tests), a `Gpu::submit` each; inside validation, internal and
+  out-of-memory scopes; `BakeKit` made through `checked`, a refusal sets `bake_refused` for good
+  (`refuse_bake` in tests). Memory: 8 bytes a map pixel (17.6 MiB at 1920×1200, 63 MiB at 4K), and
+  while baking at most 48 MiB of scratch, let go after. `stage_render`: `MapJob { projector, aspect,
+  size, key, scene, output }` in `StageJob::maps` (`merged` keeps the newer of a projector and size),
+  output maps baked first of all, preview maps after the previews; each `Baked` pushed at once to the
+  `BakedSlot` given by `StageThread::spawn_with` (`StageDrawer::baked_into`); counted
+  (`maps_baked`, `maps_refused`). `stage_live`: `lens_map(projector, size, use_)` (aspect
+  `Projector::aspect(size)`, or its own pixels' for `Preview`) and `lens_map_shaped(.., aspect, ..)`:
+  the call is the ask (`MapEntry` by projector and size: `want`, `in_flight`, `refused`, `asked_at`,
+  let go after `MAP_KEPT`), None until the first map, the old map until the new lands; `begin` makes
+  `still`/`still_key` with the scene; the scene's key is `stage_key_of` (`shape_key` with fine and
+  line-up cleared; `stage_seen` kept when only those changed); `send` -> `maps_due` (output maps
+  always, preview maps only with a lit request this pass and not while `displays_behind`; a due map
+  keeps `wanted_at` and starts the thread, an up-to-date one doesn't), `in_flight` cleared when the
+  thread is found stopped; `take_baked` in `begin`'s asks, `send` and `landed` (a map landing makes
+  `landed` true); `feeds_output` (`feeds_of_outputs`: the canvases a window's or stream's map's
+  projector sees, the whole pictures and sub displays, from the ask on); `forget_device` clears the
+  maps and the slot. Not yet: `depth` (round 3), the 3D view's light through a map (round 2), the
+  app's calls (agent B). Tests: `stage3d/lensmap_tests.rs` (pure), `render3d/bake_tests.rs` (lavapipe,
+  64×36, against the reference away from edges: feed exact, coverage 1, place within 3e-5 plus 2% of
+  a pixel's step; flat, curved both ways, angled wall, jumbotron, a box in the way, a screen on a
+  wall, front and rear, two canvases, tiles of 10; a refused bake; naga HLSL 5.1/6.0 and MSL),
+  `stage_render_map_tests.rs`, `stage_live_map_tests.rs` (thread started for a bake and the map
+  outliving the idle release; a still scene and a fine-tune or line-up bake nothing again; a moved
+  projector re-bakes its own; a preview map waits for a lit view; a lost device; a venue landing
+  later). Lavapipe only; never a real GPU or projector.
 
 - `src/calib/`: the line-up solver (step P3 of `.claude/notes/projection-plan.md`, section 5.3). Pure
   f64, hand-written (no linear algebra crate, the owner's choice), `pub(crate)`, `#[allow(dead_code)]`
