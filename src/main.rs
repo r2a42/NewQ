@@ -10,6 +10,10 @@ mod bench;
 mod blend;
 mod branding;
 mod bulk_edit;
+// The line-up solver (projection plan P3): P5 wires it into the show and the
+// UI; until then only its tests use it.
+#[allow(dead_code)]
+mod calib;
 mod clicker;
 mod clock;
 mod color;

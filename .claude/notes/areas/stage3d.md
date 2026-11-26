@@ -1,6 +1,6 @@
 # The 3D stage, projectors and the 3D renderer
 
-Covers `src/stage3d/`, `src/stage_render.rs`, `src/stage_live.rs`, `src/stage_counts.rs`, `src/render3d/`, `src/ui/stage_view.rs`, `src/ui/stage_edit.rs`, `src/ui/stage_projectors.rs`.
+Covers `src/stage3d/`, `src/calib/`, `src/stage_render.rs`, `src/stage_live.rs`, `src/stage_counts.rs`, `src/render3d/`, `src/ui/stage_view.rs`, `src/ui/stage_edit.rs`, `src/ui/stage_projectors.rs`.
 
 Moved word for word from the Layout section of `CLAUDE.md` (commit 2589061). Read this before
 working in these files, and keep it true when the code changes. A heading that says "Part of"
@@ -188,6 +188,34 @@ is a piece of a longer entry that covered several areas.
   window sends, `light_up`, only a lit view lit), `ui/stage_view_tests.rs` (`Driven`: Light and the views
   by mouse, notices, legends). Tried headless under xvfb (lavapipe); never a real GPU, Mac, Windows or
   projector.
+
+- `src/calib/`: the line-up solver (step P3 of `.claude/notes/projection-plan.md`, section 5.3). Pure
+  f64, hand-written (no linear algebra crate, the owner's choice), `pub(crate)`, `#[allow(dead_code)]`
+  on `mod calib` in `main.rs` until P5 wires it in. Conventions in `mod.rs`'s header: points in metres
+  (`LinePoint::world`) and **pixels** of the projector's picture (`LinePoint::pixel`, (0, 0) its top-left
+  corner, (W, H) its bottom-right, y down: `in_picture`'s `(u, v)` times `Problem::pixels`); the lens
+  (`LensFit`) and pose (`Pose`, `Placement`'s yaw/pitch/roll in f64) as `projector.rs`'s; point numbers
+  in words are index + 1, switched-off points counted. `model.rs` `project` is `in_picture` in f64
+  (pinned by `the_projection_is_the_projectors_own` against `in_picture` and `ray`), `refine` is
+  Levenberg-Marquardt on the error in pixels (central-difference Jacobian, a small turn in the lens's
+  frame, Marquardt's diagonal damping, `MAX_ROUNDS`, no clock; a step putting a point behind the lens is
+  refused), `spreads` the standard deviations for a pixel's error per point. `start.rs` the starting
+  guesses: a flat set's homography, the 3x4 DLT (six or more, not flat; RQ split with `D = diag(1,-1,-1)`
+  for the -Z lens and the downward v), a 64-direction ring of places facing the points (Horn); plus
+  `Problem::start` (the placement now). `linalg.rs` 3-vectors, row-major 3x3s, `from_euler`/`to_euler`
+  (straight up or down: roll 0, all yaw), cyclic Jacobi, Cholesky, `nearest_rotation` (Horn), `rq`.
+  `solve(&Problem) -> Result<Solution, Refusal>`: checks first (`Refusal`: too few, no picture, not a
+  number, same spot, same pixel, in a line, in a line in the picture, three of four flat points in a
+  line, behind), then the ladder (`Rung`: Pose at 4, Throw at 6 not flat, Shift at 8 not flat, Aspect only
+  when `Freedom::aspect`; a rung is kept only inside the lens's bounds and with each number's sd under
+  2%, else a `Note` says why), then leave-one-out with five or more points (`Outlier`, named when it is
+  3 px and five times the others' error off). `Solution::words`/`Refusal::words` are the operator's
+  sentences; `placement()` and `lens_onto(&Lens, pixels)` apply it; `points_key` (FNV-1a of the
+  points and picture size) lets another computer tell a sent `Solution` is for its points
+  (`LineUp::is_current`). Every type is serde with defaults, lenient enums (`Unknown`) and `extra` on
+  `LinePoint`/`LineUp`. Deterministic on one computer; solve once and send the answer (another
+  system's libm may differ in the last bit). Tests: `calib/tests.rs` (made-up projectors with
+  `LensPreset`'s throws; exact data to 1e-6 m and rad; noise bounded by four of the solver's own sds).
 
 - `src/render3d/`: the 3D stage's renderer (0.25.0 previz, `.claude/notes/stage3d-plan.md`; drawn on
   `stage_render`'s thread, `#![allow(dead_code)]` for what isn't used yet). `scene.rs` re-exports `stage3d::scene`'s neutral types (`Mesh`, `Paint`,
