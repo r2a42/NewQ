@@ -507,6 +507,7 @@ impl App {
         let show = match initial_show {
             Some(path) => match Show::load(&path) {
                 Ok(show) => {
+                    crate::ui::note_opened(&mut ui, &show, Some(&path), &mut engine);
                     ui.show_path = Some(path);
                     show
                 }

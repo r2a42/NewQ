@@ -3,8 +3,8 @@
 //! `settings`' `*_MENU` and `MenuItem` constants, so a pointer follows a move.
 
 use super::settings::{
-    CUE_MENU, EDIT_MENU, FILE_MENU, HELP_MENU, KEYS_ITEM, SETTINGS_MENU, STATISTICS_ITEM,
-    TIMELINE_OPENS_ITEM, TOOLS_MENU, WINDOW_MENU,
+    CUE_MENU, EDIT_MENU, FILE_MENU, HELP_MENU, KEYS_ITEM, SAVE_AS_ITEM, SETTINGS_MENU,
+    STATISTICS_ITEM, TIMELINE_OPENS_ITEM, TOOLS_MENU, WINDOW_MENU,
 };
 use super::*;
 
@@ -554,7 +554,7 @@ fn file_menu(ui: &mut Ui, actions: &mut Vec<Action>) {
         ("New show", "Ctrl+N", Action::New),
         ("Open…", "Ctrl+O", Action::Open),
         ("Save", "Ctrl+S", Action::Save),
-        ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
+        (SAVE_AS_ITEM.label, "Ctrl+Shift+S", Action::SaveAs),
     ] {
         if item(ui, F, label, Some(key)).clicked() {
             actions.push(action);

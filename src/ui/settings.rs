@@ -299,6 +299,10 @@ pub const TOOLS_MENU: &str = "Tools";
 pub const SETTINGS_MENU: &str = "Settings";
 pub const HELP_MENU: &str = "Help";
 
+pub const SAVE_AS_ITEM: MenuItem = MenuItem {
+    menu: FILE_MENU,
+    label: "Save as…",
+};
 pub const MEDIA_MANAGER_ITEM: MenuItem = MenuItem {
     menu: TOOLS_MENU,
     label: "Media manager…",

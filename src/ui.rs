@@ -12,7 +12,9 @@ mod preview;
 pub(crate) use preview::part_shape;
 mod net_media;
 mod network;
+mod newer_file;
 pub(crate) use network::{login_note, own_addresses, path_to, peer_address};
+pub(crate) use newer_file::opened as note_opened;
 mod settings;
 // The 3D stage (0.25.0): its view in a preview and its settings page.
 pub(crate) mod stage_edit;
@@ -317,6 +319,8 @@ pub struct UiState {
     /// Counts the shows opened (and test shows): cue numbers mean other cues in another.
     show_epoch: u64,
     pub show_path: Option<PathBuf>,
+    /// The show's file was saved by a newer NewQ: kept from a plain Save.
+    pub newer_file: Option<newer_file::NewerFile>,
     pub monitors: Vec<MonitorInfo>,
     /// Which of them the main window is on (set each frame by the app).
     pub control_monitor: Option<usize>,
@@ -1257,6 +1261,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         ui.disable();
     }
     egui::Panel::top("menu").show(ui, |ui| menu_bar(ui, show, st, &mut actions));
+    newer_file::strip(ui, st, &mut actions);
     let modern = st.prefs.new_layout;
     if !modern {
         egui::Panel::top("transport")
@@ -10948,6 +10953,7 @@ fn saved(st: &mut UiState, path: PathBuf, snapshot: Option<String>) {
     // slow disk would hold the show up.)
     recovery::clear_in_background(st.show_path.as_deref());
     recovery::clear_in_background(Some(&path));
+    newer_file::saved(st);
     st.show_path = Some(path);
     st.saved_json = snapshot;
 }
@@ -11050,6 +11056,7 @@ fn load_into(
     st.selected = engine.playhead;
     st.forget_multi();
     st.show_epoch += 1;
+    newer_file::opened(st, show, path.as_deref(), engine);
     st.show_path = path;
     st.saved_json = serde_json::to_string(show).ok();
     st.check_media(show);
@@ -11921,7 +11928,8 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                 }
             }
         }
-        Action::Save => match st.show_path.clone() {
+        // (Not over a file a newer NewQ saved: `newer_file`.)
+        Action::Save => match newer_file::save_target(st) {
             Some(path) => start_save(show, engine, st, path),
             None => start_dialog(st, show, DialogFor::SaveShow),
         },
