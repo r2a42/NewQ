@@ -259,7 +259,7 @@ pub(crate) mod tests {
         assert_eq!(holo.kind.cue_type(), CueType::Unknown);
         assert_eq!(
             holo.kind.unknown_note().unwrap(),
-            "Hologram cue, made in a newer NewQ: can't play here"
+            "Made in a newer NewQ: can't play here (a Hologram cue)"
         );
         // Written back: all of it but what can't be kept, the unknown cue
         // exactly (compared as JSON: serde_json writes an object's keys in
@@ -306,11 +306,15 @@ pub(crate) mod tests {
             "{:?}",
             e.messages
         );
-        // GO on it.
+        // GO on it does nothing but move the playhead to the next cue.
+        let after = show.make_cue(CueType::Wait, None, show.cues.len());
+        let after_id = after.id;
+        show.cues.push(after);
         e.playhead = Some(holo);
         e.go(&show);
         e.tick_shared(&show, 2.0);
-        assert!(e.active.iter().all(|a| a.cue_id != holo));
+        assert!(e.active.is_empty(), "neither it nor the next cue plays");
+        assert_eq!(e.playhead, Some(after_id));
         // A group with a mode this NewQ doesn't know: the group can't play,
         // and its child stays its own.
         let mut group = show.make_cue(CueType::Group, None, 0);
@@ -323,7 +327,7 @@ pub(crate) mod tests {
         assert!(!group.kind.is_known());
         assert_eq!(
             group.kind.unknown_note().unwrap(),
-            "Group cue with settings from a newer NewQ: can't play here"
+            "Settings from a newer NewQ: can't play here (a Group cue)"
         );
         show.cues.push(group);
         show.cues.push(child);
@@ -339,6 +343,22 @@ pub(crate) mod tests {
         assert!(
             e.active.is_empty(),
             "neither the group nor its child played"
+        );
+        // Moved and deleted as a cue with children is, without a panic.
+        let gi = show.cue_index(gid).unwrap();
+        show.move_cue(gi, -1);
+        show.normalize_groups();
+        let gi = show.cue_index(gid).unwrap();
+        assert_eq!(
+            show.cues[gi + 1].parent,
+            Some(gid),
+            "the child moved with it"
+        );
+        let (_, removed) = show.delete_many(&[gid]).expect("deleted");
+        assert!(removed.contains(&gid));
+        assert!(
+            show.cues.iter().all(|c| c.parent != Some(gid)),
+            "no orphan left"
         );
         // A control cue whose action it doesn't know is one it can't read, so
         // it never does some other action in its place.
@@ -446,6 +466,33 @@ pub(crate) mod tests {
             Some(THIS_NEWQ)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_demo_show_has_nothing_this_newq_doesnt_know() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_media/demo.newq");
+        let show = Show::load(&path).expect("the demo show opens");
+        assert!(show.extra.is_empty(), "{:?}", show.extra);
+        assert!(!show.cues.is_empty());
+        for c in &show.cues {
+            assert!(
+                c.kind.is_known() && c.extra.is_empty(),
+                "{}: {:?}",
+                c.number,
+                c.extra
+            );
+            assert!(!matches!(c.continue_mode, ContinueMode::Other(_)));
+            assert!(!matches!(c.color, Some(CueColor::Other(_))));
+            if let Some(m) = c.kind.media() {
+                assert!(!matches!(m.transition, Transition::Other(_)));
+                assert!(!matches!(m.fit, Fit::Other(_)));
+                assert!(
+                    m.effects
+                        .iter()
+                        .all(|e| !matches!(e.kind, EffectKind::Other(_)))
+                );
+            }
+        }
     }
 
     #[test]

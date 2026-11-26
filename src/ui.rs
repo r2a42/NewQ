@@ -8815,7 +8815,7 @@ fn inspector_one(
                 ui.label(
                     RichText::new(
                         "This NewQ keeps it as it was and saves it so, for the newer NewQ to \
-                         play; here GO passes it by and firing it does nothing.",
+                         play; here firing it does nothing, and GO on it only moves to the next cue.",
                     )
                     .weak(),
                 );

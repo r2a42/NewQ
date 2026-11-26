@@ -141,6 +141,11 @@ mod tests {
         );
         // The first Save asks where (as Save as does)...
         assert_eq!(save_target(&st), None);
+        // ...also once the show is taken back from its recovery copy (which
+        // this NewQ wrote) or put back by undo: the protection is the file's.
+        let recovered = newer_show(THIS_NEWQ);
+        assert_eq!(recovered.saved_with.as_deref(), Some(THIS_NEWQ));
+        assert_eq!(save_target(&st), None);
         // ...and once saved elsewhere, Save saves there.
         st.show_path = Some("/shows/mine.newq".into());
         saved(&mut st);

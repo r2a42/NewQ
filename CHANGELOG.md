@@ -56,9 +56,9 @@ release page, and a release is refused if it has none.
 - **A show from a newer NewQ opens, and isn't overwritten by mistake.** One new cue type, transition
   or effect in a show made by a newer NewQ used to stop the whole show opening, and on a show
   network a computer with an older NewQ kept failing to take the show. Now the show opens: cues of
-  a kind this NewQ doesn't know stay in the list, marked *made in a newer NewQ: can't play here*,
-  and GO passes them by; an unknown transition fades in, an unknown fit letterboxes and an unknown
-  effect does nothing. A strip over the window says the show came from a newer NewQ, and the first
+  a kind this NewQ doesn't know stay in the list, marked *made in a newer NewQ: can't play here*;
+  GO on one does nothing but move to the next cue, and an auto-continue stops at one. An unknown
+  transition fades in, an unknown fit letterboxes and an unknown effect does nothing. A strip over the window says the show came from a newer NewQ, and the first
   Save asks for a new name, so the original file is kept as it was. What this NewQ doesn't know is
   saved back as it was read where it can be.
 

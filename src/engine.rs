@@ -1734,7 +1734,7 @@ impl Engine {
         };
         // Children never take the playhead: it moves over whole groups.
         let mut end = idx;
-        while show.cues[end].continue_mode != ContinueMode::DoNotContinue
+        while show.cues[end].continue_mode.continues()
             && let Some(next) = show.next_armed_top(end)
         {
             end = next;
@@ -4859,7 +4859,7 @@ impl Engine {
                 let next = show.next_armed_top(idx);
                 match next {
                     Some(n)
-                        if cue.continue_mode != ContinueMode::DoNotContinue
+                        if cue.continue_mode.continues()
                             && wanted.len() - group_children_wanted(&wanted, show)
                                 < MAX_PRELOAD =>
                     {
@@ -5080,9 +5080,10 @@ impl Engine {
                 continue;
             };
             let (layer, fit, transform, color, fx, source) = match &a.kind {
+                // (A fit a newer NewQ wrote is `Contain` here: `Fit::here`.)
                 ActiveKind::Video(v) => (
                     v.layer,
-                    v.fit,
+                    v.fit.here(),
                     v.transform,
                     v.color,
                     v.fx,
@@ -5091,7 +5092,7 @@ impl Engine {
                 ActiveKind::Image(i) => match &i.image {
                     Some(img) => (
                         i.layer,
-                        i.fit,
+                        i.fit.here(),
                         i.transform,
                         i.color,
                         i.fx,

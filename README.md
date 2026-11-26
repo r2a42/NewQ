@@ -1181,7 +1181,7 @@ stays on the computer until you send it yourself.
   the show file, so a show folder can move between machines. Each file says
   which NewQ saved it. A show saved by a newer NewQ still opens: a strip over
   the window says so, cues of kinds this NewQ doesn't know are kept and marked
-  *made in a newer NewQ: can't play here* (GO passes them by), settings it
+  *made in a newer NewQ: can't play here* (GO on one only moves on), settings it
   doesn't know are kept or fall back (a transition fades in, a fit letterboxes,
   an effect does nothing), and the first *Save* asks for a new name so the
   newer file isn't replaced by a copy that may lack some of it.
