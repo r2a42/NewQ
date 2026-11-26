@@ -161,8 +161,14 @@ fn is_false(v: &bool) -> bool {
 pub struct TimelineSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
-    /// Tracks kept though they have no clips, and the order of tracks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Tracks kept though they have no clips, and the order of tracks. (One
+    /// of a kind a newer NewQ wrote is left out: the tracks are worked out
+    /// from the clips, so only its place in the order is lost.)
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::show::compat::lenient_vec"
+    )]
     pub tracks: Vec<TrackId>,
     /// Clips that overlap on a track crossfade over the overlap.
     #[serde(default, skip_serializing_if = "is_false")]

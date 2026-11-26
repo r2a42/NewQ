@@ -1555,7 +1555,10 @@ impl Engine {
             CueKind::Fade(f) => Some(Some(f.duration)),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Timecode(t) => Some((t.duration > 0.0).then_some(t.duration)),
-            CueKind::Stop(_) | CueKind::Send(_) | CueKind::Control(_) => Some(Some(0.0)),
+            // (One this NewQ can't read doesn't play here: it takes no time.)
+            CueKind::Stop(_) | CueKind::Send(_) | CueKind::Control(_) | CueKind::Unknown(_) => {
+                Some(Some(0.0))
+            }
             // Slide show: the slides are timed to end together with the last.
             CueKind::Group(g) if g.slides.is_some_and(|s| s.advance == Advance::OnGo) => Some(None),
             CueKind::Group(g) if g.slides.is_some() => Some(Some(show.slides_length(cue.id))),
@@ -1868,6 +1871,11 @@ impl Engine {
     /// Cues it leads to (continues, a group's children) are fired after it,
     /// in order, before this returns.
     pub fn fire(&mut self, show: &Show, id: CueId) {
+        // A cue this NewQ can't read is neither played nor sent to the show
+        // network (where a newer computer could play it while this one can't).
+        if self.cant_play(show, id) {
+            return;
+        }
         if self.gated(|_| crate::net::play::Command::Fire { cue: id }) {
             return;
         }
@@ -1911,6 +1919,20 @@ impl Engine {
             self.fire_one(show, id);
         }
         self.firing = false;
+    }
+
+    /// Whether `id` is a cue this NewQ can't read (`CueKind::Unknown`), saying
+    /// so: it is never played here.
+    fn cant_play(&mut self, show: &Show, id: CueId) -> bool {
+        let Some(note) = show
+            .cue(id)
+            .and_then(|c| c.kind.unknown_note().map(|n| (c, n)))
+        else {
+            return false;
+        };
+        let (cue, note) = note;
+        self.log(format!("Cue {} ({}): {note}", cue.number, cue.name));
+        true
     }
 
     fn fire_one(&mut self, show: &Show, id: CueId) {
@@ -3015,6 +3037,12 @@ impl Engine {
         let Some(original) = show.cue(id) else {
             return;
         };
+        // (Every way of starting a cue comes here: a group's children, a
+        // timeline's clips, a network command.)
+        if !original.kind.is_known() {
+            self.cant_play(show, id);
+            return;
+        }
         if self.camera_missing(original) {
             return;
         }
@@ -3546,6 +3574,8 @@ impl Engine {
                     });
                 }
             }
+            // Never started: `start_with` turns it away first.
+            CueKind::Unknown(_) => ok = false,
         }
         if ok {
             if let (Some(_), Some(clip)) = (at.run, clip) {

@@ -183,6 +183,7 @@ fn continue_text(c: &Cue) -> String {
         DoNotContinue => String::new(),
         AutoContinue => "Auto-continue".into(),
         AutoFollow => "Auto-follow".into(),
+        Other(k) => format!("{} (a newer NewQ's)", k.name()),
     }
 }
 
