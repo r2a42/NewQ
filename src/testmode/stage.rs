@@ -15,6 +15,9 @@
 //!    it in place of the test's pictures; with one monitor (or none, or
 //!    across a show network) a display with no window does, drawn for the
 //!    previews only, at their pace.
+//! 5. **A mapped projector** (`testmode::mapped`): the last ticked monitor's
+//!    display shows the screens through a mapped projector, the lap on the
+//!    canvas they show (left out across a show network or with no monitor).
 //!
 //! The governor starts each leg afresh (`PreviewGovernor::reset`), so what
 //! one leg taught it doesn't decide the next. Each leg is measured from
@@ -35,7 +38,7 @@ use crate::stage_render::StageTotals;
 use std::io::Write;
 
 /// What the window's "What does this do?" says of the part.
-pub const WHAT_IT_DOES: &str = "Plays the cue list's lap round and round, first with every preview off, then with a 3D view of the stage turning in this window, then with its projectors' light on, then with a display showing the stage, and says whether the 3D stage makes the displays miss pictures on this computer. With no 3D stage in your show it uses a sample venue with a projector for each of the test's displays.";
+pub const WHAT_IT_DOES: &str = "Plays the cue list's lap round and round, first with every preview off, then with a 3D view of the stage turning in this window, then with its projectors' light on, then with a display showing the stage, then with a mapped projector showing the screens on the last monitor, and says whether the 3D stage makes the displays miss pictures on this computer. With no 3D stage in your show it uses a sample venue with a projector for each of the test's displays.";
 
 /// The Test Mode window's 3D view, as the governor knows it.
 pub const VIEW: PreviewId = PreviewId::Other("test-mode-3d", 0);
@@ -49,7 +52,7 @@ pub const LONG_LEG_SECS: f64 = 120.0;
 pub const SETTLE: f64 = 4.0;
 /// The file the part writes, a row a leg.
 pub const CSV: &str = "stage.csv";
-pub const CSV_HEADER: &str = "leg,round,measured_s,new_pictures,late,late_pct,worst_window,worst_new_pictures,worst_late,worst_late_pct,previews_down,previews_up,previews_below_full_s,previews_lowest,views,stage_displays,feeds,throws,cpu_mean_ms,cpu_worst_band_ms,light_left_out,thread_stops,stage_display_fps";
+pub const CSV_HEADER: &str = "leg,round,measured_s,new_pictures,late,late_pct,worst_window,worst_new_pictures,worst_late,worst_late_pct,previews_down,previews_up,previews_below_full_s,previews_lowest,views,stage_displays,feeds,throws,cpu_mean_ms,cpu_worst_band_ms,light_left_out,thread_stops,stage_display_fps,maps_baked,maps_refused";
 /// A venue that took longer than this to load is said (ms).
 pub const SLOW_VENUE_MS: u64 = 10_000;
 /// The view turns this fast (degrees a second): slowly, but every picture
@@ -63,6 +66,8 @@ pub enum Leg {
     View,
     Light,
     Display,
+    /// A mapped projector's display (`testmode::mapped`).
+    Mapped,
 }
 
 impl Leg {
@@ -73,6 +78,7 @@ impl Leg {
             Leg::View => "the 3D view, light off",
             Leg::Light => "the 3D view with its light on",
             Leg::Display => "a display showing the stage",
+            Leg::Mapped => "a mapped projector's display",
         }
     }
 
@@ -83,6 +89,7 @@ impl Leg {
             Leg::View => "view",
             Leg::Light => "light",
             Leg::Display => "display",
+            Leg::Mapped => "mapped",
         }
     }
 
@@ -98,6 +105,7 @@ impl Leg {
             Leg::View => "with the 3D view open",
             Leg::Light => "with the 3D view open and its light on",
             Leg::Display => "with a display showing the 3D stage",
+            Leg::Mapped => "with a mapped projector showing the lap",
         }
     }
 }
@@ -124,6 +132,8 @@ pub struct Setup {
     /// Projectors that throw a picture (in the light legs).
     pub projectors: usize,
     pub stage_display: Option<StageDisplay>,
+    /// The mapped projector of the last leg (`testmode::mapped`).
+    pub mapped: Option<super::mapped::MappedLeg>,
     /// The legs, in order (Light left out with no projector to throw).
     pub legs: Vec<Leg>,
 }
@@ -132,8 +142,14 @@ impl Setup {
     /// Put the stage display as `leg` wants it in `show` (the live test
     /// show). Whether anything changed.
     pub fn apply(&self, show: &mut Show, leg: Leg) -> bool {
+        let mut changed = false;
+        if let Some(m) = &self.mapped {
+            // Put back before the stage display changes (they may be the
+            // same display).
+            changed |= m.apply(show, leg == Leg::Mapped);
+        }
         let Some(d) = &self.stage_display else {
-            return false;
+            return changed;
         };
         let want = if leg == Leg::Display {
             &d.during
@@ -145,7 +161,7 @@ impl Setup {
                 *o = want.clone();
                 true
             }
-            _ => false,
+            _ => changed,
         }
     }
 }
@@ -195,6 +211,9 @@ pub struct LegResult {
     pub stage: StageTotals,
     /// The stage display's monitor's refresh (a windowed one, its leg).
     pub refresh_hz: Option<f32>,
+    /// Lens maps made and refused over the whole leg (its settling
+    /// included: a mapped projector's map lands then).
+    pub maps: (u64, u64),
 }
 
 impl LegResult {
@@ -225,6 +244,7 @@ impl LegResult {
             lowest,
             stage: b.stage.since(&a.stage),
             refresh_hz,
+            maps: (0, 0),
         }
     }
 
@@ -255,6 +275,7 @@ impl LegResult {
         match self.leg {
             Some(Leg::Baseline) | None => true,
             Some(Leg::Display) => self.stage.displays + self.stage.views > 0,
+            Some(Leg::Mapped) => self.maps.0 > 0 && self.maps.1 == 0,
             Some(_) => self.stage.views > 0,
         }
     }
@@ -310,6 +331,7 @@ impl LegResult {
         s.venue_failures += t.venue_failures;
         s.venue_load_ms = s.venue_load_ms.max(t.venue_load_ms);
         self.refresh_hz = self.refresh_hz.or(o.refresh_hz);
+        self.maps = (self.maps.0 + o.maps.0, self.maps.1 + o.maps.1);
     }
 }
 
@@ -338,6 +360,8 @@ pub struct StageRun {
     current: Option<(usize, f64, u32)>,
     /// The look `SETTLE` into the leg.
     look: Option<Look>,
+    /// The stage's counts as the leg began (its lens maps).
+    begun: Option<StageTotals>,
     pub results: Vec<LegResult>,
     /// Legs played to their end.
     played: usize,
@@ -397,6 +421,7 @@ impl StageRun {
             total,
             current: None,
             look: None,
+            begun: None,
             results: Vec::new(),
             played: 0,
             finished: false,
@@ -495,7 +520,11 @@ impl StageRun {
                 }),
                 _ => None,
             };
-            let r = LegResult::from(leg, round, &start, &end, refresh);
+            let mut r = LegResult::from(leg, round, &start, &end, refresh);
+            if let Some(b) = &self.begun {
+                let all = end.stage.since(b);
+                r.maps = (all.maps_baked, all.maps_refused);
+            }
             lines.push(format!("3D stage: {} over: {}", leg.name(), leg_words(&r)));
             self.row(&r);
             self.results.push(r);
@@ -529,6 +558,7 @@ impl StageRun {
         let leg = self.setup.legs[i];
         self.current = Some((i, t, round));
         self.look = None;
+        self.begun = Some(crate::stage_render::totals());
         // The governor starts afresh; the hold for the baseline is set from
         // `holds_previews` (here, and by the app each pass).
         st.preview_governor.reset();
@@ -571,7 +601,7 @@ impl StageRun {
         let pct = |s: Option<f64>| s.map_or(String::new(), |s| format!("{:.2}", s * 100.0));
         let _ = writeln!(
             f,
-            "{},{},{:.1},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{:.1},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.leg.map_or("", Leg::token),
             r.round,
             r.secs,
@@ -611,6 +641,8 @@ impl StageRun {
             r.stage.light_left_out,
             r.stage.thread_stops,
             r.display_fps().map_or(String::new(), |f| format!("{f:.1}")),
+            r.maps.0,
+            r.maps.1,
         );
         let _ = f.flush();
     }
@@ -722,6 +754,10 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
     }
     for r in &threed {
         let leg = r.leg.expect("a leg");
+        if !r.drew() && leg == Leg::Mapped {
+            // Said by `mapped::findings`.
+            continue;
+        }
         if !r.drew() {
             out.push(note(if cx.previews_off && leg != Leg::Display {
                 format!(
@@ -739,7 +775,12 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
         let (Some(b), Some(s)) = (base_share, r.share()) else {
             continue;
         };
-        if s - b >= line && r.worst_late() >= Governor::MIN_SEEN {
+        if s - b >= line && r.worst_late() >= Governor::MIN_SEEN && leg == Leg::Mapped {
+            out.push(problem(super::mapped::costs_words(
+                &percent(s),
+                &percent(b),
+            )));
+        } else if s - b >= line && r.worst_late() >= Governor::MIN_SEEN {
             out.push(problem(format!(
                 "{} the displays missed {} of their pictures; with previews off, {}. On this computer the 3D stage costs the show{}. Set the previews to Strict, or turn them off, for the performance ({SETTINGS_WORDS}).",
                 capital(leg.with()),
@@ -805,6 +846,7 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
             _ => {}
         }
     }
+    out.extend(super::mapped::findings(&legs));
     let stops: u64 = legs.iter().map(|r| r.stage.thread_stops).sum();
     if stops > 0 {
         out.push(problem(format!(
@@ -831,10 +873,10 @@ fn capital(s: &str) -> String {
 /// The one sentence of the verdict, for the report and the window.
 pub fn in_short(results: &[LegResult], cx: &Context, findings: &[Finding]) -> String {
     let legs = by_leg(results, &cx.setup.legs);
-    if findings
-        .iter()
-        .any(|f| f.severity == Severity::Problem && f.text.contains("costs the show"))
-    {
+    if findings.iter().any(|f| {
+        f.severity == Severity::Problem
+            && (f.text.contains("costs the show") || f.text.starts_with("With a mapped"))
+    }) {
         return "The 3D stage costs the displays on this computer: see above.".into();
     }
     let base = legs
@@ -901,6 +943,13 @@ pub fn report_part(results: &[LegResult], cx: &Context, findings: &[Finding]) ->
         ),
         None => {}
     }
+    if let Some(m) = &s.mapped {
+        out.push(format!(
+            "The lap was also shown on a canvas the screens show; in the leg with a mapped projector, {} showed the screens as {} sees them, through its lens map.",
+            m.display_name,
+            m.during.name
+        ));
+    }
     out.push(format!(
         "The 3D view in the Test Mode window turned slowly in every leg but the first; each leg the previews' governor started afresh, and its first {SETTLE:.0} s were not measured."
     ));
@@ -934,6 +983,18 @@ pub fn report_part(results: &[LegResult], cx: &Context, findings: &[Finding]) ->
             line.push_str(&format!(
                 "; {:.1} ms of processor time a 3D picture on average",
                 ms as f64 / 1000.0
+            ));
+        }
+        if leg == Leg::Mapped {
+            line.push_str(&format!(
+                "; {} lens map{} made{}",
+                r.maps.0,
+                if r.maps.0 == 1 { "" } else { "s" },
+                if r.maps.1 > 0 {
+                    format!(", {} refused", r.maps.1)
+                } else {
+                    String::new()
+                }
             ));
         }
         if let Some(fps) = r.display_fps() {
@@ -973,6 +1034,7 @@ mod tests {
             screens: 3,
             projectors: 2,
             stage_display: None,
+            mapped: None,
             legs: vec![Leg::Baseline, Leg::View, Leg::Light, Leg::Display],
         }
     }
@@ -997,6 +1059,7 @@ mod tests {
                 ..Default::default()
             },
             refresh_hz: None,
+            maps: (0, 0),
         }
     }
 
@@ -1268,5 +1331,58 @@ mod tests {
         }
         assert_eq!(run.results.len(), 10, "20 minutes of 2-minute legs");
         assert_eq!(run.results.last().unwrap().round, 3);
+    }
+
+    #[test]
+    fn a_mapped_projectors_leg_is_judged_by_the_same_line() {
+        use crate::preview_pace::Strictness;
+        let mut s = setup();
+        s.legs.push(Leg::Mapped);
+        let mapped = |late: u32, maps: (u64, u64)| LegResult {
+            maps,
+            ..leg(Leg::Mapped, 3000, late, 0, 0)
+        };
+        let base = leg(Leg::Baseline, 3000, 9, 0, 0);
+        // Within the line: nothing to say, and the short sentence counts it.
+        let legs = [base.clone(), mapped(12, (1, 0))];
+        let c = cx(&s, Strictness::Strict);
+        let f = judge(&legs, &c);
+        assert!(f.is_empty(), "{f:?}");
+        assert!(
+            in_short(&legs, &c, &f).starts_with("With a mapped projector showing the lap"),
+            "{}",
+            in_short(&legs, &c, &f)
+        );
+        // 4% against 0.3%: over Strict's 1%, a Problem in its own words.
+        let legs = [base.clone(), mapped(120, (1, 0))];
+        let f = judge(&legs, &c);
+        assert_eq!(
+            problems(&f),
+            [
+                "With a mapped projector showing the lap the displays missed 4.0% of their pictures; with previews off, 0.3%. On this computer a mapped projector costs the show: its picture is drawn for every frame and never gives way. Try a smaller canvas, or fewer canvases a projector."
+            ]
+        );
+        assert_eq!(
+            in_short(&legs, &c, &f),
+            "The 3D stage costs the displays on this computer: see above."
+        );
+        // Under Relaxed's 5%: none.
+        assert!(problems(&judge(&legs, &cx(&s, Strictness::Relaxed))).is_empty());
+        // A card that refused the map: a Problem, and the leg not compared.
+        let legs = [base.clone(), mapped(120, (0, 1))];
+        let f = judge(&legs, &c);
+        assert_eq!(problems(&f).len(), 1);
+        assert!(problems(&f)[0].contains("stays black"), "{f:?}");
+        // No map made: said, never passed.
+        let legs = [base, mapped(2, (0, 0))];
+        let f = judge(&legs, &c);
+        assert!(f[0].text.starts_with("No lens map was made"), "{f:?}");
+        assert!(in_short(&legs, &c, &f).starts_with("Not measured"));
+        let part = report_part(&legs, &c, &f).join(" / ");
+        assert!(
+            part.contains("A mapped projector's display, 41 s measured"),
+            "{part}"
+        );
+        assert!(part.contains("0 lens maps made"), "{part}");
     }
 }

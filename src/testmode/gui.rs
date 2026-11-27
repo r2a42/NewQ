@@ -1483,6 +1483,9 @@ fn stage_running(ui: &mut egui::Ui, st: &mut UiState, s: &super::stage::StageRun
                 }
                 _ => "A display with no window shows the stage, drawn for the previews only, at their pace.",
             },
+            Leg::Mapped => {
+                "The last monitor shows the screens through a mapped projector, the lap on the canvas they show."
+            }
         })
         .weak()
         .small(),

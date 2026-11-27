@@ -1198,12 +1198,17 @@ pub(super) fn stage_setup(
             }
         })
     };
+    // The lap on a canvas too, and a mapped projector for the last leg.
+    let mapped = super::mapped::setup(show, mirror, &mut notes);
     let mut legs = vec![Leg::Baseline, Leg::View];
     if projectors > 0 {
         legs.push(Leg::Light);
     }
     if stage_display.is_some() {
         legs.push(Leg::Display);
+    }
+    if mapped.is_some() {
+        legs.push(Leg::Mapped);
     }
     if sample {
         notes.push(format!(
@@ -1219,6 +1224,7 @@ pub(super) fn stage_setup(
             screens,
             projectors,
             stage_display,
+            mapped,
             legs,
         },
         notes,
@@ -2929,11 +2935,47 @@ mod tests {
             .collect();
         let ids: Vec<OutputId> = b.show.outputs.iter().map(|o| o.id).collect();
         assert_eq!(throws, vec![Some(ids[0]), Some(ids[1])]);
+        let m = setup.mapped.as_ref().expect("a mapped leg");
         let first = b.show.stage3d.surfaces[0].feed.output();
-        assert_eq!(first, Some(ids[0]), "the screens show the test's picture");
+        assert_eq!(first, Some(m.canvas), "the screens show the lap's canvas");
+        assert!(b.show.is_canvas(m.canvas));
+        assert!(
+            b.show
+                .cues
+                .iter()
+                .filter_map(|c| c.kind.media())
+                .any(|media| media.also_on.contains(&m.canvas)),
+            "the lap is on the canvas too"
+        );
         assert_eq!(
             setup.legs,
-            [Leg::Baseline, Leg::View, Leg::Light, Leg::Display]
+            [
+                Leg::Baseline,
+                Leg::View,
+                Leg::Light,
+                Leg::Display,
+                Leg::Mapped
+            ]
+        );
+        // The projector on the last monitor's display, mapped in its leg
+        // alone; put back after.
+        assert_eq!(m.display, ids[1]);
+        let mut show = b.show.clone();
+        assert!(show.mapped_projector(m.display).is_none());
+        assert!(setup.apply(&mut show, Leg::Mapped));
+        assert_eq!(
+            show.mapped_projector(m.display).map(|p| p.id),
+            Some(m.projector)
+        );
+        assert!(show.mapped_refused(m.projector).is_none());
+        assert_eq!(show.mapped_feeds(m.projector).used, vec![m.canvas]);
+        assert!(!show.shows_stage(m.display));
+        assert!(setup.apply(&mut show, Leg::Baseline));
+        assert!(show.mapped_projector(m.display).is_none());
+        assert_eq!(
+            serde_json::to_string(&show).unwrap(),
+            serde_json::to_string(&b.show).unwrap(),
+            "all put back"
         );
         let d = setup.stage_display.as_ref().expect("a stage display");
         assert!(d.windowed && d.id == ids[1] && d.monitor == Some(2));
@@ -2961,6 +3003,9 @@ mod tests {
         assert_eq!(setup.projectors, 1);
         let d = setup.stage_display.as_ref().unwrap();
         assert!(!d.windowed && d.before.monitor.is_none() && !d.before.enabled);
+        // The one monitor's display is the mapped one in its leg.
+        let m = setup.mapped.as_ref().expect("a mapped leg on one monitor");
+        assert_eq!(m.display, b.show.outputs[0].id);
         assert!(d.during.enabled && d.during.source.is_some());
         let mut show = b.show.clone();
         setup.apply(&mut show, Leg::Display);
@@ -2981,11 +3026,15 @@ mod tests {
         let setup = b.stage.unwrap();
         assert!(!setup.sample && setup.screens == 1 && setup.projectors == 0);
         assert!(b.show.stage3d.venue.is_none());
-        assert_eq!(setup.legs, [Leg::Baseline, Leg::View, Leg::Display]);
+        // A projector is added for the mapped leg, hidden till then: no
+        // light leg.
         assert_eq!(
-            b.show.stage3d.surfaces[0].feed.output(),
-            Some(b.show.outputs[0].id)
+            setup.legs,
+            [Leg::Baseline, Leg::View, Leg::Display, Leg::Mapped]
         );
+        let m = setup.mapped.as_ref().unwrap();
+        assert!(!m.before.visible && !m.before.mapped && m.during.mapped);
+        assert_eq!(b.show.stage3d.surfaces[0].feed.output(), Some(m.canvas));
         // Across a show network: no display is changed mid-test.
         let b = build_stage(
             &original,
@@ -2995,7 +3044,14 @@ mod tests {
             false,
         );
         let setup = b.stage.unwrap();
-        assert!(setup.stage_display.is_none());
+        assert!(setup.stage_display.is_none() && setup.mapped.is_none());
         assert_eq!(setup.legs, [Leg::Baseline, Leg::View, Leg::Light]);
+        assert!(
+            b.notes
+                .iter()
+                .any(|n| n.contains("no leg with a mapped projector")),
+            "{:?}",
+            b.notes
+        );
     }
 }

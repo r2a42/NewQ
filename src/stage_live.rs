@@ -1203,6 +1203,9 @@ impl StageLive {
                         for g in &feed.groups {
                             groups_key(&mut h, g);
                             for l in &g.layers {
+                                // A canvas playing: the throw's target's own
+                                // stamp never changes, its pictures' do.
+                                h.bytes(&l.texture.stamp().to_le_bytes());
                                 l.texture.ensure_slot(owner.slot(0, j));
                             }
                         }

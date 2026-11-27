@@ -100,8 +100,8 @@ impl PartPlan {
 
 /// About how long a Short cue or timeline lap takes, with its getting ready.
 const SHORT_SECS: f64 = 60.0;
-/// The 3D stage part's four Short legs, with its getting ready.
-const STAGE_SHORT_SECS: f64 = 4.0 * super::stage::SHORT_LEG_SECS + 20.0;
+/// The 3D stage part's five Short legs, with its getting ready.
+const STAGE_SHORT_SECS: f64 = 5.0 * super::stage::SHORT_LEG_SECS + 20.0;
 
 /// Whether the 3D stage part is ticked by itself for `show`: it has a
 /// projector, or a display that shows the stage (owner's decision 8).
@@ -489,7 +489,7 @@ mod tests {
         );
         let alone = plan_with(Level::Short, ticks(false, false, false), true, false);
         assert_eq!(alone.len(), 1);
-        assert_eq!(summary(&alone), "The 3D stage: about 3 minutes");
+        assert_eq!(summary(&alone), "The 3D stage: about 4 minutes");
         assert_eq!(alone[0].part.slug(), "stage3d");
         assert_eq!(
             alone[0].part.flavour(),
