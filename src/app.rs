@@ -4260,7 +4260,10 @@ impl App {
         let removed_layer = self.textures.len() != before;
         self.crumbs.lap("dropping textures");
 
-        let playing = self.engine.is_active();
+        // A screen still on its way after its cue ended plays on too: the
+        // projectors and views follow it, and a display computer's hidden
+        // control window won't ask for the frames.
+        let playing = self.engine.is_active() || self.engine.screens_moving();
         // One extra frame after the last layer stops, so outputs go to black.
         self.part("Drawing the outputs", |app| {
             crate::crash::test_panic("outputs");
