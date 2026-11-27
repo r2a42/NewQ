@@ -1334,12 +1334,15 @@ impl Show {
         if let Some(k) = s.chosen_kind() {
             return k;
         }
-        let boxes = s.boxes();
+        // A screen that moves on a cue is judged at home and at each place
+        // its cues take it to, still from the show alone: one that a cue
+        // moves into a beam is projection, not an LED screen left black.
+        let rests = self.resting_boxes(s);
         let reached = self
             .stage3d
             .projectors
             .iter()
-            .any(|p| p.reaches_boxes(&boxes));
+            .any(|p| rests.iter().any(|b| p.reaches_boxes(b)));
         match (reached, s.rear) {
             (false, _) => ScreenKind::Led,
             (true, true) => ScreenKind::Rear,
@@ -1350,8 +1353,8 @@ impl Show {
     /// Screen `s`'s `Surface::boxes` where it rests: at home, and a
     /// movable screen also at each place its cues take it to
     /// (`Show::screen_places`). Whether a mapped projector maps it is
-    /// worked out from these, never where it is in the middle of a move
-    /// (its kind, `kind_of`, from home alone: the scene's key has no cues).
+    /// worked out from these, never where it is in the middle of a move;
+    /// so is its kind (`kind_of`).
     pub fn resting_boxes(&self, s: &Surface) -> Vec<Vec<[[f32; 3]; 8]>> {
         let mut out = vec![s.boxes()];
         for (_, at) in self.screen_places(s.id) {
