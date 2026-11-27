@@ -203,3 +203,29 @@ fn a_display_that_isnt_mapped_keeps_its_own_mesh() {
     );
     assert_eq!(show.projector(p).unwrap().fine, None);
 }
+
+/// A line-up in progress is put away when Show mode starts, though the 3D
+/// stage page (which tends it too) isn't drawn: `ui::draw` tends it every
+/// pass.
+#[test]
+fn a_line_up_in_progress_is_put_away_when_show_mode_starts_with_the_page_closed() {
+    let (mut show, _, p) = mapped_show();
+    let mut st = UiState {
+        settings_page: SettingsPage::Displays,
+        line_up: Some(stage_lineup::LineUpDraft::new(p, (1920, 1080), 1)),
+        ..UiState::default()
+    };
+    let mut w = Win {
+        ctx: egui::Context::default(),
+        e: Engine::for_tests(),
+        t: 1.0,
+    };
+    w.settle(&mut show, &mut st);
+    assert!(st.line_up.is_some(), "kept while it may go on");
+    st.show_mode = true;
+    w.frame(&mut show, &mut st, vec![]);
+    assert!(
+        st.line_up.is_none(),
+        "put away in Show mode, the page closed"
+    );
+}

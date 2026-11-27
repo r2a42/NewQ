@@ -376,8 +376,6 @@ pub struct UiState {
     /// A projector's line-up in progress (`stage_lineup`): UI state, never in
     /// the show until *Done*. The app sends its crosses to the computer that
     /// drives the projector, and `End` once it is gone.
-    // (Read by the app and the panes: round 2, agents A and B.)
-    #[allow(dead_code)]
     pub line_up: Option<stage_lineup::LineUpDraft>,
     /// The one governor of every preview (`preview_pace`): the app tells it
     /// how the outputs are doing each pass; each preview asks it
@@ -1203,6 +1201,10 @@ fn go_readout(show: &Show, engine: &mut Engine) -> Option<(String, Option<String
 
 pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState) {
     st.sync_selection();
+    // A line-up in progress that may not go on (Show mode, a test, a
+    // follower, its projector gone) is put away whether or not the 3D
+    // stage page is drawn.
+    stage_lineup::tend(show, st);
     st.display_labels = display_labels(show);
     st.note_preview_panes();
     if st.saved_json.is_none() {
@@ -1802,6 +1804,7 @@ pub fn draw_popout(
     engine: &mut Engine,
     st: &mut UiState,
 ) {
+    stage_lineup::tend(show, st);
     st.display_labels = display_labels(show);
     let mut actions: Vec<Action> = Vec::new();
     actions.append(&mut st.stage.actions);
