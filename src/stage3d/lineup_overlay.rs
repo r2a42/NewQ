@@ -167,7 +167,9 @@ fn number(img: &mut RgbaImage, n: u16, c: [u8; 4]) {
     let scale: i64 = if digits.len() <= 2 { 2 } else { 1 };
     let cell = 6 * scale;
     let x0 = SPRITE as i64 / 2 + RING as i64 - 2;
-    let x0 = x0.min(SPRITE as i64 - cell * digits.len() as i64 - 1).max(0);
+    let x0 = x0
+        .min(SPRITE as i64 - cell * digits.len() as i64 - 1)
+        .max(0);
     let y0 = 2;
     let set = |d: u8, fx: i64, fy: i64| -> bool {
         (0..5).contains(&fx) && (0..7).contains(&fy) && figure_bit(d, fx as usize, fy as usize)
@@ -331,7 +333,12 @@ mod tests {
 
     fn at(img: &RgbaImage, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * img.width + x) * 4) as usize;
-        [img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3]]
+        [
+            img.data[i],
+            img.data[i + 1],
+            img.data[i + 2],
+            img.data[i + 3],
+        ]
     }
 
     fn inked(img: &RgbaImage) -> usize {
