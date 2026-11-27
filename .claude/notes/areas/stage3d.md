@@ -170,7 +170,10 @@ is a piece of a longer entry that covered several areas.
   `PIXEL_STEPS_MM`/`SCALE`/`OVERLAP` (the shader is given them), `auto_white`, `ROOM_LIGHT`. App:
   `app.rs::projector_throws` (only when a request has its light on; shape by `stage_projectors::shape_of`,
   as the lines) and `throw_picture` (the display's group with `warp = pin`, its sub displays by
-  `corner_pin(area)`, `blend.clamped()`; None for a display that shows the stage) ->
+  `corner_pin(area)`, `blend.clamped()`; None for a display that shows the stage; a mapped projector's by
+  `mapped_throw`: its own group shows its `MapUse::Preview` frame's target, asked for at `throw_size(1.0)` by
+  `App::lens_maps(gpu, light)`, with `ThrowPicture::mapped` set and slots made for `MapOwner::Throw(n)`,
+  `n` its place among the throws; none until the map is made; those canvases stay preview work) ->
   `StageLive::send(.., projectors: &[ProjectorThrow], ..)` -> `light_up` (`lit_scene` made again only on
   `lit_key`; a key of the pictures, `groups_key`, xored into a lit view's signature, so a blend width or a
   still redraws it) -> `ThrowJob`s only in a job with a lit view, `throw_size(lit scale)` (960 wide 16:9,

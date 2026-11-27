@@ -2169,3 +2169,369 @@ fn a_computer_with_the_key_proves_it_only_to_a_peer_that_proved_it_first() {
     assert!(d.view().following.as_ref().is_some_and(|f| f.online));
     assert!(b.view().following.as_ref().is_some_and(|f| f.online));
 }
+
+// ---- Line-up across the network (mapping plan 4.4, `net::lineup`) ----
+
+mod line_up {
+    use super::*;
+    use crate::net::lineup::{
+        LEASE, LineUpMsg, Link, Mark, Overlay, Route, SEEN_WITHIN, Sender, Shown, Source, Target,
+        Under, route,
+    };
+    use crate::show::OutputId;
+
+    const D: OutputId = OutputId(3);
+    const MONITOR: (u32, u32) = (1920, 1080);
+    const REPEAT_AFTER: Duration = Duration::from_secs(2);
+
+    fn want(x: f32) -> Overlay {
+        Overlay {
+            session: 0,
+            seq: 0,
+            display: D,
+            pixels: MONITOR,
+            marks: vec![Mark {
+                n: 1,
+                at: [x, 200.0],
+                on: true,
+            }],
+            active: Some(0),
+            outline: None,
+            under: Under::Black,
+        }
+    }
+
+    /// The follower's side, as `app/lineup.rs` has it: each line-up message
+    /// the hub hands on, routed by `lineup::route` with `play_message`'s
+    /// `primary` (from the primary it follows), taken by its `Shown` at `now`
+    /// (a clock the test owns), and the `Seen` told back.
+    fn follower_takes(d: &Hub, shown: &mut Shown, now: Instant) {
+        for ev in d.take_events() {
+            let NetEvent::Message {
+                from,
+                msg: Msg::LineUp(m),
+            } = ev
+            else {
+                continue;
+            };
+            let v = d.view();
+            let primary = v.me.primary == Some(from) && v.me.adopted() && !v.is_primary();
+            if route(&m, primary, v.is_primary()) == Route::Shown
+                && let Some(seen) = shown.take(Source::Primary(from), *m, |_| Some(MONITOR), now)
+            {
+                d.tell(Some(from), Msg::LineUp(Box::new(seen)), true);
+            }
+        }
+    }
+
+    /// The primary's side: the `Seen`s that came back, heard by its sender.
+    fn primary_hears(p: &Hub, sender: &mut Sender, now: Instant) -> usize {
+        let mut n = 0;
+        for ev in p.take_events() {
+            if let NetEvent::Message {
+                from,
+                msg: Msg::LineUp(m),
+            } = ev
+                && route(&m, false, p.view().is_primary()) == Route::Sender
+                && sender.heard(Target::Computer(from), &m, now)
+            {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn until_ok(what: &str, mut f: impl FnMut() -> bool) {
+        let began = Instant::now();
+        while !f() {
+            assert!(
+                began.elapsed() < Duration::from_secs(60),
+                "waited a minute for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Two hubs on loopback with a passcode: the primary's nudges reach the
+    /// follower and its crosses follow; its `Seen` reaches the primary.
+    #[test]
+    fn the_crosses_move_on_the_follower_and_seen_comes_back() {
+        let mut rig = Rig::new();
+        let (p, d) = primary_and_display(&mut rig);
+        let did = id_of(&d);
+        p.ask(NetAction::SetPasscode(Some("opening night".into())));
+        until(&d, "the key", |v| v.me.passcode.is_some());
+        until(&p, "the display connected, proved", |v| {
+            peer(v, did).is_some_and(|x| x.connected && x.ours)
+        });
+        let _ = (p.take_events(), d.take_events());
+        let t0 = Instant::now();
+        let mut sender = Sender::new(41, D, Target::Computer(did));
+        let mut shown = Shown::default();
+        for (k, x) in [100.0, 101.0, 102.5].into_iter().enumerate() {
+            let now = t0 + Duration::from_millis(16 * k as u64);
+            let m = sender.due(&want(x), None, 0, now).expect("a nudge is sent");
+            p.tell(Some(did), Msg::LineUp(Box::new(m)), true);
+            until_ok("the nudge on the follower", || {
+                follower_takes(&d, &mut shown, now);
+                shown.overlay().is_some_and(|o| o.marks[0].at[0] == x)
+            });
+        }
+        let held = shown.overlay().unwrap();
+        assert_eq!((held.session, held.seq, held.display), (41, 3, D));
+        until_ok("the follower's Seen", || {
+            primary_hears(&p, &mut sender, t0);
+            sender.link(true, t0) == Link::Seen { pixels: MONITOR }
+        });
+        // `End`: the crosses go.
+        p.tell(Some(did), Msg::LineUp(Box::new(sender.end())), true);
+        until_ok("the end", || {
+            follower_takes(&d, &mut shown, t0);
+            shown.overlay().is_none()
+        });
+    }
+
+    /// A stranger with the primary's id (the primary gone) sends line-up
+    /// crosses: the hub hands none of it on, with or without a passcode. And
+    /// the app's own rule passes by anything not from its primary.
+    #[test]
+    fn a_strangers_line_up_is_never_heard() {
+        for passcode in [false, true] {
+            let mut rig = Rig::new();
+            let (p, d) = primary_and_display(&mut rig);
+            let pid = id_of(&p);
+            if passcode {
+                p.ask(NetAction::SetPasscode(Some("opening night".into())));
+                until(&d, "the key", |v| v.me.passcode.is_some());
+            }
+            let network = p.view().me.network;
+            let dport = d.view().port.unwrap();
+            drop(p);
+            until(&d, "the primary gone", |v| {
+                v.following.as_ref().is_some_and(|f| !f.online)
+            });
+            let _ = d.take_events();
+            let mut roles = vec![Role::Display, Role::Alone];
+            if passcode {
+                roles.push(Role::Primary);
+            }
+            for role in roles {
+                let mut s = Stranger::connect(dport, raw_hello(pid, role, network, "Booth".into()));
+                s.until("the display's hello", |seen, _| {
+                    seen.iter().any(|m| matches!(m, Msg::Hello(_)))
+                });
+                s.say(&Msg::Prove { mac: None });
+                s.say(&Msg::Welcome);
+                let mut o = want(5.0);
+                o.session = 66;
+                o.seq = 1;
+                s.say(&Msg::LineUp(Box::new(LineUpMsg::Show(Box::new(o)))));
+                s.say(&Msg::LineUp(Box::new(LineUpMsg::End { session: 66 })));
+                s.say(&Msg::Ping { n: 7 });
+                s.until("the pong after the crosses", |seen, closed| {
+                    closed || seen.iter().any(|m| matches!(m, Msg::Pong { n: 7 }))
+                });
+                let heard = messages_from(&d, pid);
+                assert!(
+                    heard.is_empty(),
+                    "passcode {passcode}, claimed {role:?}: the app heard {heard:?}"
+                );
+            }
+        }
+        let show = LineUpMsg::Show(Box::new(want(1.0)));
+        assert_eq!(route(&show, false, false), Route::Pass);
+        assert_eq!(route(&show, false, true), Route::Pass);
+    }
+
+    /// A stranger claiming to be the primary's display, with no proof, says
+    /// `Seen`: the primary with a passcode hands none of it on; and its
+    /// sender takes a `Seen` only from the computer it is for.
+    #[test]
+    fn a_strangers_seen_is_never_taken_by_the_primary() {
+        let mut rig = Rig::new();
+        let (p, d) = primary_and_display(&mut rig);
+        let did = id_of(&d);
+        p.ask(NetAction::SetPasscode(Some("opening night".into())));
+        until(&d, "the key", |v| v.me.passcode.is_some());
+        let network = p.view().me.network;
+        let pport = p.view().port.unwrap();
+        drop(d);
+        until(&p, "the display gone", |v| {
+            peer(v, did).is_some_and(|x| !x.connected)
+        });
+        let _ = p.take_events();
+        let mut s = Stranger::connect(pport, raw_hello(did, Role::Display, network, "Left".into()));
+        s.until("the primary's proof request", |seen, _| {
+            seen.iter().any(|m| matches!(m, Msg::Prove { .. }))
+        });
+        s.say(&Msg::Welcome);
+        let seen = LineUpMsg::Seen {
+            session: 41,
+            seq: 1,
+            pixels: MONITOR,
+        };
+        s.say(&Msg::LineUp(Box::new(seen.clone())));
+        s.say(&Msg::Ping { n: 7 });
+        s.until("the ping read", |seen, closed| {
+            closed || seen.iter().any(|m| matches!(m, Msg::Pong { n: 7 }))
+        });
+        let heard = messages_from(&p, did);
+        assert!(heard.is_empty(), "the primary heard {heard:?}");
+        let t0 = Instant::now();
+        let mut sender = Sender::new(41, D, Target::Computer(did));
+        sender.due(&want(1.0), None, 0, t0);
+        assert!(!sender.heard(Target::Computer(NodeId(did.0 ^ 1)), &seen, t0));
+        assert!(sender.heard(Target::Computer(did), &seen, t0));
+    }
+
+    /// The primary goes mid line-up: on the follower's own clock the crosses
+    /// go within the lease. The primary back, the next `Show` puts them up
+    /// again; meanwhile the primary's sender says the link is lost.
+    #[test]
+    fn a_dropped_link_stops_the_crosses_within_the_lease() {
+        let mut rig = Rig::new();
+        let (p, d) = primary_and_display(&mut rig);
+        let did = id_of(&d);
+        let _ = (p.take_events(), d.take_events());
+        let t0 = Instant::now();
+        let mut sender = Sender::new(8, D, Target::Computer(did));
+        let mut shown = Shown::default();
+        let m = sender.due(&want(10.0), None, 0, t0).unwrap();
+        p.tell(Some(did), Msg::LineUp(Box::new(m)), true);
+        until_ok("the crosses up", || {
+            follower_takes(&d, &mut shown, t0);
+            shown.overlay().is_some()
+        });
+        let pdir = rig.dirs[0].clone();
+        drop(p);
+        until(&d, "the primary gone", |v| {
+            v.following.as_ref().is_some_and(|f| !f.online)
+        });
+        follower_takes(&d, &mut shown, t0);
+        assert!(!shown.tick(t0 + LEASE - Duration::from_millis(100)));
+        assert!(shown.tick(t0 + LEASE + Duration::from_millis(1)));
+        assert!(shown.overlay().is_none(), "never left on the projector");
+        assert_eq!(sender.link(false, t0 + LEASE), Link::Lost);
+        let p = restart(pdir, rig.base);
+        until(&p, "the display back", |v| {
+            peer(v, did).is_some_and(|x| x.connected && x.ours)
+        });
+        until(&d, "the primary back", |v| {
+            v.following.as_ref().is_some_and(|f| f.online)
+        });
+        let _ = d.take_events();
+        let later = t0 + LEASE + REPEAT_AFTER;
+        let m = sender.due(&want(10.0), None, 0, later).expect("the repeat");
+        p.tell(Some(did), Msg::LineUp(Box::new(m)), true);
+        until_ok("the crosses back", || {
+            follower_takes(&d, &mut shown, later);
+            shown.overlay().is_some()
+        });
+    }
+
+    /// An older peer: a later NewQ's line-up kind and a message kind this
+    /// NewQ doesn't know are read and passed by, the session stays up, and the
+    /// message after them arrives. A computer that doesn't answer line-up
+    /// (one that reads `Msg::LineUp` as `Unknown`) is told apart from a lost
+    /// link: connected, no `Seen`, it is `Older`, in words.
+    #[test]
+    fn an_older_peer_neither_closes_the_session_nor_leaves_the_primary_guessing() {
+        let mut rig = Rig::new();
+        let (p, d) = primary_and_display(&mut rig);
+        let (pid, did) = (id_of(&p), id_of(&d));
+        let _ = (p.take_events(), d.take_events());
+        p.broadcast_json(r#"{"t":"line_up","k":"something_new","n":[1,2]}"#);
+        p.broadcast_json(r#"{"t":"something_newer","line_up":true}"#);
+        let mut o = want(3.0);
+        o.session = 2;
+        o.seq = 1;
+        p.broadcast(Msg::LineUp(Box::new(LineUpMsg::Show(Box::new(o)))));
+        let mut got = Vec::new();
+        until_ok("the known one after them", || {
+            got.extend(messages_from(&d, pid));
+            got.iter()
+                .any(|m| matches!(m, Msg::LineUp(l) if matches!(**l, LineUpMsg::Show(_))))
+        });
+        assert!(
+            got.contains(&Msg::LineUp(Box::new(LineUpMsg::Unknown))),
+            "{got:?}"
+        );
+        // (A message kind this NewQ doesn't know at all goes no further than the hub.)
+        assert!(peer(&p.view(), did).is_some_and(|x| x.connected));
+        // That display never answers: connected, nothing back after
+        // `SEEN_WITHIN`, the primary says so.
+        let t0 = Instant::now();
+        let mut sender = Sender::new(2, D, Target::Computer(did));
+        let m = sender.due(&want(3.0), None, 0, t0).unwrap();
+        p.tell(Some(did), Msg::LineUp(Box::new(m)), true);
+        let later = t0 + SEEN_WITHIN + Duration::from_millis(1);
+        assert_eq!(primary_hears(&p, &mut sender, later), 0);
+        let v = p.view();
+        let x = peer(&v, did).unwrap();
+        let link = sender.link(x.connected, later);
+        assert_eq!(link, Link::Older);
+        let words = crate::net::lineup::link_words(link, &x.name, "0.27.2", MONITOR).unwrap();
+        assert!(words.contains("Left runs NewQ 0.27.2"), "{words}");
+    }
+
+    /// *Done* is one ordinary show edit: the line-up kept on the projector
+    /// reaches the follower in the show the primary sends (its parts), read
+    /// whole and still current there.
+    #[test]
+    fn done_arrives_as_a_show_edit() {
+        use crate::net::play::{ShowAssembly, read_show, show_parts};
+        use crate::stage3d::projector::{LinePoint, LineUp, Solved};
+        let mut rig = Rig::new();
+        let (p, d) = primary_and_display(&mut rig);
+        let pid = id_of(&p);
+        let _ = (p.take_events(), d.take_events());
+        let mut show = crate::show::Show::default();
+        let screen = show.add_surface(None);
+        let id = show.add_projector();
+        let display = show.outputs[0].id;
+        let pr = show.projector_mut(id).unwrap();
+        pr.display = Some(display);
+        pr.mapped = true;
+        pr.placement.position = [1.0, 2.0, 9.0];
+        let mut line_up = LineUp {
+            points: (0..4)
+                .map(|i| LinePoint::on_screen(screen, [i as f32, 0.5, 0.0], [10.0 * i as f32, 5.0]))
+                .collect(),
+            pixels: MONITOR,
+            ..LineUp::default()
+        };
+        line_up.solved = Some(Solved {
+            points_key: line_up.points_key(),
+            pixels: MONITOR,
+            ..Solved::default()
+        });
+        pr.line_up = Some(line_up.clone());
+        let json = serde_json::to_string(&show).unwrap();
+        for part in show_parts(1, &json) {
+            p.tell(None, Msg::ShowPart(Box::new(part)), false);
+        }
+        let mut asm = ShowAssembly::default();
+        let mut whole = None;
+        until_ok("the show on the follower", || {
+            for m in messages_from(&d, pid) {
+                if let Msg::ShowPart(part) = m
+                    && let Some((_, _, json)) = asm.take(*part)
+                {
+                    whole = Some(json);
+                }
+            }
+            whole.is_some()
+        });
+        let (there, _) = read_show(&whole.unwrap()).unwrap();
+        let kept = there.stage3d.projectors[0].line_up.clone().unwrap();
+        assert_eq!(kept, line_up);
+        assert!(
+            kept.is_current(),
+            "the answer is for these points there too"
+        );
+        assert_eq!(
+            there.stage3d.projectors[0].placement.position,
+            [1.0, 2.0, 9.0]
+        );
+    }
+}

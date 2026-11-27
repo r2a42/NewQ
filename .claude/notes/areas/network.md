@@ -10,6 +10,44 @@ See also: the blocks after the real tests also hold notes for other areas: pictu
 `adapters::look_every` (`compositor-and-displays.md`), Test Mode across a network and its network load
 (`testmode.md`), and the rule for a tagged release build, `NEWQ_REQUIRE_NOTARISED` (`packaging.md`).
 
+- Line-up across the network (mapping plan 4.4, round 2 agent B; tried only on loopback hubs and
+  pure state machines, never two real computers and a projector). `net/lineup.rs` (pure, `now` an
+  argument): `Msg::LineUp(Box<LineUpMsg>)`, tagged `k`: `Show(Box<Overlay>)` (the whole state every
+  time: session, seq, display, pixels, `Mark { n, at, on }` in raw monitor pixels, `active`, `outline`
+  (None: keep the session's last), `Under { Black, Dimmed, Unknown }`; every field defaulted), `End
+  { session }`, `Seen { session, seq, pixels }` back, `#[serde(other)] Unknown`; an older NewQ reads
+  the whole as `Msg::Unknown`, which the hub passes by. `Overlay::sane` drops what can't be drawn
+  (non-finite, over `MAX_MARKS`/`MAX_OUTLINE_*`, pixels 0 or over `MAX_PIXELS`: refused). `Shown` (the
+  projector's computer): `take(source, msg, monitor, now)` (a display not on a monitor here, a
+  seq not newer within the session: passed by; a new session replaces; returns the `Seen`), the
+  **lease** `tick(now)` (`LEASE` 5 s since the last `Show`, `saturating_duration_since`), `keep_only(
+  primary)` (crosses from a primary not followed now go at once; `Source::Here` kept), `stamp` for
+  redraws. `Sender` (the primary): `due(want, outline, rev, now)` sends a change at once, the whole
+  state every `REPEAT` (1 s), the outline at most every `OUTLINE_EVERY` (200 ms) and with each repeat;
+  `heard` takes a `Seen` only from its `Target` for its session and a seq it sent; `link(connected,
+  now)` -> `Link { Waiting, Seen { pixels }, Lost, Older }` (connected, no `Seen` after
+  `SEEN_WITHIN` 3 s), `link_words` the panes' sentences (lost link, older NewQ with its version,
+  monitor size not the points'). **Trust**, `route(msg, from_my_primary, leading)`: on top of the hub
+  (only heeded sessions are handed on; `tell` only writes to heeded ones), `Show`/`End` only from the
+  primary this computer follows (play_message's `primary`) and only for a display with a window here;
+  `Seen` only on a primary; a primary takes no crosses. Without a passcode a stranger could blank a
+  projector for five seconds at a time; it can already send it a show: no new hole. In the app,
+  `app/lineup.rs`: `LineUpState { shown, sender, sprites, outline }`, `play_message`'s `Msg::LineUp`
+  arm -> `line_up_message`; `line_up_pass` each pass after `play_send_show` (lease, `keep_only`, the
+  draft `UiState::line_up` -> `Sender` for its display's computer, `End` when the draft goes or its
+  session changes, the link in words on the draft); **one path**: a display on this computer is
+  `Target::Here`, its messages go into this computer's own `Shown` and the `Seen` back
+  (`no_window_here` when it has no window); `line_up_wake` (100 ms while either is held);
+  `update_outputs`: `line_up_groups` (a group in raw monitor pixels: the outline picture, a sprite per
+  mark from `stage3d::lineup_overlay`, textures made once) and `with_crosses` (black, or the list's
+  opacities times `DIM`), drawn last, the window's blend off, its mapped frames dropped on black; a
+  change of `stamp` is a redraw. *Done* is the panes' one show edit, sent by show sync. Tests:
+  `net/lineup_tests.rs` (lease, late and stale, sane, outline, keep_only, the rule, the sender's
+  pace, the link and words, alone as one loop, the wire), `net/hub_tests.rs::line_up` (crosses move
+  on the follower with a passcode and `Seen` back; a stranger's line-up unheard with and without a
+  passcode; a stranger's `Seen`; a dropped primary and the lease, then back; an older peer; *Done* as
+  a show edit).
+
 - `src/net/` (stage 1 of `.claude/notes/network-plan.md`; results and what remains in
   `network-sync-trial.md`): `clock.rs` a follower's shared clock from NTP-style exchanges (pure;
   weighted fit by round trip, drift, slews once locked, never back), `msg.rs` the wire format

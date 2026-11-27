@@ -351,6 +351,8 @@ impl App {
             }
             Msg::StartAtLogin { on } if primary => self.set_start_at_login(on),
             Msg::NetTest(t) => self.net_test_message(from, *t, primary),
+            // Line-up's crosses (`app/lineup.rs`: `lineup::route` is the rule).
+            Msg::LineUp(m) => self.line_up_message(from, *m, primary),
             _ => {}
         }
     }
