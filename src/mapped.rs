@@ -396,17 +396,31 @@ pub struct FeedFrame {
     pub canvas: (u32, u32),
 }
 
-/// A screen that can move, drawn live over the map (round 3; none yet).
+/// A piece of a screen that can move, drawn live over the map (mapping plan
+/// 4.2, the live pass): one entry per piece of the screen's shape (a faceted
+/// screen is several), as `Stage3d::scene` makes its parts, at where the
+/// screen is this frame (`Engine::moved_screens`, or home).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovingScreen {
     pub surface: SurfaceId,
-    /// Where the screen is this frame (column-major, its own frame to the
-    /// room's).
+    /// The piece's triangles (`Part::mesh`): the same while the show is, so
+    /// uploaded once and kept by `mesh_key`.
+    pub mesh: Arc<crate::stage3d::scene::Mesh>,
+    /// `Part::mesh_key`.
+    pub mesh_key: u64,
+    /// Where the piece is this frame (column-major, its own frame to the
+    /// room's: the screen's placement now times the piece's own transform).
     pub matrix: [[f32; 4]; 4],
-    /// Which of the frame's feeds it shows.
-    pub feed: u8,
-    /// The part of that feed's picture (`[x, y, w, h]`).
+    /// Which of the frame's feeds it shows, by its place in
+    /// `MappedFrame::feeds` (as `lensmap::part_feed` gives it). None: none of
+    /// them (unfed, an LED screen, a canvas past the four): drawn black, still
+    /// in the way of what is behind it.
+    pub feed: Option<u8>,
+    /// The part of that feed's picture (`[x, y, w, h]`, `lensmap::part_region`).
     pub region: [f32; 4],
+    /// A front screen (`Catch::front_only`): met from behind, it shows
+    /// nothing, as the bake has it.
+    pub front_only: bool,
 }
 
 /// One mapped picture to draw: `map` looked up at every pixel of `target`,

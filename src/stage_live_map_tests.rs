@@ -39,7 +39,7 @@ fn map_pass(
             )
         })
         .collect();
-    live.send(gpu, show, shared, &[], &pictures, &[], true);
+    live.send(gpu, show, shared, &[], &pictures, &[], &[], true);
     maps
 }
 
@@ -132,7 +132,16 @@ fn a_bake_wanted_starts_the_thread_and_its_map_outlives_the_idle_release() {
     for e in live.maps.values_mut() {
         e.asked_at = Instant::now().checked_sub(MAP_KEPT);
     }
-    live.send(&gpu, &show, &mut shared, &[], &HashMap::new(), &[], false);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[],
+        &HashMap::new(),
+        &[],
+        &[],
+        false,
+    );
     assert!(live.maps.is_empty());
     assert!(!live.feeds_output(a));
 }
@@ -232,7 +241,16 @@ fn a_3d_views_map_waits_for_a_lit_view_the_governor_lets_draw() {
             },
             lines: Default::default(),
         });
-        live.send(&gpu, &show, &mut shared, &[], &HashMap::new(), &[], false);
+        live.send(
+            &gpu,
+            &show,
+            &mut shared,
+            &[],
+            &HashMap::new(),
+            &[],
+            &[],
+            false,
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(map.is_some());

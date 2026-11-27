@@ -2946,6 +2946,7 @@ impl App {
             &stage_outputs,
             &pictures,
             &projectors,
+            &self.engine.moved_screens(),
             playing || was_waiting,
         ) || self.stage.venue_busy();
 

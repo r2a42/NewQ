@@ -857,7 +857,8 @@ impl StageLive {
     /// `fresh` whether anything moved since the last pass (something plays,
     /// a picture came in). A display's view is drawn again when what it
     /// sees changed, the pictures of the displays on the stage included (a
-    /// test pattern, a still). The displays a window or stream shows come
+    /// test pattern, a still). `screens`: where the moved screens are. The
+    /// displays a window or stream shows come
     /// first: while the thread is behind with them, the previews (and the
     /// displays only the previews show) wait. Returns whether a job is
     /// still being drawn.
@@ -870,8 +871,13 @@ impl StageLive {
         outputs: &[StageOutput],
         pictures: &HashMap<OutputId, PictureLayers>,
         projectors: &[ProjectorThrow],
+        screens: &[(crate::stage3d::SurfaceId, crate::stage3d::Placement)],
         fresh: bool,
     ) -> bool {
+        // Where the moved screens are this pass (`Engine::moved_screens`;
+        // mapping plan 4.2): the 3D views and the light follow them (round 3,
+        // agent C).
+        let _ = screens;
         let now = Instant::now();
         // A thread that stopped (a panic) draws nothing: what it was given is
         // to be drawn again by the next one.
