@@ -25,7 +25,12 @@
 //! - `depth` (`Rgba8Unorm`, only when the show has a movable screen): the
 //!   distance from the lens to the nearest thing that stands still, over
 //!   `LensMap::depth_range`, in 24 bits, high byte first in r, g, b; a 255.
-//!   Nothing there is 1.0 (as far as the range goes).
+//!   The distance is along the pixel's ray from the lens's position
+//!   (`Projector::position`), in metres: `render3d::pick`'s `distance` for
+//!   `Projector::ray` at the pixel's middle, not the depth along the lens's
+//!   axis. Nothing there is 1.0 (all 255), which hides nothing; so the
+//!   range's far end must be past everything real. The live pass
+//!   (`mapped_live.rs`) hides a moving screen behind it.
 
 #![allow(dead_code)]
 
@@ -423,6 +428,28 @@ pub struct MovingScreen {
     pub front_only: bool,
 }
 
+/// A moving screen as plain values (no mesh kept, none compared vertex by
+/// vertex): what a new picture is told by (`render::Shot`, the app's
+/// redraw).
+pub type MovingShot = (SurfaceId, u64, [[f32; 4]; 4], Option<u8>, [f32; 4], bool);
+
+/// `moving` as plain values.
+pub fn moving_shots(moving: &[MovingScreen]) -> Vec<MovingShot> {
+    moving
+        .iter()
+        .map(|m| {
+            (
+                m.surface,
+                m.mesh_key,
+                m.matrix,
+                m.feed,
+                m.region,
+                m.front_only,
+            )
+        })
+        .collect()
+}
+
 /// One mapped picture to draw: `map` looked up at every pixel of `target`,
 /// each pixel showing its feed's picture at the place the map gives.
 #[derive(Clone)]
@@ -435,9 +462,11 @@ pub struct MappedFrame {
     pub map: Arc<LensMap>,
     /// The canvases, in `map.feeds`' order: `feeds[i]` is `map.feeds[i]`.
     pub feeds: Vec<FeedFrame>,
-    /// Round 3: far to near. Empty until then.
+    /// The pieces of the movable screens, where this frame's tick put them,
+    /// far to near (`live::moving_for`); drawn over the map by the live pass.
     pub moving: Vec<MovingScreen>,
-    /// The projector's matrix, for the moving screens.
+    /// The projector's matrix, for the moving screens: world to its clip
+    /// space (`lensmap::lens_matrix` at the shape the map was made at).
     pub lens: [[f32; 4]; 4],
     /// Light shares applied (`how.r ^ (1 / gamma)`): false for a stream.
     pub shares: bool,
@@ -543,6 +572,9 @@ struct FrameKit {
     group: Option<(Arc<LensMap>, [u64; MAX_FEEDS], wgpu::BindGroup)>,
     /// The target last drawn into, and a view to draw into it.
     target: Option<(Arc<LayerTexture>, wgpu::TextureView)>,
+    /// The live pass's uniforms and bind group, made at the first frame
+    /// with a moving screen.
+    live: Option<live::FrameLive>,
 }
 
 /// Draws mapped pictures: one per thread that draws them (a window's, a
@@ -556,15 +588,26 @@ pub struct Drawer {
     kit: Option<Kit>,
     frames: Vec<FrameKit>,
     serial: u64,
+    /// The live pass (`mapped_live.rs`): None until a frame has a moving
+    /// screen; then None inside if the card refused it (moving screens
+    /// aren't drawn; the map still is).
+    live: Option<Option<live::LiveKit>>,
+    /// The moving screens' meshes on the card, by `MovingScreen::mesh_key`.
+    meshes: std::collections::HashMap<u64, live::GpuMesh>,
+    /// Counts `draw_all` calls (which meshes were drawn lately).
+    generation: u64,
 }
 
 impl Drawer {
     pub fn new(gpu: &Gpu) -> Drawer {
-        let kit = checked(&gpu.device, || Kit::new(gpu));
+        let kit = checked(&gpu.device, "the map pass", || Kit::new(gpu));
         Drawer {
             kit,
             frames: Vec::new(),
             serial: 0,
+            live: None,
+            meshes: std::collections::HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -597,6 +640,7 @@ impl Drawer {
             return Vec::new();
         };
         let mut cmds = Vec::with_capacity(frames.len() * (MAX_FEEDS + 1));
+        self.generation += 1;
         let most = gpu.device.limits().max_texture_dimension_2d.max(1);
         for (i, frame) in frames.iter().take(MAX_FRAMES).enumerate() {
             if self.frames.len() <= i {
@@ -660,12 +704,12 @@ impl Drawer {
                 .group
                 .as_ref()
                 .is_none_or(|(m, s, _)| !Arc::ptr_eq(m, &frame.map) || *s != serials);
+            let views: [&wgpu::TextureView; MAX_FEEDS] =
+                std::array::from_fn(|j| match (&fk.canvases[j], serials[j]) {
+                    (Some(c), s) if s != 0 => &c.view,
+                    _ => &kit.blank,
+                });
             if stale {
-                let views: [&wgpu::TextureView; MAX_FEEDS] =
-                    std::array::from_fn(|j| match (&fk.canvases[j], serials[j]) {
-                        (Some(c), s) if s != 0 => &c.view,
-                        _ => &kit.blank,
-                    });
                 let group = kit.group(gpu, uniform, &frame.map, views);
                 fk.group = Some((frame.map.clone(), serials, group));
             }
@@ -679,6 +723,36 @@ impl Drawer {
                     .render_view()
                     .map(|v| (frame.target.clone(), v));
             }
+            // The live pass's moving screens (none: nothing of it is made).
+            let live_kit = if frame.moving.is_empty() {
+                None
+            } else {
+                self.live
+                    .get_or_insert_with(|| {
+                        checked(&gpu.device, "the moving screens' pass", || {
+                            live::LiveKit::new(gpu)
+                        })
+                    })
+                    .as_ref()
+            };
+            let live_ready = match live_kit {
+                Some(lk) => {
+                    let fl = fk.live.get_or_insert_with(|| lk.frame_live(gpu));
+                    live::prepare(
+                        gpu,
+                        lk,
+                        fl,
+                        &mut self.meshes,
+                        self.generation,
+                        frame,
+                        views,
+                        serials,
+                        &kit.blank,
+                        &kit.sampler,
+                    )
+                }
+                None => false,
+            };
             let (Some((_, _, group)), Some((_, view))) = (&fk.group, &fk.target) else {
                 continue;
             };
@@ -707,6 +781,10 @@ impl Drawer {
                 pass.set_pipeline(&kit.pipeline);
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..3, 0..1);
+                // Over it, the moving screens, far to near (mapping plan 4.2).
+                if let (true, Some(lk), Some(fl)) = (live_ready, live_kit, &fk.live) {
+                    live::record(&mut pass, lk, fl, &self.meshes, frame);
+                }
             }
             cmds.push(encoder.finish());
             // Filled once: its stamp stays, so `render::Shot` tells a new
@@ -881,7 +959,7 @@ impl Kit {
 /// `f`, in error scopes: None (and a line in the log) if the card refused
 /// what it made, so a card that won't take the map pass leaves a projector
 /// black, never a broken window.
-fn checked<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Option<T> {
+fn checked<T>(device: &wgpu::Device, what: &str, f: impl FnOnce() -> T) -> Option<T> {
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let made = f();
@@ -890,7 +968,7 @@ fn checked<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Option<T> {
     match inner.or(outer) {
         None => Some(made),
         Some(e) => {
-            log::warn!("mapped projectors stay black: this GPU won't draw the map pass ({e})");
+            log::warn!("mapped projectors: this GPU won't draw {what} ({e}); it is left out");
             None
         }
     }
@@ -969,9 +1047,16 @@ pub fn wanted(
     out
 }
 
+#[path = "mapped_live.rs"]
+pub mod live;
+
 #[cfg(test)]
 #[path = "mapped_tests.rs"]
 pub(crate) mod gpu_tests;
+
+#[cfg(test)]
+#[path = "mapped_live_tests.rs"]
+pub(crate) mod live_tests;
 
 #[cfg(test)]
 mod tests {

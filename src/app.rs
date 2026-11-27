@@ -335,6 +335,10 @@ pub struct App {
     /// What each mapped display's mapped picture is drawn into, for its
     /// window and for its stream (made again only at a new size).
     mapped_targets: HashMap<(OutputId, crate::mapped::MapUse), Arc<LayerTexture>>,
+    /// The pieces of the movable screens the mapped pictures draw live
+    /// (`mapped::live::movable_pieces`), made again only with the scene or
+    /// a change in which screens are movable.
+    movable: MovablePieces,
     /// Line-up's crosses: shown here, and the primary's sender (`app/lineup.rs`).
     line_up: lineup::LineUpState,
     /// Windows whose render thread is shutting down; kept alive until it exits.
@@ -635,6 +639,7 @@ impl App {
             screens: HashMap::new(),
             targets: HashMap::new(),
             mapped_targets: HashMap::new(),
+            movable: MovablePieces::default(),
             line_up: Default::default(),
             closing: Vec::new(),
             popouts: Vec::new(),
@@ -2375,6 +2380,7 @@ impl App {
         };
         lens_maps(
             gpu,
+            &self.show,
             &wanted,
             &shaped,
             &mut self.stage,
@@ -2629,7 +2635,7 @@ impl App {
             &self.show,
             maps.iter()
                 .filter(|(k, _)| k.1 != crate::mapped::MapUse::Preview)
-                .map(|(_, (_, m))| m.as_ref()),
+                .map(|(_, (_, m, _))| m.as_ref()),
         );
         let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
         for setup in configs {
@@ -2696,7 +2702,7 @@ impl App {
             // is made (black till then); cues sent to it aren't seen.
             let mapped_layer = maps
                 .get(&(id, crate::mapped::MapUse::Window))
-                .map(|(target, _)| whole_layer(target.clone()));
+                .map(|(target, _, _)| whole_layer(target.clone()));
             let has_picture = if mapped {
                 mapped_layer.is_some()
             } else {
@@ -2929,8 +2935,14 @@ impl App {
             });
         }
 
-        // The mapped pictures, now that every canvas's layers are known.
-        let frames = mapped_frames(&self.show, &maps, &pictures);
+        // The mapped pictures, now that every canvas's layers are known,
+        // with the movable screens where the engine has them this tick
+        // (taken once: every projector, stream and view has the same).
+        let places = self.engine.moved_screens();
+        if !maps.is_empty() {
+            self.movable.refresh(&self.show, &self.ui.stage);
+        }
+        let frames = mapped_frames(&self.show, &maps, &pictures, &self.movable.pieces, &places);
         self.update_streams(&groups, &frames);
         // The projectors in the 3D stage, for the views with their light on:
         // each one's shape and what its display sends.
@@ -2946,7 +2958,7 @@ impl App {
             &stage_outputs,
             &pictures,
             &projectors,
-            &self.engine.moved_screens(),
+            &places,
             playing || was_waiting,
         ) || self.stage.venue_busy();
 
@@ -4744,13 +4756,43 @@ fn picture_layers(
 /// The layers as they are on the graphics card now, nothing uploaded or made:
 /// a preview-only output's while the previews give way (`update_outputs`).
 /// The mapped pictures' lens maps and targets, by display and use.
-type MappedTargets =
-    HashMap<(OutputId, crate::mapped::MapUse), (Arc<LayerTexture>, Arc<crate::mapped::LensMap>)>;
+/// With each, the shape (width per height) its map was made at, which
+/// the moving screens are drawn through (`lensmap::lens_matrix`).
+type MappedTargets = HashMap<
+    (OutputId, crate::mapped::MapUse),
+    (Arc<LayerTexture>, Arc<crate::mapped::LensMap>, f32),
+>;
+
+/// The movable screens' pieces (`mapped::live::movable_pieces`), kept with
+/// what they were made from: the scene's key and which screens are movable
+/// (the scene's key doesn't hash the cues that make a screen movable).
+#[derive(Default)]
+struct MovablePieces {
+    made_from: Option<(u64, Vec<crate::stage3d::SurfaceId>)>,
+    pieces: Vec<crate::mapped::live::MovablePiece>,
+}
+
+impl MovablePieces {
+    /// Made again if the scene or the movable screens changed.
+    fn refresh(&mut self, show: &Show, stage: &crate::ui::stage_view::StageShared) {
+        let movable = show.movable_screens();
+        let from = (stage.scene_key, movable.iter().copied().collect::<Vec<_>>());
+        if self.made_from.as_ref() != Some(&from) {
+            self.pieces = crate::mapped::live::movable_pieces(show, &stage.scene, &movable);
+            self.made_from = Some(from);
+        }
+    }
+}
 
 /// What of the mapped pictures was last sent to a window: each frame's map
 /// (`LensMap::stamp`) and its canvases' layers' places. A change is a redraw
 /// though nothing plays (a map made, a sub display on a canvas dragged).
-type MapsSent = Vec<(u64, Vec<(OutputId, (u32, u32), Vec<Geometry>)>)>;
+/// And where its moving screens were (a *Put at* while nothing plays).
+type MapsSent = Vec<(
+    u64,
+    Vec<(OutputId, (u32, u32), Vec<Geometry>)>,
+    Vec<crate::mapped::MovingShot>,
+)>;
 
 fn maps_sent(frames: &[crate::mapped::MappedFrame]) -> MapsSent {
     frames
@@ -4764,7 +4806,7 @@ fn maps_sent(frames: &[crate::mapped::MappedFrame]) -> MapsSent {
                     (c.output, c.canvas, places)
                 })
                 .collect();
-            (f.map.stamp(), feeds)
+            (f.map.stamp(), feeds, crate::mapped::moving_shots(&f.moving))
         })
         .collect()
 }
@@ -4802,6 +4844,7 @@ fn may_stream(show: &Show, o: &OutputConfig) -> bool {
 /// `StageLive::lens_map_shaped`), None for the projector's own at that size.
 fn lens_maps(
     gpu: &Gpu,
+    show: &Show,
     wanted: &[crate::mapped::MapWanted],
     shaped: &dyn Fn(&crate::mapped::MapWanted) -> Option<f32>,
     stage: &mut crate::stage_live::StageLive,
@@ -4809,13 +4852,20 @@ fn lens_maps(
 ) -> MappedTargets {
     let mut out = HashMap::new();
     for w in wanted {
-        let map = match shaped(w) {
+        let shape = shaped(w);
+        let map = match shape {
             Some(aspect) => stage.lens_map_shaped(w.projector, w.size, aspect, w.use_),
             None => stage.lens_map(w.projector, w.size, w.use_),
         };
         let Some(map) = map else {
             continue;
         };
+        // The shape `lens_map` makes it at: the projector's at its size.
+        let aspect = shape.unwrap_or_else(|| {
+            show.stage3d
+                .projector(w.projector)
+                .map_or(16.0 / 9.0, |p| p.aspect(w.size))
+        });
         let key = (w.display, w.use_);
         let target = match targets.get(&key) {
             Some(t) if (t.width, t.height) == map.size => t.clone(),
@@ -4825,7 +4875,7 @@ fn lens_maps(
                 t
             }
         };
-        out.insert(key, (target, map));
+        out.insert(key, (target, map, aspect));
     }
     targets.retain(|k, _| out.contains_key(k));
     out
@@ -4853,14 +4903,18 @@ fn canvases_of<'a>(
 }
 
 /// The mapped frames for `maps`: each map's canvases, in its order, from
-/// `pictures` (a canvas with nothing to show keeps its place, black).
+/// `pictures` (a canvas with nothing to show keeps its place, black), and
+/// the movable screens' `pieces` where `places` (the engine's, this tick)
+/// has them, seen through the projector's lens at its map's shape.
 fn mapped_frames(
     show: &Show,
     maps: &MappedTargets,
     pictures: &HashMap<OutputId, crate::stage_live::PictureLayers>,
+    pieces: &[crate::mapped::live::MovablePiece],
+    places: &[(crate::stage3d::SurfaceId, crate::stage3d::Placement)],
 ) -> HashMap<(OutputId, crate::mapped::MapUse), crate::mapped::MappedFrame> {
     maps.iter()
-        .filter_map(|(key, (target, map))| {
+        .filter_map(|(key, (target, map, aspect))| {
             let p = show.mapped_projector(key.0)?;
             let feeds = map
                 .feeds
@@ -4884,8 +4938,14 @@ fn mapped_frames(
                 target: target.clone(),
                 map: map.clone(),
                 feeds,
-                moving: Vec::new(),
-                lens: IDENTITY_4,
+                moving: crate::mapped::live::moving_for(
+                    show,
+                    pieces,
+                    places,
+                    &map.feeds,
+                    p.position(),
+                ),
+                lens: crate::stage3d::lensmap::lens_matrix(p, *aspect),
                 // A stream is what the projector is asked to show, before any
                 // blending (mapping plan 4.5).
                 shares: key.1 != crate::mapped::MapUse::Stream,
@@ -4895,14 +4955,6 @@ fn mapped_frames(
         })
         .collect()
 }
-
-/// The identity matrix (column-major).
-const IDENTITY_4: [[f32; 4]; 4] = [
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0],
-];
 
 /// Whether a display's pictures are preview work: shown only by the
 /// previews here (no window, no stream) and wanted by nothing that is
@@ -5436,17 +5488,30 @@ mod tests {
             ..window
         };
         // No map yet: nothing, and the display stays black.
-        assert!(lens_maps(&gpu, &[window], &|_| None, &mut stage, &mut targets).is_empty());
+        assert!(lens_maps(&gpu, &show, &[window], &|_| None, &mut stage, &mut targets).is_empty());
         stage.give_lens_map(p, map.clone());
-        let maps = lens_maps(&gpu, &[window, stream], &|_| None, &mut stage, &mut targets);
+        let maps = lens_maps(
+            &gpu,
+            &show,
+            &[window, stream],
+            &|_| None,
+            &mut stage,
+            &mut targets,
+        );
         assert_eq!(maps.len(), 1, "only the map of the size asked for");
-        let (target, got) = &maps[&(display, MapUse::Window)];
+        let (target, got, aspect) = &maps[&(display, MapUse::Window)];
+        let pr = show.stage3d.projector(p).unwrap();
+        assert_eq!(
+            *aspect,
+            pr.aspect((64, 36)),
+            "the shape the map was made at"
+        );
         assert!(Arc::ptr_eq(got, &map));
         assert_eq!((target.width, target.height), (64, 36));
-        let again = lens_maps(&gpu, &[window], &|_| None, &mut stage, &mut targets);
+        let again = lens_maps(&gpu, &show, &[window], &|_| None, &mut stage, &mut targets);
         assert!(Arc::ptr_eq(&again[&(display, MapUse::Window)].0, target));
         // The canvases: both, the cyc's sub display too, not the projector.
-        let canvases = canvases_of(&show, maps.values().map(|(_, m)| m.as_ref()));
+        let canvases = canvases_of(&show, maps.values().map(|(_, m, _)| m.as_ref()));
         assert_eq!(canvases, HashSet::from([floor, cyc, surtitles]));
         // Frames: the floor has nothing to show and keeps its place.
         let tex = Arc::new(LayerTexture::new_rgba(&gpu, 2, 2));
@@ -5457,7 +5522,7 @@ mod tests {
                 canvas: (1920, 1080),
             },
         )]);
-        let frames = mapped_frames(&show, &maps, &pictures);
+        let frames = mapped_frames(&show, &maps, &pictures, &[], &[]);
         let f = &frames[&(display, MapUse::Window)];
         assert_eq!(
             f.feeds.iter().map(|c| c.output).collect::<Vec<_>>(),
@@ -5470,7 +5535,10 @@ mod tests {
         let mut as_stream = maps.clone();
         let w = as_stream.remove(&(display, MapUse::Window)).unwrap();
         as_stream.insert((display, MapUse::Stream), w);
-        assert!(!mapped_frames(&show, &as_stream, &pictures)[&(display, MapUse::Stream)].shares);
+        assert!(
+            !mapped_frames(&show, &as_stream, &pictures, &[], &[])[&(display, MapUse::Stream)]
+                .shares
+        );
         // A sub display dragged on a canvas, nothing playing: a redraw.
         let before = maps_sent(std::slice::from_ref(f));
         show.outputs.last_mut().unwrap().area.0[0] = [0.2, 0.2];
@@ -5480,14 +5548,94 @@ mod tests {
         };
         let mut moved = pictures.clone();
         moved.insert(surtitles, sub);
-        let frames = mapped_frames(&show, &maps, &moved);
+        let frames = mapped_frames(&show, &maps, &moved, &[], &[]);
         assert_ne!(
             maps_sent(&[frames[&(display, MapUse::Window)].clone()]),
             before
         );
         // Not mapped any more: the target is let go.
-        assert!(lens_maps(&gpu, &[], &|_| None, &mut stage, &mut targets).is_empty());
+        assert!(lens_maps(&gpu, &show, &[], &|_| None, &mut stage, &mut targets).is_empty());
         assert!(targets.is_empty());
+    }
+
+    /// The moving screens a mapped frame draws: every movable screen,
+    /// moved or at home, where one snapshot of the engine's places has it;
+    /// seen through the projector's real lens at the map's shape; the same
+    /// places for every frame of one pass; and a *Put at* while nothing
+    /// plays is a redraw.
+    #[test]
+    fn mapped_frames_draw_the_movable_screens_where_the_engine_has_them() {
+        let Some(gpu) = crate::gpu::Gpu::headless() else {
+            assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+            return;
+        };
+        use crate::mapped::{CpuMap, LensMap, MapUse};
+        let (mut show, a, s, p) = crate::stage3d::lensmap::tests::flat_show();
+        let display = show.add_display();
+        show.projector_mut(p).unwrap().display = Some(display);
+        show.projector_mut(p).unwrap().mapped = true;
+        let mut c = show.make_cue(crate::show::CueType::Screen, None, 0);
+        if let crate::show::CueKind::Screen(sc) = &mut c.kind {
+            sc.screen = Some(s);
+        }
+        show.cues.push(c);
+        let mut shared = crate::ui::stage_view::StageShared::default();
+        shared.scene = Arc::new(show.stage3d.scene(&show, None));
+        shared.scene_key = 1;
+        let mut movable = MovablePieces::default();
+        movable.refresh(&show, &shared);
+        assert_eq!(movable.pieces.len(), 1);
+        let mut cpu = CpuMap::black((64, 36));
+        cpu.feeds = vec![a];
+        let map = Arc::new(LensMap::from_cpu(&gpu, &cpu, 7));
+        let target = Arc::new(LayerTexture::new_target(&gpu, 64, 36));
+        let aspect = 16.0 / 10.0;
+        let maps: MappedTargets = HashMap::from([
+            (
+                (display, MapUse::Window),
+                (target.clone(), map.clone(), aspect),
+            ),
+            ((display, MapUse::Stream), (target, map, aspect)),
+        ]);
+        let pictures = HashMap::new();
+        // Never moved: at home, still drawn.
+        let frames = mapped_frames(&show, &maps, &pictures, &movable.pieces, &[]);
+        let f = &frames[&(display, MapUse::Window)];
+        let home = show.stage3d.surface(s).unwrap().placement.matrix();
+        assert_eq!(f.moving.len(), 1);
+        assert_eq!(f.moving[0].matrix, home);
+        assert_eq!(f.moving[0].feed, Some(0));
+        let pr = show.stage3d.projector(p).unwrap();
+        assert_eq!(f.lens, crate::stage3d::lensmap::lens_matrix(pr, aspect));
+        let before = maps_sent(std::slice::from_ref(f));
+        // Moved (a *Put at*): the same place in the window's and the
+        // stream's frames, and a redraw though nothing plays.
+        let at = crate::stage3d::Placement {
+            position: [1.0, 0.5, 0.2],
+            yaw: 30.0,
+            ..Default::default()
+        };
+        let frames = mapped_frames(&show, &maps, &pictures, &movable.pieces, &[(s, at)]);
+        let (w, st) = (
+            &frames[&(display, MapUse::Window)],
+            &frames[&(display, MapUse::Stream)],
+        );
+        assert_eq!(w.moving[0].matrix, at.matrix());
+        assert_eq!(
+            crate::mapped::moving_shots(&w.moving),
+            crate::mapped::moving_shots(&st.moving)
+        );
+        assert_ne!(maps_sent(std::slice::from_ref(w)), before);
+        // Made again only when the scene or the movable screens change.
+        let kept = Arc::as_ptr(&movable.pieces[0].mesh);
+        movable.refresh(&show, &shared);
+        assert_eq!(Arc::as_ptr(&movable.pieces[0].mesh), kept);
+        show.cues.clear();
+        movable.refresh(&show, &shared);
+        assert!(
+            movable.pieces.is_empty(),
+            "nothing movable: nothing drawn live"
+        );
     }
 
     fn keys(names: &[&str]) -> Vec<MonitorKey> {
