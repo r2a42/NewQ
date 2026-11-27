@@ -371,3 +371,137 @@ fn a_tiles_matrix_is_its_part_of_the_lens() {
     // The same depth.
     assert!((whole[2] / whole[3] - part[2] / part[3]).abs() < 1e-6);
 }
+
+/// `flat_show` with a second, smaller screen half a metre in front of the
+/// first, fed by the same display, that a screen cue moves: movable.
+pub(crate) fn movable_show() -> (Show, OutputId, SurfaceId, SurfaceId, ProjectorId) {
+    let (mut show, a, s, p) = flat_show();
+    let m = show.add_surface(None);
+    let screen = show.stage3d.surface_mut(m).unwrap();
+    screen.feed = Feed::Display {
+        output: a,
+        region: WHOLE,
+    };
+    screen.shape = SurfaceShape::Flat {
+        width: 1.6,
+        height: 0.9,
+    };
+    screen.placement.position = [0.8, 0.2, 0.5];
+    let mut cue = show.make_cue(crate::show::CueType::Screen, None, 0);
+    if let crate::show::CueKind::Screen(c) = &mut cue.kind {
+        c.screen = Some(m);
+        c.to.x = Some(-0.8);
+    }
+    show.cues.push(cue);
+    assert!(show.movable(m) && !show.movable(s));
+    (show, a, s, m, p)
+}
+
+#[test]
+fn a_movable_screen_is_left_out_of_the_map_and_the_depth_is_the_nearest_still_thing() {
+    let (show, a, _, m, p) = movable_show();
+    let pr = show.projector(p).unwrap();
+    let size = (32, 18);
+    let aspect = pr.aspect(size);
+    // Its canvas is still the map's (drawn live through it).
+    assert_eq!(feeds_for(&show, p), vec![a]);
+    let still = still_of(&show);
+    let whole = show.stage3d.scene(&show, None);
+    let bodies = show.stage3d.projectors.iter().filter(|p| p.visible).count();
+    assert_eq!(
+        still.parts.len() + 1 + bodies,
+        whole.parts.len(),
+        "the movable screen left out"
+    );
+    // The map is the first screen's alone, as if the second weren't there.
+    let mut alone = show.clone();
+    alone.stage3d.surfaces.retain(|x| x.id != m);
+    alone.cues.clear();
+    let want = reference(&still_of(&alone), alone.projector(p).unwrap(), size, &[a]);
+    let map = reference_with_depth(&still, pr, size, aspect, &[a]);
+    assert_eq!(map.place, want.place);
+    assert_eq!(map.how, want.how);
+    assert!(want.depth.is_none() && map.depth_range == DEPTH_RANGE);
+    // Depth: everywhere the screen, at its distance along each pixel's ray
+    // (the lens is square on to it).
+    let depth = map.depth.as_ref().expect("depth worked out");
+    let d = pr.placement.position[2];
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let ray = pr.ray((x as f32 + 0.5) / 32.0, (y as f32 + 0.5) / 18.0, aspect);
+            let want = d / -ray.dir[2];
+            let got = crate::mapped::unpack_depth(depth[(y * 32 + x) as usize], DEPTH_RANGE);
+            assert!((got - want).abs() < 2e-3, "({x}, {y}): {got} not {want}");
+        }
+    }
+    // A box of the room in front of the middle: there the depth is the
+    // box's front, nearer than the screen; elsewhere still the screen.
+    let mut scene = still.clone();
+    scene
+        .parts
+        .insert(0, box_part([0.0, 0.0, 0.5], [0.5, 0.5, 0.25]));
+    let map = reference_with_depth(&scene, pr, size, aspect, &[a]);
+    let depth = map.depth.as_ref().unwrap();
+    let at_middle = crate::mapped::unpack_depth(depth[(9 * 32 + 16) as usize], DEPTH_RANGE);
+    let ray = pr.ray(16.5 / 32.0, 9.5 / 18.0, aspect);
+    let front = (d - 0.75) / -ray.dir[2];
+    assert!((at_middle - front).abs() < 2e-3, "{at_middle} not {front}");
+    let corner = crate::mapped::unpack_depth(depth[0], DEPTH_RANGE);
+    assert!(corner > d && corner < d * 1.2, "{corner}");
+    // Nothing at all: the far end; and nothing the lens can see packs so.
+    let empty = Scene {
+        parts: Vec::new(),
+        throws: Vec::new(),
+    };
+    let map = reference_with_depth(&empty, pr, (4, 4), aspect, &[a]);
+    assert!(map.depth.unwrap().iter().all(|px| *px == [255, 255, 255, 255]));
+    let far = crate::stage3d::light::THROW_FAR * 2.0;
+    assert_ne!(crate::mapped::pack_depth(far, DEPTH_RANGE), [255, 255, 255, 255]);
+}
+
+#[test]
+fn making_a_screen_movable_changes_the_still_key_and_where_it_goes_does_not() {
+    let (show, _, _, _, p) = movable_show();
+    let mut plain = show.clone();
+    plain.cues.clear();
+    let k = |s: &Show| still_key(&still_of(s));
+    assert_ne!(k(&show), k(&plain), "a screen cue added: a new still scene");
+    let mut further = show.clone();
+    if let crate::show::CueKind::Screen(c) = &mut further.cues[0].kind {
+        c.to.x = Some(3.0);
+    }
+    assert_eq!(k(&show), k(&further));
+    let pr = show.projector(p).unwrap();
+    let key = |depth| map_key(k(&show), pr, 16.0 / 9.0, (64, 36), depth, &[]);
+    assert_ne!(key(true), key(false));
+}
+
+#[test]
+fn a_moved_screens_parts_are_put_where_it_is_and_the_rest_stay() {
+    let (show, _, s, m, _) = movable_show();
+    let scene = show.stage3d.scene(&show, None);
+    let pieces = screen_pieces(&show, &scene);
+    assert_eq!(pieces.len(), 2, "two flat screens, a piece each");
+    assert!(moved_parts(&pieces, &[]).is_empty());
+    let mut there = show.stage3d.surface(m).unwrap().placement;
+    there.position[0] = -0.8;
+    there.yaw = 30.0;
+    let moved = moved_parts(&pieces, &[(m, there)]);
+    assert_eq!(moved.len(), 1);
+    let after = with_moved(&scene, &moved);
+    // The same as a scene made with the screen there.
+    let mut at = show.clone();
+    at.stage3d.surface_mut(m).unwrap().placement = there;
+    let want = at.stage3d.scene(&at, None);
+    for (i, (a, b)) in after.parts.iter().zip(&want.parts).enumerate() {
+        for c in 0..4 {
+            for r in 0..4 {
+                assert!(
+                    (a.transform[c][r] - b.transform[c][r]).abs() < 1e-5,
+                    "part {i}"
+                );
+            }
+        }
+    }
+    let _ = s;
+}

@@ -111,6 +111,7 @@ fn both(
                 size: SIZE,
                 key,
                 feeds: &feeds,
+                depth: false,
             },
         )
         .expect("baked");
@@ -346,6 +347,7 @@ fn a_card_that_refuses_the_bake_refuses_it_and_still_draws_the_stage() {
         size: SIZE,
         key: 1,
         feeds: &[],
+        depth: false,
     };
     assert!(r.bake(&gpu, &job).is_err());
     assert!(r.bake_refused());
@@ -407,11 +409,13 @@ fn the_bake_shader_is_written_for_directx_and_metal() {
             .write(&module, &info, None)
             .expect("written as HLSL");
         assert!(hlsl.contains("fs_bake") && hlsl.contains("fs_resolve"));
+        assert!(hlsl.contains("fs_bake_depth") && hlsl.contains("fs_resolve_depth"));
     }
     let (msl, _) =
         naga::back::msl::write_string(&module, &info, &Default::default(), &Default::default())
             .expect("written as MSL");
     assert!(msl.contains("fs_bake") && msl.contains("fs_resolve"));
+    assert!(msl.contains("fs_bake_depth") && msl.contains("fs_resolve_depth"));
 }
 
 #[test]
@@ -419,4 +423,102 @@ fn the_bakes_numbers_are_packed_as_its_shader_reads_them() {
     assert_eq!(size_of::<BakeFrame>(), 96);
     assert_eq!(size_of::<BakePart>(), 144);
     assert_eq!(size_of::<TileUniform>(), 16);
+}
+
+/// Bake `p`'s map of `scene` with its depth, and the reference's.
+fn both_with_depth(
+    gpu: &Gpu,
+    renderer: &mut Renderer,
+    show: &Show,
+    scene: &Scene,
+    p: ProjectorId,
+) -> (CpuMap, CpuMap) {
+    let pr = show.projector(p).expect("there");
+    let aspect = pr.aspect(SIZE);
+    let feeds = feeds_for(show, p);
+    let key = map_key(still_key(scene), pr, aspect, SIZE, true, &feeds);
+    let baked = renderer
+        .bake(
+            gpu,
+            &Bake {
+                scene,
+                projector: pr,
+                aspect,
+                size: SIZE,
+                key,
+                feeds: &feeds,
+                depth: true,
+            },
+        )
+        .expect("baked");
+    assert_eq!(baked.depth_range, crate::stage3d::lensmap::DEPTH_RANGE);
+    let mut got = read_map(gpu, &baked);
+    got.depth = Some(read(gpu, baked.depth.as_ref().expect("a depth picture")));
+    (
+        got,
+        crate::stage3d::lensmap::reference_with_depth(scene, pr, SIZE, aspect, &feeds),
+    )
+}
+
+/// The card's depth against the reference's, away from where the depth
+/// jumps (an edge of something): within half the step to a neighbour (the
+/// card's is the nearest of four samples a quarter of a pixel off the
+/// middle) and a millimetre. How many compared.
+fn depth_agrees(g: &CpuMap, c: &CpuMap) -> usize {
+    use crate::mapped::unpack_depth;
+    let range = crate::stage3d::lensmap::DEPTH_RANGE;
+    let (w, h) = c.size;
+    let d = |m: &CpuMap, x: u32, y: u32| {
+        unpack_depth(m.depth.as_ref().unwrap()[(y * w + x) as usize], range)
+    };
+    let mut compared = 0;
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let here = d(c, x, y);
+            let step = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                .iter()
+                .map(|(nx, ny)| (d(c, *nx, *ny) - here).abs())
+                .fold(0.0f32, f32::max);
+            // An edge: a jump of more than a few centimetres to a neighbour.
+            if step > 0.05 || here >= range.1 * 0.999 {
+                continue;
+            }
+            let got = d(g, x, y);
+            assert!(
+                (got - here).abs() <= 0.5 * step + 1e-3,
+                "the depth at ({x}, {y}): {got} on the card, {here} worked out"
+            );
+            compared += 1;
+        }
+    }
+    compared
+}
+
+#[test]
+fn a_maps_depth_bakes_as_the_reference_works_it_out() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    let (mut show, _, _, m, p) = crate::stage3d::lensmap::tests::movable_show();
+    // From off to one side, so the depth changes across the picture.
+    let pr = show.projector_mut(p).unwrap();
+    pr.placement.position = [0.8, 0.5, pr.placement.position[2] * 1.4];
+    pr.placement.yaw = 7.0;
+    let still = still_of(&show);
+    // The movable screen isn't in it: the map is as if it weren't there.
+    let (g, c) = both_with_depth(&gpu, &mut r, &show, &still, p);
+    enough(agree(&g, &c), 500);
+    assert!(depth_agrees(&g, &c) > 600);
+    // A box of the room in front: its front is the depth there.
+    let mut scene = still.clone();
+    scene
+        .parts
+        .insert(0, box_part([0.3, -0.2, 0.6], [0.6, 0.4, 0.3]));
+    let (g, c) = both_with_depth(&gpu, &mut r, &show, &scene, p);
+    enough(agree(&g, &c), 300);
+    assert!(depth_agrees(&g, &c) > 600);
+    // The place and feed are those the plain bake makes.
+    let (plain, _) = both(&gpu, &mut r, &show, &scene, p);
+    assert_eq!(plain.place, g.place);
+    assert_eq!(plain.how, g.how);
+    let _ = m;
 }

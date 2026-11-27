@@ -94,7 +94,14 @@ in its "after the real tests" blocks. The cross-target clippy note ends the `src
   with no monitor. `LegResult::maps` (baked, refused over the whole leg, from `StageRun::begun`:
   the map lands while settling); `drew` for it is a map made and none refused; `judge` compares
   it by the same line with `mapped::costs_words`, and `mapped::findings` (refused: Problem; none
-  made: Note); `stage.csv` ends `maps_baked,maps_refused`; `choice::STAGE_SHORT_SECS` five legs.
+  made: Note); `stage.csv` ends `maps_baked,maps_refused`; `choice::STAGE_SHORT_SECS` six legs.
+  The sixth, `Leg::Moving` (mapping round 3; tried only in simulation): `mapped::MovingLeg`
+  (`MappedLeg::moving`, made by `setup` for the first screen `mapped_feeds(..).screens` names): a
+  disarmed screen cue put in by `Setup::apply` for that leg alone (one bake as it settles) and
+  `place_at` (`SWING_M`, `SWING_DEG`, `SWING_SECS`) put through `Engine::put_screen` by
+  `session.rs` each look (`StageRun::screen_to_put`, counted in `LegResult::moves`); `Leg::mapped`
+  covers both mapped legs; `drew` also wants a move; `judge` by the same line with
+  `mapped::moving_costs_words`; `mapped::findings` notes a screen that never moved. Token `moving`.
   Tests: `stage.rs` (judge sentences, legs driven), `choice.rs`, `plan.rs`,
   `session.rs::a_3d_stage_part_…`; run headless under xvfb only (lavapipe).
 

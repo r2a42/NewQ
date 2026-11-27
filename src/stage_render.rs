@@ -136,6 +136,8 @@ pub struct MapJob {
     /// For a window or a stream: baked before anything else, never
     /// governed. Else for a 3D view's light, after the previews.
     pub output: bool,
+    /// With its depth picture (the show has a movable screen).
+    pub depth: bool,
 }
 
 /// A lens map made (or refused: None, said in the log).
@@ -160,6 +162,11 @@ pub struct StageJob {
     pub views: Vec<ViewJob>,
     /// Lens maps to bake.
     pub maps: Vec<MapJob>,
+    /// The moved screens' parts and where they are (`lensmap::moved_parts`,
+    /// mapping plan 4.2): every view draws its scene with these parts'
+    /// transforms put in, so a screen that moves makes no new scene (and
+    /// no new lit scene: its shadows follow by `shadow_key`).
+    pub moved: Arc<Vec<(usize, [[f32; 4]; 4])>>,
     /// Counts up; `StageThread::done` says the last one drawn.
     pub serial: u64,
 }
@@ -212,6 +219,8 @@ impl StageJob {
             throw_size,
             views,
             maps,
+            // Where the screens are now.
+            moved: newer.moved,
             serial: newer.serial.max(self.serial),
         }
     }
@@ -464,6 +473,7 @@ impl StageDrawer {
                 size: job.size,
                 key: job.key,
                 feeds: &job.feeds,
+                depth: job.depth,
             },
         );
         self.count.map_baked(made.is_ok());
@@ -595,10 +605,19 @@ impl StageDrawer {
                 LightView::Off => None,
                 _ => self.throws.as_ref().map(|t| &t.array),
             };
+            // The moved screens where they are (a copy of the parts, the
+            // meshes shared; the scene the app keeps is never changed).
+            let moved;
+            let scene: &Scene = if job.moved.is_empty() {
+                &v.scene
+            } else {
+                moved = crate::stage3d::lensmap::with_moved(&v.scene, &job.moved);
+                &moved
+            };
             let s = self.renderer.render_lit(
                 gpu,
                 &target,
-                &v.scene,
+                scene,
                 &v.camera,
                 &|o| feeds.get(&o).map(|f| &f.view),
                 &v.options,

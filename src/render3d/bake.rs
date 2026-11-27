@@ -22,6 +22,16 @@
 //!   texture, and the twice-size pictures, 12 bytes a sample, are at most
 //!   48 MiB, let go as soon as the map is made. The map itself is 8 bytes a
 //!   pixel.
+//! - With a movable screen in the show (`Bake::depth`, mapping plan 4.2):
+//!   a third picture, `depth`, how far from the lens (metres, Euclidean,
+//!   `length(world - eye)`) the nearest still thing is, whatever it is (a
+//!   fed screen, an unfed one, a screen's back, the venue), packed over
+//!   `lensmap::DEPTH_RANGE` as `mapped::pack_depth`; nothing there is the
+//!   far end (all 255). The resolve takes the nearest of the four samples
+//!   (unpacked, compared, packed again). Its own pipelines
+//!   (`fs_bake_depth`, `fs_resolve_depth`), made at the first such bake
+//!   inside `checked`: a card that refuses them gets maps without depth.
+//!   4 more bytes a pixel, 16 more a sample while baking (64 MiB in all).
 //! - All of it inside error scopes (validation, internal, out of memory): a
 //!   card that refuses the pipelines refuses every bake after (said once);
 //!   one bake that fails is said and returns an error. The stage view is
@@ -86,14 +96,24 @@ pub struct Bake<'a> {
     pub size: (u32, u32),
     pub key: u64,
     pub feeds: &'a [OutputId],
+    /// Bake the depth picture too (the show has a movable screen, mapping
+    /// plan 4.2): how far from the lens the nearest still thing is, over
+    /// `lensmap::DEPTH_RANGE`. A card that refuses it gets a map without.
+    pub depth: bool,
 }
 
 /// The bake's pipelines and buffers, made at the first bake.
 pub(super) struct BakeKit {
+    frame_layout: wgpu::BindGroupLayout,
     part_layout: wgpu::BindGroupLayout,
     resolve_layout: wgpu::BindGroupLayout,
+    module: wgpu::ShaderModule,
     pipeline: wgpu::RenderPipeline,
     resolve: wgpu::RenderPipeline,
+    /// With the depth picture (a show with a movable screen): made at the
+    /// first such bake; `Some(None)` when the card refused it (maps are then
+    /// made without depth).
+    depth: Option<Option<DepthKit>>,
     frame: wgpu::Buffer,
     frame_group: wgpu::BindGroup,
     tile: wgpu::Buffer,
@@ -103,6 +123,166 @@ pub(super) struct BakeKit {
     part_stride: u64,
 }
 
+/// The bake's pipelines with the depth picture: a third target in both
+/// passes, and the resolve reading the twice-size depth.
+pub(super) struct DepthKit {
+    resolve_layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    resolve: wgpu::RenderPipeline,
+}
+
+fn uniform_entry(binding: u32, dynamic: bool, size: usize) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: dynamic,
+            min_binding_size: wgpu::BufferSize::new(size as u64),
+        },
+        count: None,
+    }
+}
+
+fn picture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// The layouts a bake's pipelines are made with.
+struct Layouts<'a> {
+    frame: &'a wgpu::BindGroupLayout,
+    part: &'a wgpu::BindGroupLayout,
+    resolve: &'a wgpu::BindGroupLayout,
+}
+
+/// The bake's two pipelines (the parts at twice the size, the resolve)
+/// writing `targets` pictures, through entries `fs` and `resolve_fs`.
+fn bake_pipelines(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layouts: &Layouts,
+    targets: usize,
+    (fs, resolve_fs): (&str, &str),
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    let target = Some(wgpu::ColorTargetState {
+        format: FORMAT,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    });
+    let targets = vec![target; targets];
+    let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lens map"),
+        bind_group_layouts: &[Some(layouts.frame), Some(layouts.part)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lens map"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_bake"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &attributes,
+            })],
+        },
+        primitive: wgpu::PrimitiveState {
+            // Both faces: a front screen's back is in the way too.
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(fs),
+            compilation_options: Default::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let resolve_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lens map resolve"),
+        bind_group_layouts: &[Some(layouts.resolve)],
+        immediate_size: 0,
+    });
+    let resolve = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lens map resolve"),
+        layout: Some(&resolve_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_whole"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(resolve_fs),
+            compilation_options: Default::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, resolve)
+}
+
+impl DepthKit {
+    /// None when this card won't make them.
+    fn new(device: &wgpu::Device, kit: &BakeKit) -> Option<DepthKit> {
+        super::checked(device, "lens maps' depth", || {
+            let resolve_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("lens map resolve, depth"),
+                    entries: &[
+                        picture_entry(1),
+                        picture_entry(2),
+                        uniform_entry(3, false, size_of::<TileUniform>()),
+                        picture_entry(4),
+                    ],
+                });
+            let (pipeline, resolve) = bake_pipelines(
+                device,
+                &kit.module,
+                &Layouts {
+                    frame: &kit.frame_layout,
+                    part: &kit.part_layout,
+                    resolve: &resolve_layout,
+                },
+                3,
+                ("fs_bake_depth", "fs_resolve_depth"),
+            );
+            DepthKit {
+                resolve_layout,
+                pipeline,
+                resolve,
+            }
+        })
+    }
+}
+
 impl BakeKit {
     /// None when this card won't make them.
     fn new(device: &wgpu::Device, source: &str) -> Option<BakeKit> {
@@ -110,26 +290,8 @@ impl BakeKit {
     }
 
     fn make(device: &wgpu::Device, source: &str) -> BakeKit {
-        let uniform = |binding, dynamic, size: usize| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: dynamic,
-                min_binding_size: wgpu::BufferSize::new(size as u64),
-            },
-            count: None,
-        };
-        let picture = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
+        let uniform = uniform_entry;
+        let picture = picture_entry;
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lens map frame"),
             entries: &[uniform(0, false, size_of::<BakeFrame>())],
@@ -150,86 +312,17 @@ impl BakeKit {
             label: Some("lens map"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let targets = [
-            Some(wgpu::ColorTargetState {
-                format: FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-        ];
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("lens map"),
-            bind_group_layouts: &[Some(&frame_layout), Some(&part_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lens map"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_bake"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &attributes,
-                })],
+        let (pipeline, resolve) = bake_pipelines(
+            device,
+            &module,
+            &Layouts {
+                frame: &frame_layout,
+                part: &part_layout,
+                resolve: &resolve_layout,
             },
-            primitive: wgpu::PrimitiveState {
-                // Both faces: a front screen's back is in the way too.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Greater),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_bake"),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let resolve_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("lens map resolve"),
-                bind_group_layouts: &[Some(&resolve_layout)],
-                immediate_size: 0,
-            });
-        let resolve = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lens map resolve"),
-            layout: Some(&resolve_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_whole"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_resolve"),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+            2,
+            ("fs_bake", "fs_resolve"),
+        );
         let buffer = |label, size: u64| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -255,10 +348,13 @@ impl BakeKit {
         let (parts, parts_group) =
             Self::part_buffer(device, &part_layout, part_stride, part_capacity);
         BakeKit {
+            frame_layout,
             part_layout,
             resolve_layout,
+            module,
             pipeline,
             resolve,
+            depth: None,
             frame,
             frame_group,
             tile,
@@ -345,6 +441,19 @@ impl Renderer {
                 }
             }
         }
+        // The depth picture's pipelines, at the first bake that wants it.
+        if job.depth
+            && let Some(kit) = self.bake_kit.as_mut()
+            && kit.depth.is_none()
+        {
+            let made = DepthKit::new(&gpu.device, kit);
+            if made.is_none() {
+                log::warn!(
+                    "this graphics card won't make a lens map's depth: a moving screen isn't hidden by what is in front of it"
+                );
+            }
+            kit.depth = Some(made);
+        }
         let device = &gpu.device;
         let size = (job.size.0.max(1), job.size.1.max(1));
         let feeds: Vec<OutputId> = job
@@ -401,11 +510,13 @@ impl Renderer {
                 m.used = now;
             }
         }
-        let (place, how) = made;
-        Ok(LensMap::new(size, place, how, None, feeds, job.key))
+        let (place, how, depth) = made;
+        let depth = depth.map(|d| (d, lensmap::DEPTH_RANGE));
+        Ok(LensMap::new(size, place, how, depth, feeds, job.key))
     }
 
-    /// The map's two pictures, drawn tile by tile.
+    /// The map's pictures, drawn tile by tile (its depth when the job
+    /// wants it and the card makes it).
     fn bake_tiles(
         &mut self,
         gpu: &Gpu,
@@ -413,7 +524,7 @@ impl Renderer {
         size: (u32, u32),
         uniforms: &[BakePart],
         draws: &[u64],
-    ) -> (wgpu::Texture, wgpu::Texture) {
+    ) -> (wgpu::Texture, wgpu::Texture, Option<wgpu::Texture>) {
         let device = &gpu.device;
         let kit = self.bake_kit.as_mut().expect("made above");
         kit.fit_parts(device, uniforms.len() as u64);
@@ -427,37 +538,60 @@ impl Renderer {
             gpu.queue.write_buffer(&kit.parts, 0, &bytes);
         }
         let kit = self.bake_kit.as_ref().expect("made above");
+        // With depth: its own pipelines (None: not wanted, or refused).
+        let deep = kit
+            .depth
+            .as_ref()
+            .and_then(Option::as_ref)
+            .filter(|_| job.depth);
         let place = LensMap::texture(gpu, size, "lens map place");
         let how = LensMap::texture(gpu, size, "lens map how");
+        let far = deep.map(|_| LensMap::texture(gpu, size, "lens map depth"));
         let place_view = place.create_view(&Default::default());
         let how_view = how.create_view(&Default::default());
+        let far_view = far.as_ref().map(|t| t.create_view(&Default::default()));
         let most = (device.limits().max_texture_dimension_2d / 2).max(1);
         let tile = self.bake_tile.clamp(1, most);
         let big = (2 * tile.min(size.0), 2 * tile.min(size.1));
         let big_place = scratch(gpu, big, FORMAT, "lens map place, twice");
         let big_how = scratch(gpu, big, FORMAT, "lens map how, twice");
-        let depth = scratch(gpu, big, DEPTH_FORMAT, "lens map depth");
+        let big_far = deep.map(|_| scratch(gpu, big, FORMAT, "lens map depth, twice"));
+        let depth = scratch(gpu, big, DEPTH_FORMAT, "lens map depth test");
         let big_place_view = big_place.create_view(&Default::default());
         let big_how_view = big_how.create_view(&Default::default());
+        let big_far_view = big_far
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
         let depth_view = depth.create_view(&Default::default());
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&big_place_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&big_how_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: kit.tile.as_entire_binding(),
+            },
+        ];
+        if let Some(v) = &big_far_view {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(v),
+            });
+        }
         let resolve_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lens map resolve"),
-            layout: &kit.resolve_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&big_place_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&big_how_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: kit.tile.as_entire_binding(),
-                },
-            ],
+            layout: deep.map_or(&kit.resolve_layout, |d| &d.resolve_layout),
+            entries: &entries,
         });
+        let (pipeline, resolve) = match deep {
+            Some(d) => (&d.pipeline, &d.resolve),
+            None => (&kit.pipeline, &kit.resolve),
+        };
         // A fed screen's clip z moved by this is its distance taken
         // `SCREEN_SLACK` shorter (the projection's z = a - b·d; `a` its
         // [3][2]).
@@ -465,6 +599,7 @@ impl Renderer {
             use crate::stage3d::light::{THROW_FAR, THROW_NEAR};
             THROW_NEAR * THROW_FAR / (THROW_FAR - THROW_NEAR) * lensmap::SCREEN_SLACK
         };
+        let range = lensmap::DEPTH_RANGE;
         let eye = job.projector.position();
         for ty in (0..size.1).step_by(tile as usize) {
             for tx in (0..size.0).step_by(tile as usize) {
@@ -477,7 +612,7 @@ impl Renderer {
                         [tx, ty, tw, th],
                     ),
                     eye: [eye[0], eye[1], eye[2], 1.0],
-                    extra: [push, 0.0, 0.0, 0.0],
+                    extra: [push, range.0, range.1, 0.0],
                 };
                 gpu.queue
                     .write_buffer(&kit.frame, 0, bytemuck::bytes_of(&frame));
@@ -489,25 +624,30 @@ impl Renderer {
                     label: Some("lens map"),
                 });
                 {
-                    let clear = |view| {
+                    let clear = |view, v: f64| {
                         Some(wgpu::RenderPassColorAttachment {
                             view,
                             depth_slice: None,
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.0,
-                                    g: 0.0,
-                                    b: 0.0,
+                                    r: v,
+                                    g: v,
+                                    b: v,
                                     a: 1.0,
                                 }),
                                 store: wgpu::StoreOp::Store,
                             },
                         })
                     };
+                    // Nothing there: no feed, and (with depth) the far end.
+                    let mut targets = vec![clear(&big_place_view, 0.0), clear(&big_how_view, 0.0)];
+                    if let Some(v) = &big_far_view {
+                        targets.push(clear(v, 1.0));
+                    }
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("lens map, twice"),
-                        color_attachments: &[clear(&big_place_view), clear(&big_how_view)],
+                        color_attachments: &targets,
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                             view: &depth_view,
                             depth_ops: Some(wgpu::Operations {
@@ -521,7 +661,7 @@ impl Renderer {
                         multiview_mask: None,
                     });
                     pass.set_viewport(0.0, 0.0, (2 * tw) as f32, (2 * th) as f32, 0.0, 1.0);
-                    pass.set_pipeline(&kit.pipeline);
+                    pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &kit.frame_group, &[]);
                     for (i, key) in draws.iter().enumerate() {
                         let Some(mesh) = self.meshes.get(key) else {
@@ -546,16 +686,20 @@ impl Renderer {
                             },
                         })
                     };
+                    let mut targets = vec![keep(&place_view), keep(&how_view)];
+                    if let Some(v) = &far_view {
+                        targets.push(keep(v));
+                    }
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("lens map resolve"),
-                        color_attachments: &[keep(&place_view), keep(&how_view)],
+                        color_attachments: &targets,
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
                     pass.set_viewport(tx as f32, ty as f32, tw as f32, th as f32, 0.0, 1.0);
-                    pass.set_pipeline(&kit.resolve);
+                    pass.set_pipeline(resolve);
                     pass.set_bind_group(0, &resolve_group, &[]);
                     pass.draw(0..3, 0..1);
                 }
@@ -563,7 +707,7 @@ impl Renderer {
                 gpu.submit([encoder.finish()]);
             }
         }
-        (place, how)
+        (place, how, far)
     }
 
     /// Bake maps in tiles of at most `side` pixels (for a test of the tiles).

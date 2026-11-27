@@ -1334,22 +1334,12 @@ impl Show {
         if let Some(k) = s.chosen_kind() {
             return k;
         }
-        let reaches = |s: &Surface| {
-            let boxes = s.boxes();
-            self.stage3d
-                .projectors
-                .iter()
-                .any(|p| p.reaches_boxes(&boxes))
-        };
-        // A screen that moves on a cue is judged at home and at each place
-        // its cues take it to (`Show::screen_places`), still from the show
-        // alone: one that a cue moves into a beam is projection there.
-        let reached = reaches(s)
-            || self.screen_places(s.id).into_iter().any(|(_, at)| {
-                let mut moved = s.clone();
-                moved.placement = at;
-                reaches(&moved)
-            });
+        let rests = self.resting_boxes(s);
+        let reached = self
+            .stage3d
+            .projectors
+            .iter()
+            .any(|p| rests.iter().any(|b| p.reaches_boxes(b)));
         match (reached, s.rear) {
             (false, _) => ScreenKind::Led,
             (true, true) => ScreenKind::Rear,
@@ -1357,13 +1347,32 @@ impl Show {
         }
     }
 
+    /// Screen `s`'s `Surface::boxes` where it rests: at home, and a
+    /// movable screen also at each place its cues take it to
+    /// (`Show::screen_places`). What its kind and whether a projector maps
+    /// it are worked out from, never where it is in the middle of a move.
+    pub fn resting_boxes(&self, s: &Surface) -> Vec<Vec<[[f32; 3]; 8]>> {
+        let mut out = vec![s.boxes()];
+        for (_, at) in self.screen_places(s.id) {
+            if at != s.placement {
+                let mut there = s.clone();
+                there.placement = at;
+                out.push(there.boxes());
+            }
+        }
+        out
+    }
+
     /// The canvases mapped projector `id` shows (mapping plan 4.1): the
     /// displays whose pictures are on the projection screens its beam
     /// reaches where they stand, in the order of the screens, each once. At
     /// most `mapped::MAX_FEEDS` are `used`; the rest are `left_out` (their
     /// screens are black through this projector), said in words on the page.
-    /// A screen that is hidden, LED, can move, or shows nothing (or a
-    /// display that shows the stage, or a mapped projector's) is no feed.
+    /// A screen that is hidden, LED, or shows nothing (or a display that
+    /// shows the stage, or a mapped projector's) is no feed. A screen that
+    /// can move (`Show::movable`) is one where the beam reaches it at home
+    /// or at a place its cues take it to (`resting_boxes`): it is drawn
+    /// live, over the map (mapping plan 4.2), and its canvas is the map's.
     pub fn mapped_feeds(&self, id: ProjectorId) -> MappedFeeds {
         let mut out = MappedFeeds::default();
         let Some(p) = self.projector(id) else {
@@ -1373,12 +1382,14 @@ impl Show {
             let Some(o) = s.feed.output() else { continue };
             let usable = s.visible
                 && s.shape.is_known()
-                && !self.movable(s.id)
                 && self.output(o).is_some()
                 && !self.shows_stage(o)
                 && self.mapped_projector(o).is_none()
                 && self.kind_of(s).is_projection()
-                && p.reaches_screen(s);
+                && self
+                    .resting_boxes(s)
+                    .iter()
+                    .any(|b| p.reaches_boxes(b));
             if !usable {
                 continue;
             }

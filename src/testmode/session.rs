@@ -1218,7 +1218,15 @@ impl TestMode {
                 }
                 // The 3D stage part's legs: begun and ended as their time comes.
                 let lines = match &mut r.stage {
-                    Some(s) => s.tick(show, st, t),
+                    Some(s) => {
+                        let lines = s.tick(show, st, t);
+                        // The moving leg's screen, where it is now (as *Put
+                        // at* puts one: through the engine, never the show).
+                        if let Some((screen, at)) = s.screen_to_put(t) {
+                            engine.put_screen(show, screen, at);
+                        }
+                        lines
+                    }
                     None => Vec::new(),
                 };
                 for line in lines {

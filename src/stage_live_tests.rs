@@ -1,6 +1,6 @@
 use super::*;
 use crate::show::Corners;
-use crate::stage3d::{Feed, StageSource, WHOLE};
+use crate::stage3d::{Feed, Placement, StageSource, SurfaceId, WHOLE};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("newq-stage-live-{name}-{}", std::process::id()));
@@ -1098,4 +1098,109 @@ fn only_a_view_with_its_light_on_is_lit() {
     if let Some(h) = live.forget_device(&mut shared) {
         h.join().unwrap();
     }
+}
+
+/// A screen that moves (mapping plan 4.2): the display showing the stage is
+/// drawn again with the screen where it is, and no new scene is made (not
+/// the views', not the lens maps' still one): only the moved parts'
+/// transforms go with the job.
+#[test]
+fn a_moving_screen_redraws_a_view_and_makes_no_new_scene() {
+    let Some(gpu) = crate::gpu::Gpu::headless() else {
+        assert!(std::env::var_os("NEWQ_REQUIRE_GPU").is_none(), "no GPU");
+        return;
+    };
+    let (mut show, _, _, m, _) = crate::stage3d::lensmap::tests::movable_show();
+    let b = show.add_display();
+    show.outputs.iter_mut().find(|o| o.id == b).unwrap().source = Some(StageSource::default());
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&show, &mut shared, &mut Vec::new());
+    let _layer = live.output_layer(&gpu, b, (160, 90));
+    let camera = show.stage_camera(
+        &StageSource::default(),
+        shared.bounds.map(|b| (b.min, b.max)),
+        16.0 / 9.0,
+    );
+    let pictures: HashMap<OutputId, PictureLayers> = HashMap::new();
+    let out = [seen(b, camera)];
+    let pass = |live: &mut StageLive, shared: &mut StageShared, at: &[(SurfaceId, Placement)]| {
+        live.begin(&show, shared, &mut Vec::new());
+        live.send(&gpu, &show, shared, &out, &pictures, &[], at, false);
+        wait(live);
+    };
+    pass(&mut live, &mut shared, &[]);
+    let (scene, still, key, serial) = (
+        live.scene.clone(),
+        live.still.clone(),
+        shared.scene_key,
+        live.serial,
+    );
+    assert!(live.moved.is_empty());
+    // Still and nothing playing: not drawn again.
+    pass(&mut live, &mut shared, &[]);
+    assert_eq!(live.serial, serial);
+    // It moves: drawn again, its part where it is, the scene the same.
+    let home = show.stage3d.surface(m).unwrap().placement;
+    let mut at = home;
+    for step in 1..=3 {
+        at.position[0] = home.position[0] - 0.4 * step as f32;
+        pass(&mut live, &mut shared, &[(m, at)]);
+        assert_eq!(live.serial, serial + step, "drawn again at step {step}");
+        assert_eq!(live.moved.len(), 1);
+        let (part, matrix) = live.moved[0];
+        assert!((matrix[3][0] - at.position[0]).abs() < 1e-5);
+        assert!(Arc::ptr_eq(&live.scene, &scene), "no new scene");
+        assert!(Arc::ptr_eq(&live.still, &still), "no new still scene");
+        assert_eq!(shared.scene_key, key);
+        assert_eq!(
+            live.scene.parts[part].transform[3][0], home.position[0],
+            "the scene itself keeps the screen at home"
+        );
+    }
+    // Where it stopped: not drawn again; back home: drawn once more.
+    pass(&mut live, &mut shared, &[(m, at)]);
+    assert_eq!(live.serial, serial + 3);
+    pass(&mut live, &mut shared, &[]);
+    assert_eq!(live.serial, serial + 4);
+    assert!(live.moved.is_empty());
+    if let Some(h) = live.forget_device(&mut shared) {
+        h.join().unwrap();
+    }
+}
+
+/// The lens maps' still scene is made again when a screen becomes movable
+/// (a show edit), never because one moves.
+#[test]
+fn a_screen_cue_added_makes_the_still_scene_again_and_a_move_does_not() {
+    let (show, _, _, m, _) = crate::stage3d::lensmap::tests::movable_show();
+    let mut plain = show.clone();
+    plain.cues.clear();
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    live.begin(&plain, &mut shared, &mut Vec::new());
+    let (scene, still) = (live.scene.clone(), live.still.clone());
+    assert!(!live.depth_wanted);
+    assert_eq!(still.parts.len(), 2);
+    live.begin(&plain, &mut shared, &mut Vec::new());
+    assert!(Arc::ptr_eq(&live.still, &still), "nothing changed");
+    live.begin(&show, &mut shared, &mut Vec::new());
+    assert!(Arc::ptr_eq(&live.scene, &scene), "the views' scene is the same");
+    assert!(!Arc::ptr_eq(&live.still, &still), "the still one is made again");
+    assert_eq!(live.still.parts.len(), 1, "without the movable screen");
+    assert!(live.depth_wanted);
+    let still = live.still.clone();
+    // Its cue taken further: the same still scene's parts (its key).
+    let key = live.still_key;
+    let mut further = show.clone();
+    if let crate::show::CueKind::Screen(c) = &mut further.cues[0].kind {
+        c.to.x = Some(4.0);
+    }
+    live.begin(&further, &mut shared, &mut Vec::new());
+    assert_eq!(live.still_key, key);
+    live.begin(&further, &mut shared, &mut Vec::new());
+    let again = live.still.clone();
+    live.begin(&further, &mut shared, &mut Vec::new());
+    assert!(Arc::ptr_eq(&live.still, &again));
+    let _ = (still, m);
 }

@@ -14,6 +14,16 @@ release page, and a release is refused if it has none.
   is now* and *Put the screen there now* save typing numbers. Every computer of a show network moves
   it together, and one that joins late or takes control has it where it is. An older NewQ keeps the
   cue and doesn't play it.
+- **Screens that move: where they are, and *Put at*** (tried only in simulation; no real scenery,
+  projector or second computer yet). A screen a *Move a screen* cue names is drawn where it is now in
+  the 3D views and their light, and a mapped projector leaves it out of its baked picture so it can be
+  drawn where it is, hidden behind what stands in front of it. Making a screen movable redraws the
+  mapped projectors' pictures once; a GO never does. In *Settings ▸ 3D stage ▸ Screens* such a
+  screen says where it is *Now at*, and *Put at ▸* puts it at home or where any of its cues leaves
+  it, at once and without changing the show: for rehearsals, and after a restart mid-show. Test
+  Mode's 3D stage part has a last leg with one of those screens swinging in front of a mapped
+  projector, judged like the others.
+
 - **Canvases for the 3D stage** (mapping; tried only in simulation). A canvas is a display with
   no monitor that a screen of the 3D stage shows: send cues to it, and the screens show it.
   *Settings ▸ Displays ▸ + Add ▸ Canvas* makes one, as does a screen's *Shows ▸ New canvas…*. Its

@@ -268,6 +268,39 @@ is a piece of a longer entry that covered several areas.
   `StreamKind::Record`, the real app run under Xvfb, a late frame of each against
   `lensmap::reference` at the recording's size (the canvas's recording is the codec's floor).
   The fine-tune's editor is `ui.rs::fine_tune_editor` (below, previews-and-ui).
+  Round 3 (agent C; mapping plan 4.2; tried only in simulation): **movable screens.** The still
+  scene leaves out `Show::movable_screens()` (`lensmap::still_scene_of`, the set worked out once);
+  `StageLive::begin` keeps `movable_key` (`movable_key_of`: the set and every
+  `Show::screen_places`) and makes `still`, `still_key` and `map_feeds` again when it changes,
+  without a new view scene (`scene_key` untouched), so adding a screen cue re-bakes once and a GO
+  never does; `depth_wanted` (any movable) goes into `map_key`, `MapJob::depth` and `Bake::depth`.
+  `Show::mapped_feeds` and `kind_of` (projector.rs) work a screen out where it rests
+  (`Show::resting_boxes`: home and each cue place), and a movable screen's canvas is in its map's
+  `feeds` (drawn live through it). **The depth picture** (`mapped.rs`'s header packing):
+  Euclidean metres from the lens (`length(world - eye)`, as `pick`'s distance) to the nearest
+  still thing of any kind, over `lensmap::DEPTH_RANGE` (0 to 4 × `THROW_FAR`, about half a
+  millimetre a step, the same for every map), 1.0 (all 255) for nothing; `bake.wgsl`'s
+  `fs_bake_depth`/`fs_resolve_depth` (the nearest of the four samples, unpacked and packed
+  again), their pipelines (`DepthKit`, `bake_pipelines`, `Layouts`) made at the first depth bake
+  inside `checked`; a card that refuses them gets maps without depth (said in the log). CPU
+  reference `lensmap::reference_with_depth` (`pick` over every still part). **The views and the
+  light follow**: `lensmap::screen_pieces` (each visible screen's parts and piece transforms, made
+  with the scene), `moved_parts(pieces, engine.moved_screens())` and `with_moved`; `send` keeps
+  `moved`/`moved_key` (folded into every view's signature, so a *Put at* with nothing playing
+  redraws) and hands `StageJob::moved` (newest wins in `merged`); `StageDrawer::draw` draws each
+  view with a copy of its scene's parts moved (the job's scene `Arc`, the lit scene and `lit_key`
+  unchanged; shadows follow by `shadow_key`). Not moved: the page's pick (`shared.scene` is at
+  home) and the projector lines. **The Screens tab**: a movable screen's *Now at* (`NOW_AT`,
+  `screen_cue::place_words`, "(at home)") and *Put at ▸* (`PUT_AT`, `PUT_HOME`, then each cue by
+  `cue_label`) push `Action::PutScreen` (not an edit; `Whereabouts::of` from `st.screens_now`).
+  Tests: `lensmap_tests` (`movable_show`; left out and its depth, a box in front; still key;
+  `moved_parts` against a scene made there), `bake_tests::a_maps_depth_bakes_as_the_reference_
+  works_it_out` (lavapipe, away from depth jumps, within half a neighbour's step and 1 mm), naga
+  HLSL/MSL with the depth entries, `stage_live_tests::a_moving_screen_redraws_a_view_and_makes_no_
+  new_scene`, `…a_screen_cue_added_makes_the_still_scene_again…`, `stage_live_map_tests::a_go_of_a_
+  screen_cue_bakes_nothing` (`maps_baked` once for the edit, not for the GO), `ui/stage_edit_tests::
+  a_movable_screen_says_where_it_is_now_and_is_put_at_its_places_by_mouse` (both interfaces,
+  1280×760).
 
 - `src/calib/`: the line-up solver (step P3 of `.claude/notes/projection-plan.md`, section 5.3). Pure
   f64, hand-written (no linear algebra crate, the owner's choice), `pub(crate)`, `#[allow(dead_code)]`

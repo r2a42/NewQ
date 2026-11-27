@@ -337,6 +337,49 @@ pub struct StageLive {
     /// The canvases the maps a window or stream draws use, and the displays
     /// they are drawn from (`feeds_output`).
     output_feeds: HashSet<OutputId>,
+    /// What the still scene was last made for besides the scene: the
+    /// screens that can move (`Show::movable_screens`) and the places their
+    /// cues take them to (a key). Adding a screen cue makes the still scene
+    /// (and so the maps) again, once; a GO never does.
+    movable_key: u64,
+    /// The show has a movable screen: its maps are baked with depth.
+    depth_wanted: bool,
+    /// Each visible screen's parts in the scene (`lensmap::screen_pieces`),
+    /// made with it: what a moved screen's parts are.
+    pieces: Vec<lensmap::ScreenPiece>,
+    /// The moved screens' parts where they are this pass, and a key of them
+    /// (a view is drawn again when it changes).
+    moved: Arc<Vec<(usize, [[f32; 4]; 4])>>,
+    moved_key: u64,
+}
+
+/// A key of what the still scene depends on besides the scene: which
+/// screens can move and the places their cues take them to (their canvases
+/// are mapped where a projector reaches them at one of those).
+fn movable_key_of(show: &Show) -> (u64, std::collections::BTreeSet<crate::stage3d::SurfaceId>) {
+    let movable = show.movable_screens();
+    let mut h = crate::stage3d::scene::Fnv::new();
+    for id in &movable {
+        h.bytes(&id.0.to_le_bytes());
+        for (_, at) in show.screen_places(*id) {
+            at.position.iter().for_each(|v| h.f32(*v));
+            [at.yaw, at.pitch, at.roll].iter().for_each(|v| h.f32(*v));
+        }
+    }
+    (h.0, movable)
+}
+
+/// A key of where the moved screens' parts are.
+fn moved_key_of(moved: &[(usize, [[f32; 4]; 4])]) -> u64 {
+    if moved.is_empty() {
+        return 0;
+    }
+    let mut h = crate::stage3d::scene::Fnv::new();
+    for (i, m) in moved {
+        h.bytes(&(*i as u64).to_le_bytes());
+        m.iter().flatten().for_each(|v| h.f32(*v));
+    }
+    h.0
 }
 
 /// `Stage3d::shape_key` without the projectors' fine-tunes and line-ups:
@@ -487,11 +530,25 @@ impl StageLive {
                 h.bytes(&p.display.0.to_le_bytes());
             }
         }
-        if h.0 != self.scene_key || shared.scene_key != h.0 {
+        // The screens that can move: a show edit (a screen cue added, or
+        // pointed at another screen) makes the still scene again; a GO,
+        // which moves a screen, never does.
+        let (movable_key, movable) = movable_key_of(show);
+        let new_scene = h.0 != self.scene_key || shared.scene_key != h.0;
+        if new_scene {
             self.scene_key = h.0;
             let scene = stage.scene(show, self.venue.loaded.as_deref());
             self.bounds = stage_bounds(stage, &scene, self.venue.loaded.as_deref());
-            let still = lensmap::still_scene(show, &scene);
+            self.pieces = lensmap::screen_pieces(show, &scene);
+            self.scene = Arc::new(scene);
+            shared.scene = self.scene.clone();
+            shared.scene_key = h.0;
+            shared.bounds = self.bounds;
+        }
+        if new_scene || movable_key != self.movable_key {
+            self.movable_key = movable_key;
+            self.depth_wanted = !movable.is_empty();
+            let still = lensmap::still_scene_of(show, &self.scene, &movable);
             self.still_key = lensmap::still_key(&still);
             self.map_feeds = stage
                 .projectors
@@ -499,10 +556,6 @@ impl StageLive {
                 .map(|p| (p.id, lensmap::feeds_for(show, p.id)))
                 .collect();
             self.still = Arc::new(still);
-            self.scene = Arc::new(scene);
-            shared.scene = self.scene.clone();
-            shared.scene_key = h.0;
-            shared.bounds = self.bounds;
         }
         let shown = show
             .outputs
@@ -766,7 +819,7 @@ impl StageLive {
             .map_feeds
             .get(&projector)
             .map_or(&[][..], Vec::as_slice);
-        let key = lensmap::map_key(self.still_key, p, aspect, size, false, feeds);
+        let key = lensmap::map_key(self.still_key, p, aspect, size, self.depth_wanted, feeds);
         let e = self.maps.entry(at).or_default();
         e.given = false;
         e.want = Some((key, aspect));
@@ -875,9 +928,15 @@ impl StageLive {
         fresh: bool,
     ) -> bool {
         // Where the moved screens are this pass (`Engine::moved_screens`;
-        // mapping plan 4.2): the 3D views and the light follow them (round 3,
-        // agent C).
-        let _ = screens;
+        // mapping plan 4.2): every view draws those parts there, the scene
+        // itself unchanged (no new scene, no new lit scene); a view is drawn
+        // again when they move.
+        let moved = lensmap::moved_parts(&self.pieces, screens);
+        let moved_key = moved_key_of(&moved);
+        if moved_key != self.moved_key || moved.len() != self.moved.len() {
+            self.moved_key = moved_key;
+            self.moved = Arc::new(moved);
+        }
         let now = Instant::now();
         // A thread that stopped (a panic) draws nothing: what it was given is
         // to be drawn again by the next one.
@@ -916,7 +975,9 @@ impl StageLive {
         let pictures_key = if outputs.is_empty() && asked.is_empty() {
             0
         } else {
-            feeds_key(show, &self.scene, pictures)
+            // (With where the moved screens are: a *Put at* with nothing
+            // playing redraws.)
+            feeds_key(show, &self.scene, pictures) ^ self.moved_key.rotate_left(17)
         };
         // The projectors' light, for the views with their light on.
         let lit_asked = asked
@@ -1061,6 +1122,7 @@ impl StageLive {
                         throw_size,
                         views,
                         maps: map_jobs,
+                        moved: self.moved.clone(),
                         serial: self.serial,
                     }
                     .merged(StageJob::default());
@@ -1124,6 +1186,7 @@ impl StageLive {
                 scene: self.still.clone(),
                 feeds: self.map_feeds.get(&id).cloned().unwrap_or_default(),
                 output: e.output,
+                depth: self.depth_wanted,
             });
         }
         // Output work first (the thread bakes it before anything else).

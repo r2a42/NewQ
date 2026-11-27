@@ -1207,8 +1207,11 @@ pub(super) fn stage_setup(
     if stage_display.is_some() {
         legs.push(Leg::Display);
     }
-    if mapped.is_some() {
+    if let Some(m) = &mapped {
         legs.push(Leg::Mapped);
+        if m.moving.is_some() {
+            legs.push(Leg::Moving);
+        }
     }
     if sample {
         notes.push(format!(
@@ -2954,7 +2957,8 @@ mod tests {
                 Leg::View,
                 Leg::Light,
                 Leg::Display,
-                Leg::Mapped
+                Leg::Mapped,
+                Leg::Moving
             ]
         );
         // The projector on the last monitor's display, mapped in its leg
@@ -2970,6 +2974,18 @@ mod tests {
         assert!(show.mapped_refused(m.projector).is_none());
         assert_eq!(show.mapped_feeds(m.projector).used, vec![m.canvas]);
         assert!(!show.shows_stage(m.display));
+        // The moving leg: its screen movable then alone (a disarmed cue),
+        // the projector still mapped; put back after.
+        let mv = m.moving.as_ref().expect("a moving leg");
+        assert!(!show.movable(mv.screen));
+        assert!(setup.apply(&mut show, Leg::Moving));
+        assert!(show.movable(mv.screen));
+        assert!(show.cues.last().is_some_and(|c| !c.armed));
+        assert!(show.mapped_projector(m.display).is_some());
+        assert_eq!(show.mapped_feeds(m.projector).used, vec![m.canvas]);
+        assert!(setup.apply(&mut show, Leg::Mapped));
+        assert!(!show.movable(mv.screen));
+        assert!(setup.apply(&mut show, Leg::Moving));
         assert!(setup.apply(&mut show, Leg::Baseline));
         assert!(show.mapped_projector(m.display).is_none());
         assert_eq!(
@@ -3030,7 +3046,13 @@ mod tests {
         // light leg.
         assert_eq!(
             setup.legs,
-            [Leg::Baseline, Leg::View, Leg::Display, Leg::Mapped]
+            [
+                Leg::Baseline,
+                Leg::View,
+                Leg::Display,
+                Leg::Mapped,
+                Leg::Moving
+            ]
         );
         let m = setup.mapped.as_ref().unwrap();
         assert!(!m.before.visible && !m.before.mapped && m.during.mapped);

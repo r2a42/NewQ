@@ -473,3 +473,57 @@ fn a_baked_maps_canvases_are_the_ones_the_model_says_it_maps() {
     });
     assert_eq!(maps[0].as_ref().unwrap().feeds, show.mapped_feeds(p).used);
 }
+
+/// A GO of a screen cue bakes nothing (mapping plan 4.2): making a screen
+/// movable is a show edit and re-bakes the map once, with its depth; then
+/// the cue plays, the engine moves the screen, every pass is handed where it
+/// is, and the bake counter doesn't move, nor is a new scene made.
+#[test]
+fn a_go_of_a_screen_cue_bakes_nothing() {
+    let Some(gpu) = map_gpu() else { return };
+    let (show, a, _, m, p) = crate::stage3d::lensmap::tests::movable_show();
+    let mut plain = show.clone();
+    plain.cues.clear();
+    let mut live = StageLive::default();
+    let count = crate::stage_render::Counters::for_test();
+    live.count_into(count);
+    let mut shared = StageShared::default();
+    let asks = [(p, (64, 36), MapUse::Window)];
+    // Without the cue: a map with no depth.
+    let maps = passes_until(&mut live, &gpu, &plain, &mut shared, &asks, all_there);
+    let first = maps[0].clone().expect("baked");
+    assert!(first.depth.is_none());
+    passes_still(&mut live, &gpu, &plain, &mut shared, &asks);
+    assert_eq!(count.0.totals().maps_baked, 1);
+    // The cue added: baked once more, with depth, the same canvas.
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, |m| {
+        m[0].as_ref().is_some_and(|m| !Arc::ptr_eq(m, &first))
+    });
+    let map = maps[0].clone().expect("baked again");
+    assert!(map.depth.is_some(), "with its depth");
+    assert_eq!(map.depth_range, crate::stage3d::lensmap::DEPTH_RANGE);
+    assert_eq!(map.feeds, vec![a]);
+    passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    let baked = count.0.totals().maps_baked;
+    assert_eq!(baked, 2, "once for the edit");
+    let (scene, still) = (live.scene.clone(), live.still.clone());
+    // GO, and the cue plays out on the engine's clock.
+    let mut engine = crate::engine::Engine::for_tests();
+    let cue = show.cues[0].id;
+    engine.fire(&show, cue);
+    let mut moved_once = false;
+    for _ in 0..40 {
+        engine.tick(&show, 0.25);
+        let at = engine.moved_screens();
+        moved_once |= at.iter().any(|(s, _)| *s == m);
+        live.begin(&show, &mut shared, &mut Vec::new());
+        let now = live.lens_map(p, (64, 36), MapUse::Window);
+        assert!(now.as_ref().is_some_and(|n| Arc::ptr_eq(n, &map)), "the same map");
+        live.send(&gpu, &show, &mut shared, &[], &HashMap::new(), &[], &at, true);
+    }
+    assert!(moved_once, "the engine moved the screen");
+    assert!(engine.screen_at(m).is_some(), "and it stays where the cue left it");
+    passes_still(&mut live, &gpu, &show, &mut shared, &asks);
+    assert_eq!(count.0.totals().maps_baked, baked, "a GO bakes nothing");
+    assert!(Arc::ptr_eq(&live.scene, &scene) && Arc::ptr_eq(&live.still, &still));
+}

@@ -642,7 +642,7 @@ fn tabs(ui: &mut Ui, show: &Show, st: &mut UiState) {
 fn tab_content(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     match st.stage.tab {
         StageTab::Venue => venue_section(ui, show, st, actions),
-        StageTab::Screens => surfaces_section(ui, show, st),
+        StageTab::Screens => surfaces_section(ui, show, st, actions),
         StageTab::Projectors => super::stage_projectors::section_ui(ui, show, st),
         StageTab::Viewpoints => viewpoints_section(ui, show),
         StageTab::Displays => sources_section(ui, show, st, actions),
@@ -860,7 +860,100 @@ pub(super) fn placement_rows(ui: &mut Ui, salt: &str, p: &mut Placement, unit: L
     ui.end_row();
 }
 
-fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
+/// What a movable screen's *Now at* row reads and its *Put at ▸* menu
+/// offers (mapping plan 4.2): worked out before the screens are borrowed.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Whereabouts {
+    /// Where it is now, and whether a cue (or *Put at*) moved it.
+    pub now: Placement,
+    pub moved: bool,
+    /// Home, then each place its cues take it to: (menu words, place).
+    pub places: Vec<(String, Placement)>,
+}
+
+/// The *Now at* row's label.
+pub const NOW_AT: &str = "Now at";
+/// The *Put at ▸* menu's.
+pub const PUT_AT: &str = "Put at";
+/// Its first entry.
+pub const PUT_HOME: &str = "Home (where it stands in the show)";
+
+impl Whereabouts {
+    /// Every movable screen's, by id (`st.screens_now`: where the engine has
+    /// the moved ones).
+    pub(super) fn of(show: &Show, st: &UiState) -> HashMap<SurfaceId, Whereabouts> {
+        let mut out = HashMap::new();
+        for id in show.movable_screens() {
+            let Some(s) = show.stage3d.surface(id) else {
+                continue;
+            };
+            let home = s.placement;
+            let moved = st.screens_now.iter().find(|(m, _)| *m == id).map(|(_, p)| *p);
+            let mut places = vec![(PUT_HOME.to_string(), home)];
+            for (cue, at) in show.screen_places(id) {
+                let label = show.cue(cue).map_or_else(String::new, super::cue_label);
+                places.push((label, at));
+            }
+            out.insert(
+                id,
+                Whereabouts {
+                    now: moved.unwrap_or(home),
+                    moved: moved.is_some(),
+                    places,
+                },
+            );
+        }
+        out
+    }
+}
+
+/// A movable screen's *Now at* and *Put at ▸* rows (in its grid). A jump
+/// with no move, for rehearsals and after a restart mid-show: not an edit of
+/// the show (`Action::PutScreen`, a command on a show network's primary).
+fn whereabouts_rows(
+    ui: &mut Ui,
+    id: SurfaceId,
+    screen: &str,
+    w: &Whereabouts,
+    actions: &mut Vec<Action>,
+) {
+    ui.label(NOW_AT);
+    let words = super::screen_cue::place_words(&w.now);
+    let r = ui.label(if w.moved {
+        words
+    } else {
+        format!("{words} (at home)")
+    });
+    note(ui, &format!("3D stage ▸ {screen} ▸ {NOW_AT}"), &r);
+    ui.end_row();
+    ui.label("");
+    let menu = format!("3D stage ▸ {screen} ▸ {PUT_AT}");
+    let r = ui
+        .push_id(("put_at", id.0), |ui| {
+            ui.menu_button(format!("{PUT_AT} ▸"), |ui| {
+                for (label, at) in &w.places {
+                    let r = ui
+                        .button(label)
+                        .on_hover_text(super::screen_cue::place_words(at));
+                    note(ui, &format!("{menu} ▸ {label}"), &r);
+                    if r.clicked() {
+                        actions.push(Action::PutScreen(id, *at));
+                        ui.close();
+                    }
+                }
+            })
+            .response
+        })
+        .inner
+        .on_hover_text(
+            "Puts the screen at once where it stands at home or after one of its cues: \
+             for rehearsals, and after a restart mid-show. The show isn't changed.",
+        );
+    note(ui, &menu, &r);
+    ui.end_row();
+}
+
+fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
     untitled(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label("Units shown");
@@ -898,6 +991,7 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
             .iter()
             .map(|s| (s.id, show.kind_of(s)))
             .collect();
+        let whereabouts = Whereabouts::of(show, st);
         let mut remove = None;
         let mut copy = None;
         let mut new_canvas = None;
@@ -939,6 +1033,9 @@ fn surfaces_section(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
                         }
                         kind_row(ui, s, kinds.get(&id).copied());
                         placement_rows(ui, &format!("s{}", id.0), &mut s.placement, unit);
+                        if let Some(w) = whereabouts.get(&id) {
+                            whereabouts_rows(ui, id, &s.name, w, actions);
+                        }
                         shape_rows(ui, id, &mut s.shape, unit);
                     });
             });
