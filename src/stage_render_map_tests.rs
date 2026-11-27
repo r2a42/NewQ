@@ -27,6 +27,7 @@ fn map_job(output: bool, size: (u32, u32)) -> MapJob {
         size,
         scene,
         output,
+        depth: false,
     }
 }
 

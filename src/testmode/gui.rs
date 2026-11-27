@@ -1486,6 +1486,9 @@ fn stage_running(ui: &mut egui::Ui, st: &mut UiState, s: &super::stage::StageRun
             Leg::Mapped => {
                 "The last monitor shows the screens through a mapped projector, the lap on the canvas they show."
             }
+            Leg::Moving => {
+                "The same mapped projector, with one of its screens moving to and fro: drawn live over the map."
+            }
         })
         .weak()
         .small(),

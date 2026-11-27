@@ -13,6 +13,15 @@
 //! findings (`findings`): a card that won't make a lens map, or a leg in
 //! which none was made.
 //!
+//! Its variant, the leg with a screen moving (`Leg::Moving`, mapping round
+//! 3): the same mapped projector, with one of the screens it maps made
+//! movable for the leg (a disarmed screen cue names it, added as the leg
+//! begins and taken out after: one bake, while it settles) and swung to and
+//! fro by the engine all through it (`MovingLeg::place_at`, put each look as
+//! *Put at* does). So the screen is drawn live over the map in the
+//! projector's window, hidden where the room is in front of it, and the
+//! light and the 3D view follow it. Judged by the same line.
+//!
 //! Left out, in words, across a show network (turning a projector mapped
 //! mid-test is a show edit, which would send the show to every computer
 //! again), with no monitor ticked (a mapped picture is drawn for a window),
@@ -28,6 +37,61 @@ use crate::stage3d::{Projector, ProjectorId};
 pub const CANVAS_NAME: &str = "Canvas (test)";
 /// A projector added for the leg (none was on the display): its name.
 pub const PROJECTOR_NAME: &str = "Mapped (test)";
+/// The moving leg's swing: this far each way across (metres)...
+pub const SWING_M: f32 = 0.25;
+/// ...and turned this far each way (degrees)...
+pub const SWING_DEG: f32 = 8.0;
+/// ...once round in this long (seconds).
+pub const SWING_SECS: f64 = 6.0;
+
+/// The screen that moves in the moving leg.
+#[derive(Clone, Debug)]
+pub struct MovingLeg {
+    pub screen: crate::stage3d::SurfaceId,
+    pub screen_name: String,
+    /// Where it stands in the show.
+    pub home: crate::stage3d::Placement,
+    /// The disarmed cue that makes it movable while the leg lasts.
+    pub cue: crate::show::Cue,
+}
+
+impl PartialEq for MovingLeg {
+    fn eq(&self, o: &Self) -> bool {
+        // (A cue has no `PartialEq`: the same cue is the same id.)
+        self.screen == o.screen
+            && self.screen_name == o.screen_name
+            && self.home == o.home
+            && self.cue.id == o.cue.id
+    }
+}
+
+impl MovingLeg {
+    /// Put the cue in `show` (`on`) or take it out. Whether anything changed.
+    pub fn apply(&self, show: &mut Show, on: bool) -> bool {
+        let there = show.cues.iter().position(|c| c.id == self.cue.id);
+        match (there, on) {
+            (None, true) => {
+                show.cues.push(self.cue.clone());
+                true
+            }
+            (Some(i), false) => {
+                show.cues.remove(i);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Where the screen is `t` seconds into the leg: swung across and
+    /// turned about home, smoothly, never still for long.
+    pub fn place_at(&self, t: f64) -> crate::stage3d::Placement {
+        let phase = (t / SWING_SECS * std::f64::consts::TAU).sin() as f32;
+        let mut at = self.home;
+        at.position[0] += SWING_M * phase;
+        at.yaw += SWING_DEG * phase;
+        at
+    }
+}
 
 /// The leg's projector, as it is in its leg and out of it.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +105,8 @@ pub struct MappedLeg {
     pub canvas: OutputId,
     pub before: Projector,
     pub during: Projector,
+    /// The moving leg's screen (None: no such leg).
+    pub moving: Option<MovingLeg>,
 }
 
 impl MappedLeg {
@@ -151,6 +217,7 @@ pub fn setup(show: &mut Show, mirror: bool, notes: &mut Vec<String>) -> Option<M
         canvas,
         before,
         during,
+        moving: None,
     };
     // Tried on a copy: it must be mappable and see a screen.
     let mut probe = show.clone();
@@ -163,19 +230,66 @@ pub fn setup(show: &mut Show, mirror: bool, notes: &mut Vec<String>) -> Option<M
         return None;
     }
     notes.push(format!(
-        "In the 3D stage part the lap is also shown on a canvas the screens show; in its last leg {name} is a mapped projector's display, showing the screens as {} sees them",
+        "In the 3D stage part the lap is also shown on a canvas the screens show; in its last legs {name} is a mapped projector's display, showing the screens as {} sees them",
         leg.during.name
     ));
+    let mut leg = leg;
+    leg.moving = moving_for(show, &probe, id, notes);
     Some(leg)
 }
 
-/// What the leg says besides the comparison with the baseline (pure): a
-/// card that refused the lens map, or a leg in which none was made.
+/// The moving leg's screen: the first the mapped projector maps (`probe`:
+/// the show with it mapped), with a disarmed cue made for it in `show`'s
+/// ids (not put in: `MovingLeg::apply` does, for the leg).
+fn moving_for(
+    show: &mut Show,
+    probe: &Show,
+    id: ProjectorId,
+    notes: &mut Vec<String>,
+) -> Option<MovingLeg> {
+    let screen = probe.mapped_feeds(id).screens.first().copied();
+    let Some(s) = screen.and_then(|s| show.stage3d.surface(s)).cloned() else {
+        notes.push(
+            "The 3D stage part has no leg with a screen moving: the mapped projector maps no screen".into(),
+        );
+        return None;
+    };
+    let mut cue = show.make_cue(crate::show::CueType::Screen, None, show.cues.len());
+    cue.name = "Screen moving (test)".into();
+    cue.armed = false;
+    if let crate::show::CueKind::Screen(c) = &mut cue.kind {
+        c.screen = Some(s.id);
+        c.duration = 0.0;
+    }
+    notes.push(format!(
+        "In the 3D stage part's very last leg {} moves to and fro (by {SWING_M} m and {SWING_DEG}°) in front of the mapped projector",
+        s.name
+    ));
+    Some(MovingLeg {
+        screen: s.id,
+        screen_name: s.name.clone(),
+        home: s.placement,
+        cue,
+    })
+}
+
+/// What the legs with a mapped projector say besides the comparison with
+/// the baseline (pure): a card that refused the lens map, a leg in which
+/// none was made, a moving leg whose screen never moved.
 pub fn findings(results: &[LegResult]) -> Vec<Finding> {
     let mut out = Vec::new();
+    if let Some(r) = results.iter().find(|r| r.leg == Some(Leg::Moving))
+        && r.moves == 0
+        && r.maps.1 == 0
+    {
+        out.push(Finding {
+            severity: Severity::Note,
+            text: "The screen didn't move in the leg with a screen moving, so that leg says nothing about moving screens here.".into(),
+        });
+    }
     let legs: Vec<&LegResult> = results
         .iter()
-        .filter(|r| r.leg == Some(Leg::Mapped))
+        .filter(|r| r.leg.is_some_and(Leg::mapped))
         .collect();
     if legs.is_empty() {
         return out;
@@ -194,6 +308,14 @@ pub fn findings(results: &[LegResult]) -> Vec<Finding> {
         });
     }
     out
+}
+
+/// The Problem sentence for the moving leg that missed more than the
+/// baseline by the line.
+pub fn moving_costs_words(share: &str, base: &str) -> String {
+    format!(
+        "With a screen moving in front of a mapped projector the displays missed {share} of their pictures; with previews off, {base}. On this computer a moving screen costs the show: it is drawn for every frame and never gives way. Try fewer moving screens, or a smaller canvas."
+    )
 }
 
 /// The Problem sentence for a mapped leg that missed more than the

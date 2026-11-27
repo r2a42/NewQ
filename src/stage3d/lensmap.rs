@@ -43,6 +43,16 @@ pub const SCREEN_SLACK: f32 = 0.001;
 /// LED screen (`Catch::led`) is kept only as something in the way: its
 /// picture is never a feed.
 pub fn still_scene(show: &Show, scene: &Scene) -> Scene {
+    still_scene_of(show, scene, &show.movable_screens())
+}
+
+/// `still_scene`, with the show's movable screens (`Show::movable_screens`)
+/// already worked out.
+pub fn still_scene_of(
+    show: &Show,
+    scene: &Scene,
+    movable: &std::collections::BTreeSet<super::SurfaceId>,
+) -> Scene {
     let stage = &show.stage3d;
     let bodies_from = stage.projectors_from(scene);
     let venue_parts = scene.parts.iter().take_while(|p| p.lit).count();
@@ -63,7 +73,7 @@ pub fn still_scene(show: &Show, scene: &Scene) -> Scene {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i < bodies_from)
-            .filter(|(i, _)| owner[*i].is_none_or(|s| !show.movable(s)))
+            .filter(|(i, _)| owner[*i].is_none_or(|s| !movable.contains(&s)))
             .map(|(_, p)| {
                 let mut p = p.clone();
                 if p.catch.led && matches!(p.paint, Paint::Output { .. }) {
@@ -233,6 +243,104 @@ pub fn reference_every(
     }
     map.feeds = feeds.to_vec();
     map
+}
+
+/// What a map's `depth` picture's 0 and 1 are (`LensMap::depth_range`), in
+/// metres from the lens, the same for every map: from the lens itself to
+/// four times the light's far plane (`light::THROW_FAR`), past anything the
+/// lens can see however wide (a corner of its picture is further than the
+/// axis), so a thing that stands still never packs as "nothing" (1.0, all
+/// 255). Its step is about half a millimetre.
+pub const DEPTH_RANGE: (f32, f32) = (0.0, 4.0 * crate::stage3d::light::THROW_FAR);
+
+/// `reference_with` and its `depth` picture (mapping plan 4.2, for a show
+/// with a movable screen): at each pixel's middle, how far from the lens the
+/// nearest still thing is (a screen, fed or not, a screen's back, the
+/// venue), packed over `DEPTH_RANGE` (`mapped::pack_depth`); nothing there
+/// is the far end. The bake's depth is the nearest of the four samples'.
+pub fn reference_with_depth(
+    scene: &Scene,
+    projector: &Projector,
+    size: (u32, u32),
+    aspect: f32,
+    feeds: &[OutputId],
+) -> CpuMap {
+    let mut map = reference_with(scene, projector, size, aspect, feeds);
+    let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let mut depth = Vec::with_capacity(size.0 as usize * size.1 as usize);
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let ray = projector.ray((x as f32 + 0.5) / w, (y as f32 + 0.5) / h, aspect);
+            let d = crate::render3d::pick(scene, &ray, &|_, _| true).map_or(f32::NAN, |hit| hit.distance);
+            depth.push(crate::mapped::pack_depth(d, DEPTH_RANGE));
+        }
+    }
+    map.depth = Some(depth);
+    map.depth_range = DEPTH_RANGE;
+    map
+}
+
+/// One piece of a visible screen in a scene `Stage3d::scene` made: its part
+/// and the piece's own transform (the screen's placement times it is the
+/// part's transform).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPiece {
+    pub part: usize,
+    pub surface: crate::stage3d::SurfaceId,
+    pub piece: Mat4,
+}
+
+/// Every visible screen's pieces in `scene` (made by `Stage3d::scene` for
+/// `show`), in the scene's order: what a moved screen's parts are.
+pub fn screen_pieces(show: &Show, scene: &Scene) -> Vec<ScreenPiece> {
+    let venue_parts = scene.parts.iter().take_while(|p| p.lit).count();
+    let mut out = Vec::new();
+    let mut i = venue_parts;
+    for s in show.stage3d.surfaces.iter().filter(|s| s.visible) {
+        for piece in super::geometry::surface_mesh(&s.shape) {
+            if i < scene.parts.len() {
+                out.push(ScreenPiece {
+                    part: i,
+                    surface: s.id,
+                    piece: piece.transform,
+                });
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Where each piece of the moved screens is (`at`: `Engine::moved_screens`),
+/// as (part, its transform there): what the 3D views and the light draw
+/// those parts with, the scene itself unchanged. A screen not in `at` is at
+/// home and not listed.
+pub fn moved_parts(
+    pieces: &[ScreenPiece],
+    at: &[(crate::stage3d::SurfaceId, crate::stage3d::Placement)],
+) -> Vec<(usize, Mat4)> {
+    if at.is_empty() {
+        return Vec::new();
+    }
+    pieces
+        .iter()
+        .filter_map(|p| {
+            let (_, place) = at.iter().find(|(s, _)| *s == p.surface)?;
+            Some((p.part, super::geometry::mul(&place.matrix(), &p.piece)))
+        })
+        .collect()
+}
+
+/// `scene` with `moved` (`moved_parts`) put in: a copy, the parts' meshes
+/// shared.
+pub fn with_moved(scene: &Scene, moved: &[(usize, Mat4)]) -> Scene {
+    let mut out = scene.clone();
+    for (i, m) in moved {
+        if let Some(p) = out.parts.get_mut(*i) {
+            p.transform = *m;
+        }
+    }
+    out
 }
 
 /// What a ray from the lens sees: the place in its feed's picture and which

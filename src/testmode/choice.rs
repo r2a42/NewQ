@@ -101,7 +101,7 @@ impl PartPlan {
 /// About how long a Short cue or timeline lap takes, with its getting ready.
 const SHORT_SECS: f64 = 60.0;
 /// The 3D stage part's five Short legs, with its getting ready.
-const STAGE_SHORT_SECS: f64 = 5.0 * super::stage::SHORT_LEG_SECS + 20.0;
+const STAGE_SHORT_SECS: f64 = 6.0 * super::stage::SHORT_LEG_SECS + 20.0;
 
 /// Whether the 3D stage part is ticked by itself for `show`: it has a
 /// projector, or a display that shows the stage (owner's decision 8).

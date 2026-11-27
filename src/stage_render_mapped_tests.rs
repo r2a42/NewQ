@@ -116,6 +116,7 @@ fn content_mapped_and_thrown_back_is_the_content_laid_straight_on_a_curved_scree
                     size: THROW,
                     key,
                     feeds: &feeds,
+                    depth: false,
                 },
             )
             .expect("baked"),

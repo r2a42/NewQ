@@ -10,7 +10,8 @@ struct Frame {
     // xyz the lens.
     eye: vec4<f32>,
     // x what a fed screen's clip z is moved by: nearer by `SCREEN_SLACK` of
-    // its distance, so one on a wall wins.
+    // its distance, so one on a wall wins; y, z the depth picture's range
+    // (metres from the lens: `lensmap::DEPTH_RANGE`).
     extra: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> f: Frame;
@@ -80,6 +81,10 @@ fn nothing() -> Baked {
 
 @fragment
 fn fs_bake(i: VOut) -> Baked {
+    return bake_at(i);
+}
+
+fn bake_at(i: VOut) -> Baked {
     let feed = round(p.flags.x);
     // A front screen met from behind takes no light (and is in the way).
     let seen = p.flags.y < 0.5 || dot(i.normal, f.eye.xyz - i.world) > 0.0;
@@ -89,6 +94,38 @@ fn fs_bake(i: VOut) -> Baked {
     var o: Baked;
     o.place = pack_place(p.region.xy + i.uv * p.region.zw);
     o.how = vec4<f32>(1.0, feed / 255.0, 1.0, 1.0);
+    return o;
+}
+
+// ----- With depth (a show with a movable screen, mapping plan 4.2) ----------------
+
+struct BakedDepth {
+    @location(0) place: vec4<f32>,
+    @location(1) how: vec4<f32>,
+    // How far from the lens this sample is (whatever it is: everything
+    // here stands still), over the range, 24 bits high byte first
+    // (mapped::pack_depth).
+    @location(2) depth: vec4<f32>,
+};
+
+// A 0..1 number as `depth`'s bytes (mapped::pack_depth).
+fn pack_depth01(t: f32) -> vec4<f32> {
+    let v = u32(round(clamp(t, 0.0, 1.0) * 16777215.0));
+    return vec4<f32>(f32((v >> 16u) & 255u), f32((v >> 8u) & 255u), f32(v & 255u), 255.0) / 255.0;
+}
+
+fn depth_here(world: vec3<f32>) -> vec4<f32> {
+    let range = max(f.extra.z - f.extra.y, 1e-6);
+    return pack_depth01((length(world - f.eye.xyz) - f.extra.y) / range);
+}
+
+@fragment
+fn fs_bake_depth(i: VOut) -> BakedDepth {
+    let b = bake_at(i);
+    var o: BakedDepth;
+    o.place = b.place;
+    o.how = b.how;
+    o.depth = depth_here(i.world);
     return o;
 }
 
@@ -114,6 +151,10 @@ fn vs_whole(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 // the samples that show it as the coverage.
 @fragment
 fn fs_resolve(@builtin(position) pos: vec4<f32>) -> Baked {
+    return resolve_at(pos);
+}
+
+fn resolve_at(pos: vec4<f32>) -> Baked {
     let local = vec2<i32>(floor(pos.xy)) - tile.origin.xy;
     var counts = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
     var feeds = array<u32, 4>(0u, 0u, 0u, 0u);
@@ -144,5 +185,27 @@ fn fs_resolve(@builtin(position) pos: vec4<f32>) -> Baked {
     var o: Baked;
     o.place = pack_place(sum / n);
     o.how = vec4<f32>(1.0, f32(best) / 255.0, n / 4.0, 1.0);
+    return o;
+}
+
+@group(0) @binding(4) var big_depth: texture_2d<f32>;
+
+// As `fs_resolve`, and the depth: the nearest of the four samples (unpacked,
+// compared, packed again; never averaged). Where a still thing's edge
+// crosses the pixel it is taken as there, so a moving screen behind it is
+// hidden in that pixel.
+@fragment
+fn fs_resolve_depth(@builtin(position) pos: vec4<f32>) -> BakedDepth {
+    let b = resolve_at(pos);
+    let local = vec2<i32>(floor(pos.xy)) - tile.origin.xy;
+    var near = 1.0;
+    for (var k = 0; k < 4; k++) {
+        let s = local * 2 + vec2<i32>(k & 1, k >> 1u);
+        near = min(near, unpack_depth01(textureLoad(big_depth, s, 0)));
+    }
+    var o: BakedDepth;
+    o.place = b.place;
+    o.how = b.how;
+    o.depth = pack_depth01(near);
     return o;
 }

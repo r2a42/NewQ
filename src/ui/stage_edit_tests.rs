@@ -1055,3 +1055,51 @@ fn a_projector_whose_display_a_screen_shows_is_refused_mapped_and_given_a_canvas
         assert!(kept_by_sanitize(&show), "modern {modern}");
     }
 }
+
+#[test]
+fn a_movable_screen_says_where_it_is_now_and_is_put_at_its_places_by_mouse() {
+    use super::super::screen_cue::place_words;
+    for modern in [false, true] {
+        let mut show = Show::default();
+        let screen = add_surface(&mut show, Preset::Flat);
+        let other = add_surface(&mut show, Preset::Flat);
+        let mut cue = show.make_cue(crate::show::CueType::Screen, None, 0);
+        if let crate::show::CueKind::Screen(c) = &mut cue.kind {
+            c.screen = Some(screen);
+            c.to.x = Some(3.0);
+            c.to.yaw = Some(30.0);
+        }
+        let label = super::super::cue_label(&cue);
+        show.cues.push(cue);
+        let home = show.stage3d.surface(screen).unwrap().placement;
+        let there = show.screen_places(screen)[0].1;
+        assert_ne!(home, there);
+        let (mut w, mut st) = Win::new(modern, SettingsPage::Stage3d, &mut show);
+        w.tab(&mut show, &mut st, "Screens");
+        st.stage.picked = Some(screen);
+        w.settle(&mut show, &mut st);
+        let name = show.stage3d.surface(screen).unwrap().name.clone();
+        let now = format!("3D stage ▸ {name} ▸ {NOW_AT}");
+        w.see(&mut show, &mut st, &now);
+        let at_home = format!("{} (at home)", place_words(&home));
+        assert!(w.has(&at_home), "modern {modern}: {at_home:?} in {:?}", w.texts);
+        // A screen no cue moves has neither row.
+        let other_name = show.stage3d.surface(other).unwrap().name.clone();
+        assert!(w.find(&format!("3D stage ▸ {other_name} ▸ {NOW_AT}")).is_none());
+        let saved = serde_json::to_value(&show).unwrap();
+        // Put at ▸ the cue's place: the engine has it there, the show is
+        // as it was.
+        let menu = format!("3D stage ▸ {name} ▸ {PUT_AT}");
+        w.press(&mut show, &mut st, &menu);
+        w.press(&mut show, &mut st, &format!("{menu} ▸ {label}"));
+        assert_eq!(w.e.screen_at(screen), Some(there), "modern {modern}");
+        assert!(w.has(&place_words(&there)), "modern {modern}: {:?}", w.texts);
+        assert!(!w.has(&at_home));
+        assert_eq!(serde_json::to_value(&show).unwrap(), saved, "not an edit");
+        // And home again.
+        w.press(&mut show, &mut st, &menu);
+        w.press(&mut show, &mut st, &format!("{menu} ▸ {PUT_HOME}"));
+        assert_eq!(w.e.screen_at(screen), Some(home), "modern {modern}");
+        assert!(w.has(&place_words(&home)), "modern {modern}: {:?}", w.texts);
+    }
+}

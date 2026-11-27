@@ -18,6 +18,9 @@
 //! 5. **A mapped projector** (`testmode::mapped`): the last ticked monitor's
 //!    display shows the screens through a mapped projector, the lap on the
 //!    canvas they show (left out across a show network or with no monitor).
+//! 6. **A screen moving** (`testmode::mapped`, mapping round 3): the same,
+//!    with one of the screens it maps swung to and fro, drawn live over the
+//!    map.
 //!
 //! The governor starts each leg afresh (`PreviewGovernor::reset`), so what
 //! one leg taught it doesn't decide the next. Each leg is measured from
@@ -38,7 +41,7 @@ use crate::stage_render::StageTotals;
 use std::io::Write;
 
 /// What the window's "What does this do?" says of the part.
-pub const WHAT_IT_DOES: &str = "Plays the cue list's lap round and round, first with every preview off, then with a 3D view of the stage turning in this window, then with its projectors' light on, then with a display showing the stage, then with a mapped projector showing the screens on the last monitor, and says whether the 3D stage makes the displays miss pictures on this computer. With no 3D stage in your show it uses a sample venue with a projector for each of the test's displays.";
+pub const WHAT_IT_DOES: &str = "Plays the cue list's lap round and round, first with every preview off, then with a 3D view of the stage turning in this window, then with its projectors' light on, then with a display showing the stage, then with a mapped projector showing the screens on the last monitor, then with one of those screens moving, and says whether the 3D stage makes the displays miss pictures on this computer. With no 3D stage in your show it uses a sample venue with a projector for each of the test's displays.";
 
 /// The Test Mode window's 3D view, as the governor knows it.
 pub const VIEW: PreviewId = PreviewId::Other("test-mode-3d", 0);
@@ -68,6 +71,8 @@ pub enum Leg {
     Display,
     /// A mapped projector's display (`testmode::mapped`).
     Mapped,
+    /// The same with a screen it maps moving (`testmode::mapped`).
+    Moving,
 }
 
 impl Leg {
@@ -79,6 +84,7 @@ impl Leg {
             Leg::Light => "the 3D view with its light on",
             Leg::Display => "a display showing the stage",
             Leg::Mapped => "a mapped projector's display",
+            Leg::Moving => "a mapped projector's display with a screen moving",
         }
     }
 
@@ -90,7 +96,13 @@ impl Leg {
             Leg::Light => "light",
             Leg::Display => "display",
             Leg::Mapped => "mapped",
+            Leg::Moving => "moving",
         }
+    }
+
+    /// A mapped projector's display is shown (`Mapped` or `Moving`).
+    pub fn mapped(self) -> bool {
+        matches!(self, Leg::Mapped | Leg::Moving)
     }
 
     /// The view's light is on.
@@ -106,6 +118,7 @@ impl Leg {
             Leg::Light => "with the 3D view open and its light on",
             Leg::Display => "with a display showing the 3D stage",
             Leg::Mapped => "with a mapped projector showing the lap",
+            Leg::Moving => "with a screen moving in front of a mapped projector",
         }
     }
 }
@@ -146,7 +159,10 @@ impl Setup {
         if let Some(m) = &self.mapped {
             // Put back before the stage display changes (they may be the
             // same display).
-            changed |= m.apply(show, leg == Leg::Mapped);
+            changed |= m.apply(show, leg.mapped());
+            if let Some(mv) = &m.moving {
+                changed |= mv.apply(show, leg == Leg::Moving);
+            }
         }
         let Some(d) = &self.stage_display else {
             return changed;
@@ -214,6 +230,8 @@ pub struct LegResult {
     /// Lens maps made and refused over the whole leg (its settling
     /// included: a mapped projector's map lands then).
     pub maps: (u64, u64),
+    /// The moving leg: how many times the screen was put somewhere new.
+    pub moves: u64,
 }
 
 impl LegResult {
@@ -245,6 +263,7 @@ impl LegResult {
             stage: b.stage.since(&a.stage),
             refresh_hz,
             maps: (0, 0),
+            moves: 0,
         }
     }
 
@@ -276,6 +295,7 @@ impl LegResult {
             Some(Leg::Baseline) | None => true,
             Some(Leg::Display) => self.stage.displays + self.stage.views > 0,
             Some(Leg::Mapped) => self.maps.0 > 0 && self.maps.1 == 0,
+            Some(Leg::Moving) => self.maps.0 > 0 && self.maps.1 == 0 && self.moves > 0,
             Some(_) => self.stage.views > 0,
         }
     }
@@ -332,6 +352,7 @@ impl LegResult {
         s.venue_load_ms = s.venue_load_ms.max(t.venue_load_ms);
         self.refresh_hz = self.refresh_hz.or(o.refresh_hz);
         self.maps = (self.maps.0 + o.maps.0, self.maps.1 + o.maps.1);
+        self.moves += o.moves;
     }
 }
 
@@ -362,6 +383,8 @@ pub struct StageRun {
     look: Option<Look>,
     /// The stage's counts as the leg began (its lens maps).
     begun: Option<StageTotals>,
+    /// The moving leg's screen put somewhere new, this leg.
+    moves: u64,
     pub results: Vec<LegResult>,
     /// Legs played to their end.
     played: usize,
@@ -422,6 +445,7 @@ impl StageRun {
             current: None,
             look: None,
             begun: None,
+            moves: 0,
             results: Vec::new(),
             played: 0,
             finished: false,
@@ -525,6 +549,7 @@ impl StageRun {
                 let all = end.stage.since(b);
                 r.maps = (all.maps_baked, all.maps_refused);
             }
+            r.moves = self.moves;
             lines.push(format!("3D stage: {} over: {}", leg.name(), leg_words(&r)));
             self.row(&r);
             self.results.push(r);
@@ -558,6 +583,7 @@ impl StageRun {
         let leg = self.setup.legs[i];
         self.current = Some((i, t, round));
         self.look = None;
+        self.moves = 0;
         self.begun = Some(crate::stage_render::totals());
         // The governor starts afresh; the hold for the baseline is set from
         // `holds_previews` (here, and by the app each pass).
@@ -577,6 +603,22 @@ impl StageRun {
             },
             leg.name()
         ));
+    }
+
+    /// In the moving leg, `t` seconds into the test: the screen and where it
+    /// is to be put now (the session puts it, `Engine::put_screen`, each
+    /// look). None in any other leg.
+    pub fn screen_to_put(
+        &mut self,
+        t: f64,
+    ) -> Option<(crate::stage3d::SurfaceId, crate::stage3d::Placement)> {
+        let (i, began, _) = self.current?;
+        if self.finished || self.setup.legs[i] != Leg::Moving {
+            return None;
+        }
+        let m = self.setup.mapped.as_ref()?.moving.as_ref()?;
+        self.moves += 1;
+        Some((m.screen, m.place_at(t - began)))
     }
 
     /// The part is over: the stage display put back, the hold let go.
@@ -754,7 +796,7 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
     }
     for r in &threed {
         let leg = r.leg.expect("a leg");
-        if !r.drew() && leg == Leg::Mapped {
+        if !r.drew() && leg.mapped() {
             // Said by `mapped::findings`.
             continue;
         }
@@ -775,7 +817,12 @@ pub fn judge(results: &[LegResult], cx: &Context) -> Vec<Finding> {
         let (Some(b), Some(s)) = (base_share, r.share()) else {
             continue;
         };
-        if s - b >= line && r.worst_late() >= Governor::MIN_SEEN && leg == Leg::Mapped {
+        if s - b >= line && r.worst_late() >= Governor::MIN_SEEN && leg == Leg::Moving {
+            out.push(problem(super::mapped::moving_costs_words(
+                &percent(s),
+                &percent(b),
+            )));
+        } else if s - b >= line && r.worst_late() >= Governor::MIN_SEEN && leg == Leg::Mapped {
             out.push(problem(super::mapped::costs_words(
                 &percent(s),
                 &percent(b),
@@ -985,7 +1032,10 @@ pub fn report_part(results: &[LegResult], cx: &Context, findings: &[Finding]) ->
                 ms as f64 / 1000.0
             ));
         }
-        if leg == Leg::Mapped {
+        if leg == Leg::Moving {
+            line.push_str(&format!("; the screen put somewhere new {} times", r.moves));
+        }
+        if leg.mapped() {
             line.push_str(&format!(
                 "; {} lens map{} made{}",
                 r.maps.0,
@@ -1060,6 +1110,7 @@ mod tests {
             },
             refresh_hz: None,
             maps: (0, 0),
+            moves: 0,
         }
     }
 
@@ -1384,5 +1435,105 @@ mod tests {
             "{part}"
         );
         assert!(part.contains("0 lens maps made"), "{part}");
+    }
+
+    #[test]
+    fn the_moving_screens_leg_is_judged_by_the_same_line() {
+        use crate::preview_pace::Strictness;
+        let mut s = setup();
+        s.legs.extend([Leg::Mapped, Leg::Moving]);
+        let moving = |late: u32, maps: (u64, u64), moves: u64| LegResult {
+            maps,
+            moves,
+            ..leg(Leg::Moving, 3000, late, 0, 0)
+        };
+        let mapped = LegResult {
+            maps: (1, 0),
+            ..leg(Leg::Mapped, 3000, 10, 0, 0)
+        };
+        let base = leg(Leg::Baseline, 3000, 9, 0, 0);
+        let c = cx(&s, Strictness::Strict);
+        // Within the line: nothing to say.
+        let legs = [base.clone(), mapped.clone(), moving(12, (1, 0), 400)];
+        let f = judge(&legs, &c);
+        assert!(f.is_empty(), "{f:?}");
+        // 4% against 0.3%: over Strict's 1%, a Problem in its own words,
+        // the mapped leg's own fine.
+        let legs = [base.clone(), mapped.clone(), moving(120, (1, 0), 400)];
+        let f = judge(&legs, &c);
+        assert_eq!(
+            problems(&f),
+            [
+                "With a screen moving in front of a mapped projector the displays missed 4.0% of their pictures; with previews off, 0.3%. On this computer a moving screen costs the show: it is drawn for every frame and never gives way. Try fewer moving screens, or a smaller canvas."
+            ]
+        );
+        assert_eq!(
+            in_short(&legs, &c, &f),
+            "The 3D stage costs the displays on this computer: see above."
+        );
+        assert!(problems(&judge(&legs, &cx(&s, Strictness::Relaxed))).is_empty());
+        // A screen that never moved: said, and the leg not compared.
+        let legs = [base.clone(), mapped.clone(), moving(120, (1, 0), 0)];
+        let f = judge(&legs, &c);
+        assert!(problems(&f).is_empty(), "{f:?}");
+        assert!(
+            f.iter().any(|f| f.text.starts_with("The screen didn't move")),
+            "{f:?}"
+        );
+        // The map refused: a Problem (once), not compared.
+        let legs = [base.clone(), mapped, moving(120, (0, 1), 400)];
+        let f = judge(&legs, &c);
+        assert_eq!(problems(&f).len(), 1, "{f:?}");
+        assert!(problems(&f)[0].contains("stays black"));
+        let part = report_part(&legs, &c, &f).join(" / ");
+        assert!(part.contains("the screen put somewhere new 400 times"), "{part}");
+    }
+
+    #[test]
+    fn the_screen_is_put_only_in_the_moving_leg_and_swings_about_home() {
+        let mut show = Show::default();
+        let screen = show.add_surface(None);
+        let home = show.stage3d.surface(screen).unwrap().placement;
+        let cue = show.make_cue(crate::show::CueType::Screen, None, 0);
+        let mv = super::super::mapped::MovingLeg {
+            screen,
+            screen_name: "Screen 1".into(),
+            home,
+            cue,
+        };
+        assert_eq!(mv.place_at(0.0), home);
+        let quarter = mv.place_at(super::super::mapped::SWING_SECS / 4.0);
+        assert!((quarter.position[0] - home.position[0] - super::super::mapped::SWING_M).abs() < 1e-4);
+        assert!((quarter.yaw - home.yaw - super::super::mapped::SWING_DEG).abs() < 1e-3);
+        let mut s = setup();
+        s.legs = vec![Leg::Baseline, Leg::Moving];
+        s.mapped = Some(super::super::mapped::MappedLeg {
+            projector: crate::stage3d::ProjectorId(1),
+            display: show.outputs[0].id,
+            display_name: String::new(),
+            canvas: show.outputs[0].id,
+            before: crate::stage3d::Projector::new(crate::stage3d::ProjectorId(1), "P".into()),
+            during: crate::stage3d::Projector::new(crate::stage3d::ProjectorId(1), "P".into()),
+            moving: Some(mv),
+        });
+        let mut st = crate::ui::UiState::default();
+        let mut run = StageRun::new(s, &show, 0, false, None);
+        run.shorten(10.0);
+        let mut puts = 0;
+        let mut t = 0.0;
+        while !run.finished && t < 100.0 {
+            run.tick(&mut show, &mut st, t);
+            let put = run.screen_to_put(t);
+            assert_eq!(put.is_some(), run.leg() == Some(Leg::Moving), "at {t}");
+            if put.is_some() {
+                puts += 1;
+                assert!(show.movable(screen), "movable while it moves");
+            } else {
+                assert!(!show.movable(screen), "not movable at {t}");
+            }
+            t += 0.5;
+        }
+        assert!(puts > 0);
+        assert_eq!(run.results.last().map(|r| r.moves), Some(puts));
     }
 }
