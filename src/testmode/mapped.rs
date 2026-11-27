@@ -238,4 +238,52 @@ mod tests {
         // No mapped leg: nothing.
         assert!(findings(&[base]).is_empty());
     }
+
+    /// The lap is on the canvas too, on one computer: every picture the
+    /// lap sends to the first display is also on the canvas (so the mapped
+    /// leg doesn't map a black canvas).
+    #[test]
+    fn the_lap_is_shown_on_the_canvas_too() {
+        use crate::testmode::plan::{DisplayChoice, SoundChoice, build_stage};
+        let picks: Vec<DisplayChoice> = (1..=2)
+            .map(|i| DisplayChoice {
+                computer: None,
+                key: format!("M{i}"),
+                reference: crate::show::DisplayRef {
+                    name: format!("M{i}"),
+                    index: i,
+                    hardware: None,
+                },
+                twins: 1,
+                label: format!("M{i}"),
+            })
+            .collect();
+        let b = build_stage(
+            &Show::default(),
+            &std::collections::HashMap::new(),
+            &picks,
+            &SoundChoice::default(),
+            true,
+        );
+        let m = b
+            .stage
+            .as_ref()
+            .and_then(|s| s.mapped.clone())
+            .expect("a mapped leg");
+        let first = b.show.outputs[0].id;
+        // Every picture the lap sends to the first display goes to the
+        // canvas too.
+        let sent: Vec<_> = b
+            .show
+            .cues
+            .iter()
+            .filter_map(|c| c.kind.media().map(|x| (c, x)))
+            .filter(|(_, x)| x.output.is_none_or(|o| o == first))
+            .collect();
+        assert!(!sent.is_empty());
+        assert!(sent.iter().all(|(_, x)| x.also_on.contains(&m.canvas)));
+        // (The engine plays a cue on its `also_on` displays as on its own:
+        // its tests; the lap's media aren't here without the downloads.)
+        assert!(b.show.is_canvas(m.canvas));
+    }
 }
