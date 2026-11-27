@@ -115,6 +115,8 @@ fn frame_of(
 struct Agreed {
     fed: usize,
     compared: usize,
+    /// Pixels the live side's map (of what stands still) shows a canvas at.
+    live_fed: usize,
 }
 
 /// The pixels of `got` and `want` agree, within `within` of a step, where
@@ -126,6 +128,7 @@ fn agree(map: &CpuMap, want: &[u8], got: &[u8], within: i16, what: &str) -> Agre
     let mut a = Agreed {
         fed: 0,
         compared: 0,
+        live_fed: 0,
     };
     for y in 0..H {
         for x in 0..W {
@@ -205,18 +208,10 @@ fn both_ways(
         MapOwner::Window(0),
         &frame_of(gpu, &map, &canvases, moving, lens),
     );
-    let a = agree(&baked, &want, &got, 3, what);
-    // (The live side's map has none of the movable screens in it.)
-    for (part, shows) in room.parts.iter().map(|q| (q, lensmap::part_feed(q, feeds))) {
-        if shows.is_some() {
-            assert!(
-                pieces
-                    .iter()
-                    .all(|m| m.mesh_key != part.mesh_key || !Arc::ptr_eq(&m.mesh, &part.mesh)),
-                "{what}: the map leaves the moving screens out"
-            );
-        }
-    }
+    let mut a = agree(&baked, &want, &got, 3, what);
+    a.live_fed = (0..(W * H) as usize)
+        .filter(|i| unpack_how(map.how[*i]).feed.is_some())
+        .count();
     (baked, a)
 }
 
@@ -288,9 +283,11 @@ fn a_moved_flat_curved_and_faceted_screen_is_drawn_where_the_reference_has_it() 
         let places = [(s, moved([0.5, -0.3, 0.7], 14.0, 5.0))];
         let (_, agreed) = both_ways(&gpu, &show, p, &places, &[], &[a], what);
         enough(&agreed, 600, what);
+        assert_eq!(agreed.live_fed, 0, "{what}: the map leaves it out");
         // At home, never moved: still drawn (the map leaves it out).
         let (_, agreed) = both_ways(&gpu, &show, p, &[], &[], &[a], what);
         enough(&agreed, 900, &format!("{what} at home"));
+        assert_eq!(agreed.live_fed, 0, "{what} at home: drawn live");
     }
 }
 
@@ -304,6 +301,7 @@ fn a_moving_screen_is_hidden_behind_a_baked_box() {
     let (open, _) = both_ways(&gpu, &show, p, &places, &[], &[a], "no box");
     let (boxed, agreed) = both_ways(&gpu, &show, p, &places, &[block], &[a], "behind a box");
     enough(&agreed, 600, "behind a box");
+    assert_eq!(agreed.live_fed, 0, "the map leaves the screen out");
     // The box hides a good part of it (compared: black on both).
     let hidden = (0..(W * H) as usize)
         .filter(|i| {

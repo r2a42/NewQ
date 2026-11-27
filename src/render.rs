@@ -2396,5 +2396,30 @@ mod pace_tests {
             Some(&last),
             &Shot::of(SIZE, &groups, blend, &[])
         ));
+        // A moving screen: the same place twice is not new; moved, it is.
+        let mesh = crate::stage3d::scene::Mesh {
+            positions: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+            indices: vec![0, 1, 2],
+        };
+        let mut moving = f.clone();
+        moving.moving = vec![crate::mapped::MovingScreen {
+            surface: crate::stage3d::SurfaceId(1),
+            mesh_key: mesh.content_key(),
+            mesh: Arc::new(mesh),
+            matrix: crate::stage3d::scene::IDENTITY,
+            feed: Some(0),
+            region: [0.0, 0.0, 1.0, 1.0],
+            front_only: true,
+        }];
+        let still = frame(&moving);
+        assert!(
+            !is_new_picture(Some(&still), &frame(&moving)),
+            "standing still"
+        );
+        let mut on = moving.clone();
+        on.moving[0].matrix[3][0] = 0.25;
+        assert!(is_new_picture(Some(&still), &frame(&on)), "moved");
     }
 }
