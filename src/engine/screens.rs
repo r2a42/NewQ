@@ -28,7 +28,7 @@ use crate::net::play::{AxisMove, Command, PlayState, ScreenNow};
 use crate::show::screen::{AXES, axes_of, placement_of};
 use crate::show::{Cue, Curve, ScreenCue, Show};
 use crate::stage3d::{Placement, SurfaceId};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// How long a screen cue takes (a time that isn't one, or less than 0, is a
 /// jump).
@@ -60,14 +60,18 @@ struct Clock {
     elapsed: f64,
     /// The shared time its time was 0, while ticking by a shared clock.
     anchor: Option<f64>,
+    /// Its time stands (the show paused, its timeline at a pause; for one
+    /// taken from a heartbeat, as the primary's stood).
+    standing: bool,
 }
 
 impl Clock {
-    fn free(elapsed: f64, anchor: Option<f64>) -> Clock {
+    fn free(elapsed: f64, anchor: Option<f64>, standing: bool) -> Clock {
         Clock {
             instance: 0,
             elapsed,
             anchor,
+            standing,
         }
     }
 }
@@ -158,6 +162,9 @@ pub struct ScreenDoubts {
     heard: bool,
     /// The heartbeats in a row each screen has differed at.
     steady: HashMap<SurfaceId, u32>,
+    /// Screens put right while a cue here drove them (by that cue's
+    /// instance): not again while it does (R21: once, then left).
+    fixed: HashSet<(SurfaceId, u64)>,
 }
 
 impl ScreenDoubts {
@@ -174,16 +181,18 @@ fn same(a: &[f32; AXES], b: &[f32; AXES]) -> bool {
     })
 }
 
-/// Where a heartbeat's screen is at shared time `now`.
-fn theirs_at(s: &ScreenNow, now: f64) -> [f32; AXES] {
+/// Where a heartbeat's screen (of shared time `then`) is at shared time
+/// `now`: a number whose clock stands is where it was then.
+fn theirs_at(s: &ScreenNow, now: f64, then: f64) -> [f32; AXES] {
     let mut v = axes_of(&s.at);
     for m in &s.moving {
         let i = usize::from(m.axis);
         if i >= AXES || !m.from.is_finite() || !m.to.is_finite() {
             continue;
         }
+        let t = if m.standing { then } else { now };
         let k = if m.duration.is_finite() && m.duration > 0.0 {
-            m.curve.apply((now - m.anchor) / m.duration) as f32
+            m.curve.apply((t - m.anchor) / m.duration) as f32
         } else {
             1.0
         };
@@ -255,16 +264,33 @@ impl Engine {
             .or_insert_with(|| Screen::at(&home));
         let now = screen.shown();
         let secs = length(s);
+        let from = if from.is_finite() { from.max(0.0) } else { 0.0 };
         let clock = Clock {
             instance,
-            elapsed: from.max(0.0),
+            elapsed: from,
             anchor: None,
+            standing: false,
+        };
+        // Started part way (a timeline's seek into it): from where the
+        // screen is now, on to arrive where and when the cue does, so the
+        // seek moves nothing at once.
+        let done = if secs > 0.0 {
+            s.curve.apply(from / secs) as f32
+        } else {
+            1.0
         };
         for (i, to) in s.to.axes().into_iter().enumerate() {
             let Some(to) = to.filter(|v| v.is_finite()) else {
                 continue;
             };
-            screen.axes[i].go(now[i], to, secs, s.curve, clock);
+            let start = if done <= 0.0 {
+                now[i]
+            } else if done < 1.0 {
+                (now[i] - to * done) / (1.0 - done)
+            } else {
+                to
+            };
+            screen.axes[i].go(start, to, secs, s.curve, clock);
             // This number is the new move's: the ease lets go of it.
             if let Some(e) = &mut screen.ease {
                 e.from[i] = None;
@@ -292,17 +318,23 @@ impl Engine {
             .collect();
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         let step = |c: &mut Clock| {
+            let before = c.elapsed;
             if let Some((elapsed, anchor)) = cues.get(&c.instance).filter(|_| c.instance != 0) {
                 c.elapsed = *elapsed;
                 c.anchor = *anchor;
+                // (A tick that took no time says nothing of it.)
+                if dt > 0.0 {
+                    c.standing = paused || c.elapsed == before;
+                }
                 return;
             }
             // Its cue is gone: on by the clock it kept to.
             c.instance = 0;
+            let stands = paused || c.standing;
             match (shared, &mut c.anchor) {
-                (Some(_), Some(a)) if paused => *a += dt,
+                (Some(_), Some(a)) if stands => *a += dt,
                 (Some(now), Some(a)) => c.elapsed = (now - *a).max(c.elapsed),
-                _ if !paused => c.elapsed += dt,
+                _ if !stands => c.elapsed += dt,
                 _ => {}
             }
         };
@@ -347,6 +379,7 @@ impl Engine {
                             anchor: c.anchor.unwrap_or(now - c.elapsed),
                             duration,
                             curve,
+                            standing: c.standing,
                         })
                     })
                     .collect(),
@@ -372,15 +405,37 @@ impl Engine {
         ids.dedup();
         let first = !doubts.heard;
         doubts.heard = true;
+        let live: HashSet<u64> = self.active.iter().map(|a| a.instance).collect();
+        // A move taken from a heartbeat follows the primary's (its anchor,
+        // and whether it stands), as a paused cue's anchor is followed.
+        for (id, ours) in &mut self.screens.at {
+            let Some(t) = theirs.get(id) else { continue };
+            for m in &t.moving {
+                let i = usize::from(m.axis);
+                let Some(a) = ours.axes.get_mut(i) else {
+                    continue;
+                };
+                let same = a.param.ramp_parts().is_some_and(|(f, to, d, c)| {
+                    f == m.from && to == m.to && d == m.duration && c == m.curve
+                });
+                if let Some(c) = a.clock.as_mut().filter(|c| c.instance == 0 && same) {
+                    c.anchor = Some(m.anchor);
+                    c.standing = m.standing;
+                    c.elapsed = (if m.standing { s.time } else { now }) - m.anchor;
+                    a.param.ramp_at(c.elapsed.max(0.0));
+                }
+            }
+        }
         let mut done = Vec::new();
         let mut steady = HashMap::new();
+        doubts.fixed.retain(|(_, instance)| live.contains(instance));
         for id in ids {
             let Some(home) = show.stage3d.surface(id).map(|x| x.placement) else {
                 continue;
             };
             let want = theirs
                 .get(&id)
-                .map_or_else(|| axes_of(&home), |t| theirs_at(t, now));
+                .map_or_else(|| axes_of(&home), |t| theirs_at(t, now, s.time));
             let ours = self
                 .screens
                 .at
@@ -389,32 +444,47 @@ impl Engine {
             if same(&want, &ours) {
                 continue;
             }
+            // The cues here that drive it: put right once while they do.
+            let tied: Vec<(usize, u64)> = self.screens.at.get(&id).map_or_else(Vec::new, |x| {
+                x.axes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, a)| a.clock.map(|c| (i, c.instance)))
+                    .filter(|(_, n)| *n != 0 && live.contains(n))
+                    .collect()
+            });
+            if tied.iter().any(|(_, n)| doubts.fixed.contains(&(id, *n))) {
+                continue;
+            }
             let beats = doubts.steady.get(&id).copied().unwrap_or(0) + 1;
             if !first && beats < STEADY_BEATS {
                 steady.insert(id, beats);
                 continue;
             }
-            // Theirs, exactly: each number where it is and on its way.
+            // Theirs, exactly: each number where it is and on its way (one
+            // that a cue here drives stays that cue's, from theirs).
             let mut fresh = Screen::at(&theirs.get(&id).map_or(home, |t| t.at));
             for m in theirs.get(&id).map_or(&[][..], |t| &t.moving[..]) {
                 let i = usize::from(m.axis);
                 if i < AXES && m.from.is_finite() && m.to.is_finite() && m.anchor.is_finite() {
-                    let elapsed = (now - m.anchor).max(0.0);
-                    fresh.axes[i].go(
-                        m.from,
-                        m.to,
-                        m.duration,
-                        m.curve,
-                        Clock::free(elapsed, Some(m.anchor)),
-                    );
+                    let t = if m.standing { s.time } else { now };
+                    let mut clock =
+                        Clock::free((t - m.anchor).max(0.0), Some(m.anchor), m.standing);
+                    if let Some((_, n)) = tied.iter().find(|(k, _)| *k == i) {
+                        clock.instance = *n;
+                    }
+                    fresh.axes[i].go(m.from, m.to, m.duration, m.curve, clock);
                 }
+            }
+            for (_, n) in &tied {
+                doubts.fixed.insert((id, *n));
             }
             // Just joined: nothing was right before, so it is taken at once.
             // Else eased to, from where the picture has it.
             if !first {
                 fresh.ease = Some(Ease {
                     from: ours.map(Some),
-                    clock: Clock::free(0.0, Some(now)),
+                    clock: Clock::free(0.0, Some(now), false),
                 });
             }
             self.screens.at.insert(id, fresh);

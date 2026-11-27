@@ -295,6 +295,10 @@ pub struct AxisMove {
     /// (A curve a later NewQ adds reads as the S-curve.)
     #[serde(default, deserialize_with = "crate::show::compat::lenient")]
     pub curve: Curve,
+    /// Its clock stands (the show paused, its timeline at a pause): it is
+    /// where the heartbeat's time has it, not run on to a later one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standing: bool,
 }
 
 impl PlayState {

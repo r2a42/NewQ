@@ -58,7 +58,8 @@ See also: `remote.md` holds the one line on `src/text.rs` (text cue rendering), 
   given from where the screen is shown; `screens_tick` (after `tick_inner`) puts each ramp at its
   clock's time by `Param::ramp_at` (absolute, not summed): the cue's `elapsed`/`anchor` while it
   plays, then on by that anchor (or `dt`) once it is gone, so *Stop all*/*Panic* leave it going to
-  where it was told; it drops screens no cue moves or the show lacks. `show_opened` puts all home.
+  where it was told (`Clock::standing` when its cue's time stood that tick); a part-way start (`at.from`)
+  bends the ramp's start so the screen doesn't jump; a timeline seek starts no screen clip; it drops screens no cue moves or the show lacks. `show_opened` puts all home.
   API: `screen_at`, `moved_screens` (for `StageLive::send`, `UiState::screens_now`),
   `screens_moving` (the main loop should keep ticking), `put_screen` (gated: `Command::PutScreen`),
   `screen_cue_length`. Tests: `engine/screens_tests.rs`, `show/screen.rs`'s tests,
