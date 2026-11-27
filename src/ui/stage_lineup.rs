@@ -62,7 +62,7 @@ use crate::preview_pace::PreviewId;
 use crate::render::{OutputGroup, OutputLayer, OutputPreview};
 use crate::render3d::{self, Camera, Orbit};
 use crate::show::{OutputId, Show};
-use crate::stage3d::projector::{Before, LineUp, LinePoint, Projector, ProjectorId};
+use crate::stage3d::projector::{Before, LinePoint, LineUp, Projector, ProjectorId};
 use crate::stage3d::{ScreenKind, Stage3d, SurfaceId, SurfaceShape, geometry};
 use serde::{Deserialize, Serialize};
 
@@ -181,8 +181,7 @@ pub const DIMMED: &str = "Its picture, dimmed, under the crosses";
 
 /// Why line-up can't start or go on here, in words.
 pub const SHOW_MODE_WORDS: &str = "Line-up isn't possible in Show mode: leave Show mode first.";
-pub const LOCKED_WORDS: &str =
-    "This computer follows a primary, so its show is run from there: line projectors up on the \
+pub const LOCKED_WORDS: &str = "This computer follows a primary, so its show is run from there: line projectors up on the \
      primary.";
 pub const TEST_WORDS: &str = "Line-up waits while Test Mode runs.";
 
@@ -265,8 +264,10 @@ impl Panes {
                 return None;
             }
         };
-        (f.show == *st_show && f.show_name == show.name && show.projector(f.draft.projector).is_some())
-            .then_some(f.draft)
+        (f.show == *st_show
+            && f.show_name == show.name
+            && show.projector(f.draft.projector).is_some())
+        .then_some(f.draft)
     }
 
     /// Write `draft` when it differs from what was last written.
@@ -362,8 +363,9 @@ pub fn tend(show: &Show, st: &mut UiState) -> bool {
     panes.drag = None;
     panes.solve = None;
     panes.note = Some(match (why, gone || other_show) {
-        (_, true) => "The line-up in progress was put away: its projector isn't in this show."
-            .to_string(),
+        (_, true) => {
+            "The line-up in progress was put away: its projector isn't in this show.".to_string()
+        }
         (Some(w), _) => format!(
             "The line-up in progress was put away. {w} It can be carried on afterwards from {}.",
             super::settings::STAGE_PROJECTORS.path()
@@ -689,14 +691,14 @@ pub(super) fn panes(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     // for their hover, so the panes and the words still fit.
     let short = ui.available_height() < 420.0;
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(format!("Lining up {}", p.name)).strong().size(16.0))
-            .on_hover_text(PANES_HINT);
+        ui.label(
+            RichText::new(format!("Lining up {}", p.name))
+                .strong()
+                .size(16.0),
+        )
+        .on_hover_text(PANES_HINT);
         ui.add_space(12.0);
-        let ok = panes
-            .solve
-            .as_ref()
-            .is_some_and(|s| s.result.is_ok())
-            && refusal.is_none();
+        let ok = panes.solve.as_ref().is_some_and(|s| s.result.is_ok()) && refusal.is_none();
         let r = ui
             .add_enabled(ok, egui::Button::new(RichText::new(DONE).strong()))
             .on_hover_text("Put the projector where the points say, and keep the points")
@@ -746,7 +748,9 @@ pub(super) fn panes(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     let room = ui.available_size();
     // The panes take what the words and the points' list (at least about
     // two rows of it) leave.
-    let h = (room.y - 120.0).min(520.0).max(90.0).min((room.y * 0.65).max(90.0));
+    let h = (room.y - 120.0)
+        .clamp(90.0, 520.0)
+        .min((room.y * 0.65).max(90.0));
     let w = ((room.x - 12.0) / 2.0).max(120.0);
     let editable = refusal.is_none();
     ui.horizontal(|ui| {
@@ -956,7 +960,7 @@ fn model_pane(
         st.stage.requests.push(super::stage_view::ViewRequest {
             id: LINEUP_VIEW,
             size: super::stage_view::request_size(rect.size() * ppp),
-            camera: camera.clone(),
+            camera,
             options: super::stage_view::view_options(&view, budget.scale, st.stage.bounds.as_ref()),
             lines: Arc::new(Vec::new()),
         });
@@ -1120,11 +1124,18 @@ fn mark(painter: &egui::Painter, at: Pos2, i: usize, active: bool, on: bool) {
         Color32::WHITE
     };
     let ring = egui::Stroke::new(2.0, colour);
-    painter.circle_stroke(at, 7.0, egui::Stroke::new(4.0, Color32::from_black_alpha(160)));
+    painter.circle_stroke(
+        at,
+        7.0,
+        egui::Stroke::new(4.0, Color32::from_black_alpha(160)),
+    );
     painter.circle_stroke(at, 7.0, ring);
     if active {
         for d in [vec2(1.0, 0.0), vec2(0.0, 1.0)] {
-            painter.line_segment([at - d * 12.0, at + d * 12.0], egui::Stroke::new(1.5, colour));
+            painter.line_segment(
+                [at - d * 12.0, at + d * 12.0],
+                egui::Stroke::new(1.5, colour),
+            );
         }
     }
     painter.text(
@@ -1244,7 +1255,13 @@ fn picture_pane(ui: &mut Ui, panes: &mut Panes, draft: &mut LineUpDraft, editabl
         }
     }
     for (i, pt) in draft.points.iter().enumerate() {
-        mark(&painter, to_pos(pt.pixel), i, draft.active == Some(i), pt.on);
+        mark(
+            &painter,
+            to_pos(pt.pixel),
+            i,
+            draft.active == Some(i),
+            pt.on,
+        );
     }
     painter.text(
         area.left_bottom() + vec2(6.0, -4.0),
@@ -1299,7 +1316,10 @@ fn point_rows(
     editable: bool,
 ) {
     if draft.points.is_empty() {
-        hint(ui, "No points yet: click a corner of a screen on the model, on the left.");
+        hint(
+            ui,
+            "No points yet: click a corner of a screen on the model, on the left.",
+        );
         return;
     }
     let residuals: Vec<Option<f64>> = match panes.solve.as_ref().map(|s| &s.result) {
@@ -1389,7 +1409,10 @@ pub(super) fn row_buttons(ui: &mut Ui, show: &mut Show, st: &mut UiState, id: Pr
             return;
         }
         let r = ui
-            .add_enabled(why.is_none() && st.line_up.is_none(), egui::Button::new(LINE_UP))
+            .add_enabled(
+                why.is_none() && st.line_up.is_none(),
+                egui::Button::new(LINE_UP),
+            )
             .on_hover_text(
                 "Find where this projector really is from points: click a spot on the model, \
                  move its cross on the wall onto it, four times or more",

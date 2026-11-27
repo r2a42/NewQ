@@ -117,7 +117,14 @@ impl Win {
         self.spots.iter().any(|(t, _)| t.contains(words))
     }
 
-    fn pointer(&mut self, show: &mut Show, st: &mut UiState, at: Pos2, pressed: bool, m: Modifiers) {
+    fn pointer(
+        &mut self,
+        show: &mut Show,
+        st: &mut UiState,
+        at: Pos2,
+        pressed: bool,
+        m: Modifiers,
+    ) {
         self.frame(
             show,
             st,
@@ -229,8 +236,12 @@ fn rig(preset: Preset) -> (Show, ProjectorId, SurfaceId, Placement) {
     let middle = super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
     let aimed = show.projector(id).unwrap().placement;
     let mut truth = aimed;
-    for k in 0..3 {
-        truth.position[k] += (aimed.position[k] - middle[k]) * 0.3;
+    for (t, (a, m)) in truth
+        .position
+        .iter_mut()
+        .zip(aimed.position.iter().zip(middle))
+    {
+        *t += (a - m) * 0.3;
     }
     truth.yaw += 0.6;
     truth.pitch -= 0.4;
@@ -278,7 +289,10 @@ fn start_by_mouse(w: &mut Win, show: &mut Show, st: &mut UiState) {
 /// snap is what puts it there).
 fn drop_point(w: &mut Win, show: &mut Show, st: &mut UiState, room: [f32; 3], towards: [f32; 3]) {
     let rect = w.rect("Line-up ▸ model");
-    let p = show.projector(st.line_up.as_ref().unwrap().projector).unwrap().clone();
+    let p = show
+        .projector(st.line_up.as_ref().unwrap().projector)
+        .unwrap()
+        .clone();
     let camera = model_camera(show, st, &st.stage.projectors.lineup, &p);
     let at = model_pos(&camera, rect, room).expect("in front");
     let mid = model_pos(&camera, rect, towards).expect("in front");
@@ -306,14 +320,21 @@ fn nudge_to(w: &mut Win, show: &mut Show, st: &mut UiState, i: usize, target: [f
     );
     // The keys for the rest.
     let mut keys = Vec::new();
-    for (k, (minus, plus)) in [(Key::ArrowLeft, Key::ArrowRight), (Key::ArrowUp, Key::ArrowDown)]
-        .into_iter()
-        .enumerate()
+    for (k, (minus, plus)) in [
+        (Key::ArrowLeft, Key::ArrowRight),
+        (Key::ArrowUp, Key::ArrowDown),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let mut left = target[k] - now[k];
         let key = if left < 0.0 { minus } else { plus };
         left = left.abs();
-        for (step, m) in [(10.0, Modifiers::SHIFT), (1.0, Modifiers::NONE), (0.1, Modifiers::ALT)] {
+        for (step, m) in [
+            (10.0, Modifiers::SHIFT),
+            (1.0, Modifiers::NONE),
+            (0.1, Modifiers::ALT),
+        ] {
             let n = if step < 1.0 {
                 (left / step).round()
             } else {
@@ -349,7 +370,8 @@ fn four_points_on_a_flat_screen_line_a_projector_up_by_mouse_and_arrow_keys() {
         let (mut w, mut st) = Win::new(modern, &mut show, &dir);
         start_by_mouse(&mut w, &mut show, &mut st);
         let corners = room_corners(&show, s);
-        let middle = super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
+        let middle =
+            super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
         for c in &corners {
             drop_point(&mut w, &mut show, &mut st, *c, middle);
         }
@@ -413,7 +435,11 @@ fn four_points_on_a_flat_screen_line_a_projector_up_by_mouse_and_arrow_keys() {
             }],
         );
         w.settle(&mut show, &mut st);
-        assert_eq!(show.projector(id).unwrap(), &entered, "one undo is all of it");
+        assert_eq!(
+            show.projector(id).unwrap(),
+            &entered,
+            "one undo is all of it"
+        );
         assert!(!st.history.can_undo(), "and it was one step");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -429,7 +455,8 @@ fn eight_points_on_a_faceted_screen_find_the_pose_and_name_a_bad_point() {
         let rect = w.rect("Line-up ▸ model");
         let p = show.projector(id).unwrap().clone();
         let camera = model_camera(&show, &st, &st.stage.projectors.lineup, &p);
-        let middle = super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
+        let middle =
+            super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
         // Eight corners the lens sees well apart from each other.
         let mut chosen: Vec<[f32; 3]> = Vec::new();
         let mut at: Vec<Pos2> = Vec::new();
@@ -524,9 +551,17 @@ fn cancel_leaves_the_show_exactly_as_it_was() {
         let before = serde_json::to_string(&show).unwrap();
         // Moved about and nudged, then cancelled.
         let pic = w.rect("Line-up ▸ picture");
-        w.drag(&mut show, &mut st, pic.center(), pic.center() + vec2(30.0, 10.0));
+        w.drag(
+            &mut show,
+            &mut st,
+            pic.center(),
+            pic.center() + vec2(30.0, 10.0),
+        );
         w.keys(&mut show, &mut st, &[(Key::ArrowRight, Modifiers::SHIFT)]);
-        assert!(dir.join(DRAFT_FILE).exists(), "the draft is kept as it goes");
+        assert!(
+            dir.join(DRAFT_FILE).exists(),
+            "the draft is kept as it goes"
+        );
         w.press(&mut show, &mut st, "Line-up ▸ Cancel");
         assert!(st.line_up.is_none());
         assert_eq!(serde_json::to_string(&show).unwrap(), before);
@@ -545,7 +580,8 @@ fn back_to_before_line_up_puts_it_back_exactly() {
         let (mut w, mut st) = Win::new(modern, &mut show, &dir);
         start_by_mouse(&mut w, &mut show, &mut st);
         let corners = room_corners(&show, s);
-        let middle = super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
+        let middle =
+            super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
         for c in &corners {
             drop_point(&mut w, &mut show, &mut st, *c, middle);
         }
@@ -574,7 +610,12 @@ fn back_to_before_line_up_puts_it_back_exactly() {
         start_by_mouse(&mut w, &mut show, &mut st);
         assert_eq!(st.line_up.as_ref().unwrap().points.len(), 4, "carried on");
         let pic = w.rect("Line-up ▸ picture");
-        w.drag(&mut show, &mut st, pic.center(), pic.center() + vec2(-20.0, 0.0));
+        w.drag(
+            &mut show,
+            &mut st,
+            pic.center(),
+            pic.center() + vec2(-20.0, 0.0),
+        );
         w.press(&mut show, &mut st, "Line-up ▸ Back");
         assert!(st.line_up.is_none());
         let p = show.projector(id).unwrap();
@@ -618,7 +659,12 @@ fn a_line_up_in_progress_survives_a_restart() {
     for modern in [false, true] {
         let (mut show, mut w, mut st, id, dir) = four_placed(modern, &format!("restart-{modern}"));
         let pic = w.rect("Line-up ▸ picture");
-        w.drag(&mut show, &mut st, pic.center(), pic.center() + vec2(25.0, -15.0));
+        w.drag(
+            &mut show,
+            &mut st,
+            pic.center(),
+            pic.center() + vec2(25.0, -15.0),
+        );
         let d = st.line_up.clone().unwrap();
         drop((w, st));
         // A new run of NewQ, the same show.
@@ -638,8 +684,10 @@ fn a_line_up_in_progress_survives_a_restart() {
         assert_ne!(back.session, d.session, "a new session");
         assert!(w.find("Line-up ▸ model").is_some());
         // Another show isn't offered it; Forget it takes it away.
-        let mut other = Show::default();
-        other.name = "Another".into();
+        let mut other = Show {
+            name: "Another".into(),
+            ..Default::default()
+        };
         let (w2, _) = Win::new(modern, &mut other, &dir);
         assert!(!w2.says("Carry on lining up"), "{:?}", w2.words());
         w.press(&mut show, &mut st, "Line-up ▸ Cancel");
@@ -695,7 +743,7 @@ fn corners_are_each_screens_own_once() {
     // A curved wall's edge, top and bottom.
     let curved = Preset::Curved.shape();
     let n = corners(&curved).len();
-    assert!(n > 8 && n % 2 == 0, "{n}");
+    assert!(n > 8 && n.is_multiple_of(2), "{n}");
     // Facets that touch share their corners: a 6 x 3 wall has 7 x 4.
     assert_eq!(corners(&Preset::AngledWall.shape()).len(), 28);
 }
@@ -767,13 +815,21 @@ fn a_new_point_starts_where_the_lens_throws_it() {
     let draft = LineUpDraft::new(id, HD, 1);
     let c = room_corners(&show, s)[0];
     let middle = super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
-    let off_middle = [(c[0] + middle[0]) / 2.0, (c[1] + middle[1]) / 2.0, middle[2]];
+    let off_middle = [
+        (c[0] + middle[0]) / 2.0,
+        (c[1] + middle[1]) / 2.0,
+        middle[2],
+    ];
     let px = first_pixel(&show, &p, &Panes::default(), &draft, off_middle);
     let want = calib::project(&p.placement, &p.lens, HD, off_middle).unwrap();
     assert_eq!(px, want);
     // A corner a hair outside the picture is put on its edge.
     let px = first_pixel(&show, &p, &Panes::default(), &draft, c);
-    assert!(px.iter().zip([1920.0, 1080.0]).all(|(v, n)| (0.0..=n).contains(v)));
+    assert!(
+        px.iter()
+            .zip([1920.0, 1080.0])
+            .all(|(v, n)| (0.0..=n).contains(v))
+    );
     assert_ne!(px, [960.0, 540.0]);
     // Off the picture: its middle.
     let behind = [0.0, 0.0, 1e4];

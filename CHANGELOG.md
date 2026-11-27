@@ -17,8 +17,8 @@ release page, and a release is refused if it has none.
   cues and says so; the Displays page keeps its corners and warp for when *Mapped* is switched off.
   Its fine-tune, edge blend, sub displays, cards and Identify work as on any display, and its stream
   or recording shows the mapped picture (without the fine-tune or blend). Displays that aren't
-  mapped draw exactly as before. Lining a projector up by points comes next; until then its place
-  and aim are typed in, and for one flat screen the four corners on the Displays page still do the
+  mapped draw exactly as before. Its place and aim are typed in or found by lining it up (below),
+  and for one flat screen the four corners on the Displays page still do the
   job with less work. Tried only on a software graphics card.
 - **Line-up crosses from the control desk** (tried only in simulation; no second computer or
   projector yet). While a projector is lined up, its crosses are drawn on the real projector by the
@@ -29,6 +29,14 @@ release page, and a release is refused if it has none.
   that computer runs a NewQ too old to show crosses, and when its monitor isn't the size the points
   are placed in. Only the primary that computer follows can put crosses on it; finishing a line-up is
   one ordinary change to the show.
+- **Line a projector up by points** (tried only in simulation: no real projector, wall or second
+  computer yet). *Settings ▸ 3D stage ▸ Projectors ▸ Line up…*: click a corner of a screen on the
+  model, move its cross on the wall onto it with the mouse or the arrow keys (one pixel, Shift ten,
+  Alt a tenth), four times or more, and NewQ works out where the projector is (and, with more
+  points not on one flat surface, its throw and lens shift), saying how well the points agree and
+  naming one that doesn't. *Done* moves it there as one undo step and keeps the points; *Cancel*
+  leaves it be; *Back to before line-up* puts it back. A line-up in progress survives a restart.
+  Not in Show mode.
 - **A screen's kind.** Each screen of the 3D stage is *Projection, front*, *Projection, rear*,
   *LED or monitor*, or *Works it out* (the default: projection where a projector reaches it, else
   LED), worked out where things stand, never while something moves.

@@ -359,3 +359,54 @@ is a piece of a longer entry that covered several areas.
   `stage3d/tests.rs` (a later kind and field on a screen kept), and the mouse-driven
   `ui/stage_edit_tests.rs::a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_everywhere`
   (both interfaces, 1280×760; `Win::see`, `press_add`).
+
+- Line-up on the page (mapping plan round 2, agent A; old plan 5.2; tried only in simulation).
+  `src/ui/stage_lineup.rs`: `LineUpDraft` (`UiState::line_up`, the contract's) and the panes'
+  own state `Panes` (`ProjectorsUi::lineup`: the last `Solve`, `solves` counted for tests, the
+  left view's `orbit`, the drag, `want_focus`, `asking`, `offer`, `note`, `draft_dir` for tests).
+  `row_buttons` (end of `stage_projectors::row`): *Line up…* (`LINE_UP`; a projector with a
+  display asks first, `blanks_words`, *Line it up* / *Not now*), *Back to before line-up* while
+  the placement or lens differs from `LineUp::before`, the last line-up in words. `start` (refused
+  by `refused`: `SHOW_MODE_WORDS`, `LOCKED_WORDS` on a follower, `TEST_WORDS`): a new random
+  session, the stored points carried on (scaled, with a note, when the picture's size changed),
+  `before` = the line-up's own or where it stands. `stage_edit::page` calls `tend` first (puts a
+  draft away, kept in its file and offered, in Show mode, on a follower, in Test Mode, when its
+  projector or show is gone), then `panes` while there is a draft, else `offer` ("Carry on lining
+  up Projector 1?", *Carry on* takes a new session, *Forget it*). `panes`: Done / Cancel / Back /
+  *Its picture, dimmed* (`Under`), `link_words` and the refusal as warnings, `PANES_HINT` (only on
+  a page 420 pt high or more; else the heading's hover), the two panes, the solve's words, the
+  points' grid (number, screen, pixel, error, *On*, *Remove*). Left (`model_pane`): its own governed
+  3D view `LINEUP_VIEW` (`PreviewId::Other("stage-lineup", 0)`: `preview_budget`, `in_sight`,
+  `requests`, no lines) through the lens at the show's placement (`model_camera`; drag orbits, the
+  wheel's own events (not a page's smooth scroll) dolly, double-click back), the lens frame
+  letterboxed, every screen corner a dot, the points; a click (`click_model`) picks a point within
+  `PICK_PT` or drops one on a screen (`render3d::pick` over the unlit parts before the projectors:
+  screens only, no venue ray test on the main thread, so no venue corners), snapped to `corners`
+  (each piece's mesh corners in the screen's own frame, a shared one once) within `SNAP_PT` unless
+  Alt, kept by `LinePoint::on_screen` (`calib::to_screen` when free); it starts at `first_pixel`
+  (the last answer's projection, else the show's; a hair off the picture clamped, far off the
+  middle). Right (`picture_pane`): the picture's shape (`picture_rect`), the outline, the marks;
+  drag a mark (offset kept), click to pick; the pane takes keyboard focus (`request_focus`, a focus
+  lock filter for the arrows), so `ui.rs::keyboard` sees `egui_wants_keyboard_input` and leaves the
+  arrows (and Space/GO, hotkeys) alone while it has it; `arrows` reads them (1, Shift 10, Alt 0.1;
+  repeats count). `solve_if_due` solves only when `solve_key` changes (points key, pixels, the
+  projector's placement, lens and resolution, the used screens' placement and shape), from the
+  last answer's pose (`Problem::start`) with the lens as entered; `wrong_side`: every point on one
+  flat screen and the answer on the side it isn't lit from (`Show::kind_of`: behind a front or LED
+  one, in front of a rear one) is `Refusal::Mirrored`. The outline (`outline`: each visible
+  screen's mesh boundary, chained, through `calib::project`, cut behind the lens, at most
+  `MAX_OUTLINE_PIECES`; empty on a refusal) is set with `outline_rev` counted when it changes.
+  *Done* (`done`): `end_burst`, placement and `lens_onto`, the `LineUp` kept (its `extra` and first
+  `before` kept, `solved()`), observe, `end_burst`: one undo step. *Back* (`back_to_before`):
+  placement and lens exactly `before`, `solved` cleared, points kept. The draft file
+  (`DRAFT_FILE`, `lineup-draft.json` in `net::node::node_dir`, `DraftFile` with the show's path
+  and name) is written (tmp + rename) whenever the serialised draft changes and removed by Done,
+  Cancel, Back and *Forget it*. `stage3d/lineup_overlay.rs` (pure, the projector's side): `sprite`
+  (ring, number in a built-in 5x7 figure font, Active yellow with a cross, Off grey, straight
+  alpha), `sprite_transform`, `outline_picture` (lines `OUTLINE_WIDTH` per 1080 rows, clipped
+  Liang-Barsky before stepping). Tests: `ui/stage_lineup_tests.rs` (whole window by mouse and
+  keys at 1280x760, both interfaces: four points on a flat screen to the true pose and one undo
+  step; eight on an angled faceted wall with the rung named and a bad point named and switched
+  off; Cancel and Back exact; Show mode refuses and puts away; the draft survives a restart; pure:
+  arrows, corners, outline, mirrored, first pixel), `lineup_overlay` tests. Not yet: `tend` called
+  each pass by the app (only the page calls it), a point on a screen that isn't at home (round 3).

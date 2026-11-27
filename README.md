@@ -1402,8 +1402,34 @@ bright the picture is, on any screen, curved wall or set.
   (it would show itself): *Give Screen 1 a new canvas, and map it* does both
   in one click. For one flat screen, the four corners on the Displays page
   still do the same job with less work.
-- **Not yet:** lining a mapped projector up by clicking points (for now its
-  position and lens are typed in), and screens that move. The read-outs, the
+- **Line up** (tried only in simulation). *Line up…* on a projector's row
+  finds where it really is from points: the page becomes two panes. On the
+  left, the model through the projector's lens: click a spot you can find in
+  the room (a click snaps to the nearest corner of a screen or facet; hold
+  Alt to place it freely). A numbered cross appears on the projector and in
+  the right pane, the projector's picture: drag the number, or click it and
+  use the arrow keys (one pixel, Shift ten, Alt a tenth) while you watch the
+  wall, until the cross sits on that spot. Do it for four spots or more.
+  After every nudge NewQ works out where the projector is and says so in
+  words under the panes ("Lined up to within about 2 pixels", which lens
+  numbers it worked out and why not the others, a point that disagrees with
+  the rest by name); the model's outline as that answer throws it is drawn
+  in the picture pane and on the projector. Four points find where it stands
+  and its aim with the lens as entered; six or more, not all on one flat
+  surface, the throw too; eight or more, the lens shift. *Done* moves the
+  projector there and keeps the points (one step to undo); *Cancel* leaves
+  it as it was; *Back to before line-up* (in the panes, and on the row any
+  time after) puts it back where it stood before it was first lined up. A
+  projector with a display asks first, since its display shows black and the
+  crosses meanwhile (or, ticked, its picture dimmed under them). Points on
+  one flat screen that only fit a picture flipped left to right are refused.
+  A line-up in progress is kept in `lineup-draft.json` in the node folder, so
+  after a restart the page offers to carry on. It isn't possible in Show
+  mode (one in progress is put away and offered again after), on a computer
+  that follows a primary, or while Test Mode runs. From the primary the
+  crosses go to the computer that drives the projector.
+- **Not yet:** screens that move. The points go on screens only (not on the
+  venue model's own corners). The read-outs, the
   light and mapping are sums: nothing here has met a real projector, a light
   meter or a real graphics card (only a software one).
 - A show with projectors opened in 0.25 plays as before; saving it there
