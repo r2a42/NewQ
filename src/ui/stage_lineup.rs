@@ -685,8 +685,12 @@ pub(super) fn panes(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     let mut panes = std::mem::take(&mut st.stage.projectors.lineup);
     let refusal = refused(st);
     let mut end: Option<End> = None;
+    // A short page (the classic window's settings) keeps the panes' hint
+    // for their hover, so the panes and the words still fit.
+    let short = ui.available_height() < 420.0;
     ui.horizontal_wrapped(|ui| {
-        ui.heading(format!("Lining up {}", p.name));
+        ui.label(RichText::new(format!("Lining up {}", p.name)).strong().size(16.0))
+            .on_hover_text(PANES_HINT);
         ui.add_space(12.0);
         let ok = panes
             .solve
@@ -736,17 +740,23 @@ pub(super) fn panes(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     if let Some(n) = &panes.note {
         hint(ui, n);
     }
-    hint(ui, PANES_HINT);
+    if !short {
+        hint(ui, PANES_HINT);
+    }
     let room = ui.available_size();
-    let h = (room.y - 150.0).clamp(140.0, 520.0);
+    // The panes take what the words and the points' list (at least about
+    // two rows of it) leave.
+    let h = (room.y - 120.0).min(520.0).max(90.0).min((room.y * 0.65).max(90.0));
     let w = ((room.x - 12.0) / 2.0).max(120.0);
     let editable = refusal.is_none();
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         let mut l = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        l.set_clip_rect(rect.intersect(ui.clip_rect()));
         model_pane(&mut l, show, st, &mut panes, &mut draft, &p, editable);
         let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         let mut r = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        r.set_clip_rect(rect.intersect(ui.clip_rect()));
         picture_pane(&mut r, &mut panes, &mut draft, editable);
     });
     solve_if_due(show, &mut panes, &mut draft);
@@ -757,12 +767,14 @@ pub(super) fn panes(ui: &mut Ui, show: &mut Show, st: &mut UiState) {
     };
     let r = ui.label(RichText::new(&words).strong());
     super::stage_edit::note(ui, &format!("Line-up ▸ words ▸ {words}"), &r);
-    egui::ScrollArea::vertical()
+    let out = egui::ScrollArea::both()
         .id_salt("lineup_points")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             point_rows(ui, show, &mut panes, &mut draft, editable);
         });
+    // (The part that scrolls, as a tab's content is for the tests.)
+    super::stage_edit::note_rect(ui, "3D stage ▸ tab content", out.inner_rect);
     if !editable {
         panes.drag = None;
     }
