@@ -271,7 +271,8 @@ pub fn reference_with_depth(
     for y in 0..size.1 {
         for x in 0..size.0 {
             let ray = projector.ray((x as f32 + 0.5) / w, (y as f32 + 0.5) / h, aspect);
-            let d = crate::render3d::pick(scene, &ray, &|_, _| true).map_or(f32::NAN, |hit| hit.distance);
+            let d = crate::render3d::pick(scene, &ray, &|_, _| true)
+                .map_or(f32::NAN, |hit| hit.distance);
             depth.push(crate::mapped::pack_depth(d, DEPTH_RANGE));
         }
     }

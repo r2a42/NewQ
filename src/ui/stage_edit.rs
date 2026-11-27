@@ -888,7 +888,11 @@ impl Whereabouts {
                 continue;
             };
             let home = s.placement;
-            let moved = st.screens_now.iter().find(|(m, _)| *m == id).map(|(_, p)| *p);
+            let moved = st
+                .screens_now
+                .iter()
+                .find(|(m, _)| *m == id)
+                .map(|(_, p)| *p);
             let mut places = vec![(PUT_HOME.to_string(), home)];
             for (cue, at) in show.screen_places(id) {
                 let label = show.cue(cue).map_or_else(String::new, super::cue_label);

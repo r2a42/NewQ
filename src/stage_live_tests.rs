@@ -1185,8 +1185,14 @@ fn a_screen_cue_added_makes_the_still_scene_again_and_a_move_does_not() {
     live.begin(&plain, &mut shared, &mut Vec::new());
     assert!(Arc::ptr_eq(&live.still, &still), "nothing changed");
     live.begin(&show, &mut shared, &mut Vec::new());
-    assert!(Arc::ptr_eq(&live.scene, &scene), "the views' scene is the same");
-    assert!(!Arc::ptr_eq(&live.still, &still), "the still one is made again");
+    assert!(
+        Arc::ptr_eq(&live.scene, &scene),
+        "the views' scene is the same"
+    );
+    assert!(
+        !Arc::ptr_eq(&live.still, &still),
+        "the still one is made again"
+    );
     assert_eq!(live.still.parts.len(), 1, "without the movable screen");
     assert!(live.depth_wanted);
     let still = live.still.clone();

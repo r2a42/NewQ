@@ -1477,7 +1477,8 @@ mod tests {
         let f = judge(&legs, &c);
         assert!(problems(&f).is_empty(), "{f:?}");
         assert!(
-            f.iter().any(|f| f.text.starts_with("The screen didn't move")),
+            f.iter()
+                .any(|f| f.text.starts_with("The screen didn't move")),
             "{f:?}"
         );
         // The map refused: a Problem (once), not compared.
@@ -1486,7 +1487,10 @@ mod tests {
         assert_eq!(problems(&f).len(), 1, "{f:?}");
         assert!(problems(&f)[0].contains("stays black"));
         let part = report_part(&legs, &c, &f).join(" / ");
-        assert!(part.contains("the screen put somewhere new 400 times"), "{part}");
+        assert!(
+            part.contains("the screen put somewhere new 400 times"),
+            "{part}"
+        );
     }
 
     #[test]
@@ -1503,7 +1507,9 @@ mod tests {
         };
         assert_eq!(mv.place_at(0.0), home);
         let quarter = mv.place_at(super::super::mapped::SWING_SECS / 4.0);
-        assert!((quarter.position[0] - home.position[0] - super::super::mapped::SWING_M).abs() < 1e-4);
+        assert!(
+            (quarter.position[0] - home.position[0] - super::super::mapped::SWING_M).abs() < 1e-4
+        );
         assert!((quarter.yaw - home.yaw - super::super::mapped::SWING_DEG).abs() < 1e-3);
         let mut s = setup();
         s.legs = vec![Leg::Baseline, Leg::Moving];

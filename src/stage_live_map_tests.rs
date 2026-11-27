@@ -518,11 +518,26 @@ fn a_go_of_a_screen_cue_bakes_nothing() {
         moved_once |= at.iter().any(|(s, _)| *s == m);
         live.begin(&show, &mut shared, &mut Vec::new());
         let now = live.lens_map(p, (64, 36), MapUse::Window);
-        assert!(now.as_ref().is_some_and(|n| Arc::ptr_eq(n, &map)), "the same map");
-        live.send(&gpu, &show, &mut shared, &[], &HashMap::new(), &[], &at, true);
+        assert!(
+            now.as_ref().is_some_and(|n| Arc::ptr_eq(n, &map)),
+            "the same map"
+        );
+        live.send(
+            &gpu,
+            &show,
+            &mut shared,
+            &[],
+            &HashMap::new(),
+            &[],
+            &at,
+            true,
+        );
     }
     assert!(moved_once, "the engine moved the screen");
-    assert!(engine.screen_at(m).is_some(), "and it stays where the cue left it");
+    assert!(
+        engine.screen_at(m).is_some(),
+        "and it stays where the cue left it"
+    );
     passes_still(&mut live, &gpu, &show, &mut shared, &asks);
     assert_eq!(count.0.totals().maps_baked, baked, "a GO bakes nothing");
     assert!(Arc::ptr_eq(&live.scene, &scene) && Arc::ptr_eq(&live.still, &still));
