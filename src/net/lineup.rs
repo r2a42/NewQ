@@ -65,7 +65,8 @@ pub enum LineUpMsg {
         #[serde(default)]
         session: u64,
     },
-    /// Back: this is shown, on a monitor of this size.
+    /// Back: this is shown, on a monitor of this size ((0, 0): this computer
+    /// has the display but shows it on no monitor).
     Seen {
         #[serde(default)]
         session: u64,
@@ -383,7 +384,8 @@ impl Shown {
 pub enum Link {
     /// Sent, nothing back yet.
     Waiting,
-    /// Shown there, on a monitor this big.
+    /// Shown there, on a monitor this big ((0, 0): that computer has the
+    /// display but no monitor for it).
     Seen { pixels: (u32, u32) },
     /// The computer isn't connected.
     Lost,
@@ -527,6 +529,12 @@ pub fn link_words(
         Link::Older => Some(format!(
             "{computer} runs NewQ {version}, which can't show line-up crosses. Update it, or \
              line this projector up on that computer."
+        )),
+        Link::Seen {
+            pixels: (0, _) | (_, 0),
+        } => Some(format!(
+            "{computer} has this projector's display, but it isn't on a monitor there, so the \
+             crosses can't be shown: choose its monitor on that computer."
         )),
         Link::Seen { pixels } if pixels != points_in => Some(format!(
             "{computer} shows this projector's display at {} × {}, but the points are placed in \

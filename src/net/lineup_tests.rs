@@ -315,6 +315,9 @@ fn the_link_lost_older_and_seen_in_words() {
         link_words(Link::Seen { pixels: MONITOR }, "x", "", MONITOR),
         None
     );
+    // That computer has the display but no monitor for it: not an older NewQ.
+    let none = link_words(Link::Seen { pixels: (0, 0) }, "Stage-left", "", MONITOR).unwrap();
+    assert!(none.contains("isn't on a monitor there"), "{none}");
     // A count never sent is no `Seen`.
     assert!(!s.heard(
         Target::Computer(n),
