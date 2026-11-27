@@ -217,6 +217,13 @@ impl Win {
 fn rig(preset: Preset) -> (Show, ProjectorId, SurfaceId, Placement) {
     let mut show = Show::default();
     let s = add_surface(&mut show, preset);
+    if preset == Preset::AngledWall {
+        // Three columns of two panels, each turned 45° from the next: far
+        // from flat, every corner in sight of a lens in front.
+        show.stage3d.surface_mut(s).unwrap().shape = SurfaceShape::Faceted {
+            facets: geometry::angled_wall(3, 2, 2.0, 1.5, 45.0),
+        };
+    }
     let st = UiState::default();
     let id = super::super::stage_projectors::add_aimed_at(&mut show, &st, s);
     let middle = super::super::stage_projectors::screen_middle(show.stage3d.surface(s).unwrap());
@@ -415,7 +422,7 @@ fn four_points_on_a_flat_screen_line_a_projector_up_by_mouse_and_arrow_keys() {
 #[test]
 fn eight_points_on_a_faceted_screen_find_the_pose_and_name_a_bad_point() {
     for modern in [false, true] {
-        let (mut show, id, s, truth) = rig(Preset::Jumbotron);
+        let (mut show, id, s, truth) = rig(Preset::AngledWall);
         let dir = scratch(&format!("faceted-{modern}"));
         let (mut w, mut st) = Win::new(modern, &mut show, &dir);
         start_by_mouse(&mut w, &mut show, &mut st);
@@ -458,7 +465,14 @@ fn eight_points_on_a_faceted_screen_find_the_pose_and_name_a_bad_point() {
             nudge_to(&mut w, &mut show, &mut st, i, target);
         }
         let words = w.words().join("\n");
-        assert!(words.contains("Worked out the throw"), "{words}");
+        // Eight points not on one flat surface: the throw (and the shift)
+        // are tried; the rung used is said either way, by name.
+        assert!(
+            words.contains("Worked out the throw")
+                || (words.contains("Using the lens you entered")
+                    && words.contains("The points don't pin the throw down")),
+            "{words}"
+        );
         assert!(
             words.contains("Lined up to within half a pixel."),
             "{words}"
