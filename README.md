@@ -2525,7 +2525,7 @@ stage* is ticked), so the other computers don't fetch it first.
 ### The 3D stage part: does 3D cost the displays here?
 
 Tick *3D stage*. It plays the cue list's Short lap round and round in legs of the same length
-(45 s each at *Short*, about three minutes in all; at *Medium* and *Long* the legs go round
+(45 s each at *Short*, about four minutes in all; at *Medium* and *Long* the legs go round
 for the part's share of the time), and compares them:
 
 1. **Previews off**: every preview held off, the baseline.
@@ -2538,6 +2538,14 @@ for the part's share of the time), and compares them:
    a display with no window does, drawn for the previews only, at their pace. Across a show
    network there is no such leg: changing a display mid-test would send the show to every
    computer again.
+5. **A mapped projector**: the lap is also shown on a canvas that the screens show (from the
+   first leg on, so every leg draws the same pictures), and in this leg the last ticked
+   monitor's display is a mapped projector's, showing the screens as that projector sees them
+   (its own projector, or one added for the test if none is on it). A mapped picture is drawn
+   for every frame and never gives way, so it is judged by the same line as the other legs but
+   in its own words; a graphics card that won't make the lens map is a problem (that display
+   stays black here). No such leg across a show network, with no monitor ticked, or when the
+   projector reaches no screen. Tried only in simulation.
 
 With no 3D stage in your show it uses the *Proscenium* sample with its usual screens and a
 projector for each ticked monitor (two make an overlapping pair), on the test's copy of your
@@ -2552,6 +2560,7 @@ full rate throughout.*). The holding off ends with the leg however the test ends
 | Finding | Problem when | Worth knowing when |
 |---|---|---|
 | A 3D leg's displays missed more than the baseline's | by this computer's own line or more (1% Strict, 5% Relaxed, 5% when the previews never give way) | |
+| The graphics card won't make a mapped projector's lens map | always (a mapped display stays black on this computer) | |
 | The previews gave way in the 3D legs | never | once or more, or below full rate for a second |
 | The displays already missed pictures with every preview off | | over the line: that much is the computer's, not 3D's |
 | The light was refused by the graphics card, projectors past the 16 the light shows | | any |
@@ -2654,6 +2663,12 @@ is in the file). It makes the test clips it needs (about
 folder (or `--dir FOLDER`), writes the show, opens NewQ on it with the stats log on and
 GO pressed after five seconds, and when you close the window writes the report (below)
 to the screen and to `stats.report.txt` beside the log.
+
+`newq --soak --mapped` (with `--short` too, if you like) plays the same show on a canvas that
+one curved screen in the Proscenium sample venue shows, through two mapped projectors sharing
+it. Each projector's display sends its picture to a stream that keeps nothing, so the mapped
+pictures are drawn all night on any computer; give the two displays monitors in *Settings ▸
+Displays* to watch them. Tried only in simulation.
 
 
 The show plays itself: every cue hands over to the next, and the last starts the first

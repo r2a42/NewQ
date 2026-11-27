@@ -37,6 +37,17 @@ release page, and a release is refused if it has none.
   naming one that doesn't. *Done* moves it there as one undo step and keeps the points; *Cancel*
   leaves it be; *Back to before line-up* puts it back. A line-up in progress survives a restart.
   Not in Show mode.
+- **A mapped projector in the 3D view's light** (tried only in simulation): with the light on, a
+  mapped projector throws its mapped picture, so the screens show what the audience would see.
+  An LED screen takes no projector's light and is never mapped onto, whatever it shows.
+- **Fine-tune a mapped projector** on *Settings ▸ Displays*: *Fine-tune…* on its display puts a
+  grid of points on the display's preview, as the mesh warp does, to bend the mapped picture the
+  last few pixels onto the real screen. Left flat, nothing is kept.
+- **Test Mode's 3D stage part has a fifth leg, a mapped projector** (tried only in simulation):
+  the lap on a canvas the screens show, the last ticked monitor showing them through a mapped
+  projector, judged against previews off by the same line as the other legs.
+- **`newq --soak --mapped`**: the soak show played on a canvas through two mapped projectors on
+  one curved screen (tried only in simulation).
 - **A screen's kind.** Each screen of the 3D stage is *Projection, front*, *Projection, rear*,
   *LED or monitor*, or *Works it out* (the default: projection where a projector reaches it, else
   LED), worked out where things stand, never while something moves.
