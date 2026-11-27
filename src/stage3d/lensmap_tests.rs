@@ -42,7 +42,12 @@ fn close(a: [f32; 2], b: [f32; 2], within: f32) -> bool {
 fn a_projector_square_on_to_a_screen_it_fills_sees_its_picture_pixel_for_pixel() {
     let (show, a, _, p) = flat_show();
     let size = (64, 36);
-    let map = reference(&still_of(&show), show.projector(p).unwrap(), size);
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        size,
+        &feeds_for(&show, p),
+    );
     assert_eq!(map.feeds, vec![a]);
     assert_eq!(map.size, size);
     for y in 0..size.1 {
@@ -62,7 +67,12 @@ fn a_feeds_region_is_where_its_places_are() {
         output: a,
         region: [0.5, 0.25, 0.5, 0.5],
     };
-    let map = reference(&still_of(&show), show.projector(p).unwrap(), (16, 9));
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        (16, 9),
+        &feeds_for(&show, p),
+    );
     let (_, place) = at(&map, 0, 0);
     assert!(close(place, [0.5 + 0.5 / 32.0, 0.25 + 0.5 / 18.0], 1e-4));
     let (_, place) = at(&map, 15, 8);
@@ -74,7 +84,12 @@ fn a_projector_twice_as_far_away_sees_the_screen_in_the_middle_of_its_picture() 
     let (mut show, _, _, p) = flat_show();
     let pr = show.projector_mut(p).unwrap();
     pr.placement.position[2] *= 2.0;
-    let map = reference(&still_of(&show), show.projector(p).unwrap(), (32, 18));
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        (32, 18),
+        &feeds_for(&show, p),
+    );
     // The outer quarter all round is black; the middle half is the screen.
     assert_eq!(at(&map, 0, 0).0, None);
     assert_eq!(at(&map, 7, 5).0, None);
@@ -91,10 +106,20 @@ fn a_front_screen_seen_from_behind_shows_nothing_and_a_rear_screen_shows_its_pic
     let pr = show.projector_mut(p).unwrap();
     pr.placement.position[2] = -pr.placement.position[2];
     pr.placement.yaw = 180.0;
-    let map = reference(&still_of(&show), show.projector(p).unwrap(), (16, 9));
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        (16, 9),
+        &feeds_for(&show, p),
+    );
     assert!((0..16 * 9).all(|i| unpack_how(map.how[i]).feed.is_none()));
     show.stage3d.surface_mut(s).unwrap().rear = true;
-    let map = reference(&still_of(&show), show.projector(p).unwrap(), (16, 9));
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        (16, 9),
+        &feeds_for(&show, p),
+    );
     // Seen from behind, the picture's left is the projector's right.
     let (feed, place) = at(&map, 0, 0);
     assert_eq!(feed, Some(0));
@@ -151,7 +176,12 @@ fn a_box_in_the_way_shows_nothing_and_a_screen_on_a_wall_shows_its_picture() {
     scene
         .parts
         .insert(0, box_part([0.0, 0.0, 0.5], [0.5, 0.5, 0.25]));
-    let map = reference(&scene, show.projector(p).unwrap(), (32, 18));
+    let map = reference(
+        &scene,
+        show.projector(p).unwrap(),
+        (32, 18),
+        &feeds_for(&show, p),
+    );
     assert_eq!(at(&map, 16, 9).0, None, "the box hides the middle");
     assert_eq!(at(&map, 0, 0).0, Some(0), "not the corner");
     // A wall the screen is hung on, its face where the screen is: the
@@ -160,7 +190,12 @@ fn a_box_in_the_way_shows_nothing_and_a_screen_on_a_wall_shows_its_picture() {
     scene
         .parts
         .insert(0, box_part([0.0, 0.0, -0.5], [5.0, 5.0, 0.5]));
-    let map = reference(&scene, show.projector(p).unwrap(), (32, 18));
+    let map = reference(
+        &scene,
+        show.projector(p).unwrap(),
+        (32, 18),
+        &feeds_for(&show, p),
+    );
     assert!((0..32 * 18).all(|i| unpack_how(map.how[i]).feed == Some(0)));
 }
 
@@ -172,13 +207,18 @@ fn an_unfed_screen_is_in_the_way_and_shows_nothing() {
         height: 1.0,
     }));
     show.stage3d.surface_mut(front).unwrap().placement.position = [0.0, 0.0, 1.0];
-    let map = reference(&still_of(&show), show.projector(p).unwrap(), (32, 18));
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        (32, 18),
+        &feeds_for(&show, p),
+    );
     assert_eq!(at(&map, 16, 9).0, None);
     assert_eq!(at(&map, 0, 0).0, Some(0));
 }
 
 #[test]
-fn a_map_names_only_the_canvases_its_projector_sees() {
+fn a_map_names_the_canvases_the_model_says_it_maps() {
     let (mut show, a, _, p) = flat_show();
     let b = show.add_display();
     let far = show.add_surface(None);
@@ -188,13 +228,51 @@ fn a_map_names_only_the_canvases_its_projector_sees() {
         output: b,
         region: WHOLE,
     };
-    let scene = still_of(&show);
-    let pr = show.projector(p).unwrap();
-    assert_eq!(feeds_seen(&scene, pr, 16.0 / 9.0), vec![a]);
+    assert_eq!(feeds_for(&show, p), vec![a]);
+    assert_eq!(feeds_for(&show, p), show.mapped_feeds(p).used);
     // Turned to look at it instead.
-    let mut turned = pr.clone();
-    turned.placement.position = [100.0, 0.0, turned.placement.position[2]];
-    assert_eq!(feeds_seen(&scene, &turned, 16.0 / 9.0), vec![b]);
+    show.projector_mut(p).unwrap().placement.position[0] = 100.0;
+    assert_eq!(feeds_for(&show, p), vec![b]);
+}
+
+#[test]
+fn an_led_screen_is_only_in_the_way_whatever_it_shows() {
+    use crate::stage3d::SurfaceKind;
+    let (mut show, a, s, p) = flat_show();
+    // A small LED screen in front of the screen's middle, showing the same
+    // canvas: no light lands on it, so the projector shows nothing there.
+    let led = show.add_surface(Some(SurfaceShape::Flat {
+        width: 1.0,
+        height: 1.0,
+    }));
+    let l = show.stage3d.surface_mut(led).unwrap();
+    l.placement.position = [0.0, 0.0, 0.5];
+    l.feed = Feed::Display {
+        output: a,
+        region: WHOLE,
+    };
+    l.kind = Some(SurfaceKind::Led);
+    let still = still_of(&show);
+    assert!(still.parts.iter().any(|q| q.catch.led));
+    let map = reference(
+        &still,
+        show.projector(p).unwrap(),
+        (32, 18),
+        &feeds_for(&show, p),
+    );
+    assert_eq!(map.feeds, vec![a]);
+    assert_eq!(at(&map, 16, 9).0, None, "the LED screen is in the way");
+    assert_eq!(at(&map, 0, 0).0, Some(0), "the projection screen round it");
+    // Chosen as LED, the big screen too shows nothing: no feed at all.
+    show.stage3d.surface_mut(s).unwrap().kind = Some(SurfaceKind::Led);
+    assert!(feeds_for(&show, p).is_empty());
+    let map = reference(
+        &still_of(&show),
+        show.projector(p).unwrap(),
+        (32, 18),
+        &feeds_for(&show, p),
+    );
+    assert!((0..32 * 18).all(|i| unpack_how(map.how[i]).feed.is_none()));
 }
 
 #[test]
@@ -222,7 +300,7 @@ fn a_maps_key_has_the_lens_and_the_size_and_never_the_fine_tune_or_the_line_up()
     let still = still_key(&still_of(&show));
     let key = |show: &Show, size| {
         let pr = show.projector(p).unwrap();
-        map_key(still, pr, pr.aspect(size), size, false)
+        map_key(still, pr, pr.aspect(size), size, false, &[])
     };
     let k = key(&show, (1920, 1080));
     assert_ne!(key(&show, (1280, 720)), k);
@@ -233,9 +311,35 @@ fn a_maps_key_has_the_lens_and_the_size_and_never_the_fine_tune_or_the_line_up()
     show.projector_mut(p).unwrap().lens.shift = [0.0, 0.1];
     assert_ne!(key(&show, (1920, 1080)), k);
     let pr = show.projector(p).unwrap();
-    assert_ne!(map_key(still, pr, 1.5, (1920, 1080), false), k);
+    assert_ne!(map_key(still, pr, 1.5, (1920, 1080), false, &[]), k);
     assert_ne!(
-        map_key(still, pr, pr.aspect((1920, 1080)), (1920, 1080), true),
+        map_key(still, pr, pr.aspect((1920, 1080)), (1920, 1080), true, &[]),
+        k
+    );
+    // Another canvas named, another map.
+    assert_ne!(
+        map_key(
+            still,
+            pr,
+            pr.aspect((1920, 1080)),
+            (1920, 1080),
+            false,
+            &[OutputId(7)]
+        ),
+        k
+    );
+    // Anything else of the projector (its display) is in it.
+    let mut other = pr.clone();
+    other.display = Some(OutputId(9));
+    assert_ne!(
+        map_key(
+            still,
+            &other,
+            other.aspect((1920, 1080)),
+            (1920, 1080),
+            false,
+            &[]
+        ),
         k
     );
 }

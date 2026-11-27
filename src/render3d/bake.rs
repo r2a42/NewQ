@@ -32,6 +32,7 @@
 use super::{DEPTH_FORMAT, Renderer, Scene, Vertex, maths};
 use crate::gpu::Gpu;
 use crate::mapped::{FORMAT, LensMap};
+use crate::show::OutputId;
 use crate::stage3d::Projector;
 use crate::stage3d::lensmap;
 
@@ -75,14 +76,16 @@ struct TileUniform {
 }
 
 /// What to bake: projector `projector`'s map of `scene` (a still scene) at
-/// `size`, its picture `aspect` wide per high; `key` is the map's
-/// (`lensmap::map_key`).
+/// `size`, its picture `aspect` wide per high, naming `feeds`
+/// (`lensmap::feeds_for`: the model's `Show::mapped_feeds`, never worked out
+/// here); `key` is the map's (`lensmap::map_key`).
 pub struct Bake<'a> {
     pub scene: &'a Scene,
     pub projector: &'a Projector,
     pub aspect: f32,
     pub size: (u32, u32),
     pub key: u64,
+    pub feeds: &'a [OutputId],
 }
 
 /// The bake's pipelines and buffers, made at the first bake.
@@ -344,7 +347,12 @@ impl Renderer {
         }
         let device = &gpu.device;
         let size = (job.size.0.max(1), job.size.1.max(1));
-        let feeds = lensmap::feeds_seen(job.scene, job.projector, job.aspect);
+        let feeds: Vec<OutputId> = job
+            .feeds
+            .iter()
+            .take(crate::mapped::MAX_FEEDS)
+            .copied()
+            .collect();
         // Each part's numbers.
         let mut uniforms: Vec<BakePart> = Vec::with_capacity(job.scene.parts.len());
         let mut draws: Vec<u64> = Vec::with_capacity(job.scene.parts.len());

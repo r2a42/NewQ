@@ -35,7 +35,7 @@
 //! map outlives the thread.
 
 use crate::gpu::{Gpu, LayerTexture, Slot};
-use crate::mapped::LensMap;
+use crate::mapped::{Drawer, LensMap, MapOwner, MappedFrame};
 use crate::render::{Mailbox, OutputGroup};
 use crate::render3d::{Camera, FrameStats, LightView, Line, Options, Renderer, Scene, Target};
 use crate::show::{EdgeBlend, OutputId};
@@ -73,6 +73,11 @@ pub struct ThrowJob {
     pub groups: Vec<OutputGroup>,
     /// Its edge blend.
     pub blend: EdgeBlend,
+    /// A mapped projector's: its mapped picture, drawn first (by
+    /// `mapped::Drawer`, through `MapOwner::Throw(layer)`'s slots) into the
+    /// frame's target, which `groups` shows as the display's layer. None for
+    /// any other projector: drawn as before.
+    pub mapped: Option<MappedFrame>,
 }
 
 /// The size every projector's picture is drawn at for views drawn at `scale`:
@@ -118,8 +123,8 @@ pub struct ViewJob {
 }
 
 /// A lens map to bake: projector `projector`'s at `size`, its picture
-/// `aspect` wide per high, of `scene` (`lensmap::still_scene`); `key` is
-/// `lensmap::map_key`'s.
+/// `aspect` wide per high, of `scene` (`lensmap::still_scene`), naming
+/// `feeds` (`lensmap::feeds_for`); `key` is `lensmap::map_key`'s.
 #[derive(Clone)]
 pub struct MapJob {
     pub projector: Projector,
@@ -127,6 +132,7 @@ pub struct MapJob {
     pub size: (u32, u32),
     pub key: u64,
     pub scene: Arc<Scene>,
+    pub feeds: Vec<OutputId>,
     /// For a window or a stream: baked before anything else, never
     /// governed. Else for a 3D view's light, after the previews.
     pub output: bool,
@@ -403,6 +409,8 @@ pub struct StageDrawer {
     count: CountTo,
     /// Where the lens maps it makes land.
     baked: BakedSlot,
+    /// Draws mapped projectors' pictures for the light; made at the first.
+    mapped: Option<Drawer>,
 }
 
 impl StageDrawer {
@@ -423,6 +431,7 @@ impl StageDrawer {
             scenes: Vec::new(),
             count,
             baked: BakedSlot::default(),
+            mapped: None,
         }
     }
 
@@ -454,6 +463,7 @@ impl StageDrawer {
                 aspect: job.aspect,
                 size: job.size,
                 key: job.key,
+                feeds: &job.feeds,
             },
         );
         self.count.map_baked(made.is_ok());
@@ -638,14 +648,25 @@ impl StageDrawer {
                     let Some(layer) = throws.layers.get(t.layer as usize) else {
                         continue;
                     };
+                    // A mapped projector's picture first, into the target
+                    // its groups show (nothing at all for any other).
+                    let mut cmds = match &t.mapped {
+                        Some(f) => crate::mapped::draw_mapped(
+                            &mut self.mapped,
+                            gpu,
+                            MapOwner::Throw(t.layer as u8),
+                            std::slice::from_ref(f),
+                        ),
+                        None => Vec::new(),
+                    };
                     let draw: Vec<_> = t.groups.iter().map(OutputGroup::draw).collect();
                     let blend = (!t.blend.is_off()).then(|| {
                         self.blend.set(&gpu.queue, &t.blend);
                         &self.blend
                     });
-                    let cmd = gpu.composite(&self.compositor, Slot::Stage, layer, &draw, blend);
+                    cmds.push(gpu.composite(&self.compositor, Slot::Stage, layer, &draw, blend));
                     // Before the next one's uniforms and blend are written.
-                    gpu.submit([cmd]);
+                    gpu.submit(cmds);
                     drawn += 1;
                 }
             }
@@ -704,3 +725,7 @@ mod tests;
 #[cfg(test)]
 #[path = "stage_render_map_tests.rs"]
 mod map_tests;
+
+#[cfg(test)]
+#[path = "stage_render_mapped_tests.rs"]
+mod mapped_tests;

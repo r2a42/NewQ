@@ -1259,6 +1259,7 @@ fn wall() -> Part {
         catch: Catch {
             gain: 1.0,
             front_only: true,
+            led: false,
         },
         ..part(
             square(),
@@ -1733,4 +1734,40 @@ fn a_screen_no_projector_reaches_keeps_its_own_picture() {
     // Its own colour, 0.2 grey, as without light.
     let v = px(&pixels, size.0, 40, 30);
     assert!(near(v, [51, 51, 51], 3), "{v:?}");
+}
+
+/// An LED screen (`Catch::led`, `Show::kind_of`) in a projector's beam
+/// keeps its own picture: no light lands on it.
+#[test]
+fn an_led_screen_in_a_beam_keeps_its_own_picture() {
+    let Some(gpu) = test_gpu() else { return };
+    let mut r = Renderer::new(&gpu);
+    let p = projector_at(0.0, 6.0, 3.2, 5000.0);
+    let mut led = wall();
+    led.catch.led = true;
+    let scene = Scene {
+        parts: vec![led],
+        throws: vec![sums::throw_of(&p, 16.0 / 9.0, (1920, 1080), 0, false)],
+    };
+    let camera = looking_down_z(9.0);
+    let size = (80, 60);
+    let picture = |r: &mut Renderer, scene: &Scene| {
+        draw_lit(
+            &gpu,
+            r,
+            scene,
+            &camera,
+            &lit(LightView::Picture, 100.0),
+            None,
+            size,
+        )
+        .0
+    };
+    let v = px(&picture(&mut r, &scene), size.0, 40, 30);
+    assert!(near(v, [51, 51, 51], 3), "{v:?}");
+    // The same wall as a projection screen is lit.
+    let mut lit_wall = scene.clone();
+    lit_wall.parts[0].catch.led = false;
+    let w = px(&picture(&mut r, &lit_wall), size.0, 40, 30);
+    assert!(!near(w, [v[0], v[1], v[2]], 10), "{w:?} against {v:?}");
 }

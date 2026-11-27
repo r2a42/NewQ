@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::stage3d::lensmap::tests::{flat_show, still_of};
-use crate::stage3d::lensmap::{map_key, still_key};
+use crate::stage3d::lensmap::{feeds_for, map_key, still_key};
 
 fn gpu() -> Option<Gpu> {
     let gpu = Gpu::headless();
@@ -18,8 +18,10 @@ fn map_job(output: bool, size: (u32, u32)) -> MapJob {
     let scene = Arc::new(still_of(&show));
     let pr = show.projector(p).unwrap().clone();
     let aspect = pr.aspect(size);
+    let feeds = feeds_for(&show, p);
     MapJob {
-        key: map_key(still_key(&scene), &pr, aspect, size, false),
+        key: map_key(still_key(&scene), &pr, aspect, size, false, &feeds),
+        feeds,
         projector: pr,
         aspect,
         size,

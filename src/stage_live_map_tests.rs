@@ -385,3 +385,73 @@ fn a_refused_bake_is_said_once_and_not_baked_again() {
     live.begin(&show, &mut shared, &mut said);
     assert!(said.is_empty(), "said once");
 }
+
+/// The canvases a baked map names are exactly what the model says the
+/// projector maps (`Show::mapped_feeds(p).used`, its row on the page), and
+/// what `feeds_output` keeps at an output's pace: with an LED screen in
+/// the beam showing a canvas of its own, five canvases (one past the most),
+/// and a window of another shape than the projector's own `resolution`.
+#[test]
+fn a_baked_maps_canvases_are_the_ones_the_model_says_it_maps() {
+    use crate::stage3d::{Feed, SurfaceKind, SurfaceShape};
+    let Some(gpu) = map_gpu() else { return };
+    let (mut show, a, s, p) = flat_show();
+    show.stage3d.surface_mut(s).unwrap().placement.position = [-1.5, 0.0, 0.0];
+    show.projector_mut(p).unwrap().resolution = Some((1920, 1200));
+    // An LED screen in front (first of the rest), showing a canvas no other
+    // screen shows.
+    let led_canvas = show.add_display();
+    let led = show.add_surface(Some(SurfaceShape::Flat {
+        width: 0.5,
+        height: 0.5,
+    }));
+    let l = show.stage3d.surface_mut(led).unwrap();
+    l.placement.position = [1.2, -0.6, 0.3];
+    l.feed = Feed::Display {
+        output: led_canvas,
+        region: [0.0, 0.0, 1.0, 1.0],
+    };
+    l.kind = Some(SurfaceKind::Led);
+    // Four more screens side by side across the picture, a canvas each.
+    let mut canvases = vec![a];
+    for i in 0..4 {
+        let c = show.add_display();
+        let id = show.add_surface(Some(SurfaceShape::Flat {
+            width: 0.5,
+            height: 0.5,
+        }));
+        let sf = show.stage3d.surface_mut(id).unwrap();
+        sf.placement.position = [-0.6 + i as f32 * 0.6, 0.6, 0.2];
+        sf.feed = Feed::Display {
+            output: c,
+            region: [0.0, 0.0, 1.0, 1.0],
+        };
+        canvases.push(c);
+    }
+    let model = show.mapped_feeds(p);
+    assert_eq!(model.used, canvases[..4].to_vec(), "{model:?}");
+    assert_eq!(model.left_out, vec![canvases[4]]);
+    let mut live = StageLive::default();
+    let mut shared = StageShared::default();
+    // A 4:3 window, not the 16:10 of the projector's own pixels.
+    let asks = [(p, (64, 48), MapUse::Window)];
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, all_there);
+    let map = maps[0].clone().expect("baked");
+    assert_eq!(map.feeds, model.used);
+    for c in &model.used {
+        assert!(live.feeds_output(*c), "{c:?} is output work");
+    }
+    assert!(
+        !live.feeds_output(canvases[4]),
+        "left out: not drawn for it"
+    );
+    assert!(!live.feeds_output(led_canvas), "an LED screen is no feed");
+    // Chosen as projection, the LED screen's canvas would be a feed: the
+    // map's key changes with what the model says.
+    let key = map.key;
+    show.stage3d.surface_mut(led).unwrap().kind = Some(SurfaceKind::Projection);
+    let maps = passes_until(&mut live, &gpu, &show, &mut shared, &asks, |m| {
+        m[0].as_ref().is_some_and(|m| m.key != key)
+    });
+    assert_eq!(maps[0].as_ref().unwrap().feeds, show.mapped_feeds(p).used);
+}

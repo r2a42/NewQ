@@ -19,7 +19,7 @@ fn a_feed_is_drawn_small_and_never_bigger_than_its_picture() {
     assert!(h >= 1);
 }
 
-fn gpu() -> Option<Gpu> {
+pub(super) fn gpu() -> Option<Gpu> {
     let gpu = Gpu::headless();
     if gpu.is_none() && std::env::var_os("NEWQ_REQUIRE_GPU").is_some() {
         panic!("NEWQ_REQUIRE_GPU is set but there is no GPU adapter");
@@ -30,7 +30,7 @@ fn gpu() -> Option<Gpu> {
 const PICTURE: (u32, u32) = (64, 36);
 
 /// A layer of `tex` stretched over a picture `canvas` big.
-fn group(tex: &Arc<LayerTexture>, canvas: (u32, u32)) -> OutputGroup {
+pub(super) fn group(tex: &Arc<LayerTexture>, canvas: (u32, u32)) -> OutputGroup {
     OutputGroup {
         layers: vec![OutputLayer {
             texture: tex.clone(),
@@ -65,7 +65,7 @@ fn quarters(gpu: &Gpu) -> Arc<LayerTexture> {
 
 /// What a display window would show with `groups`: composited into a
 /// picture `size` big and read back (RGBA rows).
-fn shown(gpu: &Gpu, groups: &[OutputGroup], size: (u32, u32)) -> Vec<u8> {
+pub(super) fn shown(gpu: &Gpu, groups: &[OutputGroup], size: (u32, u32)) -> Vec<u8> {
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("shown"),
         size: wgpu::Extent3d {
@@ -437,6 +437,7 @@ fn a_view_drawn_without_its_light_is_counted() {
     let target = Arc::new(LayerTexture::new_target(&gpu, 64, 36));
     let job = StageJob {
         throws: vec![ThrowJob {
+            mapped: None,
             layer: 0,
             groups: vec![group(&picture, PICTURE)],
             blend: EdgeBlend::default(),
@@ -570,6 +571,7 @@ fn a_projectors_picture_is_drawn_with_its_blend_and_thrown_the_right_way_round()
     );
     let job = |blend: EdgeBlend| StageJob {
         throws: vec![ThrowJob {
+            mapped: None,
             layer: 0,
             groups: vec![group(&picture, PICTURE)],
             blend,
@@ -630,6 +632,7 @@ fn a_projectors_picture_is_drawn_with_its_blend_and_thrown_the_right_way_round()
 #[test]
 fn merging_keeps_the_newer_pictures_of_the_projectors_and_the_older_others() {
     let t = |layer| ThrowJob {
+        mapped: None,
         layer,
         groups: Vec::new(),
         blend: EdgeBlend {
@@ -645,6 +648,7 @@ fn merging_keeps_the_newer_pictures_of_the_projectors_and_the_older_others() {
     };
     let new = StageJob {
         throws: vec![ThrowJob {
+            mapped: None,
             blend: EdgeBlend::default(),
             ..t(1)
         }],
@@ -685,6 +689,7 @@ fn a_blended_pairs_overlap_is_as_bright_as_either_alone() {
         catch: Catch {
             gain: 1.0,
             front_only: true,
+            led: false,
         },
     };
     // Each picture 4 m wide from 6 m; their middles 3 m apart: 1 m of overlap.
@@ -728,6 +733,7 @@ fn a_blended_pairs_overlap_is_as_bright_as_either_alone() {
     let job = |blended: bool| StageJob {
         throws: [(0, 0.0, 0.25), (1, 0.25, 0.0)]
             .map(|(layer, l, r)| ThrowJob {
+                mapped: None,
                 layer,
                 groups: vec![group(&white, PICTURE)],
                 blend: if blended {
