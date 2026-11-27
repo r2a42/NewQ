@@ -1593,3 +1593,7 @@ mod tests;
 #[cfg(test)]
 #[path = "stage_live_map_tests.rs"]
 mod map_tests;
+
+#[cfg(test)]
+#[path = "stage_live_e2e_tests.rs"]
+mod e2e_tests;
