@@ -296,6 +296,8 @@ pub struct ProjectorsUi {
     /// Where they are kept: the log folder unless set (tests set it).
     pub library_dir: Option<PathBuf>,
     pub library_note: Option<String>,
+    /// Line-up's panes (`stage_lineup`): what isn't the draft itself.
+    pub lineup: super::stage_lineup::Panes,
 }
 
 impl ProjectorsUi {
@@ -1143,6 +1145,7 @@ fn row(ui: &mut Ui, show: &mut Show, st: &mut UiState, id: ProjectorId) -> bool 
             p.mapped = true;
         }
     }
+    super::stage_lineup::row_buttons(ui, show, st, id);
     delete
 }
 

@@ -2666,6 +2666,7 @@ night is about 3,000 rows.
 | ← / Page Up           | Show mode: the slide before in such a slide show; otherwise pause everything, and again to fade it out |
 | Ctrl+↑ / Ctrl+↓       | Reorder the selected cue                        |
 | ← ↑ → ↓ / Shift+arrow | Move the selected corner 1 px / 5 px (while editing) |
+| ← ↑ → ↓ / Shift / Alt (line-up) | Move the picked line-up point 1 / 10 / 0.1 pixel (once it is clicked in the projector's picture) |
 | Ctrl+D / Del          | Duplicate / delete cue (all selected)           |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste cues                    |
 | Ctrl-click / Shift-click | Add to the selection / select a run of cues  |

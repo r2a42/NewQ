@@ -4,7 +4,7 @@
 use super::*;
 
 /// (key, what it does), in the README's order.
-pub(super) const KEYS: [(&str, &str); 30] = [
+pub(super) const KEYS: [(&str, &str); 31] = [
     (
         "Space",
         "GO on a cue list; on a timeline you are working on (a timeline list's tab, or the tracks editor you last clicked in or are pointing at): play / pause it — running, it pauses; paused, parked, at a pause cue or in a loop it does what GO does there; stopped, it runs",
@@ -33,6 +33,10 @@ pub(super) const KEYS: [(&str, &str); 30] = [
     (
         "← ↑ → ↓ / Shift+arrow",
         "Move the selected corner 1 px / 5 px (while editing)",
+    ),
+    (
+        "← ↑ → ↓ / Shift / Alt (line-up)",
+        "Move the picked line-up point 1 / 10 / 0.1 pixel (once it is clicked in the projector's picture)",
     ),
     ("Ctrl+D / Del", "Duplicate / delete cue (all selected)"),
     ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste cues"),

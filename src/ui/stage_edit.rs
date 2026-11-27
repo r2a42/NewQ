@@ -481,6 +481,13 @@ const VIEW_HINT: &str = "Drag to turn, right-drag or Shift-drag to slide, the wh
 /// The page: the view pinned (its size can be dragged), the tabs beside or
 /// under it, and the chosen tab's content in a scroll area of its own.
 pub(super) fn page(ui: &mut Ui, show: &mut Show, st: &mut UiState, actions: &mut Vec<Action>) {
+    // A line-up in progress has the page: its two panes.
+    super::stage_lineup::tend(show, st);
+    if st.line_up.is_some() {
+        super::stage_lineup::panes(ui, show, st);
+        return;
+    }
+    super::stage_lineup::offer(ui, show, st);
     let room = ui.available_size();
     match arrangement(room) {
         Arrangement::Stacked => {
@@ -1416,7 +1423,7 @@ pub(super) fn note(ui: &Ui, name: &str, r: &egui::Response) {
 }
 
 /// The same for a rectangle.
-fn note_rect(ui: &Ui, name: &str, rect: egui::Rect) {
+pub(super) fn note_rect(ui: &Ui, name: &str, rect: egui::Rect) {
     #[cfg(test)]
     {
         let seen = ui.clip_rect().contains_rect(rect);
