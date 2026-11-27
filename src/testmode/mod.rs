@@ -20,6 +20,7 @@ pub mod fleet;
 pub mod full;
 pub mod gui;
 pub mod hitches;
+pub mod mapped;
 #[cfg(test)]
 pub mod net_demo;
 pub mod net_judge;
