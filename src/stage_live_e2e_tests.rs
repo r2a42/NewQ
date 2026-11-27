@@ -73,8 +73,10 @@ fn the_show(dir: &Path) -> (Show, OutputId, crate::stage3d::ProjectorId) {
         image::ExtendedColorType::Rgb8,
     )
     .expect("the picture is written");
-    let mut show = Show::default();
-    show.name = "Mapped end to end".into();
+    let mut show = Show {
+        name: "Mapped end to end".into(),
+        ..Show::default()
+    };
     let canvas = show.outputs[0].id;
     let mut c = show.make_cue(CueType::Image, Some(png), 0);
     c.name = "The known picture".into();
@@ -145,6 +147,7 @@ fn late_frame(file: &Path) -> (Vec<u8>, (u32, u32)) {
 
 /// Errors (the largest of a pixel's three, 0..1), summed up.
 #[derive(Debug)]
+#[allow(dead_code)] // (all printed, not all judged)
 struct Errors {
     compared: usize,
     mean: f32,

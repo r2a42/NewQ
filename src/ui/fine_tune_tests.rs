@@ -181,8 +181,11 @@ fn a_display_that_isnt_mapped_keeps_its_own_mesh() {
     show.projector_mut(p).unwrap().mapped = false;
     show.outputs[0].mesh = Some(Mesh::from_pin(3, 3, |u, v| [u, v]));
     assert!(fine_tune_of(&mut show, display).is_none());
-    let mut st = UiState::default();
-    st.geometry_edit = Some(display);
+    let st = UiState {
+        geometry_edit: Some(display),
+        ..UiState::default()
+    };
+    let mut st = st;
     st.handle_sel.set(Some(HandleSel {
         quad: Quad::Mesh(display),
         corner: Some(4),
