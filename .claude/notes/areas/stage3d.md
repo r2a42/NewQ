@@ -274,9 +274,11 @@ is a piece of a longer entry that covered several areas.
   `Show::screen_places`) and makes `still`, `still_key` and `map_feeds` again when it changes,
   without a new view scene (`scene_key` untouched), so adding a screen cue re-bakes once and a GO
   never does; `depth_wanted` (any movable) goes into `map_key`, `MapJob::depth` and `Bake::depth`.
-  `Show::mapped_feeds` and `kind_of` (projector.rs) work a screen out where it rests
+  `Show::mapped_feeds` (projector.rs) works a screen's reach out where it rests
   (`Show::resting_boxes`: home and each cue place), and a movable screen's canvas is in its map's
-  `feeds` (drawn live through it). **The depth picture** (`mapped.rs`'s header packing):
+  `feeds` (drawn live through it); its kind (`kind_of`) is still worked out at home only (the
+  scene's key has no cues), so a worked-out screen no beam reaches at home is LED: choose its
+  kind. **The depth picture** (`mapped.rs`'s header packing):
   Euclidean metres from the lens (`length(world - eye)`, as `pick`'s distance) to the nearest
   still thing of any kind, over `lensmap::DEPTH_RANGE` (0 to 4 × `THROW_FAR`, about half a
   millimetre a step, the same for every map), 1.0 (all 255) for nothing; `bake.wgsl`'s

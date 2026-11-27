@@ -1111,6 +1111,8 @@ fn a_movable_screen_says_where_it_is_now_and_is_put_at_its_places_by_mouse() {
         w.press(&mut show, &mut st, &menu);
         w.press(&mut show, &mut st, &format!("{menu} ▸ {PUT_HOME}"));
         assert_eq!(w.e.screen_at(screen), Some(home), "modern {modern}");
+        // (Not in Show mode yet: `ui.rs` greys the whole settings pane
+        // there, this menu with it.)
         assert!(w.has(&place_words(&home)), "modern {modern}: {:?}", w.texts);
     }
 }

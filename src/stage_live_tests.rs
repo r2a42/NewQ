@@ -1116,7 +1116,14 @@ fn a_moving_screen_redraws_a_view_and_makes_no_new_scene() {
     let mut live = StageLive::default();
     let mut shared = StageShared::default();
     live.begin(&show, &mut shared, &mut Vec::new());
-    let _layer = live.output_layer(&gpu, b, (160, 90));
+    let layer = live.output_layer(&gpu, b, (160, 90));
+    let look = || {
+        crate::stage_render::tests::shown(
+            &gpu,
+            &[crate::stage_render::tests::group(&layer.texture, (160, 90))],
+            (160, 90),
+        )
+    };
     let camera = show.stage_camera(
         &StageSource::default(),
         shared.bounds.map(|b| (b.min, b.max)),
@@ -1137,6 +1144,7 @@ fn a_moving_screen_redraws_a_view_and_makes_no_new_scene() {
         live.serial,
     );
     assert!(live.moved.is_empty());
+    let at_home = look();
     // Still and nothing playing: not drawn again.
     pass(&mut live, &mut shared, &[]);
     assert_eq!(live.serial, serial);
@@ -1153,9 +1161,15 @@ fn a_moving_screen_redraws_a_view_and_makes_no_new_scene() {
         assert!(Arc::ptr_eq(&live.scene, &scene), "no new scene");
         assert!(Arc::ptr_eq(&live.still, &still), "no new still scene");
         assert_eq!(shared.scene_key, key);
-        assert_eq!(
-            live.scene.parts[part].transform[3][0], home.position[0],
+        assert!(
+            (live.scene.parts[part].transform[3][0] - home.position[0]).abs() < 1e-6,
             "the scene itself keeps the screen at home"
+        );
+        // And drawn there: the picture isn't the one at home.
+        assert_ne!(
+            look(),
+            at_home,
+            "the screen drawn where it is at step {step}"
         );
     }
     // Where it stopped: not drawn again; back home: drawn once more.
@@ -1164,6 +1178,7 @@ fn a_moving_screen_redraws_a_view_and_makes_no_new_scene() {
     pass(&mut live, &mut shared, &[]);
     assert_eq!(live.serial, serial + 4);
     assert!(live.moved.is_empty());
+    assert_eq!(look(), at_home, "home again, drawn as it was");
     if let Some(h) = live.forget_device(&mut shared) {
         h.join().unwrap();
     }

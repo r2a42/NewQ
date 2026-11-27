@@ -508,6 +508,22 @@ fn a_maps_depth_bakes_as_the_reference_works_it_out() {
     let (g, c) = both_with_depth(&gpu, &mut r, &show, &still, p);
     enough(agree(&g, &c), 500);
     assert!(depth_agrees(&g, &c) > 600);
+    // Where nothing stands, the card's depth is the far end exactly, as
+    // the reference's (a moving screen there is never hidden).
+    let nothing = [255, 255, 255, 255];
+    let far: Vec<usize> = (0..c.depth.as_ref().unwrap().len())
+        .filter(|i| c.depth.as_ref().unwrap()[*i] == nothing)
+        .collect();
+    assert!(far.len() > 100, "the screen doesn't fill the picture");
+    let gd = g.depth.as_ref().unwrap();
+    let agreeing = far.iter().filter(|i| gd[**i] == nothing).count();
+    // (Bar a pixel at the screen's edge, where a sample may meet it.)
+    assert!(
+        agreeing * 10 >= far.len() * 9,
+        "{agreeing} of {}",
+        far.len()
+    );
+    assert!(gd.iter().all(|px| *px == nothing || px[3] == 255));
     // A box of the room in front: its front is the depth there.
     let mut scene = still.clone();
     scene
