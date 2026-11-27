@@ -574,7 +574,7 @@ pub fn corners(shape: &SurfaceShape) -> Vec<[f32; 3]> {
 /// into runs of corners.
 fn boundary(indices: &[u32]) -> Vec<Vec<u32>> {
     let mut count: std::collections::HashMap<(u32, u32), (u32, (u32, u32))> = Default::default();
-    for t in indices.chunks_exact(3) {
+    for t in indices.as_chunks::<3>().0 {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             let k = (a.min(b), a.max(b));
             count.entry(k).or_insert((0, (a, b))).0 += 1;
