@@ -1322,8 +1322,9 @@ impl Show {
     /// What screen `surface` is (mapping plan, section 8): what was chosen on
     /// it, or, left to be worked out, projection when some projector's beam
     /// reaches it where everything stands (front or rear as `Surface::rear`
-    /// says), else LED. Worked out from the show alone, never per frame, so
-    /// a screen doesn't change kind as it moves through a beam.
+    /// says), at home or at any place its screen cues take it, else LED.
+    /// Worked out from the show alone, never per frame, so a screen doesn't
+    /// change kind as it moves through a beam.
     pub fn screen_kind(&self, surface: SurfaceId) -> Option<ScreenKind> {
         self.stage3d.surface(surface).map(|s| self.kind_of(s))
     }
@@ -1333,12 +1334,22 @@ impl Show {
         if let Some(k) = s.chosen_kind() {
             return k;
         }
-        let boxes = s.boxes();
-        let reached = self
-            .stage3d
-            .projectors
-            .iter()
-            .any(|p| p.reaches_boxes(&boxes));
+        let reaches = |s: &Surface| {
+            let boxes = s.boxes();
+            self.stage3d
+                .projectors
+                .iter()
+                .any(|p| p.reaches_boxes(&boxes))
+        };
+        // A screen that moves on a cue is judged at home and at each place
+        // its cues take it to (`Show::screen_places`), still from the show
+        // alone: one that a cue moves into a beam is projection there.
+        let reached = reaches(s)
+            || self.screen_places(s.id).into_iter().any(|(_, at)| {
+                let mut moved = s.clone();
+                moved.placement = at;
+                reaches(&moved)
+            });
         match (reached, s.rear) {
             (false, _) => ScreenKind::Led,
             (true, true) => ScreenKind::Rear,

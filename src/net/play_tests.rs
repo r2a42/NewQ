@@ -31,6 +31,8 @@ enum Act {
     FireSend,
     /// Fire the screen cue (`World::screen`).
     FireScreen,
+    /// Pause (or go on with) the whole show.
+    Paused(bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -424,6 +426,7 @@ impl World {
                             e.fire(show, c)
                         }
                     }
+                    Act::Paused(p) => e.set_paused(p),
                 }
             }
             Ev::Restart(i) => {
@@ -1703,4 +1706,80 @@ fn a_late_joiner_and_a_backup_taking_control_have_the_screen_where_it_is() {
     }
     let f = w.nodes[2].follower.as_ref().unwrap();
     assert!(f.in_step, "{:?}", f.corrected);
+}
+
+/// The screen of `with_screen` everywhere: each computer's x, and the
+/// followers' corrections.
+fn screen_everywhere(w: &World) -> (Vec<f32>, u64) {
+    let xs = (0..w.nodes.len())
+        .filter(|k| !w.dead[*k])
+        .map(|k| w.screen_x(k).unwrap_or(f32::NAN))
+        .collect();
+    let fixed = w
+        .nodes
+        .iter()
+        .filter_map(|n| n.follower.as_ref())
+        .map(|f| f.corrections)
+        .sum();
+    (xs, fixed)
+}
+
+fn all_at(xs: &[f32], what: &str) -> f32 {
+    for x in xs {
+        assert!((x - xs[0]).abs() < 1e-3, "{what}: {xs:?}");
+    }
+    xs[0]
+}
+
+/// The show paused mid-move, and a timeline paused with the screen cue as
+/// its clip: through seconds of heartbeats every computer holds the screen at
+/// the same place, nothing is put right, and it goes on together after.
+#[test]
+fn a_move_that_stands_stands_alike_everywhere_and_nothing_is_put_right() {
+    // The whole show paused.
+    let mut w = World::new(2, Network::wired(), 67);
+    w.with_screen();
+    w.run(5.0);
+    w.acts(&[
+        (5.5, Act::FireScreen),
+        (8.0, Act::Paused(true)),
+        (12.0, Act::Paused(false)),
+    ]);
+    w.run(9.0);
+    let held = all_at(&screen_everywhere(&w).0, "paused");
+    assert!(held > 0.1 && held < 3.9, "{held}");
+    w.run(11.9);
+    let (xs, fixed) = screen_everywhere(&w);
+    assert_eq!(all_at(&xs, "still paused"), held, "it stood");
+    assert_eq!(fixed, 0, "nothing put right while it stood");
+    w.run(25.0);
+    let (xs, fixed) = screen_everywhere(&w);
+    assert_eq!(all_at(&xs, "on and there"), 4.0);
+    assert_eq!(fixed, 0);
+
+    // A timeline's pause, the screen cue its clip from 1 s.
+    let mut w = World::new(2, Network::wired(), 69);
+    w.with_screen();
+    let (cue, _) = w.screen.unwrap();
+    let c = w.ts.show.cue_mut(cue).unwrap();
+    c.parent = Some(w.ts.group);
+    c.pre_wait = 1.0;
+    w.ts.show.normalize_groups();
+    w.run(5.0);
+    w.acts(&[
+        (5.5, Act::RunTimeline),
+        (9.0, Act::Pause),
+        (13.0, Act::RunTimeline),
+    ]);
+    w.run(10.0);
+    let held = all_at(&screen_everywhere(&w).0, "at the pause");
+    assert!(held > 0.1 && held < 3.9, "{held}");
+    w.run(12.9);
+    let (xs, fixed) = screen_everywhere(&w);
+    assert_eq!(all_at(&xs, "still at the pause"), held, "it waited");
+    assert_eq!(fixed, 0, "nothing put right while it waited");
+    w.run(30.0);
+    let (xs, fixed) = screen_everywhere(&w);
+    assert_eq!(all_at(&xs, "on and there"), 4.0);
+    assert_eq!(fixed, 0);
 }

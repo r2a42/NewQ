@@ -399,7 +399,8 @@ is a piece of a longer entry that covered several areas.
   is one per piece: `surface, mesh, mesh_key, matrix` (placement now times the piece's transform,
   as `Stage3d::scene`), `feed: Option<u8>` (0-based in `MappedFrame::feeds`, as
   `lensmap::part_feed`; None black but in the way), `region`, `front_only`. `LensMap::depth` was
-  already there (round 1).
+  already there (round 1). `Show::kind_of` (worked out) judges a movable screen at home and at
+  each of its `screen_places`: projection if any projector reaches it at one of them.
 
 - Line-up on the page (mapping plan round 2, agent A; old plan 5.2; tried only in simulation).
   `src/ui/stage_lineup.rs`: `LineUpDraft` (`UiState::line_up`, the contract's) and the panes'

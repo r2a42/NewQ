@@ -51,17 +51,21 @@ See also: the blocks after the real tests also hold notes for other areas: pictu
 - Moving screens on the network (mapping plan 4.2, round 3 agent A; tried only in `World` and on
   engines, never two computers). A move is a cue: no new message. `PlayState::screens:
   Vec<ScreenNow { screen, at, moving: Vec<AxisMove { axis, from, to, anchor, duration, curve }> }>`
-  (`Engine::screens_now`; defaulted, unwritten when empty, `lenient_vec` at both levels and a
+  (`Engine::screens_now`; `AxisMove::standing`: its clock stands (paused, its timeline at a pause), so it is
+  read at the heartbeat's time, not run on; defaulted, unwritten when empty, `lenient_vec` at both levels and a
   `lenient` curve, an axis past 5 passed by). `Command::PutScreen { screen, at }` (*Put at*; an
   older NewQ reads `Unknown`). `net_correct` calls `screens_correct` (`NetCorrection::screens:
   ScreenDoubts`): the first heartbeat a follower compares is taken at once (a late joiner), after
   that a screen off by over `SAME_METRES`/`SAME_DEGREES` at 4 heartbeats in a row is set to the
   primary's (its moves re-made from the anchors) and eased over `EASE` (0.5 s) from where it was
-  shown (R21); a screen cue's own anchor is never shifted (`is_screen_cue`). `net_shift_shared` and
+  shown (R21); a move taken from a heartbeat (instance 0) follows the primary's anchor and standing at each
+  heartbeat; a number a cue here drives keeps that cue's time and is put right once per instance
+  (`ScreenDoubts::fixed`); a screen cue's own anchor is never shifted (`is_screen_cue`). `net_shift_shared` and
   `net_leave_shared` move the screens' anchors too. A backup that takes control has the moves its
   engine made from the commands. Tests: `play_tests.rs` (`World::with_screen`, `screen_log`,
   `screens_agree`: three computers at every tick, a late command, a restart mid-move and a takeover
-  then *Stop all*), `engine/screens_tests.rs` (the ease, *Put at* as a command).
+  then *Stop all*, the show paused and a timeline paused mid-move with nothing put right),
+  `engine/screens_tests.rs` (the ease, *Put at* as a command).
 
 - `src/net/` (stage 1 of `.claude/notes/network-plan.md`; results and what remains in
   `network-sync-trial.md`): `clock.rs` a follower's shared clock from NTP-style exchanges (pure;

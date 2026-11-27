@@ -1493,7 +1493,8 @@ watches it travel needs tracking, which NewQ doesn't do yet.
   at* (on the Screens tab, and *Put the screen there now* on a cue) puts it
   where it was. Where screens are is never saved in the show.
 - **On a timeline** a Move a screen clip moves with the timeline's clock and
-  waits at its pauses.
+  waits at its pauses. A seek or jump doesn't move screens (not yet): after
+  one, *Put at* puts a screen where it should be.
 - **On a show network** every computer moves the screen at the same shared
   time, so two projectors on two computers keep the picture on it together. A
   computer that joins late, or a backup that takes control, learns where the

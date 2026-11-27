@@ -758,6 +758,33 @@ fn a_screen_works_out_its_kind_where_things_stand_unless_one_is_chosen() {
 }
 
 #[test]
+fn a_screen_a_cue_moves_into_a_beam_is_projection_though_its_home_is_out_of_it() {
+    use crate::show::{CueKind, CueType, ScreenTarget};
+    let (mut show, _, _, s, _) = mapped_room(1);
+    let s = s[0];
+    // Home far off to the side, out of the beam: LED.
+    show.stage3d.surface_mut(s).unwrap().placement.position = [200.0, 2.0, 0.0];
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Led));
+    // A cue takes it into the beam: projection, judged from the show (never
+    // per frame, so it doesn't flip as it travels).
+    let mut c = show.make_cue(CueType::Screen, None, 0);
+    if let CueKind::Screen(sc) = &mut c.kind {
+        sc.screen = Some(s);
+        sc.to = ScreenTarget {
+            x: Some(0.0),
+            ..ScreenTarget::default()
+        };
+    }
+    show.cues.push(c);
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Front));
+    // A cue that keeps it out of the beam changes nothing.
+    if let CueKind::Screen(sc) = &mut show.cues[0].kind {
+        sc.to.x = Some(150.0);
+    }
+    assert_eq!(show.screen_kind(s), Some(ScreenKind::Led));
+}
+
+#[test]
 fn nothing_mapping_adds_is_written_at_its_defaults_and_an_old_show_reads_the_same() {
     let (mut show, p, ..) = mapped_room(2);
     // A 0.27 show (no kind, no mapped, no fine-tune, no line-up) reads as

@@ -381,3 +381,50 @@ fn put_at_is_a_command_on_a_primary_and_nothing_on_a_follower() {
         serde_json::from_value(serde_json::json!({"do": "put_screen_on_a_track", "x": 1})).unwrap();
     assert_eq!(later, Command::Unknown);
 }
+
+/// A timeline sought into the middle of a screen clip, or past it, doesn't
+/// start the clip (as a fade cue's isn't chased): the screen stays where it
+/// was, and *Put at* puts it where it should be. (Not yet: working out
+/// where a seek leaves each screen.)
+#[test]
+fn a_seek_into_or_past_a_screen_clip_leaves_the_screen_where_it_was() {
+    let mut show = Show::default();
+    let id = show.add_surface(None);
+    let mut g = show.make_cue(CueType::Group, None, 0);
+    if let CueKind::Group(gc) = &mut g.kind {
+        gc.mode = GroupMode::Timeline;
+    }
+    let gid = g.id;
+    show.cues.push(g);
+    let cue = screen_cue(
+        &mut show,
+        id,
+        [Some(4.0), None, None, None, None, None],
+        4.0,
+        Curve::Linear,
+    );
+    show.cue_mut(cue).unwrap().parent = Some(gid);
+    // A long wait so the timeline goes on past the clip.
+    let mut w = show.make_cue(CueType::Wait, None, show.cues.len());
+    if let CueKind::Wait(wc) = &mut w.kind {
+        wc.duration = 100.0;
+    }
+    w.parent = Some(gid);
+    show.cues.push(w);
+    let key = crate::timeline::TimelineKey::Group(gid);
+    for to in [2.0, 10.0] {
+        let mut e = Engine::for_tests();
+        e.timeline_seek(&show, key, to, false);
+        e.tick(&show, 0.0);
+        assert_eq!(e.screen_at(id), None, "sought to {to}: not moved at once");
+        e.timeline_run(&show, key);
+        for _ in 0..20 {
+            e.tick(&show, 0.25);
+        }
+        assert_eq!(
+            e.screen_at(id),
+            None,
+            "sought to {to}: the clip wasn't started"
+        );
+    }
+}
