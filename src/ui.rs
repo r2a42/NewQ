@@ -1217,6 +1217,10 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     stage_lineup::tend(show, st);
     st.display_labels = display_labels(show);
     st.screens_now = engine.moved_screens();
+    // A screen on its way: drawn again, so where it is keeps up.
+    if engine.screens_moving() {
+        ui.ctx().request_repaint();
+    }
     st.note_preview_panes();
     if st.saved_json.is_none() {
         st.saved_json = serde_json::to_string(show).ok();

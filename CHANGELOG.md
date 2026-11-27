@@ -6,6 +6,14 @@ release page, and a release is refused if it has none.
 
 ## Unreleased
 
+- **Screens that move on a cue** (tried only in simulation; no real scenery, winch or projector
+  yet). A *Move a screen* cue (*Cue ▸ Add*) takes a screen of the 3D stage to a place over a time
+  (each of across, up, towards the audience, turn, tilt and roll, or left where it is), and the
+  picture goes with it. NewQ moves the picture as the cue says; it doesn't know where the scenery
+  really is. The screen stays where the cue left it; *Stop all* doesn't send it back. *Use where it
+  is now* and *Put the screen there now* save typing numbers. Every computer of a show network moves
+  it together, and one that joins late or takes control has it where it is. An older NewQ keeps the
+  cue and doesn't play it.
 - **Canvases for the 3D stage** (mapping; tried only in simulation). A canvas is a display with
   no monitor that a screen of the 3D stage shows: send cues to it, and the screens show it.
   *Settings ▸ Displays ▸ + Add ▸ Canvas* makes one, as does a screen's *Shows ▸ New canvas…*. Its

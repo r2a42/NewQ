@@ -44,6 +44,27 @@ See also: `remote.md` holds the one line on `src/text.rs` (text cue rendering), 
   network commands) reaches the queue through `fire`, so the count sees it; a timeline's clips
   are started by its run (`timeline_step`, `MAX_STARTS`, `MAX_JUMPS`).
 
+- Screens that move on a cue (mapping plan 4.2, round 3 agent A; tried only in simulation).
+  `src/show/screen.rs`: `CueKind::Screen(ScreenCue { screen, to: ScreenTarget, duration, curve })`
+  (`ScreenTarget`: six `Option<f32>` in `AXES` order x, y, z, yaw, pitch, roll; `apply` keeps a
+  number not given or not finite; `whole`; all unwritten at defaults; `"Screen"` in
+  `compat::KNOWN_KINDS`, so an older NewQ's `Unknown` keeps it), `Show::movable_screens` (any cue
+  naming it, armed or not: never changes at a GO) and `Show::screen_places` (each cue's place, in
+  show order, from home); `stage3d::Show::movable` scans the cues; `paste_cues` clears the screen
+  of a cue from another show (or of one the show lacks). `src/engine/screens.rs`: `Screens` (by
+  `SurfaceId`: six `Axis { param: Param, clock }`, an `Ease`), never in `Show::stage3d`. A screen
+  cue plays as `ActiveKind::Fade` with its length (so a shared clock, `net_backdate`, a pause and a
+  timeline's clock keep its time, `fade_from`) and `screen_cue` starts a `Param` ramp per number
+  given from where the screen is shown; `screens_tick` (after `tick_inner`) puts each ramp at its
+  clock's time by `Param::ramp_at` (absolute, not summed): the cue's `elapsed`/`anchor` while it
+  plays, then on by that anchor (or `dt`) once it is gone, so *Stop all*/*Panic* leave it going to
+  where it was told; it drops screens no cue moves or the show lacks. `show_opened` puts all home.
+  API: `screen_at`, `moved_screens` (for `StageLive::send`, `UiState::screens_now`),
+  `screens_moving` (the main loop should keep ticking), `put_screen` (gated: `Command::PutScreen`),
+  `screen_cue_length`. Tests: `engine/screens_tests.rs`, `show/screen.rs`'s tests,
+  `ui/screen_cue_tests.rs`. UI: `ui/screen_cue.rs` (`Choices::of` before the cue is borrowed,
+  `inspector`, `target_text`, `HONEST_WORDS`), `Action::PutScreen`, Cue ▸ Add ▸ "On the 3D stage".
+
 ## Part of the `src/app.rs` / `src/ui.rs` entry: group crossfade, shape cues, editing several cues
 
   Group crossfade: in a "play in order" group a child whose next sibling crossfades in (`crossfade_into_next`) is not faded out by itself, and `advance_groups` starts the next one that long before it ends; a held next cue (`holds`: picture, text, shape, camera) gets the overlap added to its hold (`Engine::started_early` -> `ActiveCue::extra_hold`, which the per-tick hold update adds back), so the group keeps its timing; a video can't, so `cue_duration` subtracts a crossfade into a video, and a next child with a pre-wait doesn't overlap. Shape cues: `show::ShapeCue` (`ShapeKind`), drawn by `shape::render` at the display's size on a thread (`Engine::prepare_shape`, which hands the picture over as `PreparedKind::Text`, like a text cue). Editing several cues: `inspector` wraps `inspector_one` and `spread_edit` makes in the other picked cues what changed (`bulk_edit::spread` compares the cue as JSON before and after, skipping the fields that are a cue's own, `target` and `device` included). A list missing from the file is empty, so a list that appears or empties is a length change and isn't spread; an item with a `kind` (an effect) is addressed as `<index>#<kind>` and changes only the same kind; `start`/`end` reach only the same cue type (`SAME_KIND_ONLY`); `inspector` spreads only on a frame with user input. `Engine::tick` copies the show's layer, geometry, colour, effects, fit, output and hold time into the cues playing (the block under `if let Some(m) = media`), and a shape or typed text is drawn again when `drawing_key` changes (`ImageState::redraw`); what is fixed at start (file, in/out, loop, speed, audio routing, fade-in) is not.

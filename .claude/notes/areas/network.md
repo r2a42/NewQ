@@ -48,6 +48,21 @@ See also: the blocks after the real tests also hold notes for other areas: pictu
   passcode; a stranger's `Seen`; a dropped primary and the lease, then back; an older peer; *Done* as
   a show edit).
 
+- Moving screens on the network (mapping plan 4.2, round 3 agent A; tried only in `World` and on
+  engines, never two computers). A move is a cue: no new message. `PlayState::screens:
+  Vec<ScreenNow { screen, at, moving: Vec<AxisMove { axis, from, to, anchor, duration, curve }> }>`
+  (`Engine::screens_now`; defaulted, unwritten when empty, `lenient_vec` at both levels and a
+  `lenient` curve, an axis past 5 passed by). `Command::PutScreen { screen, at }` (*Put at*; an
+  older NewQ reads `Unknown`). `net_correct` calls `screens_correct` (`NetCorrection::screens:
+  ScreenDoubts`): the first heartbeat a follower compares is taken at once (a late joiner), after
+  that a screen off by over `SAME_METRES`/`SAME_DEGREES` at 4 heartbeats in a row is set to the
+  primary's (its moves re-made from the anchors) and eased over `EASE` (0.5 s) from where it was
+  shown (R21); a screen cue's own anchor is never shifted (`is_screen_cue`). `net_shift_shared` and
+  `net_leave_shared` move the screens' anchors too. A backup that takes control has the moves its
+  engine made from the commands. Tests: `play_tests.rs` (`World::with_screen`, `screen_log`,
+  `screens_agree`: three computers at every tick, a late command, a restart mid-move and a takeover
+  then *Stop all*), `engine/screens_tests.rs` (the ease, *Put at* as a command).
+
 - `src/net/` (stage 1 of `.claude/notes/network-plan.md`; results and what remains in
   `network-sync-trial.md`): `clock.rs` a follower's shared clock from NTP-style exchanges (pure;
   weighted fit by round trip, drift, slews once locked, never back), `msg.rs` the wire format

@@ -1428,7 +1428,8 @@ bright the picture is, on any screen, curved wall or set.
   mode (one in progress is put away and offered again after), on a computer
   that follows a primary, or while Test Mode runs. From the primary the
   crosses go to the computer that drives the projector.
-- **Not yet:** screens that move. The points go on screens only (not on the
+- Screens can move on a cue (*Screens that move*, below); line up with them at
+  home. The points go on screens only (not on the
   venue model's own corners). The read-outs, the
   light and mapping are sums: nothing here has met a real projector, a light
   meter or a real graphics card (only a software one).
@@ -1460,6 +1461,47 @@ says "Also on the stage: LED wall".
   tab lists the canvases and what they feed.
 - A canvas's delay (*Settings ▸ Sync*) is the one that counts for what is on
   it, for every projector that shows it.
+
+### Screens that move
+
+*Tried only in simulation: no real scenery, winch or projector yet.* A
+**Move a screen** cue (*Cue ▸ Add ▸ Move a screen*) takes a screen of the 3D
+stage from where it is to a place over a time: a wall that tracks downstage,
+a flat that flies in, a revolve that turns. The projectors, the 3D views and
+the light go with it.
+
+**NewQ moves the picture as the cue says. It doesn't know where the scenery
+really is.** If the scenery is half a second late, the picture is half a
+second ahead of it. A screen with a few resting places (most theatre) is
+exactly right; a picture that has to stay stuck to scenery while the audience
+watches it travel needs tracking, which NewQ doesn't do yet.
+
+- **The cue's page.** *Screen* (which one), *Takes* (seconds; 0 jumps) and the
+  *Curve*. Under *To*, each of *Across (X)*, *Up (Y)*, *Towards the audience
+  (Z)*, *Turn*, *Tilt* and *Roll* is ticked to move it there or left where it
+  is, in metres and degrees as on the Screens tab. A turn keeps counting: 720°
+  is twice round. *Use where it is now* takes every number from where the
+  screen is, so you move it (or put it) where you want and press that; *Put
+  the screen there now* jumps it to where this cue leaves it, for rehearsals.
+  The page says where the screen is now.
+- **Where it stays.** A screen stays where its last cue left it after the cue
+  is over. *Stop all* and *Panic* don't send it back or stop it on its way:
+  stopping the sound doesn't stop a winch. A cue moves only the numbers it
+  gives, from where the screen is, so one cue can move a wall while another
+  turns it. Opening a show puts every screen at home (its place on the
+  Screens tab), and so does restarting NewQ: after a restart mid-show, *Put
+  at* (on the Screens tab, and *Put the screen there now* on a cue) puts it
+  where it was. Where screens are is never saved in the show.
+- **On a timeline** a Move a screen clip moves with the timeline's clock and
+  waits at its pauses.
+- **On a show network** every computer moves the screen at the same shared
+  time, so two projectors on two computers keep the picture on it together. A
+  computer that joins late, or a backup that takes control, learns where the
+  screens are from the primary; one that finds it disagrees with the primary
+  eases to it over half a second rather than jump. A NewQ before this one keeps
+  the cue in the show and doesn't play it.
+- A screen a Move a screen cue names is drawn live by its projectors; it is
+  left out of their lens maps, so moving it never makes the maps again.
 
 ## Show network: several computers
 
