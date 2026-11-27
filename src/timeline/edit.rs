@@ -360,6 +360,7 @@ fn trim_right(cue: &mut Cue, lead: f64, content: Option<f64>, t: f64) -> bool {
         }
         CueKind::Fade(f) => set_if(&mut f.duration, t),
         CueKind::Wait(w) => set_if(&mut w.duration, t),
+        CueKind::Screen(s) => set_if(&mut s.duration, t),
         kind => {
             let Some(m) = kind.media_mut() else {
                 return false;
@@ -384,6 +385,7 @@ fn trim_left(cue: &mut Cue, start: f64, lead: f64, content: Option<f64>, d: f64)
     match &cue.kind {
         CueKind::Fade(f) => d = d.min(f.duration - MIN_LEN),
         CueKind::Wait(w) => d = d.min(w.duration - MIN_LEN),
+        CueKind::Screen(s) => d = d.min(s.duration - MIN_LEN),
         // Without a lead-in to grow, the in point can't go before the file's start.
         CueKind::Video(m) | CueKind::Audio(m) if lead <= 0.0 => d = d.max(-m.start / m.speed()),
         _ => {}
@@ -403,6 +405,7 @@ fn trim_left(cue: &mut Cue, start: f64, lead: f64, content: Option<f64>, d: f64)
     match &mut cue.kind {
         CueKind::Fade(f) => f.duration -= d,
         CueKind::Wait(w) => w.duration -= d,
+        CueKind::Screen(s) => s.duration -= d,
         CueKind::Video(m) | CueKind::Audio(m) => {
             m.start = (m.start + cut * m.speed()).max(0.0);
             shift_all_keys(m, d);

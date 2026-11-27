@@ -390,6 +390,17 @@ is a piece of a longer entry that covered several areas.
   `ui/stage_edit_tests.rs::a_canvas_is_added_a_screen_shows_it_and_a_mapped_projector_reads_as_one_everywhere`
   (both interfaces, 1280×760; `Win::see`, `press_add`).
 
+- Moving screens, round 3's contract and the cue (agent A; tried only in simulation). What moves a
+  screen is `CueKind::Screen` (`show-and-engine.md`); `Show::movable` is real (a screen cue names
+  it) and `Show::movable_screens` answers for many at once (use it in loops, `still_scene`). Where
+  screens are: `Engine::moved_screens()` -> `StageLive::send(.., projectors, screens, fresh)` (the
+  app passes it) and `UiState::screens_now` (each frame, for the Screens tab's *Now at*; *Put at*
+  is `Action::PutScreen(screen, place)`, places from `Show::screen_places`). `mapped::MovingScreen`
+  is one per piece: `surface, mesh, mesh_key, matrix` (placement now times the piece's transform,
+  as `Stage3d::scene`), `feed: Option<u8>` (0-based in `MappedFrame::feeds`, as
+  `lensmap::part_feed`; None black but in the way), `region`, `front_only`. `LensMap::depth` was
+  already there (round 1).
+
 - Line-up on the page (mapping plan round 2, agent A; old plan 5.2; tried only in simulation).
   `src/ui/stage_lineup.rs`: `LineUpDraft` (`UiState::line_up`, the contract's) and the panes'
   own state `Panes` (`ProjectorsUi::lineup`: the last `Solve`, `solves` counted for tests, the
