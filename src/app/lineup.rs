@@ -85,11 +85,27 @@ impl App {
                     LineUpMsg::Show(o) => self.line_up_monitor(o.display),
                     _ => None,
                 };
-                if let Some(seen) = self
+                // A display of this computer's with no window here: said
+                // back as seen on no monitor, so the primary doesn't take this
+                // computer for an older NewQ.
+                let unseen = match &m {
+                    LineUpMsg::Show(o) if size.is_none() => self
+                        .show
+                        .output(o.display)
+                        .filter(|d| d.is_on(self.ui.net.me.id))
+                        .map(|_| LineUpMsg::Seen {
+                            session: o.session,
+                            seq: o.seq,
+                            pixels: (0, 0),
+                        }),
+                    _ => None,
+                };
+                let seen = self
                     .line_up
                     .shown
                     .take(Source::Primary(from), m, |_| size, now)
-                {
+                    .or(unseen);
+                if let Some(seen) = seen {
                     self.net.tell(Some(from), Msg::LineUp(Box::new(seen)), true);
                 }
             }
@@ -350,4 +366,74 @@ pub(super) fn with_crosses(
     };
     out.push(crosses);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mapped::gpu_tests::{H, W, gpu, layer, pixel, plain, stretched, window};
+
+    /// A sprite as the window draws it: `SPRITE` square, transparent but for
+    /// a red dot at its middle, so where the dot lands is where the mark is.
+    fn dot_sprite(gpu: &gpu::Gpu) -> Arc<LayerTexture> {
+        let s = lineup_overlay::SPRITE;
+        let mut data = vec![0u8; (s * s * 4) as usize];
+        for y in s / 2 - 1..s / 2 + 1 {
+            for x in s / 2 - 1..s / 2 + 1 {
+                let k = ((y * s + x) * 4) as usize;
+                data[k..k + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        let t = LayerTexture::new_rgba(gpu, s, s);
+        t.upload_rgba(&gpu.queue, &data);
+        Arc::new(t)
+    }
+
+    /// On a card (lavapipe): a mark at a pixel of a picture the size of the
+    /// monitor lands on that pixel, in raw monitor pixels; over black nothing
+    /// of the picture is left, dimmed it is `DIM` of itself.
+    #[test]
+    fn a_cross_lands_on_its_pixel_over_black_or_the_picture_dimmed() {
+        let Some(gpu) = gpu() else { return };
+        let monitor = (W, H);
+        let at = [20.0, 12.0];
+        let crosses = OutputGroup {
+            layers: vec![sprite_layer(
+                dot_sprite(&gpu),
+                lineup_overlay::sprite_transform(at, monitor, monitor),
+            )],
+            geometry: plain(monitor),
+        };
+        let white = vec![255u8; (W * H * 4) as usize];
+        let picture = OutputGroup {
+            layers: vec![stretched(layer(&gpu, &white))],
+            geometry: plain(monitor),
+        };
+        for under in [Under::Black, Under::Dimmed] {
+            let list = with_crosses(vec![picture.clone()], crosses.clone(), under);
+            let got = window(&gpu, &mut None, 0, &list, &[]);
+            // The dot is the four pixels round `at`.
+            for (x, y) in [(19, 11), (20, 11), (19, 12), (20, 12)] {
+                let p = pixel(&got, x, y);
+                assert!(
+                    p[0] > 200 && p[1] < 60,
+                    "{under:?}: the dot at {x},{y}: {p:?}"
+                );
+            }
+            // Elsewhere, under the sprite's clear part and beyond it.
+            for (x, y) in [(5, 5), (40, 30), (60, 2)] {
+                let p = pixel(&got, x, y);
+                let want = match under {
+                    Under::Dimmed => (255.0 * DIM) as i32,
+                    _ => 0,
+                };
+                for (c, v) in p.iter().take(3).enumerate() {
+                    assert!(
+                        (*v as i32 - want).abs() <= 8,
+                        "{under:?}: at {x},{y} channel {c} is {v}, not {want}"
+                    );
+                }
+            }
+        }
+    }
 }

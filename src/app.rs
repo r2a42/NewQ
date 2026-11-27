@@ -2354,7 +2354,32 @@ impl App {
                 }
             }
         }
-        lens_maps(gpu, &wanted, &mut self.stage, &mut self.mapped_targets)
+        // A throw is 16:9 whatever the projector's shape: its map is made in
+        // the projector's own (`shape_of`, as the throw's lens has it).
+        let shapes: HashMap<crate::stage3d::projector::ProjectorId, f32> = self
+            .show
+            .stage3d
+            .projectors
+            .iter()
+            .map(|p| {
+                (
+                    p.id,
+                    crate::ui::stage_projectors::shape_of(&self.show, &self.ui, p).1,
+                )
+            })
+            .collect();
+        let shaped = |w: &crate::mapped::MapWanted| {
+            (w.use_ == crate::mapped::MapUse::Preview)
+                .then(|| shapes.get(&w.projector).copied())
+                .flatten()
+        };
+        lens_maps(
+            gpu,
+            &wanted,
+            &shaped,
+            &mut self.stage,
+            &mut self.mapped_targets,
+        )
     }
 
     /// The size of display `id`'s picture: the one it is given, or its
@@ -4771,16 +4796,23 @@ fn may_stream(show: &Show, o: &OutputConfig) -> bool {
 /// The lens maps of the mapped pictures `wanted` here, by display and use,
 /// each with the target it is drawn into (the map's size; made again only
 /// when that changes). A map not made yet is left out, and its display is
-/// black. Targets no longer drawn are let go.
+/// black. Targets no longer drawn are let go. `shaped` gives the picture's
+/// shape for a map drawn into a picture of another (a 3D view's light:
+/// `StageLive::lens_map_shaped`), None for the projector's own at that size.
 fn lens_maps(
     gpu: &Gpu,
     wanted: &[crate::mapped::MapWanted],
+    shaped: &dyn Fn(&crate::mapped::MapWanted) -> Option<f32>,
     stage: &mut crate::stage_live::StageLive,
     targets: &mut HashMap<(OutputId, crate::mapped::MapUse), Arc<LayerTexture>>,
 ) -> MappedTargets {
     let mut out = HashMap::new();
     for w in wanted {
-        let Some(map) = stage.lens_map(w.projector, w.size, w.use_) else {
+        let map = match shaped(w) {
+            Some(aspect) => stage.lens_map_shaped(w.projector, w.size, aspect, w.use_),
+            None => stage.lens_map(w.projector, w.size, w.use_),
+        };
+        let Some(map) = map else {
             continue;
         };
         let key = (w.display, w.use_);
@@ -5106,8 +5138,18 @@ fn projector_throws(
                 if show.mapped_projector(d).is_none() {
                     return Some(pic);
                 }
-                let frame = frames.get(&(d, crate::mapped::MapUse::Preview))?;
-                Some(mapped_throw(pic, frame, i))
+                Some(match frames.get(&(d, crate::mapped::MapUse::Preview)) {
+                    Some(frame) => mapped_throw(pic, frame, i),
+                    // Black until its map is made, never its flat picture
+                    // (and never the white of no picture).
+                    None => {
+                        let mut pic = pic;
+                        if let Some(own) = pic.groups.first_mut() {
+                            own.layers.clear();
+                        }
+                        pic
+                    }
+                })
             });
             crate::stage_live::ProjectorThrow {
                 id: p.id,
@@ -5393,14 +5435,14 @@ mod tests {
             ..window
         };
         // No map yet: nothing, and the display stays black.
-        assert!(lens_maps(&gpu, &[window], &mut stage, &mut targets).is_empty());
+        assert!(lens_maps(&gpu, &[window], &|_| None, &mut stage, &mut targets).is_empty());
         stage.give_lens_map(p, map.clone());
-        let maps = lens_maps(&gpu, &[window, stream], &mut stage, &mut targets);
+        let maps = lens_maps(&gpu, &[window, stream], &|_| None, &mut stage, &mut targets);
         assert_eq!(maps.len(), 1, "only the map of the size asked for");
         let (target, got) = &maps[&(display, MapUse::Window)];
         assert!(Arc::ptr_eq(got, &map));
         assert_eq!((target.width, target.height), (64, 36));
-        let again = lens_maps(&gpu, &[window], &mut stage, &mut targets);
+        let again = lens_maps(&gpu, &[window], &|_| None, &mut stage, &mut targets);
         assert!(Arc::ptr_eq(&again[&(display, MapUse::Window)].0, target));
         // The canvases: both, the cyc's sub display too, not the projector.
         let canvases = canvases_of(&show, maps.values().map(|(_, m)| m.as_ref()));
@@ -5443,7 +5485,7 @@ mod tests {
             before
         );
         // Not mapped any more: the target is let go.
-        assert!(lens_maps(&gpu, &[], &mut stage, &mut targets).is_empty());
+        assert!(lens_maps(&gpu, &[], &|_| None, &mut stage, &mut targets).is_empty());
         assert!(targets.is_empty());
     }
 
