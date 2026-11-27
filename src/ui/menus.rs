@@ -484,6 +484,8 @@ fn add_menu(ui: &mut Ui, actions: &mut Vec<Action>) {
                 CueType::Timecode,
             ][..],
         ),
+        // The 3D stage's screens (mapping plan 4.2).
+        ("On the 3D stage", &[CueType::Screen][..]),
     ] {
         ui.separator();
         heading(ui, title);

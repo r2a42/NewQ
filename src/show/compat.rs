@@ -23,7 +23,7 @@ pub const THIS_NEWQ: &str = env!("CARGO_PKG_VERSION");
 /// The names `CueKind`'s variants are written under (a test keeps it so): a
 /// `CueKind::Unknown` of one of these is a cue of a kind this NewQ knows whose
 /// settings it can't read.
-pub const KNOWN_KINDS: [&str; 14] = [
+pub const KNOWN_KINDS: [&str; 15] = [
     "Video",
     "Image",
     "Audio",
@@ -38,6 +38,7 @@ pub const KNOWN_KINDS: [&str; 14] = [
     "LiveAudio",
     "Control",
     "Timecode",
+    "Screen",
 ];
 
 /// A value a newer NewQ wrote that this one doesn't know, kept so that it is
@@ -422,6 +423,7 @@ pub(crate) mod tests {
             CueType::LiveAudio,
             CueType::Control,
             CueType::Timecode,
+            CueType::Screen,
         ] {
             let c = show.make_cue(ty, None, 0);
             names.push(super::kind_name(&serde_json::to_value(&c.kind).unwrap()));

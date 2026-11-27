@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 pub mod compat;
 pub use compat::{Kept, THIS_NEWQ};
+pub mod screen;
+pub use screen::{ScreenCue, ScreenTarget};
 
 pub const SHOW_EXTENSION: &str = "newq";
 /// Volumes at or below this are treated as silence.
@@ -1604,6 +1606,8 @@ pub enum CueKind {
     LiveAudio(LiveAudioCue),
     Control(ControlCue),
     Timecode(TimecodeCue),
+    /// Moves a 3D stage screen (`show::screen`, mapping plan 4.2).
+    Screen(ScreenCue),
     /// A cue this NewQ can't read: of a kind a newer NewQ made, or of a kind
     /// it knows with settings it doesn't (`show::compat`). The kind is kept as
     /// it was written (`{"Kind": {...}}`) and written back so; the cue keeps its
@@ -1635,6 +1639,8 @@ pub enum CueType {
     Timer,
     /// Makes MIDI Time Code on a MIDI output while it runs.
     Timecode,
+    /// Moves a 3D stage screen.
+    Screen,
     /// A cue this NewQ can't read (`CueKind::Unknown`). Never made here.
     Unknown,
 }
@@ -1658,6 +1664,7 @@ impl CueType {
             CueType::Clock => "Clock",
             CueType::Timer => "Timer",
             CueType::Timecode => "Timecode",
+            CueType::Screen => "Move a screen",
             CueType::Unknown => "Unknown",
         }
     }
@@ -1679,6 +1686,7 @@ impl CueType {
             CueType::Clock => "🕒",
             CueType::Timer => "⏳",
             CueType::Timecode => "🎞",
+            CueType::Screen => "🔀",
             CueType::Unknown => "❓",
         }
     }
@@ -1701,6 +1709,7 @@ impl CueKind {
             CueKind::LiveAudio(_) => CueType::LiveAudio,
             CueKind::Control(_) => CueType::Control,
             CueKind::Timecode(_) => CueType::Timecode,
+            CueKind::Screen(_) => CueType::Screen,
             CueKind::Unknown(_) => CueType::Unknown,
         }
     }
@@ -4112,6 +4121,14 @@ impl Show {
                     duration: 0.0,
                 }),
             ),
+            CueType::Screen => (
+                "Move a screen".into(),
+                CueKind::Screen(ScreenCue {
+                    screen: self.stage3d.surfaces.first().map(|s| s.id),
+                    duration: 5.0,
+                    ..ScreenCue::default()
+                }),
+            ),
             CueType::Timer => (
                 "Speaker timer".into(),
                 CueKind::Text(TextCue::timer(default_output)),
@@ -4903,6 +4920,17 @@ impl Show {
                 }
             }
             run.extend(block);
+        }
+        // A screen is this show's: one from another show (where the same id
+        // is another screen, or none) is chosen again.
+        for c in inside.iter_mut().chain(after.iter_mut()) {
+            if let CueKind::Screen(s) = &mut c.kind
+                && (!same_show
+                    || s.screen
+                        .is_some_and(|id| self.stage3d.surface(id).is_none()))
+            {
+                s.screen = None;
+            }
         }
         // What the pasted cues aim at.
         for c in inside.iter_mut().chain(after.iter_mut()) {

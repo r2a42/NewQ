@@ -405,6 +405,7 @@ impl Engine {
             Command::TimelineGoOne { key } => self.timeline_go_one(show, *key),
             Command::TimelineContinue { key } => self.timeline_continue(show, *key),
             Command::TimelineLeave { key } => self.timeline_leave(show, *key),
+            Command::PutScreen { screen, at } => self.put_screen(show, *screen, *at),
             Command::Unknown => {
                 log::debug!("show network: a command from a later NewQ, not known here")
             }

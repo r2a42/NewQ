@@ -24,7 +24,8 @@
 
 use crate::engine::{Engine, NetCorrection};
 use crate::net::node::NodeId;
-use crate::show::{ControlAction, CueId, Show};
+use crate::show::{ControlAction, CueId, Curve, Show};
+use crate::stage3d::{Placement, SurfaceId};
 use crate::timeline::{PauseFreeze, TimelineKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -118,6 +119,12 @@ pub enum Command {
     },
     TimelineLeave {
         key: TimelineKey,
+    },
+    /// Put a 3D stage screen at a place at once (*Put at*: a jump, no ramp).
+    /// An older NewQ reads it as `Unknown` and leaves its screens alone.
+    PutScreen {
+        screen: SurfaceId,
+        at: Placement,
     },
     /// A command a later NewQ sends that this one doesn't know: acknowledged
     /// and not done (a frame that can't be read would close the session).
@@ -245,6 +252,49 @@ pub struct PlayState {
     /// sends nor reads it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub started: bool,
+    /// Where each moved screen is (mapping plan 4.2; `Engine::net_state`):
+    /// a computer that joins late, or a backup that takes control, has them
+    /// from here. Left out when none is moved; an older NewQ neither sends
+    /// nor reads it. Read leniently: an entry this NewQ can't read is left
+    /// out, never the whole heartbeat.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::show::compat::lenient_vec"
+    )]
+    pub screens: Vec<ScreenNow>,
+}
+
+/// A moved screen, as the heartbeat has it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScreenNow {
+    pub screen: SurfaceId,
+    /// Where it is at the heartbeat's time.
+    pub at: Placement,
+    /// Its numbers still on their way (each from where it was, by its own
+    /// cue): with these a computer works out where it is at any time.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::show::compat::lenient_vec"
+    )]
+    pub moving: Vec<AxisMove>,
+}
+
+/// One number of a screen's placement on its way (`show::screen::AXES`'
+/// order: x, y, z, turn, tilt, roll): from `from` at shared time `anchor` to
+/// `to` at `anchor + duration`, along `curve`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AxisMove {
+    /// Which number (one past the six, from a later NewQ, is passed by).
+    pub axis: u8,
+    pub from: f32,
+    pub to: f32,
+    pub anchor: f64,
+    pub duration: f64,
+    /// (A curve a later NewQ adds reads as the S-curve.)
+    #[serde(default, deserialize_with = "crate::show::compat::lenient")]
+    pub curve: Curve,
 }
 
 impl PlayState {

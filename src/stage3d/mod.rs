@@ -939,11 +939,15 @@ impl Show {
                 .any(|s| s.feed.output() == Some(output))
     }
 
-    /// Whether screen `surface` can move (a cue moves it, or a tracker is
-    /// bound to it): worked out from the show. A movable screen is never in
-    /// a lens map; it is drawn live (mapping plan 4.2). None can yet.
-    pub fn movable(&self, _surface: SurfaceId) -> bool {
-        false
+    /// Whether screen `surface` can move (a screen cue names it; later, a
+    /// tracker bound to it): worked out from the show, armed or not, so it
+    /// changes only when the show is edited. A movable screen is never in a
+    /// lens map; it is drawn live (mapping plan 4.2). For many screens at
+    /// once, `Show::movable_screens` looks once.
+    pub fn movable(&self, surface: SurfaceId) -> bool {
+        self.cues.iter().any(
+            |c| matches!(&c.kind, crate::show::CueKind::Screen(s) if s.screen == Some(surface)),
+        )
     }
 
     /// How display `output`'s picture shows the stage, if it does: the

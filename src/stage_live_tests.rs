@@ -324,6 +324,7 @@ fn a_display_that_shows_the_stage_gets_its_picture() {
         &[seen(b, camera)],
         &pictures,
         &[],
+        &[],
         false,
     );
     wait(&mut live);
@@ -337,6 +338,7 @@ fn a_display_that_shows_the_stage_gets_its_picture() {
         &[seen(b, camera)],
         &pictures,
         &[],
+        &[],
         false
     ));
     assert_eq!(live.serial, serial);
@@ -348,12 +350,13 @@ fn a_display_that_shows_the_stage_gets_its_picture() {
         &[seen(b, camera)],
         &pictures,
         &[],
+        &[],
         true,
     );
     assert_eq!(live.serial, serial + 1, "a job was sent");
     wait(&mut live);
     // The display stops showing the stage: its target goes.
-    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], &[], false);
     assert!(live.target_of(ViewKey::Output(b)).is_none());
     // The device is lost: everything on it goes, the thread stops.
     if let Some(h) = live.forget_device(&mut shared) {
@@ -423,6 +426,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &[seen(b, camera)],
         &pictures,
         &[],
+        &[],
         false,
     );
     wait(&mut live);
@@ -433,6 +437,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         &[],
         false,
     );
@@ -454,6 +459,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &[seen(b, camera)],
         &pictures,
         &[],
+        &[],
         false,
     );
     assert_eq!(live.serial, serial + 1);
@@ -464,6 +470,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         &[],
         false,
     );
@@ -476,6 +483,7 @@ fn a_still_change_on_a_screen_redraws_a_display_showing_the_stage() {
         &mut shared,
         &[seen(b, camera)],
         &pictures,
+        &[],
         &[],
         false,
     );
@@ -504,13 +512,13 @@ fn after_the_drawing_thread_stops_a_still_stage_is_drawn_again() {
     let layer = live.output_layer(&gpu, b, (160, 90));
     let pictures = HashMap::new();
     let out = [seen(b, Camera::default())];
-    live.send(&gpu, &show, &mut shared, &out, &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &out, &pictures, &[], &[], false);
     wait(&mut live);
     assert!(layer.texture.is_filled());
     live.panic_thread();
     // Something to draw (it plays), with the thread gone: not busy, and the
     // loop is to come back when another may start.
-    let busy = live.send(&gpu, &show, &mut shared, &out, &pictures, &[], true);
+    let busy = live.send(&gpu, &show, &mut shared, &out, &pictures, &[], &[], true);
     assert!(!busy, "a stopped thread is never busy");
     assert!(!live.has_thread(), "not started again within RESTART_EVERY");
     let at = live.wake_at().expect("a time to start it again");
@@ -519,7 +527,7 @@ fn after_the_drawing_thread_stops_a_still_stage_is_drawn_again() {
     // it is drawn all the same.
     std::thread::sleep(at.saturating_duration_since(Instant::now()));
     let serial = live.serial;
-    live.send(&gpu, &show, &mut shared, &out, &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &out, &pictures, &[], &[], false);
     assert!(live.has_thread());
     assert_eq!(live.serial, 1, "drawn by the new thread (was {serial})");
     wait(&mut live);
@@ -563,21 +571,39 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
     let mut governed = seen(b, Camera::default());
     governed.seen = false;
     governed.due = false;
-    live.send(&gpu, &show, &mut shared, &[governed], &pictures, &[], true);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[governed],
+        &pictures,
+        &[],
+        &[],
+        true,
+    );
     assert_eq!(live.serial, 0);
     assert!(!live.has_thread());
     // B's own pictures are then preview work too.
     live.begin(&show, &mut shared, &mut Vec::new());
     assert!(!live.feeds_a_display(_a));
     governed.due = true;
-    live.send(&gpu, &show, &mut shared, &[governed], &pictures, &[], true);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &[governed],
+        &pictures,
+        &[],
+        &[],
+        true,
+    );
     assert_eq!(live.serial, 1);
     wait(&mut live);
     // B stops showing the stage; nothing asks for a while.
-    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], &[], false);
     assert!(live.has_thread(), "not at once");
     live.as_if_idle();
-    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], &[], false);
     assert!(!live.has_thread());
     assert_eq!(live.wake_at(), None, "nothing to come back for");
     // Asked for again: started at once.
@@ -588,6 +614,7 @@ fn an_idle_stage_lets_go_of_the_graphics_card() {
         &mut shared,
         &[seen(b, Camera::default())],
         &pictures,
+        &[],
         &[],
         false,
     );
@@ -631,7 +658,7 @@ fn a_view_in_sight_keeps_the_stage_on_the_card_however_still() {
         lines: Default::default(),
     });
     shared.in_sight.push(preview);
-    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], &[], false);
     assert!(live.has_thread());
     wait(&mut live);
     let target = live.target_of(ViewKey::Preview(preview)).unwrap();
@@ -640,7 +667,7 @@ fn a_view_in_sight_keeps_the_stage_on_the_card_however_still() {
     for _ in 0..3 {
         live.as_if_idle();
         shared.in_sight.push(preview);
-        live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+        live.send(&gpu, &show, &mut shared, &[], &pictures, &[], &[], false);
         assert!(live.has_thread(), "kept while the view is in sight");
         let kept = live.target_of(ViewKey::Preview(preview)).unwrap();
         assert!(Arc::ptr_eq(&target, &kept), "and its picture");
@@ -657,13 +684,14 @@ fn a_view_in_sight_keeps_the_stage_on_the_card_however_still() {
         &[seen(b, Camera::default())],
         &pictures,
         &[],
+        &[],
         false,
     );
     assert!(live.has_thread(), "kept while a display shows the stage");
     wait(&mut live);
     // Neither for IDLE_RELEASE: let go, the view's picture too.
     live.as_if_idle();
-    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], false);
+    live.send(&gpu, &show, &mut shared, &[], &pictures, &[], &[], false);
     assert!(!live.has_thread());
     assert!(live.target_of(ViewKey::Preview(preview)).is_none());
 }
@@ -740,7 +768,16 @@ fn previews_give_way_while_the_thread_is_behind_with_the_displays() {
     let display = [seen(b, Camera::default())];
     live.set_behind(true);
     ask(&mut shared);
-    live.send(&gpu, &show, &mut shared, &display, &pictures, &[], true);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &display,
+        &pictures,
+        &[],
+        &[],
+        true,
+    );
     assert_eq!(live.serial, 1, "the display is drawn");
     assert!(live.drawn_with.contains_key(&ViewKey::Output(b)));
     assert!(!live.drawn_with.contains_key(&ViewKey::Preview(preview)));
@@ -749,7 +786,16 @@ fn previews_give_way_while_the_thread_is_behind_with_the_displays() {
     // Not behind: drawn.
     live.set_behind(false);
     ask(&mut shared);
-    live.send(&gpu, &show, &mut shared, &display, &pictures, &[], true);
+    live.send(
+        &gpu,
+        &show,
+        &mut shared,
+        &display,
+        &pictures,
+        &[],
+        &[],
+        true,
+    );
     assert_eq!(live.serial, 2);
     assert!(live.drawn_with.contains_key(&ViewKey::Preview(preview)));
     wait(&mut live);
@@ -1013,6 +1059,7 @@ fn only_a_view_with_its_light_on_is_lit() {
         &[],
         &HashMap::new(),
         &throws,
+        &[],
         true,
     );
     wait(&mut live);
@@ -1028,6 +1075,7 @@ fn only_a_view_with_its_light_on_is_lit() {
         &[],
         &HashMap::new(),
         &throws,
+        &[],
         false,
     );
     assert_eq!(live.serial, drawn, "a still lit view isn't drawn again");
@@ -1043,6 +1091,7 @@ fn only_a_view_with_its_light_on_is_lit() {
         &[],
         &HashMap::new(),
         &throws,
+        &[],
         true,
     );
     assert_eq!(live.serial, serial);

@@ -22,6 +22,8 @@ pub(crate) mod stage_edit;
 pub(crate) mod stage_lineup;
 pub(crate) mod stage_projectors;
 pub(crate) mod stage_view;
+// The screen cue's page in the inspector (mapping plan 4.2).
+mod screen_cue;
 mod timeline;
 
 use crate::clicker::{BACK_GUARD, Button, Do};
@@ -456,6 +458,10 @@ pub struct UiState {
     reveal_display: Cell<Option<OutputId>>,
     /// Every display's `display_label`, made at the start of each frame.
     display_labels: HashMap<OutputId, String>,
+    /// Where the moved 3D stage screens are (`Engine::moved_screens`), made
+    /// at the start of each frame, for pages without the engine (the 3D
+    /// stage's *Now at*). A screen not here is at home.
+    pub screens_now: Vec<(crate::stage3d::SurfaceId, crate::stage3d::Placement)>,
     about_logo: Option<egui::TextureHandle>,
     sync_clip: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// Videos being converted to Hap, by the cue they are for.
@@ -885,6 +891,10 @@ enum Action {
     /// (`AudioOutputConfig::move_to`). Allowed in show mode: it puts the
     /// sound back in the middle of one.
     PlaySoundHere(AudioOutputId, crate::net::node::NodeId),
+    /// *Put at*: a 3D stage screen jumps to a place (`Engine::put_screen`;
+    /// a command on a show network's primary). Not an edit of the show, so
+    /// allowed in show mode: it is the rehearsal and restart tool.
+    PutScreen(crate::stage3d::SurfaceId, crate::stage3d::Placement),
     Go,
     /// The Space key: on a timeline being worked on, its play/pause; else GO
     /// (`space_key`). With the timeline of an editor the pointer was over.
@@ -1206,6 +1216,7 @@ pub fn draw(ui: &mut Ui, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     // stage page is drawn.
     stage_lineup::tend(show, st);
     st.display_labels = display_labels(show);
+    st.screens_now = engine.moved_screens();
     st.note_preview_panes();
     if st.saved_json.is_none() {
         st.saved_json = serde_json::to_string(show).ok();
@@ -2191,6 +2202,7 @@ pub(crate) fn cue_target_text(show: &Show, c: &Cue) -> String {
             .map(|t| format!("» {}", cue_label(t)))
             .unwrap_or_else(|| "» everything".into()),
         CueKind::Wait(_) => String::new(),
+        CueKind::Screen(s) => screen_cue::target_text(show, s),
         CueKind::Unknown(_) => c.kind.unknown_note().unwrap_or_default(),
         CueKind::Timecode(t) => format!(
             "{} from {} ({})",
@@ -8598,6 +8610,8 @@ fn inspector_one(
         .filter(|o| show.mapped_projector(o.id).is_some())
         .map(|o| (o.id, display_label(show, o.id)))
         .collect();
+    // The screens a screen cue can move, and where each is (mapping plan 4.2).
+    let screen_choices = screen_cue::Choices::of(show, engine, st.selected);
     let audio_outputs: Vec<(AudioOutputId, String)> = show
         .audio_outputs
         .iter()
@@ -9197,6 +9211,7 @@ fn inspector_one(
                     .weak(),
                 );
             }
+            CueKind::Screen(s) => screen_cue::inspector(ui, cue_id, s, &screen_choices, actions),
             CueKind::Unknown(_) => {
                 let note = cue.kind.unknown_note().unwrap_or_default();
                 ui.label(RichText::new(format!("❓ {note}.")).strong());
@@ -11838,6 +11853,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
     match action {
         Action::Timeline(a) => timeline::apply(a, show, engine, st),
         Action::Stage(e) => stage_edit::apply(e, show, engine, st),
+        Action::PutScreen(screen, at) => {
+            engine.put_screen(show, screen, at);
+            st.screens_now = engine.moved_screens();
+        }
         Action::Go => {
             // On a timeline list the playhead means nothing: what is picked stays.
             let on_timeline = timeline::list_tab::active(show, engine).is_some();

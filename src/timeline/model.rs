@@ -793,6 +793,7 @@ mod tests {
             CueType::Send,
             CueType::Control,
             CueType::Timecode,
+            CueType::Screen,
         ] {
             assert_eq!(
                 track_of(&show.make_cue(ty, None, 0)),

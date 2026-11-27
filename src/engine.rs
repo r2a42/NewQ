@@ -4,6 +4,8 @@
 mod cards;
 mod displays;
 mod net;
+mod screens;
+pub use screens::length as screen_cue_length;
 mod timeline;
 
 pub use net::{NetCorrection, NetMode};
@@ -1226,6 +1228,8 @@ pub struct Engine {
     media_finder: Option<std::sync::Arc<dyn crate::net::media::Finder>>,
     /// The show's "transfer cards" setting, as of the last tick (off: black).
     transfer_cards: bool,
+    /// Where the 3D stage's moved screens are (`engine/screens.rs`).
+    screens: screens::Screens,
 }
 
 /// Where the shared clock was at the last `Engine::tick_shared`.
@@ -1290,6 +1294,7 @@ impl Engine {
             net: net::NetGate::default(),
             media_finder: None,
             transfer_cards: true,
+            screens: screens::Screens::default(),
         }
     }
 
@@ -1342,6 +1347,7 @@ impl Engine {
             net: net::NetGate::default(),
             media_finder: None,
             transfer_cards: true,
+            screens: screens::Screens::default(),
         }
     }
 
@@ -1553,6 +1559,7 @@ impl Engine {
             CueKind::Camera(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::LiveAudio(c) => Some(c.media.end.filter(|d| *d > 0.0)),
             CueKind::Fade(f) => Some(Some(f.duration)),
+            CueKind::Screen(s) => Some(Some(screens::length(s))),
             CueKind::Wait(w) => Some(Some(w.duration)),
             CueKind::Timecode(t) => Some((t.duration > 0.0).then_some(t.duration)),
             // (One this NewQ can't read doesn't play here: it takes no time.)
@@ -3519,6 +3526,15 @@ impl Engine {
                 active.kind = ActiveKind::Wait;
                 active.duration = Some(w.duration);
             }
+            CueKind::Screen(s) => {
+                // Its time is kept as a fade cue's is (by a shared clock, by
+                // its timeline's clock); the move it starts outlives it.
+                active.kind = ActiveKind::Fade;
+                active.duration = Some(screens::length(s));
+                active.fade_from = self.run_clock(at.run).map(|(_, pos)| pos);
+                active.elapsed = at.from.max(0.0);
+                self.screen_cue(show, &cue, s, instance);
+            }
             CueKind::Timecode(t) => {
                 active.duration = (t.duration > 0.0).then_some(t.duration);
                 // In a show network the primary alone makes timecode (R8).
@@ -3754,6 +3770,8 @@ impl Engine {
         // be caught by a show network's gate (`engine/net.rs`).
         self.enter();
         self.tick_inner(show, dt);
+        // Where the screens are, from the cues' times this tick.
+        self.screens_tick(show);
         self.leave();
     }
 
@@ -5039,6 +5057,9 @@ impl Engine {
     /// (`started_since_show`).
     pub fn show_opened(&mut self) {
         self.started_before_show = self.started_total();
+        // Every screen at home (a restart mid-show likewise: *Put at* puts
+        // them where they were).
+        self.screens_home();
     }
 
     /// Whether a cue has been started (or a timeline's picture put up) since
