@@ -10,6 +10,13 @@
 //!
 //! Every cue of the main list but the last follows the one before it; the
 //! last starts the first again.
+//!
+//! `--mapped` (either command) plays the same cues on a canvas that one
+//! curved screen in the Proscenium sample venue shows, and two mapped
+//! projectors share that screen (`mapped_stage`). Each projector's display
+//! sends its mapped picture to FFmpeg's null output (a stream that keeps
+//! nothing), so its lens map and mapped picture are drawn every frame on any
+//! computer, one monitor or many; give the displays monitors to see them.
 
 use crate::show::*;
 use std::path::{Path, PathBuf};
@@ -26,6 +33,111 @@ pub const FILES: [&str; 8] = [
     "slide3.png",
     "ambience.wav",
 ];
+
+/// The FFmpeg arguments of the mapped displays' streams: everything thrown
+/// away (`-f null`), so the mapped picture is drawn and nothing is kept.
+pub const NULL_STREAM: &str = "-f null -";
+
+/// The soak show, played on a canvas through two mapped projectors
+/// (`--mapped`).
+pub fn build_mapped(media: &Path, short: bool) -> Show {
+    let mut show = build(media, short);
+    show.name = if short {
+        "Soak, mapped (short)"
+    } else {
+        "Soak, mapped"
+    }
+    .into();
+    let canvas = show.outputs[0].id;
+    mapped_stage(&mut show, canvas);
+    for p in show.stage3d.projectors.clone() {
+        if let Some(o) = p
+            .display
+            .and_then(|d| show.outputs.iter_mut().find(|o| o.id == d))
+        {
+            o.stream = Some(StreamOut {
+                enabled: true,
+                kind: StreamKind::Custom {
+                    args: NULL_STREAM.into(),
+                },
+                fps: 30,
+                height: 720,
+            });
+        }
+    }
+    show
+}
+
+/// Make display `canvas` (the show's first, which the cues are sent to) a
+/// canvas (no monitor, 1920 x 1080) shown by one concave curved screen in
+/// the Proscenium sample venue, and add two displays, each a mapped
+/// projector's, the two projectors sharing the screen with an overlap in
+/// the middle. Their ids, left then right.
+pub fn mapped_stage(show: &mut Show, canvas: OutputId) -> [crate::stage3d::ProjectorId; 2] {
+    use crate::stage3d::samples::{SampleVenue, screens};
+    use crate::stage3d::{Feed, SurfaceShape};
+    let kind = SampleVenue::Proscenium;
+    crate::ui::stage_edit::use_sample(show, kind, false);
+    show.stage3d.add_sample_viewpoints(kind);
+    if let Some(o) = show.outputs.iter_mut().find(|o| o.id == canvas) {
+        o.name = "Canvas".into();
+        o.monitor = None;
+        o.picture = Some((1920, 1080));
+    }
+    let (width, height) = (8.0, 4.5);
+    let s = show.add_surface(Some(SurfaceShape::Curved {
+        width,
+        radius: 7.0,
+        height,
+        convex: false,
+    }));
+    let placement = screens(kind)
+        .first()
+        .map(|st| st.placement)
+        .unwrap_or_default();
+    if let Some(sf) = show.stage3d.surface_mut(s) {
+        sf.name = "Curved screen".into();
+        sf.placement = placement;
+        sf.feed = Feed::Display {
+            output: canvas,
+            region: [0.0, 0.0, 1.0, 1.0],
+        };
+    }
+    let screen = show.stage3d.surface(s).cloned().expect("just added");
+    let m = screen.placement.matrix();
+    let mut ids = [crate::stage3d::ProjectorId(0); 2];
+    for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+        let display = show.add_display();
+        if let Some(o) = show.outputs.iter_mut().find(|o| o.id == display) {
+            o.name = if side < 0.0 {
+                "Projector left"
+            } else {
+                "Projector right"
+            }
+            .into();
+            o.monitor = None;
+        }
+        let id = show.add_projector();
+        let Some(p) = show.projector_mut(id) else {
+            continue;
+        };
+        p.name = if side < 0.0 { "Left" } else { "Right" }.into();
+        p.lumens = 12_000.0;
+        p.resolution = Some((1920, 1080));
+        p.display = Some(display);
+        p.mapped = true;
+        let aspect = 16.0 / 9.0;
+        // Each a little more than half the screen (4.8 m of its 8 m, 9 m
+        // out), from its own side.
+        p.lens.throw = 9.0 / (width * 0.6);
+        p.placement.position =
+            crate::render3d::maths::transform_point(&m, [side * width * 0.2, 0.3, 9.0]);
+        let aim = crate::render3d::maths::transform_point(&m, [side * width * 0.22, 0.0, 0.0]);
+        p.aim_at(aim, aspect);
+        ids[i] = id;
+    }
+    ids
+}
 
 /// Builds the show. `short` makes a cycle of about a minute instead of about
 /// five, for trying it out before leaving it overnight.
@@ -421,11 +533,13 @@ pub fn make_media(ff: &crate::media::ffmpeg::Ffmpeg, dir: &Path) -> Result<(), S
 /// `newq --soak [--short] [--dir DIR]`: everything, in one command.
 fn soak(args: &[String]) -> Result<i32, String> {
     let mut short = false;
+    let mut mapped = false;
     let mut dir = crate::crash::log_dir().join("soak");
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--short" => short = true,
+            "--mapped" => mapped = true,
             "--dir" => dir = PathBuf::from(it.next().ok_or("--dir needs a folder")?),
             other => return Err(format!("unknown option {other}")),
         }
@@ -437,14 +551,18 @@ fn soak(args: &[String]) -> Result<i32, String> {
     );
     make_media(&ff, &dir)?;
     let media = dir.canonicalize().map_err(|e| e.to_string())?;
-    let show_path = dir.join(if short {
-        "soak-short.newq"
-    } else {
-        "soak.newq"
+    let show_path = dir.join(match (short, mapped) {
+        (true, false) => "soak-short.newq",
+        (false, false) => "soak.newq",
+        (true, true) => "soak-mapped-short.newq",
+        (false, true) => "soak-mapped.newq",
     });
-    build(&media, short)
-        .save(&show_path)
-        .map_err(|e| format!("{e:#}"))?;
+    let show = if mapped {
+        build_mapped(&media, short)
+    } else {
+        build(&media, short)
+    };
+    show.save(&show_path).map_err(|e| format!("{e:#}"))?;
     let stats = dir.join(if short {
         "stats-short.csv"
     } else {
@@ -492,14 +610,16 @@ pub fn run_if_asked(args: &[String]) -> Option<i32> {
     let result = (|| {
         let out = args
             .get(1)
-            .ok_or("usage: --make-soak-show OUT.newq --media DIR [--short]")?;
+            .ok_or("usage: --make-soak-show OUT.newq --media DIR [--short] [--mapped]")?;
         let mut media = None;
         let mut short = false;
+        let mut mapped = false;
         let mut it = args[2..].iter();
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--media" => media = it.next().map(PathBuf::from),
                 "--short" => short = true,
+                "--mapped" => mapped = true,
                 other => return Err(format!("unknown option {other}")),
             }
         }
@@ -519,9 +639,12 @@ pub fn run_if_asked(args: &[String]) -> Option<i32> {
                 missing.join(", ")
             ));
         }
-        build(&media, short)
-            .save(Path::new(out))
-            .map_err(|e| format!("{e:#}"))?;
+        let show = if mapped {
+            build_mapped(&media, short)
+        } else {
+            build(&media, short)
+        };
+        show.save(Path::new(out)).map_err(|e| format!("{e:#}"))?;
         println!("wrote {out}");
         Ok(())
     })();
@@ -587,6 +710,62 @@ mod tests {
             let ids: std::collections::HashSet<_> = show.cues.iter().map(|c| c.id).collect();
             assert_eq!(ids.len(), show.cues.len());
         }
+    }
+
+    /// The mapped soak: the same cues on a canvas that one curved screen
+    /// shows, two mapped projectors sharing it, each display streamed to
+    /// nothing so its mapped picture is drawn on any computer.
+    #[test]
+    fn the_mapped_soak_plays_on_a_canvas_through_two_mapped_projectors() {
+        let plain = build(Path::new("/media"), true);
+        let show = build_mapped(Path::new("/media"), true);
+        assert_eq!(show.cues.len(), plain.cues.len());
+        let canvas = show.outputs[0].id;
+        assert!(show.is_canvas(canvas), "the cues' display is a canvas");
+        assert_eq!(show.stage3d.surfaces.len(), 1);
+        assert!(
+            show.stage3d
+                .venue
+                .as_ref()
+                .is_some_and(|v| v.sample.is_some())
+        );
+        let projectors = &show.stage3d.projectors;
+        assert_eq!(projectors.len(), 2);
+        for p in projectors {
+            assert!(
+                p.mapped && show.mapped_refused(p.id).is_none(),
+                "{}",
+                p.name
+            );
+            assert_eq!(show.mapped_feeds(p.id).used, vec![canvas], "{}", p.name);
+            let d = show.output(p.display.unwrap()).unwrap();
+            assert!(d.monitor.is_none());
+            let s = d.stream.as_ref().expect("streamed");
+            assert!(s.enabled);
+            assert_eq!(
+                s.kind,
+                StreamKind::Custom {
+                    args: NULL_STREAM.into()
+                }
+            );
+        }
+        // Each lights its own side of the screen, overlapping in the middle.
+        let s = &show.stage3d.surfaces[0];
+        let m = s.placement.matrix();
+        let at = |x: f32| crate::render3d::maths::transform_point(&m, [x, 0.0, 0.0]);
+        let sees = |i: usize, x: f32| projectors[i].reaches(at(x), 16.0 / 9.0);
+        assert!(sees(0, -3.0) && !sees(0, 3.5));
+        assert!(sees(1, 3.0) && !sees(1, -3.5));
+        assert!(sees(0, 0.0) && sees(1, 0.0));
+        // It saves and loads as the plain one does.
+        let dir = std::env::temp_dir().join(format!("newq_soak_mapped_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("soak-mapped.newq");
+        show.save(&path).unwrap();
+        let back = Show::load(&path).unwrap();
+        assert_eq!(back.stage3d.projectors.len(), 2);
+        assert!(back.stage3d.projectors.iter().all(|p| p.mapped));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
