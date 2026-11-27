@@ -101,6 +101,8 @@ pub struct NetCorrection {
     started: HashMap<(CueId, usize), f64>,
     /// Those said to have gone again.
     gave_up: HashSet<(CueId, usize)>,
+    /// The screens' differences (`engine/screens.rs`).
+    screens: super::screens::ScreenDoubts,
     /// The primary was paused at the last heartbeat: its anchors slide while
     /// it is (by the time it stands), so they are followed, not compared.
     was_paused: bool,
@@ -112,7 +114,7 @@ const SAME_ANCHOR: f64 = LEAVE_UNDER;
 
 impl NetCorrection {
     pub fn is_empty(&self) -> bool {
-        self.seen.is_empty()
+        self.seen.is_empty() && self.screens.is_empty()
     }
 }
 
@@ -249,6 +251,7 @@ impl Engine {
             *t += by;
         }
         self.runs.net_shift(by);
+        self.screens_shift(by);
     }
 
     /// Back to ticking by `dt` alone: anchors are let go, so times are sums of
@@ -260,6 +263,7 @@ impl Engine {
             a.anchor = None;
         }
         self.runs.net_unanchor();
+        self.screens_unanchor();
     }
 
     /// Do a command (at the shared time of the last tick). `late`: it was due
@@ -453,6 +457,7 @@ impl Engine {
             cues,
             runs,
             started: self.started_since_show(),
+            screens: self.screens_now(now),
             ..Default::default()
         }
     }
@@ -560,7 +565,10 @@ impl Engine {
                     }
                     Some((instance, anchor, _)) => {
                         let off = anchor - c.anchor;
-                        if s.time - c.anchor < SETTLING {
+                        // A screen cue's own time is never moved: the screen
+                        // it moves would jump (R21). The screens are put right
+                        // by themselves, eased (`screens_correct`).
+                        if s.time - c.anchor < SETTLING || is_screen_cue(show, *cue) {
                             continue;
                         }
                         if off.abs() <= LEAVE_UNDER {
@@ -739,6 +747,8 @@ impl Engine {
                 }
             }
         }
+        // The screens.
+        done.extend(self.screens_correct(show, s, now, &mut doubts.screens));
         // What no longer differs starts counting again; what has ended is
         // forgotten.
         doubts.steady.retain(|i, _| seen.contains(&Doubt::Off(*i)));
@@ -866,6 +876,11 @@ impl super::ActiveCue {
     fn listed(&self) -> bool {
         self.plays_by_itself() && !self.over_by_clock
     }
+}
+
+fn is_screen_cue(show: &Show, id: CueId) -> bool {
+    show.cue(id)
+        .is_some_and(|c| matches!(c.kind, CueKind::Screen(_)))
 }
 
 fn name(show: &Show, id: CueId) -> String {

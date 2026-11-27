@@ -207,6 +207,22 @@ impl Param {
     pub fn ramping(&self) -> bool {
         self.ramp.is_some()
     }
+    /// Put its ramp at `t` seconds from its start (not by summing ticks): a
+    /// screen's move keeps to its cue's time, which a shared clock, a late
+    /// command's backdating and a timeline's clock all set
+    /// (`engine/screens.rs`). Past its end, it is at its end and done.
+    pub(super) fn ramp_at(&mut self, t: f64) {
+        if let Some(r) = &mut self.ramp {
+            r.t = 0.0;
+            self.advance(t.max(0.0));
+        }
+    }
+    /// Its ramp under way: (from, to, duration, curve).
+    pub(super) fn ramp_parts(&self) -> Option<(f32, f32, f64, Curve)> {
+        self.ramp
+            .as_ref()
+            .map(|r| (r.from, r.to, r.duration, r.curve))
+    }
     /// Seconds its ramp has to go (0 with none).
     fn left(&self) -> f64 {
         self.ramp
@@ -3533,7 +3549,7 @@ impl Engine {
                 active.duration = Some(screens::length(s));
                 active.fade_from = self.run_clock(at.run).map(|(_, pos)| pos);
                 active.elapsed = at.from.max(0.0);
-                self.screen_cue(show, &cue, s, instance);
+                self.screen_cue(show, &cue, s, instance, at.from);
             }
             CueKind::Timecode(t) => {
                 active.duration = (t.duration > 0.0).then_some(t.duration);
@@ -3771,7 +3787,7 @@ impl Engine {
         self.enter();
         self.tick_inner(show, dt);
         // Where the screens are, from the cues' times this tick.
-        self.screens_tick(show);
+        self.screens_tick(show, dt);
         self.leave();
     }
 
