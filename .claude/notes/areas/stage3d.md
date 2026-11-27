@@ -238,6 +238,36 @@ is a piece of a longer entry that covered several areas.
   outliving the idle release; a still scene and a fine-tune or line-up bake nothing again; a moved
   projector re-bakes its own; a preview map waits for a lit view; a lost device; a venue landing
   later). Lavapipe only; never a real GPU or projector.
+  Round 2 (agent C): **the bake agrees with the model.** A map's canvases are
+  `lensmap::feeds_for(show, p)` = `Show::mapped_feeds(p).used` (what the projector's row says it
+  maps), worked out by `StageLive::begin` with the scene into `map_feeds` (by projector), carried
+  in `MapJob::feeds`/`Bake::feeds`, hashed into `map_key` (which hashes
+  `Projector::without_tuning()` whole, so a renamed or redisplayed projector re-bakes), and used
+  by `feeds_output`; `feeds_seen` is gone; `reference`/`reference_with` take the feeds. An LED
+  screen (`Catch::led`, set from `Show::kind_of` in `Stage3d::scene`) is unfed in `still_scene`
+  (only in the way) and never `lit::reached` (keeps its picture in the light). Not covered: a
+  screen the window's or stream's frustum meets but `reaches_screen` (the projector's own
+  `resolution` shape) doesn't is in the way, black through that projector.
+  **A mapped projector in the light**: `ThrowJob::mapped: Option<MappedFrame>` (from
+  `ThrowPicture::mapped`, which `app.rs::throw_picture` fills with the `MapUse::Preview` map at
+  the throw's size); `draw_throws` runs `mapped::draw_mapped` (`StageDrawer::mapped`, made at the
+  first, `MapOwner::Throw(layer)`, frame 0) and submits its buffers with that throw's composite;
+  `light_up` keys the lit view on the frame's map stamp and its canvases' layers (stamps
+  included) and makes their `Slot::Map`s on the main thread. Tests: `stage_render_mapped_tests.rs`
+  (the round trip on lavapipe: a gradient laid straight on a concave curved screen against the
+  same content mapped and thrown back, worked out as (mapped - black) / (white - black) through
+  the projector's gamma, where the white throw is bright five pixels round: mean 0.003, 95th
+  percentile 0.006, worst 0.009 in display values, lines 0.01/0.02/0.05; the content thrown
+  unmapped is 0.041, so the test tells a map from none; a plain throw makes no drawer),
+  `stage_live_map_tests.rs::a_baked_maps_canvases_are_the_ones_the_model_says_it_maps` (an LED
+  screen showing a canvas, five canvases, a 4:3 window), `lensmap_tests` (LED in the way, feeds),
+  `render3d/tests.rs::an_led_screen_in_a_beam_keeps_its_own_picture`. End to end:
+  `stage_live_e2e_tests.rs` (ignored; `NEWQ_MAPPED_E2E`) and `scripts/mapped_e2e.sh`: a known
+  picture on a canvas, `soak::mapped_stage` (two mapped projectors on one curved screen in the
+  Proscenium sample), the left projector's display and the canvas recorded with
+  `StreamKind::Record`, the real app run under Xvfb, a late frame of each against
+  `lensmap::reference` at the recording's size (the canvas's recording is the codec's floor).
+  The fine-tune's editor is `ui.rs::fine_tune_editor` (below, previews-and-ui).
 
 - `src/calib/`: the line-up solver (step P3 of `.claude/notes/projection-plan.md`, section 5.3). Pure
   f64, hand-written (no linear algebra crate, the owner's choice), `pub(crate)`, `#[allow(dead_code)]`

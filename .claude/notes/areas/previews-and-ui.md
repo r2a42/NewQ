@@ -141,3 +141,11 @@ mixer's load, `media-and-streams.md`'s area).
   "canvas → Cyc", a mapped one's `MAPPED_LABEL`, and `Mid::takes_cues` keeps a cue from being
   dropped on it (`PatchRects::subs` for tests). Not changed (other owners' files): the Sync page's
   delay row of a mapped display (`ui/settings.rs`), `export.rs`'s display names.
+  A mapped display's fine-tune (mapping round 2, agent C): `ui.rs::fine_tune_editor(ui, id, name,
+  &mut Option<Mesh>, st, actions)` in place of its greyed corner pin (A's Projectors tab may call
+  it too): *Fine-tune…* starts `Projector::fine` as a flat 3 × 3 grid and opens the display's
+  geometry edit; `fine_tune_of(show, id)` points the preview's handles (`mesh_handles`),
+  `Action::Nudge` and `mesh_editor(ui, id, &mut Mesh, st)` at it; `Action::EditGeometry` leaving
+  a flat one sets it to None (nothing written). Notes "Displays ▸ <name> ▸ Fine-tune" and
+  "… ▸ Reset". Tests: `ui/fine_tune_tests.rs` (both interfaces, by mouse; a display that isn't
+  mapped keeps its own mesh).

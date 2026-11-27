@@ -84,7 +84,18 @@ in its "after the real tests" blocks. The cross-target clippy note ends the `src
   `ui::stage_view::draw` with `StageRun::show` (a copy of the live test show: the window gets no
   show) as `stage::VIEW`. Decision 9: `plan::leave_venue_out` in `network::build`, `session::build`
   across and after `full::plan_for`, unless the run has the 3D part (`Prep::keep_venue`). With no monitor ticked `unshow_stage` clears
-  every display's source. Tests: `stage.rs` (judge sentences, legs driven), `choice.rs`, `plan.rs`,
+  every display's source. The fifth leg, `Leg::Mapped` (mapping round 2; tried only in
+  simulation): `testmode/mapped.rs` `setup` (from `stage_setup`, after the stage display) adds
+  `CANVAS_NAME` (`Show::add_canvas`), puts it in every lap cue's `also_on` (output None or the
+  first display), feeds every screen from it, and takes the projector on the last ticked monitor's
+  display (or adds `PROJECTOR_NAME`, hidden until its leg); `MappedLeg { before, during }`
+  (`mapped`, `visible` on) put by `Setup::apply` before the stage display; tried on a copy
+  (`mapped_refused`, `mapped_feeds`), else no leg, said in the notes; none across a network or
+  with no monitor. `LegResult::maps` (baked, refused over the whole leg, from `StageRun::begun`:
+  the map lands while settling); `drew` for it is a map made and none refused; `judge` compares
+  it by the same line with `mapped::costs_words`, and `mapped::findings` (refused: Problem; none
+  made: Note); `stage.csv` ends `maps_baked,maps_refused`; `choice::STAGE_SHORT_SECS` five legs.
+  Tests: `stage.rs` (judge sentences, legs driven), `choice.rs`, `plan.rs`,
   `session.rs::a_3d_stage_part_…`; run headless under xvfb only (lavapipe).
 
 - `src/testmode/`: Test Mode (Tools menu), no command line. `assets.rs` is the pinned
@@ -171,3 +182,8 @@ in its "after the real tests" blocks. The cross-target clippy note ends the `src
   self-running soak show: `newq --soak` makes the media with our FFmpeg, runs the app on it
   and writes the report; `--make-soak-show` writes just the show. sysinfo
   lists Linux threads as processes (`thread_kind()`), skip them when summing children.
+  `--mapped` (both commands): `build_mapped` plays the same cues on the first display made a
+  canvas, through `mapped_stage` (the Proscenium sample, one concave curved screen, two mapped
+  projectors sharing it, overlapping in the middle), each projector's display streamed to
+  `NULL_STREAM` (`-f null -`) so the mapped pictures are drawn on any computer; tested by
+  `the_mapped_soak_plays_on_a_canvas_through_two_mapped_projectors`.
