@@ -720,6 +720,8 @@ impl Stage3d {
                 }
                 _ => None,
             };
+            // An LED screen takes no projector's light (mapping plan 8).
+            let led = show.kind_of(s) == ScreenKind::Led;
             for piece in geometry::surface_mesh(&s.shape) {
                 let key = piece.mesh.content_key();
                 let mesh = meshes
@@ -743,6 +745,7 @@ impl Stage3d {
                     catch: crate::stage3d::scene::Catch {
                         gain: s.gain,
                         front_only: !s.rear,
+                        led,
                     },
                 });
             }

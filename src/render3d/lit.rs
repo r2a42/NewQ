@@ -179,8 +179,12 @@ pub(super) fn shadow_key(casters: u64, t: &Throw) -> u64 {
     h.0
 }
 
-/// Whether part `p` (unlit) is a screen some throw can reach.
+/// Whether part `p` (unlit) is a screen some throw can reach. An LED
+/// screen (`Catch::led`) never is: it keeps its own picture.
 pub(super) fn reached(p: &Part, bounds: ([f32; 3], [f32; 3]), throws: &[Throw]) -> bool {
+    if p.catch.led {
+        return false;
+    }
     let corners = box_corners(bounds.0, bounds.1, &p.transform);
     throws
         .iter()

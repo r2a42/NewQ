@@ -141,8 +141,6 @@ pub struct ThrowPicture {
     /// throw's size by `mapped::Drawer::draw` into `target` (`app.rs::
     /// throw_picture` makes it; the stage thread draws it, mapping plan
     /// 4.1). `groups` then shows that target as the display's layer.
-    // (Read by the stage thread: round 2, agent C.)
-    #[allow(dead_code)]
     pub mapped: Option<crate::mapped::MappedFrame>,
 }
 
@@ -324,6 +322,10 @@ pub struct StageLive {
     /// again with the scene.
     still: Arc<Scene>,
     still_key: u64,
+    /// Each projector's canvases (`lensmap::feeds_for`, the model's
+    /// `Show::mapped_feeds`), worked out with the scene: what its maps
+    /// name, what their keys hash, and what `feeds_output` says.
+    map_feeds: HashMap<ProjectorId, Vec<OutputId>>,
     /// Mapped projectors' lens maps, by projector and size.
     maps: HashMap<MapAt, MapEntry>,
     /// A bake the card refused has landed since `begin` last said so.
@@ -491,6 +493,11 @@ impl StageLive {
             self.bounds = stage_bounds(stage, &scene, self.venue.loaded.as_deref());
             let still = lensmap::still_scene(show, &scene);
             self.still_key = lensmap::still_key(&still);
+            self.map_feeds = stage
+                .projectors
+                .iter()
+                .map(|p| (p.id, lensmap::feeds_for(show, p.id)))
+                .collect();
             self.still = Arc::new(still);
             self.scene = Arc::new(scene);
             shared.scene = self.scene.clone();
@@ -755,7 +762,11 @@ impl StageLive {
         }
         self.take_baked();
         let p = self.stage_seen.as_ref()?.projector(projector)?;
-        let key = lensmap::map_key(self.still_key, p, aspect, size, false);
+        let feeds = self
+            .map_feeds
+            .get(&projector)
+            .map_or(&[][..], Vec::as_slice);
+        let key = lensmap::map_key(self.still_key, p, aspect, size, false, feeds);
         let e = self.maps.entry(at).or_default();
         e.given = false;
         e.want = Some((key, aspect));
@@ -1105,6 +1116,7 @@ impl StageLive {
                 size,
                 key,
                 scene: self.still.clone(),
+                feeds: self.map_feeds.get(&id).cloned().unwrap_or_default(),
                 output: e.output,
             });
         }
@@ -1122,7 +1134,7 @@ impl StageLive {
             if !std::mem::take(&mut e.output) {
                 continue;
             }
-            let Some((key, aspect)) = e.want else {
+            let Some((key, _)) = e.want else {
                 continue;
             };
             if e.given {
@@ -1131,10 +1143,11 @@ impl StageLive {
                     e.map.as_ref().map_or_else(Vec::new, |m| m.feeds.clone()),
                 );
             } else if e.feeds.0 != key || key == 0 {
-                let Some(p) = self.stage_seen.as_ref().and_then(|s| s.projector(id)) else {
+                // The same canvases its maps name (`feeds_for`).
+                let Some(feeds) = self.map_feeds.get(&id) else {
                     continue;
                 };
-                e.feeds = (key, lensmap::feeds_seen(&self.still, p, aspect));
+                e.feeds = (key, feeds.clone());
             }
             for &f in &e.feeds.1 {
                 let whole = show.whole_picture(f);
@@ -1179,10 +1192,27 @@ impl StageLive {
                     groups_key(&mut h, g);
                 }
                 h.bytes(format!("{:?}", pic.blend).as_bytes());
+                // A mapped picture: drawn again when its map lands or a
+                // canvas's pictures change (its target's own stamp never
+                // does). Its canvases' slots are made here, not on the thread.
+                if let Some(f) = &pic.mapped {
+                    h.bytes(&f.map.stamp().to_le_bytes());
+                    let owner = crate::mapped::MapOwner::Throw(layer as u8);
+                    for (j, feed) in f.feeds.iter().take(crate::mapped::MAX_FEEDS).enumerate() {
+                        h.bytes(&feed.output.0.to_le_bytes());
+                        for g in &feed.groups {
+                            groups_key(&mut h, g);
+                            for l in &g.layers {
+                                l.texture.ensure_slot(owner.slot(0, j));
+                            }
+                        }
+                    }
+                }
                 jobs.push(ThrowJob {
                     layer,
                     groups: pic.groups.clone(),
                     blend: pic.blend,
+                    mapped: pic.mapped.clone(),
                 });
             }
         }

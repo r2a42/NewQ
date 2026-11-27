@@ -98,6 +98,10 @@ pub struct Catch {
     /// normals are its front); else on either side (a rear-projection
     /// screen, a venue's walls, wound either way).
     pub front_only: bool,
+    /// An LED screen (`Show::kind_of`): no projector's light lands on it,
+    /// so it keeps its own picture in the light, and a lens map leaves it
+    /// unfed (only in the way).
+    pub led: bool,
 }
 
 impl Default for Catch {
@@ -105,6 +109,7 @@ impl Default for Catch {
         Catch {
             gain: 1.0,
             front_only: false,
+            led: false,
         }
     }
 }

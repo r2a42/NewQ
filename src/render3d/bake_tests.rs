@@ -8,7 +8,7 @@ use crate::mapped::{CpuMap, unpack_how, unpack_place};
 use crate::render3d::{Options, Target};
 use crate::show::Show;
 use crate::stage3d::lensmap::tests::{box_part, flat_show, still_of};
-use crate::stage3d::lensmap::{map_key, reference_with, still_key};
+use crate::stage3d::lensmap::{feeds_for, map_key, reference_with, still_key};
 use crate::stage3d::{Facet, Feed, Placement, ProjectorId, SurfaceShape, geometry};
 
 /// How far a GPU place may be from the reference's, away from edges: a
@@ -99,7 +99,8 @@ fn both(
 ) -> (CpuMap, CpuMap) {
     let pr = show.projector(p).expect("there");
     let aspect = pr.aspect(SIZE);
-    let key = map_key(still_key(scene), pr, aspect, SIZE, false);
+    let feeds = feeds_for(show, p);
+    let key = map_key(still_key(scene), pr, aspect, SIZE, false, &feeds);
     let baked = renderer
         .bake(
             gpu,
@@ -109,6 +110,7 @@ fn both(
                 aspect,
                 size: SIZE,
                 key,
+                feeds: &feeds,
             },
         )
         .expect("baked");
@@ -116,7 +118,7 @@ fn both(
     assert_eq!(baked.size, SIZE);
     (
         read_map(gpu, &baked),
-        reference_with(scene, pr, SIZE, aspect),
+        reference_with(scene, pr, SIZE, aspect, &feeds),
     )
 }
 
@@ -343,6 +345,7 @@ fn a_card_that_refuses_the_bake_refuses_it_and_still_draws_the_stage() {
         aspect: pr.aspect(SIZE),
         size: SIZE,
         key: 1,
+        feeds: &[],
     };
     assert!(r.bake(&gpu, &job).is_err());
     assert!(r.bake_refused());

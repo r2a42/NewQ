@@ -9,10 +9,12 @@
 //! - `still_scene`: what a map is made of. The scene the views draw without
 //!   the projectors' bodies and without any screen that can move
 //!   (`Show::movable`; those are drawn live, plan 4.2).
-//! - `feeds_seen`: which canvases a projector's map names (its `feeds`):
-//!   those of the fed screens whose box meets its picture, in the scene's
-//!   order, at most `MAX_FEEDS`. A fed screen past them is in the way like
-//!   the venue, and shows nothing.
+//! - `feeds_for`: which canvases a projector's map names (its `feeds`),
+//!   exactly `Show::mapped_feeds(p).used`, what the projector's row on the
+//!   page says it maps: in the screens' order, at most `MAX_FEEDS`. A fed
+//!   screen showing another canvas is in the way like the venue, and shows
+//!   nothing; so is an LED screen (`Catch::led`, `Show::kind_of`), whatever
+//!   it shows: no projector's light lands on it.
 //! - Which wins where two meet: a fed screen wins over anything else (the
 //!   venue, an unfed screen) up to `SCREEN_SLACK` of its distance behind it,
 //!   so a screen hung on a wall of the venue model shows its picture.
@@ -21,9 +23,9 @@
 //! - The place is taken at the middle of each pixel: the bake draws at twice
 //!   the size and its resolve averages the four samples' places, which is
 //!   the middle of the pixel when all four agree.
-//! - The key (`map_key`): the still parts (`still_key`), the projector's
-//!   placement and lens, the picture's shape and size. Nothing a cue
-//!   changes, and not `Projector::fine` or `line_up`.
+//! - The key (`map_key`): the still parts (`still_key`), the projector
+//!   (`Projector::without_tuning`: never its `fine` or `line_up`), its
+//!   feeds, the picture's shape and size. Nothing a cue changes.
 
 use super::projector::Projector;
 use crate::mapped::{CpuMap, How, MAX_FEEDS};
@@ -37,7 +39,9 @@ use crate::stage3d::scene::Fnv;
 pub const SCREEN_SLACK: f32 = 0.001;
 
 /// What a lens map is made of: `scene` (made by `Stage3d::scene` for `show`)
-/// without the projectors' bodies and without the screens that can move.
+/// without the projectors' bodies and without the screens that can move. An
+/// LED screen (`Catch::led`) is kept only as something in the way: its
+/// picture is never a feed.
 pub fn still_scene(show: &Show, scene: &Scene) -> Scene {
     let stage = &show.stage3d;
     let bodies_from = stage.projectors_from(scene);
@@ -60,7 +64,13 @@ pub fn still_scene(show: &Show, scene: &Scene) -> Scene {
             .enumerate()
             .filter(|(i, _)| *i < bodies_from)
             .filter(|(i, _)| owner[*i].is_none_or(|s| !show.movable(s)))
-            .map(|(_, p)| p.clone())
+            .map(|(_, p)| {
+                let mut p = p.clone();
+                if p.catch.led && matches!(p.paint, Paint::Output { .. }) {
+                    p.paint = Paint::Colour(crate::stage3d::UNFED_GREY);
+                }
+                p
+            })
             .collect(),
         throws: Vec::new(),
     }
@@ -89,18 +99,25 @@ pub fn still_key(scene: &Scene) -> u64 {
 }
 
 /// The key a map of `projector` at `size` (a picture `aspect` wide per
-/// high) is made for, over a still scene of key `still`. `depth`: whether
-/// the map has its depth picture (only with a movable screen, round 3).
+/// high), naming `feeds` (`feeds_for`), is made for, over a still scene of
+/// key `still`. `depth`: whether the map has its depth picture (only with a
+/// movable screen, round 3). The projector is hashed whole but for its
+/// fine-tune and line-up (`Projector::without_tuning`).
 pub fn map_key(
     still: u64,
     projector: &Projector,
     aspect: f32,
     size: (u32, u32),
     depth: bool,
+    feeds: &[OutputId],
 ) -> u64 {
     let mut h = Fnv::new();
     h.bytes(&still.to_le_bytes());
-    h.bytes(format!("{:?}{:?}", projector.placement, projector.lens).as_bytes());
+    h.bytes(format!("{:?}", projector.without_tuning()).as_bytes());
+    for f in feeds {
+        h.bytes(&f.0.to_le_bytes());
+    }
+    h.bytes(&(feeds.len() as u64).to_le_bytes());
     h.f32(aspect);
     h.bytes(&size.0.to_le_bytes());
     h.bytes(&size.1.to_le_bytes());
@@ -135,28 +152,13 @@ pub fn tile_matrix(projector: &Projector, aspect: f32, size: (u32, u32), tile: [
     maths::mul(&maths::frustum_reversed(&sub, THROW_NEAR, THROW_FAR), &view)
 }
 
-/// The canvases projector `projector`'s map names: those of `scene`'s fed
-/// screens whose box meets its picture, each once, in the scene's order, at
-/// most `MAX_FEEDS`.
-pub fn feeds_seen(scene: &Scene, projector: &Projector, aspect: f32) -> Vec<OutputId> {
-    let lens = lens_matrix(projector, aspect);
-    let mut out = Vec::new();
-    for p in &scene.parts {
-        let Paint::Output { output, .. } = p.paint else {
-            continue;
-        };
-        if p.lit || out.contains(&output) || out.len() >= MAX_FEEDS {
-            continue;
-        }
-        let Some((lo, hi)) = mesh_box(p) else {
-            continue;
-        };
-        let corners = crate::render3d::lit::box_corners(lo, hi, &p.transform);
-        if crate::render3d::lit::box_meets(&lens, &corners) {
-            out.push(output);
-        }
-    }
-    out
+/// The canvases projector `id`'s map names: exactly what `Show::
+/// mapped_feeds` uses (and the projector's row on the page says it maps),
+/// in the screens' order, at most `MAX_FEEDS`.
+pub fn feeds_for(show: &Show, id: crate::stage3d::ProjectorId) -> Vec<OutputId> {
+    let mut used = show.mapped_feeds(id).used;
+    used.truncate(MAX_FEEDS);
+    used
 }
 
 /// Which feed part `part` shows in a map naming `feeds`, if it is a fed
@@ -179,22 +181,16 @@ pub fn part_region(part: &Part) -> [f32; 4] {
     }
 }
 
-fn mesh_box(p: &Part) -> Option<(Vec3, Vec3)> {
-    let mut it = p.mesh.positions.iter().filter(|v| maths::finite(**v));
-    let first = *it.next()?;
-    Some(it.fold((first, first), |(lo, hi), v| {
-        (
-            std::array::from_fn(|i| lo[i].min(v[i])),
-            std::array::from_fn(|i| hi[i].max(v[i])),
-        )
-    }))
-}
-
-/// What projector `projector`'s pixels see of `scene`'s still screens, for a
-/// picture `size` big, its shape the projector's for that size
-/// (`Projector::aspect`).
-pub fn reference(scene: &Scene, projector: &Projector, size: (u32, u32)) -> CpuMap {
-    reference_with(scene, projector, size, projector.aspect(size))
+/// What projector `projector`'s pixels see of `scene`'s still screens
+/// showing `feeds` (`feeds_for`), for a picture `size` big, its shape the
+/// projector's for that size (`Projector::aspect`).
+pub fn reference(
+    scene: &Scene,
+    projector: &Projector,
+    size: (u32, u32),
+    feeds: &[OutputId],
+) -> CpuMap {
+    reference_with(scene, projector, size, projector.aspect(size), feeds)
 }
 
 /// `reference`, for a picture `aspect` wide per high whatever its size (a
@@ -204,10 +200,11 @@ pub fn reference_with(
     projector: &Projector,
     size: (u32, u32),
     aspect: f32,
+    feeds: &[OutputId],
 ) -> CpuMap {
     let mut map = CpuMap::black(size);
-    let feeds = feeds_seen(scene, projector, aspect);
-    let fed: Vec<Option<u8>> = scene.parts.iter().map(|p| part_feed(p, &feeds)).collect();
+    let feeds = &feeds[..feeds.len().min(MAX_FEEDS)];
+    let fed: Vec<Option<u8>> = scene.parts.iter().map(|p| part_feed(p, feeds)).collect();
     let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
     for y in 0..size.1 {
         for x in 0..size.0 {
@@ -219,7 +216,7 @@ pub fn reference_with(
             }
         }
     }
-    map.feeds = feeds;
+    map.feeds = feeds.to_vec();
     map
 }
 

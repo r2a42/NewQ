@@ -742,6 +742,7 @@ pub fn stage_trial(
             .collect();
         let throws: Vec<ThrowJob> = (0..throwing.len())
             .map(|i| ThrowJob {
+                mapped: None,
                 layer: i as u32,
                 groups: vec![group()],
                 blend: EdgeBlend::default(),
