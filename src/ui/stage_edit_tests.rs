@@ -1082,10 +1082,17 @@ fn a_movable_screen_says_where_it_is_now_and_is_put_at_its_places_by_mouse() {
         let now = format!("3D stage ▸ {name} ▸ {NOW_AT}");
         w.see(&mut show, &mut st, &now);
         let at_home = format!("{} (at home)", place_words(&home));
-        assert!(w.has(&at_home), "modern {modern}: {at_home:?} in {:?}", w.texts);
+        assert!(
+            w.has(&at_home),
+            "modern {modern}: {at_home:?} in {:?}",
+            w.texts
+        );
         // A screen no cue moves has neither row.
         let other_name = show.stage3d.surface(other).unwrap().name.clone();
-        assert!(w.find(&format!("3D stage ▸ {other_name} ▸ {NOW_AT}")).is_none());
+        assert!(
+            w.find(&format!("3D stage ▸ {other_name} ▸ {NOW_AT}"))
+                .is_none()
+        );
         let saved = serde_json::to_value(&show).unwrap();
         // Put at ▸ the cue's place: the engine has it there, the show is
         // as it was.
@@ -1093,7 +1100,11 @@ fn a_movable_screen_says_where_it_is_now_and_is_put_at_its_places_by_mouse() {
         w.press(&mut show, &mut st, &menu);
         w.press(&mut show, &mut st, &format!("{menu} ▸ {label}"));
         assert_eq!(w.e.screen_at(screen), Some(there), "modern {modern}");
-        assert!(w.has(&place_words(&there)), "modern {modern}: {:?}", w.texts);
+        assert!(
+            w.has(&place_words(&there)),
+            "modern {modern}: {:?}",
+            w.texts
+        );
         assert!(!w.has(&at_home));
         assert_eq!(serde_json::to_value(&show).unwrap(), saved, "not an edit");
         // And home again.

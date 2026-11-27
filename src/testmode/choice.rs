@@ -489,7 +489,7 @@ mod tests {
         );
         let alone = plan_with(Level::Short, ticks(false, false, false), true, false);
         assert_eq!(alone.len(), 1);
-        assert_eq!(summary(&alone), "The 3D stage: about 4 minutes");
+        assert_eq!(summary(&alone), "The 3D stage: about 5 minutes");
         assert_eq!(alone[0].part.slug(), "stage3d");
         assert_eq!(
             alone[0].part.flavour(),

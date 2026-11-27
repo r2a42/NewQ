@@ -1386,10 +1386,7 @@ impl Show {
                 && !self.shows_stage(o)
                 && self.mapped_projector(o).is_none()
                 && self.kind_of(s).is_projection()
-                && self
-                    .resting_boxes(s)
-                    .iter()
-                    .any(|b| p.reaches_boxes(b));
+                && self.resting_boxes(s).iter().any(|b| p.reaches_boxes(b));
             if !usable {
                 continue;
             }

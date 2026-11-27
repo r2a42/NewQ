@@ -1381,6 +1381,13 @@ bright the picture is, on any screen, curved wall or set.
   pictures and shadows when they need the computer. A display that shows the
   stage shows it without light. A graphics card that can't draw the light
   shows the view without it, and says so.
+- **Where a moving screen is.** A screen a *Move a screen* cue names is drawn where it is now in
+  the 3D views, in their light and through mapped projectors (left out of their baked picture and
+  drawn live, hidden behind what stands in front of it). Its row on the Screens tab says where it
+  is *Now at*, and *Put at ▸* puts it at home or where one of its cues leaves it, at once, without
+  changing the show: for rehearsals, and after a restart mid-show. Making a screen movable redraws
+  the mapped projectors' pictures once; a GO never does. NewQ moves the picture as the cue says;
+  it doesn't know where the scenery is. Tried only in simulation.
 - **A screen's kind.** Each screen has a *Kind* on the Screens tab:
   *Projection, front*, *Projection, rear*, *LED or monitor* (it makes its own
   light: the light leaves its picture as it is and no mapped projector maps
@@ -2589,6 +2596,10 @@ for the part's share of the time), and compares them:
    in its own words; a graphics card that won't make the lens map is a problem (that display
    stays black here). No such leg across a show network, with no monitor ticked, or when the
    projector reaches no screen. Tried only in simulation.
+6. **A screen moving**: the same mapped projector, with the first screen it maps made movable
+   for the leg alone and swung to and fro (a quarter of a metre each way, turned 8°), so it is
+   drawn live over the mapped picture, hidden where the room is in front of it. Judged by the
+   same line, in its own words; a screen that never moved is said. Tried only in simulation.
 
 With no 3D stage in your show it uses the *Proscenium* sample with its usual screens and a
 projector for each ticked monitor (two make an overlapping pair), on the test's copy of your

@@ -454,9 +454,17 @@ fn a_movable_screen_is_left_out_of_the_map_and_the_depth_is_the_nearest_still_th
         throws: Vec::new(),
     };
     let map = reference_with_depth(&empty, pr, (4, 4), aspect, &[a]);
-    assert!(map.depth.unwrap().iter().all(|px| *px == [255, 255, 255, 255]));
+    assert!(
+        map.depth
+            .unwrap()
+            .iter()
+            .all(|px| *px == [255, 255, 255, 255])
+    );
     let far = crate::stage3d::light::THROW_FAR * 2.0;
-    assert_ne!(crate::mapped::pack_depth(far, DEPTH_RANGE), [255, 255, 255, 255]);
+    assert_ne!(
+        crate::mapped::pack_depth(far, DEPTH_RANGE),
+        [255, 255, 255, 255]
+    );
 }
 
 #[test]

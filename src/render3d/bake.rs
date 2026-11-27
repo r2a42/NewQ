@@ -559,9 +559,7 @@ impl Renderer {
         let depth = scratch(gpu, big, DEPTH_FORMAT, "lens map depth test");
         let big_place_view = big_place.create_view(&Default::default());
         let big_how_view = big_how.create_view(&Default::default());
-        let big_far_view = big_far
-            .as_ref()
-            .map(|t| t.create_view(&Default::default()));
+        let big_far_view = big_far.as_ref().map(|t| t.create_view(&Default::default()));
         let depth_view = depth.create_view(&Default::default());
         let mut entries = vec![
             wgpu::BindGroupEntry {
