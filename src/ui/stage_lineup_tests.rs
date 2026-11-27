@@ -838,3 +838,55 @@ fn a_new_point_starts_where_the_lens_throws_it() {
         [960.0, 540.0]
     );
 }
+
+/// Writes a show with a sample venue, a screen and a projector, and a
+/// line-up of it in progress, to try by hand (or headless):
+/// `NEWQ_LINEUP_SHOW=/abs/show.newq NEWQ_LINEUP_NODE=/abs/node cargo test
+/// write_a_line_up_show -- --ignored`, then run NewQ with that
+/// `NEWQ_NODE_DIR` on that show: Settings ▸ 3D stage offers to carry on.
+#[test]
+#[ignore]
+fn write_a_line_up_show() {
+    let (Some(path), Some(node)) = (
+        std::env::var_os("NEWQ_LINEUP_SHOW"),
+        std::env::var_os("NEWQ_LINEUP_NODE"),
+    ) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let (mut show, id, s, truth) = rig(Preset::Flat);
+    show.name = "Line-up".into();
+    crate::ui::stage_edit::use_sample(
+        &mut show,
+        crate::stage3d::samples::SampleVenue::Proscenium,
+        false,
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&show).unwrap()).unwrap();
+    let mut draft = LineUpDraft::new(id, HD, 7);
+    let screen = show.stage3d.surface(s).unwrap().clone();
+    let m = screen.placement.matrix();
+    let p = show.projector(id).unwrap().clone();
+    for (i, c) in corners(&screen.shape).into_iter().enumerate() {
+        let room = geometry::point(&m, c);
+        // The first three where they truly are; the last still where the
+        // projector as entered throws it.
+        let px = if i < 3 {
+            truly(&show, id, &truth, room)
+        } else {
+            calib::project(&p.placement, &p.lens, HD, room).unwrap()
+        };
+        draft.points.push(LinePoint::on_screen(s, c, px));
+    }
+    draft.active = Some(3);
+    draft.before = Some(Before {
+        placement: p.placement,
+        lens: p.lens.clone(),
+        extra: Default::default(),
+    });
+    let mut panes = Panes {
+        draft_dir: Some(PathBuf::from(node)),
+        ..Default::default()
+    };
+    panes.show = Some((Some(path), show.name.clone()));
+    panes.write(&draft);
+}
