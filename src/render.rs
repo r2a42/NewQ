@@ -282,7 +282,9 @@ struct MappedShot {
     map: u64,
     shares: bool,
     feeds: Vec<(crate::show::OutputId, (u32, u32), Vec<GroupShot>)>,
-    moving: Vec<crate::mapped::MovingScreen>,
+    moving: Vec<crate::mapped::MovingShot>,
+    /// The lens they are seen through.
+    lens: [[f32; 4]; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -316,7 +318,8 @@ impl Shot {
                         .iter()
                         .map(|c| (c.output, c.canvas, group_shots(&c.groups)))
                         .collect(),
-                    moving: f.moving.clone(),
+                    moving: crate::mapped::moving_shots(&f.moving),
+                    lens: f.lens,
                 })
                 .collect(),
         }
