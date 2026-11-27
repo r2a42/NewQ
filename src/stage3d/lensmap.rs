@@ -202,12 +202,27 @@ pub fn reference_with(
     aspect: f32,
     feeds: &[OutputId],
 ) -> CpuMap {
+    reference_every(scene, projector, size, aspect, feeds, 1)
+}
+
+/// `reference_with` worked out only at every `step`th pixel each way (the
+/// rest black): for a big map of a big venue, which is slow on the
+/// processor (the end-to-end check's).
+pub fn reference_every(
+    scene: &Scene,
+    projector: &Projector,
+    size: (u32, u32),
+    aspect: f32,
+    feeds: &[OutputId],
+    step: u32,
+) -> CpuMap {
     let mut map = CpuMap::black(size);
     let feeds = &feeds[..feeds.len().min(MAX_FEEDS)];
     let fed: Vec<Option<u8>> = scene.parts.iter().map(|p| part_feed(p, feeds)).collect();
     let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
-    for y in 0..size.1 {
-        for x in 0..size.0 {
+    let step = step.max(1) as usize;
+    for y in (0..size.1).step_by(step) {
+        for x in (0..size.0).step_by(step) {
             let u = (x as f32 + 0.5) / w;
             let v = (y as f32 + 0.5) / h;
             let ray = projector.ray(u, v, aspect);
