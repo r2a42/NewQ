@@ -27,9 +27,6 @@
 //!
 //! Everything takes `now` as an argument: tests run on a clock they own.
 
-// Until the app uses it (round 2, agent B, after the contract).
-#![allow(dead_code)]
-
 use crate::net::node::NodeId;
 use crate::show::OutputId;
 use serde::{Deserialize, Serialize};
@@ -167,10 +164,13 @@ impl Overlay {
             self.active = None;
         }
         if let Some(o) = &mut self.outline {
+            for piece in o.iter_mut() {
+                piece.retain(finite);
+            }
+            o.retain(|p| p.len() >= 2);
             o.truncate(MAX_OUTLINE_PIECES);
             let mut left = MAX_OUTLINE_POINTS;
             for piece in o.iter_mut() {
-                piece.retain(finite);
                 piece.truncate(left);
                 left -= piece.len();
             }
@@ -358,6 +358,7 @@ impl Shown {
     }
 
     /// Where it came from.
+    #[cfg(test)]
     pub fn source(&self) -> Option<Source> {
         self.held.as_ref().map(|h| h.source)
     }
@@ -535,3 +536,7 @@ pub fn link_words(
         Link::Seen { .. } => None,
     }
 }
+
+#[cfg(test)]
+#[path = "lineup_tests.rs"]
+mod tests;

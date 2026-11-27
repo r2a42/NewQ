@@ -20,6 +20,15 @@ release page, and a release is refused if it has none.
   mapped draw exactly as before. Lining a projector up by points comes next; until then its place
   and aim are typed in, and for one flat screen the four corners on the Displays page still do the
   job with less work. Tried only on a software graphics card.
+- **Line-up crosses from the control desk** (tried only in simulation; no second computer or
+  projector yet). While a projector is lined up, its crosses are drawn on the real projector by the
+  computer that drives it, over black or its picture dimmed, through none of the mapping, the
+  fine-tune or the edge blend, and follow each nudge at once. They go by themselves five seconds
+  after the control desk goes quiet, so a crash or a pulled cable never leaves crosses in front of an
+  audience. The line-up says so when the link to that computer is lost (your points are kept), when
+  that computer runs a NewQ too old to show crosses, and when its monitor isn't the size the points
+  are placed in. Only the primary that computer follows can put crosses on it; finishing a line-up is
+  one ordinary change to the show.
 - **A screen's kind.** Each screen of the 3D stage is *Projection, front*, *Projection, rear*,
   *LED or monitor*, or *Works it out* (the default: projection where a projector reaches it, else
   LED), worked out where things stand, never while something moves.

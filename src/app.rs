@@ -24,6 +24,8 @@ use crate::upload;
 
 // The computers playing together (stage 4a): the shared clock, commands, the
 // heartbeat and show sync (`app/play.rs`).
+// Line-up across the show network (mapping plan 4.4).
+mod lineup;
 mod play;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -333,6 +335,8 @@ pub struct App {
     /// What each mapped display's mapped picture is drawn into, for its
     /// window and for its stream (made again only at a new size).
     mapped_targets: HashMap<(OutputId, crate::mapped::MapUse), Arc<LayerTexture>>,
+    /// Line-up's crosses: shown here, and the primary's sender (`app/lineup.rs`).
+    line_up: lineup::LineUpState,
     /// Windows whose render thread is shutting down; kept alive until it exits.
     closing: Vec<(Arc<Window>, JoinHandle<()>)>,
     /// GPU textures for playing layers, with the serial of the uploaded frame.
@@ -631,6 +635,7 @@ impl App {
             screens: HashMap::new(),
             targets: HashMap::new(),
             mapped_targets: HashMap::new(),
+            line_up: Default::default(),
             closing: Vec::new(),
             popouts: Vec::new(),
             popout_stopping: Vec::new(),
@@ -906,6 +911,8 @@ impl App {
         self.pass_media();
         // ---- Playing together: the show to the followers ----
         self.play_send_show();
+        // ---- Line-up's crosses (`app/lineup.rs`) ----
+        self.line_up_pass();
         if let Some(on) = self.ui.start_at_login_request.take() {
             self.set_start_at_login(on);
         }
@@ -2324,11 +2331,29 @@ impl App {
     /// and use, each with the target it is drawn into (the map's size; made
     /// again only when that changes). A map not made yet is left out, and its
     /// display is black. Targets no longer drawn are let go.
-    fn lens_maps(&mut self, gpu: &Gpu) -> MappedTargets {
+    /// With `light` (a 3D view has its light on), also each visible mapped
+    /// projector's map at the throw's size (`MapUse::Preview`), for the
+    /// mapped picture it throws.
+    fn lens_maps(&mut self, gpu: &Gpu, light: bool) -> MappedTargets {
         let me = self.ui.net.me.id;
         let streams: Vec<(OutputId, (u32, u32))> =
             self.streams.iter().map(|(id, r)| (*id, r.size)).collect();
-        let wanted = crate::mapped::wanted(&self.show, me, &streams, &|id| self.window_size(id));
+        let mut wanted =
+            crate::mapped::wanted(&self.show, me, &streams, &|id| self.window_size(id));
+        if light {
+            for p in self.show.stage3d.projectors.iter().filter(|p| p.visible) {
+                if let Some(display) = p.display.filter(|d| {
+                    p.mapped && self.show.mapped_projector(*d).is_some_and(|q| q.id == p.id)
+                }) {
+                    wanted.push(crate::mapped::MapWanted {
+                        projector: p.id,
+                        display,
+                        size: crate::stage_render::throw_size(1.0),
+                        use_: crate::mapped::MapUse::Preview,
+                    });
+                }
+            }
+        }
         lens_maps(gpu, &wanted, &mut self.stage, &mut self.mapped_targets)
     }
 
@@ -2566,8 +2591,21 @@ impl App {
         // lens maps (asked for every pass: the ask is what has them made),
         // the targets they are drawn into, and the canvases they show, which
         // are output work here (never at the previews' pace).
-        let maps = self.lens_maps(gpu);
-        let map_feeds = canvases_of(&self.show, maps.values().map(|(_, m)| m.as_ref()));
+        let light_asked = self
+            .ui
+            .stage
+            .requests
+            .iter()
+            .any(|r| r.options.light != crate::render3d::LightView::Off);
+        let maps = self.lens_maps(gpu, light_asked);
+        // (A 3D view's light is preview work: its canvases aren't made output
+        // work by it.)
+        let map_feeds = canvases_of(
+            &self.show,
+            maps.iter()
+                .filter(|(k, _)| k.1 != crate::mapped::MapUse::Preview)
+                .map(|(_, (_, m))| m.as_ref()),
+        );
         let mut groups: HashMap<OutputId, OutputGroup> = HashMap::new();
         for setup in configs {
             let OutputSetup {
@@ -2871,14 +2909,8 @@ impl App {
         self.update_streams(&groups, &frames);
         // The projectors in the 3D stage, for the views with their light on:
         // each one's shape and what its display sends.
-        let light_asked = self
-            .ui
-            .stage
-            .requests
-            .iter()
-            .any(|r| r.options.light != crate::render3d::LightView::Off);
         let projectors = if light_asked {
-            projector_throws(&self.show, &self.ui, &groups)
+            projector_throws(&self.show, &self.ui, &groups, &frames)
         } else {
             Vec::new()
         };
@@ -2938,7 +2970,19 @@ impl App {
         for (m, has_display) in monitors {
             cards.insert(m, self.card(m, has_display));
         }
+        // A line-up's crosses, drawn last on the projector's monitor.
+        let shapes: Vec<(usize, Vec<OutputId>, (u32, u32))> = self
+            .screens
+            .iter()
+            .map(|(m, s)| (*m, s.outputs.clone(), s.size))
+            .collect();
+        let mut waiting = false;
+        let (mut crosses, crosses_changed) = self.line_up_groups(gpu, &shapes, &mut waiting);
+        self.uploads_waiting |= waiting;
         for (m, screen) in &mut self.screens {
+            if crosses_changed.contains(m) {
+                screen.needs_redraw = true;
+            }
             let mut list: Vec<OutputGroup> = screen
                 .outputs
                 .iter()
@@ -2978,21 +3022,30 @@ impl App {
                 .collect();
             // The mapped pictures of the displays on it (a map made or
             // replaced is a redraw).
-            let mapped: Vec<crate::mapped::MappedFrame> = screen
+            let mut mapped: Vec<crate::mapped::MappedFrame> = screen
                 .outputs
                 .iter()
                 .filter_map(|id| frames.get(&(*id, crate::mapped::MapUse::Window)).cloned())
                 .collect();
-            let maps_sent = maps_sent(&mapped);
             // The fade at the edges is the display's own, whatever sub displays
             // share its monitor.
-            let blend = screen
+            let mut blend = screen
                 .outputs
                 .iter()
                 .filter_map(|id| self.show.output(*id))
                 .find(|o| !o.is_sub_display())
                 .map(|o| o.blend.clamped())
                 .unwrap_or_default();
+            // A line-up's crosses: in raw monitor pixels, last, the edge blend
+            // off, over black (nothing mapped is drawn) or the picture dimmed.
+            if let Some((group, under)) = crosses.remove(m) {
+                list = lineup::with_crosses(list, group, under);
+                if under != crate::net::lineup::Under::Dimmed {
+                    mapped.clear();
+                }
+                blend = EdgeBlend::default();
+            }
+            let maps_sent = maps_sent(&mapped);
             // (A picture that came in since the last pass is drawn too.)
             if playing
                 || was_waiting
@@ -4271,6 +4324,9 @@ impl App {
         if let Some(t) = self.play_wake(now) {
             next = next.min(t);
         }
+        if let Some(t) = self.line_up_wake(now) {
+            next = next.min(t);
+        }
         if let Some(s) = &self.splash {
             // Look again when it is time for the splash to go.
             next = next.min((s.opened + crate::splash::HOLD).max(now + Duration::from_millis(50)));
@@ -5029,26 +5085,56 @@ fn handed_show_refused(playing: bool, testing: bool, following: bool) -> Option<
 
 /// Each visible projector of the 3D stage, as the views with their light on
 /// throw it: its shape (as the views' lines have it) and what its display's
-/// window sends (`throw_picture`).
+/// window sends (`throw_picture`). A mapped projector throws its mapped
+/// picture: `frames`' `MapUse::Preview` frame for its display (`mapped_throw`),
+/// none (black) until its map is made.
 fn projector_throws(
     show: &Show,
     ui: &UiState,
     groups: &HashMap<OutputId, OutputGroup>,
+    frames: &HashMap<(OutputId, crate::mapped::MapUse), crate::mapped::MappedFrame>,
 ) -> Vec<crate::stage_live::ProjectorThrow> {
     show.stage3d
         .projectors
         .iter()
         .filter(|p| p.visible)
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let (pixels, aspect) = crate::ui::stage_projectors::shape_of(show, ui, p);
+            let picture = p.display.and_then(|d| {
+                let pic = throw_picture(show, d, groups)?;
+                if show.mapped_projector(d).is_none() {
+                    return Some(pic);
+                }
+                let frame = frames.get(&(d, crate::mapped::MapUse::Preview))?;
+                Some(mapped_throw(pic, frame, i))
+            });
             crate::stage_live::ProjectorThrow {
                 id: p.id,
                 pixels,
                 aspect,
-                picture: p.display.and_then(|d| throw_picture(show, d, groups)),
+                picture,
             }
         })
         .collect()
+}
+
+/// A mapped projector's throw (`throw_picture`'s `pic` of its display): its
+/// own group shows `frame`'s target (drawn at the throw's size by the stage
+/// thread, `ThrowPicture::mapped`) in place of the window's, with the
+/// fine-tune as before. Its canvases' slots are made here for owner
+/// `MapOwner::Throw(n)`, `n` its place among the throws.
+fn mapped_throw(
+    mut pic: crate::stage_live::ThrowPicture,
+    frame: &crate::mapped::MappedFrame,
+    n: usize,
+) -> crate::stage_live::ThrowPicture {
+    if let Some(own) = pic.groups.first_mut() {
+        own.layers = vec![whole_layer(frame.target.clone())];
+    }
+    make_map_slots(crate::mapped::MapOwner::Throw(n as u8), 0, frame);
+    pic.mapped = Some(frame.clone());
+    pic
 }
 
 /// What display `id`'s window sends: its layers through its own keystone,
