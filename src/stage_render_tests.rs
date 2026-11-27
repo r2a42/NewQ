@@ -30,7 +30,7 @@ pub(super) fn gpu() -> Option<Gpu> {
 const PICTURE: (u32, u32) = (64, 36);
 
 /// A layer of `tex` stretched over a picture `canvas` big.
-pub(super) fn group(tex: &Arc<LayerTexture>, canvas: (u32, u32)) -> OutputGroup {
+pub(crate) fn group(tex: &Arc<LayerTexture>, canvas: (u32, u32)) -> OutputGroup {
     OutputGroup {
         layers: vec![OutputLayer {
             texture: tex.clone(),
@@ -65,7 +65,7 @@ fn quarters(gpu: &Gpu) -> Arc<LayerTexture> {
 
 /// What a display window would show with `groups`: composited into a
 /// picture `size` big and read back (RGBA rows).
-pub(super) fn shown(gpu: &Gpu, groups: &[OutputGroup], size: (u32, u32)) -> Vec<u8> {
+pub(crate) fn shown(gpu: &Gpu, groups: &[OutputGroup], size: (u32, u32)) -> Vec<u8> {
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("shown"),
         size: wgpu::Extent3d {

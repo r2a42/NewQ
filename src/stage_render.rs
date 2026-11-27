@@ -739,7 +739,7 @@ fn stage_loop(
 
 #[cfg(test)]
 #[path = "stage_render_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "stage_render_map_tests.rs"]

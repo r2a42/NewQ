@@ -1116,16 +1116,19 @@ impl StageLive {
                             e.in_flight = Some(m.key);
                         }
                     }
-                    let job = StageJob {
+                    let mut job = StageJob {
                         feeds,
                         throws,
                         throw_size,
                         views,
                         maps: map_jobs,
-                        moved: self.moved.clone(),
+                        moved: Arc::default(),
                         serial: self.serial,
                     }
                     .merged(StageJob::default());
+                    // (After the merge, which takes the newer job's, here
+                    // the empty one's.)
+                    job.moved = self.moved.clone();
                     t.submit(job);
                     self.drawn_with.extend(marks);
                     self.restart_wanted = false;
@@ -1266,6 +1269,13 @@ impl StageLive {
                 // does). Its canvases' slots are made here, not on the thread.
                 if let Some(f) = &pic.mapped {
                     h.bytes(&f.map.stamp().to_le_bytes());
+                    // Its moving screens where they are this frame: a lit
+                    // view follows them (the live pass, mapping plan 4.2).
+                    for m in &f.moving {
+                        h.bytes(&m.surface.0.to_le_bytes());
+                        h.bytes(&m.mesh_key.to_le_bytes());
+                        m.matrix.iter().flatten().for_each(|v| h.f32(*v));
+                    }
                     let owner = crate::mapped::MapOwner::Throw(layer as u8);
                     for (j, feed) in f.feeds.iter().take(crate::mapped::MAX_FEEDS).enumerate() {
                         h.bytes(&feed.output.0.to_le_bytes());
