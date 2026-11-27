@@ -28,6 +28,13 @@ release page, and a release is refused if it has none.
   mapped draw exactly as before. Its place and aim are typed in or found by lining it up (below),
   and for one flat screen the four corners on the Displays page still do the
   job with less work. Tried only on a software graphics card.
+- **Mapped projectors follow screens that move** (tried only in simulation, on a software graphics
+  card; no real projector or moving scenery yet). A screen a *Move a screen* cue names is drawn by
+  every mapped projector where the cue has it at that moment, in the same frame as the video on it,
+  so two projectors on one moving screen stay together. It is hidden where the room or a screen
+  that stands still is in front of it, and covers what is behind it. It is drawn where it stands
+  before any cue has moved it too. NewQ moves the picture as the cue says: it doesn't know where
+  the scenery really is.
 - **Line-up crosses from the control desk** (tried only in simulation; no second computer or
   projector yet). While a projector is lined up, its crosses are drawn on the real projector by the
   computer that drives it, over black or its picture dimmed, through none of the mapping, the

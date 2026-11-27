@@ -120,3 +120,30 @@ restart and `adapters::look_every`.
   views, naga HLSL/MSL, an unmapped display unchanged byte for byte, the new-picture count, the
   stream through FFmpeg, the preview rule (pure). Tried on lavapipe only; never a real projector,
   card or the app with a baked map.
+  Round 3 (agent B), **the live pass** (`mapped_live.rs`, `mapped_live_tests.rs`; plan 4.2): a
+  screen `Show::movable` names is never in a map; every piece of one (moved or at home) is a
+  `MovingScreen` in the frame, drawn in the map pass's own render pass after its triangle: corners
+  through `MappedFrame::lens` times `matrix`, uv through the piece's `region` into its feed's
+  canvas, hidden where `LensMap::depth` is nearer than the fragment's distance from the lens
+  (`live::eye_of(lens)`) by more than `lensmap::SCREEN_SLACK` (depth 1.0, all 255, is nothing; a
+  map without depth hides nothing), faded over the last pixel by uv (one-piece screens only: a
+  faceted screen's pieces don't fade, or their joins would show), black and in the way when turned
+  away (`front_only`) or showing no canvas of the frame (unfed, LED, a fifth). No depth buffer: the
+  main thread sorts the pieces far to near (`live::moving_for`, by each piece's box middle from
+  the lens). `LiveKit` (pipeline) is made only at the first frame with a moving screen, in its own
+  error scope; `FrameLive` keeps a frame uniform, one pieces buffer of `MAX_PIECES` (256) slots
+  with dynamic offsets (stride from `min_uniform_buffer_offset_alignment`) and a reused staging
+  `Vec`; meshes are uploaded once by `mesh_key` (`Drawer::meshes`, dropped only when a new one is
+  made and they weren't drawn lately). A frame with none draws exactly as before (byte for byte,
+  also on a drawer that drew some). `app.rs`: `MappedTargets` carries the shape each map was made
+  at (`p.aspect(size)`, or `shape_of` for a throw) and `mapped_frames` sets `lens` from
+  `lensmap::lens_matrix(p, aspect)`; `MovablePieces` (`live::movable_pieces` from
+  `UiState::stage.scene`, made again only with the scene's key or the movable set) and one
+  `Engine::moved_screens` snapshot a pass, used by every frame (window, stream, throw) and by
+  `StageLive::send`; `maps_sent` and `Shot` keep moving screens as plain values
+  (`mapped::moving_shots`, no mesh compared) and `Shot` the lens. Tests: moved flat, curved and
+  faceted screens, a box in the way, in front of and behind a still screen, turned away and rear,
+  two projectors from one tick, 16 moving screens and a still one, none (byte for byte), a stream's
+  owner, naga HLSL/MSL; each against `lensmap::reference` with the screen standing there, through
+  the map pass, within 3 steps away from edges, with made-up depth pictures (`pick`'s distance).
+  Tried on lavapipe only.
