@@ -162,6 +162,32 @@ pub(crate) fn inspector(
         );
         return;
     }
+    if let Some(now) = c.now {
+        let state = if c.moved { "" } else { " (at home)" };
+        ui.label(RichText::new(format!("Now at: {}{state}", place_words(&now))).weak());
+    }
+    ui.horizontal(|ui| {
+        let now = c.now;
+        if ui
+            .add_enabled(now.is_some(), egui::Button::new(USE_NOW))
+            .on_hover_text("Every number from where the screen is now")
+            .clicked()
+            && let Some(p) = now
+        {
+            s.to = ScreenTarget::whole(&p);
+        }
+        // Where this cue leaves it, played in order, with the cue as it is
+        // now (an edit made this frame included).
+        let there = s.to.apply(&c.before.unwrap_or_default());
+        if ui
+            .add_enabled(s.screen.is_some(), egui::Button::new(PUT_THERE))
+            .on_hover_text("A jump, no move: for rehearsals, and after a restart mid-show")
+            .clicked()
+            && let Some(screen) = s.screen
+        {
+            actions.push(Action::PutScreen(screen, there));
+        }
+    });
     ui.add_space(4.0);
     ui.label(RichText::new("To").strong());
     let base = c.now.or(c.home).unwrap_or_default();
@@ -196,31 +222,9 @@ pub(crate) fn inspector(
                 ui.end_row();
             }
         });
-    ui.horizontal(|ui| {
-        let now = c.now;
-        if ui
-            .add_enabled(now.is_some(), egui::Button::new(USE_NOW))
-            .on_hover_text("Every number from where the screen is now")
-            .clicked()
-            && let Some(p) = now
-        {
-            s.to = ScreenTarget::whole(&p);
-        }
-        // Where this cue leaves it, played in order, with the cue as it is
-        // now (an edit made this frame included).
-        let there = s.to.apply(&c.before.unwrap_or_default());
-        if ui
-            .add_enabled(s.screen.is_some(), egui::Button::new(PUT_THERE))
-            .on_hover_text("A jump, no move: for rehearsals, and after a restart mid-show")
-            .clicked()
-            && let Some(screen) = s.screen
-        {
-            actions.push(Action::PutScreen(screen, there));
-        }
-    });
-    if let Some(now) = c.now {
-        let state = if c.moved { "" } else { " (at home)" };
-        ui.label(RichText::new(format!("Now at: {}{state}", place_words(&now))).weak());
-    }
     ui.label(RichText::new(HONEST_WORDS).weak());
 }
+
+#[cfg(test)]
+#[path = "screen_cue_tests.rs"]
+mod tests;

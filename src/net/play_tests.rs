@@ -29,6 +29,8 @@ enum Act {
     StopAll,
     /// Fire the send cue (`World::send_cue`).
     FireSend,
+    /// Fire the screen cue (`World::screen`).
+    FireScreen,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -161,6 +163,12 @@ struct World {
     /// Per computer: heartbeats the network test couldn't compare there, as
     /// `app/play.rs` judges it (`Follower::has_done`, `Measurer::unmatched`).
     uncompared: Vec<u32>,
+    // ---- Screens that move on a cue (mapping plan 4.2) ----
+    /// The screen cue of `Act::FireScreen` and its screen.
+    screen: Option<(CueId, crate::stage3d::SurfaceId)>,
+    /// Per computer, at each tick once its screen has moved: the shared time
+    /// it ticked to and the screen's x there.
+    screen_log: Vec<Vec<(f64, f32)>>,
 }
 
 fn frame(t: f64) -> i64 {
@@ -224,6 +232,8 @@ impl World {
             jumps: vec![Vec::new(); followers + 1],
             ticks_seen: vec![0; followers + 1],
             uncompared: vec![0; followers + 1],
+            screen: None,
+            screen_log: vec![Vec::new(); followers + 1],
         }
     }
 
@@ -393,6 +403,7 @@ impl World {
                 let (_, act) = self.script[k];
                 let key = TimelineKey::Group(self.ts.group);
                 let send = self.send_cue;
+                let screen = self.screen;
                 let (e, show) = (&mut self.nodes[self.primary].engine, &self.ts.show);
                 match act {
                     Act::Go => e.go(show),
@@ -405,6 +416,11 @@ impl World {
                     Act::StopAll => e.stop_all(0.0),
                     Act::FireSend => {
                         if let Some(c) = send {
+                            e.fire(show, c)
+                        }
+                    }
+                    Act::FireScreen => {
+                        if let Some((c, _)) = screen {
                             e.fire(show, c)
                         }
                     }
@@ -525,6 +541,11 @@ impl World {
                 }
             }
             self.last_cue[i] = cue.map(|c| (local, c));
+        }
+        if let Some((_, sid)) = self.screen
+            && let (Some(at), Some(p)) = (n.engine.net_shared_time(), n.engine.screen_at(sid))
+        {
+            self.screen_log[i].push((at, p.position[0]));
         }
         let src = n.shared(now);
         if let Some(src) = src {
@@ -1535,4 +1556,151 @@ fn a_follower_takes_a_newer_primarys_show_and_its_unknown_cue_does_nothing() {
         f.messages
     );
     assert_eq!(f.net_sent(), 0);
+}
+
+// ----- Screens that move on a cue (mapping plan 4.2) -----------------------------
+
+/// How long the screen cue of `with_screen` takes.
+const SCREEN_SECS: f64 = 10.0;
+
+impl World {
+    /// A screen at home at x 0 and a cue taking it to x 4 over `SCREEN_SECS`
+    /// along an S-curve.
+    fn with_screen(&mut self) {
+        use crate::show::{CueKind, CueType, ScreenTarget};
+        let show = &mut self.ts.show;
+        let sid = show.add_surface(None);
+        let mut c = show.make_cue(CueType::Screen, None, show.cues.len());
+        if let CueKind::Screen(s) = &mut c.kind {
+            s.screen = Some(sid);
+            s.to = ScreenTarget {
+                x: Some(4.0),
+                ..ScreenTarget::default()
+            };
+            s.duration = SCREEN_SECS;
+        }
+        self.screen = Some((c.id, sid));
+        show.cues.push(c);
+    }
+
+    /// The shared time the screen's move began, as the primary has it.
+    fn screen_anchor(&self) -> f64 {
+        let n = &self.nodes[self.primary];
+        let now = n
+            .engine
+            .net_shared_time()
+            .expect("ticking by the shared clock");
+        let s = n.engine.net_state(now);
+        s.screens[0].moving[0].anchor
+    }
+
+    /// Every computer, at every tick since its screen moved, had it where the
+    /// move puts it at that tick's shared time: the same place at the same
+    /// shared time on all of them. How many ticks were looked at.
+    fn screens_agree(&self, anchor: f64) -> usize {
+        let mut n = 0;
+        for (k, log) in self.screen_log.iter().enumerate() {
+            for (at, x) in log {
+                let want = 4.0 * Curve::SCurve.apply((at - anchor) / SCREEN_SECS) as f32;
+                assert!(
+                    (x - want).abs() < 1e-3,
+                    "computer {k} at shared {at:.4}: x {x}, the move has {want}"
+                );
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn screen_x(&self, k: usize) -> Option<f32> {
+        let (_, sid) = self.screen?;
+        self.nodes[k].engine.screen_at(sid).map(|p| p.position[0])
+    }
+}
+
+/// Three computers, a screen cue fired: at every tick of each, the screen is
+/// where the move has it at that tick's shared time, and stays there after;
+/// nothing was put right (the command did it all).
+#[test]
+fn three_computers_agree_on_a_moving_screen_at_every_tick() {
+    let mut w = World::new(2, Network::wired(), 61);
+    w.with_screen();
+    w.run(5.0);
+    assert!(w.locked(5.0));
+    w.acts(&[(5.5, Act::FireScreen)]);
+    w.run(8.0);
+    let anchor = w.screen_anchor();
+    w.run(20.0);
+    let n = w.screens_agree(anchor);
+    assert!(n > 3 * 60 * 10, "{n} ticks looked at");
+    for k in 0..3 {
+        assert_eq!(w.screen_x(k), Some(4.0), "computer {k} kept it there");
+    }
+    for nd in &w.nodes[1..] {
+        let f = nd.follower.as_ref().unwrap();
+        assert_eq!(f.corrections, 0, "{:?}", f.corrected);
+    }
+}
+
+/// A command that comes late (150 ms past its time) starts the move where it
+/// would have been: from then on the follower agrees at every tick.
+#[test]
+fn a_late_screen_cue_is_placed_where_it_would_have_been() {
+    let mut w = World::new(1, Network::wired(), 63);
+    w.with_screen();
+    w.run(4.0);
+    w.late = Some((1, 0.2));
+    w.acts(&[(4.5, Act::FireScreen)]);
+    w.run(6.0);
+    let anchor = w.screen_anchor();
+    w.run(16.0);
+    assert!(w.screens_agree(anchor) > 1000);
+    let f = w.nodes[1].follower.as_ref().unwrap();
+    assert_eq!(f.corrections, 0, "{:?}", f.corrected);
+}
+
+/// A computer that starts again mid-move has the screen from the heartbeat
+/// (taken at once: nothing was right before), on its way, and agrees at
+/// every tick after; a backup that then takes control (the primary dying)
+/// has it too and its heartbeats carry it on; and *Stop all* on the new
+/// primary leaves the screen going to where it was told.
+#[test]
+fn a_late_joiner_and_a_backup_taking_control_have_the_screen_where_it_is() {
+    let mut w = World::new(2, Network::wired(), 65);
+    w.with_screen();
+    w.run(5.0);
+    w.acts(&[(5.5, Act::FireScreen)]);
+    w.run(7.0);
+    let anchor = w.screen_anchor();
+    w.q.push(7.0, Ev::Restart(2));
+    w.run(7.01);
+    assert_eq!(w.screen_x(2), None, "from nothing: at home");
+    w.screen_log[2].clear();
+    // Locked again, and a heartbeat.
+    w.run(10.0);
+    let f = w.nodes[2].follower.as_ref().unwrap();
+    assert!(
+        f.corrected
+            .iter()
+            .any(|c| c.contains("put where the primary has it")),
+        "{:?}",
+        f.corrected
+    );
+    let first = w.screen_log[2].first().expect("it has the screen").0;
+    assert!(first < anchor + SCREEN_SECS, "mid-move");
+    // The primary dies mid-move; the backup takes control.
+    w.q.push(11.0, Ev::TakeOver(1, true));
+    w.run(13.0);
+    assert_eq!(w.primary, 1);
+    let carried = w.screen_anchor();
+    assert!((carried - anchor).abs() < 1e-6, "the move carried on");
+    // Stop all on the new primary: the screen goes on to where it was told.
+    w.acts(&[(13.5, Act::StopAll)]);
+    w.run(25.0);
+    assert!(w.screens_agree(anchor) > 3 * 60 * 10);
+    for k in [1, 2] {
+        assert_eq!(w.screen_x(k), Some(4.0), "computer {k}");
+    }
+    let f = w.nodes[2].follower.as_ref().unwrap();
+    assert!(f.in_step, "{:?}", f.corrected);
 }

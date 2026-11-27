@@ -287,3 +287,97 @@ fn a_screen_cue_on_a_timeline_moves_with_its_clock_and_waits_at_its_pause() {
     }
     near(x_of(&e, id), 4.0, "there");
 }
+
+/// R21 on a follower: a screen that differs from the primary's heartbeat is
+/// left for three heartbeats, then eased to the primary's place over half a
+/// second, never jumped; the first heartbeat a computer compares is taken at
+/// once.
+#[test]
+fn a_follower_eases_a_screen_that_steadily_differs_and_takes_the_first_at_once() {
+    use crate::net::play::{PlayState, ScreenNow};
+    let (show, id, _) = moving_show(Curve::Linear);
+    let beat = |x: f32, t: f64| PlayState {
+        time: t,
+        screens: vec![ScreenNow {
+            screen: id,
+            at: crate::stage3d::Placement {
+                position: [x, 1.0, -2.0],
+                ..Default::default()
+            },
+            moving: Vec::new(),
+        }],
+        ..PlayState::default()
+    };
+    // Just joined: the first heartbeat is taken at once.
+    let mut e = Engine::for_tests();
+    e.tick_shared(&show, 0.0);
+    let mut doubts = crate::engine::NetCorrection::default();
+    let said = e.net_correct(&show, &beat(3.0, 0.0), 0.0, &mut doubts);
+    assert!(said.iter().any(|s| s.contains("put where")), "{said:?}");
+    near(x_of(&e, id), 3.0, "taken at once");
+    // Then the primary has it elsewhere: three heartbeats change nothing.
+    let mut t = 0.0;
+    for _ in 0..3 {
+        t += 0.25;
+        e.tick_shared(&show, t);
+        assert!(
+            e.net_correct(&show, &beat(1.0, t), t, &mut doubts)
+                .is_empty()
+        );
+        near(x_of(&e, id), 3.0, "left alone");
+    }
+    t += 0.25;
+    e.tick_shared(&show, t);
+    let said = e.net_correct(&show, &beat(1.0, t), t, &mut doubts);
+    assert!(said.iter().any(|s| s.contains("eased")), "{said:?}");
+    near(x_of(&e, id), 3.0, "no jump at the correction");
+    // Eased over half a second at 60 Hz: no frame's step is more than the
+    // ease's steepest (S-curve: 1.5 times 2 m over 0.5 s) allows.
+    let mut last = x_of(&e, id);
+    for _ in 0..40 {
+        t += 1.0 / 60.0;
+        e.tick_shared(&show, t);
+        let x = x_of(&e, id);
+        assert!(
+            (x - last).abs() <= 1.5 * 2.0 / 0.5 / 60.0 + 1e-4,
+            "{last} -> {x}"
+        );
+        assert!(x <= last + 1e-6, "towards the primary's");
+        last = x;
+    }
+    near(last, 1.0, "at the primary's place");
+}
+
+/// *Put at* on a show network: the primary catches it as a command (done
+/// everywhere at one shared time), a follower drops it (its controls are
+/// the primary's), and the command does it.
+#[test]
+fn put_at_is_a_command_on_a_primary_and_nothing_on_a_follower() {
+    use crate::engine::NetMode;
+    use crate::net::play::Command;
+    let (show, id, _) = moving_show(Curve::Linear);
+    let at = crate::stage3d::Placement {
+        position: [5.0, 0.0, 0.0],
+        ..Default::default()
+    };
+    let mut p = Engine::for_tests();
+    p.net_set_mode(NetMode::Primary);
+    p.put_screen(&show, id, at);
+    assert_eq!(p.screen_at(id), None, "not done until its time");
+    let cmds = p.net_take();
+    assert_eq!(cmds, vec![Command::PutScreen { screen: id, at }]);
+    p.tick_shared(&show, 1.0);
+    p.net_apply(&show, &cmds[0], 0.0);
+    assert_eq!(p.screen_at(id), Some(at));
+    let mut f = Engine::for_tests();
+    f.net_set_mode(NetMode::Follower);
+    f.put_screen(&show, id, at);
+    assert_eq!(f.screen_at(id), None);
+    assert!(f.net_take().is_empty());
+    // On the wire, and as an older NewQ reads one it doesn't know.
+    let wire = serde_json::to_value(&cmds[0]).unwrap();
+    assert_eq!(wire["do"], "put_screen");
+    let later: Command =
+        serde_json::from_value(serde_json::json!({"do": "put_screen_on_a_track", "x": 1})).unwrap();
+    assert_eq!(later, Command::Unknown);
+}
