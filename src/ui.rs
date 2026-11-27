@@ -5184,7 +5184,12 @@ fn output_previews(ui: &mut Ui, show: &mut Show, st: &mut UiState, fill: bool, h
             },
         },
     ));
-    if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == id) {
+    if editing && let Some(fine) = fine_tune_of(show, id) {
+        // A mapped projector's display: its fine-tune's points.
+        if let Some(mesh) = fine {
+            mesh_handles(ui, rect, id, mesh, &st.handle_sel);
+        }
+    } else if editing && let Some(cfg) = show.outputs.iter_mut().find(|o| o.id == id) {
         match &mut cfg.mesh {
             Some(mesh) => mesh_handles(ui, rect, id, mesh, &st.handle_sel),
             None => corner_handles(ui, rect, id, &mut cfg.corners, &st.handle_sel),
@@ -6156,7 +6161,14 @@ fn displays_panel(
             if let Some(StageRole::Mapped { projector, name, .. }) = role {
                 // Mapped: the 3D stage decides what it shows and where.
                 mapped_shows_row(ui, d, *projector, name, actions);
-                ui.add_enabled_ui(false, |ui| corner_pin_editor(ui, d, st, actions));
+                if let Some(p) = show
+                    .stage3d
+                    .projectors
+                    .iter_mut()
+                    .find(|p| p.id == *projector)
+                {
+                    fine_tune_editor(ui, d.id, &d.name, &mut p.fine, st, actions);
+                }
             } else {
                 shared_picture_editor(
                     ui,
@@ -7806,8 +7818,8 @@ fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions:
             st.handle_sel.set(None);
         }
     });
-    if out.mesh.is_some() {
-        mesh_editor(ui, out, st);
+    if let Some(mesh) = out.mesh.as_mut() {
+        mesh_editor(ui, out.id, mesh, st);
         return;
     }
     if !out.corners.is_convex() {
@@ -7852,13 +7864,10 @@ fn corner_pin_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState, actions:
         });
 }
 
-/// Controls for a mesh warp: how many lines, removing one, and the exact place
+/// Controls for a mesh warp on display `id` (its own, or a mapped
+/// projector's fine-tune): how many lines, removing one, and the exact place
 /// of the selected point. (A point is added by Ctrl-clicking the preview.)
-fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
-    let id = out.id;
-    let Some(mesh) = out.mesh.as_mut() else {
-        return;
-    };
+fn mesh_editor(ui: &mut Ui, id: OutputId, mesh: &mut Mesh, st: &UiState) {
     let size = st
         .previews
         .iter()
@@ -7956,6 +7965,65 @@ fn mesh_editor(ui: &mut Ui, out: &mut OutputConfig, st: &UiState) {
         .clicked()
     {
         mesh.flatten();
+    }
+}
+
+/// A mapped projector's display `id`: its projector's fine-tune
+/// (`Projector::fine`, the mesh the window bends its mapped picture by),
+/// which the preview's handles, the arrow keys and `mesh_editor` edit in
+/// place of the display's own mesh. None for any other display.
+fn fine_tune_of(show: &mut Show, id: OutputId) -> Option<&mut Option<Mesh>> {
+    let p = show.mapped_projector(id)?.id;
+    show.projector_mut(p).map(|p| &mut p.fine)
+}
+
+/// The fine-tune of a mapped projector whose display is `id`: the display
+/// mesh editor (`mesh_editor`, the preview's handles, the arrow keys)
+/// pointed at `Projector::fine`. *Fine-tune…* starts it as a flat 3 × 3
+/// grid; one left flat is no fine-tune (`Action::EditGeometry`), so
+/// nothing is written for it. For the Displays page and the 3D stage's
+/// Projectors tab.
+fn fine_tune_editor(
+    ui: &mut Ui,
+    id: OutputId,
+    name: &str,
+    fine: &mut Option<Mesh>,
+    st: &UiState,
+    actions: &mut Vec<Action>,
+) {
+    let editing = st.geometry_edit == Some(id);
+    ui.horizontal(|ui| {
+        let label = if editing { "Done" } else { "Fine-tune…" };
+        let r = ui.selectable_label(editing, label).on_hover_text(
+            "Bend the mapped picture a little to meet the real screen: drag the points on \
+             this display's preview. The 3D stage still decides where the picture goes; this \
+             is for the last few pixels.",
+        );
+        stage_edit::note(ui, &format!("Displays ▸ {name} ▸ Fine-tune"), &r);
+        if r.clicked() {
+            if !editing && fine.is_none() {
+                *fine = Some(Mesh::from_pin(3, 3, |u, v| [u, v]));
+            }
+            actions.push(Action::EditGeometry((!editing).then_some(id)));
+        }
+        if fine.as_ref().is_some_and(|m| !m.is_flat()) {
+            ui.label(RichText::new("fine-tuned").color(PLAYHEAD).small());
+            let r = ui
+                .small_button("Reset")
+                .on_hover_text("Back to the picture as the 3D stage maps it");
+            stage_edit::note(ui, &format!("Displays ▸ {name} ▸ Fine-tune ▸ Reset"), &r);
+            if r.clicked() {
+                *fine = if editing {
+                    Some(Mesh::from_pin(3, 3, |u, v| [u, v]))
+                } else {
+                    None
+                };
+                st.handle_sel.set(None);
+            }
+        }
+    });
+    if editing && let Some(mesh) = fine.as_mut() {
+        mesh_editor(ui, id, mesh, st);
     }
 }
 
@@ -12531,6 +12599,14 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
             }
         }
         Action::EditGeometry(id) => {
+            // A mapped projector's fine-tune left flat is no fine-tune:
+            // nothing is written for it.
+            if let Some(was) = st.geometry_edit.filter(|w| Some(*w) != id)
+                && let Some(fine) = fine_tune_of(show, was)
+                && fine.as_ref().is_some_and(|m| m.is_flat())
+            {
+                *fine = None;
+            }
             st.geometry_edit = id;
             st.handle_sel.set(None);
         }
@@ -12546,11 +12622,15 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
                         .iter()
                         .find(|p| p.id == id)
                         .map_or((1920, 1080), |p| p.canvas);
-                    if let Some(mesh) = show
-                        .outputs
-                        .iter_mut()
-                        .find(|o| o.id == id)
-                        .and_then(|o| o.mesh.as_mut())
+                    let mesh = match fine_tune_of(show, id) {
+                        Some(fine) => fine.as_mut(),
+                        None => show
+                            .outputs
+                            .iter_mut()
+                            .find(|o| o.id == id)
+                            .and_then(|o| o.mesh.as_mut()),
+                    };
+                    if let Some(mesh) = mesh
                         && let Some(point) = sel.corner.and_then(|k| mesh.points.get_mut(k))
                     {
                         nudge_point(point, d, size, sel.quad.range());
@@ -12791,6 +12871,10 @@ fn apply(action: Action, show: &mut Show, engine: &mut Engine, st: &mut UiState)
         Action::Quit => leave::ask(leave::Leave::Quit, show, engine, st),
     }
 }
+
+#[cfg(test)]
+#[path = "ui/fine_tune_tests.rs"]
+mod fine_tune_tests;
 
 #[cfg(test)]
 mod tests {
